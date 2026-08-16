@@ -1,15 +1,16 @@
 //! `cargo xtask layer-deps` —— source-centric 分层依赖治理 lint。
 //!
-//! 读各 workspace 成员 `Cargo.toml` 的全部 shipped 依赖表——`[dependencies]` +
-//! `[build-dependencies]` + 每个 `[target.<cfg>.dependencies]` / `[target.<cfg>.build-dependencies]`
-//! 条件依赖表——按 `docs/rules/architecture.md §分层` 矩阵（`layers::allows`）校验工作区**内部边**。
+//! 读各 workspace 成员 `Cargo.toml` 的 shipped 与 dev 依赖表（含每个 `[target.<cfg>]` 条件表），
+//! 解析工作区**内部边**。shipped 边按 `docs/rules/architecture.md §分层` 的完整矩阵与精确收敛规则校验；
+//! dev 边只守域测试的两条稳定边界：禁止兄弟域依赖、禁止非组合根依赖 adapter。
 //! source-centric：只解析含 `path`（或经根 `[workspace.dependencies]` 解析出 path 的 `workspace = true`）
 //! 的本地依赖到工作区成员再判层，外部 crates.io 依赖（纯 version / 无 path）一律忽略——**免疫裸名×crates.io
 //! 命名冲突**（如 adapter `redis` 与 crates.io `redis`），补 cargo-deny target-centric wrappers 表达不了的
 //! source-centric 反向边（无 back-path 的基础/引擎→上层）。**fail-closed**：含 `path` 但逃逸 workspace
 //! root / 不指向任何成员的本地依赖，作 `UnresolvedPath` finding 显式报错，绝不静默丢（LAYER-DEPS-07）。
 //!
-//! 评级 Medium（CI 门，接入 `cargo xtask verify`）；每条规则配 synthetic red case（见
+//! 评级 AcceptedMedium（CI 门，接入 `cargo xtask verify`）；Cargo/rustc 允许表达 dev 依赖，若不拆分全部
+//! 域测试包拓扑就不存在低成本 Hard 上移路径。每条规则配 synthetic red case（见
 //! `#[cfg(test)]`），anti-vacuity：真实工作区绿用例必过、各红用例必失。Hard 兜底（crate 图
 //! 未声明即 import 不到 + cargo 无环）与 cargo-deny wrappers 并存。
 //!
@@ -20,8 +21,8 @@
 //!   source-centric 反向边 + issue #343 path-dep bug —— 自建本 lint 的理由）。
 //!
 //! INVARIANT: LAYER-DEPS-01 { level = "Medium", exec = "check", source = "code" }—— back-path 反向边（上行 / 横向同层 / 跨界依赖）。
-//! INVARIANT: LAYER-DEPS-02 { level = "Medium", exec = "check", source = "code" }—— 兄弟域互斥（跨域只经 contract）。
-//! INVARIANT: LAYER-DEPS-03 { level = "Medium", exec = "check", source = "code" }—— adapter 仅组合根注入（不被域 / 服务依赖）。
+//! INVARIANT: LAYER-DEPS-02 { level = "Medium", exec = "check", source = "code" }—— 兄弟域互斥（跨域只经 contract）；shipped/dev 边均守。
+//! INVARIANT: LAYER-DEPS-03 { level = "Medium", exec = "check", source = "code" }—— adapter 仅组合根注入（不被域 / 服务依赖）；shipped/dev 边均守。
 //! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "check", source = "code" }—— generated 仅域 + 组合根，以及精确
 //!   `eventexec|bootstrap → generated` sealed runtime authoring/registration seam 依赖；其它 Service→Generated 仍禁。
 //! INVARIANT: LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::bootstrap_generated_registrar_surface_rejects_non_registrar_matrix", anti_vacuity = "tests::bootstrap_generated_registrar_surface_accepts_exact_vocabulary|tests::real_workspace_green" }——
@@ -32,8 +33,8 @@
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
 //! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit`、`tracewiretest` 与 `iotdevice`）只准经
-//!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
-//!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
+//!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。该规则只接收 `shipped_edges`，故**任一**指向
+//!   test-support 成员的 shipped 内部边即误用；补 `allows` 矩阵盲区
 //!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
 //!   分类也不会自行阻止 root/其它允许边把 iotdevice 带入 shipped 图）。
 //! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_testsupport_feature_closure_is_shipped|tests::red_generated_testsupport_direct_alias_and_forwarding_are_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
@@ -61,7 +62,7 @@
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
 //!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/primitives/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
-//!   `[dev-dependencies]` 不入扫描。
+//!   `[dev-dependencies]` 不入该 shipped allowlist 扫描。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
 
@@ -132,10 +133,20 @@ pub(crate) struct Edge {
     pub(crate) to: String,
 }
 
+/// Cargo manifest dependency table semantics. The closed kind is assigned while enumerating the
+/// manifest and immediately partitions resolved edges so dev edges cannot contaminate shipped-only
+/// wrapper, feature, or allowlist proofs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DependencyKind {
+    Shipped,
+    Dev,
+}
+
 /// `load_edges` 一趟扫描结果：内部边 + path 解析期 fail-closed findings（LAYER-DEPS-07）。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct EdgeScan {
-    pub(crate) edges: Vec<Edge>,
+    pub(crate) shipped_edges: Vec<Edge>,
+    pub(crate) dev_edges: Vec<Edge>,
     pub(crate) findings: Vec<Finding>,
 }
 
@@ -172,29 +183,33 @@ impl GovernanceCheck for LayerDeps {
         let shipped_deps = collect_shipped_deps(&root, &members, &workspace.dependencies)?;
         let shipped_test_support_features =
             scan_workspace_testsupport_features(&root, &members, &workspace.dependencies)?;
-        let mut findings = check_layers(&members, &scan.edges);
+        let mut findings = check_layers(&members, &scan.shipped_edges);
+        findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
         findings.extend(scan_bootstrap_generated_sources(&root)?);
-        findings.extend(check_wrappers(&members, &bans, &scan.edges));
+        findings.extend(check_wrappers(&members, &bans, &scan.shipped_edges));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_workspacefacts_confinement(
             &members,
             &bans,
-            &scan.edges,
+            &scan.shipped_edges,
             &shipped_deps,
         ));
-        findings.extend(check_test_support_confinement(&scan.edges));
-        findings.extend(check_test_support_internal_dependencies(&scan.edges));
+        findings.extend(check_test_support_confinement(&scan.shipped_edges));
+        findings.extend(check_test_support_internal_dependencies(
+            &scan.shipped_edges,
+        ));
         findings.extend(shipped_test_support_features);
         findings.extend(check_runtimeexec_direct_dependencies(
-            &scan.edges,
+            &scan.shipped_edges,
             &shipped_deps,
         ));
 
         let summary = format!(
-            "{} 成员 / {} 内部边 / {} wrappers / {} shipped 依赖（feature + RuntimeExec allowlist 扫描）全部通过",
+            "{} 成员 / {} shipped 内部边 / {} dev 内部边 / {} wrappers / {} shipped 依赖（feature + RuntimeExec allowlist 扫描）全部通过",
             members.len(),
-            scan.edges.len(),
+            scan.shipped_edges.len(),
+            scan.dev_edges.len(),
             bans.len(),
             shipped_deps.len(),
         );
@@ -439,6 +454,40 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
         }
     }
     findings
+}
+
+/// Domain test dependencies retain only the boundaries that are invariant across production and
+/// test graphs. Tests may depend on lower layers/generated and composition roots may assemble real
+/// adapters, but a domain test must not couple to a sibling bounded context or concrete adapter.
+fn check_dev_layer_boundaries(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
+    let layer_of: BTreeMap<&str, Layer> = members
+        .iter()
+        .filter_map(|member| member.layer.map(|layer| (member.name.as_str(), layer)))
+        .collect();
+    edges
+        .iter()
+        .filter_map(|edge| {
+            let (&from, &to) = (
+                layer_of.get(edge.from.as_str())?,
+                layer_of.get(edge.to.as_str())?,
+            );
+            let rule = if from == Layer::Domain && to == Layer::Domain && edge.from != edge.to {
+                Rule::SiblingDomain
+            } else if from != Layer::Root && to == Layer::Adapter {
+                Rule::AdapterScope
+            } else {
+                return None;
+            };
+            Some(finding(
+                rule,
+                edge.from.clone(),
+                format!(
+                    "{} {}.{} → `{}`（{to:?}）违反 dev-dependency 测试边界",
+                    edge.from_manifest, edge.section, edge.key, edge.to,
+                ),
+            ))
+        })
+        .collect()
 }
 
 /// 外部 crate 收敛 wrapper（`(外部 crate, 允许依赖它的内部 crate 白名单)`）——**非分层 wrapper**。
@@ -1315,7 +1364,7 @@ pub(crate) fn check_workspacefacts_confinement(
 
 /// LAYER-DEPS-08：test-support 库（[`layers::TEST_SUPPORT_CRATES`]）禁进生产 shipped 依赖图。
 ///
-/// 本 lint 只扫 shipped 依赖表（见模块头），dev-dependency 边不入 `edges`；故**任一**指向 test-support
+/// 本规则只接收 `shipped_edges`，dev-dependency 边位于独立桶；故**任一**指向 test-support
 /// 成员的内部边都是 shipped 误用——应改放 `[dev-dependencies]`。补 `allows` 矩阵盲区：`allows(Domain,
 /// Service)=true` 不阻止域 crate 把 `testkit` 误放 `[dependencies]`（把 architecture.md「testkit 不进
 /// 生产 shipped 图」从注释 Soft 升为 Medium 机器门）。anti-vacuity：真实工作区 testkit 仅 dev-dep，0 finding；
@@ -1339,8 +1388,8 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
 
 /// LAYER-DEPS-10：test-support 库的内部 shipped 出边只允许 `testkit → rss-conformance`。
 ///
-/// [`Edge`] 只表示已解析的 workspace 内部 shipped 边，因此只需按 source 精确筛选
-/// [`layers::TEST_SUPPORT_CRATES`]；外部依赖不会进入 `edges`，`[dev-dependencies]` 也不在扫描范围。
+/// 本规则只接收已解析的 `shipped_edges`，因此只需按 source 精确筛选
+/// [`layers::TEST_SUPPORT_CRATES`]；外部依赖不形成 [`Edge`]，dev 边位于独立桶且调用方不得传入。
 /// 该规则只约束 test-support 的**出边**，不复用或放宽 LAYER-DEPS-08 的入边检查。
 pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Finding> {
     edges
@@ -1427,7 +1476,7 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str, &str)] = &[
 ];
 
 /// 一条 **shipped**（非 dev）依赖表条目的 feature 视图——供依赖 allowlist 与 feature 单测扫描。
-/// `[dev-dependencies]` 不入（[`MemberManifest`] 刻意不解析 dev 表），故收集到的均为 shipped。
+/// 统一枚举在构造此视图前按 [`DependencyKind`] 过滤，故收集到的均为 shipped。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShippedDep {
     /// 声明该依赖的成员 crate 名。
@@ -1607,7 +1656,10 @@ fn feature_dependencies(
     ws_deps: &BTreeMap<String, DepSpec>,
 ) -> BTreeMap<String, Vec<FeatureDependency>> {
     let mut dependencies: BTreeMap<String, Vec<FeatureDependency>> = BTreeMap::new();
-    for (section, key, spec) in manifest.dep_entries() {
+    for (kind, section, key, spec) in manifest.dep_entries() {
+        if kind == DependencyKind::Dev {
+            continue;
+        }
         dependencies
             .entry(key.to_string())
             .or_default()
@@ -1788,8 +1840,7 @@ fn first_banned_feature_path(
     None
 }
 
-/// 读各成员全部 shipped 依赖表（`dep_entries`），收集每条依赖的 feature 与内/外部视图（[`ShippedDep`]）。
-/// dev-dependencies 不入（[`MemberManifest`] 不解析 dev 表），故天然只覆盖 shipped 表。
+/// 从统一依赖表枚举中只收集 shipped entry 的 feature 与内/外部视图（[`ShippedDep`]）。
 fn collect_shipped_deps(
     root: &Path,
     members: &[Member],
@@ -1799,7 +1850,10 @@ fn collect_shipped_deps(
     for m in members {
         let manifest = read_member_manifest(root, &m.path)?;
         let manifest_file = format!("{}/Cargo.toml", m.path);
-        for (section, key, spec) in manifest.dep_entries() {
+        for (kind, section, key, spec) in manifest.dep_entries() {
+            if kind == DependencyKind::Dev {
+                continue;
+            }
             let features = dependency_features(key, spec, ws_deps);
             out.push(ShippedDep {
                 from: m.name.clone(),
@@ -1820,7 +1874,7 @@ fn collect_shipped_deps(
 
 /// RuntimeExec direct shipped dependency 闭包：内部看解析后的 package edge，外部看 Cargo 展开
 /// `package` rename / workspace dependency 继承后的真实 package identity。
-/// dev-dependency 不进入 `Edge` / `ShippedDep`，因此测试依赖不受本规则约束。
+/// dev-dependency 不进入 `shipped_edges` / `ShippedDep`，因此测试依赖不受本规则约束。
 pub(crate) fn check_runtimeexec_direct_dependencies(
     edges: &[Edge],
     deps: &[ShippedDep],
@@ -1987,41 +2041,78 @@ struct MemberManifest {
     dependencies: BTreeMap<String, DepSpec>,
     #[serde(default, rename = "build-dependencies")]
     build_dependencies: BTreeMap<String, DepSpec>,
-    /// 条件依赖：`[target.<cfg>.dependencies]` / `[target.<cfg>.build-dependencies]`。
-    /// 与普通表同为 shipped 边，必须入 lint——否则条件依赖可绕过分层门（LAYER-DEPS-01..04）。
+    #[serde(default, rename = "dev-dependencies")]
+    dev_dependencies: BTreeMap<String, DepSpec>,
+    /// 条件依赖：`[target.<cfg>.{dependencies,build-dependencies,dev-dependencies}]`。
+    /// 所有 Cargo 合法依赖表必须入 lint，否则 target-specific 声明可绕过对应边界。
     #[serde(default)]
     target: BTreeMap<String, TargetSection>,
-    // reason: [dev-dependencies] 是测试期边，非 shipped artifact 分层边，不入本 lint。
-    // 已知盲区：域单测 dev-dep 兄弟域/adapter（CLAUDE.md 禁）当前不机器强制——见 issue #1057。
 }
 
-/// 单个 `[target.<cfg>]` 块内的 shipped 依赖表。
+/// 单个 `[target.<cfg>]` 块内的依赖表。
 #[derive(Deserialize)]
 struct TargetSection {
     #[serde(default)]
     dependencies: BTreeMap<String, DepSpec>,
     #[serde(default, rename = "build-dependencies")]
     build_dependencies: BTreeMap<String, DepSpec>,
+    #[serde(default, rename = "dev-dependencies")]
+    dev_dependencies: BTreeMap<String, DepSpec>,
 }
 
 impl MemberManifest {
-    /// 遍历全部 shipped 依赖表，yield `(section 标签, dep key, spec)`——`[dependencies]` +
-    /// `[build-dependencies]` + 每个 `[target.<cfg>.{dependencies,build-dependencies}]`。
-    /// 单源迭代点：所有依赖表共用此处，新增表形态只在此扩展（DRY）。
-    fn dep_entries(&self) -> Vec<(String, &str, &DepSpec)> {
-        let mut out: Vec<(String, &str, &DepSpec)> = Vec::new();
+    /// 遍历所有 Cargo 依赖表并携带闭值 kind。扫描阶段以 kind 立即分桶；后续 shipped-only
+    /// proof 不需要反复过滤，也无法意外把 dev edge 当作 production source evidence。
+    fn dep_entries(&self) -> Vec<(DependencyKind, String, &str, &DepSpec)> {
+        let mut out = Vec::new();
         for (k, v) in &self.dependencies {
-            out.push(("[dependencies]".to_string(), k.as_str(), v));
+            out.push((
+                DependencyKind::Shipped,
+                "[dependencies]".to_string(),
+                k.as_str(),
+                v,
+            ));
         }
         for (k, v) in &self.build_dependencies {
-            out.push(("[build-dependencies]".to_string(), k.as_str(), v));
+            out.push((
+                DependencyKind::Shipped,
+                "[build-dependencies]".to_string(),
+                k.as_str(),
+                v,
+            ));
+        }
+        for (k, v) in &self.dev_dependencies {
+            out.push((
+                DependencyKind::Dev,
+                "[dev-dependencies]".to_string(),
+                k.as_str(),
+                v,
+            ));
         }
         for (cfg, sect) in &self.target {
             for (k, v) in &sect.dependencies {
-                out.push((format!("[target.{cfg}.dependencies]"), k.as_str(), v));
+                out.push((
+                    DependencyKind::Shipped,
+                    format!("[target.{cfg}.dependencies]"),
+                    k.as_str(),
+                    v,
+                ));
+            }
+            for (k, v) in &sect.dev_dependencies {
+                out.push((
+                    DependencyKind::Dev,
+                    format!("[target.{cfg}.dev-dependencies]"),
+                    k.as_str(),
+                    v,
+                ));
             }
             for (k, v) in &sect.build_dependencies {
-                out.push((format!("[target.{cfg}.build-dependencies]"), k.as_str(), v));
+                out.push((
+                    DependencyKind::Shipped,
+                    format!("[target.{cfg}.build-dependencies]"),
+                    k.as_str(),
+                    v,
+                ));
             }
         }
         out
@@ -2181,7 +2272,8 @@ fn load_members(root: &Path, member_paths: &[String]) -> Result<Vec<Member>> {
     Ok(members)
 }
 
-/// 读各成员全部 shipped 依赖表（`dep_entries`），解析内部 path 边 + fail-closed 标记未解析的本地 path 依赖。
+/// 单次读取各成员全部 shipped/dev 依赖表（`dep_entries`），解析内部 path 边后按 kind 立即分桶；
+/// 未解析的任一本地 path 依赖都 fail-closed。
 /// `ws_deps` = 根 `[workspace.dependencies]`（解析 `workspace = true` 形态用），由 `run` 传入避免重复解析根 manifest。
 fn load_edges(
     root: &Path,
@@ -2197,7 +2289,7 @@ fn load_edges(
     for m in members {
         let manifest = read_member_manifest(root, &m.path)?;
         let manifest_file = format!("{}/Cargo.toml", m.path);
-        for (section, key, spec) in manifest.dep_entries() {
+        for (kind, section, key, spec) in manifest.dep_entries() {
             let target = classify_dep(&m.path, key, spec, ws_deps);
             match edge_or_unresolved(
                 &m.name,
@@ -2207,7 +2299,10 @@ fn load_edges(
                 target,
                 &path_to_name,
             ) {
-                Some(Ok(edge)) => scan.edges.push(edge),
+                Some(Ok(edge)) => match kind {
+                    DependencyKind::Shipped => scan.shipped_edges.push(edge),
+                    DependencyKind::Dev => scan.dev_edges.push(edge),
+                },
                 Some(Err(f)) => scan.findings.push(f),
                 None => {} // reason: 外部 crate（纯 version / 无 path），非内部边，按设计忽略。
             }
@@ -2365,6 +2460,16 @@ mod tests {
             from: from.to_string(),
             from_manifest: format!("crates/{from}/Cargo.toml"),
             section: "[dependencies]".to_string(),
+            key: to.to_string(),
+            to: to.to_string(),
+        }
+    }
+
+    fn dev_e(from: &str, to: &str) -> Edge {
+        Edge {
+            from: from.to_string(),
+            from_manifest: format!("crates/{from}/Cargo.toml"),
+            section: "[dev-dependencies]".to_string(),
             key: to.to_string(),
             to: to.to_string(),
         }
@@ -2596,7 +2701,7 @@ mod tests {
         assert_eq!(check_test_support_internal_dependencies(&edges).len(), 2);
     }
 
-    /// LAYER-DEPS-10 anti-vacuity：无 shipped 出边时不误报；dev-dep 本来就不进入 `edges`。
+    /// LAYER-DEPS-10 anti-vacuity：无 shipped 出边时不误报；dev 边由独立 bucket 与规则 owner 处理。
     #[test]
     fn test_support_internal_dependencies_green_no_shipped_edge() {
         assert!(check_test_support_internal_dependencies(&[]).is_empty());
@@ -4196,7 +4301,12 @@ tracing = { package = "tower", version = "1" }
         let shipped_deps = collect_shipped_deps(&root, &members, &workspace.dependencies)?;
 
         assert!(members.len() > 20, "成员数异常少: {}", members.len());
-        assert!(scan.edges.len() > 20, "内部边异常少: {}", scan.edges.len());
+        assert!(
+            scan.shipped_edges.len() > 20,
+            "shipped 内部边异常少: {}",
+            scan.shipped_edges.len()
+        );
+        assert!(!scan.dev_edges.is_empty(), "未解析到任何 dev 内部边");
         assert!(!bans.is_empty(), "未读到任何分层 wrappers");
         // fail-closed 不误伤：真实工作区无 path 解析期 finding（LAYER-DEPS-07 anti-false-positive）。
         assert!(
@@ -4214,25 +4324,28 @@ tracing = { package = "tower", version = "1" }
                 .collect::<Vec<_>>()
         );
 
-        let mut findings = check_layers(&members, &scan.edges);
+        let mut findings = check_layers(&members, &scan.shipped_edges);
+        findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
-        findings.extend(check_wrappers(&members, &bans, &scan.edges));
+        findings.extend(check_wrappers(&members, &bans, &scan.shipped_edges));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_workspacefacts_confinement(
             &members,
             &bans,
-            &scan.edges,
+            &scan.shipped_edges,
             &shipped_deps,
         ));
-        findings.extend(check_test_support_confinement(&scan.edges));
-        findings.extend(check_test_support_internal_dependencies(&scan.edges));
+        findings.extend(check_test_support_confinement(&scan.shipped_edges));
+        findings.extend(check_test_support_internal_dependencies(
+            &scan.shipped_edges,
+        ));
         findings.extend(scan_workspace_testsupport_features(
             &root,
             &members,
             &workspace.dependencies,
         )?);
         findings.extend(check_runtimeexec_direct_dependencies(
-            &scan.edges,
+            &scan.shipped_edges,
             &shipped_deps,
         ));
         assert!(findings.is_empty(), "真实工作区应无违规: {findings:?}");
@@ -4241,9 +4354,9 @@ tracing = { package = "tower", version = "1" }
 
     // ---- F2：条件依赖表（[target.*]）必须入 lint ----
 
-    /// `dep_entries` 覆盖 normal + build + `[target.*]` 两类条件依赖表——否则条件依赖可绕过分层门。
+    /// 依赖表单次枚举覆盖 shipped/dev 及其 target-specific 形态，并携带闭值 kind 供扫描时分桶。
     #[test]
-    fn dep_entries_includes_target_specific_tables() -> Result<()> {
+    fn dep_entries_classifies_shipped_and_dev_tables() -> Result<()> {
         let src = r#"
 [package]
 name = "x"
@@ -4251,17 +4364,251 @@ name = "x"
 a = { path = "../a" }
 [build-dependencies]
 b = { path = "../b" }
-[target.'cfg(unix)'.dependencies]
+[dev-dependencies]
 c = { path = "../c" }
-[target.'cfg(windows)'.build-dependencies]
+[target.'cfg(unix)'.dependencies]
 d = { path = "../d" }
+[target.'cfg(windows)'.build-dependencies]
+e = { path = "../e" }
+[target.'cfg(unix)'.dev-dependencies]
+f = { path = "../f" }
 "#;
         let manifest: MemberManifest = toml::from_str(src)?;
-        let keys: Vec<&str> = manifest.dep_entries().iter().map(|(_, k, _)| *k).collect();
-        for want in ["a", "b", "c", "d"] {
-            assert!(keys.contains(&want), "dep_entries 漏 `{want}`: {keys:?}");
-        }
+        let entries: Vec<(DependencyKind, &str)> = manifest
+            .dep_entries()
+            .iter()
+            .map(|(kind, _, key, _)| (*kind, *key))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (DependencyKind::Shipped, "a"),
+                (DependencyKind::Shipped, "b"),
+                (DependencyKind::Dev, "c"),
+                (DependencyKind::Shipped, "d"),
+                (DependencyKind::Dev, "f"),
+                (DependencyKind::Shipped, "e"),
+            ]
+        );
         Ok(())
+    }
+
+    #[test]
+    fn load_edges_partitions_dev_and_reuses_internal_resolution() -> Result<()> {
+        let root = crate::testutil::unique_tmp("layerdeps-dev-edge-partition");
+        let manifests = [
+            (
+                "crates/identity/Cargo.toml",
+                r#"
+[package]
+name = "identity"
+[dependencies]
+base_alias = { package = "vocab", path = "../vocab" }
+testkit_shipped_alias = { package = "testkit", path = "../testkit" }
+[dev-dependencies]
+sibling_alias = { package = "settings", path = "../settings" }
+service_alias = { workspace = true }
+testkit_dev_alias = { package = "testkit", path = "../testkit" }
+[target.'cfg(unix)'.dev-dependencies]
+adapter_alias = { package = "postgres", path = "../../adapters/postgres" }
+"#,
+            ),
+            ("crates/vocab/Cargo.toml", "[package]\nname = \"vocab\"\n"),
+            (
+                "crates/settings/Cargo.toml",
+                "[package]\nname = \"settings\"\n",
+            ),
+            (
+                "crates/httpserve/Cargo.toml",
+                "[package]\nname = \"httpserve\"\n",
+            ),
+            (
+                "adapters/postgres/Cargo.toml",
+                "[package]\nname = \"postgres\"\n[dev-dependencies]\nidentity = { path = \"../../crates/identity\" }\n",
+            ),
+            (
+                "crates/testkit/Cargo.toml",
+                "[package]\nname = \"testkit\"\n",
+            ),
+            (
+                "crates/runtimeexec/Cargo.toml",
+                r#"
+[package]
+name = "runtimeexec"
+[dependencies]
+forbidden_shipped = { package = "identity", path = "../identity" }
+bad_external = { package = "axum", version = "1" }
+[dev-dependencies]
+forbidden_dev = { package = "identity", path = "../identity" }
+dev_external = { package = "axum", version = "1" }
+"#,
+            ),
+        ];
+        for (relative, source) in manifests {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().context("fixture parent")?)?;
+            std::fs::write(path, source)?;
+        }
+        let members = vec![
+            m("identity", "crates/identity", Some(Layer::Domain)),
+            m("vocab", "crates/vocab", Some(Layer::Basis)),
+            m("settings", "crates/settings", Some(Layer::Domain)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+            m("testkit", "crates/testkit", Some(Layer::Service)),
+            m(
+                "runtimeexec",
+                "crates/runtimeexec",
+                Some(Layer::RuntimeExec),
+            ),
+        ];
+        let ws_deps = BTreeMap::from([(
+            "service_alias".to_string(),
+            DepSpec::Detailed(DetailedDep {
+                package: Some("httpserve".to_string()),
+                path: Some("crates/httpserve".to_string()),
+                workspace: false,
+                default_features: None,
+                optional: false,
+                features: Vec::new(),
+            }),
+        )]);
+
+        let scan = load_edges(&root, &members, &ws_deps)?;
+        assert!(scan.findings.is_empty(), "{:#?}", scan.findings);
+        assert_eq!(
+            scan.shipped_edges
+                .iter()
+                .map(|edge| edge.to.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["vocab", "testkit", "identity"])
+        );
+        assert_eq!(
+            scan.dev_edges
+                .iter()
+                .map(|edge| edge.to.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["settings", "httpserve", "postgres", "testkit", "identity"])
+        );
+        assert!(scan.dev_edges.iter().any(|edge| {
+            edge.to == "postgres" && edge.section.contains("target.cfg(unix).dev-dependencies")
+        }));
+
+        let test_support = check_test_support_confinement(&scan.shipped_edges);
+        assert_eq!(test_support.len(), 1, "{test_support:#?}");
+        assert!(test_support[0].detail.contains("testkit_shipped_alias"));
+
+        let shipped_deps = collect_shipped_deps(&root, &members, &ws_deps)?;
+        let runtimeexec = check_runtimeexec_direct_dependencies(&scan.shipped_edges, &shipped_deps);
+        assert_eq!(runtimeexec.len(), 2, "{runtimeexec:#?}");
+        assert!(runtimeexec.iter().any(|finding| {
+            finding.detail.contains("forbidden_shipped")
+                && !finding.detail.contains("forbidden_dev")
+        }));
+        assert!(runtimeexec.iter().any(|finding| {
+            finding.detail.contains("bad_external") && !finding.detail.contains("dev_external")
+        }));
+
+        let wrapper_members = vec![
+            m("identity", "crates/identity", Some(Layer::Domain)),
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+        ];
+        let wrapper_bans = vec![ban("identity", &["postgres"]), ban("postgres", &[])];
+        let wrappers = check_wrappers(&wrapper_members, &wrapper_bans, &scan.shipped_edges);
+        assert_eq!(wrappers.len(), 1, "{wrappers:#?}");
+        assert!(wrappers[0].detail.contains("无 adapter→域 source edge"));
+        assert!(
+            scan.dev_edges
+                .iter()
+                .any(|edge| edge.from == "postgres" && edge.to == "identity")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_edges_dev_path_is_fail_closed_without_polluting_shipped_edges() -> Result<()> {
+        let root = crate::testutil::unique_tmp("layerdeps-dev-edge-fail-closed");
+        let manifest = root.join("crates/identity/Cargo.toml");
+        std::fs::create_dir_all(manifest.parent().context("fixture parent")?)?;
+        std::fs::write(
+            &manifest,
+            r#"
+[package]
+name = "identity"
+[dev-dependencies]
+escaped = { path = "../../../outside" }
+missing = { path = "../missing-member" }
+"#,
+        )?;
+        let members = vec![m("identity", "crates/identity", Some(Layer::Domain))];
+
+        let scan = load_edges(&root, &members, &BTreeMap::new())?;
+        assert!(scan.shipped_edges.is_empty());
+        assert!(scan.dev_edges.is_empty());
+        assert_eq!(scan.findings.len(), 2, "{:#?}", scan.findings);
+        assert!(
+            scan.findings
+                .iter()
+                .all(|finding| finding.rule == Rule::UnresolvedPath)
+        );
+        assert!(
+            scan.findings
+                .iter()
+                .any(|finding| finding.detail.contains("[dev-dependencies].escaped"))
+        );
+        assert!(
+            scan.findings
+                .iter()
+                .any(|finding| finding.detail.contains("[dev-dependencies].missing"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dev_layer_boundaries_reject_sibling_domain_and_non_root_adapter() {
+        let members = vec![
+            m("identity", "crates/identity", Some(Layer::Domain)),
+            m("settings", "crates/settings", Some(Layer::Domain)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+        ];
+        let findings = check_dev_layer_boundaries(
+            &members,
+            &[
+                dev_e("identity", "settings"),
+                dev_e("identity", "postgres"),
+                dev_e("httpserve", "postgres"),
+            ],
+        );
+        assert_eq!(findings.len(), 3, "{findings:#?}");
+        assert_eq!(findings[0].rule, Rule::SiblingDomain);
+        assert!(
+            findings[1..]
+                .iter()
+                .all(|finding| finding.rule == Rule::AdapterScope)
+        );
+    }
+
+    #[test]
+    fn dev_layer_boundaries_keep_legal_test_edges() {
+        let members = vec![
+            m("identity", "crates/identity", Some(Layer::Domain)),
+            m("vocab", "crates/vocab", Some(Layer::Basis)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+            m("testkit", "crates/testkit", Some(Layer::Service)),
+            m("generated", "generated", Some(Layer::Generated)),
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+            m("journeys", "journeys", Some(Layer::Root)),
+        ];
+        let edges = [
+            dev_e("identity", "identity"),
+            dev_e("identity", "vocab"),
+            dev_e("identity", "httpserve"),
+            dev_e("identity", "testkit"),
+            dev_e("identity", "generated"),
+            dev_e("journeys", "postgres"),
+        ];
+        assert!(check_dev_layer_boundaries(&members, &edges).is_empty());
     }
 
     // ---- F3：含 path 的本地依赖 fail-closed（LAYER-DEPS-07）----

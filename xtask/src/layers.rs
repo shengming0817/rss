@@ -70,7 +70,7 @@ pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
 ///
 /// `testkit` 是**服务层 test-support 库**（HTTP 契约测试 oneshot harness，#1136）：出边全是外部 crate
 /// （axum/tower/serde…，无 workspace 内部边可违 [`allows`]），经 `[dev-dependencies]` 被域/组合根消费
-/// （dev-dep 边不入 layerdeps shipped 扫描，见 `layerdeps` 文档头）。归 Service 层 ⇒ 无需 deny.toml 分层
+/// （dev 边进入 layerdeps 独立 bucket，不进入 `shipped_edges`，见 `layerdeps` 文档头）。归 Service 层 ⇒ 无需 deny.toml 分层
 /// ban（仅 Domain/Adapter/Generated 需，LAYER-DEPS-06）、无需改 base intra-DAG。
 pub(crate) const SERVICE_CRATES: &[&str] = &[
     "httpserve",
@@ -112,8 +112,9 @@ pub(crate) fn is_proc_macro(name: &str) -> bool {
 /// test-support 库（HTTP 契约测试 harness 与可编程外部设备 actor）：保持各自既有分层供 classify，但
 /// **只准经 `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（architecture.md §分层）。机器守由 layerdeps
 /// [`check_test_support_confinement`](crate::layerdeps::check_test_support_confinement)（INVARIANT:
-/// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区；layerdeps 只扫 shipped 依赖表，故任一指向本集成员的
-/// 内部边即 shipped 误用。`iotdevice` 仍是 Example 层外部 actor，不因 test-support 身份获得特殊层。
+/// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区。该规则只消费 `shipped_edges`，故任一指向本集成员的
+/// shipped 内部边即误用；独立 dev bucket 仅应用 LAYER-DEPS-02/03。`iotdevice` 仍是 Example 层外部
+/// actor，不因 test-support 身份获得特殊层。
 pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit", "tracewiretest", "iotdevice"];
 
 /// 该 crate 是否 test-support 库（只准 dev-dependency 消费，见 [`TEST_SUPPORT_CRATES`]）。

@@ -47,7 +47,7 @@ effect，但必须遵守其各自治理边界。
 - DB 字段 snake_case。
 - JSON、query、path、event header 字段 camelCase（`#[serde(rename_all = "camelCase")]`）。
 - 错误使用 `vocab`(error) + `thiserror`。
-- mock 放 `#[cfg(test)]` 模块或 `mockall`；域 crate 单测不依赖平台 adapter crate。
+- mock 放 `#[cfg(test)]` 模块或 `mockall`；域 crate 单测的 `[dev-dependencies]` 不依赖兄弟域或平台 adapter crate，该边界由 `cargo xtask layer-deps` 的 dev 规则子集机器强制。
 - 集成测试用 `tests/` 目录 + Cargo `[[test]] required-features`（经 `LocalFeatureScope`）作为 eligibility 唯一 owner；禁止同轴 crate-level `#[cfg(feature = …)]` 双门。调度语义见 `docs/ops/202607111214-1730-integration-shards.md`（INTEGRATION-SHARD-ELIGIBILITY-01）。
 
 ## 覆盖率
