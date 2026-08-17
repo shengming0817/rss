@@ -36,6 +36,9 @@ fn ui() {
     t.compile_fail("tests/ui/envelope_header_private_fields_fail.rs");
     t.compile_fail("tests/ui/message_envelope_private_fields_fail.rs");
     t.compile_fail("tests/ui/message_private_fields_fail.rs");
+    t.compile_fail("tests/ui/pki_artifact_request_clone_fail.rs");
+    t.compile_fail("tests/ui/pki_artifact_san_forge_fail.rs");
+    t.compile_fail("tests/ui/pki_artifact_digest_swap_fail.rs");
     t.compile_fail("tests/ui/publisher_error_legacy_is_transient_fail.rs");
     t.compile_fail("tests/ui/saga_operator_authorization_forge_fail.rs");
     t.compile_fail("tests/ui/saga_operator_authorization_clone_fail.rs");

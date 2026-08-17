@@ -44,6 +44,8 @@ consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 # SagaDurableStore port 的 SagaId(uuid::Uuid)：saga 实例标识下沉 diport（eventexec::SagaId re-export 本类型）。
 uuid = { workspace = true }
+# PKI URI SANs require a standards-aware absolute-URI parser rather than delimiter-only checks.
+url = { workspace = true }
 # Subscriber port 返回 MessageStream = Pin<Box<dyn Stream + Send>>（futures::Stream）。
 futures = { workspace = true }
 # Service-token replay deadlines are typed, absolute Tokio deadlines so every adapter operation

@@ -3101,6 +3101,281 @@ pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
 impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
 pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
 pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
+pub mod diport::pki_artifact
+pub enum diport::pki_artifact::PkiArtifactErrorKind
+pub diport::pki_artifact::PkiArtifactErrorKind::Forbidden
+pub diport::pki_artifact::PkiArtifactErrorKind::InvalidResponse
+pub diport::pki_artifact::PkiArtifactErrorKind::Misconfigured
+pub diport::pki_artifact::PkiArtifactErrorKind::OutcomeUnknown
+pub diport::pki_artifact::PkiArtifactErrorKind::Rejected
+pub diport::pki_artifact::PkiArtifactErrorKind::Unavailable
+impl core::clone::Clone for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::clone(&self) -> diport::pki_artifact::PkiArtifactErrorKind
+impl core::cmp::Eq for diport::pki_artifact::PkiArtifactErrorKind
+impl core::cmp::PartialEq for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::eq(&self, &diport::pki_artifact::PkiArtifactErrorKind) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Send for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactErrorKind
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactErrorKind
+pub enum diport::pki_artifact::PkiArtifactValueError
+pub diport::pki_artifact::PkiArtifactValueError::InvalidCertificateMaterial
+pub diport::pki_artifact::PkiArtifactValueError::InvalidCommonName
+pub diport::pki_artifact::PkiArtifactValueError::InvalidCsrSize
+pub diport::pki_artifact::PkiArtifactValueError::InvalidExtendedKeyUsage
+pub diport::pki_artifact::PkiArtifactValueError::InvalidIssuerChain
+pub diport::pki_artifact::PkiArtifactValueError::InvalidSan
+pub diport::pki_artifact::PkiArtifactValueError::InvalidValidity
+pub diport::pki_artifact::PkiArtifactValueError::ZeroGeneration
+impl core::clone::Clone for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::clone(&self) -> diport::pki_artifact::PkiArtifactValueError
+impl core::cmp::Eq for diport::pki_artifact::PkiArtifactValueError
+impl core::cmp::PartialEq for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::eq(&self, &diport::pki_artifact::PkiArtifactValueError) -> bool
+impl core::error::Error for diport::pki_artifact::PkiArtifactValueError
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Send for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactValueError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactValueError
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactValueError
+pub enum diport::pki_artifact::PkiExtendedKeyUsage
+pub diport::pki_artifact::PkiExtendedKeyUsage::ClientAuth
+pub diport::pki_artifact::PkiExtendedKeyUsage::ServerAuth
+impl core::clone::Clone for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::clone(&self) -> diport::pki_artifact::PkiExtendedKeyUsage
+impl core::cmp::Eq for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::cmp::PartialEq for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::eq(&self, &diport::pki_artifact::PkiExtendedKeyUsage) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Freeze for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Send for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Sync for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Unpin for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiExtendedKeyUsage
+pub enum diport::pki_artifact::PkiSanRef<'a>
+pub diport::pki_artifact::PkiSanRef::Dns(&'a str)
+pub diport::pki_artifact::PkiSanRef::Email(&'a str)
+pub diport::pki_artifact::PkiSanRef::Ip(core::net::ip_addr::IpAddr)
+pub diport::pki_artifact::PkiSanRef::Uri(&'a str)
+pub diport::pki_artifact::PkiSanRef::Utf8OtherName
+pub diport::pki_artifact::PkiSanRef::Utf8OtherName::oid: &'a str
+pub diport::pki_artifact::PkiSanRef::Utf8OtherName::value: &'a str
+impl<'a> core::clone::Clone for diport::pki_artifact::PkiSanRef<'a>
+pub fn diport::pki_artifact::PkiSanRef<'a>::clone(&self) -> diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::cmp::Eq for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::cmp::PartialEq for diport::pki_artifact::PkiSanRef<'a>
+pub fn diport::pki_artifact::PkiSanRef<'a>::eq(&self, &diport::pki_artifact::PkiSanRef<'a>) -> bool
+impl<'a> core::fmt::Debug for diport::pki_artifact::PkiSanRef<'a>
+pub fn diport::pki_artifact::PkiSanRef<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Copy for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::StructuralPartialEq for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Freeze for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Send for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Sync for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Unpin for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::UnsafeUnpin for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiSanRef<'a>
+pub struct diport::pki_artifact::PkiArtifactError
+impl diport::pki_artifact::PkiArtifactError
+pub const fn diport::pki_artifact::PkiArtifactError::kind(&self) -> diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactError::new<E>(diport::pki_artifact::PkiArtifactErrorKind, E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
+impl core::error::Error for diport::pki_artifact::PkiArtifactError
+pub fn diport::pki_artifact::PkiArtifactError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactError
+pub fn diport::pki_artifact::PkiArtifactError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pki_artifact::PkiArtifactError
+pub fn diport::pki_artifact::PkiArtifactError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactError
+impl core::marker::Send for diport::pki_artifact::PkiArtifactError
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactError
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactError
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactError
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactError
+impl !core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactError
+pub struct diport::pki_artifact::PkiArtifactRequest
+impl diport::pki_artifact::PkiArtifactRequest
+pub const fn diport::pki_artifact::PkiArtifactRequest::common_name(&self) -> &diport::pki_artifact::PkiCommonName
+pub const fn diport::pki_artifact::PkiArtifactRequest::csr_pem(&self) -> &diport::RedactedBytes
+pub fn diport::pki_artifact::PkiArtifactRequest::extended_key_usages(&self) -> &[diport::pki_artifact::PkiExtendedKeyUsage]
+pub const fn diport::pki_artifact::PkiArtifactRequest::generation(&self) -> diport::pki_artifact::PkiRequestGeneration
+pub const fn diport::pki_artifact::PkiArtifactRequest::policy_digest(&self) -> &diport::pki_artifact::PkiPolicyDigest
+pub const fn diport::pki_artifact::PkiArtifactRequest::renew_before(&self) -> core::time::Duration
+pub const fn diport::pki_artifact::PkiArtifactRequest::requested_validity(&self) -> core::time::Duration
+pub fn diport::pki_artifact::PkiArtifactRequest::sans(&self) -> &[diport::pki_artifact::PkiSan]
+pub const fn diport::pki_artifact::PkiArtifactRequest::scope(&self) -> diport::revocation_store::CertScope
+pub const fn diport::pki_artifact::PkiArtifactRequest::spki_digest(&self) -> &diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiArtifactRequest::try_new(diport::revocation_store::CertScope, diport::pki_artifact::PkiRequestGeneration, diport::pki_artifact::PkiPolicyDigest, diport::RedactedBytes, diport::pki_artifact::PkiSpkiDigest, diport::pki_artifact::PkiCommonName, alloc::vec::Vec<diport::pki_artifact::PkiSan>, alloc::vec::Vec<diport::pki_artifact::PkiExtendedKeyUsage>, core::time::Duration, core::time::Duration) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactRequest
+pub fn diport::pki_artifact::PkiArtifactRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::Send for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactRequest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactRequest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactRequest
+pub struct diport::pki_artifact::PkiChainDigest(_)
+impl diport::pki_artifact::PkiChainDigest
+pub const fn diport::pki_artifact::PkiChainDigest::as_bytes(&self) -> &[u8; 32]
+pub const fn diport::pki_artifact::PkiChainDigest::new([u8; 32]) -> Self
+impl core::clone::Clone for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::clone(&self) -> diport::pki_artifact::PkiChainDigest
+impl core::cmp::Eq for diport::pki_artifact::PkiChainDigest
+impl core::cmp::PartialEq for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::eq(&self, &diport::pki_artifact::PkiChainDigest) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiChainDigest
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiChainDigest
+impl core::marker::Freeze for diport::pki_artifact::PkiChainDigest
+impl core::marker::Send for diport::pki_artifact::PkiChainDigest
+impl core::marker::Sync for diport::pki_artifact::PkiChainDigest
+impl core::marker::Unpin for diport::pki_artifact::PkiChainDigest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiChainDigest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiChainDigest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiChainDigest
+pub struct diport::pki_artifact::PkiCommonName(_)
+impl diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::as_str(&self) -> &str
+pub fn diport::pki_artifact::PkiCommonName::try_new(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::clone::Clone for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::clone(&self) -> diport::pki_artifact::PkiCommonName
+impl core::cmp::Eq for diport::pki_artifact::PkiCommonName
+impl core::cmp::PartialEq for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::eq(&self, &diport::pki_artifact::PkiCommonName) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiCommonName
+impl core::marker::Freeze for diport::pki_artifact::PkiCommonName
+impl core::marker::Send for diport::pki_artifact::PkiCommonName
+impl core::marker::Sync for diport::pki_artifact::PkiCommonName
+impl core::marker::Unpin for diport::pki_artifact::PkiCommonName
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiCommonName
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiCommonName
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiCommonName
+pub struct diport::pki_artifact::PkiPolicyDigest(_)
+impl diport::pki_artifact::PkiPolicyDigest
+pub const fn diport::pki_artifact::PkiPolicyDigest::as_bytes(&self) -> &[u8; 32]
+pub const fn diport::pki_artifact::PkiPolicyDigest::new([u8; 32]) -> Self
+impl core::clone::Clone for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::clone(&self) -> diport::pki_artifact::PkiPolicyDigest
+impl core::cmp::Eq for diport::pki_artifact::PkiPolicyDigest
+impl core::cmp::PartialEq for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::eq(&self, &diport::pki_artifact::PkiPolicyDigest) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Freeze for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Send for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Sync for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Unpin for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiPolicyDigest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiPolicyDigest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiPolicyDigest
+pub struct diport::pki_artifact::PkiRequestGeneration(_)
+impl diport::pki_artifact::PkiRequestGeneration
+pub const fn diport::pki_artifact::PkiRequestGeneration::get(self) -> u64
+pub fn diport::pki_artifact::PkiRequestGeneration::try_new(u64) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::clone::Clone for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::clone(&self) -> diport::pki_artifact::PkiRequestGeneration
+impl core::cmp::Eq for diport::pki_artifact::PkiRequestGeneration
+impl core::cmp::PartialEq for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::eq(&self, &diport::pki_artifact::PkiRequestGeneration) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Freeze for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Send for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Sync for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Unpin for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiRequestGeneration
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiRequestGeneration
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiRequestGeneration
+pub struct diport::pki_artifact::PkiSan(_)
+impl diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::as_ref(&self) -> diport::pki_artifact::PkiSanRef<'_>
+pub fn diport::pki_artifact::PkiSan::dns(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+pub fn diport::pki_artifact::PkiSan::email(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+pub const fn diport::pki_artifact::PkiSan::ip(core::net::ip_addr::IpAddr) -> Self
+pub fn diport::pki_artifact::PkiSan::uri(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+pub fn diport::pki_artifact::PkiSan::utf8_other_name(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::clone::Clone for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::clone(&self) -> diport::pki_artifact::PkiSan
+impl core::cmp::Eq for diport::pki_artifact::PkiSan
+impl core::cmp::PartialEq for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::eq(&self, &diport::pki_artifact::PkiSan) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiSan
+impl core::marker::Freeze for diport::pki_artifact::PkiSan
+impl core::marker::Send for diport::pki_artifact::PkiSan
+impl core::marker::Sync for diport::pki_artifact::PkiSan
+impl core::marker::Unpin for diport::pki_artifact::PkiSan
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiSan
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiSan
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiSan
+pub struct diport::pki_artifact::PkiSpkiDigest(_)
+impl diport::pki_artifact::PkiSpkiDigest
+pub const fn diport::pki_artifact::PkiSpkiDigest::as_bytes(&self) -> &[u8; 32]
+pub const fn diport::pki_artifact::PkiSpkiDigest::new([u8; 32]) -> Self
+impl core::clone::Clone for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::clone(&self) -> diport::pki_artifact::PkiSpkiDigest
+impl core::cmp::Eq for diport::pki_artifact::PkiSpkiDigest
+impl core::cmp::PartialEq for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::eq(&self, &diport::pki_artifact::PkiSpkiDigest) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Freeze for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Send for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Sync for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Unpin for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiSpkiDigest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiSpkiDigest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiSpkiDigest
+pub const diport::pki_artifact::MAX_PKI_CERT_BYTES: usize
+pub const diport::pki_artifact::MAX_PKI_CSR_BYTES: usize
+pub const diport::pki_artifact::MAX_PKI_ISSUER_CERTS: usize
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
 pub diport::publisher::PublishErrorKind::Ambiguous
@@ -6083,6 +6358,104 @@ impl core::marker::Unpin for diport::pdp::PdpError
 impl core::marker::UnsafeUnpin for diport::pdp::PdpError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::PdpError
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::PdpError
+pub enum diport::PkiArtifactErrorKind
+pub diport::PkiArtifactErrorKind::Forbidden
+pub diport::PkiArtifactErrorKind::InvalidResponse
+pub diport::PkiArtifactErrorKind::Misconfigured
+pub diport::PkiArtifactErrorKind::OutcomeUnknown
+pub diport::PkiArtifactErrorKind::Rejected
+pub diport::PkiArtifactErrorKind::Unavailable
+impl core::clone::Clone for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::clone(&self) -> diport::pki_artifact::PkiArtifactErrorKind
+impl core::cmp::Eq for diport::pki_artifact::PkiArtifactErrorKind
+impl core::cmp::PartialEq for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::eq(&self, &diport::pki_artifact::PkiArtifactErrorKind) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactErrorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Send for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactErrorKind
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactErrorKind
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactErrorKind
+pub enum diport::PkiArtifactValueError
+pub diport::PkiArtifactValueError::InvalidCertificateMaterial
+pub diport::PkiArtifactValueError::InvalidCommonName
+pub diport::PkiArtifactValueError::InvalidCsrSize
+pub diport::PkiArtifactValueError::InvalidExtendedKeyUsage
+pub diport::PkiArtifactValueError::InvalidIssuerChain
+pub diport::PkiArtifactValueError::InvalidSan
+pub diport::PkiArtifactValueError::InvalidValidity
+pub diport::PkiArtifactValueError::ZeroGeneration
+impl core::clone::Clone for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::clone(&self) -> diport::pki_artifact::PkiArtifactValueError
+impl core::cmp::Eq for diport::pki_artifact::PkiArtifactValueError
+impl core::cmp::PartialEq for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::eq(&self, &diport::pki_artifact::PkiArtifactValueError) -> bool
+impl core::error::Error for diport::pki_artifact::PkiArtifactValueError
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pki_artifact::PkiArtifactValueError
+pub fn diport::pki_artifact::PkiArtifactValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Send for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactValueError
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactValueError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactValueError
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactValueError
+pub enum diport::PkiExtendedKeyUsage
+pub diport::PkiExtendedKeyUsage::ClientAuth
+pub diport::PkiExtendedKeyUsage::ServerAuth
+impl core::clone::Clone for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::clone(&self) -> diport::pki_artifact::PkiExtendedKeyUsage
+impl core::cmp::Eq for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::cmp::PartialEq for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::eq(&self, &diport::pki_artifact::PkiExtendedKeyUsage) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiExtendedKeyUsage
+pub fn diport::pki_artifact::PkiExtendedKeyUsage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Freeze for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Send for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Sync for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::Unpin for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiExtendedKeyUsage
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiExtendedKeyUsage
+pub enum diport::PkiSanRef<'a>
+pub diport::PkiSanRef::Dns(&'a str)
+pub diport::PkiSanRef::Email(&'a str)
+pub diport::PkiSanRef::Ip(core::net::ip_addr::IpAddr)
+pub diport::PkiSanRef::Uri(&'a str)
+pub diport::PkiSanRef::Utf8OtherName
+pub diport::PkiSanRef::Utf8OtherName::oid: &'a str
+pub diport::PkiSanRef::Utf8OtherName::value: &'a str
+impl<'a> core::clone::Clone for diport::pki_artifact::PkiSanRef<'a>
+pub fn diport::pki_artifact::PkiSanRef<'a>::clone(&self) -> diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::cmp::Eq for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::cmp::PartialEq for diport::pki_artifact::PkiSanRef<'a>
+pub fn diport::pki_artifact::PkiSanRef<'a>::eq(&self, &diport::pki_artifact::PkiSanRef<'a>) -> bool
+impl<'a> core::fmt::Debug for diport::pki_artifact::PkiSanRef<'a>
+pub fn diport::pki_artifact::PkiSanRef<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Copy for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::StructuralPartialEq for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Freeze for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Send for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Sync for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::Unpin for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::marker::UnsafeUnpin for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiSanRef<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiSanRef<'a>
 pub enum diport::ProjectionOperatorTokenProfile
 impl core::clone::Clone for diport::pdp::ProjectionOperatorTokenProfile
 pub fn diport::pdp::ProjectionOperatorTokenProfile::clone(&self) -> diport::pdp::ProjectionOperatorTokenProfile
@@ -9031,6 +9404,179 @@ impl<T> core::marker::Unpin for diport::managed_resource::OwnedTask<T>
 impl<T> core::marker::UnsafeUnpin for diport::managed_resource::OwnedTask<T>
 impl<T> core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::OwnedTask<T>
 impl<T> core::panic::unwind_safe::UnwindSafe for diport::managed_resource::OwnedTask<T>
+pub struct diport::PkiArtifactError
+impl diport::pki_artifact::PkiArtifactError
+pub const fn diport::pki_artifact::PkiArtifactError::kind(&self) -> diport::pki_artifact::PkiArtifactErrorKind
+pub fn diport::pki_artifact::PkiArtifactError::new<E>(diport::pki_artifact::PkiArtifactErrorKind, E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
+impl core::error::Error for diport::pki_artifact::PkiArtifactError
+pub fn diport::pki_artifact::PkiArtifactError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactError
+pub fn diport::pki_artifact::PkiArtifactError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::pki_artifact::PkiArtifactError
+pub fn diport::pki_artifact::PkiArtifactError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactError
+impl core::marker::Send for diport::pki_artifact::PkiArtifactError
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactError
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactError
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactError
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactError
+impl !core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactError
+pub struct diport::PkiArtifactRequest
+impl diport::pki_artifact::PkiArtifactRequest
+pub const fn diport::pki_artifact::PkiArtifactRequest::common_name(&self) -> &diport::pki_artifact::PkiCommonName
+pub const fn diport::pki_artifact::PkiArtifactRequest::csr_pem(&self) -> &diport::RedactedBytes
+pub fn diport::pki_artifact::PkiArtifactRequest::extended_key_usages(&self) -> &[diport::pki_artifact::PkiExtendedKeyUsage]
+pub const fn diport::pki_artifact::PkiArtifactRequest::generation(&self) -> diport::pki_artifact::PkiRequestGeneration
+pub const fn diport::pki_artifact::PkiArtifactRequest::policy_digest(&self) -> &diport::pki_artifact::PkiPolicyDigest
+pub const fn diport::pki_artifact::PkiArtifactRequest::renew_before(&self) -> core::time::Duration
+pub const fn diport::pki_artifact::PkiArtifactRequest::requested_validity(&self) -> core::time::Duration
+pub fn diport::pki_artifact::PkiArtifactRequest::sans(&self) -> &[diport::pki_artifact::PkiSan]
+pub const fn diport::pki_artifact::PkiArtifactRequest::scope(&self) -> diport::revocation_store::CertScope
+pub const fn diport::pki_artifact::PkiArtifactRequest::spki_digest(&self) -> &diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiArtifactRequest::try_new(diport::revocation_store::CertScope, diport::pki_artifact::PkiRequestGeneration, diport::pki_artifact::PkiPolicyDigest, diport::RedactedBytes, diport::pki_artifact::PkiSpkiDigest, diport::pki_artifact::PkiCommonName, alloc::vec::Vec<diport::pki_artifact::PkiSan>, alloc::vec::Vec<diport::pki_artifact::PkiExtendedKeyUsage>, core::time::Duration, core::time::Duration) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::fmt::Debug for diport::pki_artifact::PkiArtifactRequest
+pub fn diport::pki_artifact::PkiArtifactRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::Send for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::Sync for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::Unpin for diport::pki_artifact::PkiArtifactRequest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiArtifactRequest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiArtifactRequest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiArtifactRequest
+pub struct diport::PkiChainDigest(_)
+impl diport::pki_artifact::PkiChainDigest
+pub const fn diport::pki_artifact::PkiChainDigest::as_bytes(&self) -> &[u8; 32]
+pub const fn diport::pki_artifact::PkiChainDigest::new([u8; 32]) -> Self
+impl core::clone::Clone for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::clone(&self) -> diport::pki_artifact::PkiChainDigest
+impl core::cmp::Eq for diport::pki_artifact::PkiChainDigest
+impl core::cmp::PartialEq for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::eq(&self, &diport::pki_artifact::PkiChainDigest) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiChainDigest
+pub fn diport::pki_artifact::PkiChainDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiChainDigest
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiChainDigest
+impl core::marker::Freeze for diport::pki_artifact::PkiChainDigest
+impl core::marker::Send for diport::pki_artifact::PkiChainDigest
+impl core::marker::Sync for diport::pki_artifact::PkiChainDigest
+impl core::marker::Unpin for diport::pki_artifact::PkiChainDigest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiChainDigest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiChainDigest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiChainDigest
+pub struct diport::PkiCommonName(_)
+impl diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::as_str(&self) -> &str
+pub fn diport::pki_artifact::PkiCommonName::try_new(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::clone::Clone for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::clone(&self) -> diport::pki_artifact::PkiCommonName
+impl core::cmp::Eq for diport::pki_artifact::PkiCommonName
+impl core::cmp::PartialEq for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::eq(&self, &diport::pki_artifact::PkiCommonName) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiCommonName
+pub fn diport::pki_artifact::PkiCommonName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiCommonName
+impl core::marker::Freeze for diport::pki_artifact::PkiCommonName
+impl core::marker::Send for diport::pki_artifact::PkiCommonName
+impl core::marker::Sync for diport::pki_artifact::PkiCommonName
+impl core::marker::Unpin for diport::pki_artifact::PkiCommonName
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiCommonName
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiCommonName
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiCommonName
+pub struct diport::PkiPolicyDigest(_)
+impl diport::pki_artifact::PkiPolicyDigest
+pub const fn diport::pki_artifact::PkiPolicyDigest::as_bytes(&self) -> &[u8; 32]
+pub const fn diport::pki_artifact::PkiPolicyDigest::new([u8; 32]) -> Self
+impl core::clone::Clone for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::clone(&self) -> diport::pki_artifact::PkiPolicyDigest
+impl core::cmp::Eq for diport::pki_artifact::PkiPolicyDigest
+impl core::cmp::PartialEq for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::eq(&self, &diport::pki_artifact::PkiPolicyDigest) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiPolicyDigest
+pub fn diport::pki_artifact::PkiPolicyDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Freeze for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Send for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Sync for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::Unpin for diport::pki_artifact::PkiPolicyDigest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiPolicyDigest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiPolicyDigest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiPolicyDigest
+pub struct diport::PkiRequestGeneration(_)
+impl diport::pki_artifact::PkiRequestGeneration
+pub const fn diport::pki_artifact::PkiRequestGeneration::get(self) -> u64
+pub fn diport::pki_artifact::PkiRequestGeneration::try_new(u64) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::clone::Clone for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::clone(&self) -> diport::pki_artifact::PkiRequestGeneration
+impl core::cmp::Eq for diport::pki_artifact::PkiRequestGeneration
+impl core::cmp::PartialEq for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::eq(&self, &diport::pki_artifact::PkiRequestGeneration) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiRequestGeneration
+pub fn diport::pki_artifact::PkiRequestGeneration::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Freeze for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Send for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Sync for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::Unpin for diport::pki_artifact::PkiRequestGeneration
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiRequestGeneration
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiRequestGeneration
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiRequestGeneration
+pub struct diport::PkiSan(_)
+impl diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::as_ref(&self) -> diport::pki_artifact::PkiSanRef<'_>
+pub fn diport::pki_artifact::PkiSan::dns(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+pub fn diport::pki_artifact::PkiSan::email(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+pub const fn diport::pki_artifact::PkiSan::ip(core::net::ip_addr::IpAddr) -> Self
+pub fn diport::pki_artifact::PkiSan::uri(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+pub fn diport::pki_artifact::PkiSan::utf8_other_name(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::pki_artifact::PkiArtifactValueError>
+impl core::clone::Clone for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::clone(&self) -> diport::pki_artifact::PkiSan
+impl core::cmp::Eq for diport::pki_artifact::PkiSan
+impl core::cmp::PartialEq for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::eq(&self, &diport::pki_artifact::PkiSan) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiSan
+pub fn diport::pki_artifact::PkiSan::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiSan
+impl core::marker::Freeze for diport::pki_artifact::PkiSan
+impl core::marker::Send for diport::pki_artifact::PkiSan
+impl core::marker::Sync for diport::pki_artifact::PkiSan
+impl core::marker::Unpin for diport::pki_artifact::PkiSan
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiSan
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiSan
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiSan
+pub struct diport::PkiSpkiDigest(_)
+impl diport::pki_artifact::PkiSpkiDigest
+pub const fn diport::pki_artifact::PkiSpkiDigest::as_bytes(&self) -> &[u8; 32]
+pub const fn diport::pki_artifact::PkiSpkiDigest::new([u8; 32]) -> Self
+impl core::clone::Clone for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::clone(&self) -> diport::pki_artifact::PkiSpkiDigest
+impl core::cmp::Eq for diport::pki_artifact::PkiSpkiDigest
+impl core::cmp::PartialEq for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::eq(&self, &diport::pki_artifact::PkiSpkiDigest) -> bool
+impl core::fmt::Debug for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::pki_artifact::PkiSpkiDigest
+pub fn diport::pki_artifact::PkiSpkiDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::StructuralPartialEq for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Freeze for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Send for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Sync for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::Unpin for diport::pki_artifact::PkiSpkiDigest
+impl core::marker::UnsafeUnpin for diport::pki_artifact::PkiSpkiDigest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::pki_artifact::PkiSpkiDigest
+impl core::panic::unwind_safe::UnwindSafe for diport::pki_artifact::PkiSpkiDigest
 pub struct diport::PublishRequest
 impl diport::publisher::PublishRequest
 pub fn diport::publisher::PublishRequest::event_id(&self) -> &diport::subscriber::MessageId
@@ -10276,6 +10822,9 @@ pub const diport::KEY_SUBJECT_ID: &str
 pub const diport::KEY_TENANT_AUTHORITY: &str
 pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
+pub const diport::MAX_PKI_CERT_BYTES: usize
+pub const diport::MAX_PKI_CSR_BYTES: usize
+pub const diport::MAX_PKI_ISSUER_CERTS: usize
 pub const diport::MAX_RATE_LIMIT_QUOTA: u32
 pub const diport::RESERVED_METADATA_KEYS: [&str; 10]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str

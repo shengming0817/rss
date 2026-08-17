@@ -116,7 +116,7 @@ impl SecurityProvider {
     const fn carrier_marker(self) -> Option<ImpactMarker> {
         match self {
             Self::Oidc => Some(ImpactMarker::OidcProvider),
-            Self::Vault => None,
+            Self::Vault => Some(ImpactMarker::VaultProvider),
         }
     }
 
@@ -124,6 +124,19 @@ impl SecurityProvider {
         match self {
             Self::Oidc => "security-provider:oidc",
             Self::Vault => "security-provider:vault",
+        }
+    }
+
+    fn expected_critical_carriers(self) -> BTreeSet<IntegrationUnitId> {
+        use IntegrationUnitId as Id;
+        match self {
+            Self::Oidc => BTreeSet::from([
+                Id::IdentityPasswordSecurityEventJourney,
+                Id::IdentityRefreshProducerTransactionJourney,
+                Id::IdentityLoginWireE2e,
+                Id::ServiceTokenReplayE2e,
+            ]),
+            Self::Vault => BTreeSet::from([Id::VaultLive]),
         }
     }
 }
@@ -160,6 +173,7 @@ pub(crate) enum ImpactMarker {
     LocalTxContract,
     DeviceCertificateCandidate,
     OidcProvider,
+    VaultProvider,
 }
 
 impl ImpactMarker {
@@ -220,6 +234,7 @@ impl ImpactMarker {
             Self::LocalTxContract => "localtx-contract",
             Self::DeviceCertificateCandidate => "device-certificate-candidate",
             Self::OidcProvider => "security-provider:oidc",
+            Self::VaultProvider => "security-provider:vault",
         }
     }
 
@@ -327,10 +342,11 @@ pub(crate) enum LocalFeatureScope {
     S3,
     SettingsOnly,
     IdentityAudit,
+    Vault,
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Postgres,
         Self::PostgresMigration,
         Self::RedisAdapter,
@@ -344,6 +360,7 @@ impl LocalFeatureScope {
         Self::S3,
         Self::SettingsOnly,
         Self::IdentityAudit,
+        Self::Vault,
     ];
 
     pub(crate) const fn package(self) -> &'static str {
@@ -361,6 +378,7 @@ impl LocalFeatureScope {
             Self::S3 => "s3",
             Self::SettingsOnly => "settingsonly",
             Self::IdentityAudit => "identityaudit",
+            Self::Vault => "vault",
         }
     }
 
@@ -378,7 +396,8 @@ impl LocalFeatureScope {
             | Self::Testkit
             | Self::JourneysFaultMatrix
             | Self::S3
-            | Self::SettingsOnly => "integration",
+            | Self::SettingsOnly
+            | Self::Vault => "integration",
         }
     }
 
@@ -397,6 +416,7 @@ impl LocalFeatureScope {
             Self::S3 => "adapters/s3",
             Self::SettingsOnly => "assemblies/settingsonly",
             Self::IdentityAudit => "assemblies/identityaudit",
+            Self::Vault => "adapters/vault",
         }
     }
 
@@ -939,7 +959,7 @@ integration_shard_catalog! {
     },
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
-        local_feature_scopes: [Journeys, Runtime, SettingsOnly, IdentityAudit],
+        local_feature_scopes: [Journeys, Runtime, SettingsOnly, IdentityAudit, Vault],
         units: [
             SecurityProviderCloseoutJourney => ("security-provider-closeout-journey", ReleaseCheck, "journeys", "security_provider_closeout", Test, Parallel, Affected, resources: [Postgres, Vault], impact_packages: [], capabilities: []),
             SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
@@ -948,6 +968,8 @@ integration_shard_catalog! {
             IdentityAuditArtifactAcceptance => ("identity-audit-artifact-acceptance", ReleaseCheck, "identityaudit", "artifact_acceptance", Test, Parallel, Affected, resources: [], impact_packages: [IdentityAuditPackage], capabilities: []),
             IdentityAuditRuntimeImageAcceptance => ("identity-audit-runtime-image-acceptance", ReleaseCheck, "identityaudit", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [IdentityAuditPackage], capabilities: [Docker]),
             RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [DeviceCertificateCandidate], capabilities: []),
+            VaultLib => ("vault-lib", ReleaseCheck, "vault", "vault", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            VaultLive => ("vault-live", IntegrationCritical, "vault", "live_vault", Test, Serial, RemoteOnly, resources: [Vault], impact_packages: [VaultProvider], capabilities: [Docker]),
             AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             ServerBudgetStructure => ("server-budget-structure", ReleaseCheck, "runtime", "server_budget_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -1240,12 +1262,12 @@ fn validate_source_and_provider_relations(specs: &[IntegrationUnitSpec]) -> Resu
         bail!("security provider adapter projection is incomplete or duplicated");
     }
     for provider in SecurityProvider::ALL {
-        if provider.carrier_marker().is_some()
-            && critical_units_for_provider_in(provider, specs).is_none()
-        {
+        let actual = critical_units_for_provider_in(provider, specs).unwrap_or_default();
+        let expected = provider.expected_critical_carriers();
+        if actual != expected {
             bail!(
-                "security provider {} has no integration-critical carrier",
-                provider.label()
+                "security provider {} carrier relation drift: expected {expected:?}, got {actual:?}",
+                provider.label(),
             );
         }
     }
@@ -1686,6 +1708,7 @@ const INTEGRATION_PACKAGES: &[&str] = &[
     "s3",
     "settingsonly",
     "identityaudit",
+    "vault",
 ];
 
 type TargetId = (String, String, String);
@@ -2429,7 +2452,10 @@ mod tests {
                 Id::ServiceTokenReplayE2e,
             ]))
         );
-        assert_eq!(critical_units_for_provider(SecurityProvider::Vault), None);
+        assert_eq!(
+            critical_units_for_provider(SecurityProvider::Vault),
+            Some(BTreeSet::from([Id::VaultLive]))
+        );
         validate_source_and_provider_relations(INTEGRATION_UNIT_SPECS)
     }
 
@@ -2445,6 +2471,30 @@ mod tests {
         assert!(
             validate_source_and_provider_relations(&drifted).is_err(),
             "removing every OIDC carrier edge must invalidate the closed provider relation"
+        );
+
+        let mut vault_drifted = INTEGRATION_UNIT_SPECS.to_vec();
+        vault_drifted[IntegrationUnitId::VaultLive as usize].impact_markers = &[];
+        assert!(
+            validate_source_and_provider_relations(&vault_drifted).is_err(),
+            "removing the unique Vault carrier edge must invalidate the closed provider relation"
+        );
+
+        let mut duplicated_vault = INTEGRATION_UNIT_SPECS.to_vec();
+        duplicated_vault[IntegrationUnitId::ConfigsReadyE2e as usize].impact_markers =
+            &[ImpactMarker::VaultProvider];
+        assert!(
+            validate_source_and_provider_relations(&duplicated_vault).is_err(),
+            "adding a second Vault carrier must invalidate the exact provider relation"
+        );
+
+        let mut wrong_vault = INTEGRATION_UNIT_SPECS.to_vec();
+        wrong_vault[IntegrationUnitId::VaultLive as usize].impact_markers = &[];
+        wrong_vault[IntegrationUnitId::ConfigsReadyE2e as usize].impact_markers =
+            &[ImpactMarker::VaultProvider];
+        assert!(
+            validate_source_and_provider_relations(&wrong_vault).is_err(),
+            "moving the Vault marker to the wrong carrier must invalidate the relation"
         );
 
         let mut wrong_owner = INTEGRATION_UNIT_SPECS.to_vec();
@@ -2672,6 +2722,7 @@ mod tests {
                 Resource::ObjectStorage,
                 BTreeSet::from([Id::IntegrationObjectStore]),
             ),
+            (Resource::Vault, BTreeSet::from([Id::VaultLive])),
         ];
         for (resource, expected) in cases {
             let actual = critical_units_for_resource(resource);
@@ -3112,7 +3163,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
-    fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
+    fn settingsonly_and_vault_carriers_are_unique_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
         let release = IntegrationSelection::release_check();
         assert!(
@@ -3124,6 +3175,31 @@ mod tests {
             spec.local_feature_scopes
                 .contains(&LocalFeatureScope::SettingsOnly)
         );
+        assert!(
+            spec.local_feature_scopes
+                .contains(&LocalFeatureScope::Vault)
+        );
+
+        let vault_units = spec
+            .units
+            .iter()
+            .filter(|unit| unit.package == "vault")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vault_units.len(),
+            2,
+            "Vault must have exactly lib and live carriers"
+        );
+        let live = vault_units
+            .iter()
+            .find(|unit| unit.id == IntegrationUnitId::VaultLive)
+            .expect("Vault live carrier remains catalog-owned");
+        assert_eq!(live.target, "live_vault");
+        assert_eq!(live.primary_owner, ExecutionProfile::IntegrationCritical);
+        assert_eq!(live.scheduling, Scheduling::Serial);
+        assert_eq!(live.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(live.resources, &[Resource::Vault]);
+        assert_eq!(live.capabilities, &[Capability::Docker]);
 
         let units = spec
             .units
@@ -3202,6 +3278,7 @@ mod tests {
             ("s3", "integration_object_store"),
             ("journeys", "settingsonly_production_artifact"),
             ("journeys", "two_replica_runtime"),
+            ("vault", "live_vault"),
         ]);
         let actual_serial: BTreeSet<_> = all_units()
             .into_iter()
@@ -3402,7 +3479,10 @@ mod tests {
                     Resource::Mqtt,
                 ],
             ),
-            (IntegrationShard::RuntimeHttpAuth, vec![Resource::Postgres]),
+            (
+                IntegrationShard::RuntimeHttpAuth,
+                vec![Resource::Postgres, Resource::Vault],
+            ),
             (IntegrationShard::ConsistencyFault, vec![Resource::Redis]),
             (
                 IntegrationShard::CdcProjectionSaga,
@@ -3594,7 +3674,7 @@ mod tests {
         .expect_err("missing integration package must fail closed");
         assert_eq!(
             error.to_string(),
-            "workspace facts missing legacy integration packages: [\"identityaudit\"]"
+            "workspace facts missing legacy integration packages: [\"vault\"]"
         );
 
         let mut duplicate = all_units();

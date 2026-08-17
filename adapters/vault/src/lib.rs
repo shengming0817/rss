@@ -1,10 +1,13 @@
-//! vault adapter —— RSS workspace（W 阶段真身，#1011 Transit 签名切片）。See docs/rules/architecture.md.
+//! vault adapter —— RSS workspace（Transit 与 caller-owned CSR PKI transport）。See docs/rules/architecture.md.
 //!
 //! `VaultSigner` / `VaultKeyProvider`（sealed-marker）：
 //! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-12）。
 //! - `backend` feature 开时增补 `impl diport::Signer`（HashiCorp Vault Transit `sign`，见 `transit` 模块）。
 //! - `backend` feature 开时增补 `impl diport::KeyProvider`（HashiCorp Vault Transit `encrypt`/`decrypt`/
 //!   `rewrap`，见 `transit` 模块）。
+//! - `backend` feature 开时增补 concrete Vault PKI transport。它固定调用 Vault PKI
+//!   `/sign/{role}`，并在返回 transport evidence 前本地验证 CSR、leaf、chain 与有效期。
+//!   Evidence 不是 production authorization receipt；该层不接触 `/issue` 或私钥。
 //!
 //! **TLS-agnostic**（对标 s3 注入 aws `Client`）：adapter 只持有组合根注入的 `reqwest::Client`；TLS provider
 //! （rustls+ring，对齐 sqlx，避开 deny.toml openssl/aws-lc-sys/ring-license ban）与 roots 由组合根在 Join
@@ -59,6 +62,9 @@
 mod transit;
 
 #[cfg(feature = "backend")]
+mod pki;
+
+#[cfg(feature = "backend")]
 mod secret_resolver;
 
 #[cfg(feature = "backend")]
@@ -66,6 +72,11 @@ mod bundle;
 
 #[cfg(feature = "backend")]
 pub use bundle::{VaultDomain, VaultDomainDeps, VaultRuntimeDeps, caps};
+#[cfg(feature = "backend")]
+pub use pki::{
+    VaultPkiArtifactEvidence, VaultPkiHttpClient, VaultPkiMount, VaultPkiRole, VaultPkiTransport,
+    VaultPkiTransportConfig,
+};
 #[cfg(feature = "backend")]
 pub use secret_resolver::{
     SECRET_RESOLVER_READINESS_KEY, SecretResolverReadinessTarget, StoreBinding,
@@ -171,6 +182,21 @@ pub enum VaultConfigError {
         "vault token must not be empty (provide via composition root / Vault Agent, not hardcoded)"
     )]
     EmptyToken,
+    /// PKI transport timeout must be non-zero.
+    #[error("vault request timeout must be non-zero")]
+    ZeroTimeout,
+    /// PKI role is empty.
+    #[error("vault PKI role must not be empty")]
+    EmptyPkiRole,
+    /// PKI role must be one safe URL path segment.
+    #[error("vault PKI role has an invalid path segment")]
+    InvalidPkiRole,
+    /// At least one explicit PKI trust root is required.
+    #[error("vault PKI trust roots must not be empty")]
+    EmptyPkiTrustRoots,
+    /// PKI trust root is malformed or is not a self-signed CA.
+    #[error("vault PKI trust root is invalid")]
+    InvalidPkiTrustRoot,
 }
 
 #[cfg(feature = "backend")]
@@ -400,6 +426,17 @@ impl ManagedResource for VaultKeyProvider {
 }
 
 #[cfg(feature = "backend")]
+impl ManagedResource for VaultPkiTransport {
+    fn name(&self) -> &str {
+        "vault-pki-transport"
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "backend")]
 impl diport::Signer for VaultSigner {
     async fn sign(
         &self,
@@ -511,6 +548,8 @@ mod smoke {
     #[test]
     fn impls_managed_resource() {
         assert_managed_resource(PhantomData::<super::VaultSigner>);
+        #[cfg(feature = "backend")]
+        assert_managed_resource(PhantomData::<super::VaultPkiTransport>);
     }
 
     #[cfg(feature = "backend")]
@@ -522,6 +561,7 @@ mod smoke {
         assert_signer(PhantomData::<super::VaultSigner>);
     }
 
+    #[cfg(feature = "backend")]
     #[cfg(feature = "backend")]
     fn assert_secret_resolver<T: diport::SecretResolver>(_: PhantomData<T>) {}
 

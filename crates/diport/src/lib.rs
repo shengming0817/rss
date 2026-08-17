@@ -117,6 +117,7 @@ pub mod metrics_exporter;
 pub mod object_store;
 pub mod outbox_emitter;
 pub mod pdp;
+pub mod pki_artifact;
 pub mod publisher;
 pub mod rate_limiter;
 // provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进跨 crate 导出面）：`pub enum` 错误
@@ -209,6 +210,11 @@ pub use pdp::{
     ServiceTokenTenantBinding, TokenAlgorithm, TokenPolicy, TokenProfile, TokenProfileMarker,
     VerifiedAccessGrantFacts, VerifiedClaimShapeError, VerifiedClaims, VerifiedClaimsView,
     VerifiedFederatedPermissions,
+};
+pub use pki_artifact::{
+    MAX_PKI_CERT_BYTES, MAX_PKI_CSR_BYTES, MAX_PKI_ISSUER_CERTS, PkiArtifactError,
+    PkiArtifactErrorKind, PkiArtifactRequest, PkiArtifactValueError, PkiChainDigest, PkiCommonName,
+    PkiExtendedKeyUsage, PkiPolicyDigest, PkiRequestGeneration, PkiSan, PkiSanRef, PkiSpkiDigest,
 };
 pub use publisher::{
     DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,

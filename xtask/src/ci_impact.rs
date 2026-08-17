@@ -3162,6 +3162,7 @@ fn try_impact_entries(
     let mut resources = BTreeSet::new();
     let mut providers = BTreeSet::new();
     add_device_certificate_candidate_impact(entries, facts, &mut packages, &mut markers)?;
+    add_vault_pki_seam_impact(entries, &mut markers);
     for (package, reasons) in &packages {
         let has_structured_relation = reasons.iter().any(|impact| {
             matches!(
@@ -3294,6 +3295,19 @@ fn add_device_certificate_candidate_impact(
         }
     }
     Ok(())
+}
+
+fn add_vault_pki_seam_impact(entries: &[DiffEntry], markers: &mut BTreeSet<ImpactMarker>) {
+    const VAULT_PKI_SEAM_PATHS: &[&str] = &[
+        "crates/diport/src/pki_artifact.rs",
+        "crates/diport/src/lib.rs",
+    ];
+    if entries
+        .iter()
+        .any(|entry| VAULT_PKI_SEAM_PATHS.contains(&entry.path.as_str()))
+    {
+        markers.insert(ImpactMarker::VaultProvider);
+    }
 }
 
 #[cfg(test)]
@@ -7116,11 +7130,8 @@ mod tests {
     }
 
     #[test]
-    fn undeclared_journey_support_and_uncovered_security_provider_fail_closed() {
-        for path in [
-            "journeys/tests/support/new_shared_fixture.rs",
-            "adapters/vault/src/lib.rs",
-        ] {
+    fn undeclared_journey_support_fails_closed() {
+        for path in ["journeys/tests/support/new_shared_fixture.rs"] {
             assert!(
                 classify_diff(&[DiffEntry::modified(path)]).mode == SelectionMode::PrComplete,
                 "{path} must require the complete PR set without a declared critical carrier"
@@ -7148,6 +7159,48 @@ mod tests {
                 Id::ServiceTokenReplayE2e,
             ])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn vault_provider_change_selects_the_unique_live_carrier() -> Result<()> {
+        use IntegrationUnitId as Id;
+        let ImpactSet::Selective(impact) = impact_entries(
+            &[DiffEntry::modified("adapters/vault/src/pki.rs")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ) else {
+            bail!("Vault provider must use its exact critical carrier set");
+        };
+        assert_eq!(impact.integration_units, BTreeSet::from([Id::VaultLive]));
+        let ImpactSet::Selective(unrelated) = impact_entries(
+            &[DiffEntry::modified("crates/diport/src/outbox_emitter.rs")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ) else {
+            bail!("unrelated diport source must stay selective");
+        };
+        assert!(
+            !unrelated.integration_units.contains(&Id::VaultLive),
+            "the relation must remain path-exact"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn diport_pki_seam_selects_the_unique_vault_live_carrier() -> Result<()> {
+        use IntegrationUnitId as Id;
+        let ImpactSet::Selective(impact) = impact_entries(
+            &[DiffEntry::modified("crates/diport/src/pki_artifact.rs")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ) else {
+            bail!("diport PKI seam must select its exact critical carrier");
+        };
+        assert_eq!(impact.integration_units, BTreeSet::from([Id::VaultLive]));
         Ok(())
     }
 

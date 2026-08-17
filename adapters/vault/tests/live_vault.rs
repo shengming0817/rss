@@ -1,368 +1,533 @@
-//! Live HashiCorp Vault Transit round-trip（需真 Vault + transit 引擎已 mount + signing/encryption keys）。
+//! Hermetic TLS HashiCorp Vault Transit + PKI T2 conformance.
 //!
-//! # Runbook
-//!
-//! Offline harness（无 Vault、无 `integration`；env / anti-vacuity / warm proxy）:
-//! ```text
-//! ./hack/cargo.sh test -p vault --test live_vault_harness
-//! ```
-//!
-//! Full live（本 target；Cargo `[[test]] required-features = ["integration"]` 唯一门控，#1978）:
-//! ```text
-//! export RSS_VAULT_TEST_ADDR='http://127.0.0.1:8200'
-//! export RSS_VAULT_TEST_TOKEN='…'
-//! export RSS_VAULT_TEST_MOUNT='transit'
-//! export RSS_VAULT_TEST_SIGNING_KEY='rss-ecdsa'          # ECDSA signing key
-//! export RSS_VAULT_TEST_ENCRYPTION_KEY='rss-aes'         # derived AES encryption key（≠ signing）
-//! ./hack/cargo.sh test -p vault --features integration --test live_vault
-//! ```
-//!
-//! Warm-outage 仅支持 plaintext `http://` upstream（https 会 fail-loud）；五坐标必填且非空，
-//! 无旧单 KEY fallback。本文件不加同轴 `cfg(feature = "integration")`，也不用 harness ignore。
+//! Run with Docker: `./hack/cargo.sh test -p vault --features integration --test live_vault`.
+
+#![allow(clippy::expect_used)]
 
 #[path = "live_vault_support.rs"]
 mod live_vault_support;
 
-use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use diport::key_provider::KeyProviderErrorKind;
 use diport::{
-    KeyId, KeyName, KeyProvider, KeyProviderError, KeyRef, SignRequest, Signer, SigningPurpose,
+    CertScope, Clock, KeyId, KeyName, KeyProvider, PkiArtifactErrorKind, PkiArtifactRequest,
+    PkiCommonName, PkiExtendedKeyUsage, PkiPolicyDigest, PkiRequestGeneration, PkiSan,
+    PkiSpkiDigest, RedactedBytes, SignRequest, Signer, SigningPurpose,
 };
-use live_vault_support::{
-    LiveVaultInputs, REDACTED, WarmOutageProxy, assert_sensitive_text_absent,
-    assert_warm_outage_trace_anti_vacuity,
+use ids::DeviceId;
+use rcgen::{
+    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyPair,
+    KeyUsagePurpose, PublicKeyData, SanType,
 };
-
-const FIELD_PLAINTEXT: &[u8] = b"vault-field-secret";
-const KEY_PROVIDER_ERROR_DISPLAY: &str = "key provider operation failed";
+use reqwest::{Client, StatusCode};
 use rss_request_context::TenantId;
 use secure::{Plaintext, ProtectionContext};
-use tracing::field::{Field, Visit};
-use tracing::span::Attributes;
-use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::{Context as LayerContext, Layer};
-use tracing_subscriber::prelude::*;
-use vault::{VaultKeyProvider, VaultSigner};
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+use vault::{
+    VaultKeyProvider, VaultPkiHttpClient, VaultPkiMount, VaultPkiRole, VaultPkiTransport,
+    VaultPkiTransportConfig, VaultSigner,
+};
+use x509_parser::extensions::{GeneralName, ParsedExtension};
+use x509_parser::prelude::{FromDer, X509Certificate};
+
+use live_vault_support::WarmOutageProxy;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSIT_MOUNT: &str = "transit";
+const SIGNING_KEY: &str = "rss-ecdsa";
+const ENCRYPTION_KEY: &str = "rss-aes";
+const PKI_MOUNT: &str = "pki-device";
+const PKI_ROLE: &str = "rss-device";
 
-/// Fail-loud env gate：panic 走 typed error 的 `Display`，避免 `expect` 绕回 `Debug`。
-#[allow(clippy::panic)] // live target 缺坐标必须大声失败；消息仅含静态 env 名。
-fn require_live_inputs() -> LiveVaultInputs {
-    LiveVaultInputs::from_get(|name| std::env::var(name).ok())
-        .unwrap_or_else(|error| panic!("{error}"))
+struct LiveClock;
+impl Clock for LiveClock {
+    #[allow(clippy::disallowed_methods)]
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
 }
 
-/// 禁用 idle pool，避免 warm-outage cut 后复用旧连接掩盖 Unavailable。
-#[allow(clippy::expect_used)]
-fn integration_client() -> reqwest::Client {
-    reqwest::Client::builder()
+struct ProvisionedVault {
+    _fixture: testkit::VaultTlsFixture,
+    _network: testkit::BridgeNetwork,
+    client: Client,
+    endpoint: String,
+    runtime_token: String,
+    pki_root_pem: String,
+    vault_tls_ca_pem: String,
+}
+
+async fn provision() -> Result<ProvisionedVault, Box<dyn std::error::Error>> {
+    let network = testkit::bridge_network("rss-vault-tls").await?;
+    let dns_name = format!("{}-node", network.name());
+    let fixture = testkit::vault_tls(testkit::NetworkAttachment {
+        network: network.name(),
+        dns_name: &dns_name,
+    })
+    .await?;
+    let endpoint = fixture.endpoint_url().to_owned();
+    let vault_tls_ca_pem = fixture.ca_pem().to_owned();
+    let ca = reqwest::Certificate::from_pem(vault_tls_ca_pem.as_bytes())?;
+    let client = Client::builder()
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(ca)
         .pool_max_idle_per_host(0)
-        .build()
-        .expect("reqwest client")
-}
+        .timeout(REQUEST_TIMEOUT)
+        .build()?;
+    let root_token = fixture.root_token().to_owned();
 
-#[allow(clippy::expect_used)]
-fn key_name(raw: String) -> KeyName {
-    KeyName::try_new(raw).expect("non-empty key")
-}
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "sys/mounts/transit",
+        json!({"type":"transit"}),
+    )
+    .await?;
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "transit/keys/rss-ecdsa",
+        json!({"type":"ecdsa-p256"}),
+    )
+    .await?;
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "transit/keys/rss-aes",
+        json!({"type":"aes256-gcm96","derived":true}),
+    )
+    .await?;
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "sys/mounts/pki-root",
+        json!({"type":"pki"}),
+    )
+    .await?;
+    let root = vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "pki-root/root/generate/internal",
+        json!({"common_name":"RSS T2 Root","ttl":"720h","key_type":"ec","key_bits":256}),
+    )
+    .await?;
+    let pki_root_pem = required_str(&root, "/data/certificate")?.to_owned();
 
-#[allow(clippy::expect_used)]
-fn key_provider(
-    inputs: &live_vault_support::LiveVaultInputs,
-    client: reqwest::Client,
-    addr_override: Option<String>,
-) -> (VaultKeyProvider, KeyName) {
-    let addr = addr_override.unwrap_or_else(|| inputs.addr.clone());
-    let provider = VaultKeyProvider::new_allow_http(
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "sys/mounts/pki-device",
+        json!({"type":"pki"}),
+    )
+    .await?;
+    let intermediate = vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "pki-device/intermediate/generate/internal",
+        json!({"common_name":"RSS T2 Device Intermediate","key_type":"ec","key_bits":256}),
+    )
+    .await?;
+    let intermediate_csr = required_str(&intermediate, "/data/csr")?;
+    let signed = vault_post(&client, &endpoint, &root_token, "pki-root/root/sign-intermediate", json!({"csr":intermediate_csr,"common_name":"RSS T2 Device Intermediate","ttl":"168h","format":"pem"})).await?;
+    let intermediate_pem = required_str(&signed, "/data/certificate")?;
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "pki-device/intermediate/set-signed",
+        json!({"certificate":intermediate_pem}),
+    )
+    .await?;
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "pki-device/roles/rss-device",
+        json!({
+            "allowed_domains":["device.example"], "allow_bare_domains":true,
+            "allowed_uri_sans":["spiffe://tenant/device"], "allow_ip_sans":false,
+            "client_flag":true, "server_flag":false, "code_signing_flag":false,
+            "email_protection_flag":false, "key_usage":["DigitalSignature"],
+            "basic_constraints_valid_for_non_ca":true,
+            "ext_key_usage":["ClientAuth"], "require_cn":true,
+            "key_type":"ec", "key_bits":256,
+            "use_csr_common_name":true, "use_csr_sans":true, "ttl":"1h", "max_ttl":"1h"
+        }),
+    )
+    .await?;
+
+    let policy = format!(
+        r#"
+path "transit/sign/{SIGNING_KEY}" {{ capabilities = ["update"] }}
+path "transit/encrypt/{ENCRYPTION_KEY}" {{ capabilities = ["update"] }}
+path "transit/decrypt/{ENCRYPTION_KEY}" {{ capabilities = ["update"] }}
+path "transit/rewrap/{ENCRYPTION_KEY}" {{ capabilities = ["update"] }}
+path "{PKI_MOUNT}/sign/{PKI_ROLE}" {{ capabilities = ["update"] }}
+"#
+    );
+    vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "sys/policies/acl/rss-live",
+        json!({"policy":policy}),
+    )
+    .await?;
+    let token = vault_post(
+        &client,
+        &endpoint,
+        &root_token,
+        "auth/token/create",
+        json!({"policies":["rss-live"],"ttl":"1h","no_default_policy":true}),
+    )
+    .await?;
+    let runtime_token = required_str(&token, "/auth/client_token")?.to_owned();
+    Ok(ProvisionedVault {
+        _fixture: fixture,
+        _network: network,
         client,
+        endpoint,
+        runtime_token,
+        pki_root_pem,
+        vault_tls_ca_pem,
+    })
+}
+
+async fn vault_post(
+    client: &Client,
+    endpoint: &str,
+    token: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let response = client
+        .post(format!("{endpoint}/v1/{path}"))
+        .header("X-Vault-Token", token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .await?;
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > 1024 * 1024)
+    {
+        return Err("Vault provisioning response exceeds limit".into());
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            return Err("Vault provisioning response exceeds limit".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        return Err(format!("Vault provisioning request failed with status {status}").into());
+    }
+    if bytes.is_empty() {
+        Ok(Value::Null)
+    } else {
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
+fn required_str<'a>(
+    value: &'a Value,
+    pointer: &str,
+) -> Result<&'a str, Box<dyn std::error::Error>> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Vault response missing {pointer}").into())
+}
+
+fn pki_request() -> Result<PkiArtifactRequest, Box<dyn std::error::Error>> {
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::new(vec!["device.example".to_owned()])?;
+    let mut name = DistinguishedName::new();
+    name.push(DnType::CommonName, "device.example");
+    params.distinguished_name = name;
+    params
+        .subject_alt_names
+        .push(SanType::URI("spiffe://tenant/device".try_into()?));
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let csr = params.serialize_request(&key)?;
+    let csr_pem = csr.pem()?;
+    let spki_digest: [u8; 32] = Sha256::digest(key.subject_public_key_info()).into();
+    Ok(PkiArtifactRequest::try_new(
+        CertScope::new(
+            TenantId::parse("11111111-2222-4333-8444-555555555555")?,
+            DeviceId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")?,
+        ),
+        PkiRequestGeneration::try_new(7)?,
+        PkiPolicyDigest::new([0x5a; 32]),
+        RedactedBytes::new(csr_pem.into_bytes()),
+        PkiSpkiDigest::new(spki_digest),
+        PkiCommonName::try_new("device.example")?,
+        vec![
+            PkiSan::dns("device.example")?,
+            PkiSan::uri("spiffe://tenant/device")?,
+        ],
+        vec![PkiExtendedKeyUsage::ClientAuth],
+        Duration::from_secs(3600),
+        Duration::from_secs(300),
+    )?)
+}
+
+fn pki_transport_config(
+    addr: impl Into<String>,
+    token: impl Into<String>,
+    mount: &str,
+    role: &str,
+    trust_roots_pem: Vec<RedactedBytes>,
+    timeout: Duration,
+) -> Result<VaultPkiTransportConfig, Box<dyn std::error::Error>> {
+    Ok(VaultPkiTransportConfig::new(
         addr,
-        inputs.token.clone(),
-        inputs.mount.clone(),
-        REQUEST_TIMEOUT,
-    )
-    .expect("valid config");
-    (provider, key_name(inputs.encryption_key.clone()))
+        token,
+        VaultPkiMount::try_new(mount)?,
+        VaultPkiRole::try_new(role)?,
+        trust_roots_pem,
+        timeout,
+    ))
 }
 
-#[allow(clippy::expect_used)]
-fn signer(inputs: &live_vault_support::LiveVaultInputs, client: reqwest::Client) -> VaultSigner {
-    VaultSigner::new_rss_access_allow_http(
-        client,
-        inputs.addr.clone(),
-        inputs.token.clone(),
-        inputs.mount.clone(),
-        REQUEST_TIMEOUT,
-        diport::JwtSigningBinding::rss_access(diport::KeyId::new(inputs.signing_key.clone())),
-    )
-    .expect("valid config")
+fn pki_http_client(
+    vault: &ProvisionedVault,
+) -> Result<VaultPkiHttpClient, Box<dyn std::error::Error>> {
+    Ok(VaultPkiHttpClient::with_root_certificates([
+        reqwest::Certificate::from_pem(vault.vault_tls_ca_pem.as_bytes())?,
+    ])?)
 }
 
-#[allow(clippy::expect_used)]
-fn field_aad(field: &str) -> secure::DerivedAad {
-    let tenant = TenantId::parse("11111111-2222-4333-8444-555555555555").expect("canonical tenant");
-    ProtectionContext::authenticated_request(tenant, "settings/db", field, 1)
-        .expect("valid protection context")
+fn field_aad() -> secure::DerivedAad {
+    let tenant = TenantId::parse("11111111-2222-4333-8444-555555555555").expect("tenant");
+    ProtectionContext::authenticated_request(tenant, "settings/db", "value", 1)
+        .expect("context")
         .derive()
 }
 
-/// Adapter live readiness：encrypt → decrypt → mismatched DerivedAAD → Rejected。
-/// 复用本 target 的 crypto helper，不复制 composition/settings 生产常量/算法。
-#[allow(clippy::expect_used)]
-async fn assert_key_provider_live_ready(provider: &VaultKeyProvider, key: KeyName) {
-    const PLAINTEXT: &[u8] = b"rss-live-vault-readiness-v1";
-    let aad = field_aad("live-readiness");
-    let encrypted = provider
-        .encrypt(key, Plaintext::new(PLAINTEXT.to_vec()), aad.clone())
-        .await
-        .expect("live readiness encrypt");
-    let decrypted = provider
-        .decrypt(
-            encrypted.ciphertext().to_vec().into(),
-            encrypted.key().clone(),
-            aad,
-        )
-        .await
-        .expect("live readiness decrypt");
-    assert_eq!(decrypted.expose(), PLAINTEXT);
-
-    let wrong_aad = field_aad("live-readiness-mismatch");
-    let err = provider
-        .decrypt(
-            encrypted.ciphertext().to_vec().into(),
-            encrypted.key().clone(),
-            wrong_aad,
-        )
-        .await
-        .expect_err("live readiness mismatched AAD must fail closed");
-    assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
-}
-
-fn assert_key_provider_error_surface_safe(
-    error: &KeyProviderError,
-    inputs: &live_vault_support::LiveVaultInputs,
-    request_endpoint: &str,
-    plaintext_marker: &[u8],
-) {
-    assert_eq!(
-        error.to_string(),
-        KEY_PROVIDER_ERROR_DISPLAY,
-        "KeyProviderError Display must stay the fixed safe summary"
-    );
-    let debug = format!("{error:?}");
-    assert!(
-        debug.contains(REDACTED),
-        "KeyProviderError Debug must contain redacted marker"
-    );
-    assert_sensitive_text_absent(
-        &error.to_string(),
-        inputs,
-        request_endpoint,
-        plaintext_marker,
-    );
-    assert_sensitive_text_absent(&debug, inputs, request_endpoint, plaintext_marker);
-}
-
-fn assert_sensitive_values_absent(
-    error: &KeyProviderError,
-    inputs: &live_vault_support::LiveVaultInputs,
-    request_endpoint: &str,
-    plaintext_marker: &[u8],
-    trace: &str,
-) {
-    assert_warm_outage_trace_anti_vacuity(trace);
-    assert_key_provider_error_surface_safe(error, inputs, request_endpoint, plaintext_marker);
-    assert_sensitive_text_absent(trace, inputs, request_endpoint, plaintext_marker);
-}
-
-/// 最小 tracing Layer recorder：把 span/event 字段拼进共享缓冲，供脱敏断言读取。
-struct TraceRecorder {
-    buf: Arc<std::sync::Mutex<String>>,
-    _guard: tracing::subscriber::DefaultGuard,
-}
-
-struct CaptureLayer {
-    buf: Arc<std::sync::Mutex<String>>,
-}
-
-struct CaptureVisitor {
-    parts: Vec<String>,
-}
-
-impl Visit for CaptureVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.parts.push(format!("{field}={value:?}"));
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.parts.push(format!("{field}={value}"));
-    }
-}
-
-impl<S: Subscriber> Layer<S> for CaptureLayer {
-    fn on_new_span(&self, attrs: &Attributes<'_>, _id: &tracing::Id, _ctx: LayerContext<'_, S>) {
-        let mut visitor = CaptureVisitor {
-            parts: vec![format!("span={}", attrs.metadata().name())],
-        };
-        attrs.record(&mut visitor);
-        self.append(visitor.parts);
-    }
-
-    fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
-        let mut visitor = CaptureVisitor {
-            parts: vec![format!("target={}", event.metadata().target())],
-        };
-        event.record(&mut visitor);
-        self.append(visitor.parts);
-    }
-}
-
-impl CaptureLayer {
-    fn append(&self, parts: Vec<String>) {
-        let line = parts.join(" ");
-        if let Ok(mut guard) = self.buf.lock() {
-            guard.push_str(&line);
-            guard.push('\n');
-        }
-    }
-}
-
-impl TraceRecorder {
-    fn install() -> Self {
-        let buf = Arc::new(std::sync::Mutex::new(String::new()));
-        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
-            buf: Arc::clone(&buf),
-        });
-        let guard = tracing::subscriber::set_default(subscriber);
-        Self { buf, _guard: guard }
-    }
-
-    fn dump(&self) -> String {
-        self.buf.lock().map_or_else(
-            |poisoned| poisoned.into_inner().clone(),
-            |trace| trace.clone(),
-        )
-    }
-}
-
-// env fail-closed：缺 ADDR/TOKEN/MOUNT/SIGNING_KEY/ENCRYPTION_KEY 时大声失败（不静默跳过）。
-// item-level panic carve-out（error-handling.md §Carve-out）；Cargo required-features 已挡默认构建。
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::expect_used)]
-async fn sign_round_trip() {
-    let inputs = require_live_inputs();
-    // Jws：集成测试对接 JWT/JWS 签名用途（raw r‖s，URL-safe base64）。
-    let signer = signer(&inputs, integration_client());
+async fn integration_vault_transit_and_pki_conformance() -> Result<(), Box<dyn std::error::Error>> {
+    let vault = provision().await?;
+    let signer = VaultSigner::new_rss_access(
+        vault.client.clone(),
+        vault.endpoint.clone(),
+        vault.runtime_token.clone(),
+        TRANSIT_MOUNT,
+        REQUEST_TIMEOUT,
+        diport::JwtSigningBinding::rss_access(KeyId::new(SIGNING_KEY)),
+    )?;
     let signature = signer
         .sign(SignRequest {
-            key: KeyId::new(inputs.signing_key.clone()),
-            purpose: SigningPurpose::new("integration-test"),
+            key: KeyId::new(SIGNING_KEY),
+            purpose: SigningPurpose::new("auth.rss-access"),
             message: b"hello-rss".to_vec().into(),
         })
-        .await
-        .expect("transit sign");
-    // adapter 已 decode 出原始签名字节（剥离 vault:vN: 前缀）；非空即签名成功。
+        .await?;
     assert!(!signature.as_bytes().is_empty());
-}
 
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::expect_used)]
-async fn decrypt_with_different_aad_fails_closed() {
-    let inputs = require_live_inputs();
-    let (provider, key) = key_provider(&inputs, integration_client(), None);
-    let aad = field_aad("value");
-    let encrypted = provider
-        .encrypt(key, Plaintext::new(FIELD_PLAINTEXT.to_vec()), aad)
-        .await
-        .expect("transit encrypt");
-    let wrong_aad = field_aad("other-field");
-    let err = provider
+    let key_provider = VaultKeyProvider::new(
+        vault.client.clone(),
+        vault.endpoint.clone(),
+        vault.runtime_token.clone(),
+        TRANSIT_MOUNT,
+        REQUEST_TIMEOUT,
+    )?;
+    let aad = field_aad();
+    let encrypted = key_provider
+        .encrypt(
+            KeyName::try_new(ENCRYPTION_KEY)?,
+            Plaintext::new(b"vault-field-secret".to_vec()),
+            aad.clone(),
+        )
+        .await?;
+    let decrypted = key_provider
         .decrypt(
             encrypted.ciphertext().to_vec().into(),
             encrypted.key().clone(),
-            wrong_aad,
-        )
-        .await
-        .expect_err("AAD mismatch must fail closed");
-    assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::expect_used)]
-async fn rewrap_round_trip_preserves_aad_binding() {
-    let inputs = require_live_inputs();
-    let (provider, key) = key_provider(&inputs, integration_client(), None);
-    let aad = field_aad("value");
-    let encrypted = provider
-        .encrypt(key, Plaintext::new(FIELD_PLAINTEXT.to_vec()), aad.clone())
-        .await
-        .expect("transit encrypt");
-    let rewrapped = provider
-        .rewrap(
-            encrypted.ciphertext().to_vec().into(),
-            KeyRef::new(encrypted.key().name().clone(), encrypted.key().version()),
-            aad.clone(),
-        )
-        .await
-        .expect("transit rewrap");
-    let decrypted = provider
-        .decrypt(
-            rewrapped.ciphertext().to_vec().into(),
-            rewrapped.key().clone(),
             aad,
         )
-        .await
-        .expect("transit decrypt after rewrap");
-    assert_eq!(decrypted.expose(), FIELD_PLAINTEXT);
+        .await?;
+    assert_eq!(decrypted.expose(), b"vault-field-secret");
 
-    let wrong_aad = field_aad("other-field");
-    let err = provider
-        .decrypt(
-            rewrapped.ciphertext().to_vec().into(),
-            rewrapped.key().clone(),
-            wrong_aad,
-        )
-        .await
-        .expect_err("rewrapped ciphertext must remain AAD-bound");
-    assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
-}
-
-/// current_thread：tracing `set_default` 是 thread-local，需与 encrypt 同线程捕获 outage 诊断。
-#[tokio::test(flavor = "current_thread")]
-#[allow(clippy::expect_used)]
-async fn provider_readiness_succeeds_then_warm_outage_fails_closed_without_disclosure() {
-    let inputs = require_live_inputs();
-    let proxy = WarmOutageProxy::start(&inputs.addr)
-        .await
-        .expect("start live Vault cut proxy");
-    let request_endpoint = proxy.endpoint().to_string();
-    let (provider, key) = key_provider(
-        &inputs,
-        integration_client(),
-        Some(request_endpoint.clone()),
+    let transport = VaultPkiTransport::new(
+        Arc::new(LiveClock),
+        pki_http_client(&vault)?,
+        pki_transport_config(
+            vault.endpoint.clone(),
+            vault.runtime_token.clone(),
+            PKI_MOUNT,
+            PKI_ROLE,
+            vec![RedactedBytes::new(vault.pki_root_pem.as_bytes().to_vec())],
+            REQUEST_TIMEOUT,
+        )?,
+    )?;
+    let evidence = transport.sign_csr(pki_request()?).await?;
+    assert_eq!(
+        evidence.request().scope().tenant().to_string(),
+        "11111111-2222-4333-8444-555555555555"
     );
-    assert_key_provider_live_ready(&provider, key.clone()).await;
-
-    proxy.cut().await.expect("cut live Vault proxy");
-    let plaintext_marker = b"rss-live-outage-plaintext";
-    let recorder = TraceRecorder::install();
-    let error = provider
-        .encrypt(
-            key,
-            Plaintext::new(plaintext_marker.to_vec()),
-            field_aad("warm-outage"),
-        )
-        .await
-        .expect_err("warm provider outage must fail closed");
-    assert_eq!(error.kind(), KeyProviderErrorKind::Unavailable);
-    assert_sensitive_values_absent(
-        &error,
-        &inputs,
-        &request_endpoint,
-        plaintext_marker,
-        &recorder.dump(),
+    assert_eq!(
+        evidence.request().scope().device().as_uuid().to_string(),
+        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     );
+    assert_eq!(evidence.request().generation().get(), 7);
+    assert_eq!(evidence.request().policy_digest().as_bytes(), &[0x5a; 32]);
+    assert_eq!(evidence.issuer_chain_der().len(), 2);
+    let (_, leaf) = X509Certificate::from_der(evidence.leaf_der().as_bytes())?;
+    let leaf_spki: [u8; 32] = Sha256::digest(leaf.public_key().raw).into();
+    assert_eq!(evidence.request().spki_digest().as_bytes(), &leaf_spki);
+    assert_eq!(evidence.serial().as_bytes(), leaf.raw_serial());
+    assert_eq!(
+        evidence.not_after().unix_seconds(),
+        leaf.validity().not_after.timestamp()
+    );
+    let sans = leaf.subject_alternative_name()?.expect("leaf SAN");
+    assert!(
+        sans.value
+            .general_names
+            .iter()
+            .any(|name| matches!(name, GeneralName::DNSName("device.example")))
+    );
+    assert!(
+        sans.value
+            .general_names
+            .iter()
+            .any(|name| matches!(name, GeneralName::URI("spiffe://tenant/device")))
+    );
+    assert!(leaf.extensions().iter().any(|extension| matches!(extension.parsed_extension(), ParsedExtension::ExtendedKeyUsage(eku) if eku.client_auth && !eku.server_auth)));
+    let mut digest = Sha256::new();
+    for cert in std::iter::once(evidence.leaf_der()).chain(evidence.issuer_chain_der()) {
+        digest.update((cert.len() as u64).to_be_bytes());
+        digest.update(cert.as_bytes());
+    }
+    assert_eq!(
+        evidence.chain_digest().as_bytes(),
+        &<[u8; 32]>::from(digest.finalize())
+    );
+
+    for path in [
+        format!("{PKI_MOUNT}/issue/{PKI_ROLE}"),
+        format!("{PKI_MOUNT}/roles/adjacent"),
+        format!("{PKI_MOUNT}/issuers/generate/root/internal"),
+        format!("{PKI_MOUNT}/keys/generate/internal"),
+        format!("{PKI_MOUNT}/revoke"),
+    ] {
+        let response = vault
+            .client
+            .post(format!("{}/v1/{path}", vault.endpoint))
+            .header("X-Vault-Token", &vault.runtime_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "runtime token must not access {path}"
+        );
+    }
+
+    let denied_role = VaultPkiTransport::new(
+        Arc::new(LiveClock),
+        pki_http_client(&vault)?,
+        pki_transport_config(
+            vault.endpoint.clone(),
+            vault.runtime_token.clone(),
+            PKI_MOUNT,
+            "adjacent",
+            vec![RedactedBytes::new(vault.pki_root_pem.as_bytes().to_vec())],
+            REQUEST_TIMEOUT,
+        )?,
+    )?;
+    assert_eq!(
+        denied_role
+            .sign_csr(pki_request()?)
+            .await
+            .expect_err("runtime token must not select another role")
+            .kind(),
+        PkiArtifactErrorKind::Forbidden
+    );
+
+    let mut wrong_root_params = CertificateParams::default();
+    wrong_root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    wrong_root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let wrong_root_key = KeyPair::generate()?;
+    let wrong_pki_root = wrong_root_params.self_signed(&wrong_root_key)?.pem();
+    let wrong_ca_transport = VaultPkiTransport::new(
+        Arc::new(LiveClock),
+        pki_http_client(&vault)?,
+        pki_transport_config(
+            vault.endpoint.clone(),
+            vault.runtime_token.clone(),
+            PKI_MOUNT,
+            PKI_ROLE,
+            vec![RedactedBytes::new(wrong_pki_root.into_bytes())],
+            Duration::from_secs(5),
+        )?,
+    )?;
+    assert_eq!(
+        wrong_ca_transport
+            .sign_csr(pki_request()?)
+            .await
+            .expect_err("wrong PKI trust root must fail")
+            .kind(),
+        PkiArtifactErrorKind::InvalidResponse
+    );
+
+    let proxy = WarmOutageProxy::start(&vault.endpoint).await?;
+    let outage_client = pki_http_client(&vault)?;
+    let outage_transport = VaultPkiTransport::new(
+        Arc::new(LiveClock),
+        outage_client.clone(),
+        pki_transport_config(
+            proxy.endpoint(),
+            vault.runtime_token.clone(),
+            PKI_MOUNT,
+            PKI_ROLE,
+            vec![RedactedBytes::new(vault.pki_root_pem.as_bytes().to_vec())],
+            Duration::from_secs(5),
+        )?,
+    )?;
+    outage_transport.sign_csr(pki_request()?).await?;
+    proxy.cut().await?;
+    let error = outage_transport
+        .sign_csr(pki_request()?)
+        .await
+        .expect_err("warm outage must fail closed");
+    assert!(matches!(
+        error.kind(),
+        PkiArtifactErrorKind::Unavailable | PkiArtifactErrorKind::OutcomeUnknown
+    ));
+    let diagnostic = format!("{error:?} {error}");
+    assert!(!diagnostic.contains(&vault.runtime_token));
+    assert!(!diagnostic.contains(&vault.endpoint));
+    assert!(diagnostic.contains("<redacted>"));
+    let recovered_proxy = WarmOutageProxy::start(&vault.endpoint).await?;
+    let recovered_transport = VaultPkiTransport::new(
+        Arc::new(LiveClock),
+        outage_client,
+        pki_transport_config(
+            recovered_proxy.endpoint(),
+            vault.runtime_token.clone(),
+            PKI_MOUNT,
+            PKI_ROLE,
+            vec![RedactedBytes::new(vault.pki_root_pem.as_bytes().to_vec())],
+            Duration::from_secs(5),
+        )?,
+    )?;
+    recovered_transport.sign_csr(pki_request()?).await?;
+    Ok(())
 }

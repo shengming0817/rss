@@ -603,7 +603,10 @@ mod partition_key_tests {
         assert_eq!(got_subject.as_str(), "subj");
         assert_eq!(got_actor.kind(), rss_request_context::PrincipalKind::Admin);
         assert_eq!(got_actor.actor_id().as_str(), "actor-admin");
-        assert_eq!(got_actor.scope(), rss_request_context::RowScope::Tenant);
+        assert_eq!(
+            got_actor.scope(),
+            rss_request_context::RowScope::Tenant.into()
+        );
         assert!(pk.is_some(), "with_partition_key 后 into_parts 应透出 Some");
         assert_eq!(pk.unwrap().as_str(), "aggregate-123");
         assert!(causation_id.is_none(), "未设 causation_id 时应透出 None");

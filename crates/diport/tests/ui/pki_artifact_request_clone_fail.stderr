@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `PkiArtifactRequest` in the current scope
+ --> tests/ui/pki_artifact_request_clone_fail.rs:4:30
+  |
+4 |     let _duplicate = request.clone();
+  |                              ^^^^^ method not found in `PkiArtifactRequest`
