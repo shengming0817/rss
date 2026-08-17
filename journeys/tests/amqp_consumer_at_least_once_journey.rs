@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use amqp::{AmqpPublisher, AmqpSubscriber};
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use bootstrap::replaydeps::resolve;
 use bootstrap::{IdempotencyConfig, ResolvedIdempotency, Topology};
 use consistency::{ConsumerGroup, HandleResult};
@@ -61,6 +61,14 @@ async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublishe
 async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {
     let endpoint = amqp_endpoint(url)?;
     Ok(AmqpSubscriber::connect_with_webpki_for_test(&endpoint, name).await?)
+}
+
+fn consumer_admission() -> anyhow::Result<primitives::ConsumerAdmission> {
+    let (control, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+    control
+        .start_running()
+        .context("start AMQP journey consumer admission")?;
+    Ok(consumer)
 }
 
 /// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经
@@ -153,6 +161,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     // !Send consume future 与 drive 同任务并发（与 AMQP 连接同 runtime）。
     // Owner must outlive the join! consume future (E0597 if declared inside the block).
     let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
+    let admission = consumer_admission()?;
     let (_, driven) = tokio::join!(
         run_consumer_ackable(
             stream,
@@ -162,6 +171,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
             &handler,
             // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
             LeaseConfig::from_ttl(std::time::Duration::from_secs(60)),
+            admission,
         ),
         drive,
     );
@@ -255,6 +265,7 @@ async fn run_consumer_ackable_quarantines_untrusted_envelope_in_broker_dlq()
         anyhow::Ok(())
     };
     let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
+    let admission = consumer_admission()?;
     let (_, driven) = tokio::join!(
         run_consumer_ackable(
             stream,
@@ -263,6 +274,7 @@ async fn run_consumer_ackable_quarantines_untrusted_envelope_in_broker_dlq()
             &meta,
             &handler,
             LeaseConfig::from_ttl(Duration::from_secs(60)),
+            admission,
         ),
         drive,
     );

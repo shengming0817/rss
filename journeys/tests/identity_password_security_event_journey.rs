@@ -22,10 +22,11 @@ use generated::http::identity_v1::roles_assign::PRODUCER as ROLES_ASSIGN_PRODUCE
 use httpserve::ProducerMarker;
 use identity::ports::{
     AccountSecurityReadRepo as _, Credential, CredentialRepo as _, DynRoleBindingLifecycle,
-    DynRoleReadRepo, Role, TenantId, TenantRepoScope,
+    DynRoleReadRepo, Role, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use rss_request_context::TenantId;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,

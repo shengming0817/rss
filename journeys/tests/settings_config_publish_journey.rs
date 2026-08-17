@@ -121,7 +121,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         secret_uow,
         secret_resolve,
     );
-    let mut registry = bootstrap::compose(&[&domain])?;
+    let registry = bootstrap::compose(&[&domain])?;
     let (admission_control, _, _, write_admission) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control.start_running()?;
