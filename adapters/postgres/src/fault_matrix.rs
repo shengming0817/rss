@@ -900,6 +900,37 @@ pub struct PgFaultMatrixHarness {
     relay_budget: RelayBudget,
 }
 
+/// Feature-gated L2 DR fixture that keeps the recovery store, plan, and admission epoch bound.
+///
+/// The private fields prevent fault-matrix callers from mixing a durable start proof with a
+/// different plan or admission epoch. Repeated calls mint fresh move-only fences for the same
+/// prepared recovery, which is required to exercise the durable `AlreadyApplied` path.
+pub struct FaultMatrixPreparedL2DrRecovery<'a> {
+    recovery: &'a crate::PgL2DrRecoveryDeps,
+    plan: eventexec::L2DrRecoveryPlan,
+    admission_epoch: primitives::AdmissionEpochId,
+}
+
+impl FaultMatrixPreparedL2DrRecovery<'_> {
+    /// Record the durable start audit and lower this prepared recovery into the required fence.
+    pub async fn required_fence(
+        &self,
+        operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
+        start_audit_id: uuid::Uuid,
+    ) -> FaultMatrixResult<eventexec::RequiredAdmissionFence> {
+        let proof = self
+            .recovery
+            .record_l2_dr_recovery_start_audit_subject(operator_subject, &self.plan, start_audit_id)
+            .await?;
+        let authorized = eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+            self.plan.clone(),
+            proof,
+            eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator(),
+        )?;
+        Ok(authorized.require_admission(self.admission_epoch))
+    }
+}
+
 impl PgFaultMatrixHarness {
     /// Use already-provisioned opaque logins, run migrations, and construct runtime deps.
     pub async fn setup(
@@ -942,6 +973,54 @@ impl PgFaultMatrixHarness {
             deps,
             owner_pool,
             relay_budget,
+        })
+    }
+
+    /// Establish a real drained admission epoch and bind it to one exact L2 DR plan.
+    pub async fn prepare_l2_dr_recovery<'a>(
+        &self,
+        recovery: &'a crate::PgL2DrRecoveryDeps,
+        plan: eventexec::L2DrRecoveryPlan,
+    ) -> FaultMatrixResult<FaultMatrixPreparedL2DrRecovery<'a>> {
+        sqlx::query("DELETE FROM public.event_l2_dr_admission_epoch WHERE singleton")
+            .execute(&self.owner_pool)
+            .await?;
+
+        let admission_epoch = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+        let assembly_identity = "fault-matrix";
+        let runtime_plan_fingerprint = "sha256:fault-matrix-l2-dr";
+        let instance_id = uuid::Uuid::new_v4();
+        let boot_id = uuid::Uuid::new_v4();
+        let declared_instances = serde_json::json!([{
+            "assemblyIdentity": assembly_identity,
+            "runtimePlanFingerprint": runtime_plan_fingerprint,
+            "instanceId": instance_id.to_string(),
+        }]);
+
+        recovery
+            .request_l2_dr_admission_pause(admission_epoch, &plan, &declared_instances, true)
+            .await?;
+        let acknowledged = self
+            .deps
+            .handle()
+            .acknowledge_l2_dr_admission(
+                admission_epoch,
+                assembly_identity,
+                runtime_plan_fingerprint,
+                instance_id,
+                boot_id,
+                "drained",
+                Some(admission_epoch),
+            )
+            .await?;
+        if !acknowledged {
+            bail!("fault-matrix L2 DR admission acknowledgement was rejected");
+        }
+
+        Ok(FaultMatrixPreparedL2DrRecovery {
+            recovery,
+            plan,
+            admission_epoch,
         })
     }
 

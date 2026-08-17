@@ -1,5 +1,5 @@
 warning: operator durable start proof `L2DrRecoveryDurableStartProof::from_store` 仅可由已提交精确 start audit 的 Postgres issuer 构造
-  --> $DIR/postgres.rs:11:5
+  --> $DIR/postgres.rs:9:5
    |
 LL |     eventexec::L2DrRecoveryDurableStartProof::from_store(
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -8,7 +8,7 @@ LL |     eventexec::L2DrRecoveryDurableStartProof::from_store(
    = note: `#[warn(rss_operator_authorization_callsite)]` on by default
 
 warning: operator durable start proof `L2DrRecoveryDurableStartProof::from_store` 仅可由已提交精确 start audit 的 Postgres issuer 构造
-  --> $DIR/postgres.rs:28:17
+  --> $DIR/postgres.rs:24:17
    |
 LL |     let issue = eventexec::L2DrRecoveryDurableStartProof::from_store;
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -16,12 +16,28 @@ LL |     let issue = eventexec::L2DrRecoveryDurableStartProof::from_store;
    = help: 仅允许 `postgres::bundle::PgL2DrRecoveryDeps::record_l2_dr_recovery_start_audit_subject` 精确生产 callsite；不要直接调用、保存 constructor 函数项或创建同名旁路
 
 warning: operator durable start proof `L2DrRecoveryDurableStartProof::from_store` 仅可由已提交精确 start audit 的 Postgres issuer 构造
-  --> $DIR/postgres.rs:75:13
+  --> $DIR/postgres.rs:67:13
    |
 LL |             eventexec::L2DrRecoveryDurableStartProof::from_store(
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 仅允许 `postgres::bundle::PgL2DrRecoveryDeps::record_l2_dr_recovery_start_audit_subject` 精确生产 callsite；不要直接调用、保存 constructor 函数项或创建同名旁路
 
-warning: 3 warnings emitted
+warning: operator capability `OperatorL2DrRecoveryCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确受信 wrapper 签发
+  --> $DIR/postgres.rs:105:17
+   |
+LL |                 eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过以下精确受信 wrapper 之一构造：`runtime::operator::dr_recovery::issue_authorized_l2_dr_recovery_capability`, `postgres::fault_matrix::FaultMatrixPreparedL2DrRecovery::required_fence`；不要直接调用或保存 constructor 函数项
+
+warning: operator recovery plan `AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized` 仅可在认证、精确授权且已消费 durable start proof 的精确受信 callsite 构造
+  --> $DIR/postgres.rs:106:13
+   |
+LL |             eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅允许以下精确受信 callsite 之一：`runtime::operator::dr_recovery::execute_connected_l2_dr_recovery`, `postgres::fault_matrix::FaultMatrixPreparedL2DrRecovery::required_fence`；不要直接调用、保存 constructor 函数项或创建同名旁路
+
+warning: 5 warnings emitted
 

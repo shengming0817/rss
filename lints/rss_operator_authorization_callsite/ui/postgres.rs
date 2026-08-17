@@ -3,35 +3,31 @@
 
 fn mint(
     subject: eventexec::L2DrRecoveryOperatorSubject,
-    tenant: rss_request_context::TenantId,
-    epoch: eventexec::RecoveryEpochId,
-    digest: eventexec::L2DrRecoveryPlanDigest,
+    plan: &eventexec::L2DrRecoveryPlan,
     start: uuid::Uuid,
 ) -> Result<eventexec::L2DrRecoveryDurableStartProof, eventexec::L2DrRecoveryError> {
     eventexec::L2DrRecoveryDurableStartProof::from_store(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         subject,
-        tenant,
-        epoch,
-        digest,
+        plan.tenant(),
+        plan.epoch_id(),
+        *plan.digest(),
         start,
     )
 }
 
 fn mint_function_item(
     subject: eventexec::L2DrRecoveryOperatorSubject,
-    tenant: rss_request_context::TenantId,
-    epoch: eventexec::RecoveryEpochId,
-    digest: eventexec::L2DrRecoveryPlanDigest,
+    plan: &eventexec::L2DrRecoveryPlan,
     start: uuid::Uuid,
 ) {
     let issue = eventexec::L2DrRecoveryDurableStartProof::from_store;
     let _ = issue(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         subject,
-        tenant,
-        epoch,
-        digest,
+        plan.tenant(),
+        plan.epoch_id(),
+        *plan.digest(),
         start,
     );
 }
@@ -43,18 +39,16 @@ mod bundle {
         pub fn record_l2_dr_recovery_start_audit_subject(
             &self,
             subject: eventexec::L2DrRecoveryOperatorSubject,
-            tenant: rss_request_context::TenantId,
-            epoch: eventexec::RecoveryEpochId,
-            digest: eventexec::L2DrRecoveryPlanDigest,
+            plan: &eventexec::L2DrRecoveryPlan,
             start: uuid::Uuid,
         ) -> Result<eventexec::L2DrRecoveryDurableStartProof, eventexec::L2DrRecoveryError>
         {
             eventexec::L2DrRecoveryDurableStartProof::from_store(
                 vocab::ServiceCallerDomain::MaintenanceOperator,
                 subject,
-                tenant,
-                epoch,
-                digest,
+                plan.tenant(),
+                plan.epoch_id(),
+                *plan.digest(),
                 start,
             )
         }
@@ -66,19 +60,51 @@ mod bundle {
         pub fn record_l2_dr_recovery_start_audit_subject(
             &self,
             subject: eventexec::L2DrRecoveryOperatorSubject,
-            tenant: rss_request_context::TenantId,
-            epoch: eventexec::RecoveryEpochId,
-            digest: eventexec::L2DrRecoveryPlanDigest,
+            plan: &eventexec::L2DrRecoveryPlan,
             start: uuid::Uuid,
         ) -> Result<eventexec::L2DrRecoveryDurableStartProof, eventexec::L2DrRecoveryError>
         {
             eventexec::L2DrRecoveryDurableStartProof::from_store(
                 vocab::ServiceCallerDomain::MaintenanceOperator,
                 subject,
-                tenant,
-                epoch,
-                digest,
+                plan.tenant(),
+                plan.epoch_id(),
+                *plan.digest(),
                 start,
+            )
+        }
+    }
+}
+
+mod fault_matrix {
+    pub struct FaultMatrixPreparedL2DrRecovery;
+
+    impl FaultMatrixPreparedL2DrRecovery {
+        pub fn required_fence(
+            &self,
+            plan: eventexec::L2DrRecoveryPlan,
+            proof: eventexec::L2DrRecoveryDurableStartProof,
+        ) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, eventexec::L2DrRecoveryError> {
+            let capability =
+                eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
+            eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+                plan, proof, capability,
+            )
+        }
+    }
+
+    pub struct SameNamedSibling;
+
+    impl SameNamedSibling {
+        pub fn required_fence(
+            &self,
+            plan: eventexec::L2DrRecoveryPlan,
+            proof: eventexec::L2DrRecoveryDurableStartProof,
+        ) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, eventexec::L2DrRecoveryError> {
+            let capability =
+                eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
+            eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+                plan, proof, capability,
             )
         }
     }

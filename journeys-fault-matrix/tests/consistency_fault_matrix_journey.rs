@@ -530,7 +530,7 @@ fn session_created_payload(
         occurred_at: TEST_OCCURRED_AT,
         session_id,
         subject: Uuid::new_v4(),
-        tenant_id: tenant.as_uuid(),
+        tenant_id: Uuid::from_bytes(tenant.octets()),
     }
 }
 

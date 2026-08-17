@@ -14,10 +14,9 @@ use diport::{
     Publisher, Topic,
 };
 use eventexec::{
-    AuthorizedL2DrRecoveryPlan, L2DrRecoveryDurableStartProof, L2DrRecoveryError,
-    L2DrRecoveryOperatorSubject, L2DrRecoveryOutcome, L2DrRecoveryPlan, L2DrRecoveryStore,
-    OperatorL2DrRecoveryCapability, RecoveryChangeTicket, RecoveryDirection, RecoveryEpochId,
-    RecoveryEventSet, UtcEpochMicros,
+    L2DrRecoveryError, L2DrRecoveryOperatorSubject, L2DrRecoveryOutcome, L2DrRecoveryPlan,
+    L2DrRecoveryStore, RecoveryChangeTicket, RecoveryDirection, RecoveryEpochId, RecoveryEventSet,
+    UtcEpochMicros,
 };
 use futures::StreamExt;
 use postgres::fault_matrix::{
@@ -76,7 +75,7 @@ impl JourneyHarness {
             params.password.clone(),
         );
         let logins = PgFaultMatrixLoginCredentials::generate();
-        let [auditor_role, executor_role] = owned
+        let _serving_roles = owned
             .resolve_app_roles([
                 testkit::PgAppRoleSpec::new(logins.serving_role(), logins.serving_password()),
                 testkit::PgAppRoleSpec::new(logins.reader_role(), logins.reader_password()),
@@ -93,7 +92,7 @@ impl JourneyHarness {
         // Migration creates this function-only role as NOLOGIN; provision its test-only login only
         // after migration, then connect through the production operator config/deps funnel.
         let logins = PgFaultMatrixLoginCredentials::generate();
-        owned
+        let [auditor_role, executor_role] = owned
             .resolve_app_roles([
                 testkit::PgAppRoleSpec::new(
                     logins.l2_dr_recovery_auditor_role(),
@@ -164,7 +163,7 @@ fn session_created_payload(
         occurred_at: TEST_OCCURRED_AT,
         session_id,
         subject: Uuid::new_v4(),
-        tenant_id: tenant.as_uuid(),
+        tenant_id: Uuid::from_bytes(tenant.octets()),
     }
 }
 
@@ -191,19 +190,6 @@ fn recovery_plan(
         )?,
         RecoveryChangeTicket::parse(format!("CHG-1837-{}", epoch.as_uuid().simple()))?,
     )?)
-}
-
-fn authorize(
-    plan: L2DrRecoveryPlan,
-    proof: L2DrRecoveryDurableStartProof,
-) -> Result<AuthorizedL2DrRecoveryPlan> {
-    Ok(
-        AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
-            plan,
-            proof,
-            OperatorL2DrRecoveryCapability::issue_for_authorized_operator(),
-        )?,
-    )
 }
 
 fn test_operator_subject() -> Result<L2DrRecoveryOperatorSubject> {
@@ -281,6 +267,24 @@ fn assert_published_unchanged(
     Ok(())
 }
 
+async fn publish_duplicate_events(
+    publisher: &AmqpPublisher,
+    topic: &Topic,
+    event_id: &str,
+    payload: &[u8],
+) -> Result<()> {
+    for _ in 0..2 {
+        publisher
+            .publish(PublishRequest::new(
+                topic.clone(),
+                MessageId::new(event_id),
+                payload.to_vec(),
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
 async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
     let event_id = Uuid::new_v4().to_string();
     let group = harness.name("broker-ahead-consumer");
@@ -292,15 +296,7 @@ async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
     let publisher =
         connect_publisher(&harness.rabbit_url, &harness.name("broker-ahead-pub")).await?;
     let payload = serde_json::to_vec(&session_created_payload(harness.tenant, session_id))?;
-    for _ in 0..2 {
-        publisher
-            .publish(PublishRequest::new(
-                topic.clone(),
-                MessageId::new(&event_id),
-                payload.clone(),
-            ))
-            .await?;
-    }
+    publish_duplicate_events(&publisher, &topic, &event_id, &payload).await?;
 
     let epoch = RecoveryEpochId::new(Uuid::new_v4())?;
     let start_audit_id = Uuid::new_v4();
@@ -311,14 +307,14 @@ async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
         RecoveryDirection::BrokerAheadDatabaseEarlier,
         &[&event_id],
     )?;
-    let proof = harness
-        .recovery
-        .record_l2_dr_recovery_start_audit_subject(&operator_subject, &plan, start_audit_id)
+    let prepared = harness
+        .pg
+        .prepare_l2_dr_recovery(&harness.recovery, plan)
         .await?;
-    let receipt = harness
-        .recovery
-        .apply_l2_dr_recovery(authorize(plan, proof)?)
+    let required = prepared
+        .required_fence(&operator_subject, start_audit_id)
         .await?;
+    let receipt = harness.recovery.apply_l2_dr_recovery(required).await?;
     harness
         .recovery
         .record_l2_dr_recovery_finish_audit_subject(
@@ -384,14 +380,14 @@ async fn arm_database_ahead_redrive(harness: &JourneyHarness) -> Result<Database
     )?;
     let start_audit_id = Uuid::new_v4();
     let operator_subject = test_operator_subject()?;
-    let proof = harness
-        .recovery
-        .record_l2_dr_recovery_start_audit_subject(&operator_subject, &plan, start_audit_id)
+    let prepared = harness
+        .pg
+        .prepare_l2_dr_recovery(&harness.recovery, plan)
         .await?;
-    let receipt = harness
-        .recovery
-        .apply_l2_dr_recovery(authorize(plan, proof)?)
+    let required = prepared
+        .required_fence(&operator_subject, start_audit_id)
         .await?;
+    let receipt = harness.recovery.apply_l2_dr_recovery(required).await?;
     ensure!(receipt.outcome() == L2DrRecoveryOutcome::Applied);
     let armed = harness
         .pg
@@ -406,25 +402,12 @@ async fn arm_database_ahead_redrive(harness: &JourneyHarness) -> Result<Database
         .redrive_deadline()
         .context("L2 DR did not arm an absolute redrive deadline")?;
 
+    let retry_required = prepared
+        .required_fence(&operator_subject, Uuid::new_v4())
+        .await?;
     let repeated = harness
         .recovery
-        .apply_l2_dr_recovery({
-            let retry_plan = recovery_plan(
-                harness.tenant,
-                epoch,
-                RecoveryDirection::DatabaseAheadBrokerEarlier,
-                &[&event_id],
-            )?;
-            let retry_proof = harness
-                .recovery
-                .record_l2_dr_recovery_start_audit_subject(
-                    &operator_subject,
-                    &retry_plan,
-                    Uuid::new_v4(),
-                )
-                .await?;
-            authorize(retry_plan, retry_proof)?
-        })
+        .apply_l2_dr_recovery(retry_required)
         .await?;
     ensure!(repeated.outcome() == L2DrRecoveryOutcome::AlreadyApplied);
     ensure!(repeated.applied_at() == receipt.applied_at());
@@ -545,13 +528,16 @@ async fn invalid_exact_set_is_atomic(harness: &JourneyHarness) -> Result<()> {
         RecoveryDirection::DatabaseAheadBrokerEarlier,
         &[&event_id, &missing_event_id],
     )?;
-    let proof = harness
-        .recovery
-        .record_l2_dr_recovery_start_audit_subject(&operator_subject, &plan, start_audit_id)
+    let prepared = harness
+        .pg
+        .prepare_l2_dr_recovery(&harness.recovery, plan)
+        .await?;
+    let required = prepared
+        .required_fence(&operator_subject, start_audit_id)
         .await?;
     let error = harness
         .recovery
-        .apply_l2_dr_recovery(authorize(plan, proof)?)
+        .apply_l2_dr_recovery(required)
         .await
         .err()
         .context("missing exact event set must fail atomically")?;
