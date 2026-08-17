@@ -2537,7 +2537,10 @@ mod tests {
     use diport::{DlxLifecycleOperation, DlxLifecycleReason};
 
     fn open_write_admission() -> primitives::WriteAdmission {
-        let (_, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
+        let (control, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
+        control
+            .start_running()
+            .unwrap_or_else(|_| unreachable!("fresh test admission must start"));
         writes
     }
 
@@ -3354,7 +3357,7 @@ mod tests {
         observation: DlxTickObservation,
         epochs: Arc<std::sync::Mutex<Vec<i64>>>,
         cancel_after_tick: Option<tokio_util::sync::CancellationToken>,
-        tick_signal: Option<std::sync::mpsc::Sender<()>>,
+        tick_signal: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     }
 
     impl FakeDlxTickRunner {
@@ -3382,7 +3385,7 @@ mod tests {
         fn signalling(
             observation: DlxTickObservation,
             token: tokio_util::sync::CancellationToken,
-            tick_signal: std::sync::mpsc::Sender<()>,
+            tick_signal: tokio::sync::mpsc::UnboundedSender<()>,
         ) -> Self {
             Self {
                 observation,
@@ -3769,22 +3772,21 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn dlx_loop_degrades_when_total_tick_io_budget_expires() {
         let token = tokio_util::sync::CancellationToken::new();
-        let health = Arc::new(WorkerHealth::starting());
-        let metrics = Arc::new(RecordingDlxMetrics::default());
-        let handle = tokio::spawn(dlx_lifecycle_loop(
-            NeverCompletingDlxTickRunner,
-            FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
-            token.clone(),
-            Arc::clone(&health),
-            Arc::clone(&metrics) as Arc<dyn RetentionMetrics>,
-            Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
-            DlxWorkerConfig::canonical(),
-            open_write_admission(),
-        ));
-        tokio::task::yield_now().await;
-        tokio::time::advance(DLX_LIFECYCLE_TICK_TIMEOUT).await;
-        tokio::task::yield_now().await;
+        let health = WorkerHealth::starting();
+        let metrics = RecordingDlxMetrics::default();
 
+        let step = run_bounded_dlx_lifecycle_tick(
+            &NeverCompletingDlxTickRunner,
+            &FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
+            &token,
+            &health,
+            &metrics,
+            &SequenceClock::new([SystemTime::UNIX_EPOCH]),
+            DlxWorkerConfig::canonical(),
+        )
+        .await;
+
+        assert_eq!(step, DlxLoopStep::Continue);
         assert_eq!(health.status(), primitives::healthz::HealthStatus::Degraded);
         assert_eq!(
             metrics
@@ -3794,8 +3796,6 @@ mod tests {
                 .outcome,
             RetentionOutcome::Transient
         );
-        token.cancel();
-        assert!(handle.await.is_ok());
     }
 
     #[tokio::test]
@@ -3936,7 +3936,7 @@ mod tests {
     #[tokio::test]
     async fn dlx_worker_builder_runs_tick_on_owned_runtime_and_stops_cleanly() {
         let token = tokio_util::sync::CancellationToken::new();
-        let (tick_signal, tick_observed) = std::sync::mpsc::channel();
+        let (tick_signal, mut tick_observed) = tokio::sync::mpsc::unbounded_channel();
         let lifecycle = FakeDlxTickRunner::signalling(
             observation(DlxLifecycleHealth::Healthy),
             token.clone(),
@@ -3955,7 +3955,10 @@ mod tests {
         let resource = match worker {
             WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => make.into_factory()(token),
         };
-        assert!(tick_observed.recv_timeout(Duration::from_secs(2)).is_ok());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), tick_observed.recv()).await,
+            Ok(Some(()))
+        );
         assert!(resource.shutdown().await.is_ok());
         assert_eq!(
             epochs

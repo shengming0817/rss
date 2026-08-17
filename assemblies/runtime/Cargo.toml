@@ -194,6 +194,9 @@ integration = [
 [dev-dependencies]
 jsonschema = { workspace = true }
 otel = { path = "../../adapters/otel", features = ["backend", "test-support"] }
+# Runtime inventory lib-test fixtures need a ready host without exposing lifecycle transitions
+# through the production dependency graph.
+runtimeexec = { path = "../../crates/runtimeexec", features = ["test-support"] }
 # Enable SubscriberBinding::from_test_parts / from_parts_for_test for topology fixtures
 # (LAYER-DEPS-09：仅 dev-dep)。
 bootstrap = { path = "../../crates/bootstrap", features = ["test-support"] }

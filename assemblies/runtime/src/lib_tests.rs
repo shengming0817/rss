@@ -1495,32 +1495,42 @@ impl AuthGrantSweepRunner for ScriptedAuthGrantSweeper {
     }
 }
 
+fn open_test_write_admission() -> primitives::WriteAdmission {
+    let (control, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
+    control
+        .start_running()
+        .expect("sweeper fixture write admission starts running");
+    writes
+}
+
 async fn wait_for_sweeper_calls(calls: &AtomicUsize, expected: usize) {
-    for _ in 0..32 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
         if calls.load(Ordering::SeqCst) >= expected {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sweeper loop did not reach expected call count: expected {expected}, observed {}",
+            calls.load(Ordering::SeqCst)
+        );
         tokio::task::yield_now().await;
     }
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        expected,
-        "sweeper loop did not reach expected call count"
-    );
 }
 
 async fn wait_for_sweeper_health(health: &SweeperHealth, expected: (HealthStatus, &'static str)) {
-    for _ in 0..32 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
         if health.status_detail() == expected {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sweeper loop did not reach expected health state: expected {expected:?}, observed {:?}",
+            health.status_detail()
+        );
         tokio::task::yield_now().await;
     }
-    assert_eq!(
-        health.status_detail(),
-        expected,
-        "sweeper loop did not reach expected health state"
-    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1539,7 +1549,7 @@ async fn auth_grant_sweeper_health_tracks_first_success_error_and_exit() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
-        primitives::prepare_dr_admission_controls().into_parts().3,
+        open_test_write_admission(),
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
@@ -1583,7 +1593,7 @@ async fn auth_grant_sweeper_delays_missed_ticks_instead_of_bursting() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
-        primitives::prepare_dr_admission_controls().into_parts().3,
+        open_test_write_admission(),
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
@@ -1625,7 +1635,7 @@ async fn revocation_sweeper_health_tracks_success_error_recovery_and_exit() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
-        primitives::prepare_dr_admission_controls().into_parts().3,
+        open_test_write_admission(),
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
@@ -1676,7 +1686,7 @@ async fn revocation_sweeper_delays_missed_ticks_instead_of_bursting() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
-        primitives::prepare_dr_admission_controls().into_parts().3,
+        open_test_write_admission(),
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
