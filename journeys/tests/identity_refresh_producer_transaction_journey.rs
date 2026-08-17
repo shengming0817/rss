@@ -11,9 +11,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
 use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
-use identity::ports::{Credential, CredentialRepo as _, TenantId, TenantRepoScope};
+use identity::ports::{Credential, CredentialRepo as _, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use rss_request_context::TenantId;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,

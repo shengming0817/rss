@@ -3568,6 +3568,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rss-diag-context",
+ "rss-request-context",
  "runctx",
  "runtime",
  "secure",

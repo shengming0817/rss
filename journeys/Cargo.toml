@@ -128,6 +128,7 @@ diagctx = { package = "rss-diag-context", path = "../crates/diagctx", version = 
 runctx = { path = "../crates/runctx", features = ["test-support"] }
 primitives = { path = "../crates/primitives" }
 assembly-schema = { path = "../crates/assembly-schema" }
+rss-request-context.workspace = true
 # settings 配置发布 journey 需 TenantId 构造 + 事件 payload 解码。
 vocab = { path = "../crates/vocab" }
 # #1277：登录种子的 canonical user id（ids::UserId）与登录标识（username）解耦——审计 actor 取 canonical id。
