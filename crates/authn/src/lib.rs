@@ -1522,7 +1522,7 @@ mod row_visibility_tests {
         match expect {
             Expect::Scoped(scope) => {
                 let vis = principal.row_visibility(&ctx)?;
-                assert_eq!(vis.scope(), scope, "kind={kind:?}");
+                assert_eq!(vis.scope(), scope.into(), "kind={kind:?}");
                 assert_eq!(vis.tenant(), Some(tid), "kind={kind:?}");
             }
             Expect::FailClosed => {

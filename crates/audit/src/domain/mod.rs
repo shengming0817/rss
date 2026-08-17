@@ -942,7 +942,7 @@ mod tests {
         // DOMAIN_TAG(13)
         expected.extend_from_slice(DOMAIN_TAG);
         // tenant uuid bytes(16)
-        expected.extend_from_slice(tenant(TENANT_A).as_uuid().as_bytes());
+        expected.extend_from_slice(&tenant(TENANT_A).octets());
         // seq=0 u64 BE(8)
         expected.extend_from_slice(&0u64.to_be_bytes());
         // actor uuid bytes(16)

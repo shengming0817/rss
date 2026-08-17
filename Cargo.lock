@@ -6099,6 +6099,7 @@ dependencies = [
  "tracing",
  "trait-variant",
  "trybuild",
+ "uuid",
  "vocab",
 ]
 
