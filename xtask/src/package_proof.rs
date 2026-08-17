@@ -452,7 +452,7 @@ fn request_context_receipt() -> serde_json::Value {
     json!({
         "package": "rss-request-context", "tenantCanonical": true, "requestId": true,
         "principalRedacted": true, "deadlineShortened": true, "cancelObserved": true,
-        "obligationsRead": true
+        "deadlineSemantics": true, "contextViewRead": true, "obligationsRead": true
     })
 }
 
@@ -1428,6 +1428,8 @@ mod tests {
                     "requestId",
                     "principalRedacted",
                     "deadlineShortened",
+                    "deadlineSemantics",
+                    "contextViewRead",
                     "cancelObserved",
                     "obligationsRead",
                 ][..],

@@ -992,7 +992,8 @@ fn validate_amqp_base_url_table() {
 
 #[cfg(feature = "integration")]
 #[tokio::test]
-async fn real_redis_lifecycle_preserves_cross_scope_canary() {
+async fn real_redis_lifecycle_preserves_cross_scope_canary() -> anyhow::Result<()> {
+    use anyhow::Context as _;
     use std::process::{Command, Output};
     use testcontainers_modules::redis::Redis;
 
@@ -1005,26 +1006,27 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
         }
     }
 
-    fn run(program: &str, args: &[&str]) -> Output {
+    fn run(operation: &str, program: &str, args: &[&str]) -> anyhow::Result<Output> {
         Command::new(program)
             .args(args)
             .output()
-            .unwrap_or_else(|error| panic!("failed to run {program}: {error}"))
+            .with_context(|| format!("{operation}: failed to run {program}"))
     }
-    fn assert_success(output: &Output, operation: &str) {
-        assert!(
+    fn ensure_success(output: &Output, operation: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
             output.status.success(),
             "{operation} failed: stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        Ok(())
     }
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let script = root.join(".github/scripts/integration-services.sh");
     let temp = unique_test_dir("real-lifecycle");
     let _ = std::fs::remove_dir_all(&temp);
-    std::fs::create_dir_all(&temp).expect("smoke temp directory must be creatable");
+    std::fs::create_dir_all(&temp).context("create smoke temp directory")?;
     let scope = format!("rss-smoke-{}", std::process::id());
     let other_scope = format!("{scope}-canary");
     let log_dir = temp.join(format!("integration-service-logs-{scope}"));
@@ -1049,7 +1051,7 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
     for operation in ["bootstrap", "prepare"] {
         let mut args = vec![operation];
         args.extend(common);
-        assert_success(&run(script.as_str(), &args), operation);
+        ensure_success(&run(operation, script.as_str(), &args)?, operation)?;
     }
 
     let fixture = runtime::start_with_context(
@@ -1063,9 +1065,10 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
         }),
     )
     .await
-    .expect("real Redis fixture must self-provision");
+    .context("real Redis fixture must self-provision")?;
 
     let owned = run(
+        "discover owned Redis",
         "docker",
         &[
             "ps",
@@ -1075,22 +1078,23 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
             "--filter",
             &format!("label=io.rss.integration.scope={scope}"),
         ],
-    );
-    assert_success(&owned, "discover owned Redis");
+    )?;
+    ensure_success(&owned, "discover owned Redis")?;
     let owned_id = String::from_utf8(owned.stdout)
-        .expect("docker id must be UTF-8")
+        .context("docker id must be UTF-8")?
         .trim()
         .to_string();
     assert!(!owned_id.is_empty(), "owned Redis id must be discoverable");
     assert!(!owned_id.contains('\n'), "scope must own exactly one Redis");
 
     let labels = run(
+        "inspect owned Redis labels",
         "docker",
         &["inspect", "--format", "{{json .Config.Labels}}", &owned_id],
-    );
-    assert_success(&labels, "inspect owned Redis labels");
+    )?;
+    ensure_success(&labels, "inspect owned Redis labels")?;
     let labels: serde_json::Value =
-        serde_json::from_slice(&labels.stdout).expect("Docker labels must be JSON");
+        serde_json::from_slice(&labels.stdout).context("Docker labels must be JSON")?;
     for (key, value) in [
         ("io.rss.integration.managed", "true"),
         ("io.rss.integration.scope", scope.as_str()),
@@ -1102,6 +1106,7 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
     }
 
     let canary = run(
+        "start cross-scope canary",
         "docker",
         &[
             "run",
@@ -1118,19 +1123,20 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
             "io.rss.integration.service=redis",
             "redis:5.0",
         ],
-    );
-    assert_success(&canary, "start cross-scope canary");
+    )?;
+    ensure_success(&canary, "start cross-scope canary")?;
     let canary = Canary(
         String::from_utf8(canary.stdout)
-            .expect("canary id must be UTF-8")
+            .context("canary id must be UTF-8")?
             .trim()
             .to_string(),
     );
 
     let canonical = std::fs::read_dir(&log_dir)
-        .expect("prepared log directory must be readable")
-        .map(|entry| entry.expect("log entry must be readable").path())
-        .collect::<Vec<_>>();
+        .context("prepared log directory must be readable")?
+        .map(|entry| entry.map(|value| value.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .context("canonical log entries must be readable")?;
     assert!(
         canonical.iter().any(|path| {
             path.file_name()
@@ -1152,23 +1158,46 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
     let mut collect = vec!["collect"];
     collect.extend(common);
     collect.extend(["--outcome", "failure", "--archive", archive_s.as_str()]);
-    assert_success(&run(script.as_str(), &collect), "collect real Redis logs");
+    ensure_success(
+        &run("collect real Redis logs", script.as_str(), &collect)?,
+        "collect real Redis logs",
+    )?;
 
     std::mem::forget(fixture);
     let mut cleanup = vec!["cleanup"];
     cleanup.extend(common);
-    assert_success(&run(script.as_str(), &cleanup), "cleanup owned Redis");
+    ensure_success(
+        &run("cleanup owned Redis", script.as_str(), &cleanup)?,
+        "cleanup owned Redis",
+    )?;
     assert!(
-        !run("docker", &["inspect", &owned_id]).status.success(),
+        !run(
+            "verify owned Redis cleanup",
+            "docker",
+            &["inspect", &owned_id]
+        )?
+        .status
+        .success(),
         "exact-scope cleanup must delete owned Redis"
     );
     assert!(
-        run("docker", &["inspect", &canary.0]).status.success(),
+        run(
+            "verify cross-scope canary survival",
+            "docker",
+            &["inspect", &canary.0]
+        )?
+        .status
+        .success(),
         "cross-scope canary must survive cleanup"
     );
-    let archive_listing = run("tar", &["-tzf", archive_s.as_str()]);
-    assert_success(&archive_listing, "inspect lifecycle archive");
-    let archive_listing = String::from_utf8_lossy(&archive_listing.stdout);
+    let archive_listing = run(
+        "inspect lifecycle archive",
+        "tar",
+        &["-tzf", archive_s.as_str()],
+    )?;
+    ensure_success(&archive_listing, "inspect lifecycle archive")?;
+    let archive_listing =
+        String::from_utf8(archive_listing.stdout).context("archive listing must be UTF-8")?;
     assert!(archive_listing.contains("redis-"));
     assert!(archive_listing.contains(".log"));
     assert!(
@@ -1177,5 +1206,6 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() {
     );
 
     drop(canary);
-    std::fs::remove_dir_all(temp).expect("smoke temp directory cleanup must succeed");
+    std::fs::remove_dir_all(temp).context("smoke temp directory cleanup must succeed")?;
+    Ok(())
 }

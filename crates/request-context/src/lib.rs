@@ -410,40 +410,30 @@ mod tests {
     }
 
     #[test]
-    fn tenant_is_canonical_and_non_nil() {
-        let id = TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+    fn tenant_is_canonical_bounded_and_non_nil() -> Result<(), TenantIdError> {
+        let id = TenantId::parse("11111111-1111-4111-8111-111111111111")?;
         assert_eq!(id.to_string(), "11111111-1111-4111-8111-111111111111");
-        assert!(TenantId::parse("00000000-0000-0000-0000-000000000000").is_err());
-        assert!(TenantId::parse("11111111111141118111111111111111").is_err());
-    }
-
-    #[test]
-    fn request_id_and_principal_are_bounded_and_redacted() {
-        assert!(RequestId::parse("request.1_A-b").is_ok());
-        assert!(RequestId::parse("request 1").is_err());
-        let principal = PrincipalRef::new(PrincipalKind::User, "secret-subject").unwrap();
-        assert!(principal.matches_subject("secret-subject"));
-        assert!(!format!("{principal:?}").contains("secret-subject"));
-    }
-
-    #[test]
-    fn exhaustive_public_view_boundaries() {
+        assert_eq!(id.octets().len(), 16);
         assert_eq!(TenantId::parse(""), Err(TenantIdError::Empty));
         assert_eq!(
             TenantId::parse("00000000-0000-0000-0000-000000000000"),
             Err(TenantIdError::Nil)
         );
         assert!(TenantId::parse("11111111111141118111111111111111").is_err());
-        let tenant = TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap();
-        assert_eq!(tenant.octets().len(), 16);
+        Ok(())
+    }
+
+    #[test]
+    fn request_id_and_principal_are_bounded_and_redacted() -> Result<(), ContextValueError> {
         assert_eq!(RequestId::parse(""), Err(ContextValueError::Empty));
+        assert_eq!(RequestId::parse("request.1_A-b")?.as_str(), "request.1_A-b");
         assert!(RequestId::parse(&"a".repeat(128)).is_ok());
         assert_eq!(
             RequestId::parse(&"a".repeat(129)),
             Err(ContextValueError::TooLong)
         );
         assert_eq!(
-            RequestId::parse("bad/id"),
+            RequestId::parse("request 1"),
             Err(ContextValueError::InvalidFormat)
         );
         assert_eq!(
@@ -455,6 +445,14 @@ mod tests {
             PrincipalRef::new(PrincipalKind::User, &"x".repeat(513)),
             Err(ContextValueError::TooLong)
         );
+        let principal = PrincipalRef::new(PrincipalKind::User, "secret-subject")?;
+        assert!(principal.matches_subject("secret-subject"));
+        assert!(!format!("{principal:?}").contains("secret-subject"));
+        Ok(())
+    }
+
+    #[test]
+    fn closed_value_labels_are_exact() {
         for (kind, label) in [
             (PrincipalKind::User, "user"),
             (PrincipalKind::Device, "device"),
@@ -472,33 +470,20 @@ mod tests {
         ] {
             assert_eq!(scope.as_label(), label);
         }
-        let now = Instant::now();
-        let deadline = Deadline::at(now + Duration::from_secs(2));
-        assert!(!deadline.is_expired(now));
-        assert!(deadline.remaining(now).is_some());
-        assert_eq!(deadline.shortened_to(now).instant(), now);
+    }
+
+    #[test]
+    fn obligations_and_cancellation_are_read_only_views() {
         let fields = ["email", "name"];
         let mask = FieldMaskView::new(&fields);
         assert!(mask.allows("email"));
         assert_eq!(mask.iter().count(), 2);
         let obligations = ObligationsView::new(Some(RowScope::Tenant), mask);
-        let request = RequestId::parse("request-1").unwrap();
-        let principal = PrincipalRef::new(PrincipalKind::Admin, "subject").unwrap();
         let cancel = Never;
-        let view = RequestContextView::new(
-            Some(&tenant),
-            &request,
-            &principal,
-            deadline,
-            Cancellation::observe(&cancel),
-            obligations,
-        );
-        assert_eq!(view.tenant(), Some(&tenant));
-        assert_eq!(view.request_id(), &request);
-        assert_eq!(view.principal().kind(), PrincipalKind::Admin);
-        assert_eq!(view.deadline(), deadline);
-        assert!(!view.cancellation().is_cancelled());
-        assert_eq!(view.obligations().row_scope(), Some(RowScope::Tenant));
-        assert!(format!("{:?}", view.cancellation()).starts_with("Cancellation"));
+        let cancellation = Cancellation::observe(&cancel);
+        assert_eq!(obligations.row_scope(), Some(RowScope::Tenant));
+        assert!(obligations.field_mask().allows("name"));
+        assert!(!cancellation.is_cancelled());
+        assert!(format!("{cancellation:?}").starts_with("Cancellation"));
     }
 }

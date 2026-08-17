@@ -254,7 +254,7 @@ impl ContractDescriptor {
         version: &'static str,
         schema_digest: &'static str,
     ) -> Self {
-        Self::from_static(id, parse_static_version(version), schema_digest)
+        Self::from_static_parts(id, parse_static_version(version), schema_digest)
     }
 
     #[must_use]
@@ -263,12 +263,23 @@ impl ContractDescriptor {
         version_major: u32,
         schema_digest: &'static str,
     ) -> Self {
+        Self::from_static_parts(
+            id,
+            ContractVersion::from_static_major(version_major),
+            schema_digest,
+        )
+    }
+
+    const fn from_static_parts(
+        id: &'static str,
+        version: ContractVersion,
+        schema_digest: &'static str,
+    ) -> Self {
         assert!(valid_contract_id(id), "invalid contract id");
-        assert!(version_major != 0, "contract version must be non-zero");
         assert!(valid_schema_digest(schema_digest), "invalid schema digest");
         Self {
             id,
-            version: ContractVersion::from_static_major(version_major),
+            version,
             schema_digest,
         }
     }
@@ -287,7 +298,7 @@ impl ContractDescriptor {
     }
 }
 
-const fn parse_static_version(value: &str) -> u32 {
+const fn parse_static_version(value: &str) -> ContractVersion {
     let bytes = value.as_bytes();
     assert!(
         bytes.len() >= 2 && bytes[0] == b'v',
@@ -302,18 +313,13 @@ const fn parse_static_version(value: &str) -> u32 {
     while index < bytes.len() {
         let byte = bytes[index];
         assert!(byte.is_ascii_digit(), "invalid contract version");
-        major = match major.checked_mul(10) {
-            Some(value) => value,
-            None => panic!("invalid contract version"),
-        };
-        major = match major.checked_add((byte - b'0') as u32) {
-            Some(value) => value,
-            None => panic!("invalid contract version"),
-        };
+        let digit = (byte - b'0') as u32;
+        assert!(major <= (u32::MAX - digit) / 10, "invalid contract version");
+        major = major * 10 + digit;
         index += 1;
     }
     assert!(major != 0, "invalid contract version");
-    major
+    ContractVersion::from_static_major(major)
 }
 
 #[cfg(test)]
@@ -321,13 +327,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_values_round_trip() {
-        let id = ContractId::parse("runtime.inventory").unwrap();
-        let version = ContractVersion::parse("v12").unwrap();
-        let digest = SchemaDigest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap();
+    fn canonical_values_round_trip() -> Result<(), IdentityError> {
+        let id = ContractId::parse("runtime.inventory")?;
+        let version = ContractVersion::parse("v12")?;
+        let digest = SchemaDigest::parse(&format!("sha256:{}", "a".repeat(64)))?;
         assert_eq!(id.as_str(), "runtime.inventory");
         assert_eq!(version.to_string(), "v12");
         assert_eq!(digest.as_str().len(), 71);
+        Ok(())
     }
 
     #[test]
@@ -347,8 +354,9 @@ mod tests {
     }
 
     #[test]
-    fn static_versions_reject_leading_zero_and_overflow() {
-        for value in ["v01", "v4294967296"] {
+    fn static_versions_accept_max_and_reject_invalid_values() {
+        assert_eq!(parse_static_version("v4294967295").major(), u32::MAX);
+        for value in ["v0", "v01", "v12x", "v4294967296"] {
             assert!(std::panic::catch_unwind(|| parse_static_version(value)).is_err());
         }
     }
@@ -373,9 +381,9 @@ mod tests {
     }
 
     #[test]
-    fn exhaustive_public_value_boundaries() {
+    fn exhaustive_public_value_boundaries() -> Result<(), IdentityError> {
         let max = format!("a.{}", "b".repeat(253));
-        assert_eq!(ContractId::parse(&max).unwrap().to_string(), max);
+        assert_eq!(ContractId::parse(&max)?.to_string(), max);
         assert_eq!(
             ContractId::parse(&"a".repeat(256)),
             Err(IdentityError::TooLong)
@@ -385,10 +393,10 @@ mod tests {
             ContractVersion::from_major(0),
             Err(IdentityError::ZeroVersion)
         );
-        assert_eq!(ContractVersion::from_major(7).unwrap().major(), 7);
+        assert_eq!(ContractVersion::from_major(7)?.major(), 7);
         assert!(ContractVersion::parse("v4294967296").is_err());
         let digest = format!("sha256:{}", "0".repeat(64));
-        let parsed = SchemaDigest::parse(&digest).unwrap();
+        let parsed = SchemaDigest::parse(&digest)?;
         assert_eq!(parsed.to_string(), digest);
         assert!(SchemaDigest::parse("sha256:00").is_err());
         let descriptor = ContractDescriptor::from_static_version(
@@ -400,8 +408,16 @@ mod tests {
         assert_eq!(descriptor.version().major(), 12);
         assert_eq!(descriptor.schema_digest().len(), 71);
         assert_eq!(
+            descriptor,
+            ContractDescriptor::from_static(
+                "runtime.inventory",
+                12,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+        );
+        assert_eq!(
             ContractId::from_static("runtime.inventory"),
-            ContractId::parse("runtime.inventory").unwrap()
+            ContractId::parse("runtime.inventory")?
         );
         assert_eq!(
             SchemaDigest::from_static(
@@ -409,8 +425,8 @@ mod tests {
             ),
             SchemaDigest::parse(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )
-            .unwrap()
+            )?
         );
+        Ok(())
     }
 }
