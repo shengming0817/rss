@@ -37,8 +37,6 @@ RESERVED_ENV = (
     "RSS_CI_EXPECTED_BASE",
     "RSS_CI_EXPECTED_MERGE_BASE",
     "RSS_RUNTIME_ROOT_BASE",
-    "RSS_LOCAL_CI_LEDGER_PATH",
-    "RSS_LOCAL_CI_LEDGER_BRANCH",
 )
 RUNNER_PATHS = (
     ".cargo/config.toml",
@@ -348,14 +346,6 @@ def caller_branch(repo_root: Path) -> str:
     ).strip()
 
 
-def caller_ledger_path(repo_root: Path) -> Path:
-    raw = git_output(
-        repo_root, "rev-parse", "--git-path", "rss-local-ci/checkpoint-v1.json"
-    ).strip()
-    path = Path(raw)
-    return path if path.is_absolute() else repo_root / path
-
-
 def snapshot_wrapper(repo_root: Path, snapshot_root: Path, wrapper: Path) -> Path:
     source = wrapper if wrapper.is_absolute() else repo_root / wrapper
     try:
@@ -434,13 +424,6 @@ def run_local_ci_worker(repo_root: Path, wrapper: Path, arguments: list[str]) ->
             "RSS_RUNTIME_ROOT_BASE": merge_base,
         }
     )
-    if branch:
-        environment["RSS_LOCAL_CI_LEDGER_PATH"] = str(caller_ledger_path(repo_root))
-        environment["RSS_LOCAL_CI_LEDGER_BRANCH"] = branch
-    else:
-        environment.pop("RSS_LOCAL_CI_LEDGER_PATH", None)
-        environment.pop("RSS_LOCAL_CI_LEDGER_BRANCH", None)
-
     command_started = time.monotonic()
     try:
         completed = subprocess.run(

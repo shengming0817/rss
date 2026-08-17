@@ -37,7 +37,6 @@ mod integration_shards;
 mod l2_assurance;
 mod layerdeps;
 mod layers;
-mod local_run_ledger;
 mod localonly_evidence;
 mod localtx_coverage;
 mod localtx_evidence;
@@ -231,14 +230,12 @@ fn dispatch(command: Command) -> Result<()> {
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
             fast,
-            fresh,
             allow_missing_tools,
             against,
             fail_fast,
             only,
         } => verify::run(
             fast,
-            fresh,
             allow_missing_tools,
             against.as_deref(),
             fail_fast,

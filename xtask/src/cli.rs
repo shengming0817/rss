@@ -1,6 +1,6 @@
 //! xtask CLI 表层：单一 clap derive ADT（`Xtask` + `Command`）。
 //!
-//! 跨字段业务前置（如 `verify --fresh` 必须配 `--fast`）在 [`Command::validate`] 中 fail-closed；
+//! 跨字段业务前置在 [`Command::validate`] 中 fail-closed；
 //! 不假装 clap 属性可表达全部 RSS 约束。
 //!
 //! clap 语法错误与 argv 业务 validate 均脱敏/固定出口（help → exit 0；其余 exit 2）；
@@ -111,9 +111,6 @@ pub(crate) enum Command {
         /// 只跑 registry 显式 Always 的本地 meta 门。
         #[arg(long)]
         fast: bool,
-        /// 清空当前分支断点；须与 `--fast` 同用。
-        #[arg(long)]
-        fresh: bool,
         /// 缺外部工具时显式宽限（默认 fail-closed）。
         #[arg(long)]
         allow_missing_tools: bool,
@@ -346,12 +343,7 @@ impl Command {
                 }
                 Ok(())
             }
-            Self::Verify {
-                fast, fresh, only, ..
-            } => {
-                if *fresh && !*fast {
-                    bail!("verify --fresh 只允许与 --fast 同用");
-                }
+            Self::Verify { only, .. } => {
                 let mut seen = std::collections::BTreeSet::new();
                 for gate in only {
                     if gate.is_empty() {
@@ -709,7 +701,6 @@ mod tests {
             parse(&["verify"])?,
             Command::Verify {
                 fast: false,
-                fresh: false,
                 allow_missing_tools: false,
                 against: None,
                 fail_fast: false,
@@ -720,7 +711,6 @@ mod tests {
             parse(&[
                 "verify",
                 "--fast",
-                "--fresh",
                 "--allow-missing-tools",
                 "--fail-fast",
                 "--against",
@@ -732,14 +722,12 @@ mod tests {
             ])?,
             Command::Verify {
                 fast: true,
-                fresh: true,
                 allow_missing_tools: true,
                 against: Some("origin/develop".into()),
                 fail_fast: true,
                 only: vec!["fmt".into(), "clippy".into()],
             }
         );
-        assert!(parse(&["verify", "--fresh"]).is_err());
         assert!(parse(&["verify", "--only", "fmt", "--only", "fmt"]).is_err());
         assert!(parse(&["verify", "--only", ""]).is_err());
         assert!(parse(&["verify", "--bogus"]).is_err());

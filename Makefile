@@ -5,7 +5,7 @@
 # Cargo 前进入 committed-snapshot supervisor。直接执行 `cargo xtask ci local` 不具备来源边界并 fail-closed。
 #
 #   make verify       本地 stable-only 快门：默认 keep-going；VERIFY_ARGS 可传 --fail-fast/--only。
-#   make verify-fast  registry 显式 Always 的本地 meta 门；VERIFY_ARGS 可传 --fresh/--fail-fast/--only；冷缓存或 xtask
+#   make verify-fast  registry 显式 Always 的本地 meta 门；VERIFY_ARGS 可传 --fail-fast/--only；冷缓存或 xtask
 #                     变更时，外层 Cargo 仍会构建 xtask 启动器。
 #   make ci           按 CI_BASE...HEAD 的已提交差异执行默认 keep-going 的 10 分钟有界 typed preflight；默认
 #                     CI_BASE=origin/develop。未知路径只跑固定 meta，full-only 门不属于本地计划；

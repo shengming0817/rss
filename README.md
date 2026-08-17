@@ -46,9 +46,8 @@ cargo-nextest profile 只配置 runner 的 timeout、retry、JUnit 与 filter �
 make ci                                  # 分析 origin/develop...HEAD 的已提交差异并运行本地 preflight
 make ci CI_BASE=upstream/develop         # 显式指定比较基准
 make ci CI_ARGS='--fail-fast'            # 需要首错停止时显式启用
-make ci CI_ARGS='--fresh'                # 清空当前分支断点，从头运行 affected plan
 make ci CI_ARGS='--only test --only clippy' # 仅复验 affected test/clippy（partial）
-make verify-fast VERIFY_ARGS='--fresh'   # 清空同一分支断点并重跑 verify --fast 门集（见 xtask/src/verify.rs）
+make verify-fast                         # 运行 verify --fast 门集（见 xtask/src/verify.rs）
 make verify VERIFY_ARGS='--only runtime-root-guard' # 仅复验一个 typed gate（partial）
 make ci-full                             # 显式执行 release-check（workspace coverage，不重复 component nextest）
 ./hack/cargo.sh xtask ci local --base origin/develop
@@ -74,9 +73,8 @@ coverage、audit 或真实后端 integration；需要人工诊断无条件全量
 
 本地 `verify`、`ci local` 与 `ci full` 默认 keep-going：聚合层继续执行后续 gate/stage，Cargo
 build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参数，最后稳定汇总全部失败并返回非零。
-`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。仅 `make ci` / `ci local`
-与 `make verify-fast` / `verify --fast` 默认使用 resume ledger：跳过当前分支已经通过的 gate/stage，失败或
-超时中的步骤继续执行；这两个入口需要从头验证时显式使用 `--fresh`。完整 `verify` 与 `ci full` 不读取 ledger。
+`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。每次调用都会执行本次所选
+gate/stage；构建复用只由 committed snapshot、target pool、Cargo fingerprint 与 compiler cache 负责。
 任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端固定 Job 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与

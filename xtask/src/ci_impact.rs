@@ -76,10 +76,6 @@ const LOCAL_CI_XTASK_SCOPES: &[(&str, XtaskTestScope)] = &[
     ("xtask/src/ci_lanes.rs", XtaskTestScope::Complete),
     ("xtask/src/cmd.rs", XtaskTestScope::Complete),
     ("xtask/src/integration_shards.rs", XtaskTestScope::Complete),
-    (
-        "xtask/src/local_run_ledger.rs",
-        XtaskTestScope::Filters(&["ci_impact::", "local_run_ledger::"]),
-    ),
 ];
 
 trait LocalClock {
@@ -168,9 +164,6 @@ pub(crate) struct LocalOptions {
     /// Count 拒绝 `--fail-fast` 重复（默认 SetTrue 为 last-wins）。
     #[arg(long, action = clap::ArgAction::Count)]
     fail_fast: u8,
-    /// Count 拒绝 `--fresh` 重复。
-    #[arg(long, action = clap::ArgAction::Count)]
-    fresh: u8,
     #[arg(long = "only", value_enum, action = clap::ArgAction::Append)]
     only: Vec<LocalStage>,
 }
@@ -190,9 +183,6 @@ impl LocalOptions {
         if self.fail_fast > 1 {
             bail!("ci local 重复参数: --fail-fast");
         }
-        if self.fresh > 1 {
-            bail!("ci local 重复参数: --fresh");
-        }
         let mut seen = BTreeSet::new();
         for stage in &self.only {
             if !seen.insert(*stage) {
@@ -208,10 +198,6 @@ impl LocalOptions {
 
     fn fail_fast(&self) -> bool {
         self.fail_fast > 0
-    }
-
-    fn fresh(&self) -> bool {
-        self.fresh > 0
     }
 
     fn only_set(&self) -> BTreeSet<LocalStage> {
@@ -1131,7 +1117,7 @@ enum LocalCargoTarget {
 }
 
 impl LocalCargoTarget {
-    fn checkpoint_label(&self) -> String {
+    fn display_label(&self) -> String {
         match self {
             Self::Lib => "lib".to_owned(),
             Self::Bin(name) => format!("bin:{name}"),
@@ -1978,13 +1964,6 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     let steps = scope_xtask_unit_test_steps(steps, &impact, &entries);
     let only = options.only_set();
     let steps = select_local_steps(steps, &only)?;
-    let mut ledger = crate::local_run_ledger::LocalRunLedger::for_local_worker()?;
-    if options.fresh() {
-        ledger
-            .as_mut()
-            .context("ci local --fresh 需要有分支的 worktree")?
-            .fresh()?;
-    }
     if steps.is_empty() {
         eprintln!("ci local：<base>...HEAD 无需执行本地步骤");
         return Ok(());
@@ -2005,19 +1984,8 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     execute_local_steps(&steps, execution_policy, |step| {
         index += 1;
         eprintln!("ci local：[{}/{}] {}", index, steps.len(), step.label());
-        if let Some(unit) = step.checkpoint_key()
-            && ledger.as_ref().is_some_and(|ledger| ledger.contains(&unit))
-        {
-            eprintln!(
-                "ci local：[{}/{}] checkpoint 已通过，跳过",
-                index,
-                steps.len()
-            );
-            return Ok(());
-        }
         let step_started = clock.now();
-        let result = run_local_step(&context, step, execution_policy, ledger.as_mut());
-        let result = finalize_local_step_result(step, ledger.as_mut(), result);
+        let result = run_local_step(&context, step, execution_policy);
         let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
         match result {
             Ok(()) => {
@@ -2053,20 +2021,6 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn finalize_local_step_result(
-    step: &LocalStep,
-    ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
-    result: Result<()>,
-) -> Result<()> {
-    if result.is_ok()
-        && let Some(unit) = step.checkpoint_key()
-        && let Some(ledger) = ledger
-    {
-        ledger.mark_passed(unit);
-    }
-    result
 }
 
 fn execute_local_steps(
@@ -2144,18 +2098,7 @@ impl LocalWorkerProvenance {
         required(LOCAL_DEADLINE_ENV)?
             .parse::<f64>()
             .context("local CI deadline is malformed")?;
-        let caller_branch = required(LOCAL_CALLER_BRANCH_ENV)?;
-        let ledger_pair = (
-            env::var_os(crate::local_run_ledger::PATH_ENV),
-            env::var_os(crate::local_run_ledger::BRANCH_ENV),
-        );
-        match (&*caller_branch, &ledger_pair) {
-            ("", (None, None)) => {}
-            ("", _) => bail!("detached local CI caller must not provide a resume ledger"),
-            (_, (Some(_), Some(branch))) if branch.to_str() == Some(caller_branch.as_str()) => {}
-            (_, (Some(_), Some(_))) => bail!("local CI ledger branch does not match caller branch"),
-            (_, _) => bail!("attached local CI caller requires a complete resume ledger"),
-        }
+        required(LOCAL_CALLER_BRANCH_ENV)?;
         let head = required(LOCAL_HEAD_ENV)?;
         let base = required(LOCAL_BASE_ENV)?;
         let merge_base = required(LOCAL_MERGE_BASE_ENV)?;
@@ -2572,36 +2515,10 @@ impl LocalStep {
                         "{} {} {}",
                         operation.label(),
                         packages.join(","),
-                        target.checkpoint_label()
+                        target.display_label()
                     )
                 },
             ),
-        }
-    }
-
-    fn checkpoint_key(&self) -> Option<String> {
-        match self {
-            Self::Meta(_) => None,
-            Self::PublicApi(packages) => Some(format!("stage:public-api:{}", packages.join(","))),
-            Self::CompleteInternalPublicApi => {
-                Some("stage:public-api:complete-internal".to_owned())
-            }
-            Self::PythonHooks => Some("stage:python-hooks".to_owned()),
-            Self::CargoWrapperSelftest => Some("stage:cargo-wrapper-selftest".to_owned()),
-            Self::Packages {
-                operation,
-                packages,
-                target,
-                check_includes_lib,
-            } => Some(format!(
-                "stage:{}:lib={}:{}:{}",
-                operation.stage_name(),
-                check_includes_lib,
-                packages.join(","),
-                target
-                    .as_ref()
-                    .map_or_else(|| "package".to_owned(), LocalCargoTarget::checkpoint_label)
-            )),
         }
     }
 }
@@ -2723,14 +2640,6 @@ fn xtask_unit_test_filters(entries: &[DiffEntry]) -> Option<BTreeSet<String>> {
 }
 
 impl LocalCargoOperation {
-    const fn stage_name(self) -> &'static str {
-        match self {
-            Self::Check => "check",
-            Self::Test => "test",
-            Self::Clippy => "clippy",
-        }
-    }
-
     const fn label(self) -> &'static str {
         match self {
             Self::Check => "check reverse closure",
@@ -2752,7 +2661,6 @@ fn run_local_step(
     context: &LocalExecutionContext,
     step: &LocalStep,
     execution_policy: crate::cmd::ExecutionPolicy,
-    ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
 ) -> Result<()> {
     match step {
         LocalStep::Meta(gates) => crate::verify::run_local_meta(
@@ -2760,7 +2668,6 @@ fn run_local_step(
             gates,
             &context.merge_base,
             execution_policy,
-            ledger,
         ),
         LocalStep::PublicApi(packages) => {
             let command_facts = CommandWorkspaceFacts::new(context.root());
@@ -5094,7 +5001,6 @@ mod tests {
             LocalOptions {
                 base: vec!["origin/develop".to_owned()],
                 fail_fast: 0,
-                fresh: 0,
                 only: Vec::new(),
             }
         );
@@ -5103,7 +5009,6 @@ mod tests {
                 "--base",
                 "origin/develop",
                 "--fail-fast",
-                "--fresh",
                 "--only",
                 "meta",
                 "--only",
@@ -5112,7 +5017,6 @@ mod tests {
             LocalOptions {
                 base: vec!["origin/develop".to_owned()],
                 fail_fast: 1,
-                fresh: 1,
                 only: vec![LocalStage::Meta, LocalStage::Clippy],
             }
         );
@@ -5128,7 +5032,6 @@ mod tests {
             vec!["--base", "main", "--only", "unknown"],
             vec!["--base", "main", "--only", "test", "--only", "test"],
             vec!["--base", "main", "--fail-fast", "--fail-fast"],
-            vec!["--base", "main", "--fresh", "--fresh"],
             vec!["--base", "main", "--only", "fast-meta"],
         ] {
             assert!(parse_local_options(&args).is_err(), "accepted {args:?}");
@@ -5928,7 +5831,7 @@ mod tests {
     }
 
     #[test]
-    fn local_cargo_targets_split_checkpoints_by_typed_local_test_policy() -> Result<()> {
+    fn local_cargo_targets_follow_typed_local_test_policy() -> Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = CommandWorkspaceFacts::new(&root);
         let facts = command_facts.get()?;
@@ -6017,15 +5920,6 @@ mod tests {
                 );
             }
         }
-        let keys = steps
-            .iter()
-            .filter_map(LocalStep::checkpoint_key)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            keys.len(),
-            steps.len(),
-            "every Cargo target needs a unique checkpoint"
-        );
         Ok(())
     }
 
@@ -6054,14 +5948,6 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(filters, BTreeSet::from(["ci_impact::"]));
-        assert_eq!(
-            scoped
-                .iter()
-                .filter_map(LocalStep::checkpoint_key)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            1
-        );
         for path in [
             "xtask/src/cmd.rs",
             "xtask/src/ci_lanes.rs",
@@ -6119,34 +6005,6 @@ mod tests {
     }
 
     #[test]
-    fn single_worker_ledger_preserves_gate_successes_before_later_stage_write() -> Result<()> {
-        let root = crate::testutil::unique_tmp("ci-impact-single-ledger");
-        fs::create_dir_all(&root)?;
-        let path = root.join("checkpoint.json");
-        let mut ledger =
-            crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
-        ledger.mark_passed("gate:fmt".to_owned());
-
-        let meta = LocalStep::Meta(vec![GateId::Fmt]);
-        assert!(
-            finalize_local_step_result(
-                &meta,
-                Some(&mut ledger),
-                Err(anyhow::anyhow!("one gate failed")),
-            )
-            .is_err()
-        );
-        let later = LocalStep::CargoWrapperSelftest;
-        finalize_local_step_result(&later, Some(&mut ledger), Ok(()))?;
-
-        let stored = crate::local_run_ledger::LocalRunLedger::fixture(path, "feature/resume")?;
-        assert!(stored.contains("gate:fmt"));
-        assert!(stored.contains(&later.checkpoint_key().context("stage checkpoint")?));
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
     fn local_executor_supports_keep_going_and_fail_fast() {
         let steps = vec![
             LocalStep::Meta(local_meta_gates(None)),
@@ -6184,6 +6042,16 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(executed, steps[..2]);
+
+        executed.clear();
+        for _ in 0..2 {
+            execute_local_steps(&steps, crate::cmd::ExecutionPolicy::KeepGoing, |step| {
+                executed.push(step.clone());
+                Ok(())
+            })
+            .expect("selected local steps must execute on every invocation");
+        }
+        assert_eq!(executed, [steps.clone(), steps].concat());
     }
 
     #[test]

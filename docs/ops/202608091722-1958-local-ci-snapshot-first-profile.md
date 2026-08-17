@@ -12,8 +12,9 @@ xtask build 阶段合计 `93.33s`，新链路冷 target 的唯一 build 为 `38.
 - 时间：2026-08-09 UTC。
 - 工具链：仓库钉定 Rust toolchain；wrapper 输出 `CARGO_BUILD_JOBS=6`、
   `compiler-cache enabled=false reason=no-verified-candidate`。
-- 选择：`CI_ARGS='--only meta --fresh --fail-fast'`，只隔离 launcher、snapshot、xtask build 与同一
-  meta 前缀，不把 affected package check/test/clippy 混入启动数据。
+- 选择：本页数据采集于成功过滤 ledger 退役前；现行等价复现命令为
+  `CI_ARGS='--only meta --fail-fast'`，每次执行所选 meta 前缀，不把 affected package
+  check/test/clippy 混入启动数据。历史测量结果保留，但已退役的成功过滤入口不再作为可执行命令展示。
 - 冷 target 使用新建的显式 `CARGO_TARGET_DIR`；采样后通过 `cargo clean --target-dir` 清除。
 - 新实现的分段时间使用 `time.monotonic()`；Cargo build 同时启用 `--timings`。
 - 当前 develop 的 `assembly-artifacts-check` 在第四个 gate 报既有

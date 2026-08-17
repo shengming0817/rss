@@ -54,10 +54,6 @@ pub(crate) mod nextest;
 /// flag）皆清，语义见模块文档。charter：只清「改 verdict」的变量；`CARGO_TARGET_DIR` 等只改产物**落盘
 /// 位置**、不改门结论的变量**不**清（用户/CI 常有意设它做缓存，cargo 对 target 有锁、无竞争损坏）。
 pub(crate) const STRIPPED_ENV: &[&str] = &[
-    // Local resume capability: ambient values must never select another branch/worktree ledger.
-    // The local launcher explicitly hands both values to its detached verify child when needed.
-    crate::local_run_ledger::PATH_ENV,
-    crate::local_run_ledger::BRANCH_ENV,
     crate::ci_impact::LOCAL_WORKER_ENV,
     crate::ci_impact::LOCAL_SUPERVISED_ENV,
     crate::ci_impact::LOCAL_HANDSHAKE_FD_ENV,
