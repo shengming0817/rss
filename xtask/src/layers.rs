@@ -68,8 +68,8 @@ pub(crate) const ENGINE_CRATES: &[&str] = &[
 pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
 /// 服务层（依赖基础 + 引擎 + DI-infra）。
 ///
-/// `testkit` 是**服务层 test-support 库**（HTTP 契约测试 oneshot harness，#1136）：出边全是外部 crate
-/// （axum/tower/serde…，无 workspace 内部边可违 [`allows`]），经 `[dev-dependencies]` 被域/组合根消费
+/// `testkit` 是**服务层 test-support 库**（HTTP 契约测试 oneshot harness，#1136）：唯一 workspace
+/// 内部 shipped 出边为 `rss-conformance`，其余出边为外部 crate（axum/tower/serde…）；经 `[dev-dependencies]` 被域/组合根消费
 /// （dev 边进入 layerdeps 独立 bucket，不进入 `shipped_edges`，见 `layerdeps` 文档头）。归 Service 层 ⇒ 无需 deny.toml 分层
 /// ban（仅 Domain/Adapter/Generated 需，LAYER-DEPS-06）、无需改 base intra-DAG。
 pub(crate) const SERVICE_CRATES: &[&str] = &[
