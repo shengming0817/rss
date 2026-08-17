@@ -6570,9 +6570,19 @@ mod tests {
 
     #[test]
     fn green_fixture_closes_every_active_localtx_contract() -> anyhow::Result<()> {
-        let (summary, findings) = check_fixture_root(&fixture("green"))?;
+        let canonical_lock = fixture("green").join("Cargo.lock");
+        assert!(
+            !canonical_lock.exists(),
+            "canonical fixture must not contain a generated Cargo.lock before the test"
+        );
+        let temp = FixtureCopy::new("localtx-green-anti-vacuity")?;
+        let (summary, findings) = check_fixture_root(&temp.path)?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
         assert!(findings.is_empty(), "{findings:#?}");
+        assert!(
+            !canonical_lock.exists(),
+            "canonical fixture must not contain a generated Cargo.lock after the test"
+        );
         Ok(())
     }
 
