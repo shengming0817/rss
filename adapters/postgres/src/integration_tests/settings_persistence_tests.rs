@@ -1810,7 +1810,7 @@ async fn producer_fact_binding_mismatch_rolls_back_business_write() -> TestResul
         &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
             session_id: uuid::Uuid::from_u128(1),
             subject: uuid::Uuid::from_u128(2),
-            tenant_id: tenant.as_uuid(),
+            tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
             occurred_at: i64::try_from(TEST_OCCURRED_SECS)?,
         },
         IdemKey::parse(&event_id)?,

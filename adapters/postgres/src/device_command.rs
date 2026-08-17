@@ -3080,13 +3080,7 @@ mod integration_tests {
                SELECT target_id FROM reconcile_targets
                WHERE tenant_id=$1::uuid AND resource_id=$2)",
         )
-        .bind(
-            old_fence_unreceived_target
-                .scope
-                .tenant()
-                .as_uuid()
-                .to_string(),
-        )
+        .bind(old_fence_unreceived_target.scope.tenant().to_string())
         .bind(
             old_fence_unreceived_target
                 .scope
@@ -3109,13 +3103,7 @@ mod integration_tests {
                SELECT target_id FROM reconcile_targets
                WHERE tenant_id=$1::uuid AND resource_id=$2)",
         )
-        .bind(
-            ack_old_fence_unreceived_target
-                .scope
-                .tenant()
-                .as_uuid()
-                .to_string(),
-        )
+        .bind(ack_old_fence_unreceived_target.scope.tenant().to_string())
         .bind(
             ack_old_fence_unreceived_target
                 .scope

@@ -2107,7 +2107,7 @@ async fn saga_maintenance_audit_preserves_resource_kind_and_shared_start_audit_i
                 "failure".to_string(),
                 Some("operator observation failed".to_string()),
                 Some(start_audit_id.clone()),
-                Some(test_tenant().as_uuid().to_string()),
+                Some(test_tenant().to_string()),
             ),
             (
                 operator_subject.to_string(),
@@ -2117,7 +2117,7 @@ async fn saga_maintenance_audit_preserves_resource_kind_and_shared_start_audit_i
                 "success".to_string(),
                 None,
                 Some(start_audit_id),
-                Some(test_tenant().as_uuid().to_string()),
+                Some(test_tenant().to_string()),
             ),
         ],
         "Saga start/finish audits must keep exact resource identity and shared durable audit ID",
@@ -2227,7 +2227,7 @@ async fn saga_operator_lane_is_function_only_and_records_correlated_audit() -> T
             "saga.operator".to_string(),
             "saga.operator.status.start".to_string(),
             Some(start_audit_id),
-            Some(test_tenant().as_uuid().to_string()),
+            Some(test_tenant().to_string()),
         )
     );
 
@@ -3135,7 +3135,7 @@ async fn l2_dr_admission_requires_bootstrap_witness_and_scopes_every_transition(
          'service:l2-dr-v1-audit', $5::uuid, 'same_id_redrive_armed', clock_timestamp(), 1, NULL)",
     )
     .bind(recovery_epoch.to_string())
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(vec![event_id.clone()])
     .bind(plan.digest().as_bytes().as_slice())
     .bind(uuid::Uuid::new_v4().to_string())
@@ -3171,7 +3171,7 @@ async fn l2_dr_admission_requires_bootstrap_witness_and_scopes_every_transition(
          'CHG-1837-PG', $3::text[], $4::bytea, 'service:l2-dr-test', $5::uuid, $6::uuid)",
     )
     .bind(recovery_epoch.to_string())
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(vec![event_id])
     .bind(plan.digest().as_bytes().as_slice())
     .bind(uuid::Uuid::new_v4().to_string())

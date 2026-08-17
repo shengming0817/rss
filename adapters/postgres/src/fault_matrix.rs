@@ -2436,7 +2436,7 @@ mod tests {
             occurred_at: 1_700_000_000,
             session_id,
             subject: uuid::Uuid::from_u128(7),
-            tenant_id: tenant.as_uuid(),
+            tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
         }
     }
 

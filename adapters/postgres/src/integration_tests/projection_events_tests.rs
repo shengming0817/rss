@@ -302,7 +302,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     let (high_water_capability_first, high_water_capability_second) =
         issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             ProjectionConformanceFixture::primary().projection_id(),
             ProjectionConformanceFixture::primary().definition_version(),
             ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -329,7 +329,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     );
     let (read_capability_first, read_capability_second) = issue_projection_source_capability(
         &operator_store,
-        uuid::Uuid::parse_str(COTX_TENANT_A)?,
+        rss_request_context::TenantId::parse(COTX_TENANT_A)?,
         ProjectionConformanceFixture::primary().projection_id(),
         ProjectionConformanceFixture::primary().definition_version(),
         ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -752,7 +752,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     for (definition, binding, source_event_id, source_lsn) in &generated_sources {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             binding.projection_id(),
             definition.version(),
             definition.schema_hash(),
@@ -807,7 +807,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         let foreign_definition = generated_sources[identity_index].0;
         let (capability_first, capability_second) = issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             projection_binding.projection_id(),
             projection_definition.version(),
             projection_definition.schema_hash(),
@@ -842,7 +842,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     let (scoped_capability_first, scoped_capability_second) = {
         issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             ProjectionConformanceFixture::primary().projection_id(),
             ProjectionConformanceFixture::primary().definition_version(),
             ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -871,7 +871,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     let (cross_tenant_capability_first, cross_tenant_capability_second) = {
         issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             ProjectionConformanceFixture::primary().projection_id(),
             ProjectionConformanceFixture::primary().definition_version(),
             ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -935,7 +935,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     ] {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             ProjectionConformanceFixture::primary().projection_id(),
             ProjectionConformanceFixture::primary().definition_version(),
             ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -996,7 +996,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     ] {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &operator_store,
-            uuid::Uuid::parse_str(COTX_TENANT_A)?,
+            rss_request_context::TenantId::parse(COTX_TENANT_A)?,
             ProjectionConformanceFixture::primary().projection_id(),
             ProjectionConformanceFixture::primary().definition_version(),
             ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -1321,7 +1321,7 @@ async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> 
 
     let (capability_first, capability_second) = issue_projection_source_capability(
         &operator_store,
-        uuid::Uuid::parse_str(COTX_TENANT_A)?,
+        rss_request_context::TenantId::parse(COTX_TENANT_A)?,
         ProjectionConformanceFixture::primary().projection_id(),
         ProjectionConformanceFixture::primary().definition_version(),
         ProjectionConformanceFixture::primary().definition_schema_hash(),
@@ -1478,7 +1478,7 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     let (high_water_capability_first, high_water_capability_second) =
         issue_projection_source_capability(
             &operator_store,
-            tenant.as_uuid(),
+            tenant,
             fixture.projection_id(),
             fixture.definition_version(),
             fixture.definition_schema_hash(),
@@ -1526,7 +1526,7 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
 
     let (read_capability_first, read_capability_second) = issue_projection_source_capability(
         &operator_store,
-        tenant.as_uuid(),
+        tenant,
         fixture.projection_id(),
         fixture.definition_version(),
         fixture.definition_schema_hash(),
@@ -1626,7 +1626,7 @@ async fn projection_scoped_high_water_validates_scope_and_transaction_visibility
     ] {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &fixture.operator_store,
-            fixture.scope.tenant().as_uuid(),
+            fixture.scope.tenant(),
             fixture.scope.projection().as_str(),
             fixture.scope.definition_version(),
             fixture.scope.definition_schema_digest(),
@@ -1801,7 +1801,7 @@ async fn projection_scoped_high_water_stays_fixed_cost_under_mixed_scope_capacit
     for attempt in 1..=6 {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &fixture.operator_store,
-            fixture.scope.tenant().as_uuid(),
+            fixture.scope.tenant(),
             fixture.scope.projection().as_str(),
             fixture.scope.definition_version(),
             fixture.scope.definition_schema_digest(),
@@ -1829,7 +1829,7 @@ async fn projection_scoped_high_water_stays_fixed_cost_under_mixed_scope_capacit
     }
     let (explain_capability_first, explain_capability_second) = issue_projection_source_capability(
         &fixture.operator_store,
-        fixture.scope.tenant().as_uuid(),
+        fixture.scope.tenant(),
         fixture.scope.projection().as_str(),
         fixture.scope.definition_version(),
         fixture.scope.definition_schema_digest(),
@@ -1873,7 +1873,7 @@ async fn projection_source_rejects_unknown_same_generation_binding_before_payloa
     let (high_water_capability_first, high_water_capability_second) =
         issue_projection_source_capability(
             &fixture.operator_store,
-            fixture.scope.tenant().as_uuid(),
+            fixture.scope.tenant(),
             fixture.scope.projection().as_str(),
             fixture.scope.definition_version(),
             fixture.scope.definition_schema_digest(),
@@ -1882,7 +1882,7 @@ async fn projection_source_rejects_unknown_same_generation_binding_before_payloa
         .await?;
     let (read_capability_first, read_capability_second) = issue_projection_source_capability(
         &fixture.operator_store,
-        fixture.scope.tenant().as_uuid(),
+        fixture.scope.tenant(),
         fixture.scope.projection().as_str(),
         fixture.scope.definition_version(),
         fixture.scope.definition_schema_digest(),

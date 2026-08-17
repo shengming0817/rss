@@ -236,7 +236,7 @@ pub(in super::super) fn auth_grant_login_parts(
         &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
             session_id: grant.id().as_uuid(),
             subject: grant.user_id().as_uuid(),
-            tenant_id: grant.tenant().as_uuid(),
+            tenant_id: uuid::Uuid::from_bytes(grant.tenant().octets()),
             occurred_at,
         },
         IdemKey::parse(event_id).expect("test event id must be a valid idempotency key"),

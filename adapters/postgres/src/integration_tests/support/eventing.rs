@@ -275,7 +275,7 @@ pub(in super::super) async fn projection_source_high_water(
 ) -> Result<Option<i64>, sqlx::Error> {
     let (capability_first, capability_second) = issue_projection_source_capability(
         operator,
-        scope.tenant().as_uuid(),
+        scope.tenant(),
         scope.projection().as_str(),
         scope.definition_version(),
         scope.definition_schema_digest(),
@@ -299,7 +299,7 @@ pub(in super::super) async fn projection_source_high_water(
 
 pub(in super::super) async fn issue_projection_source_capability(
     operator: &crate::pool::VerifiedPgProjectionOperatorStore,
-    tenant: uuid::Uuid,
+    tenant: rss_request_context::TenantId,
     projection: &str,
     definition_version: &str,
     definition_digest: &str,
@@ -538,7 +538,7 @@ pub(in super::super) async fn reviewed_session_event(
         generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
             session_id,
             subject: uuid::Uuid::from_u128(0x51),
-            tenant_id: tenant.as_uuid(),
+            tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
             occurred_at: expected_occurred_at(),
         },
         tenant,
