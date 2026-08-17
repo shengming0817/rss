@@ -236,7 +236,7 @@ pub use crate::runtime_inventory::test_support as runtime_inventory;
 /// Finalize one closed listener selected from the committed, fingerprint-verified RuntimePlan
 /// fixture through the production auth finalization core.
 pub fn finalize_rss_listener(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     grants: Arc<identity::AuthGrantValidationService>,
     audit_sink: httpserve::AuditSinkHandle,
@@ -288,7 +288,7 @@ pub fn always_current_access_grants() -> Arc<identity::AuthGrantValidationServic
 /// The closed function selects Federated Access without accepting a raw profile value. It is for
 /// integration tests of Device/Admin/SuperAdmin principals, which local RSS no longer represents.
 pub fn finalize_federated_listener(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,

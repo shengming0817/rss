@@ -958,7 +958,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
     let route_authorizer = registry.take_primary_authorizer()?;
     let mut http_registry = bootstrap::compose(&[&settings_domain])?;
-    http_registry.install_write_admission(write_admission.clone())?;
+    let mut http_registry = http_registry.admit_writes(write_admission.clone());
     http_registry.register_primary_authorizer(Arc::clone(&route_authorizer))?;
     let settings_router = finalize_federated_listener(
         &mut http_registry,

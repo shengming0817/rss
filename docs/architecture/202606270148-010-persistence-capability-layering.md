@@ -171,7 +171,7 @@ impl PgRuntimeHandle {
 
 - ADR-005 的 `adapter→域` DIP 内向边、dynosaur 白名单与跨域仅经 contract 的隔离边界不变；bootstrap 仍不依赖 adapter。
 - ADR-009 typed route/auth funnel 不变：route 由 binding 内的 typed domain 在 `Domain::init` 注册，仍经
-  `bootstrap::Registry::finalize_routes` → `httpserve::finalize_auth`，不通过 `DomainModuleResult` 绕过 funnel。
+  `bootstrap::Registry::admit_writes` → `bootstrap::WriteAdmittedRegistry::finalize_routes` → `httpserve::finalize_auth`，不通过 `DomainModuleResult` 绕过 funnel。
 - `DomainModuleResult` 固定为生命周期三出口，不接受 domain service、route、`Any` 或无类型 bag；新形状减少了跨域 service
   泄漏与 service-locator 扩张面。
 - 所有权威胁收敛：外部调用方无法直接取得 domain/output；`compose_bindings` 在 compose 成功前不 drain，失败时 bindings

@@ -482,7 +482,7 @@ pub(crate) fn build_runtime_rate_limiter() -> Arc<FixtureRateLimiter> {
 pub(crate) struct FinalizeListenerPlanInputs<'config, 'borrow, S> {
     pub(crate) execution_plan: ListenerExecutionPlan,
     pub(crate) config: SnapshotConfig<'config>,
-    pub(crate) registry: &'borrow mut bootstrap::Registry,
+    pub(crate) registry: &'borrow mut bootstrap::WriteAdmittedRegistry,
     pub(crate) providers: &'borrow TokenProviderBindings,
     pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) audit_clock: Arc<dyn diport::Clock>,
@@ -821,7 +821,7 @@ fn mtls_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::Result<String> 
 
 #[cfg(feature = "integration")]
 pub(crate) fn finalize_rss_fixture_listener(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     grants: Arc<identity::AuthGrantValidationService>,
     audit_sink: httpserve::AuditSinkHandle,
@@ -845,7 +845,7 @@ pub(crate) fn finalize_rss_fixture_listener(
 
 #[cfg(feature = "integration")]
 pub(crate) fn finalize_federated_fixture_listener(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
@@ -863,7 +863,7 @@ pub(crate) fn finalize_federated_fixture_listener(
 
 #[cfg(feature = "integration")]
 fn finalize_access_fixture_listener(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     spec: crate::plan::ListenerExecutionSpec,
     providers: TokenProviderBindings,
     audit_sink: httpserve::AuditSinkHandle,
@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     fn assemble_test_plan(
-        registry: &mut bootstrap::Registry,
+        mut registry: bootstrap::Registry,
         values: &[(&str, &str)],
         providers: &TokenProviderBindings,
     ) -> anyhow::Result<FinalizedListenerSet> {
@@ -1140,10 +1140,12 @@ mod tests {
             crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(snapshot.view())?;
         let execution_plan =
             crate::plan::RuntimePlan::bundled(snapshot.view())?.listener_execution_plan();
+        let mut registry =
+            registry.admit_writes(primitives::prepare_dr_admission_controls().into_parts().3);
         finalize_listener_plan(FinalizeListenerPlanInputs {
             execution_plan,
             config: snapshot.view(),
-            registry,
+            registry: &mut registry,
             providers,
             audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             audit_clock: Arc::new(SystemClock),
@@ -1156,7 +1158,7 @@ mod tests {
     }
 
     fn assemble_rss_mtls_test(
-        registry: &mut bootstrap::Registry,
+        registry: bootstrap::Registry,
         internal_mtls_allow_set: Option<&str>,
         spiffe_endpoint: Option<&str>,
     ) -> anyhow::Result<FinalizedListenerSet> {
@@ -1189,7 +1191,7 @@ mod tests {
             .expect("Primary authorizer registered");
 
         let listeners = assemble_rss_mtls_test(
-            &mut registry,
+            registry,
             Some("spiffe://example.org/ns/rss/sa/internal"),
             Some("unix:///run/spire/test.sock"),
         )
@@ -1246,6 +1248,8 @@ mod tests {
         let framework_routes =
             crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(config.view())
                 .expect("inventory fixture");
+        let mut missing =
+            missing.admit_writes(primitives::prepare_dr_admission_controls().into_parts().3);
         let error = finalize_listener_plan(FinalizeListenerPlanInputs {
             execution_plan: crate::plan::RuntimePlan::bundled(config.view())
                 .expect("RuntimePlan")
@@ -1281,6 +1285,8 @@ mod tests {
         let framework_routes =
             crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(config.view())
                 .expect("inventory fixture");
+        let mut manual_health =
+            manual_health.admit_writes(primitives::prepare_dr_admission_controls().into_parts().3);
         let error = finalize_listener_plan(FinalizeListenerPlanInputs {
             execution_plan: crate::plan::RuntimePlan::bundled(config.view())
                 .expect("RuntimePlan")
@@ -1364,7 +1370,7 @@ mod tests {
         let federated_providers =
             TokenProviderBindings::new(None, None, Some(runtime_test_federated_provider()), None);
         let federated = assemble_test_plan(
-            &mut federated_registry,
+            federated_registry,
             &[
                 ("RSS_PRIMARY_TOKEN_PROFILE", "federated-access"),
                 ("RSS_ADMIN_TOKEN_PROFILE", "federated-access"),
@@ -1401,7 +1407,7 @@ mod tests {
             Some(runtime_test_service_provider()),
         );
         let service = assemble_test_plan(
-            &mut service_registry,
+            service_registry,
             &[
                 ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
                 ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
@@ -1475,7 +1481,7 @@ mod tests {
             .expect("healthy probe");
 
         let health = assemble_rss_mtls_test(
-            &mut registry,
+            registry,
             Some("spiffe://example.org/ns/rss/sa/internal"),
             Some("unix:///run/spire/test.sock"),
         )
@@ -1583,9 +1589,9 @@ mod tests {
             registry
         }
 
-        let mut mtls_registry = internal_registry();
+        let mtls_registry = internal_registry();
         let error = assemble_rss_mtls_test(
-            &mut mtls_registry,
+            mtls_registry,
             Some("spiffe://example.org/ns/rss/sa/internal"),
             None,
         )
@@ -1597,9 +1603,9 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn assemble_without_primary_authorizer_fails_closed() {
-        let mut registry = bootstrap::compose(&[]).expect("compose empty");
+        let registry = bootstrap::compose(&[]).expect("compose empty");
         let error = assemble_rss_mtls_test(
-            &mut registry,
+            registry,
             Some("spiffe://example.org/ns/rss/sa/internal"),
             Some("unix:///run/spire/test.sock"),
         )
@@ -1660,7 +1666,7 @@ mod tests {
             .expect("Primary authorizer registered");
 
         let listeners = assemble_rss_mtls_test(
-            &mut registry,
+            registry,
             Some("spiffe://example.org/ns/rss/sa/internal"),
             Some("unix:///run/spire/test.sock"),
         )
@@ -1763,11 +1769,14 @@ mod tests {
         let domain = RouteMetaDomain {
             capture: capture.clone(),
         };
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose evidence domain");
-        registry
-            .install_write_admission(primitives::prepare_dr_admission_controls().into_parts().3)
-            .expect("install test write admission");
+        let registry = bootstrap::compose(&[&domain]).expect("compose evidence domain");
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("route evidence fixture write admission starts running");
         let mut listeners = registry
+            .admit_writes(write_admission)
             .finalize_routes()
             .expect("finalize registry routes");
         assert_eq!(listeners.len(), 1, "one Primary listener must be finalized");

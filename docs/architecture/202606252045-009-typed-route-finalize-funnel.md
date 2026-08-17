@@ -38,7 +38,7 @@
 
 ### 2.2 受控 `bootstrap → httpserve` 边
 
-- `bootstrap` 在 `[dependencies]` 连 `httpserve`；`Registry::route_group::<L: Listener>(prefix, register)`（listener 由类型参数携带，`L::KIND` 给折叠键）；`finalize_routes` 返回 `Vec<(ListenerKind, httpserve::UnfinalizedRoutes)>`。bootstrap 只碰 sealed `UnfinalizedRoutes`，不碰裸 Router。
+- `bootstrap` 在 `[dependencies]` 连 `httpserve`；`Registry::route_group::<L: Listener>(prefix, register)`（listener 由类型参数携带，`L::KIND` 给折叠键）；process root 必须按值调用 `Registry::admit_writes(WriteAdmission)` 进入 `WriteAdmittedRegistry`，且只有该状态暴露 `finalize_routes` 并返回 `Vec<(ListenerKind, httpserve::UnfinalizedRoutes)>`。bootstrap 只碰 sealed `UnfinalizedRoutes`，不碰裸 Router。
 - 该边经 `xtask` `layers::route_funnel_allows("bootstrap","httpserve")` 放行（INVARIANT **LAYER-DEPS-ROUTE-FUNNEL-01**），`check_layers` 在 `!allows(Service,Service)` 时叠加。fail-closed：**只**放行这一对有向边；反向 `httpserve → bootstrap` 及其它任意 `Service → Service` 仍禁（rstest + 端到端 `check_layers` 正反例守）。
 
 ### 2.3 INVARIANT 落点
@@ -48,6 +48,7 @@
   `MethodRouter` 或 route 字段；endpoint 是 handler 与完整 evidence 的唯一注册单元。
 - **ROUTE-AUTH-FUNNEL-01**（#1113 Hard）：`UnfinalizedRoutes` 无 public bindable 出口。
 - **ROUTE-AUTH-FUNNEL-02**（#1113 Hard）：auth finalizer 是 `AuthenticatedRoutes` 唯一生产者，但该中间态不可 bind；业务只能由 `RateLimitedRoutes`、Health 只能由 `HealthRoutes` 进入唯一 transport core funnel。
+- **ROUTE-WRITE-ADMISSION-01**（#2134 Hard）：裸 `Registry` 不存在 `finalize_routes`；`admit_writes` 是该 registry 进入 `WriteAdmittedRegistry` 的唯一按值转换，后者私有持有传入 gate，并把同一 gate 克隆到本次 finalization 的所有 listener accumulator。漏装 gate 在编译期失败，无 optional field、install API 或 production fallback。该 Hard 结论不扩张为 workspace 全局 authority 不可铸造或 OS process singleton；独立 process/test root 可以各自准备 admission controls，canonical serving runtime 的单 coordinator 归 assembly owner。
 
 ## 3. 修订既有决策（ai-robust §审查要求：ADR amendment 须同步重评威胁矩阵）
 
@@ -91,6 +92,7 @@
 | 不变式 | 载体 | 档 |
 |---|---|---|
 | ROUTE-AUTH-FUNNEL-01/02（auth-before-bind） | 类型系统（`pub(crate)` 构造 + 无 bindable 出口 + sealed 生产者 co-located） | **Hard** |
+| ROUTE-WRITE-ADMISSION-01（write gate before finalize） | typestate（消费式 `Registry → WriteAdmittedRegistry`；裸 Registry 无 finalize 方法；同次 finalization 传播同一 gate） | **Hard** |
 | ROUTE-LISTENER-TYPED-01（listener 隔离） | 类型系统（typed marker + `NonPrimaryListener` 门 + typed-fold） | **Hard** |
 | LAYER-DEPS-ROUTE-FUNNEL-01（受控边收口） | `xtask` layers 白名单（rstest + 端到端 check_layers 正反例 anti-vacuity） | **Medium** |
 

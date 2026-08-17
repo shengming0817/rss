@@ -100,7 +100,7 @@ impl FinalizedProbeReceipt {
 }
 
 pub(crate) fn finalize<S>(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     verifier: FederatedVerifier,
     limiter: Arc<S>,
     trusted_proxy_config: httpserve::TrustedProxyConfig,

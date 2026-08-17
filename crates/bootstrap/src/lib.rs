@@ -10,7 +10,8 @@
 //! - [`domain`] / [`registry`] / [`module`]：域 crate 生命周期 trait + init 阶段声明
 //!   收集器 + 域装配单元。`compose` 聚合各域 [`Domain::init`] 声明到单一 [`Registry`]；W 阶段
 //!   finalize driver 已落地——[`Registry::readyz_report`] 驱动探针 worst-of 聚合，
-//!   [`Registry::finalize_routes`] 按 listener 分组折叠路由组 register 闭包。HTTP mount + auth
+//!   [`Registry::admit_writes`] 消费 process gate 后由 [`WriteAdmittedRegistry::finalize_routes`]
+//!   按 listener 分组折叠路由组 register 闭包。HTTP mount + auth
 //!   finalize（httpserve）、subscriber dispatch（eventexec）、socket bind / 信号 / config 归组合根（assemblies/runtime launch）。
 //!   对标：kube-rs controller lifecycle、uber-go/fx Lifecycle.Append、omicron nexus 分 listener 隔离。
 //!
@@ -34,7 +35,7 @@
 //!
 //! [`Domain::init`]: domain::Domain::init
 //! [`Registry::readyz_report`]: registry::Registry::readyz_report
-//! [`Registry::finalize_routes`]: registry::Registry::finalize_routes
+//! [`WriteAdmittedRegistry::finalize_routes`]: registry::WriteAdmittedRegistry::finalize_routes
 
 pub mod domain;
 pub mod domaintransport;
@@ -67,7 +68,7 @@ pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, Resolve
 pub use registry::DomainListenerBinding;
 pub use registry::{
     HealthProbe, HealthReporter, ReconcileSubscriberOwner, Registry, SubscriberBinding,
-    SubscriberCapability,
+    SubscriberCapability, WriteAdmittedRegistry,
 };
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
 pub use sagaprojectiondeps::{

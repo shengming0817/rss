@@ -458,7 +458,7 @@ pub(crate) struct DomainsWired<'a> {
     domain_transport: DomainTransportRuntime,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    registry: bootstrap::Registry,
+    registry: bootstrap::WriteAdmittedRegistry,
     provider_build: crate::provider_output::CompletedProviderBuild,
     placement_execution_plan: crate::plan::PlacementExecutionPlan,
 }

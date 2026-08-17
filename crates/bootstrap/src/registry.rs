@@ -26,7 +26,7 @@ type RouteRegisterFn =
 /// 路由组声明（由 [`Registry::route_group`] 收集）。
 /// `listener`/`prefix` 经 [`Registry::route_groups`] 暴露；`register` 闭包（`FnOnce`，一次性执行，
 /// finalize 后不可重入；多次 finalize 见幂等 drain 说明）由
-/// [`Registry::finalize_routes`] 在 W 阶段按 listener 分组折叠驱动（auth finalize / socket bind 归组合根）。
+/// [`WriteAdmittedRegistry::finalize_routes`] 在 W 阶段按 listener 分组折叠驱动（auth finalize / socket bind 归组合根）。
 pub(crate) struct RouteGroupDecl {
     pub(crate) domain: Option<&'static str>,
     pub(crate) listener: ListenerKind,
@@ -290,8 +290,9 @@ pub trait HealthProbe: Send + Sync {
 ///
 /// 组合根推荐的调用顺序：
 /// 1. [`readyz_report`](Self::readyz_report)（`&self`，可随时调、含 finalize 后）——驱动所有探针求值聚合。
-/// 2. [`finalize_routes`](Self::finalize_routes)（`&mut self`，drain routes）——按 listener 分组折叠路由组。
-/// 3. [`drain_subscribers`](Self::drain_subscribers)（`&mut self`，drain）——取出订阅声明交 eventexec 分发驱动。
+/// 2. [`admit_writes`](Self::admit_writes)（按值消费）——安装唯一 process gate 并进入可 finalize 状态。
+/// 3. [`WriteAdmittedRegistry::finalize_routes`]（`&mut self`，drain routes）——按 listener 分组折叠路由组。
+/// 4. [`drain_subscribers`](Self::drain_subscribers)（`&mut self`，drain）——取出订阅声明交 eventexec 分发驱动。
 ///
 /// [`Domain::init`]: crate::domain::Domain::init
 pub struct Registry {
@@ -299,8 +300,34 @@ pub struct Registry {
     subscribers: Vec<SubscriberDecl>,
     probes: Vec<ProbeDecl>,
     primary_authorizer: Option<Arc<dyn httpserve::RouteAuthorizer>>,
-    write_admission: Option<primitives::WriteAdmission>,
     current_domain: Option<&'static str>,
+}
+
+/// A composed registry that has consumed its serving-write admission gate.
+///
+/// INVARIANT: ROUTE-WRITE-ADMISSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "Registry has no finalize_routes method; admit_writes is its only transition to WriteAdmittedRegistry, whose stored gate is injected into every listener accumulator finalized from that registry" }.
+///
+/// This follows the same typestate shape as Axum's `Router<S>`: an incomplete value can still be
+/// configured, but only the state that has received its required capability can advance to the
+/// serving lifecycle. See <https://github.com/tokio-rs/axum/blob/main/axum/src/docs/routing/with_state.md>.
+#[must_use = "WriteAdmittedRegistry must be finalized or otherwise consumed by the process root"]
+pub struct WriteAdmittedRegistry {
+    registry: Registry,
+    write_admission: primitives::WriteAdmission,
+}
+
+impl std::ops::Deref for WriteAdmittedRegistry {
+    type Target = Registry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registry
+    }
+}
+
+impl std::ops::DerefMut for WriteAdmittedRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.registry
+    }
 }
 
 impl Registry {
@@ -311,20 +338,19 @@ impl Registry {
             subscribers: Vec::new(),
             probes: Vec::new(),
             primary_authorizer: None,
-            write_admission: None,
             current_domain: None,
         }
     }
 
-    /// Install the sole process write-admission gate before route finalization.
-    pub fn install_write_admission(
-        &mut self,
-        admission: primitives::WriteAdmission,
-    ) -> Result<(), KernelError> {
-        if self.write_admission.replace(admission).is_some() {
-            return Err(KernelError::Invariant);
+    /// Consume the declaration registry and bind its serving-write admission gate.
+    pub fn admit_writes(
+        self,
+        write_admission: primitives::WriteAdmission,
+    ) -> WriteAdmittedRegistry {
+        WriteAdmittedRegistry {
+            registry: self,
+            write_admission,
         }
-        Ok(())
     }
 
     /// 声明路由组——**listener 由类型参数 `L` 携带**（#1103 typed per-listener route-group）。
@@ -339,7 +365,8 @@ impl Registry {
     /// Primary endpoint 只能交给 Primary builder。取代旧 `route_group(listener: ListenerKind, ..)` 的运行期值传参 + SEGREGATION-01
     /// runtime 守（Medium→Hard）。listener marker `L` 经 [`UnfinalizedRoutes::nest_group`] 擦除进 box。
     ///
-    /// 闭包延迟到 finalize 阶段由 bootstrap 统一执行（[`finalize_routes`](Self::finalize_routes)），不在 `init` 中立即调用。
+    /// 闭包延迟到 finalize 阶段由 bootstrap 统一执行
+    /// （[`WriteAdmittedRegistry::finalize_routes`]），不在 `init` 中立即调用。
     pub fn route_group<L>(
         &mut self,
         prefix: &'static str,
@@ -424,7 +451,7 @@ impl Registry {
 
     /// 已声明的路由组（listener + prefix）的只读快照；RW-G1 journey 据此断言路由已经 bootstrap 组装声明。
     ///
-    /// 仅 peek 不执行 register 闭包（折叠驱动见 [`finalize_routes`](Self::finalize_routes)）；
+    /// 仅 peek 不执行 register 闭包（折叠驱动见 [`WriteAdmittedRegistry::finalize_routes`]）；
     /// `&self` 借用，可在 `finalize_routes` 排空前调用。
     pub fn route_groups(&self) -> Vec<(ListenerKind, &'static str)> {
         self.route_groups
@@ -500,20 +527,22 @@ impl Registry {
     /// 的接缝（#1320）：`Registry` 含 `Vec<RouteGroupDecl>`（boxed `FnOnce` 非 `Sync`）⇒ `Arc<Registry>`
     /// **非 `Sync`**，无法进 axum readyz handler 闭包（需 `Fn + Send + Sync + 'static`）。本 fn `std::mem::take`
     /// 探针装进只含 `Box<dyn HealthProbe>`（trait `Send + Sync`）的 [`HealthReporter`]——`Send + Sync`，可
-    /// `Arc` 共享进 handler。`&mut self`：与 [`finalize_routes`](Self::finalize_routes) drain 路由组不争用
+    /// `Arc` 共享进 handler。`&mut self`：与 [`WriteAdmittedRegistry::finalize_routes`] drain 路由组不争用
     /// （组合根 finalize 路由后取 reporter；探针从 Registry 移出，二次 take 得空 reporter）。
     pub fn take_health_reporter(&mut self) -> HealthReporter {
         HealthReporter {
             probes: std::mem::take(&mut self.probes),
         }
     }
+}
 
+impl WriteAdmittedRegistry {
     /// 按 listener 分组折叠路由组 register 闭包，每 listener 产出一个 [`UnfinalizedRoutes`]（未认证安全态）。
     ///
-    /// 排空 `route_groups`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
-    /// [`drain_subscribers`](Self::drain_subscribers) 不争用消费权；消费顺序由组合根定）。同一 listener 的
+    /// 排空 `route_groups`（`&mut self`，与 [`Registry::readyz_report`] /
+    /// [`Registry::drain_subscribers`] 不争用消费权；消费顺序由组合根定）。同一 listener 的
     /// 多个组折叠进同一累加器；不同 listener 各自独立——`Internal`/`Admin`/`Health` 路由**不可**
-    /// 落到 `Primary`（对外）listener（由 [`route_group`](Self::route_group) 的 typed `L` 类型层守）。
+    /// 落到 `Primary`（对外）listener（由 [`Registry::route_group`] 的 typed `L` 类型层守）。
     /// register 闭包 Err 原样冒泡（保留变体），并记 listener/prefix/error 结构化错误日志。
     ///
     /// **挂载语义**：每个路由组的 register 闭包经 typed `ListenerRouter<L>` 在**新鲜 Router** 上构建本组路由
@@ -538,13 +567,13 @@ impl Registry {
     ///
     /// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 产出 `UnfinalizedRoutes`（无 bindable 出口），唯有
     /// `httpserve::finalize_auth` 能换出可 bind 的 `AuthenticatedRoutes`（auth-finalize-before-bind，Hard）。
-    /// listener 隔离由 [`route_group`](Self::route_group) 的 typed `L`（ROUTE-LISTENER-TYPED-01，#1103
+    /// listener 隔离由 [`Registry::route_group`] 的 typed `L`（ROUTE-LISTENER-TYPED-01，#1103
     /// Medium→Hard）守——取代旧 BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 runtime 反例测试。
     pub fn finalize_routes(
         &mut self,
     ) -> Result<Vec<(ListenerKind, UnfinalizedRoutes)>, KernelError> {
         let mut by_listener: Vec<(ListenerKind, UnfinalizedRoutes)> = Vec::new();
-        for decl in std::mem::take(&mut self.route_groups) {
+        for decl in std::mem::take(&mut self.registry.route_groups) {
             let listener = decl.listener;
             let prefix = decl.prefix;
             let idx = match by_listener.iter().position(|(l, _)| *l == listener) {
@@ -552,12 +581,7 @@ impl Registry {
                 None => {
                     by_listener.push((
                         listener,
-                        match self.write_admission.clone() {
-                            Some(admission) => {
-                                UnfinalizedRoutes::with_mutation_admission(admission)
-                            }
-                            None => UnfinalizedRoutes::empty(),
-                        },
+                        UnfinalizedRoutes::with_mutation_admission(self.write_admission.clone()),
                     ));
                     by_listener.len() - 1
                 }
@@ -565,10 +589,7 @@ impl Registry {
             // 本组路由 nest 进该 listener 累加器（声明 prefix 即实际挂载前缀）；闭包 Err 原样冒泡 + 记 listener/prefix/error。
             let acc = std::mem::replace(
                 &mut by_listener[idx].1,
-                match self.write_admission.clone() {
-                    Some(admission) => UnfinalizedRoutes::with_mutation_admission(admission),
-                    None => UnfinalizedRoutes::empty(),
-                },
+                UnfinalizedRoutes::with_mutation_admission(self.write_admission.clone()),
             );
             by_listener[idx].1 = (decl.register)(acc).inspect_err(|e| {
                 tracing::error!(
@@ -585,11 +606,13 @@ impl Registry {
         );
         Ok(by_listener)
     }
+}
 
+impl Registry {
     /// 取出订阅声明 identity（contract_id + topic + consumer + group），交组合根校验 generated topology。
     ///
     /// 排空 `subscribers`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
-    /// [`finalize_routes`](Self::finalize_routes) 不争用消费权；消费顺序由组合根定）。
+    /// [`WriteAdmittedRegistry::finalize_routes`] 不争用消费权；消费顺序由组合根定）。
     /// 幂等 drain——`subscribers` 排空后再次调用返回空 `Vec`（非错误）。
     /// 返回 [`SubscriberBinding`] 列表；组合根据 `topic` 订阅 broker，据 `consumer` 构造 ConsumerMeta，
     /// 据 `group` 接 ConsumerBase；执行 handler 唯一来自 `ConsumerTx` registry。
@@ -1104,11 +1127,17 @@ mod finalize {
             .clone()
     }
 
+    fn admit_test_writes(registry: Registry) -> super::WriteAdmittedRegistry {
+        registry.admit_writes(primitives::prepare_dr_admission_controls().into_parts().3)
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn finalize_routes_empty_yields_no_routers() {
-        let mut reg = Registry::new();
-        let routers = reg.finalize_routes().expect("finalize ok");
+        let reg = Registry::new();
+        let routers = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("finalize ok");
         assert!(routers.is_empty());
     }
 
@@ -1124,7 +1153,9 @@ mod finalize {
         })
         .expect("route group a declared");
 
-        let routers = reg.finalize_routes().expect("finalize ok");
+        let routers = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("finalize ok");
         assert_eq!(routers.len(), 1);
         assert_eq!(routers[0].0, ListenerKind::Primary);
         assert_eq!(calls(&log), vec!["a"]);
@@ -1147,7 +1178,9 @@ mod finalize {
             .expect("route group declared");
         }
 
-        let routers = reg.finalize_routes().expect("finalize ok");
+        let routers = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("finalize ok");
         // 同 listener 折叠进单个 Router；两闭包均执行。
         assert_eq!(routers.len(), 1);
         assert_eq!(routers[0].0, ListenerKind::Primary);
@@ -1163,7 +1196,9 @@ mod finalize {
         reg.route_group::<Internal>("/internal/v1/i", Ok)
             .expect("internal declared");
 
-        let routers = reg.finalize_routes().expect("finalize ok");
+        let routers = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("finalize ok");
         assert_eq!(routers.len(), 2);
         let kinds: Vec<ListenerKind> = routers.iter().map(|(l, _)| *l).collect();
         assert!(kinds.contains(&ListenerKind::Primary));
@@ -1179,7 +1214,7 @@ mod finalize {
         })
         .expect("route group declared");
 
-        let result = reg.finalize_routes();
+        let result = admit_test_writes(reg).finalize_routes();
         assert!(matches!(result, Err(KernelError::RouteGroup(_))));
     }
 
@@ -1203,7 +1238,7 @@ mod finalize {
         })
         .expect("second route group declared");
 
-        let result = reg.finalize_routes();
+        let result = admit_test_writes(reg).finalize_routes();
         assert!(matches!(result, Err(KernelError::RouteGroup(_))));
         // 第一个闭包已执行（finalize 按注册顺序折叠，首先跑 ok 组再遇 err 组）。
         assert_eq!(calls(&log), vec!["first-ran"]);
@@ -1257,7 +1292,10 @@ mod finalize {
 
         // 取回各 listener 的裸 Router（测试专用入口）做 oneshot 断言。
         let (mut primary, mut internal) = (None, None);
-        for (listener, routes) in reg.finalize_routes().expect("finalize ok") {
+        for (listener, routes) in admit_test_writes(reg)
+            .finalize_routes()
+            .expect("finalize ok")
+        {
             match listener {
                 ListenerKind::Primary => primary = Some(routes.into_router_for_test()),
                 ListenerKind::Internal => internal = Some(routes.into_router_for_test()),

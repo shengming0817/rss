@@ -773,7 +773,10 @@ fn finalized_router(
         Some(authorizer) => authorizer,
         None => registry.take_primary_authorizer()?,
     };
-    let mut finalized = registry.finalize_routes()?;
+    let (admission_control, _, _, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let mut finalized = registry.admit_writes(write_admission).finalize_routes()?;
     ensure!(
         finalized.len() == 1,
         "journey domain must expose one listener"
@@ -1485,7 +1488,10 @@ fn finalized_audit_router(
     target: TenantId,
 ) -> Result<axum::Router> {
     let mut registry = bootstrap::compose(&[domain])?;
-    let routes = registry.finalize_routes()?;
+    let (admission_control, _, _, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let routes = registry.admit_writes(write_admission).finalize_routes()?;
     let (_, admin) = routes
         .into_iter()
         .find(|(listener, _)| *listener == ListenerKind::Admin)

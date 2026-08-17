@@ -1249,7 +1249,10 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
     let mut registry = bootstrap::compose(&domains)?;
     registry.register_primary_authorizer(authorizer)?;
-    registry.install_write_admission(primitives::prepare_dr_admission_controls().into_parts().3)?;
+    let (admission_control, _, _, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let mut registry = registry.admit_writes(write_admission);
     let providers =
         routes::TokenProviderBindings::new(None, None, Some(runtime_test_provider()), None);
     let snapshot = crate::config::test_snapshot(&[

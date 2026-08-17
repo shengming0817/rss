@@ -1325,24 +1325,72 @@ impl RouteAuthorizer for PublicRouteTestAuthorizer {
 }
 
 #[cfg(test)]
+struct IdentityTestProcessRoot {
+    registry: bootstrap::WriteAdmittedRegistry,
+    admission_control: primitives::ProcessAdmissionControl,
+}
+
+#[cfg(test)]
+impl IdentityTestProcessRoot {
+    #[allow(clippy::expect_used)]
+    fn new(mut registry: bootstrap::Registry, authorizer: Arc<dyn RouteAuthorizer>) -> Self {
+        registry
+            .register_primary_authorizer(authorizer)
+            .expect("test process root registers its authorizer once");
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("test process write admission starts running");
+        Self {
+            registry: registry.admit_writes(write_admission),
+            admission_control,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalize(
+        mut self,
+    ) -> (
+        Vec<(ListenerKind, httpserve::UnfinalizedRoutes)>,
+        Arc<dyn RouteAuthorizer>,
+        primitives::ProcessAdmissionControl,
+    ) {
+        let authorizer = self
+            .registry
+            .take_primary_authorizer()
+            .expect("test process root consumes its authorizer once");
+        let routes = self
+            .registry
+            .finalize_routes()
+            .expect("test process root finalizes admitted routes");
+        (routes, authorizer, self.admission_control)
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::expect_used)]
 pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<LoginService<S>>,
 ) -> axum::Router {
-    let routes = httpserve::UnfinalizedRoutes::empty()
-        .nest_group::<Primary, KernelError>(LOGIN_ROUTE_PREFIX, |router| {
+    let mut registry = bootstrap::Registry::new();
+    registry
+        .route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |router| {
             Ok(router.mount(
                 GeneratedPrimaryEndpoint::new_producer(LOGIN_PRODUCER, login_handler::<S>)?
                     .with_state(service),
             )?)
         })
         .expect("login test route uses generated production mount");
+    let (mut routes, authorizer, _admission_control) =
+        IdentityTestProcessRoot::new(registry, Arc::new(PublicRouteTestAuthorizer)).finalize();
+    let (_, routes) = routes.pop().expect("login test Primary routes");
     let plan = primitives::AuthPlan::new(
         ListenerKind::Primary,
         primitives::AuthScheme::RssAccessToken,
     )
     .expect("valid Primary access-token plan");
-    httpserve::finalize_primary_auth(routes, plan, Arc::new(PublicRouteTestAuthorizer))
+    httpserve::finalize_primary_auth(routes, plan, authorizer)
         .expect("public login test route finalizes")
         .into_plaintext_router_for_test()
 }
@@ -1352,22 +1400,59 @@ pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
 pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<RefreshService<S>>,
 ) -> axum::Router {
-    let routes = httpserve::UnfinalizedRoutes::empty()
-        .nest_group::<Primary, KernelError>(LOGIN_ROUTE_PREFIX, |router| {
+    let mut registry = bootstrap::Registry::new();
+    registry
+        .route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |router| {
             Ok(router.mount(
                 GeneratedPrimaryEndpoint::new_producer(REFRESH_PRODUCER, refresh_handler::<S>)?
                     .with_state(service),
             )?)
         })
         .expect("refresh test route uses generated producer mount");
+    let (mut routes, authorizer, _admission_control) =
+        IdentityTestProcessRoot::new(registry, Arc::new(PublicRouteTestAuthorizer)).finalize();
+    let (_, routes) = routes.pop().expect("refresh test Primary routes");
     let plan = primitives::AuthPlan::new(
         ListenerKind::Primary,
         primitives::AuthScheme::RssAccessToken,
     )
     .expect("valid Primary access-token plan");
-    httpserve::finalize_primary_auth(routes, plan, Arc::new(PublicRouteTestAuthorizer))
+    httpserve::finalize_primary_auth(routes, plan, authorizer)
         .expect("public refresh route finalizes")
         .into_plaintext_router_for_test()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+fn session_router_for_test<S: diport::Signer + Send + Sync + 'static>(
+    login: Arc<LoginService<S>>,
+    refresh: Arc<RefreshService<S>>,
+) -> (axum::Router, primitives::ProcessAdmissionControl) {
+    let mut registry = bootstrap::Registry::new();
+    registry
+        .route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |router| {
+            let router = router.mount(
+                GeneratedPrimaryEndpoint::new_producer(LOGIN_PRODUCER, login_handler::<S>)?
+                    .with_state(login),
+            )?;
+            Ok(router.mount(
+                GeneratedPrimaryEndpoint::new_producer(REFRESH_PRODUCER, refresh_handler::<S>)?
+                    .with_state(refresh),
+            )?)
+        })
+        .expect("session test routes use generated production mounts");
+    let (mut routes, authorizer, admission_control) =
+        IdentityTestProcessRoot::new(registry, Arc::new(PublicRouteTestAuthorizer)).finalize();
+    let (_, routes) = routes.pop().expect("session test Primary routes");
+    let plan = primitives::AuthPlan::new(
+        ListenerKind::Primary,
+        primitives::AuthScheme::RssAccessToken,
+    )
+    .expect("valid Primary access-token plan");
+    let router = httpserve::finalize_primary_auth(routes, plan, authorizer)
+        .expect("session test routes finalize")
+        .into_plaintext_router_for_test();
+    (router, admission_control)
 }
 
 async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
@@ -5386,16 +5471,10 @@ mod tests {
         let composition =
             seed_domain_with_profile_permissions(capture, 1_000, 3_600, profile_permissions);
         let domain = composition.domain;
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        registry
-            .register_primary_authorizer(composition.authorization_root.authorizer())
-            .expect("test process root installs Primary authorizer");
-        let authorizer = registry
-            .take_primary_authorizer()
-            .expect("identity Primary authorizer");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
+        let authorizer = composition.authorization_root.authorizer();
+        let registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let (mut finalized, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, authorizer).finalize();
         assert_eq!(finalized.len(), 1, "identity owns one Primary listener");
         let (listener, routes) = finalized.pop().expect("identity Primary routes");
         assert_eq!(listener, ListenerKind::Primary);
@@ -5751,6 +5830,15 @@ mod tests {
                 binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(provider)),
             }
         }
+
+        fn process_authorizer(&self) -> Arc<dyn RouteAuthorizer> {
+            build_contract_authorizer(
+                Arc::clone(&self.roles),
+                Arc::clone(&self.binding_reads),
+                Arc::clone(&self.policies),
+                make_shared_clock(1_000),
+            )
+        }
     }
 
     struct IdentityLocalOnlyAncillaryServices {
@@ -5811,6 +5899,7 @@ mod tests {
             RolesListHandlerState,
         >,
     ) {
+        let authorizer = repo.process_authorizer();
         let IdentityLocalOnlyAncillaryServices {
             login,
             refresh,
@@ -5829,16 +5918,9 @@ mod tests {
             clock: make_shared_clock(1_000),
         });
         let domain = composition.domain;
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        registry
-            .register_primary_authorizer(composition.authorization_root.authorizer())
-            .expect("test process root installs Primary authorizer");
-        let authorizer = registry
-            .take_primary_authorizer()
-            .expect("identity Primary authorizer");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
+        let registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let (mut finalized, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, authorizer).finalize();
         let (_, routes) = finalized.pop().expect("identity Primary routes");
         let proof = ::httpserve::prove_local_only_mounted_route_state::<RolesListHandlerState, _>(
             &routes,
@@ -5873,6 +5955,7 @@ mod tests {
             AccountStatusQueryHandlerState,
         >,
     ) {
+        let authorizer = repo.process_authorizer();
         let IdentityLocalOnlyAncillaryServices {
             login,
             refresh,
@@ -5907,16 +5990,9 @@ mod tests {
             clock: make_shared_clock(1_000),
         });
         let domain = composition.domain;
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        registry
-            .register_primary_authorizer(composition.authorization_root.authorizer())
-            .expect("test process root installs Primary authorizer");
-        let authorizer = registry
-            .take_primary_authorizer()
-            .expect("identity Primary authorizer");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
+        let registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let (mut finalized, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, authorizer).finalize();
         let (_, routes) = finalized.pop().expect("identity Primary routes");
         let proof =
             ::httpserve::prove_local_only_mounted_route_state::<AccountStatusQueryHandlerState, _>(
@@ -5952,6 +6028,7 @@ mod tests {
             PolicyQueryService,
         >,
     ) {
+        let authorizer = repo.process_authorizer();
         let IdentityLocalOnlyAncillaryServices {
             login,
             refresh,
@@ -5970,16 +6047,9 @@ mod tests {
             clock: make_shared_clock(1_000),
         });
         let domain = composition.domain;
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        registry
-            .register_primary_authorizer(composition.authorization_root.authorizer())
-            .expect("test process root installs Primary authorizer");
-        let authorizer = registry
-            .take_primary_authorizer()
-            .expect("identity Primary authorizer");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
+        let registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let (mut finalized, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, authorizer).finalize();
         let (_, routes) = finalized.pop().expect("identity Primary routes");
         let proof = ::httpserve::prove_local_only_mounted_route_state::<PolicyQueryService, _>(
             &routes,
@@ -6014,6 +6084,7 @@ mod tests {
             PolicyQueryService,
         >,
     ) {
+        let authorizer = repo.process_authorizer();
         let IdentityLocalOnlyAncillaryServices {
             login,
             refresh,
@@ -6032,16 +6103,9 @@ mod tests {
             clock: make_shared_clock(1_000),
         });
         let domain = composition.domain;
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        registry
-            .register_primary_authorizer(composition.authorization_root.authorizer())
-            .expect("test process root installs Primary authorizer");
-        let authorizer = registry
-            .take_primary_authorizer()
-            .expect("identity Primary authorizer");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
+        let registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let (mut finalized, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, authorizer).finalize();
         let (_, routes) = finalized.pop().expect("identity Primary routes");
         let proof = ::httpserve::prove_local_only_mounted_route_state::<PolicyQueryService, _>(
             &routes,
@@ -7321,11 +7385,11 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn federated_identity_domain_excludes_all_local_session_routes() {
         let composition = seed_federated_domain(1_000);
-        let mut registry =
+        let registry =
             bootstrap::compose(&[&composition.domain]).expect("compose federated identity");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize federated identity routes");
+        let (mut finalized, _, _admission_control) =
+            IdentityTestProcessRoot::new(registry, composition.authorization_root.authorizer())
+                .finalize();
         let (listener, routes) = finalized.pop().expect("federated Primary routes");
         assert_eq!(listener, ListenerKind::Primary);
         let evidence = routes.route_evidence();
@@ -7364,8 +7428,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn identity_login_route_mount_consumes_generated_spec() {
         let composition = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
-        let mut reg = bootstrap::compose(&[&composition.domain]).expect("compose ok");
-        let routes = reg.finalize_routes().expect("finalize routes");
+        let registry = bootstrap::compose(&[&composition.domain]).expect("compose ok");
+        let (routes, _, _admission_control) =
+            IdentityTestProcessRoot::new(registry, composition.authorization_root.authorizer())
+                .finalize();
         // identity domain 在 1 个 Primary listener 上挂载多条 identity HTTP 路由，
         // finalize_routes 按 listener 分组 → len() 仍 1（计组/listener，非 route 数）。
         assert_eq!(routes.len(), 1);
@@ -7432,16 +7498,10 @@ mod tests {
     async fn identity_http_route_specs_match_nested_v1_contracts_and_mounted_router() {
         let composition = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
         let domain = composition.domain;
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        registry
-            .register_primary_authorizer(composition.authorization_root.authorizer())
-            .expect("test process root installs Primary authorizer");
-        let authorizer = registry
-            .take_primary_authorizer()
-            .expect("process root registers Primary authorizer");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
+        let registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let (mut finalized, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, composition.authorization_root.authorizer())
+                .finalize();
         assert_eq!(finalized.len(), 1, "identity owns one Primary listener");
         let (listener, routes) = finalized.pop().expect("identity Primary routes");
         assert_eq!(listener, ListenerKind::Primary);
@@ -11862,6 +11922,68 @@ mod tests {
             "access_expires_at > 0（JWT 含有效期）"
         );
         assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn one_process_pause_blocks_login_and_refresh_before_downstream_calls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ports::DynRefreshTokenStore;
+        use testkit::ContractRequest;
+
+        mockall::mock! {
+            PausedRefreshStore {}
+            impl RefreshTokenStore for PausedRefreshStore {
+                async fn find_by_hash(
+                    &self,
+                    scope: TenantRepoScope,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+            }
+        }
+
+        let capture = CapturingAuthGrantLifecycle::default();
+        let login = Arc::new(seed_service(&capture, 1_700_000_000, 3_600));
+        let mut refresh_store = MockPausedRefreshStore::new();
+        refresh_store.expect_find_by_hash().times(0);
+        let refresh = Arc::new(RefreshService::new(
+            DynRefreshTokenStore::new_box(refresh_store),
+            test_lifecycle(crate::internal::mem::InMemAuthGrantStore::new()),
+            unavailable_security_lifecycle(),
+            seeded_account_reader(),
+            Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        ));
+        let (router, admission_control) = session_router_for_test(login, refresh);
+        admission_control.pause_all(primitives::AdmissionEpochId::parse(
+            "21340000-0000-4000-8000-000000000001",
+        )?)?;
+
+        let login_response = testkit::call(
+            router.clone(),
+            ContractRequest::post(LOGIN_HTTP_SPEC.route.path())
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityLoginRequest {
+                    username: "alice".to_owned(),
+                    password: "correct-horse".to_owned(),
+                }),
+        )
+        .await?;
+        login_response.ensure_status(StatusCode::SERVICE_UNAVAILABLE)?;
+
+        let refresh_response = testkit::call(
+            router,
+            ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
+                .header("X-Tenant-ID", CANON_TENANT)
+                .json(&IdentityRefreshRequest {
+                    refresh_token: "must-not-reach-store".to_owned(),
+                }),
+        )
+        .await?;
+        refresh_response.ensure_status(StatusCode::SERVICE_UNAVAILABLE)?;
+        assert_eq!(capture.count(), 0, "login lifecycle must not be called");
         Ok(())
     }
 

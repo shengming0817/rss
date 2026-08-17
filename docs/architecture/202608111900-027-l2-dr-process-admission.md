@@ -11,6 +11,10 @@ RSS 为 L2 disaster recovery 提供应用内、持久化命令驱动的进程级
 `pause` 在同一线性化点关闭三条 lane，已有 permit 完成后才产生该 boot 的 `drained` ack；恢复只能按
 Relay、Consumer、Writes 顺序推进，每一步均等待 declared instance set 的 phase ack exact-equality。
 
+这里的“每个 serving 进程”指 canonical runtime assembly 构造的一次 serving lifecycle；它不是
+`prepare_dr_admission_controls` 在 workspace 或 OS process 中只能全局调用一次的类型声明。独立 process/test
+root 可以各自准备 controls；assembly owner 必须把同一 bundle 的三条 lane 接入它所构造的 runtime。
+
 PostgreSQL 只保存一个 active admission epoch 和 append-only per-instance phase receipts。receipt 绑定
 assembly identity、verified RuntimePlan fingerprint、delivery 配置的稳定 instance ID 与随机 boot ID。
 RSS 证明 `declaredInstances == acknowledgedInstances` 且没有 unexpected instance；它不发现或证明

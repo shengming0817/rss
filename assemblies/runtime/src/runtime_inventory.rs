@@ -572,7 +572,9 @@ pub mod test_support {
             &RuntimeInventoryRoutes::new(reader, host)?,
             &mut registry,
         )?;
-        let mounted = registry.finalize_routes()?;
+        let mounted = registry
+            .admit_writes(primitives::prepare_dr_admission_controls().into_parts().3)
+            .finalize_routes()?;
         bootstrap::validate_framework_serving(&mounted, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)?;
         let (_, routes) = mounted
             .into_iter()

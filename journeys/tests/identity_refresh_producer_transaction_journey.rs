@@ -598,7 +598,11 @@ async fn identity_refresh_producer_transaction_journey() -> TestResult {
     );
     let build_router = || -> TestResult<axum::Router> {
         let mut bindings = vec![wire_identity_with(&deps, identity_values())?];
-        let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
+        let (registry, _) = bootstrap::compose_bindings(&mut bindings)?;
+        let (admission_control, _, _, writes) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control.start_running()?;
+        let mut registry = registry.admit_writes(writes);
         Ok(finalize_rss_listener(
             &mut registry,
             Arc::new(verifier()),

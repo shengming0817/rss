@@ -318,7 +318,9 @@ pub mod test_support {
             &InventoryFrameworkRoutes::new(reader),
             &mut registry,
         )?;
-        let mounted = registry.finalize_routes()?;
+        let mounted = registry
+            .admit_writes(primitives::prepare_dr_admission_controls().into_parts().3)
+            .finalize_routes()?;
         bootstrap::validate_framework_serving(&mounted, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)?;
         let (_, routes) = mounted
             .into_iter()
@@ -478,7 +480,9 @@ mod tests {
             &InventoryFrameworkRoutes::new(reader.clone()),
             &mut registry,
         )?;
-        let mounted = registry.finalize_routes()?;
+        let mounted = registry
+            .admit_writes(primitives::prepare_dr_admission_controls().into_parts().3)
+            .finalize_routes()?;
         bootstrap::validate_framework_serving(&mounted, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)?;
         Ok((reader, mounted))
     }
@@ -621,7 +625,9 @@ mod tests {
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(&framework_routes, &mut registry)
             .expect("register inventory framework route");
-        let mut finalized = registry
+        let mut admitted_registry =
+            registry.admit_writes(primitives::prepare_dr_admission_controls().into_parts().3);
+        let mut finalized = admitted_registry
             .finalize_routes()
             .expect("finalize inventory routes");
         let (_, routes) = finalized.pop().expect("mounted Admin inventory route");

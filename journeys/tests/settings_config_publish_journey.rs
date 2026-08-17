@@ -125,7 +125,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     let (admission_control, _, _, write_admission) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control.start_running()?;
-    registry.install_write_admission(write_admission)?;
+    let mut registry = registry.admit_writes(write_admission);
     let route_groups = registry.route_groups();
     assert_eq!(
         route_groups.len(),

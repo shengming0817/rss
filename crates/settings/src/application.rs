@@ -1275,6 +1275,16 @@ mod tests {
         SecretResolver, SecretResolverError,
     };
 
+    #[allow(clippy::expect_used)]
+    fn admit_test_writes(registry: bootstrap::Registry) -> bootstrap::WriteAdmittedRegistry {
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("settings test write admission starts running");
+        registry.admit_writes(write_admission)
+    }
+
     fn assert_local_read_state<T>()
     where
         T: httpserve::ClassifiedRouteState<
@@ -2004,8 +2014,14 @@ mod tests {
         ));
         let secret_service = secret_resolve_service_for(Arc::clone(&secret_repo));
         let domain = super::SettingsDomain::new(service, secret_repo, secret_uow, secret_service);
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
-        let mut finalized = registry
+        let registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("settings test write admission starts running");
+        let mut admitted_registry = registry.admit_writes(write_admission);
+        let mut finalized = admitted_registry
             .finalize_routes()
             .expect("finalize settings routes");
         assert_eq!(finalized.len(), 1, "settings owns one Primary listener");
@@ -2045,8 +2061,14 @@ mod tests {
         >,
     ) {
         let domain = settings_domain_for_test();
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
-        let mut finalized = registry
+        let registry = bootstrap::compose(&[&domain]).expect("compose settings domain");
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("settings test write admission starts running");
+        let mut admitted_registry = registry.admit_writes(write_admission);
+        let mut finalized = admitted_registry
             .finalize_routes()
             .expect("finalize settings routes");
         let (listener, routes) = finalized.pop().expect("settings Primary routes");
@@ -3174,7 +3196,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn settings_domain_declares_business_route_group() {
         let domain = settings_domain_for_test();
-        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert_eq!(
             groups.len(),
@@ -3183,7 +3205,9 @@ mod tests {
         );
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, SETTINGS_ROUTE_PREFIX);
-        let finalized = reg.finalize_routes().expect("active routes finalize");
+        let finalized = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("active routes finalize");
         assert_eq!(finalized.len(), 1, "six routes share one Primary listener");
     }
 
@@ -3191,8 +3215,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn config_cud_surface_mounts_only_the_three_mutation_contracts() {
         let domain = settings_domain_for_test().config_cud_only();
-        let mut reg = bootstrap::compose(&[&domain]).expect("compose config CUD domain");
-        let finalized = reg.finalize_routes().expect("config CUD routes finalize");
+        let reg = bootstrap::compose(&[&domain]).expect("compose config CUD domain");
+        let finalized = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("config CUD routes finalize");
         let evidence = finalized[0].1.route_evidence();
         let contracts = evidence
             .iter()

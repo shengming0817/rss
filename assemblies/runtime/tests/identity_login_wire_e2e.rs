@@ -769,7 +769,11 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
 
     // 5. 装配 Primary router（compose → assemble_authed_routers → typed plaintext test exit）。
     let mut bindings = vec![identity_binding];
-    let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
+    let (registry, _) = bootstrap::compose_bindings(&mut bindings)?;
+    let (admission_control, _, _, writes) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let mut registry = registry.admit_writes(writes);
     let primary = finalize_rss_listener(
         &mut registry,
         Arc::new(test_provider()),
@@ -1245,7 +1249,11 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
     );
 
     let mut binding_a = vec![wire_identity_with(&deps, identity_test_values())?];
-    let (mut registry_a, _) = bootstrap::compose_bindings(&mut binding_a)?;
+    let (registry_a, _) = bootstrap::compose_bindings(&mut binding_a)?;
+    let (admission_control_a, _, _, writes_a) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control_a.start_running()?;
+    let mut registry_a = registry_a.admit_writes(writes_a);
     let router_a = finalize_rss_listener(
         &mut registry_a,
         Arc::new(test_provider()),
@@ -1259,7 +1267,11 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
     .into_plaintext_router_for_test();
 
     let mut binding_b = vec![wire_identity_with(&deps, identity_test_values())?];
-    let (mut registry_b, _) = bootstrap::compose_bindings(&mut binding_b)?;
+    let (registry_b, _) = bootstrap::compose_bindings(&mut binding_b)?;
+    let (admission_control_b, _, _, writes_b) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control_b.start_running()?;
+    let mut registry_b = registry_b.admit_writes(writes_b);
     let router_b = finalize_rss_listener(
         &mut registry_b,
         Arc::new(test_provider()),
@@ -1487,7 +1499,11 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let identity_binding = wire_identity_with(&deps, identity_test_values())?;
     let settings_binding = wire_settings(&deps).await?;
     let mut bindings = vec![identity_binding, settings_binding];
-    let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
+    let (registry, _) = bootstrap::compose_bindings(&mut bindings)?;
+    let (admission_control, _, _, writes) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let mut registry = registry.admit_writes(writes);
     let primary = finalize_federated_listener(
         &mut registry,
         Arc::new(federated_test_provider()?),

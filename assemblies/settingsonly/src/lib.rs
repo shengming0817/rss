@@ -379,7 +379,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["settings"]
         );
-        let (mut registry, output) =
+        let (registry, output) =
             compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
         assert!(output.probes.is_empty());
@@ -390,10 +390,8 @@ mod tests {
         control
             .start_running()
             .expect("test durable lineage is clear");
-        registry
-            .install_write_admission(writes)
-            .expect("install test write admission");
         let routes = registry
+            .admit_writes(writes)
             .finalize_routes()
             .expect("settingsonly config CUD routes finalize");
         let contracts = routes[0]

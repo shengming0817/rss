@@ -1281,6 +1281,16 @@ mod tests {
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
     const AUDIT_TENANT_ENTRIES_PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";
 
+    #[allow(clippy::expect_used)]
+    fn admit_test_writes(registry: bootstrap::Registry) -> bootstrap::WriteAdmittedRegistry {
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("audit test write admission starts running");
+        registry.admit_writes(write_admission)
+    }
+
     #[test]
     fn scoped_list_state_is_local_read_only() {
         fn assert_local_read<T>()
@@ -2739,8 +2749,16 @@ mod tests {
             domain_sink.clone(),
             audit_clock(),
         );
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose audit domain");
-        let finalized = registry.finalize_routes().expect("finalize routes");
+        let registry = bootstrap::compose(&[&domain]).expect("compose audit domain");
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("audit test write admission starts running");
+        let mut admitted_registry = registry.admit_writes(write_admission);
+        let finalized = admitted_registry
+            .finalize_routes()
+            .expect("finalize routes");
         let (_, routes) = finalized
             .into_iter()
             .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
@@ -3483,8 +3501,10 @@ mod tests {
                 sink.clone(),
                 audit_clock(),
             );
-            let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
-            let routes = reg.finalize_routes().expect("finalize ok");
+            let reg = bootstrap::compose(&[&domain]).expect("compose ok");
+            let routes = admit_test_writes(reg)
+                .finalize_routes()
+                .expect("finalize ok");
             let (_, admin) = routes
                 .into_iter()
                 .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
@@ -4167,8 +4187,10 @@ mod tests {
         }
 
         let domain = domain(repo());
-        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
-        let routers = reg.finalize_routes().expect("finalize ok");
+        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let routers = admit_test_writes(reg)
+            .finalize_routes()
+            .expect("finalize ok");
         let (_, admin) = routers
             .into_iter()
             .find(|(listener, _)| matches!(listener, ListenerKind::Admin))

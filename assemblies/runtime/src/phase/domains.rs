@@ -35,7 +35,7 @@ fn wire_runtime_security_root(
 }
 
 struct WiredDomains {
-    registry: bootstrap::Registry,
+    registry: bootstrap::WriteAdmittedRegistry,
 }
 
 /// How domain-listener evidence is projected against RuntimePlan.
@@ -168,7 +168,7 @@ impl<'a> InfraBuilt<'a> {
                     return Err(source).context("validate generated domains against RuntimePlan");
                 }
             };
-            let (mut registry, domains_module) = match validated_domain_bindings.compose() {
+            let (registry, domains_module) = match validated_domain_bindings.compose() {
                 Ok(composed) => composed,
                 Err(failure) => {
                     let (source, mut bindings) = failure.into_parts();
@@ -176,9 +176,7 @@ impl<'a> InfraBuilt<'a> {
                     return Err(source).context("compose generated domains");
                 }
             };
-            registry
-                .install_write_admission(write_admission.clone())
-                .context("install runtime process write admission")?;
+            let mut registry = registry.admit_writes(write_admission.clone());
             provider_build.record_domain(domains_module);
             let security_root_module = wire_runtime_security_root(
                 security_execution_plan,

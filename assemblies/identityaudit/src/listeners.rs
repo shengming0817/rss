@@ -55,7 +55,7 @@ pub(crate) struct FinalizeInputs<S> {
 }
 
 pub(crate) fn finalize<S>(
-    registry: &mut bootstrap::Registry,
+    registry: &mut bootstrap::WriteAdmittedRegistry,
     inputs: FinalizeInputs<S>,
 ) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)>
 where

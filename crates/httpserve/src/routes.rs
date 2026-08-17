@@ -13,7 +13,7 @@
 //!   再取得 [`RateLimitedRoutes`] receipt；Health 必须由 [`finalize_health`] 取得 [`HealthRoutes`]。
 //!   [`UnfinalizedRoutes`] 与裸 [`AuthenticatedRoutes`] 都无法进入 transport adapter。
 //!
-//! 与兄弟 crate `bootstrap` 的协同：`bootstrap::Registry::finalize_routes` 经受控 `bootstrap → httpserve`
+//! 与兄弟 crate `bootstrap` 的协同：`bootstrap::WriteAdmittedRegistry::finalize_routes` 经受控 `bootstrap → httpserve`
 //! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根按 listener 选择
 //! [`finalize_auth`] 或 [`finalize_primary_auth`] 产 [`AuthenticatedRoutes`]。
 
@@ -1408,7 +1408,9 @@ fn permission_authz(
 /// auth finalizer（同 crate 读私有字段）换受控状态；未跑 auth 装配的 router 无法 bind。
 /// 经 [`empty`](Self::empty) + [`nest_group`](Self::nest_group) 累加（裸 `axum::Router` 不出 httpserve），
 /// 并原子保留 generated route marker 与 stateless/stateful identity；raw test mount 不具 generated identity。
-/// 由 `bootstrap::finalize_routes` 经受控 `bootstrap → httpserve` 边驱动（ADR-009）。
+/// 由 `bootstrap::Registry::admit_writes` →
+/// `bootstrap::WriteAdmittedRegistry::finalize_routes` 经受控 `bootstrap → httpserve` 边驱动
+/// （ADR-009，ROUTE-WRITE-ADMISSION-01）。
 #[must_use = "UnfinalizedRoutes must pass the listener-specific auth finalizer"]
 pub struct UnfinalizedRoutes {
     router: axum::Router,
@@ -1455,7 +1457,12 @@ impl UnfinalizedRoutes {
         }
     }
 
-    /// Construct a route accumulator whose generated mutation endpoints share the process gate.
+    /// Construct a route accumulator whose generated mutation endpoints share the supplied gate.
+    ///
+    /// This is a framework-internal composition seam, not a workspace-global authority mint. The
+    /// canonical bootstrap path uses `Registry::admit_writes` so one registry finalization injects
+    /// the same handle into every listener accumulator; independent process and test roots may
+    /// construct their own admission controls.
     pub fn with_mutation_admission(write_admission: primitives::WriteAdmission) -> Self {
         Self {
             router: axum::Router::new(),

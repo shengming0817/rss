@@ -699,7 +699,11 @@ async fn identity_password_security_event_journey() -> TestResult {
         identity_values(),
         password_change_barrier,
     )?];
-    let (mut registry, _output) = bootstrap::compose_bindings(&mut bindings)?;
+    let (registry, _output) = bootstrap::compose_bindings(&mut bindings)?;
+    let (admission_control, _, _, writes) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let mut registry = registry.admit_writes(writes);
     let routes = finalize_rss_listener(
         &mut registry,
         Arc::new(verifier()),

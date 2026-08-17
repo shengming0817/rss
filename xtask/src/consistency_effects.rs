@@ -2875,13 +2875,14 @@ fn verify_router_factory(function: &syn::ItemFn) -> Option<VerifiedRouterFactory
         proof_routes.as_str(),
         lineage.finalized.as_str(),
         lineage.domain.as_str(),
+        lineage.registry.as_str(),
     ];
     if lineage.framework_registration {
-        if mutable_reference_count(&function.block, &lineage.registry) != 1 {
+        if mutable_reference_count(&function.block, &lineage.declaration_registry) != 1 {
             return None;
         }
     } else {
-        immutable_lineage.push(lineage.registry.as_str());
+        immutable_lineage.push(lineage.declaration_registry.as_str());
     }
     if block_reassigns_any(&function.block, &immutable_lineage) {
         return None;
@@ -3109,6 +3110,7 @@ fn is_transparent_extension_layer(call: &syn::ExprMethodCall) -> bool {
 
 struct RegistryLineage {
     domain: String,
+    declaration_registry: String,
     registry: String,
     finalized: String,
     framework_registration: bool,
@@ -3141,7 +3143,25 @@ fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage>
         return None;
     }
     let finalized = route_source?;
-    let finalized_initializer = unique_direct_initializer(block, &finalized)?;
+    let finalized_initializer = unique_direct_or_tuple_initializer(block, &finalized)?;
+    if let Expr::MethodCall(root_finalize) = peel_expr(finalized_initializer)
+        && root_finalize.method == "finalize"
+        && root_finalize.args.is_empty()
+        && root_finalize.turbofish.is_none()
+        && let Expr::Call(root) = peel_expr(&root_finalize.receiver)
+        && relative_call_path_is(&root.func, &["IdentityTestProcessRoot", "new"])
+        && root.args.len() == 2
+    {
+        let registry = simple_ident(root.args.first()?)?;
+        let domain = composed_registry_domain(block, &registry)?;
+        return Some(RegistryLineage {
+            domain,
+            declaration_registry: registry.clone(),
+            registry,
+            finalized,
+            framework_registration: false,
+        });
+    }
     let Expr::MethodCall(expect) = peel_expr(finalized_initializer) else {
         return None;
     };
@@ -3159,19 +3179,81 @@ fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage>
     }
     let registry = simple_ident(&finalize.receiver)?;
     let registry_initializer = unique_direct_initializer(block, &registry)?;
-    if matches!(peel_expr(registry_initializer), Expr::Call(new)
+    let declaration_registry = match peel_expr(registry_initializer) {
+        Expr::MethodCall(admit)
+            if admit.method == "admit_writes"
+                && admit.args.len() == 1
+                && admit.turbofish.is_none() =>
+        {
+            simple_ident(&admit.receiver)?
+        }
+        _ => registry.clone(),
+    };
+    let declaration_initializer = unique_direct_initializer(block, &declaration_registry)?;
+    if matches!(peel_expr(declaration_initializer), Expr::Call(new)
         if relative_call_path_is(&new.func, &["bootstrap", "Registry", "new"])
             && new.args.is_empty())
     {
-        let framework = framework_routes_registered_into(block, &registry)?;
+        let framework = framework_routes_registered_into(block, &declaration_registry)?;
         unique_direct_initializer(block, &framework)?;
         return Some(RegistryLineage {
             domain: framework,
+            declaration_registry,
             registry,
             finalized,
             framework_registration: true,
         });
     }
+    let domain = composed_registry_domain(block, &declaration_registry)?;
+    Some(RegistryLineage {
+        domain,
+        declaration_registry,
+        registry,
+        finalized,
+        framework_registration: false,
+    })
+}
+
+fn unique_direct_or_tuple_initializer<'a>(
+    block: &'a syn::Block,
+    expected: &str,
+) -> Option<&'a Expr> {
+    struct Count<'name> {
+        expected: &'name str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Count<'_> {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            if node.ident == self.expected {
+                self.count += 1;
+            }
+            visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut count = Count { expected, count: 0 };
+    count.visit_block(block);
+    if count.count != 1 {
+        return None;
+    }
+    block.stmts.iter().find_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        let binds_expected = match &local.pat {
+            syn::Pat::Ident(pattern) => pattern.ident == expected && pattern.subpat.is_none(),
+            syn::Pat::Tuple(tuple) => tuple.elems.iter().any(
+                |pattern| matches!(pattern, syn::Pat::Ident(pattern) if pattern.ident == expected),
+            ),
+            _ => false,
+        };
+        binds_expected
+            .then(|| local.init.as_ref().map(|init| &*init.expr))
+            .flatten()
+    })
+}
+
+fn composed_registry_domain(block: &syn::Block, registry: &str) -> Option<String> {
+    let registry_initializer = unique_direct_initializer(block, registry)?;
     let Expr::MethodCall(expect) = peel_expr(registry_initializer) else {
         return None;
     };
@@ -3198,12 +3280,7 @@ fn registry_lineage(block: &syn::Block, routes: &str) -> Option<RegistryLineage>
     }
     let domain = referenced_ident(domains.elems.first()?)?;
     unique_direct_initializer(block, &domain)?;
-    Some(RegistryLineage {
-        domain,
-        registry,
-        finalized,
-        framework_registration: false,
-    })
+    Some(domain)
 }
 
 fn framework_routes_registered_into(block: &syn::Block, registry: &str) -> Option<String> {
@@ -6181,8 +6258,12 @@ fn {factory}(repo: TestRepo) -> (
     >,
 ) {{
     let domain = DemoDomain::new(repo.read);
-    let mut registry = bootstrap::compose(&[&domain]).expect("compose");
-    let finalized = registry.finalize_routes().expect("routes");
+    let registry = bootstrap::compose(&[&domain]).expect("compose");
+    let mut admitted_registry = registry
+        .admit_writes(primitives::prepare_dr_admission_controls().into_parts().3);
+    let finalized = admitted_registry
+        .finalize_routes()
+        .expect("routes");
     let (_, routes) = finalized.into_iter().next().expect("listener");
     let proof = ::httpserve::prove_local_only_mounted_route_state::<ReadState, _>(
         &routes,
@@ -6737,7 +6818,7 @@ async fn outer() {
                 canonical
                     .replace(
                         "let (_, routes) = finalized.into_iter().next().expect(\"listener\");",
-                        "let (_, routes) = finalized.into_iter().next().expect(\"listener\");\n    let wrong_finalized = registry.finalize_routes().expect(\"wrong routes\");\n    let (_, wrong_routes) = wrong_finalized.into_iter().next().expect(\"wrong listener\");",
+                        "let (_, routes) = finalized.into_iter().next().expect(\"listener\");\n    let wrong_registry = bootstrap::compose(&[&domain]).expect(\"wrong compose\");\n    let mut wrong_admitted_registry = wrong_registry.admit_writes(primitives::prepare_dr_admission_controls().into_parts().3);\n    let wrong_finalized = wrong_admitted_registry.finalize_routes().expect(\"wrong routes\");\n    let (_, wrong_routes) = wrong_finalized.into_iter().next().expect(\"wrong listener\");",
                     )
                     .replace(
                         "::httpserve::finalize_auth(routes, plan)",
@@ -8117,7 +8198,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "factory lineage must not be reassigned"
         );
         assert_eq!(
-            mutable_reference_count(&factory.block, &lineage.registry),
+            mutable_reference_count(&factory.block, &lineage.declaration_registry),
             1,
             "framework Registry has one exact generated registration mutation"
         );

@@ -311,28 +311,32 @@ where
         }
     };
     transaction.stage_domain_output(domain_output);
-    let inventory_seed = match inputs.provider_activation {
+    let (inventory_seed, mut registry) = match inputs.provider_activation {
         ProviderActivation::Production {
             eventing,
             role_closer,
             plan,
             build_metadata,
         } => {
-            registry
-                .install_write_admission(eventing.write_admission())
-                .context("install settingsonly process write admission")?;
+            let write_admission = eventing.write_admission();
             let outputs = crate::eventing::wire(eventing, registry.drain_subscribers()).await?;
             let completed_roles = role_closer.finish(outputs, transaction.provider_output_mut())?;
             let seed = plan.into_inventory_seed(completed_roles)?;
-            match build_metadata {
+            let seed = match build_metadata {
                 Some(metadata) => seed.with_build_metadata(metadata),
                 None => seed,
-            }
+            };
+            (seed, registry.admit_writes(write_admission))
         }
         #[cfg(feature = "test-support")]
         ProviderActivation::Fixture(seed) => {
             transaction.expect_workers(bootstrap::ExpectedWorkerInventory::closed([])?)?;
-            seed
+            let (admission_control, _, _, write_admission) =
+                primitives::prepare_dr_admission_controls().into_parts();
+            admission_control
+                .start_running()
+                .context("start settingsonly fixture write admission")?;
+            (seed, registry.admit_writes(write_admission))
         }
     };
     let (provider_output, domain_output) = transaction.outputs_mut();

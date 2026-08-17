@@ -126,9 +126,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             &pg.for_domain::<postgres::caps::Identity>(),
             Arc::new(crate::SystemClock),
         ))?;
-        registry
-            .install_write_admission(write_admission.clone())
-            .context("install identityaudit process write admission")?;
+        let mut registry = registry.admit_writes(write_admission.clone());
 
         let event_outputs = crate::eventing::wire(
             &pg,
