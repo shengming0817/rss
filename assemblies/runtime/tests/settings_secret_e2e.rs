@@ -29,8 +29,9 @@ use postgres::{
     ConfigValueProtections, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,
     caps,
 };
+use rss_request_context::TenantId;
 use settings::SecretService;
-use settings::ports::{SecretKey, SecretRef, StoreId, TenantId};
+use settings::ports::{SecretKey, SecretRef, StoreId};
 
 // ── 测试用常量 ────────────────────────────────────────────────────────────────
 

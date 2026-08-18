@@ -52,8 +52,7 @@ use identity::ports::{
     DynRoleBindingReadRepo, DynRoleReadRepo, EqualityPredicate, MembershipPredicate, Operator,
     OperatorInput, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect,
     PolicyLifecycle, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyScalarInput,
-    PolicyValue, PolicyValueType, ScalarOperandInput, TenantId, TenantRepoScope,
-    TypedPolicyValueInput,
+    PolicyValueType, ScalarOperandInput, TenantRepoScope, TypedPolicyValueInput,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
@@ -62,6 +61,7 @@ use postgres::{
     PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
 };
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+use rss_request_context::TenantId;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
@@ -957,7 +957,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     ))?;
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
     let route_authorizer = registry.take_primary_authorizer()?;
-    let mut http_registry = bootstrap::compose(&[&settings_domain])?;
+    let http_registry = bootstrap::compose(&[&settings_domain])?;
     let mut http_registry = http_registry.admit_writes(write_admission.clone());
     http_registry.register_primary_authorizer(Arc::clone(&route_authorizer))?;
     let settings_router = finalize_federated_listener(
@@ -1052,7 +1052,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let demo_module = wire_event_transport(
         &pg,
         wire_distributed(&deps)?,
-        Vec::new(),
+        eventing_composition::bridge_generated_subscriptions_selected(Vec::new(), &[])?,
         demo_cfg,
         demo_worker,
         MacKey::from_bytes(AUDIT_KEY.to_vec()),

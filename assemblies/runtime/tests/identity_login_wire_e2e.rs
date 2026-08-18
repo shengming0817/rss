@@ -35,10 +35,11 @@ use httpserve::ProducerMarker;
 use identity::ports::{
     AccountSecurityReadRepo as _, AccountStatus, AuthGrantProvider as _, Credential,
     CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo, IdentitySecurityLifecycle as _,
-    Role, TenantId, TenantRepoScope,
+    Role, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use rss_request_context::TenantId;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_s3_runtime_deps_from_values, build_shared_runtime_deps,
