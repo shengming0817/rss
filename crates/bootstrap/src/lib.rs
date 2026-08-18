@@ -58,10 +58,10 @@ pub use framework::{
     FrameworkHttpRoute, FrameworkRoutes, FrameworkServingError, validate_framework_serving,
 };
 pub use module::{
-    DomainBinding, DomainModuleResult, ExpectedWorkerInventory, WorkerAdmissionLane,
-    WorkerDescriptor, WorkerInventory, WorkerInventoryError, WorkerRegistration, WorkerSpec,
-    compose_bindings, drain_binding_outputs, validate_worker_inventory,
-    validate_worker_inventory_exact,
+    DomainBinding, DomainLifecycleOutput, DomainModuleResult, ExpectedWorkerInventory,
+    WorkerAdmissionLane, WorkerDescriptor, WorkerInventory, WorkerInventoryError,
+    WorkerRegistration, WorkerSpec, compose_bindings, drain_binding_outputs,
+    validate_worker_inventory, validate_worker_inventory_exact,
 };
 pub use primitives::ListenerKind;
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};

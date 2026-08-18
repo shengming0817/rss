@@ -405,47 +405,141 @@ pub enum WorkerInventoryError {
     },
 }
 
-/// 域能力的标准装配出口（ADR-010 §2.2）：`module()` / `wire_X` 的可聚合产物，组合根经
-/// [`DomainModuleResult::merge`] 聚合各域 result 后逐 `Vec` 排空到 sink，不再逐项手工接线。
+/// 单一生命周期输出通道。
 ///
-/// 只携框架擦除的生命周期三出口 probes / resources / workers。`name` / `domain` 归 [`DomainBinding`]；
-/// domain service 与 routes 不进入通用输出袋。域 service 留在 `wire_X` 内部经 typed route 闭包捕获——配合
-/// `assemblies/runtime` 的 `wire_X(deps: &SharedRuntimeDeps) -> Result<DomainModuleResult>` 签名
-/// （INVARIANT WIRING-DEPS-NO-HANDOFF-01，Hard）杜绝跨 module value handoff。
+/// 闭枚举让新增通道必须同时更新 runtime sink 的穷尽匹配；[`DomainModuleResult`] 不再维护
+/// 三个可能独立漂移的公开集合。
+pub enum DomainLifecycleOutput {
+    /// 具名健康探针。
+    Probe(ProbeName, Box<dyn HealthProbe>),
+    /// 由 shutdown stack 单次消费的受管资源。
+    Resource(Box<DynManagedResource<'static>>),
+    /// 由 runtime executor 启动并关闭的 worker 规格。
+    Worker(WorkerSpec),
+}
+
+/// 域能力的标准装配出口（ADR-010 §2.2）。
 ///
-/// # provider 单源装配（#1498 / #1676）
-///
-/// Redis / S3 / Vault capability bundle 经 `runtime_resources(&self) ->
-/// Vec<Box<DynManagedResource>>`（仅 `diport` 类型）单源派生受管资源；adapter **不依赖 bootstrap**。
-/// 组合根以 role-specific、单次消费的 provider output 把这些原语转换为本三通道载体，再进入
-/// provider lifecycle batch，避免暴露裸 channel 或逐项手写 `register_detached`（GoCell D5 多通道
-/// 漂移根因）。复用载体只做类型擦除，不会把 semantic owner 从 provider 转移给 domain；owner 仍由
-/// assembly 的 provider transaction 槽位决定。PG readiness 还需要 interval / cancel token，不适用
-/// runtime-resource seam；#1677 已由显式 PG output 收口。AMQP 归 event-infra 生命周期，不把异质
-/// 输出塞进宽泛 provider trait。
+/// `module()` / `wire_X` 产出的 probes、resources 与 workers 进入同一个闭合、保序的生命周期
+/// 集合。组合根通过 [`DomainModuleResult::merge`] 聚合，再由 runtime sink 穷尽消费；domain service
+/// 与 routes 不进入此通用输出载体。
 #[derive(Default)]
 pub struct DomainModuleResult {
-    /// readiness / liveness 探针，组合根排空进 [`Registry::probe`]（须先于 `take_health_reporter`，readyz 才聚合）。
-    ///
-    /// [`Registry::probe`]: crate::registry::Registry::probe
-    pub probes: Vec<(ProbeName, Box<dyn HealthProbe>)>,
-    /// 无后台任务的 detached 受管资源，排空进 [`ShutdownStack::register_detached`]。
-    ///
-    /// [`ShutdownStack::register_detached`]: crate::shutdown::ShutdownStack::register_detached
-    pub resources: Vec<Box<DynManagedResource<'static>>>,
-    /// 带闭合 admission shutdown policy 的后台 worker，由生命周期内核穷尽分发到对应 token funnel。
-    pub workers: Vec<WorkerSpec>,
+    outputs: Vec<DomainLifecycleOutput>,
 }
 
 impl DomainModuleResult {
-    /// 把另一个三通道载体保序搬入当前载体（domain fold；provider transaction 也可内部复用）。
+    /// 按 probes、resources、workers 的分组顺序构造输出，并保留各输入迭代器的顺序。
+    pub fn from_parts(
+        probes: impl IntoIterator<Item = (ProbeName, Box<dyn HealthProbe>)>,
+        resources: impl IntoIterator<Item = Box<DynManagedResource<'static>>>,
+        workers: impl IntoIterator<Item = WorkerSpec>,
+    ) -> Self {
+        let mut result = Self::default();
+        result.extend_probes(probes);
+        result.extend_resources(resources);
+        result.extend_workers(workers);
+        result
+    }
+
+    /// 在输出尾部追加一个 probe。
+    pub fn push_probe(&mut self, probe: (ProbeName, Box<dyn HealthProbe>)) {
+        self.outputs
+            .push(DomainLifecycleOutput::Probe(probe.0, probe.1));
+    }
+
+    /// 在输出尾部追加一个 resource。
+    pub fn push_resource(&mut self, resource: Box<DynManagedResource<'static>>) {
+        self.outputs.push(DomainLifecycleOutput::Resource(resource));
+    }
+
+    /// 在输出尾部追加一个 worker。
+    pub fn push_worker(&mut self, worker: WorkerSpec) {
+        self.outputs.push(DomainLifecycleOutput::Worker(worker));
+    }
+
+    /// 按输入顺序在输出尾部追加 probes。
+    pub fn extend_probes(
+        &mut self,
+        probes: impl IntoIterator<Item = (ProbeName, Box<dyn HealthProbe>)>,
+    ) {
+        self.outputs.extend(
+            probes
+                .into_iter()
+                .map(|(name, probe)| DomainLifecycleOutput::Probe(name, probe)),
+        );
+    }
+
+    /// 按输入顺序在输出尾部追加 resources。
+    pub fn extend_resources(
+        &mut self,
+        resources: impl IntoIterator<Item = Box<DynManagedResource<'static>>>,
+    ) {
+        self.outputs
+            .extend(resources.into_iter().map(DomainLifecycleOutput::Resource));
+    }
+
+    /// 按输入顺序在输出尾部追加 workers。
+    pub fn extend_workers(&mut self, workers: impl IntoIterator<Item = WorkerSpec>) {
+        self.outputs
+            .extend(workers.into_iter().map(DomainLifecycleOutput::Worker));
+    }
+
+    /// 按相对插入顺序借用所有 probes。
+    pub fn probes(&self) -> impl Iterator<Item = (&ProbeName, &Box<dyn HealthProbe>)> {
+        self.outputs.iter().filter_map(|output| match output {
+            DomainLifecycleOutput::Probe(name, probe) => Some((name, probe)),
+            DomainLifecycleOutput::Resource(_) | DomainLifecycleOutput::Worker(_) => None,
+        })
+    }
+
+    /// 按相对插入顺序借用所有 resources。
+    pub fn resources(&self) -> impl Iterator<Item = &Box<DynManagedResource<'static>>> {
+        self.outputs.iter().filter_map(|output| match output {
+            DomainLifecycleOutput::Resource(resource) => Some(resource),
+            DomainLifecycleOutput::Probe(_, _) | DomainLifecycleOutput::Worker(_) => None,
+        })
+    }
+
+    /// 按相对插入顺序借用所有 workers。
+    pub fn workers(&self) -> impl Iterator<Item = &WorkerSpec> {
+        self.outputs.iter().filter_map(|output| match output {
+            DomainLifecycleOutput::Worker(worker) => Some(worker),
+            DomainLifecycleOutput::Probe(_, _) | DomainLifecycleOutput::Resource(_) => None,
+        })
+    }
+
+    /// 返回 probe 数量。
+    pub fn probe_count(&self) -> usize {
+        self.probes().count()
+    }
+
+    /// 返回 resource 数量。
+    pub fn resource_count(&self) -> usize {
+        self.resources().count()
+    }
+
+    /// 返回 worker 数量。
+    pub fn worker_count(&self) -> usize {
+        self.workers().count()
+    }
+
+    /// 排空当前输出并按原始插入顺序返回；调用方必须穷尽匹配闭枚举。
+    pub fn drain_outputs(&mut self) -> std::vec::IntoIter<DomainLifecycleOutput> {
+        std::mem::take(&mut self.outputs).into_iter()
+    }
+
+    /// 按原始插入顺序消费全部闭合生命周期输出。
+    pub fn into_outputs(self) -> impl Iterator<Item = DomainLifecycleOutput> {
+        self.outputs.into_iter()
+    }
+
+    /// 把另一个闭合生命周期载体保序搬入当前载体（domain fold；provider transaction 也可内部复用）。
     ///
     /// `merge` 不改变 lifecycle output 的 semantic owner；owner 由调用方所在的 typed transaction
     /// 决定。未来域只需多一行 `module.merge(wire_X(&deps).await?)`，组合根形态恒定。
     pub fn merge(&mut self, other: DomainModuleResult) {
-        self.probes.extend(other.probes);
-        self.resources.extend(other.resources);
-        self.workers.extend(other.workers);
+        self.outputs.extend(other.outputs);
     }
 }
 
@@ -489,6 +583,20 @@ pub fn drain_binding_outputs(bindings: &mut Vec<DomainBinding>) -> DomainModuleR
 #[cfg(test)]
 mod result_tests {
     use super::*;
+
+    fn drain_workers(output: &mut DomainModuleResult) -> Vec<WorkerSpec> {
+        let mut workers = Vec::new();
+        let mut retained = DomainModuleResult::default();
+        for output in output.drain_outputs() {
+            match output {
+                DomainLifecycleOutput::Probe(name, probe) => retained.push_probe((name, probe)),
+                DomainLifecycleOutput::Resource(resource) => retained.push_resource(resource),
+                DomainLifecycleOutput::Worker(worker) => workers.push(worker),
+            }
+        }
+        *output = retained;
+        workers
+    }
 
     use std::sync::{
         Arc,
@@ -709,41 +817,38 @@ mod result_tests {
     }
 
     fn labeled_result(label: &'static str) -> DomainModuleResult {
-        DomainModuleResult {
-            probes: vec![labeled_probe(label)],
-            resources: vec![labeled_resource(label)],
-            workers: vec![labeled_worker(label)],
-        }
+        DomainModuleResult::from_parts(
+            [labeled_probe(label)],
+            [labeled_resource(label)],
+            [labeled_worker(label)],
+        )
     }
 
-    /// `Default` 产出空结果（三 Vec 皆空）。
+    /// `Default` 产出空结果（单一 lifecycle output 集合为空）。
     #[test]
     fn default_is_empty() {
         let r = DomainModuleResult::default();
-        assert!(r.probes.is_empty());
-        assert!(r.resources.is_empty());
-        assert!(r.workers.is_empty());
+        assert_eq!(r.probe_count(), 0);
+        assert_eq!(r.resource_count(), 0);
+        assert_eq!(r.worker_count(), 0);
     }
 
     /// `merge` 把另一结果的三类产物全部 extend 进来（跨域聚合）。
     #[test]
     fn merge_extends_all_vecs() {
-        let mut base = DomainModuleResult {
-            probes: vec![probe_entry()],
-            resources: vec![resource_entry()],
-            workers: vec![worker_entry()],
-        };
-        let other = DomainModuleResult {
-            probes: vec![probe_entry(), probe_entry()],
-            resources: vec![resource_entry()],
-            workers: vec![worker_entry(), worker_entry()],
-        };
+        let mut base =
+            DomainModuleResult::from_parts([probe_entry()], [resource_entry()], [worker_entry()]);
+        let other = DomainModuleResult::from_parts(
+            [probe_entry(), probe_entry()],
+            [resource_entry()],
+            [worker_entry(), worker_entry()],
+        );
 
         base.merge(other);
 
-        assert_eq!(base.probes.len(), 3, "probes 累加");
-        assert_eq!(base.resources.len(), 2, "resources 累加");
-        assert_eq!(base.workers.len(), 3, "workers 累加");
+        assert_eq!(base.probe_count(), 3, "probes 累加");
+        assert_eq!(base.resource_count(), 2, "resources 累加");
+        assert_eq!(base.worker_count(), 3, "workers 累加");
     }
 
     /// `DomainModuleResult` 必须 `Send`（组合根 `merge` / drain 跨 await 持有）。
@@ -783,11 +888,7 @@ mod result_tests {
             .collect();
         assert_eq!(init_order, ["first.init", "second.init"]);
 
-        let output_order: Vec<&str> = output
-            .probes
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
+        let output_order: Vec<&str> = output.probes().map(|(name, _)| name.as_str()).collect();
         assert_eq!(output_order, ["first.output", "second.output"]);
     }
 
@@ -821,15 +922,21 @@ mod result_tests {
         assert_eq!(bindings.len(), 1, "failure must not drain bindings");
         assert_eq!(bindings[0].name(), "failing");
 
-        let output = drain_binding_outputs(&mut bindings);
+        let mut output = drain_binding_outputs(&mut bindings);
         assert!(
             bindings.is_empty(),
             "recovery must consume all bindings once"
         );
-        assert_eq!(output.probes[0].0.as_str(), "still-owned");
-        assert_eq!(output.resources[0].name(), "still-owned");
         assert_eq!(
-            output.workers.into_iter().next().map(|worker| {
+            output.probes().next().map(|(name, _)| name.as_str()),
+            Some("still-owned")
+        );
+        assert_eq!(
+            output.resources().next().map(|resource| resource.name()),
+            Some("still-owned")
+        );
+        assert_eq!(
+            drain_workers(&mut output).into_iter().next().map(|worker| {
                 let resource = invoke_worker(worker);
                 resource.name().to_owned()
             }),
@@ -851,24 +958,21 @@ mod result_tests {
         let mut output = DomainModuleResult::default();
         output.extend(results);
         let expected = ["first", "duplicate", "duplicate", "last"];
-        let probe_order: Vec<&str> = output
-            .probes
-            .iter()
-            .map(|(name, _)| name.as_str())
+        let probe_order: Vec<String> = output
+            .probes()
+            .map(|(name, _)| name.as_str().to_owned())
             .collect();
-        let resource_order: Vec<&str> = output
-            .resources
-            .iter()
-            .map(|resource| resource.name())
+        let resource_order: Vec<String> = output
+            .resources()
+            .map(|resource| resource.name().to_owned())
             .collect();
-        let worker_order: Vec<String> = output
-            .workers
+        let worker_order: Vec<String> = drain_workers(&mut output)
             .into_iter()
             .map(|worker| invoke_worker(worker).name().to_owned())
             .collect();
 
-        assert_eq!(probe_order, expected);
-        assert_eq!(resource_order, expected);
+        assert_eq!(probe_order, expected.map(str::to_owned));
+        assert_eq!(resource_order, expected.map(str::to_owned));
         assert_eq!(
             worker_order,
             expected.map(str::to_owned),
@@ -877,9 +981,9 @@ mod result_tests {
 
         let mut identity = DomainModuleResult::default();
         identity.extend([DomainModuleResult::default()]);
-        assert!(identity.probes.is_empty());
-        assert!(identity.resources.is_empty());
-        assert!(identity.workers.is_empty());
+        assert_eq!(identity.probe_count(), 0);
+        assert_eq!(identity.resource_count(), 0);
+        assert_eq!(identity.worker_count(), 0);
     }
 
     #[test]
@@ -887,13 +991,18 @@ mod result_tests {
         let mut output = DomainModuleResult::default();
         output.extend([labeled_result("only")]);
 
-        assert_eq!(output.probes.len(), 1);
-        assert_eq!(output.probes[0].0.as_str(), "only");
-        assert_eq!(output.resources.len(), 1);
-        assert_eq!(output.resources[0].name(), "only");
-        assert_eq!(output.workers.len(), 1);
-        let worker_labels: Vec<String> = output
-            .workers
+        assert_eq!(output.probe_count(), 1);
+        assert_eq!(
+            output.probes().next().map(|(name, _)| name.as_str()),
+            Some("only")
+        );
+        assert_eq!(output.resource_count(), 1);
+        assert_eq!(
+            output.resources().next().map(|resource| resource.name()),
+            Some("only")
+        );
+        assert_eq!(output.worker_count(), 1);
+        let worker_labels: Vec<String> = drain_workers(&mut output)
             .into_iter()
             .map(|worker| invoke_worker(worker).name().to_owned())
             .collect();
@@ -910,17 +1019,17 @@ mod result_tests {
                 worker_calls.fetch_add(1, Ordering::SeqCst);
                 labeled_resource("single-use")
             });
-        let mut output = DomainModuleResult {
-            workers: vec![worker],
-            ..DomainModuleResult::default()
-        };
+        let mut output = DomainModuleResult::default();
+        output.push_worker(worker);
 
-        let worker = output.workers.pop().expect("worker must be present");
+        let worker = drain_workers(&mut output)
+            .pop()
+            .expect("worker must be present");
         let resource = invoke_worker(worker);
 
         assert_eq!(resource.name(), "single-use");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(output.workers.is_empty());
+        assert_eq!(output.worker_count(), 0);
     }
 
     #[test]

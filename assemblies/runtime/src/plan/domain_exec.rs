@@ -188,10 +188,7 @@ mod tests {
         DomainBinding::new(
             name,
             Box::new(NoopDomain),
-            DomainModuleResult {
-                resources: vec![DynManagedResource::new_box(RollbackResource)],
-                ..DomainModuleResult::default()
-            },
+            DomainModuleResult::from_parts([], [DynManagedResource::new_box(RollbackResource)], []),
         )
     }
 
@@ -199,10 +196,7 @@ mod tests {
         DomainBinding::new(
             name,
             Box::new(FailingDomain),
-            DomainModuleResult {
-                resources: vec![DynManagedResource::new_box(RollbackResource)],
-                ..DomainModuleResult::default()
-            },
+            DomainModuleResult::from_parts([], [DynManagedResource::new_box(RollbackResource)], []),
         )
     }
 
@@ -245,9 +239,9 @@ mod tests {
             ])
             .expect("exact domain bindings validate");
         let (_registry, output) = validated.compose().expect("validated domains compose");
-        assert!(output.probes.is_empty());
-        assert!(output.resources.is_empty());
-        assert!(output.workers.is_empty());
+        assert!(output.probe_count() == 0);
+        assert!(output.resource_count() == 0);
+        assert!(output.worker_count() == 0);
     }
 
     #[test]
@@ -315,8 +309,11 @@ mod tests {
         let (_, mut bindings) = failure.into_parts();
         let output = bootstrap::drain_binding_outputs(&mut bindings);
         assert!(bindings.is_empty());
-        assert_eq!(output.resources.len(), 1);
-        assert_eq!(output.resources[0].name(), "domain-validation-rollback");
+        assert_eq!(output.resource_count(), 1);
+        assert_eq!(
+            output.resources().next().map(|resource| resource.name()),
+            Some("domain-validation-rollback")
+        );
     }
 
     #[test]
@@ -337,8 +334,11 @@ mod tests {
         assert_eq!(bindings.len(), 3);
         let output = bootstrap::drain_binding_outputs(&mut bindings);
         assert!(bindings.is_empty());
-        assert_eq!(output.resources.len(), 1);
-        assert_eq!(output.resources[0].name(), "domain-validation-rollback");
+        assert_eq!(output.resource_count(), 1);
+        assert_eq!(
+            output.resources().next().map(|resource| resource.name()),
+            Some("domain-validation-rollback")
+        );
     }
 
     #[test]

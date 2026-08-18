@@ -135,7 +135,7 @@ request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVA
 | 本 ADR 为纯决策记录，**当前不新增 enforcement** | —（N/A） | 决策方向 + 切换判据成文；无机器守卫新增 |
 | typed `diport::Pdp` 定义面只在 `diport`（上游） + impl 面仅 adapter/组合根（下游） | **Medium（cargo-deny + dylint）** | 上游定义面：dynosaur/trait-variant 宏收敛白名单（`DIPORT-MACRO-CONFINE-01′`，cargo-deny + xtask，Medium）；下游 impl 面：AST 级 impl-site allowlist（`DIPORT-IMPL-ALLOWLIST-01`，dylint #1060，Medium——sealed-trait 无法对独立 adapter crate 跨 crate Hard 封闭，dylint 为最强可用载体）。**非 Hard**（与 ADR-005 §6 同源评级） |
 | 未来 PDP 必填注入 + `VerifiedClaims` 仅 Pdp mint + `from_verified_*` 入参 newtype | **Hard（类型 / 可见性 / 构造器）** | `Arc<P>` 构造器必填位置参且 `P: Pdp + Send + Sync + 'static`（缺失或 provider 不可跨 serving task 共享即编译错误，继承 ADR-004 C5）；`VerifiedClaims` 私有构造 funnel + `from_verified_*` 仅收 newtype 而非裸 token（类型层杜绝旁路 mint）——这是本接缝**真正 Hard** 的部分（与上行 Medium 的 define/impl 守卫互补） |
-| 异步 PDP 永久 Pending 占用 request task | **Hard + Medium** | 非零 `ServerRequestBudget` 必填参数 + 不实现 axum make-service 的私有字段 `ServerService` capability + httpd 双 transport 同一入参，使无预算 bind 不可表达（Hard）；`server_budget_structure` 锁 runtime snapshot 注入、httpserve timeout 层与 httpd plaintext/mTLS 单路径，且 `auth_bridge_structure` 拒绝局部 timeout（Medium，均有 synthetic-red + anti-vacuity） |
+| 异步 PDP 永久 Pending 占用 request task | **Hard + Medium** | 非零 `ServerRequestBudget` 必填参数 + 不实现 axum make-service 的私有字段 `ServerService` capability + compile-fail 证明外部无法绕过 finalization，使无预算 bind 不可表达（Hard）；httpd plaintext/mTLS 行为测试锁定双 transport 共用 timeout 路径，`auth_bridge_structure` 拒绝局部 timeout（Medium，均有 anti-vacuity） |
 
 无 Soft 新增 enforcement。
 

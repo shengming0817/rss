@@ -1,0 +1,35 @@
+error[E0599]: no method named `take_probes` found for struct `DomainModuleResult` in the current scope
+ --> tests/ui/domain_module_result_selective_take_removed.rs:3:20
+  |
+3 |     let _ = output.take_probes();
+  |                    ^^^^^^^^^^^
+  |
+help: there is a method `probes` with a similar name
+  |
+3 -     let _ = output.take_probes();
+3 +     let _ = output.probes();
+  |
+
+error[E0599]: no method named `take_resources` found for struct `DomainModuleResult` in the current scope
+ --> tests/ui/domain_module_result_selective_take_removed.rs:4:20
+  |
+4 |     let _ = output.take_resources();
+  |                    ^^^^^^^^^^^^^^
+  |
+help: there is a method `resources` with a similar name
+  |
+4 -     let _ = output.take_resources();
+4 +     let _ = output.resources();
+  |
+
+error[E0599]: no method named `take_workers` found for struct `DomainModuleResult` in the current scope
+ --> tests/ui/domain_module_result_selective_take_removed.rs:5:20
+  |
+5 |     let _ = output.take_workers();
+  |                    ^^^^^^^^^^^^
+  |
+help: there is a method `workers` with a similar name
+  |
+5 -     let _ = output.take_workers();
+5 +     let _ = output.workers();
+  |

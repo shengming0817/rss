@@ -1491,7 +1491,8 @@ fn scan_runtime_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 #[derive(Default)]
 struct RuntimeShape {
     delegated_events_bridge: bool,
-    bridged_input: bool,
+    bridged_wiring_field: bool,
+    bridged_wiring_consumer: bool,
     required_worker_probe_bundle: bool,
     policy_bound_worker_activation: bool,
 }
@@ -1507,6 +1508,16 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     let mut shape = RuntimeShape::default();
     for item in &file.items {
         match item {
+            syn::Item::Struct(item) if item.ident == "EventTransportWiring" => {
+                shape.bridged_wiring_field = item.fields.iter().any(|field| {
+                    field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == "subscribers")
+                        && matches!(field.vis, syn::Visibility::Inherited)
+                        && normalized_tokens(&field.ty) == "BridgedSubscriptions"
+                });
+            }
             syn::Item::Fn(item) if item.sig.ident == "bridge_generated_subscriptions" => {
                 let body = normalized_tokens(&item.block);
                 shape.delegated_events_bridge = body
@@ -1514,9 +1525,13 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     && !body.contains("generated::event::EVENTS");
             }
             syn::Item::Fn(item) if item.sig.ident == "wire_event_transport" => {
-                shape.bridged_input = item.sig.inputs.iter().any(|input| {
-                    normalized_tokens(input).contains("subscribers:BridgedSubscriptions")
-                });
+                shape.bridged_wiring_consumer = item
+                    .sig
+                    .inputs
+                    .iter()
+                    .any(|input| normalized_tokens(input).contains("wiring:EventTransportWiring"))
+                    && normalized_tokens(&item.block)
+                        .contains("EventTransportWiring{pg,distributed,subscribers,cfg,worker,audit_key,admissions,}=wiring");
             }
             syn::Item::Fn(item) if item.sig.ident == "wire_consumer_resource_bundle" => {
                 let body = normalized_tokens(&item.block);
@@ -1527,8 +1542,8 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     "consumer_tx_worker_for_subscription(",
                     "matchsubscription.readiness()",
                     "SubscriberReadiness::Required=>",
-                    "module.workers.push(worker)",
-                    "module.probes.push(consumer_probe)",
+                    "module.push_worker(worker)",
+                    "module.push_probe(consumer_probe)",
                     "wire_inbox_sweeper(pg,timing,write_admission,module)?",
                 ]
                 .iter()
@@ -1556,7 +1571,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             "runtime bridge carrier 必须薄委托 eventing-composition，不得复制 generated registry 解析",
         ),
         (
-            shape.bridged_input,
+            shape.bridged_wiring_field && shape.bridged_wiring_consumer,
             "wire_event_transport 必须消费 opaque BridgedSubscriptions bundle",
         ),
         (
@@ -1951,8 +1966,8 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
                 "eventing_composition::WorkerInputs::new(",
                 "matchsubscription.readiness()",
                 "SubscriberReadiness::Required=>",
-                "output.workers.push(worker)",
-                "output.probes.push(",
+                "output.push_worker(worker)",
+                "output.push_probe(",
                 "wire_inbox_sweeper(pg,write_admission,&mutoutput)?",
             ]
             .iter()
@@ -4318,7 +4333,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     &[
                         "let timing = worker.relay",
                         "pg.validate_relay_budget(timing.budget)",
-                        "wire_durable(pg, distributed, subscribers, DurableEventExecution { per_domain, local_producers, }, timing, security, audit_key, relay_admission, consumer_admission, write_admission,)",
+                        "wire_durable(pg, DurableWiring { distributed, subscribers, execution: DurableEventExecution { per_domain, local_producers, }, timing, security, audit_key, admissions, })",
                     ][..],
                 ),
                 (
@@ -6416,14 +6431,14 @@ fn runtime_relay_worker_is_connected(file: &syn::File) -> bool {
         let syn::Expr::MethodCall(push) = peel_expr(expr) else {
             return false;
         };
-        push.method == "push"
+        push.method == "push_worker"
             && push.args.len() == 1
             && push
                 .args
                 .first()
                 .and_then(simple_expr_ident)
                 .is_some_and(|worker| workers.contains(&worker))
-            && module_workers_receiver(&push.receiver).as_deref() == Some(module.1.as_str())
+            && simple_expr_ident(&push.receiver).as_deref() == Some(module.1.as_str())
     })
 }
 
@@ -6475,16 +6490,6 @@ fn closure_tail_expr(body: &syn::Expr) -> Option<&syn::Expr> {
         syn::Stmt::Expr(expr, None) => Some(expr),
         _ => None,
     }
-}
-
-fn module_workers_receiver(expr: &syn::Expr) -> Option<String> {
-    let syn::Expr::Field(field) = peel_expr(expr) else {
-        return None;
-    };
-    if !matches!(&field.member, syn::Member::Named(name) if name == "workers") {
-        return None;
-    }
-    simple_expr_ident(&field.base)
 }
 
 fn scan_outbox_claim_sql(path: &Path, content: &str) -> Vec<Finding<Rule>> {
@@ -7449,7 +7454,26 @@ mod tests {
             pub fn bridge_generated_subscriptions(bindings: Vec<SubscriberBinding>) {
                 eventing_composition::bridge_generated_subscriptions(bindings)
             }
-            fn wire_event_transport(subscribers: BridgedSubscriptions) {}
+            struct EventTransportWiring<'a> {
+                pg: &'a Pg,
+                distributed: Distributed,
+                subscribers: BridgedSubscriptions,
+                cfg: Config,
+                worker: Worker,
+                audit_key: Key,
+                admissions: Admissions,
+            }
+            fn wire_event_transport(wiring: EventTransportWiring<'_>) {
+                let EventTransportWiring {
+                    pg,
+                    distributed,
+                    subscribers,
+                    cfg,
+                    worker,
+                    audit_key,
+                    admissions,
+                } = wiring;
+            }
             fn wire_consumer_resource_bundle(pg: Pg, module: &mut Module) {
                 let group = subscription.group().clone();
                 let inbox = pg.infra().inbox();
@@ -7463,8 +7487,8 @@ mod tests {
                 let consumer_probe = probe();
                 match subscription.readiness() {
                     SubscriberReadiness::Required => {
-                        module.workers.push(worker);
-                        module.probes.push(consumer_probe);
+                        module.push_worker(worker);
+                        module.push_probe(consumer_probe);
                     }
                 }
                 wire_inbox_sweeper(pg, timing, write_admission, module)?;
@@ -9099,7 +9123,7 @@ pub mod fault_matrix;
                     let worker = WorkerSpec::observational_phase_one(move |token| {
                         DynManagedResource::new_box(spawn_relay(name, outbox, token))
                     });
-                    module.workers.push(worker);
+                    module.push_worker(worker);
                 }
                 "#,
             ),
@@ -9557,7 +9581,7 @@ $do$;
                             relay_admission,
                         ))
                     });
-                    module.workers.push(worker);
+                    module.push_worker(worker);
                     Ok(())
                 }
                 "#,

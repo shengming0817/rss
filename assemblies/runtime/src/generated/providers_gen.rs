@@ -313,14 +313,10 @@ impl ListenerPdpJwksLifecycle {
     }
 
     pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
-        let (probes, resources) = std::iter::once(self.head)
+        let (probes, resources): (Vec<_>, Vec<_>) = std::iter::once(self.head)
             .chain(self.tail)
             .map(|entry| (entry.probe, entry.resource))
             .unzip();
-        bootstrap::DomainModuleResult {
-            probes,
-            resources,
-            workers: Vec::new(),
-        }
+        bootstrap::DomainModuleResult::from_parts(probes, resources, [])
     }
 }

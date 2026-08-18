@@ -80,7 +80,7 @@ impl ProviderRoleCloser {
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> anyhow::Result<crate::providers_gen::CompletedProviderRoles> {
         let mut cas = outputs.distributed_cas;
-        cas.resources.push(self.cas_resource);
+        cas.push_resource(self.cas_resource);
         let distributed_cas_store = self
             .distributed_cas_constructor
             .finish(cas)?
@@ -170,13 +170,11 @@ pub(crate) async fn build(
         .pop()
         .context("settingsonly Postgres omitted distributed CAS lifecycle resource")?;
     let mut pg_output = bootstrap::DomainModuleResult::default();
-    pg_output.resources.extend(pg_resources);
-    pg_output
-        .workers
-        .push(bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.settingsonly.src.providers.01",
-            move |token| DynManagedResource::new_box(pg_monitor.spawn(token)),
-        ));
+    pg_output.extend_resources(pg_resources);
+    pg_output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.providers.01",
+        move |token| DynManagedResource::new_box(pg_monitor.spawn(token)),
+    ));
     let audit_sink = httpserve::AuditSinkHandle::new(pg_handle.auth_audit_sink());
 
     let vault = build_vault(
@@ -199,7 +197,7 @@ pub(crate) async fn build(
     pg_output.merge(postgres_readiness.into_output());
     let rls_probe_name = primitives::ProbeName::parse(crate::readiness::RLS)
         .context("parse settingsonly rls_ready probe name")?;
-    pg_output.probes.push((
+    pg_output.push_probe((
         rls_probe_name.clone(),
         Box::new(RlsReadyProbe {
             name: rls_probe_name,
@@ -234,13 +232,12 @@ pub(crate) async fn build(
         prometheus_adapter::PromExporter::install()
             .context("install settingsonly metrics exporter")?,
     );
-    transaction.stage_domain_output(bootstrap::DomainModuleResult {
-        resources: vec![SharedManagedResource::boxed(
-            Arc::clone(&metrics),
-            "settingsonly-prometheus",
-        )],
-        ..Default::default()
-    });
+    let mut metrics_output = bootstrap::DomainModuleResult::default();
+    metrics_output.push_resource(SharedManagedResource::boxed(
+        Arc::clone(&metrics),
+        "settingsonly-prometheus",
+    ));
+    transaction.stage_domain_output(metrics_output);
     let metrics_port: Arc<dyn diport::MetricsExporter> = metrics;
     let production = build_production_infra(
         production_infra,
@@ -365,27 +362,26 @@ async fn build_production_infra(
         .context("build settingsonly Redis readiness probe name")?;
     let redis_sampler = redis.clone();
     let sampler_ready = Arc::clone(&redis_ready);
-    let redis_output = bootstrap::DomainModuleResult {
-        probes: vec![(
-            redis_probe_name.clone(),
-            Box::new(RedisReadyProbe {
-                name: redis_probe_name,
-                ready: Arc::clone(&redis_ready),
-            }),
-        )],
-        workers: vec![bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.settingsonly.src.providers.02",
-            move |token| {
-                DynManagedResource::new_box(RedisReadinessWorker::spawn(
-                    redis_sampler,
-                    redis_readiness,
-                    token,
-                    sampler_ready,
-                ))
-            },
-        )],
-        resources: redis.runtime_resources(),
-    };
+    let mut redis_output = bootstrap::DomainModuleResult::default();
+    redis_output.push_probe((
+        redis_probe_name.clone(),
+        Box::new(RedisReadyProbe {
+            name: redis_probe_name,
+            ready: Arc::clone(&redis_ready),
+        }),
+    ));
+    redis_output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.providers.02",
+        move |token| {
+            DynManagedResource::new_box(RedisReadinessWorker::spawn(
+                redis_sampler,
+                redis_readiness,
+                token,
+                sampler_ready,
+            ))
+        },
+    ));
+    redis_output.extend_resources(redis.runtime_resources());
     let distributed_lock_store = distributed_lock_constructor
         .finish(redis_output)?
         .transfer(transaction.provider_output_mut());
@@ -431,10 +427,9 @@ async fn build_production_infra(
         "settingsonly-amqp-subscriber-startup-stage",
     ]) {
         let (startup, activation, receipt) = split_startup_resource(resource, name);
-        transaction.stage_domain_output(bootstrap::DomainModuleResult {
-            resources: vec![startup],
-            ..Default::default()
-        });
+        let mut startup_output = bootstrap::DomainModuleResult::default();
+        startup_output.push_resource(startup);
+        transaction.stage_domain_output(startup_output);
         amqp_resources.push(activation);
         amqp_activations.push(receipt);
     }
@@ -496,18 +491,13 @@ async fn build_production_infra(
         ),
         "settingsonly-dlx-hot-vault-startup-stage",
     );
-    transaction.stage_domain_output(bootstrap::DomainModuleResult {
-        resources: vec![archive_startup, hot_startup],
-        ..Default::default()
-    });
-    let mut archive_output = bootstrap::DomainModuleResult {
-        resources: vec![archive_resource],
-        ..Default::default()
-    };
-    let mut hot_output = bootstrap::DomainModuleResult {
-        resources: vec![hot_resource],
-        ..Default::default()
-    };
+    let mut startup_output = bootstrap::DomainModuleResult::default();
+    startup_output.extend_resources([archive_startup, hot_startup]);
+    transaction.stage_domain_output(startup_output);
+    let mut archive_output = bootstrap::DomainModuleResult::default();
+    archive_output.push_resource(archive_resource);
+    let mut hot_output = bootstrap::DomainModuleResult::default();
+    hot_output.push_resource(hot_resource);
     let dlx_payload_protector = postgres::DlxPayloadProtector::new(
         DynKeyProvider::new_box(SharedKeyProvider(Arc::clone(&hot_provider))),
         hot_key.clone(),
@@ -863,10 +853,9 @@ fn stage_postgres_resources(
     for resource in resources {
         let (startup, activation, receipt) =
             split_startup_resource(resource, "settingsonly-postgres-startup-stage");
-        transaction.stage_domain_output(bootstrap::DomainModuleResult {
-            resources: vec![startup],
-            ..Default::default()
-        });
+        let mut startup_output = bootstrap::DomainModuleResult::default();
+        startup_output.push_resource(startup);
+        transaction.stage_domain_output(startup_output);
         activated_resources.push(activation);
         activations.push(receipt);
     }
@@ -1083,9 +1072,9 @@ fn build_vault(
         "settingsonly Vault bundle produced an undeclared resource"
     );
     let mut key_output = bootstrap::DomainModuleResult::default();
-    key_output.resources.push(key_provider);
+    key_output.push_resource(key_provider);
     let mut resolver_output = bootstrap::DomainModuleResult::default();
-    resolver_output.resources.push(resolver);
+    resolver_output.push_resource(resolver);
     Ok(VaultProvider {
         deps,
         settings_key: key_name,
@@ -1427,15 +1416,22 @@ mod tests {
         let (_constructor, lifecycle) = build_federated_listener_pdp_jwks_lifecycle(federated);
         let output = lifecycle.into_output();
         assert_eq!(expected_probe.as_str(), crate::readiness::FEDERATED_JWKS);
-        assert_eq!(output.probes.len(), 1);
-        assert_eq!(output.probes[0].0, expected_probe);
-        assert_eq!(output.resources.len(), 1);
+        assert_eq!(output.probe_count(), 1);
+        assert_eq!(output.probes().next().unwrap().0, &expected_probe);
+        assert_eq!(output.resource_count(), 1);
         assert_eq!(
-            output.resources[0].name(),
+            output.resources().next().unwrap().name(),
             "settingsonly-federated-verifier"
         );
-        assert!(output.workers.is_empty());
-        output.resources[0]
+        assert!(output.worker_count() == 0);
+        output
+            .into_outputs()
+            .find_map(|output| match output {
+                bootstrap::DomainLifecycleOutput::Probe(_, _)
+                | bootstrap::DomainLifecycleOutput::Worker(_) => None,
+                bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
+            })
+            .unwrap()
             .shutdown()
             .await
             .expect("shutdown federated verifier");
@@ -1571,9 +1567,9 @@ mod tests {
             )
             .expect("complete role inventory");
 
-        assert!(!inventory.resources.is_empty());
-        assert!(!inventory.probes.is_empty());
-        assert!(!inventory.workers.is_empty());
+        assert_ne!(inventory.resource_count(), 0);
+        assert_ne!(inventory.probe_count(), 0);
+        assert_ne!(inventory.worker_count(), 0);
         let listener_pdp_binding = completed
             .into_probe_bindings()
             .into_iter()
@@ -1594,20 +1590,16 @@ mod tests {
                 LifecycleChannel::Probes => {
                     let name = primitives::ProbeName::parse(&format!("{role}_ready"))
                         .expect("test probe name");
-                    output
-                        .probes
-                        .push((name.clone(), Box::new(TestProbe(name))));
+                    output.push_probe((name.clone(), Box::new(TestProbe(name))));
                 }
-                LifecycleChannel::Resources => output
-                    .resources
-                    .push(DynManagedResource::new_box(TestResource)),
+                LifecycleChannel::Resources => {
+                    output.push_resource(DynManagedResource::new_box(TestResource))
+                }
                 LifecycleChannel::Workers => {
-                    output
-                        .workers
-                        .push(bootstrap::WorkerSpec::observational_phase_one(
-                            "assemblies.settingsonly.src.providers.03",
-                            |_token| DynManagedResource::new_box(TestResource),
-                        ));
+                    output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+                        "assemblies.settingsonly.src.providers.03",
+                        |_token| DynManagedResource::new_box(TestResource),
+                    ));
                 }
             }
         }

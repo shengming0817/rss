@@ -874,15 +874,11 @@ fn render_listener_pdp_lifecycle(code: &mut String) {
                  self\n\
              }\n\
              \n             pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {\n\
-                 let (probes, resources) = std::iter::once(self.head)\n\
+                 let (probes, resources): (Vec<_>, Vec<_>) = std::iter::once(self.head)\n\
                      .chain(self.tail)\n\
                      .map(|entry| (entry.probe, entry.resource))\n\
                      .unzip();\n\
-                 bootstrap::DomainModuleResult {\n\
-                     probes,\n\
-                     resources,\n\
-                     workers: Vec::new(),\n\
-                 }\n\
+	                 bootstrap::DomainModuleResult::from_parts(probes, resources, [])\n\
              }\n\
          }\n",
     );
@@ -999,7 +995,7 @@ fn render_provider_role_batches(
         " {\n\
                      anyhow::bail!(\"__ASSEMBLY__ provider role receipt came from a different exact-join generation\");\n\
                  }\n\
-                 anyhow::ensure!(inventory.probes.len() == staged[0] && inventory.resources.len() == staged[1] && inventory.workers.len() == staged[2], \"__ASSEMBLY__ transaction provider lifecycle output differs from exact receipts\");\n\
+                 anyhow::ensure!(inventory.probe_count() == staged[0] && inventory.resource_count() == staged[1] && inventory.worker_count() == staged[2], \"__ASSEMBLY__ transaction provider lifecycle output differs from exact receipts\");\n\
                  Ok(CompletedProviderRoles { probe_bindings })\n\
              }\n\
          }\n",
@@ -1008,9 +1004,9 @@ fn render_provider_role_batches(
     code.push_str(&scoped(
         "\nfn lifecycle_channels(output: &bootstrap::DomainModuleResult) -> Vec<LifecycleChannel> {\n\
              let mut channels = Vec::new();\n\
-             if !output.probes.is_empty() { channels.push(LifecycleChannel::Probes); }\n\
-             if !output.resources.is_empty() { channels.push(LifecycleChannel::Resources); }\n\
-             if !output.workers.is_empty() { channels.push(LifecycleChannel::Workers); }\n\
+	             if output.probe_count() != 0 { channels.push(LifecycleChannel::Probes); }\n\
+	             if output.resource_count() != 0 { channels.push(LifecycleChannel::Resources); }\n\
+	             if output.worker_count() != 0 { channels.push(LifecycleChannel::Workers); }\n\
              channels\n\
          }\n\
          \nfn validate_lifecycle_output(entry: &ProviderCatalogEntry, output: &bootstrap::DomainModuleResult) -> anyhow::Result<()> {\n\
@@ -1035,8 +1031,8 @@ fn render_provider_role_batches(
              pub(crate) struct {receipt} {{\n    probes: usize,\n    resources: usize,\n    workers: usize,\n    probe_names: Vec<primitives::ProbeName>,\n}}\n\
              impl {receipt} {{\n\
                  fn transfer_lifecycle(output: bootstrap::DomainModuleResult, inventory: &mut bootstrap::DomainModuleResult) -> Self {{\n\
-                     let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();\n\
-                     let receipt = Self {{ probes: output.probes.len(), resources: output.resources.len(), workers: output.workers.len(), probe_names }};\n\
+	                     let probe_names = output.probes().map(|(name, _)| name.clone()).collect();\n\
+	                     let receipt = Self {{ probes: output.probe_count(), resources: output.resource_count(), workers: output.worker_count(), probe_names }};\n\
                      inventory.merge(output);\n\
                      receipt\n\
                  }}\n\
@@ -1334,9 +1330,9 @@ fn validate_provider_role_batch_syntax(
                 {
                     let body = compact_tokens(&finish.block);
                     exact_residual_guard = [
-                        "inventory.probes.len()==staged[0]",
-                        "inventory.resources.len()==staged[1]",
-                        "inventory.workers.len()==staged[2]",
+                        "inventory.probe_count()==staged[0]",
+                        "inventory.resource_count()==staged[1]",
+                        "inventory.worker_count()==staged[2]",
                     ]
                     .iter()
                     .all(|required| body.contains(required))

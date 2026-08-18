@@ -227,7 +227,8 @@ mod tests {
     #[test]
     fn try_parse_from_prog_dlq_locks_missing_subcommand_bucket() {
         let err = FamilyMissingSubcommandProbe::try_parse_from(["prog", "dlq"])
-            .expect_err("prog dlq without family action must miss a subcommand");
+            .err()
+            .unwrap_or_else(|| unreachable!("prog dlq without family action must fail"));
         assert!(
             matches!(
                 err.kind(),

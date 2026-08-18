@@ -276,9 +276,9 @@ mod tests {
         );
         let (_, output) = compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
-        assert!(output.probes.is_empty());
-        assert!(output.resources.is_empty());
-        assert!(output.workers.is_empty());
+        assert!(output.probe_count() == 0);
+        assert!(output.resource_count() == 0);
+        assert!(output.worker_count() == 0);
     }
 
     #[allow(clippy::expect_used)]
@@ -382,9 +382,9 @@ mod tests {
         let (registry, output) =
             compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
-        assert!(output.probes.is_empty());
-        assert!(output.resources.is_empty());
-        assert!(output.workers.is_empty());
+        assert!(output.probe_count() == 0);
+        assert!(output.resource_count() == 0);
+        assert!(output.worker_count() == 0);
         let (control, _relay, _consumer, writes) =
             primitives::prepare_dr_admission_controls().into_parts();
         control

@@ -44,9 +44,9 @@ async fn wire_builds_stable_single_owned_binding() {
 
     let (_, output) = compose_bindings(&mut bindings).expect("audit domain composes");
     assert!(bindings.is_empty());
-    assert!(output.probes.is_empty());
-    assert!(output.resources.is_empty());
-    assert!(output.workers.is_empty());
+    assert_eq!(output.probe_count(), 0);
+    assert_eq!(output.resource_count(), 0);
+    assert_eq!(output.worker_count(), 0);
 }
 
 #[tokio::test]

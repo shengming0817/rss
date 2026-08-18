@@ -788,20 +788,10 @@ mod tests {
         let domain_one = Arc::new(AtomicUsize::new(0));
         let transcript = Arc::new(Mutex::new(Vec::new()));
         let mut provider_output = bootstrap::DomainModuleResult::default();
-        provider_output.resources.push(counted_resource(
-            "provider-one",
-            &provider_one,
-            &transcript,
-        ));
-        provider_output.resources.push(counted_resource(
-            "provider-two",
-            &provider_two,
-            &transcript,
-        ));
+        provider_output.push_resource(counted_resource("provider-one", &provider_one, &transcript));
+        provider_output.push_resource(counted_resource("provider-two", &provider_two, &transcript));
         let mut domain_output = bootstrap::DomainModuleResult::default();
-        domain_output
-            .resources
-            .push(counted_resource("domain-one", &domain_one, &transcript));
+        domain_output.push_resource(counted_resource("domain-one", &domain_one, &transcript));
         let plan = runtimeexec::LaunchPlan::new(
             adapter,
             FinalizedProbeReceipt {

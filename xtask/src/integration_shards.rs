@@ -973,7 +973,6 @@ integration_shard_catalog! {
             VaultLive => ("vault-live", IntegrationCritical, "vault", "live_vault", Test, Serial, RemoteOnly, resources: [Vault], impact_packages: [VaultProvider], capabilities: [Docker]),
             AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            ServerBudgetStructure => ("server-budget-structure", ReleaseCheck, "runtime", "server_budget_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             ConfigsReadyE2e => ("configs-ready-e2e", IntegrationCritical, "runtime", "configs_ready_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: []),
             DomainExecutionPlanTrybuild => ("domain-execution-plan-trybuild", ReleaseCheck, "runtime", "domain_execution_plan_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             IdentityLoginWireE2e => ("identity-login-wire-e2e", IntegrationCritical, "runtime", "identity_login_wire_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, HttpdPackage, HttpservePackage, IdentityPackage, PostgresPackage, RuntimePackage, RuntimeSurface, OidcProvider], capabilities: []),

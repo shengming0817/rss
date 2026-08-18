@@ -44,7 +44,6 @@ pub struct DistributedRuntimeDeps {
 
 impl DistributedRuntimeDeps {
     /// Coordinator for the durable event outbox maintenance workers.
-    #[must_use]
     pub fn outbox_maintenance_coordinator(
         &self,
         domains: &[vocab::DomainName],
@@ -73,7 +72,6 @@ impl DistributedRuntimeDeps {
     }
 
     /// Coordinator for the inbox backlog sampler.
-    #[must_use]
     pub fn inbox_backlog_maintenance_coordinator(
         &self,
         groups: &[consistency::ConsumerGroup],

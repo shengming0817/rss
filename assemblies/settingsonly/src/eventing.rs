@@ -138,14 +138,10 @@ pub(crate) async fn wire(
 
     let (publisher_resource, subscriber_resource) =
         split_amqp_resources(std::mem::take(&mut inputs.amqp_resources))?;
-    let mut event_publisher = DomainModuleResult {
-        resources: vec![publisher_resource],
-        ..Default::default()
-    };
-    let mut event_subscriber = DomainModuleResult {
-        resources: vec![subscriber_resource],
-        ..Default::default()
-    };
+    let mut event_publisher = DomainModuleResult::default();
+    event_publisher.push_resource(publisher_resource);
+    let mut event_subscriber = DomainModuleResult::default();
+    event_subscriber.push_resource(subscriber_resource);
     let mut distributed_cas = DomainModuleResult::default();
     wire_relay(&inputs, budget, &mut event_publisher)?;
     let EventingInputs {
@@ -198,7 +194,7 @@ fn wire_amqp_readiness(
     ));
     let publisher_name = primitives::ProbeName::parse(crate::readiness::AMQP_PUBLISHER)
         .context("build settingsonly AMQP publisher readiness probe name")?;
-    publisher.probes.push((
+    publisher.push_probe((
         publisher_name.clone(),
         Box::new(TransportProbe::new(
             publisher_name,
@@ -206,26 +202,24 @@ fn wire_amqp_readiness(
         )),
     ));
     let publisher_amqp = amqp.clone();
-    publisher
-        .workers
-        .push(bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.settingsonly.src.eventing.01",
-            move |token| {
-                DynManagedResource::new_box(AmqpReadinessWorker::spawn(
-                    publisher_amqp,
-                    AmqpReadinessRole::Publisher,
-                    publisher_ready,
-                    token,
-                ))
-            },
-        ));
+    publisher.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.eventing.01",
+        move |token| {
+            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+                publisher_amqp,
+                AmqpReadinessRole::Publisher,
+                publisher_ready,
+                token,
+            ))
+        },
+    ));
 
     let subscriber_ready = Arc::new(std::sync::atomic::AtomicBool::new(
         amqp.subscriber_readiness().is_ready(),
     ));
     let subscriber_name = primitives::ProbeName::parse(crate::readiness::AMQP_SUBSCRIBER)
         .context("build settingsonly AMQP subscriber readiness probe name")?;
-    subscriber.probes.push((
+    subscriber.push_probe((
         subscriber_name.clone(),
         Box::new(TransportProbe::new(
             subscriber_name,
@@ -233,19 +227,17 @@ fn wire_amqp_readiness(
         )),
     ));
     let subscriber_amqp = amqp.clone();
-    subscriber
-        .workers
-        .push(bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.settingsonly.src.eventing.02",
-            move |token| {
-                DynManagedResource::new_box(AmqpReadinessWorker::spawn(
-                    subscriber_amqp,
-                    AmqpReadinessRole::Subscriber,
-                    subscriber_ready,
-                    token,
-                ))
-            },
-        ));
+    subscriber.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.eventing.02",
+        move |token| {
+            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+                subscriber_amqp,
+                AmqpReadinessRole::Subscriber,
+                subscriber_ready,
+                token,
+            ))
+        },
+    ));
     Ok(())
 }
 
@@ -396,7 +388,7 @@ fn wire_relay(
     let health = Arc::new(WorkerHealth::starting());
     let worker_health = Arc::clone(&health);
     let admission = inputs.relay_admission.clone();
-    output.workers.push(bootstrap::WorkerSpec::relay_deferred(
+    output.push_worker(bootstrap::WorkerSpec::relay_deferred(
         "assemblies.settingsonly.src.eventing.03",
         &admission,
         move |token, relay_admission| {
@@ -414,9 +406,7 @@ fn wire_relay(
     ));
     let name = primitives::ProbeName::parse(crate::readiness::OUTBOX_RELAY)
         .context("build settingsonly relay probe name")?;
-    output
-        .probes
-        .push((name.clone(), Box::new(WorkerProbe::new(name, health))));
+    output.push_probe((name.clone(), Box::new(WorkerProbe::new(name, health))));
     Ok(())
 }
 
@@ -469,8 +459,8 @@ async fn wire_consumer(
     )?;
     match subscription.readiness() {
         SubscriberReadiness::Required => {
-            output.workers.push(worker);
-            output.probes.push((
+            output.push_worker(worker);
+            output.push_probe((
                 probe_name.clone(),
                 Box::new(WorkerProbe::new(probe_name, health)),
             ));
@@ -489,7 +479,7 @@ fn wire_inbox_sweeper(
         .context("build settingsonly inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::starting());
     let worker_health = Arc::clone(&health);
-    output.workers.push(bootstrap::WorkerSpec::writes_phase_one(
+    output.push_worker(bootstrap::WorkerSpec::writes_phase_one(
         "assemblies.settingsonly.src.eventing.04",
         &admission,
         move |token, worker_admission| {
@@ -518,9 +508,7 @@ fn wire_inbox_sweeper(
     ));
     let name = primitives::ProbeName::parse(crate::readiness::INBOX_SWEEPER)
         .context("build settingsonly inbox sweeper probe name")?;
-    output
-        .probes
-        .push((name.clone(), Box::new(WorkerProbe::new(name, health))));
+    output.push_probe((name.clone(), Box::new(WorkerProbe::new(name, health))));
     Ok(())
 }
 
@@ -554,41 +542,39 @@ fn wire_outbox_maintenance(
 
     let sampler_health = Arc::new(WorkerHealth::starting());
     let sampler_worker_health = Arc::clone(&sampler_health);
-    output
-        .workers
-        .push(bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.settingsonly.src.eventing.05",
-            move |token| {
-                DynManagedResource::new_box(spawn_on_dedicated_runtime(
-                    "settingsonly-outbox-sampler",
-                    token,
-                    Arc::clone(&sampler_worker_health),
-                    EVENT_WORKER_SHUTDOWN_TIMEOUT,
-                    move |thread_token| async move {
-                        eventing_composition::coordinated_outbox_backlog_sampler_loop(
-                            Arc::new(maintenance),
-                            sampler_coordinator,
-                            sampler_config,
-                            thread_token,
-                            Arc::clone(&sampler_worker_health),
-                            Arc::new(MetricsOutboxMetrics),
-                        )
-                        .await;
-                        Ok(())
-                    },
-                ))
-            },
-        ));
+    output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.eventing.05",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "settingsonly-outbox-sampler",
+                token,
+                Arc::clone(&sampler_worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    eventing_composition::coordinated_outbox_backlog_sampler_loop(
+                        Arc::new(maintenance),
+                        sampler_coordinator,
+                        sampler_config,
+                        thread_token,
+                        Arc::clone(&sampler_worker_health),
+                        Arc::new(MetricsOutboxMetrics),
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    ));
     let sampler_name = primitives::ProbeName::parse(crate::readiness::OUTBOX_SAMPLER)
         .context("build settingsonly sampler probe name")?;
-    output.probes.push((
+    output.push_probe((
         sampler_name.clone(),
         Box::new(WorkerProbe::new(sampler_name, sampler_health)),
     ));
 
     let sweeper_health = Arc::new(WorkerHealth::starting());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
-    output.workers.push(bootstrap::WorkerSpec::writes_phase_one(
+    output.push_worker(bootstrap::WorkerSpec::writes_phase_one(
         "assemblies.settingsonly.src.eventing.06",
         &admission,
         move |token, worker_admission| {
@@ -615,7 +601,7 @@ fn wire_outbox_maintenance(
     ));
     let sweeper_name = primitives::ProbeName::parse(crate::readiness::OUTBOX_SWEEPER)
         .context("build settingsonly sweeper probe name")?;
-    output.probes.push((
+    output.push_probe((
         sweeper_name.clone(),
         Box::new(WorkerProbe::new(sweeper_name, sweeper_health)),
     ));
@@ -631,34 +617,32 @@ fn retain_admission_authority(
     let health = Arc::new(WorkerHealth::starting());
     let probe_name = primitives::ProbeName::parse("settingsonly_dr_admission")
         .context("build settingsonly DR admission probe name")?;
-    output.probes.push((
+    output.push_probe((
         probe_name.clone(),
         Box::new(WorkerProbe::new(probe_name, Arc::clone(&health))),
     ));
-    output
-        .workers
-        .push(bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.settingsonly.src.eventing.07",
-            move |token| {
-                DynManagedResource::new_box(spawn_on_dedicated_runtime(
-                    "settingsonly-dr-admission-owner",
-                    token,
-                    Arc::clone(&health),
-                    EVENT_WORKER_SHUTDOWN_TIMEOUT,
-                    move |thread_token| async move {
-                        eventexec::run_dr_admission_controller(
-                            pg,
-                            control,
-                            identity,
-                            thread_token,
-                            health,
-                        )
-                        .await;
-                        Ok(())
-                    },
-                ))
-            },
-        ));
+    output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.eventing.07",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "settingsonly-dr-admission-owner",
+                token,
+                Arc::clone(&health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    eventexec::run_dr_admission_controller(
+                        pg,
+                        control,
+                        identity,
+                        thread_token,
+                        health,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    ));
     Ok(())
 }
 
@@ -785,31 +769,30 @@ mod tests {
             ))
         };
         let outputs = assemble_role_outputs(
-            DomainModuleResult {
-                probes: vec![probe(crate::readiness::OUTBOX_SAMPLER)?],
-                ..Default::default()
-            },
-            DomainModuleResult {
-                probes: vec![probe(crate::readiness::OUTBOX_RELAY)?],
-                ..Default::default()
-            },
-            DomainModuleResult {
-                probes: vec![
+            DomainModuleResult::from_parts([probe(crate::readiness::OUTBOX_SAMPLER)?], [], []),
+            DomainModuleResult::from_parts([probe(crate::readiness::OUTBOX_RELAY)?], [], []),
+            DomainModuleResult::from_parts(
+                [
                     probe(crate::readiness::EVENT_CONSUMER)?,
                     probe(crate::readiness::INBOX_SWEEPER)?,
                 ],
-                ..Default::default()
-            },
+                [],
+                [],
+            ),
         );
-        assert_eq!(outputs.distributed_cas.probes.len(), 1);
-        assert_eq!(outputs.event_publisher.probes.len(), 1);
-        assert_eq!(outputs.event_subscriber.probes.len(), 2);
+        assert_eq!(outputs.distributed_cas.probe_count(), 1);
+        assert_eq!(outputs.event_publisher.probe_count(), 1);
+        assert_eq!(outputs.event_subscriber.probe_count(), 2);
         assert_eq!(
-            outputs.event_publisher.probes[0].0.as_str(),
+            outputs.event_publisher.probes().next().unwrap().0.as_str(),
             crate::readiness::OUTBOX_RELAY
         );
         assert!(
-            outputs.event_subscriber.probes[0]
+            outputs
+                .event_subscriber
+                .probes()
+                .next()
+                .unwrap()
                 .0
                 .as_str()
                 .starts_with(EVENT_CONSUMER_PROBE)

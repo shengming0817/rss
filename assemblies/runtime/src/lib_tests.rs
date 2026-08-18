@@ -243,10 +243,21 @@ fn runtime_module_output_harness_captures_merge_and_probe_drain_order() {
 }
 
 fn runtime_module_harness_transcript() -> String {
-    let mut module = runtime_module_output_harness();
-    let module_probes = probe_names(&module.probes);
-    let module_resources = resource_names(&module.resources);
-    let module_workers = worker_names(module.workers);
+    let module = runtime_module_output_harness();
+    let module_probes = probe_names(module.probes());
+    let module_resources = resource_names(module.resources());
+    let mut probes = Vec::new();
+    let mut workers = Vec::new();
+    for output in module.into_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                probes.push((name, probe));
+            }
+            bootstrap::DomainLifecycleOutput::Resource(_) => {}
+            bootstrap::DomainLifecycleOutput::Worker(worker) => workers.push(worker),
+        }
+    }
+    let module_workers = worker_names(workers);
 
     let mut registry = bootstrap::Registry::new();
     for name in [
@@ -257,7 +268,7 @@ fn runtime_module_harness_transcript() -> String {
     ] {
         register_probe(&mut registry, name);
     }
-    for (name, probe) in module.probes.drain(..) {
+    for (name, probe) in probes {
         let result = registry.probe(name, probe);
         assert!(result.is_ok(), "module probe drains");
     }
@@ -326,7 +337,7 @@ fn runtime_module_output_harness() -> DomainModuleResult {
         &["redis", "s3", "vault-secret-resolver", "vault-key-provider"],
         &[],
     ));
-    module.resources.extend([
+    module.extend_resources([
         harness_resource("rss_access_token_verifier"),
         harness_resource("federated_access_token_verifier"),
         harness_resource("service_token_verifier"),
@@ -348,45 +359,29 @@ fn runtime_module_output_harness() -> DomainModuleResult {
             event_transport::DLX_ARCHIVE_READINESS_WORKER_NAME,
         ],
     ));
-    module
-        .workers
-        .push(harness_worker("redis-readiness-sampler"));
+    module.push_worker(harness_worker("redis-readiness-sampler"));
     module
 }
 
 fn event_transport_harness_module() -> DomainModuleResult {
     let mut module = DomainModuleResult::default();
     for domain in ["identity", "settings"] {
-        module
-            .resources
-            .push(harness_resource_owned(format!("{domain}-pub")));
-        module
-            .resources
-            .push(harness_resource_owned(format!("{domain}-sub")));
+        module.push_resource(harness_resource_owned(format!("{domain}-pub")));
+        module.push_resource(harness_resource_owned(format!("{domain}-sub")));
     }
     for domain in ["identity", "settings"] {
-        module.probes.push(harness_probe_owned(format!(
+        module.push_probe(harness_probe_owned(format!(
             "{}_{domain}",
             eventexec::OUTBOX_RELAY_PROBE
         )));
-        module
-            .workers
-            .push(harness_worker_owned(format!("outbox-relay-{domain}")));
+        module.push_worker(harness_worker_owned(format!("outbox-relay-{domain}")));
     }
-    module
-        .probes
-        .push(harness_probe(eventexec::OUTBOX_SAMPLER_PROBE));
-    module.workers.push(harness_worker("outbox-sampler"));
-    module
-        .probes
-        .push(harness_probe(eventexec::OUTBOX_SWEEPER_PROBE));
-    module
-        .workers
-        .push(harness_worker(eventexec::SWEEPER_WORKER_NAME));
-    module
-        .probes
-        .push(harness_probe(eventexec::INBOX_SAMPLER_PROBE));
-    module.workers.push(harness_worker("inbox-backlog-sampler"));
+    module.push_probe(harness_probe(eventexec::OUTBOX_SAMPLER_PROBE));
+    module.push_worker(harness_worker("outbox-sampler"));
+    module.push_probe(harness_probe(eventexec::OUTBOX_SWEEPER_PROBE));
+    module.push_worker(harness_worker(eventexec::SWEEPER_WORKER_NAME));
+    module.push_probe(harness_probe(eventexec::INBOX_SAMPLER_PROBE));
+    module.push_worker(harness_worker("inbox-backlog-sampler"));
     for (topic, consumer, group) in [
         (
             "settings.config-version-changed",
@@ -398,21 +393,19 @@ fn event_transport_harness_module() -> DomainModuleResult {
         ("identity.role-revoked", "audit", "audit.role-revoked"),
         ("identity.policy-updated", "audit", "audit.policy-updated"),
     ] {
-        module.probes.push(harness_probe_owned(format!(
+        module.push_probe(harness_probe_owned(format!(
             "{}:{}__{}__{}",
             eventexec::EVENT_CONSUMER_PROBE,
             topic.replace('.', "_"),
             consumer.replace('.', "_"),
             group.replace('.', "_")
         )));
-        module.workers.push(harness_worker_owned(format!(
+        module.push_worker(harness_worker_owned(format!(
             "event-consumer:{consumer}:{topic}"
         )));
     }
-    module
-        .probes
-        .push(harness_probe(crate::event_transport::INBOX_SWEEPER_PROBE));
-    module.workers.push(harness_worker(
+    module.push_probe(harness_probe(crate::event_transport::INBOX_SWEEPER_PROBE));
+    module.push_worker(harness_worker(
         crate::event_transport::INBOX_SWEEPER_WORKER_NAME,
     ));
     module
@@ -423,11 +416,11 @@ fn harness_module(
     resources: &[&'static str],
     workers: &[&'static str],
 ) -> DomainModuleResult {
-    DomainModuleResult {
-        probes: probes.iter().copied().map(harness_probe).collect(),
-        resources: resources.iter().copied().map(harness_resource).collect(),
-        workers: workers.iter().copied().map(harness_worker).collect(),
-    }
+    DomainModuleResult::from_parts(
+        probes.iter().copied().map(harness_probe),
+        resources.iter().copied().map(harness_resource),
+        workers.iter().copied().map(harness_worker),
+    )
 }
 
 #[allow(clippy::expect_used)]
@@ -453,16 +446,20 @@ fn register_probe(registry: &mut bootstrap::Registry, name: &'static str) {
     registry.probe(name, probe).expect("direct probe registers");
 }
 
-fn probe_names(probes: &[(ProbeName, Box<dyn bootstrap::HealthProbe>)]) -> Vec<String> {
+fn probe_names<'a>(
+    probes: impl IntoIterator<Item = (&'a ProbeName, &'a Box<dyn bootstrap::HealthProbe>)>,
+) -> Vec<String> {
     probes
-        .iter()
+        .into_iter()
         .map(|(name, _)| name.as_str().to_owned())
         .collect()
 }
 
-fn resource_names(resources: &[Box<DynManagedResource<'static>>]) -> Vec<String> {
+fn resource_names<'a>(
+    resources: impl IntoIterator<Item = &'a Box<DynManagedResource<'static>>>,
+) -> Vec<String> {
     resources
-        .iter()
+        .into_iter()
         .map(|resource| resource.name().to_owned())
         .collect()
 }
@@ -1400,11 +1397,14 @@ fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
     );
     let result = sweeper_module_result(worker, health, AUTH_GRANT_SWEEPER_PROBE_NAME)
         .expect("auth-grant sweeper module result");
-    assert_eq!(result.probes.len(), 1);
-    assert_eq!(result.probes[0].0.as_str(), AUTH_GRANT_SWEEPER_PROBE_NAME);
-    assert!(result.resources.is_empty());
+    assert_eq!(result.probe_count(), 1);
     assert_eq!(
-        result.workers.len(),
+        result.probes().next().map(|(name, _)| name.as_str()),
+        Some(AUTH_GRANT_SWEEPER_PROBE_NAME)
+    );
+    assert!(result.resource_count() == 0);
+    assert_eq!(
+        result.worker_count(),
         1,
         "auth-grant sweeper must be registered as a managed worker"
     );
@@ -1414,17 +1414,27 @@ fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
 #[allow(clippy::expect_used)]
 async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
     let pg = ::postgres::PgRuntimeHandle::for_module_test();
-    let mut result = wire_revocation_sweeper(
+    let result = wire_revocation_sweeper(
         &pg,
         &primitives::prepare_dr_admission_controls().into_parts().3,
     )
     .expect("receipt-backed revocation sweeper module result");
-    assert_eq!(result.probes.len(), 1);
-    assert_eq!(result.probes[0].0.as_str(), REVOCATION_SWEEPER_PROBE_NAME);
-    assert!(result.resources.is_empty());
-    assert_eq!(result.workers.len(), 1);
+    assert_eq!(result.probe_count(), 1);
+    assert_eq!(
+        result.probes().next().map(|(name, _)| name.as_str()),
+        Some(REVOCATION_SWEEPER_PROBE_NAME)
+    );
+    assert!(result.resource_count() == 0);
+    assert_eq!(result.worker_count(), 1);
 
-    let worker = result.workers.pop().expect("one revocation worker");
+    let worker = result
+        .into_outputs()
+        .find_map(|output| match output {
+            bootstrap::DomainLifecycleOutput::Probe(_, _)
+            | bootstrap::DomainLifecycleOutput::Resource(_) => None,
+            bootstrap::DomainLifecycleOutput::Worker(worker) => Some(worker),
+        })
+        .expect("one revocation worker");
     let root = CancellationToken::new();
     let resource = match worker {
         bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
@@ -1499,38 +1509,42 @@ fn open_test_write_admission() -> primitives::WriteAdmission {
     let (control, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
     control
         .start_running()
-        .expect("sweeper fixture write admission starts running");
+        .unwrap_or_else(|error| unreachable!("sweeper fixture admission: {error}"));
     writes
 }
 
 async fn wait_for_sweeper_calls(calls: &AtomicUsize, expected: usize) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if calls.load(Ordering::SeqCst) >= expected {
-            return;
+    let reached = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if calls.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "sweeper loop did not reach expected call count: expected {expected}, observed {}",
-            calls.load(Ordering::SeqCst)
-        );
-        tokio::task::yield_now().await;
-    }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "sweeper loop did not reach expected call count: expected {expected}, observed {}",
+        calls.load(Ordering::SeqCst)
+    );
 }
 
 async fn wait_for_sweeper_health(health: &SweeperHealth, expected: (HealthStatus, &'static str)) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if health.status_detail() == expected {
-            return;
+    let reached = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if health.status_detail() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "sweeper loop did not reach expected health state: expected {expected:?}, observed {:?}",
-            health.status_detail()
-        );
-        tokio::task::yield_now().await;
-    }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "sweeper loop did not reach expected health state: expected {expected:?}, observed {:?}",
+        health.status_detail()
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1868,10 +1882,18 @@ fn domain_transport_runtime_exports_dispatch_resource_and_readyz() {
     let _dispatch = runtime.dispatch_handle();
     let module = runtime.module_result();
 
-    assert_eq!(module.resources.len(), 1);
-    assert_eq!(module.resources[0].name(), "domain-transport-inproc");
-    assert_eq!(module.probes.len(), 1);
-    let healthy = module.probes[0].1.check();
+    assert_eq!(module.resource_count(), 1);
+    assert_eq!(
+        module.resources().next().map(|resource| resource.name()),
+        Some("domain-transport-inproc")
+    );
+    assert_eq!(module.probe_count(), 1);
+    let healthy = module
+        .probes()
+        .next()
+        .unwrap_or_else(|| unreachable!())
+        .1
+        .check();
     assert_eq!(healthy.name().as_str(), DOMAIN_TRANSPORT_READY_PROBE_NAME);
     assert_eq!(healthy.status(), HealthStatus::Healthy);
     assert_eq!(healthy.detail(), "ready");
@@ -1885,10 +1907,20 @@ fn domain_transport_runtime_exports_dispatch_resource_and_readyz() {
         distributed::TransportMode::Remote,
     );
     let module = runtime.module_result();
-    let healthy = module.probes[0].1.check();
+    let healthy = module
+        .probes()
+        .next()
+        .unwrap_or_else(|| unreachable!())
+        .1
+        .check();
     assert_eq!(healthy.status(), HealthStatus::Healthy);
     ready.store(false, std::sync::atomic::Ordering::Release);
-    let unhealthy = module.probes[0].1.check();
+    let unhealthy = module
+        .probes()
+        .next()
+        .unwrap_or_else(|| unreachable!())
+        .1
+        .check();
     assert_eq!(unhealthy.status(), HealthStatus::Unhealthy);
     assert_eq!(unhealthy.detail(), "mtls-source-unavailable");
 }
@@ -1927,7 +1959,7 @@ fn rls_ready_registers_and_is_unique() {
 
 fn test_telemetry_resource() -> otel::TelemetryResource {
     otel::TelemetryResource::try_new("runtime", "assembly-fp", "plan-fp")
-        .expect("non-empty telemetry resource")
+        .unwrap_or_else(|error| unreachable!("non-empty telemetry resource: {error}"))
 }
 
 #[test]

@@ -795,7 +795,7 @@ enum AuthorizedDlqRequest {
     Resolve(OutboxExpiredResolutionRequest),
 }
 
-pub(super) struct DlqFinishAuditContext {
+pub(super) struct DlqMaintenanceAuditContext {
     operator_subject: String,
     tenant: rss_request_context::TenantId,
     start_audit_id: DlqOperatorStartAuditId,
@@ -803,9 +803,47 @@ pub(super) struct DlqFinishAuditContext {
     resource_id: String,
 }
 
+impl DlqMaintenanceAuditContext {
+    #[cfg(test)]
+    pub(super) fn for_test(
+        operator_subject: impl Into<String>,
+        tenant: rss_request_context::TenantId,
+        start_audit_id: DlqOperatorStartAuditId,
+        action: impl Into<String>,
+        resource_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            operator_subject: operator_subject.into(),
+            tenant,
+            start_audit_id,
+            action: action.into(),
+            resource_id: resource_id.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_parts(
+        &self,
+    ) -> (
+        &str,
+        rss_request_context::TenantId,
+        &DlqOperatorStartAuditId,
+        &str,
+        &str,
+    ) {
+        (
+            &self.operator_subject,
+            self.tenant,
+            &self.start_audit_id,
+            &self.action,
+            &self.resource_id,
+        )
+    }
+}
+
 pub(super) struct AuthorizedDlqCommand {
     request: AuthorizedDlqRequest,
-    finish_audit: DlqFinishAuditContext,
+    finish_audit: DlqMaintenanceAuditContext,
 }
 
 pub(super) struct AuthorizedDlqOperator {
@@ -975,8 +1013,8 @@ fn authorize_dlq_command(
 fn finish_audit_context<A: diport::DlqOperatorAction>(
     authorization: &DlqOperatorAuthorization<A>,
     resource_id: String,
-) -> DlqFinishAuditContext {
-    DlqFinishAuditContext {
+) -> DlqMaintenanceAuditContext {
+    DlqMaintenanceAuditContext {
         operator_subject: authorization.operator_subject().to_owned(),
         tenant: authorization.tenant(),
         start_audit_id: authorization.start_audit_id().clone(),
@@ -1071,30 +1109,18 @@ pub(super) trait DlqControlRuntime {
     async fn record_dlq_maintenance_audit(
         &self,
         session: &Self::Session,
-        operator_subject: &str,
-        tenant: rss_request_context::TenantId,
-        start_audit_id: &DlqOperatorStartAuditId,
-        action: &str,
+        context: &DlqMaintenanceAuditContext,
         outcome: MaintenanceAuditOutcome<'_>,
-        resource_id: &str,
     ) -> anyhow::Result<()>;
 
     async fn record_dlq_finish_audit(
         &self,
         session: &Self::Session,
-        context: &DlqFinishAuditContext,
+        context: &DlqMaintenanceAuditContext,
         outcome: MaintenanceAuditOutcome<'_>,
     ) -> anyhow::Result<()> {
-        self.record_dlq_maintenance_audit(
-            session,
-            &context.operator_subject,
-            context.tenant,
-            &context.start_audit_id,
-            &context.action,
-            outcome,
-            &context.resource_id,
-        )
-        .await
+        self.record_dlq_maintenance_audit(session, context, outcome)
+            .await
     }
 
     async fn authorized_operator(
@@ -1133,21 +1159,17 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
     async fn record_dlq_maintenance_audit(
         &self,
         session: &Self::Session,
-        operator_subject: &str,
-        tenant: rss_request_context::TenantId,
-        start_audit_id: &DlqOperatorStartAuditId,
-        action: &str,
+        context: &DlqMaintenanceAuditContext,
         outcome: MaintenanceAuditOutcome<'_>,
-        resource_id: &str,
     ) -> anyhow::Result<()> {
         session
             .record_dlq_maintenance_audit(
-                operator_subject,
-                tenant,
-                start_audit_id,
-                action,
+                &context.operator_subject,
+                context.tenant,
+                &context.start_audit_id,
+                &context.action,
                 outcome,
-                resource_id,
+                &context.resource_id,
             )
             .await
             .context("record DLQ maintenance audit")
@@ -1231,16 +1253,15 @@ where
             .context("build DLQ operator start audit id")?;
     let session = runtime.connect_maintenance().await?;
     let start_action = format!("dlq.{}.start", parsed.command.action().as_str());
+    let start_audit = DlqMaintenanceAuditContext {
+        operator_subject: UNAUTHENTICATED_DLQ_ATTEMPT.to_owned(),
+        tenant,
+        start_audit_id: start_audit_id.clone(),
+        action: start_action,
+        resource_id: resource_id.clone(),
+    };
     if let Err(err) = runtime
-        .record_dlq_maintenance_audit(
-            &session,
-            UNAUTHENTICATED_DLQ_ATTEMPT,
-            tenant,
-            &start_audit_id,
-            &start_action,
-            MaintenanceAuditOutcome::Success,
-            &resource_id,
-        )
+        .record_dlq_maintenance_audit(&session, &start_audit, MaintenanceAuditOutcome::Success)
         .await
         .context("record DLQ maintenance start audit")
     {

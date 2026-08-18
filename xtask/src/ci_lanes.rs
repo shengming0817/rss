@@ -477,10 +477,10 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            RuntimeBaseline => (step_runtime_baseline, Some("xtask/src/runtime_baseline.rs"),
+            RuntimeAssemblyResidual => (step_runtime_assembly_residual, Some("xtask/src/runtime_assembly_residual.rs"),
                 gate(
-                        GateId::RuntimeBaseline,
-                        "runtime-baseline",
+                        GateId::RuntimeAssemblyResidual,
+                        "runtime-assembly-residual",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -976,7 +976,7 @@ impl GateId {
             }
             Self::CommandSymmetry => Policy::OnImpact(Domain::CommandSymmetry),
 
-            Self::RuntimeBaseline
+            Self::RuntimeAssemblyResidual
             | Self::L2AssuranceCheck
             | Self::ArchRules
             | Self::ProviderCapabilitiesCheck
@@ -1510,7 +1510,7 @@ mod tests {
         assert_eq!(
             full_only,
             BTreeSet::from([
-                "runtime-baseline",
+                "runtime-assembly-residual",
                 "l2-assurance-check",
                 "archrules",
                 "provider-capabilities-check",

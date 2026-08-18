@@ -241,15 +241,19 @@ impl<'a> InfraBuilt<'a> {
                     )
                     .context("bridge generated event subscriptions")?;
                 let event_module = crate::event_transport::wire_event_transport(
-                    &deps.pg,
-                    distributed,
-                    event_subscribers,
-                    event_transport,
-                    event_worker.context("active local event execution lacks worker config")?,
-                    audit_consumer_key,
-                    relay_admission.clone(),
-                    consumer_admission.clone(),
-                    write_admission.clone(),
+                    crate::event_transport::EventTransportWiring::new(
+                        &deps.pg,
+                        distributed,
+                        event_subscribers,
+                        event_transport,
+                        event_worker.context("active local event execution lacks worker config")?,
+                        audit_consumer_key,
+                        crate::event_transport::EventAdmissions::new(
+                            relay_admission.clone(),
+                            consumer_admission.clone(),
+                            write_admission.clone(),
+                        ),
+                    ),
                 )
                 .await
                 .context("wire event transport")?;

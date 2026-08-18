@@ -939,24 +939,29 @@ mod tests {
         .expect("federated access provider");
 
         let single = build_rss_listener_pdp_jwks_lifecycle(&rss).into_output();
-        assert_eq!(single.probes.len(), 1);
-        assert_eq!(single.resources.len(), 1);
-        assert!(single.workers.is_empty());
+        assert_eq!(single.probe_count(), 1);
+        assert_eq!(single.resource_count(), 1);
+        assert!(single.worker_count() == 0);
         assert_eq!(
-            single.probes[0].0.as_str(),
+            single
+                .probes()
+                .next()
+                .map(|(name, _)| name.as_str())
+                .unwrap_or_else(|| unreachable!("single lifecycle probe")),
             RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME
         );
 
         let lifecycle = build_rss_listener_pdp_jwks_lifecycle(&rss)
             .merge(build_federated_listener_pdp_jwks_lifecycle(&federated));
         let module = lifecycle.into_output();
-        assert_eq!(module.probes.len(), 2);
-        assert_eq!(module.resources.len(), 2);
-        assert!(module.workers.is_empty());
-        let rss_check = module.probes[0].1.check();
-        let federated_check = module.probes[1].1.check();
-        assert_eq!(&module.probes[0].0, rss_check.name());
-        assert_eq!(&module.probes[1].0, federated_check.name());
+        assert_eq!(module.probe_count(), 2);
+        assert_eq!(module.resource_count(), 2);
+        assert!(module.worker_count() == 0);
+        let probes = module.probes().collect::<Vec<_>>();
+        let rss_check = probes[0].1.check();
+        let federated_check = probes[1].1.check();
+        assert_eq!(probes[0].0, rss_check.name());
+        assert_eq!(probes[1].0, federated_check.name());
         assert_eq!(
             rss_check.name().as_str(),
             RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME
@@ -967,14 +972,18 @@ mod tests {
         );
         assert_eq!(rss_check.status(), HealthStatus::Healthy);
         assert_eq!(federated_check.status(), HealthStatus::Healthy);
-        assert_eq!(module.resources[0].name(), RSS_ACCESS_TOKEN_RESOURCE_NAME);
-        assert_eq!(
-            module.resources[1].name(),
-            FEDERATED_ACCESS_TOKEN_RESOURCE_NAME
-        );
+        let resources = module.resources().collect::<Vec<_>>();
+        assert_eq!(resources[0].name(), RSS_ACCESS_TOKEN_RESOURCE_NAME);
+        assert_eq!(resources[1].name(), FEDERATED_ACCESS_TOKEN_RESOURCE_NAME);
 
-        for resource in module.resources {
-            resource.shutdown().await.expect("shutdown access provider");
+        for output in module.into_outputs() {
+            match output {
+                bootstrap::DomainLifecycleOutput::Probe(_, _)
+                | bootstrap::DomainLifecycleOutput::Worker(_) => {}
+                bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                    resource.shutdown().await.expect("shutdown access provider");
+                }
+            }
         }
     }
 

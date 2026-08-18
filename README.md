@@ -120,7 +120,7 @@ cargo xtask assembly generate-modules --check          # domain modules 生成�
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
 cargo xtask assembly generate-runtime-plans --check    # manifest + lock 派生 RuntimePlan 漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
-cargo xtask runtime-baseline verify                    # 静态 inventory、merge coverage 与跨文件 escape guards
+cargo xtask verify --only runtime-assembly-residual         # runtime 跨文件 escape residuals（FullOnly）
 cargo xtask runtime-root guard                         # runtime root 纯声明 façade 守卫
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门

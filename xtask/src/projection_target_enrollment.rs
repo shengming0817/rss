@@ -1,11 +1,11 @@
 //! Projection target production enrollment guard (#1917).
 //!
-//! The structured invariant record lives beside the `runtime-baseline` gate owner; this module is
+//! The structured invariant record lives beside the `runtime-assembly-residual` gate owner; this module is
 //! its internal AST implementation.
 
 use crate::diagnostic::{Finding, finding};
 use crate::localtx_coverage::attrs_may_be_production;
-use crate::runtime_baseline::Rule;
+use crate::runtime_assembly_residual::Rule;
 use anyhow::{Context, Result};
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -62,7 +62,7 @@ pub(crate) fn findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let models_eventexec = packages
         .iter()
         .any(|package| package.relative == Path::new("crates/eventexec"));
-    // Generic runtime-baseline fixtures intentionally model only the assembly anchors. Dedicated
+    // Generic runtime-assembly-residual fixtures intentionally model only the assembly anchors. Dedicated
     // projection fixtures and the real workspace include eventexec and therefore fail closed.
     if !models_eventexec {
         return Ok(Vec::new());

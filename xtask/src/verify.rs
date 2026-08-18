@@ -42,11 +42,9 @@
 //! INVARIANT: CI-RESULT-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_ci_workflow_guard_rejects_structural_weakening", anti_vacuity = "committed_fixed_ci_workflow_is_closed" }—— external GitHub job results are aggregated by two checkout-free, Cargo-free exact result gates; every non-success state fails closed.
 
 #[cfg(test)]
-use crate::ci_lanes::CompileKind;
+use crate::ci_lanes::{CompileKind, REGISTRY};
 use crate::ci_lanes::{EvidenceKind, FixedCiInvocation, FixedCiJob};
-use crate::ci_lanes::{
-    GateExecutor, GateGroup, GateId, LocalMetaPolicy, REGISTRY, ToolRequirement,
-};
+use crate::ci_lanes::{GateExecutor, GateGroup, GateId, LocalMetaPolicy, ToolRequirement};
 use crate::diagnostic::run_check;
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 use crate::integration_shards::{
@@ -56,8 +54,9 @@ use crate::integration_shards::{
 use crate::workspace_root;
 use crate::{
     archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
-    contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard, runtime_baseline,
-    runtime_deps_guard, runtime_env_guard, runtime_root_guard, shipped_feature_guard, wsdeps,
+    contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
+    runtime_assembly_residual, runtime_deps_guard, runtime_env_guard, runtime_root_guard,
+    shipped_feature_guard, wsdeps,
 };
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -154,8 +153,8 @@ enum InternalCheck {
     InboxCutoverGuard,
     /// DLX verified WORM archive-before-purge 单漏斗守卫（DLX-LIFECYCLE-FUNNEL-01）。
     DlxLifecycleFunnel,
-    /// runtime assembly baseline 漂移门（RUNTIME-BASELINE-DRIFT-01）。
-    RuntimeBaseline,
+    /// runtime assembly 跨文件 residual 门。
+    RuntimeAssemblyResidual,
     /// runtime composition-root 纯声明 façade（RUNTIME-ROOT-DECLARATIVE-01）。
     RuntimeRootGuard,
     /// runtime production ambient environment reader closure（RUNTIME-ENV-FUNNEL-01）。
@@ -430,11 +429,11 @@ fn step_dlx_lifecycle_funnel() -> Step {
         env: &[],
     }
 }
-fn step_runtime_baseline() -> Step {
+fn step_runtime_assembly_residual() -> Step {
     Step {
-        id: GateId::RuntimeBaseline,
+        id: GateId::RuntimeAssemblyResidual,
         args: &[],
-        kind: StepKind::Internal(InternalCheck::RuntimeBaseline),
+        kind: StepKind::Internal(InternalCheck::RuntimeAssemblyResidual),
         env: &[],
     }
 }
@@ -1677,7 +1676,9 @@ fn run_internal(
         InternalCheck::DlxLifecycleFunnel => {
             run_check(&crate::dlx_lifecycle_funnel::DlxLifecycleFunnel)
         }
-        InternalCheck::RuntimeBaseline => run_check(&runtime_baseline::RuntimeBaseline),
+        InternalCheck::RuntimeAssemblyResidual => {
+            run_check(&runtime_assembly_residual::RuntimeAssemblyResidual)
+        }
         InternalCheck::RuntimeRootGuard => run_check(&runtime_root_guard::RuntimeRootGuard),
         InternalCheck::RuntimeEnvGuard => run_check(&runtime_env_guard::RuntimeEnvGuard),
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
@@ -1913,17 +1914,22 @@ fn select_verify_plan(plan: Vec<Step>, only: &[String]) -> Result<Vec<Step>> {
         return Ok(plan);
     }
     for label in only {
-        if !REGISTRY.iter().any(|spec| spec.label() == label) {
-            bail!("verify --only 未知 gate: {label}");
-        }
         if !plan.iter().any(|step| step.label() == label) {
-            bail!("verify --only gate 不属于当前计划: {label}");
+            bail!("verify --only 未知或不属于当前计划的 gate: {label}");
         }
     }
     Ok(plan
         .into_iter()
         .filter(|step| only.iter().any(|label| label == step.label()))
         .collect())
+}
+
+fn listed_verify_labels(plan: &[Step]) -> Vec<&'static str> {
+    let mut seen = std::collections::BTreeSet::new();
+    plan.iter()
+        .map(Step::label)
+        .filter(|label| seen.insert(*label))
+        .collect()
 }
 
 /// Execute the selected local meta gates inside the already provenance-checked snapshot worker.
@@ -1956,6 +1962,7 @@ pub(crate) fn run_local_meta(
 
 /// verify 入口：按 registry 顺序执行所选 plan；默认 keep-going，显式 `--fail-fast` 首错停止。
 pub(crate) fn run(
+    list_gates: bool,
     fast: bool,
     allow_missing_tools: bool,
     contract_against: Option<&str>,
@@ -1975,6 +1982,12 @@ pub(crate) fn run(
         public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
+    if list_gates {
+        for label in listed_verify_labels(&verify_plan(&opts)) {
+            println!("{label}");
+        }
+        return Ok(());
+    }
     let root = workspace_root()?;
     let plan = select_verify_plan(verify_plan(&opts), only)?;
     let mode = if fast { "fast" } else { "full" };
@@ -2889,6 +2902,21 @@ mod tests {
     }
 
     #[test]
+    fn listed_verify_labels_are_unique_and_each_is_selectable() -> anyhow::Result<()> {
+        let plan = verify_plan(&opts(false, false));
+        let listed = listed_verify_labels(&plan);
+        let unique = listed
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(listed.len(), unique.len());
+        for label in listed {
+            select_verify_plan(plan.clone(), &[label.to_owned()])?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn partial_non_nextest_plan_skips_unrelated_nextest_validation() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let fmt_only = select_verify_plan(verify_plan(&opts(false, false)), &["fmt".to_owned()])?;
@@ -3421,7 +3449,7 @@ mod tests {
                 StepKind::Internal(InternalCheck::RuntimeRootGuard)
             )
             && index.checked_sub(1).is_some_and(|before| {
-                plan[before].id == GateId::RuntimeBaseline
+                plan[before].id == GateId::RuntimeAssemblyResidual
                     && plan
                         .get(index + 1)
                         .is_some_and(|after| after.id == GateId::RuntimeEnvGuard)
@@ -3458,7 +3486,7 @@ mod tests {
             .iter_mut()
             .find(|step| step.id == GateId::RuntimeRootGuard)
             .context("committed verify plan lacks runtime-root-guard")?
-            .kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
+            .kind = StepKind::Internal(InternalCheck::RuntimeAssemblyResidual);
         assert!(!runtime_root_guard_membership_is_exact(&wrong_executor));
         Ok(())
     }
@@ -3493,7 +3521,7 @@ mod tests {
             .iter_mut()
             .find(|step| step.id == GateId::RuntimeEnvGuard)
             .context("committed verify plan lacks runtime-env-guard")?
-            .kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
+            .kind = StepKind::Internal(InternalCheck::RuntimeAssemblyResidual);
         assert!(!runtime_env_guard_membership_is_exact(&wrong_executor));
         Ok(())
     }
@@ -4263,8 +4291,8 @@ mod tests {
             let labels = labels(&plan);
             let baseline_pos = labels
                 .iter()
-                .position(|label| *label == "runtime-baseline")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-baseline 步"))?;
+                .position(|label| *label == "runtime-assembly-residual")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-assembly-residual 步"))?;
             let guard_pos = labels
                 .iter()
                 .position(|label| *label == "runtime-deps-guard")
@@ -4275,7 +4303,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
             assert!(
                 baseline_pos < guard_pos && guard_pos < archrules_pos,
-                "runtime-deps-guard 必须位于 runtime-baseline 之后、archrules 之前，确保 archrules 能索引 guard carrier"
+                "runtime-deps-guard 必须位于 runtime-assembly-residual 之后、archrules 之前，确保 archrules 能索引 guard carrier"
             );
             let step = &plan[guard_pos];
             assert!(

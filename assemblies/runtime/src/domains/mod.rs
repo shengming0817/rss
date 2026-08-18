@@ -55,8 +55,8 @@ mod tests {
 
         let (_, output) = compose_bindings(&mut bindings).expect("domain modules compose");
         assert!(bindings.is_empty());
-        assert!(output.probes.is_empty());
-        assert!(output.resources.is_empty());
-        assert!(output.workers.is_empty());
+        assert!(output.probe_count() == 0);
+        assert!(output.resource_count() == 0);
+        assert!(output.worker_count() == 0);
     }
 }

@@ -1508,8 +1508,9 @@ impl WorkerRuntimeConfig {
         settings_composition::KeyProviderReadinessInterval,
     ) {
         (
-            self.event
-                .expect("test WorkerRuntimeConfig always activates event execution"),
+            self.event.unwrap_or_else(|| {
+                unreachable!("test WorkerRuntimeConfig always activates event execution")
+            }),
             self.auth_grant_sweep_interval,
             self.keyprovider_readiness_interval,
         )

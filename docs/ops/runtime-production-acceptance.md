@@ -87,7 +87,7 @@ recovery behavior is a release limitation, not implicit evidence.
 ./hack/cargo.sh xtask assembly generate-modules --check
 ./hack/cargo.sh xtask assembly generate-providers --check
 ./hack/cargo.sh xtask assembly lock check
-./hack/cargo.sh xtask runtime-baseline verify
+./hack/cargo.sh xtask verify --only runtime-assembly-residual
 ./hack/cargo.sh test -p journeys --test production_runtime
 ./hack/cargo.sh test -p journeys --features integration --test two_replica_runtime -- --test-threads=1
 RSS_SMOKE_MODE=release ./deploy/smoke.sh

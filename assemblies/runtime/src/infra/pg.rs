@@ -524,26 +524,44 @@ const MAX_READINESS_INTERVAL_SECS: u64 = 300;
 ///
 /// 间隔是探针新鲜度 hint 非强依赖，故显式误配 fail-soft（warn+默认）而非 fail-fast。
 fn pg_readiness_interval_from_value(raw: Option<&str>) -> postgres::PgReadinessInterval {
-    match raw {
-        None => postgres::PgReadinessInterval::try_new(DEFAULT_READINESS_INTERVAL)
-            .expect("default postgres readiness interval is valid"),
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(n) if (1..=MAX_READINESS_INTERVAL_SECS).contains(&n) => {
-                postgres::PgReadinessInterval::try_new(Duration::from_secs(n))
-                    .expect("validated postgres readiness interval")
-            }
-            _ => {
-                tracing::warn!(
-                    env = PG_READINESS_INTERVAL_ENV,
-                    raw = %raw,
-                    max_secs = MAX_READINESS_INTERVAL_SECS,
-                    "invalid readiness sample interval (need 1..=300s); using default 5s"
-                );
-                postgres::PgReadinessInterval::try_new(DEFAULT_READINESS_INTERVAL)
-                    .expect("default postgres readiness interval is valid")
-            }
-        },
+    let Some(raw) = raw else {
+        return default_pg_readiness_interval();
+    };
+    let Ok(seconds) = raw.parse::<u64>() else {
+        warn_invalid_pg_readiness_interval(raw);
+        return default_pg_readiness_interval();
+    };
+    if !(1..=MAX_READINESS_INTERVAL_SECS).contains(&seconds) {
+        warn_invalid_pg_readiness_interval(raw);
+        return default_pg_readiness_interval();
     }
+    match postgres::PgReadinessInterval::try_new(Duration::from_secs(seconds)) {
+        Ok(interval) => interval,
+        Err(error) => {
+            tracing::warn!(
+                env = PG_READINESS_INTERVAL_ENV,
+                raw = %raw,
+                error = %error,
+                "readiness interval rejected by provider; using typed default"
+            );
+            default_pg_readiness_interval()
+        }
+    }
+}
+
+fn default_pg_readiness_interval() -> postgres::PgReadinessInterval {
+    let interval = postgres::PgReadinessInterval::default();
+    debug_assert_eq!(interval.get(), DEFAULT_READINESS_INTERVAL);
+    interval
+}
+
+fn warn_invalid_pg_readiness_interval(raw: &str) {
+    tracing::warn!(
+        env = PG_READINESS_INTERVAL_ENV,
+        raw = %raw,
+        max_secs = MAX_READINESS_INTERVAL_SECS,
+        "invalid readiness sample interval (need 1..=300s); using default 5s"
+    );
 }
 
 fn pg_rls_attestation_interval_from_value(
@@ -1662,7 +1680,7 @@ mod tests {
     fn rls_attestation_interval_defaults_and_accepts_boundaries() {
         assert_eq!(
             pg_rls_attestation_interval_from_value(None)
-                .expect("default")
+                .unwrap_or_else(|error| unreachable!("default interval: {error}"))
                 .get(),
             Duration::from_secs(60)
         );
@@ -1675,7 +1693,8 @@ mod tests {
     fn rls_attestation_interval_is_fail_fast_when_explicitly_invalid() {
         for raw in ["0", "9", "301", "not-a-number"] {
             let error = pg_rls_attestation_interval_from_value(Some(raw))
-                .expect_err("invalid RLS interval must fail closed");
+                .err()
+                .unwrap_or_else(|| unreachable!("invalid RLS interval must fail closed for {raw}"));
             assert!(
                 error.to_string().contains(PG_RLS_ATTESTATION_INTERVAL_ENV),
                 "{error:#}"

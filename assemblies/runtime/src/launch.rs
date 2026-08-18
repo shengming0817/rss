@@ -679,7 +679,10 @@ mod tests {
         runtimeexec::LaunchLifecycleBatches::new(
             runtimeexec::ProviderLifecycleBatch::from_provider_output(provider),
             runtimeexec::DomainLifecycleBatch::from_domain_output(domain),
-            Some(bootstrap::ExpectedWorkerInventory::closed([]).expect("empty inventory")),
+            Some(
+                bootstrap::ExpectedWorkerInventory::closed([])
+                    .unwrap_or_else(|error| unreachable!("empty inventory: {error}")),
+            ),
         )
     }
 
@@ -1052,14 +1055,16 @@ mod tests {
             },
             Some(counting_resource("trace", &trace_shutdowns)),
             lifecycle_batches(
-                bootstrap::DomainModuleResult {
-                    resources: vec![counting_resource("provider", &provider_shutdowns)],
-                    ..bootstrap::DomainModuleResult::default()
-                },
-                bootstrap::DomainModuleResult {
-                    resources: vec![counting_resource("domain", &domain_shutdowns)],
-                    ..bootstrap::DomainModuleResult::default()
-                },
+                bootstrap::DomainModuleResult::from_parts(
+                    [],
+                    [counting_resource("provider", &provider_shutdowns)],
+                    [],
+                ),
+                bootstrap::DomainModuleResult::from_parts(
+                    [],
+                    [counting_resource("domain", &domain_shutdowns)],
+                    [],
+                ),
             ),
             total_drain_budget().expect("valid runtime drain budget"),
         );
@@ -1126,14 +1131,16 @@ mod tests {
             },
             Some(counting_resource("trace", &trace_shutdowns)),
             lifecycle_batches(
-                bootstrap::DomainModuleResult {
-                    resources: vec![counting_resource("provider", &provider_shutdowns)],
-                    ..bootstrap::DomainModuleResult::default()
-                },
-                bootstrap::DomainModuleResult {
-                    resources: vec![counting_resource("domain", &domain_shutdowns)],
-                    ..bootstrap::DomainModuleResult::default()
-                },
+                bootstrap::DomainModuleResult::from_parts(
+                    [],
+                    [counting_resource("provider", &provider_shutdowns)],
+                    [],
+                ),
+                bootstrap::DomainModuleResult::from_parts(
+                    [],
+                    [counting_resource("domain", &domain_shutdowns)],
+                    [],
+                ),
             ),
             total_drain_budget().expect("valid runtime drain budget"),
         );

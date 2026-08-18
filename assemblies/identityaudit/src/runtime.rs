@@ -234,11 +234,21 @@ fn register_probes(
     registry: &mut bootstrap::Registry,
     output: &mut bootstrap::DomainModuleResult,
 ) -> anyhow::Result<()> {
-    for (name, probe) in output.probes.drain(..) {
-        registry
-            .probe(name, probe)
-            .context("register identityaudit lifecycle probe")?;
+    let mut retained = bootstrap::DomainModuleResult::default();
+    for lifecycle in output.drain_outputs() {
+        match lifecycle {
+            bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                registry
+                    .probe(name, probe)
+                    .context("register identityaudit lifecycle probe")?;
+            }
+            bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                retained.push_resource(resource);
+            }
+            bootstrap::DomainLifecycleOutput::Worker(worker) => retained.push_worker(worker),
+        }
     }
+    *output = retained;
     Ok(())
 }
 
@@ -344,17 +354,16 @@ mod tests {
                 healthy: Arc::clone(&healthy),
             }) as Box<dyn bootstrap::HealthProbe>
         };
-        let mut output = bootstrap::DomainModuleResult {
-            probes: vec![(name.clone(), probe())],
-            ..Default::default()
-        };
+        let mut output =
+            bootstrap::DomainModuleResult::from_parts([(name.clone(), probe())], [], []);
         register_probes(&mut registry, &mut output)?;
-        assert!(output.probes.is_empty());
+        assert!(output.probe_count() == 0);
 
-        let mut duplicate = bootstrap::DomainModuleResult {
-            probes: vec![(name.clone(), probe()), (name.clone(), probe())],
-            ..Default::default()
-        };
+        let mut duplicate = bootstrap::DomainModuleResult::from_parts(
+            [(name.clone(), probe()), (name.clone(), probe())],
+            [],
+            [],
+        );
         assert!(register_probes(&mut registry, &mut duplicate).is_err());
         Ok(())
     }

@@ -836,7 +836,7 @@ mod tests {
         for invalid in cases {
             let mut stdin = Cursor::new(b"secret-must-remain-unread");
             let Err(err) = prepare_device_latent_command_with_stdin(&invalid, &mut stdin) else {
-                panic!("argv must fail closed for {invalid:?}");
+                unreachable!("argv must fail closed for {invalid:?}");
             };
             assert_operator_cli_err(&err, FAMILY);
             assert_eq!(stdin.position(), 0, "stdin consumed for argv {invalid:?}");
@@ -845,7 +845,7 @@ mod tests {
         let unknown = args(&["device-latent", "resume"]);
         let mut stdin = Cursor::new(b"secret-must-remain-unread");
         let Err(err) = prepare_device_latent_command_with_stdin(&unknown, &mut stdin) else {
-            panic!("unknown subcommand must fail closed");
+            unreachable!("unknown subcommand must fail closed");
         };
         assert_eq!(
             err.to_string(),
@@ -1003,7 +1003,10 @@ mod tests {
         let ok = Ok("payload".to_owned());
         let (outcome, result) = resolve_finish_audit_outcome(&ok, true);
         assert_eq!(outcome, DeviceLatentInspectionAuditOutcome::Success);
-        assert_eq!(result.unwrap(), "payload");
+        assert_eq!(
+            result.unwrap_or_else(|error| unreachable!("success payload: {error}")),
+            "payload"
+        );
 
         let (outcome, result) = resolve_finish_audit_outcome(&ok, false);
         assert_eq!(outcome, DeviceLatentInspectionAuditOutcome::Shutdown);
@@ -1172,7 +1175,8 @@ mod tests {
     async fn run_fake(
         runtime: &FakeDeviceLatentInspectionRuntime,
     ) -> Result<(), DeviceLatentInspectionError> {
-        let parsed = execute(&inspect_args(None)).expect("fixture argv");
+        let parsed = execute(&inspect_args(None))
+            .unwrap_or_else(|error| unreachable!("fixture argv: {error}"));
         super::run_device_latent_inspection_command_with_runtime(parsed, runtime).await
     }
 

@@ -48,8 +48,8 @@ pub fn wire_saga_worker(
             write_admission,
             move |token, _write_admission| factory.spawn(token, worker_health, worker_admission),
         );
-        module.workers.push(worker);
-        module.probes.push((
+        module.push_worker(worker);
+        module.push_probe((
             probe_name.clone(),
             Box::new(WorkerHealthProbe::new(probe_name, health)),
         ));
@@ -78,7 +78,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(active_count, 0);
-        assert!(module.probes.is_empty());
-        assert!(module.workers.is_empty());
+        assert!(module.probe_count() == 0);
+        assert!(module.worker_count() == 0);
     }
 }

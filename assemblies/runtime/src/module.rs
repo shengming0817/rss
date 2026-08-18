@@ -76,7 +76,7 @@ pub struct SharedRuntimeDeps {
 
     /// 共享 outbound domain transport dispatch seam。组合根构造真实 provider 并注入 typed trait
     /// object，后续域/运行时消费者只能经 `distributed::HttpContractTransport` 发起跨域同步调用；底层 HTTP
-    /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult.resources` 托管。
+    /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult` 的 resource 输出托管。
     pub domain_transport: Arc<dyn distributed::HttpContractTransport>,
 }
 

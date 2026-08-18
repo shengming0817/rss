@@ -1,9 +1,8 @@
-//! Runtime assembly static baseline and cross-file escape gates.
+//! Runtime assembly cross-file residual gates.
 //!
 //! Typed and behavioral facts live beside their canonical owners. This module owns only static
-//! inventory drift and risks that Rust visibility/ownership cannot close across production files.
+//! risks that Rust visibility/ownership cannot close across production files.
 //!
-//! INVARIANT: RUNTIME-BASELINE-DRIFT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_baseline_drift_checker_rejects_closed_mutations", anti_vacuity = "tests::runtime_baseline_drift_checker_accepts_workspace" } -- verify compares the generated v2 static inventory with the committed file; update publishes only a complete finding-free report through the repository atomic replace primitive.
 //! INVARIANT: RUNTIME-CONFIG-ESCAPE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_reject_each_cross_file_bypass", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- reachable production consumers cannot open ambient environment readers or introduce demo/no-op/in-memory configuration fallbacks outside the closed config and purpose-bound maintenance grants.
 //! INVARIANT: RUNTIME-SECRET-TRANSFER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_track_secret_bindings_into_diagnostics", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- raw secret extraction/transfer is restricted to purpose-bound extraction sites and typed sinks; bindings, destructuring, helpers, assertions, macros, diagnostics, and parallel handoffs cannot leak it.
 //! INVARIANT: RUNTIME-PROVIDER-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::provider_protocol_rejects_missing_duplicate_and_wrong_owner_edges", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- production code cannot construct raw/legacy providers or bypass the unique from-plan, event-output receipt, and completed-owner handoff.
@@ -14,10 +13,8 @@
 //! INVARIANT: AUDIT-SECURITY-FACT-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::audit_security_fact_boundary_rejects_identity_table_reads", anti_vacuity = "tests::audit_security_fact_boundary_accepts_live_workspace" } -- the audit consumer decodes the sealed redacted fact and the entire production PostgreSQL adapter graph never references the identity credential mapping relation.
 //! INVARIANT: PROJECTION-TARGET-ENROLLMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "projection_target_enrollment::tests::production_store_requires_canonical_enrollment", anti_vacuity = "projection_target_enrollment::tests::workspace_projection_target_guard_is_green" } -- projection enrollment remains owned by its independent module and is aggregated by this gate.
 
-use crate::assembly_governance::{AssemblyGovernanceIr, Core, ProductionAssembly};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
-use crate::phase_helper_expand::mask_comments_and_strings;
 use crate::phase_helper_expand::transparent_expr;
 use crate::workspace_root;
 use anyhow::{Context, Result};
@@ -27,10 +24,6 @@ use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-const BASELINE_PATH: &str = "runtime-baseline/runtime.txt";
-const RUNTIME_CARGO_PATH: &str = "assemblies/runtime/Cargo.toml";
-const SHARED_RUNTIME_DEPS_PATH: &str = "assemblies/runtime/src/module.rs";
-const BOOTSTRAP_MODULE_PATH: &str = "crates/bootstrap/src/module.rs";
 const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
 const RSS_MAIN_PATH: &str = "bins/rss/src/main.rs";
 const POSTGRES_BUNDLE_PATH: &str = "adapters/postgres/src/bundle.rs";
@@ -40,153 +33,28 @@ const POSTGRES_CONSUMER_TX_PATH: &str = "adapters/postgres/src/consumer_tx.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
-    MissingBaseline,
-    Drift,
-    EmptyDependencies,
     MissingStructuralEvidence,
     ForbiddenWiring,
 }
 
-pub(crate) struct RuntimeBaseline;
+pub(crate) struct RuntimeAssemblyResidual;
 
-impl GovernanceCheck for RuntimeBaseline {
+impl GovernanceCheck for RuntimeAssemblyResidual {
     type Rule = Rule;
     fn name(&self) -> &'static str {
-        "runtime-baseline"
+        "runtime-assembly-residual"
     }
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
         check_root(&workspace_root()?)
     }
 }
 
-pub(crate) fn update() -> Result<()> {
-    update_root(&workspace_root()?)
-}
-
-fn update_root(root: &Path) -> Result<()> {
-    publish_report(root, collect_report(root)?)
-}
-
-fn publish_report(root: &Path, report: Report) -> Result<()> {
-    if !report.findings.is_empty() {
-        crate::diagnostic::print_findings(&report.findings);
-        anyhow::bail!(
-            "runtime-baseline: 拒绝发布含 {} 项诊断的 baseline",
-            report.findings.len()
-        );
-    }
-    let target = root.join(BASELINE_PATH);
-    crate::generated_file::atomic_replace(&target, report.rendered.as_bytes())?;
-    eprintln!("runtime-baseline: 原子更新 {}", target.display());
-    Ok(())
-}
-
 fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
-    let report = collect_report(root)?;
-    let mut findings = report.findings;
-    findings.extend(baseline_drift_findings(root, &report.rendered)?);
-    Ok((
-        format!(
-            "{} deps, {} shared fields, {} result fields",
-            report.dependencies, report.shared_fields, report.domain_fields
-        ),
-        findings,
-    ))
-}
-
-fn baseline_drift_findings(root: &Path, rendered: &str) -> Result<Vec<Finding<Rule>>> {
-    let baseline = root.join(BASELINE_PATH);
-    if !baseline.exists() {
-        return Ok(vec![finding(
-            Rule::MissingBaseline,
-            BASELINE_PATH,
-            "缺 committed baseline；运行 `cargo xtask runtime-baseline update`",
-        )]);
-    }
-    let expected =
-        fs::read_to_string(&baseline).with_context(|| format!("读 {} 失败", baseline.display()))?;
-    if normalize_newlines(&expected) == normalize_newlines(rendered) {
-        Ok(Vec::new())
-    } else {
-        Ok(vec![finding(
-            Rule::Drift,
-            BASELINE_PATH,
-            "runtime assembly baseline 漂移；运行 `cargo xtask runtime-baseline update` 后复核差异",
-        )])
-    }
-}
-
-fn normalize_newlines(text: &str) -> String {
-    let mut normalized = text.replace("\r\n", "\n");
-    if !normalized.ends_with('\n') {
-        normalized.push('\n');
-    }
-    normalized
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Report {
-    rendered: String,
-    findings: Vec<Finding<Rule>>,
-    dependencies: usize,
-    shared_fields: usize,
-    domain_fields: usize,
-}
-
-fn collect_report(root: &Path) -> Result<Report> {
-    let governance = AssemblyGovernanceIr::<Core>::load(root)?;
-    let runtime: ProductionAssembly<'_> = governance
-        .assembly("runtime")
-        .context("runtime assembly missing from governance IR")?
-        .production()
-        .context("runtime assembly must use the production profile")?;
-    collect_report_for_production(root, runtime)
-}
-
-fn collect_report_for_production(root: &Path, _runtime: ProductionAssembly<'_>) -> Result<Report> {
-    let dependencies = runtime_dependencies(root)?;
-    let shared_fields = struct_fields(
-        root,
-        SHARED_RUNTIME_DEPS_PATH,
-        "SharedRuntimeDeps",
-        "SharedRuntimeDeps",
-    )?;
-    let domain = domain_module_result(root)?;
-    let mut findings = Vec::new();
-    if dependencies.is_empty() {
-        findings.push(finding(
-            Rule::EmptyDependencies,
-            RUNTIME_CARGO_PATH,
-            "[dependencies] 为空，baseline 退化为空转",
-        ));
-    }
-    if !domain.merge_present {
-        findings.push(finding(
-            Rule::MissingStructuralEvidence,
-            BOOTSTRAP_MODULE_PATH,
-            "缺 `DomainModuleResult::merge` 聚合函数",
-        ));
-    }
-    for field in &domain.fields {
-        if !domain.merge_extends.iter().any(|name| name == &field.name) {
-            findings.push(finding(
-                Rule::MissingStructuralEvidence,
-                BOOTSTRAP_MODULE_PATH,
-                format!("`DomainModuleResult::merge` 未聚合 `{}` 字段", field.name),
-            ));
-        }
-    }
-    findings.extend(runtime_risk_residual_findings(root)?);
+    let mut findings = runtime_risk_residual_findings(root)?;
     findings.extend(postgres_setup_transaction_live_findings(root)?);
     findings.extend(audit_security_fact_boundary_findings(root)?);
     findings.extend(crate::projection_target_enrollment::findings(root)?);
-    Ok(Report {
-        rendered: render_baseline(&dependencies, &shared_fields, &domain),
-        dependencies: dependencies.len(),
-        shared_fields: shared_fields.len(),
-        domain_fields: domain.fields.len(),
-        findings,
-    })
+    Ok((format!("{} residual findings", findings.len()), findings))
 }
 
 fn runtime_risk_residual_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -2462,277 +2330,10 @@ fn type_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DependencyEntry {
-    name: String,
-    spec: String,
-}
-
-fn runtime_dependencies(root: &Path) -> Result<Vec<DependencyEntry>> {
-    let path = root.join(RUNTIME_CARGO_PATH);
-    let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-    let value: toml::Value =
-        toml::from_str(&text).with_context(|| format!("解析 {} 失败", path.display()))?;
-    let Some(table) = value.get("dependencies").and_then(toml::Value::as_table) else {
-        return Ok(Vec::new());
-    };
-    let mut deps: Vec<_> = table
-        .iter()
-        .map(|(name, spec)| DependencyEntry {
-            name: name.to_string(),
-            spec: render_dependency_spec(spec),
-        })
-        .collect();
-    deps.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(deps)
-}
-
-fn render_dependency_spec(value: &toml::Value) -> String {
-    match value {
-        toml::Value::String(s) => format!("version={s}"),
-        toml::Value::Table(table) => {
-            let preferred = [
-                "package",
-                "path",
-                "workspace",
-                "version",
-                "features",
-                "default-features",
-                "optional",
-            ];
-            let mut parts = Vec::new();
-            for key in preferred {
-                if let Some(value) = table.get(key) {
-                    parts.push(format!("{key}={}", render_toml_value(value)));
-                }
-            }
-            let mut extras: Vec<_> = table
-                .iter()
-                .filter(|(key, _)| !preferred.contains(&key.as_str()))
-                .collect();
-            extras.sort_by_key(|(key, _)| *key);
-            for (key, value) in extras {
-                parts.push(format!("{key}={}", render_toml_value(value)));
-            }
-            parts.join("; ")
-        }
-        other => render_toml_value(other),
-    }
-}
-
-fn render_toml_value(value: &toml::Value) -> String {
-    match value {
-        toml::Value::String(s) => s.to_string(),
-        toml::Value::Integer(i) => i.to_string(),
-        toml::Value::Float(f) => f.to_string(),
-        toml::Value::Boolean(b) => b.to_string(),
-        toml::Value::Datetime(dt) => dt.to_string(),
-        toml::Value::Array(values) => format!(
-            "[{}]",
-            values
-                .iter()
-                .map(render_toml_value)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        toml::Value::Table(table) => {
-            let mut entries: Vec<_> = table.iter().collect();
-            entries.sort_by_key(|(key, _)| *key);
-            format!(
-                "{{{}}}",
-                entries
-                    .into_iter()
-                    .map(|(key, value)| format!("{key}={}", render_toml_value(value)))
-                    .collect::<Vec<_>>()
-                    .join(";")
-            )
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FieldEntry {
-    name: String,
-    ty: String,
-}
-
-fn struct_fields(
-    root: &Path,
-    rel_path: &str,
-    struct_name: &str,
-    label: &str,
-) -> Result<Vec<FieldEntry>> {
-    let path = root.join(rel_path);
-    let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-    parse_struct_fields(&text, struct_name)
-        .with_context(|| format!("解析 {label} 字段失败: {}", path.display()))
-}
-
-fn parse_struct_fields(src: &str, struct_name: &str) -> Result<Vec<FieldEntry>> {
-    let body = extract_struct_body(src, struct_name)
-        .with_context(|| format!("未找到 `pub struct {struct_name}`"))?;
-    let mut fields = Vec::new();
-    for line in body.lines() {
-        let line = line.trim();
-        let Some(line) = line
-            .strip_prefix("pub ")
-            .or_else(|| line.strip_prefix("pub(crate) "))
-        else {
-            continue;
-        };
-        let field = line.split("//").next().unwrap_or(line).trim();
-        let Some((name, ty)) = field.split_once(':') else {
-            continue;
-        };
-        fields.push(FieldEntry {
-            name: name.trim().to_string(),
-            ty: ty.trim().trim_end_matches(',').trim().to_string(),
-        });
-    }
-    Ok(fields)
-}
-
-fn extract_struct_body<'a>(src: &'a str, struct_name: &str) -> Option<&'a str> {
-    let needle = format!("pub struct {struct_name}");
-    let start = src.find(&needle)?;
-    let open = src[start..].find('{')? + start;
-    let mut depth = 0usize;
-    for (offset, ch) in src[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&src[open + 1..open + offset]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DomainModuleInventory {
-    fields: Vec<FieldEntry>,
-    merge_present: bool,
-    merge_extends: Vec<String>,
-}
-
-fn domain_module_result(root: &Path) -> Result<DomainModuleInventory> {
-    let path = root.join(BOOTSTRAP_MODULE_PATH);
-    let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-    let fields = parse_struct_fields(&text, "DomainModuleResult")
-        .with_context(|| format!("解析 DomainModuleResult 字段失败: {}", path.display()))?;
-    let merge_body =
-        extract_braced_body(&text, "pub fn merge(&mut self, other: DomainModuleResult)");
-    let merge_scan = merge_body
-        .map(mask_comments_and_strings)
-        .unwrap_or_default();
-    let merge_present = merge_body.is_some();
-    let mut merge_extends = Vec::new();
-    if merge_present {
-        for field in &fields {
-            let pattern = format!("self.{}.extend(other.{})", field.name, field.name);
-            if merge_scan.contains(&pattern) {
-                merge_extends.push(field.name.clone());
-            }
-        }
-    }
-    Ok(DomainModuleInventory {
-        fields,
-        merge_present,
-        merge_extends,
-    })
-}
-
-fn extract_braced_body<'a>(src: &'a str, needle: &str) -> Option<&'a str> {
-    let start = src.find(needle)?;
-    let open = src[start..].find('{')? + start;
-    let scan = mask_comments_and_strings(&src[open..]);
-    let mut depth = 0usize;
-    for (offset, byte) in scan.as_bytes().iter().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&src[open + 1..open + offset]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn render_baseline(
-    dependencies: &[DependencyEntry],
-    shared_fields: &[FieldEntry],
-    domain: &DomainModuleInventory,
-) -> String {
-    let mut out = String::new();
-    out.push_str("# runtime-baseline v2\n");
-    out.push_str("# generated-by: cargo xtask runtime-baseline update\n");
-    out.push_str("# static-facts-only: dynamic environment/provider state is documented, not enforced here\n\n");
-
-    out.push_str("[sources]\n");
-    push_line(&mut out, format_args!("cargo = {RUNTIME_CARGO_PATH}"));
-    push_line(
-        &mut out,
-        format_args!("sharedRuntimeDeps = {SHARED_RUNTIME_DEPS_PATH}"),
-    );
-    push_line(
-        &mut out,
-        format_args!("domainModuleResult = {BOOTSTRAP_MODULE_PATH}"),
-    );
-    out.push('\n');
-
-    out.push_str("[runtime.dependencies]\n");
-    for dep in dependencies {
-        push_line(&mut out, format_args!("{} = {}", dep.name, dep.spec));
-    }
-    out.push('\n');
-
-    out.push_str("[sharedRuntimeDeps.fields]\n");
-    for field in shared_fields {
-        push_line(&mut out, format_args!("{} = {}", field.name, field.ty));
-    }
-    out.push('\n');
-
-    out.push_str("[domainModuleResult.fields]\n");
-    for field in &domain.fields {
-        push_line(&mut out, format_args!("{} = {}", field.name, field.ty));
-    }
-    push_line(
-        &mut out,
-        format_args!(
-            "merge = {}",
-            if domain.merge_present {
-                "present"
-            } else {
-                "missing"
-            }
-        ),
-    );
-    push_line(
-        &mut out,
-        format_args!("mergeExtends = {}", domain.merge_extends.join(",")),
-    );
-    out
-}
-
-fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
-    out.push_str(&args.to_string());
-    out.push('\n');
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assembly_governance::AssemblyFixtureBuilder;
     use crate::testutil::unique_tmp;
-    use assembly_schema::AssemblyProfile;
 
     fn write(path: &Path, text: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
@@ -2754,16 +2355,6 @@ mod tests {
         let mut mutated = source.to_owned();
         mutated.replace_range(offset..offset + needle.len(), replacement);
         Ok(mutated)
-    }
-
-    fn report(rendered: &str, findings: Vec<Finding<Rule>>) -> Report {
-        Report {
-            rendered: rendered.to_owned(),
-            findings,
-            dependencies: 1,
-            shared_fields: 1,
-            domain_fields: 1,
-        }
     }
 
     #[derive(Clone, Copy)]
@@ -2819,53 +2410,6 @@ mod tests {
             }
         }
         Ok(prettyplease::unparse(&file))
-    }
-
-    #[test]
-    fn runtime_baseline_update_is_atomic_closed_and_idempotent() -> Result<()> {
-        let root = unique_tmp("runtime-baseline-update");
-        let target = root.join(BASELINE_PATH);
-        write(&target, "old\n")?;
-        publish_report(&root, report("new\n", Vec::new()))?;
-        assert_eq!(fs::read(&target)?, b"new\n");
-        publish_report(&root, report("new\n", Vec::new()))?;
-        assert_eq!(fs::read(&target)?, b"new\n");
-
-        let denied = finding(
-            Rule::EmptyDependencies,
-            RUNTIME_CARGO_PATH,
-            "empty inventory",
-        );
-        assert!(publish_report(&root, report("bad\n", vec![denied])).is_err());
-        assert_eq!(fs::read(&target)?, b"new\n");
-
-        let broken = unique_tmp("runtime-baseline-collection-error");
-        write(&broken.join(BASELINE_PATH), "stable\n")?;
-        assert!(update_root(&broken).is_err());
-        assert_eq!(fs::read(broken.join(BASELINE_PATH))?, b"stable\n");
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn runtime_baseline_update_rejects_symlink_without_touching_target() -> Result<()> {
-        use std::os::unix::fs::symlink;
-        let root = unique_tmp("runtime-baseline-symlink");
-        let outside = root.join("outside.txt");
-        write(&outside, "stable\n")?;
-        fs::create_dir_all(root.join("runtime-baseline"))?;
-        symlink(&outside, root.join(BASELINE_PATH))?;
-        assert!(publish_report(&root, report("attack\n", Vec::new())).is_err());
-        assert_eq!(fs::read(&outside)?, b"stable\n");
-        let names = fs::read_dir(root.join("runtime-baseline"))?
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<std::io::Result<Vec<_>>>()?;
-        assert_eq!(
-            names.len(),
-            1,
-            "failed update must clean its temporary file"
-        );
-        Ok(())
     }
 
     #[test]
@@ -3697,30 +3241,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_baseline_drift_checker_accepts_workspace() -> Result<()> {
+    fn runtime_assembly_residual_accepts_workspace() -> Result<()> {
         let (_, findings) = check_root(&workspace_root()?)?;
         assert_eq!(findings, Vec::<Finding<Rule>>::new());
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_baseline_drift_checker_rejects_closed_mutations() -> Result<()> {
-        let root = unique_tmp("runtime-baseline-drift-red");
-        write(&root.join(BASELINE_PATH), "canonical\n")?;
-        assert!(baseline_drift_findings(&root, "canonical\n")?.is_empty());
-        write(&root.join(BASELINE_PATH), "stale\n")?;
-        assert!(!baseline_drift_findings(&root, "canonical\n")?.is_empty());
-        fs::remove_file(root.join(BASELINE_PATH))?;
-        assert!(!baseline_drift_findings(&root, "canonical\n")?.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn collect_report_rejects_wrong_profile_before_runtime_scan() -> Result<()> {
-        let repository = AssemblyFixtureBuilder::production_universe()?
-            .profile("runtime", AssemblyProfile::Test)?
-            .build()?;
-        assert!(collect_report(repository.path()).is_err());
         Ok(())
     }
 }

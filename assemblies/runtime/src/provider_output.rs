@@ -40,11 +40,10 @@ pub(crate) fn build_pg_runtime_module(
         "assemblies.runtime.src.provider_output.01",
         move |token| DynManagedResource::new_box(monitor_factory.spawn(token)),
     );
-    DomainModuleResult {
-        resources,
-        workers: vec![runtime_monitor],
-        ..DomainModuleResult::default()
-    }
+    let mut output = DomainModuleResult::default();
+    output.extend_resources(resources);
+    output.push_worker(runtime_monitor);
+    output
 }
 
 pub(crate) fn identity_signer_resource(
@@ -76,17 +75,17 @@ pub(crate) async fn identity_signer_module(
             ))
         },
     );
-    Ok(DomainModuleResult {
-        probes: vec![(
-            probe_name.clone(),
-            Box::new(IdentitySignerProbe {
-                name: probe_name,
-                health,
-            }),
-        )],
-        resources: vec![identity_signer_resource(signer)],
-        workers: vec![worker],
-    })
+    let mut output = DomainModuleResult::default();
+    output.push_probe((
+        probe_name.clone(),
+        Box::new(IdentitySignerProbe {
+            name: probe_name,
+            health,
+        }),
+    ));
+    output.push_resource(identity_signer_resource(signer));
+    output.push_worker(worker);
+    Ok(output)
 }
 
 async fn verify_identity_signer(
@@ -1005,8 +1004,7 @@ impl ProviderBuild {
             }
             let probe_names = batch
                 .module
-                .probes
-                .iter()
+                .probes()
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
             for receipt in &batch.receipts {
@@ -1171,10 +1169,24 @@ async fn abort_modules(
 ) -> anyhow::Error {
     let mut stack =
         bootstrap::shutdown::ShutdownStack::new(tokio_util::sync::CancellationToken::new());
-    for resource in provider_module.resources {
+    for resource in provider_module
+        .into_outputs()
+        .filter_map(|output| match output {
+            bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
+            bootstrap::DomainLifecycleOutput::Probe(_, _)
+            | bootstrap::DomainLifecycleOutput::Worker(_) => None,
+        })
+    {
         stack.register_detached(resource);
     }
-    for resource in domain_module.resources {
+    for resource in domain_module
+        .into_outputs()
+        .filter_map(|output| match output {
+            bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
+            bootstrap::DomainLifecycleOutput::Probe(_, _)
+            | bootstrap::DomainLifecycleOutput::Worker(_) => None,
+        })
+    {
         stack.register_detached(resource);
     }
     for failure in stack.shutdown().await {
@@ -1194,13 +1206,13 @@ fn same_channels(actual: &[LifecycleChannel], expected: &[LifecycleChannel]) -> 
 
 fn module_channels(module: &DomainModuleResult) -> Vec<LifecycleChannel> {
     let mut channels = Vec::with_capacity(3);
-    if !module.probes.is_empty() {
+    if module.probe_count() != 0 {
         channels.push(LifecycleChannel::Probes);
     }
-    if !module.resources.is_empty() {
+    if module.resource_count() != 0 {
         channels.push(LifecycleChannel::Resources);
     }
-    if !module.workers.is_empty() {
+    if module.worker_count() != 0 {
         channels.push(LifecycleChannel::Workers);
     }
     channels
@@ -1224,16 +1236,28 @@ impl CompletedProviderBuild {
         &mut self,
         registry: &mut bootstrap::Registry,
     ) -> anyhow::Result<()> {
-        for (source, probes) in [
-            ("provider", std::mem::take(&mut self.provider_module.probes)),
-            ("domain", std::mem::take(&mut self.domain_module.probes)),
+        for (source, module) in [
+            ("provider", &mut self.provider_module),
+            ("domain", &mut self.domain_module),
         ] {
-            for (name, probe) in probes {
-                let probe_label = name.as_str().to_owned();
-                registry
-                    .probe(name, probe)
-                    .with_context(|| format!("register {source} probe '{probe_label}'"))?;
+            let mut retained = DomainModuleResult::default();
+            for output in module.drain_outputs() {
+                match output {
+                    bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                        let probe_label = name.as_str().to_owned();
+                        registry
+                            .probe(name, probe)
+                            .with_context(|| format!("register {source} probe '{probe_label}'"))?;
+                    }
+                    bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                        retained.push_resource(resource);
+                    }
+                    bootstrap::DomainLifecycleOutput::Worker(worker) => {
+                        retained.push_worker(worker);
+                    }
+                }
             }
+            *module = retained;
         }
         Ok(())
     }
@@ -1397,12 +1421,12 @@ mod tests {
             .expect("all active factories produced exact receipts");
         // finish() already required one receipt per active catalog factory; pin occupancy shape.
         assert!(!PROVIDER_CATALOG.is_empty());
-        assert_eq!(completed.provider_module.probes.len(), 11);
-        assert_eq!(completed.provider_module.resources.len(), 10);
-        assert_eq!(completed.provider_module.workers.len(), 10);
-        assert!(completed.domain_module.probes.is_empty());
-        assert!(completed.domain_module.resources.is_empty());
-        assert!(completed.domain_module.workers.is_empty());
+        assert_eq!(completed.provider_module.probe_count(), 11);
+        assert_eq!(completed.provider_module.resource_count(), 10);
+        assert_eq!(completed.provider_module.worker_count(), 10);
+        assert!(completed.domain_module.probe_count() == 0);
+        assert!(completed.domain_module.resource_count() == 0);
+        assert!(completed.domain_module.worker_count() == 0);
         let receipt = completed
             .take_inventory_receipt()
             .expect("inventory receipt is present exactly once");
@@ -1549,17 +1573,15 @@ mod tests {
             ))
             .expect("record S3");
         build.record_domain(recording_module("domain-resource", Arc::clone(&shutdowns)));
-        let invalid = DomainModuleResult {
-            resources: vec![DynManagedResource::new_box(RecordingResource {
-                name: "invalid-resource",
-                shutdowns: Arc::clone(&shutdowns),
-            })],
-            workers: vec![counting_worker(
-                "invalid-worker",
-                Arc::clone(&worker_starts),
-            )],
-            ..DomainModuleResult::default()
-        };
+        let mut invalid = DomainModuleResult::default();
+        invalid.push_resource(DynManagedResource::new_box(RecordingResource {
+            name: "invalid-resource",
+            shutdowns: Arc::clone(&shutdowns),
+        }));
+        invalid.push_worker(counting_worker(
+            "invalid-worker",
+            Arc::clone(&worker_starts),
+        ));
         let constructor = dispatch.listener_pdp().expect("PDP constructor");
         let primary = build
             .record(ProviderOutput::new(
@@ -1757,13 +1779,13 @@ mod tests {
         let (mut build, mut dispatch) = provider_build_and_dispatch();
         build
             .record(ProviderOutput::redis(
-                DomainModuleResult {
-                    probes: vec![probe("failing-cleanup")],
-                    resources: vec![DynManagedResource::new_box(FailingShutdownResource {
+                DomainModuleResult::from_parts(
+                    [probe("failing-cleanup")],
+                    [DynManagedResource::new_box(FailingShutdownResource {
                         name: "failing-cleanup",
                     })],
-                    workers: vec![worker("failing-cleanup")],
-                },
+                    [worker("failing-cleanup")],
+                ),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
             .expect("record redis");
@@ -1795,11 +1817,11 @@ mod tests {
         ) {
         }
         assert_builder(build_pg_runtime_module);
-        let output = DomainModuleResult {
-            resources: vec![resource("postgres")],
-            workers: vec![worker("pg-runtime-monitor")],
-            ..DomainModuleResult::default()
-        };
+        let output = DomainModuleResult::from_parts(
+            [],
+            [resource("postgres")],
+            [worker("pg-runtime-monitor")],
+        );
 
         assert_eq!(resource_names(&output), ["postgres"]);
         assert_eq!(worker_names(output), ["pg-runtime-monitor"]);
@@ -1860,12 +1882,12 @@ mod tests {
                 .expect("valid hermetic vault providers");
 
         let mut module = DomainModuleResult::default();
-        module.resources.extend(redis.runtime_resources());
-        module.resources.extend(s3.runtime_resources());
-        module.resources.extend(vault.runtime_resources());
+        module.extend_resources(redis.runtime_resources());
+        module.extend_resources(s3.runtime_resources());
+        module.extend_resources(vault.runtime_resources());
 
-        assert!(module.probes.is_empty());
-        assert!(module.workers.is_empty());
+        assert!(module.probe_count() == 0);
+        assert!(module.worker_count() == 0);
         let registration = resource_names(&module);
         assert_eq!(
             registration,
@@ -2037,46 +2059,53 @@ mod tests {
     }
 
     fn listener_pdp_lifecycle_for_test(name: &'static str) -> ListenerPdpJwksLifecycle {
-        let mut module = module_for_channels(name, LISTENER_PDP_CHANNELS);
-        let probe = module.probes.pop().expect("listener PDP test probe");
-        let resource = module.resources.pop().expect("listener PDP test resource");
-        ListenerPdpJwksLifecycle::single(probe, resource)
+        let module = module_for_channels(name, LISTENER_PDP_CHANNELS);
+        let mut probe = None;
+        let mut resource = None;
+        for output in module.into_outputs() {
+            match output {
+                bootstrap::DomainLifecycleOutput::Probe(probe_name, health_probe) => {
+                    probe = Some((probe_name, health_probe));
+                }
+                bootstrap::DomainLifecycleOutput::Resource(managed) => resource = Some(managed),
+                bootstrap::DomainLifecycleOutput::Worker(_) => unreachable!(),
+            }
+        }
+        ListenerPdpJwksLifecycle::single(
+            probe.unwrap_or_else(|| unreachable!()),
+            resource.unwrap_or_else(|| unreachable!()),
+        )
     }
 
     fn module_for_channels(
         name: &'static str,
         channels: &[PlannedLifecycleChannel],
     ) -> DomainModuleResult {
-        DomainModuleResult {
-            probes: channels
+        DomainModuleResult::from_parts(
+            channels
                 .contains(&PlannedLifecycleChannel::Probes)
-                .then(|| probe(name))
-                .into_iter()
-                .collect(),
-            resources: channels
+                .then(|| probe(name)),
+            channels
                 .contains(&PlannedLifecycleChannel::Resources)
-                .then(|| resource(name))
-                .into_iter()
-                .collect(),
-            workers: channels
+                .then(|| resource(name)),
+            channels
                 .contains(&PlannedLifecycleChannel::Workers)
-                .then(|| worker(name))
-                .into_iter()
-                .collect(),
-        }
+                .then(|| worker(name)),
+        )
     }
 
     fn recording_module(
         name: &'static str,
         shutdowns: Arc<Mutex<Vec<&'static str>>>,
     ) -> DomainModuleResult {
-        DomainModuleResult {
-            resources: vec![DynManagedResource::new_box(RecordingResource {
+        DomainModuleResult::from_parts(
+            [],
+            [DynManagedResource::new_box(RecordingResource {
                 name,
                 shutdowns,
             })],
-            ..DomainModuleResult::default()
-        }
+            [],
+        )
     }
 
     fn recording_module_all(
@@ -2084,8 +2113,8 @@ mod tests {
         shutdowns: Arc<Mutex<Vec<&'static str>>>,
     ) -> DomainModuleResult {
         let mut module = recording_module(name, shutdowns);
-        module.probes.push(probe(name));
-        module.workers.push(worker(name));
+        module.push_probe(probe(name));
+        module.push_worker(worker(name));
         module
     }
 
@@ -2101,18 +2130,18 @@ mod tests {
     }
 
     fn resource_names(module: &DomainModuleResult) -> Vec<&str> {
-        module
-            .resources
-            .iter()
-            .map(|resource| resource.name())
-            .collect()
+        module.resources().map(|resource| resource.name()).collect()
     }
 
     fn worker_names(module: DomainModuleResult) -> Vec<String> {
         let token = tokio_util::sync::CancellationToken::new();
         module
-            .workers
-            .into_iter()
+            .into_outputs()
+            .filter_map(|output| match output {
+                bootstrap::DomainLifecycleOutput::Probe(_, _)
+                | bootstrap::DomainLifecycleOutput::Resource(_) => None,
+                bootstrap::DomainLifecycleOutput::Worker(worker) => Some(worker),
+            })
             .map(|worker| match worker {
                 WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
                     make.into_factory()(token.clone()).name().to_owned()

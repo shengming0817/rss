@@ -593,7 +593,7 @@ impl fmt::Debug for ValidatedProjectionApply {
 ///
 /// 实现必须按 receipt duplicate/conflict → persistent ordering → mutation+receipt transaction 的顺序
 /// 处理。`CommitUnknown` 不得谎报 rollback；`RollbackFailed` 不得自动重试。每个 production impl 必须
-/// 通过 `testkit::projection_target_conformance!` 完整 enrollment，`runtime-baseline verify` 会拒绝旁路。
+/// 通过 `testkit::projection_target_conformance!` 完整 enrollment，`runtime-assembly-residual gate` 会拒绝旁路。
 pub trait ProjectionTargetStore: Send + Sync + 'static {
     /// 原子 apply validated fact；不得拆成独立 mutation 与 receipt 调用。
     fn apply<'a>(

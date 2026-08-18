@@ -630,17 +630,16 @@ pub(crate) fn sweeper_module_result(
     probe_name: &'static str,
 ) -> anyhow::Result<DomainModuleResult> {
     let probe_name = ProbeName::parse(probe_name).context("sweeper probe name is invalid")?;
-    Ok(DomainModuleResult {
-        probes: vec![(
-            probe_name.clone(),
-            Box::new(AuthGrantSweeperProbe {
-                name: probe_name,
-                health,
-            }),
-        )],
-        workers: vec![worker],
-        ..Default::default()
-    })
+    let mut output = DomainModuleResult::default();
+    output.push_probe((
+        probe_name.clone(),
+        Box::new(AuthGrantSweeperProbe {
+            name: probe_name,
+            health,
+        }),
+    ));
+    output.push_worker(worker);
+    Ok(output)
 }
 
 pub(crate) fn wire_auth_grant_sweeper(
@@ -861,10 +860,10 @@ mod saga_terminal_tests {
             )
             .expect("terminal Saga retention module result");
             let expected = usize::from(active_saga_count > 0);
-            assert_eq!(result.probes.len(), expected);
-            assert_eq!(result.workers.len(), expected);
-            assert!(result.resources.is_empty());
-            if let Some((name, _)) = result.probes.first() {
+            assert_eq!(result.probe_count(), expected);
+            assert_eq!(result.worker_count(), expected);
+            assert!(result.resource_count() == 0);
+            if let Some((name, _)) = result.probes().next() {
                 assert_eq!(name.as_str(), SAGA_TERMINAL_SWEEPER_PROBE_NAME);
             }
         }

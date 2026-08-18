@@ -776,7 +776,7 @@ fn validate_health_inventory(
         );
     }
     if assembly == "runtime" {
-        for baseline in crate::runtime_baseline::artifact_launch_findings(root)? {
+        for baseline in crate::runtime_assembly_residual::artifact_launch_findings(root)? {
             reject!(
                 findings,
                 Health,

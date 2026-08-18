@@ -503,11 +503,7 @@ fn module(
     resources: Vec<Box<DynManagedResource<'static>>>,
     workers: Vec<bootstrap::WorkerSpec>,
 ) -> DomainModuleResult {
-    DomainModuleResult {
-        probes: Vec::new(),
-        resources,
-        workers,
-    }
+    DomainModuleResult::from_parts([], resources, workers)
 }
 
 fn lifecycle_batches(
@@ -516,9 +512,8 @@ fn lifecycle_batches(
 ) -> LaunchLifecycleBatches {
     let expected = bootstrap::ExpectedWorkerInventory::closed(
         provider
-            .workers
-            .iter()
-            .chain(domain.workers.iter())
+            .workers()
+            .chain(domain.workers())
             .map(bootstrap::WorkerSpec::descriptor)
             .filter(|descriptor| descriptor.lane != bootstrap::WorkerAdmissionLane::Observational),
     )
@@ -563,14 +558,14 @@ where
 async fn executor_drains_in_exact_dependency_lifo_order() {
     let transcript = Transcript::new();
     let ready_transcript = transcript.clone();
+    let mut interleaved_provider = DomainModuleResult::default();
+    interleaved_provider.push_worker(worker("provider-worker", &transcript));
+    interleaved_provider.push_resource(resource("provider-resource", &transcript));
     let launch = plan(
         &transcript,
         vec!["listener-a", "listener-b"],
         false,
-        module(
-            vec![resource("provider-resource", &transcript)],
-            vec![worker("provider-worker", &transcript)],
-        ),
+        interleaved_provider,
         module(
             vec![resource("domain-resource", &transcript)],
             vec![worker("domain-worker", &transcript)],
@@ -918,7 +913,7 @@ impl HealthProbe for LeftoverProbe {
 async fn leftover_probe_still_transfers_and_drains_later_module_resources() {
     let transcript = Transcript::new();
     let mut provider = module(vec![resource("provider", &transcript)], Vec::new());
-    provider.probes.push((
+    provider.push_probe((
         ProbeName::parse("leftover").expect("valid probe name"),
         Box::new(LeftoverProbe),
     ));
@@ -938,6 +933,53 @@ async fn leftover_probe_still_transfers_and_drains_later_module_resources() {
 
     assert!(error.to_string().contains("undrained probes"));
     assert_eq!(transcript.snapshot(), vec!["domain", "provider", "trace"]);
+}
+
+#[tokio::test]
+async fn leftover_probe_rejects_output_before_worker_factory_activation() {
+    let worker_transcript = Transcript::new();
+    let launch_transcript = Transcript::new();
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_calls_capture = Arc::clone(&factory_calls);
+    let domain_factory_calls = Arc::clone(&factory_calls);
+    let domain_worker_transcript = Transcript::new();
+    let mut provider = DomainModuleResult::default();
+    provider.push_probe((
+        ProbeName::parse("leftover").expect("valid probe name"),
+        Box::new(LeftoverProbe),
+    ));
+    provider.push_worker(bootstrap::WorkerSpec::observational_deferred(
+        "crates.runtimeexec.src.tests.leftover",
+        move |_| {
+            factory_calls_capture.fetch_add(1, Ordering::SeqCst);
+            resource("worker", &worker_transcript)
+        },
+    ));
+    let launch = plan(
+        &launch_transcript,
+        vec!["listener"],
+        false,
+        provider,
+        module(
+            Vec::new(),
+            vec![bootstrap::WorkerSpec::observational_deferred(
+                "crates.runtimeexec.src.tests.domain-after-leftover",
+                move |_| {
+                    domain_factory_calls.fetch_add(1, Ordering::SeqCst);
+                    resource("domain-worker", &domain_worker_transcript)
+                },
+            )],
+        ),
+        |_| Ok(()),
+    );
+
+    let error = launch_until(launch, || Ok(async { Ok(()) }))
+        .await
+        .err()
+        .expect("leftover probe must fail");
+
+    assert!(error.to_string().contains("undrained probes"));
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1391,7 +1433,7 @@ impl StartupAdapter for BlockingStartup {
             vec![resource("startup-provider", &self.transcript)],
             Vec::new(),
         );
-        output.probes.push((
+        output.push_probe((
             ProbeName::parse("startup-blocked").expect("valid probe name"),
             Box::new(LeftoverProbe),
         ));
@@ -1420,7 +1462,7 @@ impl StartupAdapter for FailingStartup {
             vec![resource("startup-provider", &self.transcript)],
             Vec::new(),
         );
-        output.probes.push((
+        output.push_probe((
             ProbeName::parse("startup-failed").expect("valid probe name"),
             Box::new(LeftoverProbe),
         ));

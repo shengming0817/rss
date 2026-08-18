@@ -98,69 +98,62 @@ pub(crate) fn wire(inputs: DlxInputs) -> anyhow::Result<DlxRoleOutputs> {
     let archive_key_health = Arc::new(WorkerHealth::starting());
     let hot_key_health = Arc::new(WorkerHealth::starting());
 
-    let dlx_lifecycle_repository = DomainModuleResult {
-        probes: vec![(
-            lifecycle_probe_name.clone(),
-            Box::new(WorkerProbe::new(
-                lifecycle_probe_name,
-                Arc::clone(&lifecycle_health),
-            )),
-        )],
-        resources: vec![DynManagedResource::new_box(inputs.pg_owner)],
-        workers: vec![lifecycle_worker(
-            lifecycle,
-            lifecycle_health,
-            inputs.write_admission,
-        )],
-    };
-    let dlx_archive_store = DomainModuleResult {
-        probes: vec![(
-            archive_probe_name.clone(),
-            Box::new(WorkerProbe::new(
-                archive_probe_name,
-                Arc::clone(&archive_health),
-            )),
-        )],
-        workers: vec![archive_readiness_worker(
-            inputs.archive_store,
-            archive_health,
-            inputs.readiness_interval,
-        )],
-        ..Default::default()
-    };
+    let mut dlx_lifecycle_repository = DomainModuleResult::default();
+    dlx_lifecycle_repository.push_probe((
+        lifecycle_probe_name.clone(),
+        Box::new(WorkerProbe::new(
+            lifecycle_probe_name,
+            Arc::clone(&lifecycle_health),
+        )),
+    ));
+    dlx_lifecycle_repository.push_resource(DynManagedResource::new_box(inputs.pg_owner));
+    dlx_lifecycle_repository.push_worker(lifecycle_worker(
+        lifecycle,
+        lifecycle_health,
+        inputs.write_admission,
+    ));
+    let mut dlx_archive_store = DomainModuleResult::default();
+    dlx_archive_store.push_probe((
+        archive_probe_name.clone(),
+        Box::new(WorkerProbe::new(
+            archive_probe_name,
+            Arc::clone(&archive_health),
+        )),
+    ));
+    dlx_archive_store.push_worker(archive_readiness_worker(
+        inputs.archive_store,
+        archive_health,
+        inputs.readiness_interval,
+    ));
 
-    let dlx_hot_key_provider = DomainModuleResult {
-        probes: vec![(
-            hot_key_probe_name.clone(),
-            Box::new(WorkerProbe::new(
-                hot_key_probe_name,
-                Arc::clone(&hot_key_health),
-            )),
-        )],
-        workers: vec![key_readiness_worker(
-            inputs.hot_key_provider,
-            inputs.hot_key.as_key_name().clone(),
-            KeyReadinessSpec::hot(),
-            hot_key_health,
-        )?],
-        ..Default::default()
-    };
+    let mut dlx_hot_key_provider = DomainModuleResult::default();
+    dlx_hot_key_provider.push_probe((
+        hot_key_probe_name.clone(),
+        Box::new(WorkerProbe::new(
+            hot_key_probe_name,
+            Arc::clone(&hot_key_health),
+        )),
+    ));
+    dlx_hot_key_provider.push_worker(key_readiness_worker(
+        inputs.hot_key_provider,
+        inputs.hot_key.as_key_name().clone(),
+        KeyReadinessSpec::hot(),
+        hot_key_health,
+    )?);
 
-    let dlx_archive_key_provider = DomainModuleResult {
-        probes: vec![(
-            archive_key_probe_name.clone(),
-            Box::new(WorkerProbe::new(
-                archive_key_probe_name,
-                Arc::clone(&archive_key_health),
-            )),
-        )],
-        workers: vec![archive_key_readiness_worker(
-            inputs.archive_key_provider,
-            archive_key,
-            archive_key_health,
-        )?],
-        ..Default::default()
-    };
+    let mut dlx_archive_key_provider = DomainModuleResult::default();
+    dlx_archive_key_provider.push_probe((
+        archive_key_probe_name.clone(),
+        Box::new(WorkerProbe::new(
+            archive_key_probe_name,
+            Arc::clone(&archive_key_health),
+        )),
+    ));
+    dlx_archive_key_provider.push_worker(archive_key_readiness_worker(
+        inputs.archive_key_provider,
+        archive_key,
+        archive_key_health,
+    )?);
     Ok(DlxRoleOutputs {
         dlx_lifecycle_repository,
         dlx_archive_store,

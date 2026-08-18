@@ -70,7 +70,7 @@ impl ProviderRoleCloser {
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> anyhow::Result<crate::providers_gen::CompletedProviderRoles> {
         let mut cas = outputs.distributed_cas;
-        cas.resources.push(self.cas_resource);
+        cas.push_resource(self.cas_resource);
         let distributed_cas_store = self
             .distributed_cas_constructor
             .finish(cas)?
@@ -173,26 +173,22 @@ pub(crate) async fn build(
     if pg_resources.is_empty() {
         anyhow::bail!("identityaudit Postgres omitted auth-audit lifecycle resources");
     }
-    let mut auth_audit_output = bootstrap::DomainModuleResult {
-        probes: Vec::from([pg_probe]),
-        resources: pg_resources,
-        ..Default::default()
-    };
-    auth_audit_output
-        .workers
-        .push(bootstrap::WorkerSpec::observational_phase_one(
-            "assemblies.identityaudit.src.providers.01",
-            move |token| DynManagedResource::new_box(pg_sampler.spawn(token)),
-        ));
+    let mut auth_audit_output =
+        bootstrap::DomainModuleResult::from_parts([pg_probe], pg_resources, []);
+    auth_audit_output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.identityaudit.src.providers.01",
+        move |token| DynManagedResource::new_box(pg_sampler.spawn(token)),
+    ));
     let auth_audit_sink = auth_audit_sink_constructor
         .finish(auth_audit_output)?
         .transfer(transaction.provider_output_mut());
     let (staged_cas_resource, cas_resource) =
         split_startup_resource(cas_resource, "identityaudit-postgres-cas-startup-stage");
-    transaction.stage_domain_output(bootstrap::DomainModuleResult {
-        resources: Vec::from([staged_cas_resource]),
-        ..Default::default()
-    });
+    transaction.stage_domain_output(bootstrap::DomainModuleResult::from_parts(
+        [],
+        [staged_cas_resource],
+        [],
+    ));
 
     verify_audit_chain_key(&pg, eventing.audit_chain_key_id, &audit_chain_key).await?;
 
@@ -202,16 +198,16 @@ pub(crate) async fn build(
         .context("build identityaudit Redis probe name")?;
     let redis_for_worker = redis.clone();
     let redis_worker_ready = Arc::clone(&redis_ready);
-    let lock_output = bootstrap::DomainModuleResult {
-        probes: Vec::from([(
+    let lock_output = bootstrap::DomainModuleResult::from_parts(
+        [(
             redis_probe_name.clone(),
             Box::new(RedisProbe {
                 name: redis_probe_name,
                 ready: Arc::clone(&redis_ready),
             }) as Box<dyn bootstrap::HealthProbe>,
-        )]),
-        resources: redis.runtime_resources(),
-        workers: Vec::from([bootstrap::WorkerSpec::observational_phase_one(
+        )],
+        redis.runtime_resources(),
+        [bootstrap::WorkerSpec::observational_phase_one(
             "assemblies.identityaudit.src.providers.02",
             move |token| {
                 DynManagedResource::new_box(RedisReadinessWorker::spawn(
@@ -220,8 +216,8 @@ pub(crate) async fn build(
                     Arc::clone(&redis_worker_ready),
                 ))
             },
-        )]),
-    };
+        )],
+    );
     let distributed_lock_store = distributed_lock_constructor
         .finish(lock_output)?
         .transfer(transaction.provider_output_mut());
@@ -237,26 +233,26 @@ pub(crate) async fn build(
     )
     .await?;
     let signer = Arc::clone(&vault.signer);
-    let signer_output = bootstrap::DomainModuleResult {
-        probes: Vec::from([vault.signer_readiness_probe]),
-        resources: Vec::from([SharedManagedResource::boxed(
+    let signer_output = bootstrap::DomainModuleResult::from_parts(
+        [vault.signer_readiness_probe],
+        [SharedManagedResource::boxed(
             Arc::clone(&signer),
             "identityaudit-vault-signer",
-        )]),
-        workers: Vec::from([vault.signer_readiness_worker]),
-    };
+        )],
+        [vault.signer_readiness_worker],
+    );
     let identity_signer = identity_signer_constructor
         .finish(signer_output)?
         .transfer(transaction.provider_output_mut());
     let dlx_archive_key_provider = dlx_archive_key_provider_constructor
-        .finish(bootstrap::DomainModuleResult {
-            probes: Vec::from([vault.dlx_readiness_probe]),
-            resources: Vec::from([SharedManagedResource::boxed(
+        .finish(bootstrap::DomainModuleResult::from_parts(
+            [vault.dlx_readiness_probe],
+            [SharedManagedResource::boxed(
                 Arc::clone(&vault.dlx_key_provider),
                 "identityaudit-vault-dlx-key-provider",
-            )]),
-            workers: Vec::from([vault.dlx_readiness_worker]),
-        })?
+            )],
+            [vault.dlx_readiness_worker],
+        ))?
         .transfer(transaction.provider_output_mut());
     let dlx_payload_protector = postgres::DlxPayloadProtector::new(
         DynKeyProvider::new_box(SharedKeyProvider(Arc::clone(&vault.dlx_key_provider))),
@@ -283,13 +279,14 @@ pub(crate) async fn build(
         prometheus_adapter::PromExporter::install()
             .context("install identityaudit metrics exporter")?,
     );
-    transaction.stage_domain_output(bootstrap::DomainModuleResult {
-        resources: vec![SharedManagedResource::boxed(
+    transaction.stage_domain_output(bootstrap::DomainModuleResult::from_parts(
+        [],
+        [SharedManagedResource::boxed(
             Arc::clone(&metrics),
             "identityaudit-prometheus",
         )],
-        ..Default::default()
-    });
+        [],
+    ));
     let metrics_port: Arc<dyn diport::MetricsExporter> = metrics;
 
     let tenant_authority = build_tenant_authority(
@@ -1319,28 +1316,22 @@ mod tests {
         if probes {
             let name = primitives::ProbeName::parse("identityaudit-provider-test")
                 .expect("valid static probe name");
-            output
-                .probes
-                .push((name.clone(), Box::new(TestProbe(name))));
+            output.push_probe((name.clone(), Box::new(TestProbe(name))));
         }
         if resources {
-            output
-                .resources
-                .push(DynManagedResource::new_box(TestResource {
-                    shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                }));
+            output.push_resource(DynManagedResource::new_box(TestResource {
+                shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }));
         }
         if workers {
-            output
-                .workers
-                .push(bootstrap::WorkerSpec::observational_phase_one(
-                    "assemblies.identityaudit.src.providers.05",
-                    |_token| {
-                        DynManagedResource::new_box(TestResource {
-                            shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                        })
-                    },
-                ));
+            output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+                "assemblies.identityaudit.src.providers.05",
+                |_token| {
+                    DynManagedResource::new_box(TestResource {
+                        shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    })
+                },
+            ));
         }
         output
     }
@@ -1574,9 +1565,9 @@ mod tests {
             listener_pdp_binding.probe_names(),
             std::slice::from_ref(&listener_pdp_probe_name)
         );
-        assert_eq!(inventory.probes.len(), 8);
-        assert_eq!(inventory.resources.len(), 8);
-        assert_eq!(inventory.workers.len(), 7);
+        assert_eq!(inventory.probe_count(), 8);
+        assert_eq!(inventory.resource_count(), 8);
+        assert_eq!(inventory.worker_count(), 7);
     }
 
     #[test]
@@ -1657,8 +1648,12 @@ mod tests {
             event_publisher_constructor,
             event_subscriber_constructor,
             cas_resource: lifecycle_output(false, true, false)
-                .resources
-                .pop()
+                .into_outputs()
+                .find_map(|output| match output {
+                    bootstrap::DomainLifecycleOutput::Probe(_, _)
+                    | bootstrap::DomainLifecycleOutput::Worker(_) => None,
+                    bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
+                })
                 .expect("CAS resource"),
         };
         closer
@@ -1671,9 +1666,9 @@ mod tests {
                 &mut inventory,
             )
             .expect("eventing roles close exact inventory");
-        assert_eq!(inventory.probes.len(), 8);
-        assert_eq!(inventory.resources.len(), 8);
-        assert_eq!(inventory.workers.len(), 7);
+        assert_eq!(inventory.probe_count(), 8);
+        assert_eq!(inventory.resource_count(), 8);
+        assert_eq!(inventory.worker_count(), 7);
     }
 
     #[tokio::test]
@@ -1977,17 +1972,26 @@ mod tests {
             jwks,
         };
         let (provider, _grants, lifecycle) = build_rss_listener_pdp_jwks_lifecycle(products);
-        let output = lifecycle.into_output();
+        let mut output = lifecycle.into_output();
         assert_eq!(probe_name.as_str(), "identityaudit_rss_jwks_ready");
-        assert_eq!(output.probes.len(), 1);
-        assert_eq!(output.probes[0].0, probe_name);
-        assert_eq!(output.resources.len(), 1);
+        assert_eq!(output.probe_count(), 1);
+        assert_eq!(output.probes().next().unwrap().0, &probe_name);
+        assert_eq!(output.resource_count(), 1);
         assert_eq!(
-            output.resources[0].name(),
+            output.resources().next().unwrap().name(),
             "identityaudit-rss-access-verifier"
         );
-        assert!(output.workers.is_empty());
-        output.resources[0].shutdown().await?;
+        assert!(output.worker_count() == 0);
+        output
+            .into_outputs()
+            .find_map(|output| match output {
+                bootstrap::DomainLifecycleOutput::Probe(_, _)
+                | bootstrap::DomainLifecycleOutput::Worker(_) => None,
+                bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
+            })
+            .unwrap()
+            .shutdown()
+            .await?;
         SharedManagedResource::new(provider, "identityaudit-oidc-test")
             .shutdown()
             .await?;

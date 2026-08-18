@@ -186,9 +186,19 @@ where
         activation_listener,
     } = activation;
     let mut registry = bootstrap::Registry::new();
-    for (name, probe) in module.probes.drain(..) {
-        registry.probe(name, probe)?;
+    let mut retained = bootstrap::DomainModuleResult::default();
+    for output in module.drain_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                registry.probe(name, probe)?;
+            }
+            bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                retained.push_resource(resource);
+            }
+            bootstrap::DomainLifecycleOutput::Worker(worker) => retained.push_worker(worker),
+        }
     }
+    module = retained;
     let reporter = Arc::new(registry.take_health_reporter());
     let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(SagaJourneyMetrics);
     let (listeners, receipt) = crate::routes::FinalizedListenerSet::for_saga_journey(
@@ -203,8 +213,7 @@ where
     );
     let expected_workers = bootstrap::ExpectedWorkerInventory::closed(
         module
-            .workers
-            .iter()
+            .workers()
             .map(bootstrap::WorkerSpec::descriptor)
             .filter(|descriptor| descriptor.lane != bootstrap::WorkerAdmissionLane::Observational),
     )?;
@@ -600,15 +609,19 @@ pub async fn wire_event_transport_with_admission(
         required_admission_epoch,
     )?;
     let mut module = crate::event_transport::wire_event_transport(
-        pg,
-        distributed,
-        subscribers,
-        cfg,
-        worker,
-        Some(audit_key),
-        relay_admission,
-        consumer_admission,
-        write_admission,
+        crate::event_transport::EventTransportWiring::new(
+            pg,
+            distributed,
+            subscribers,
+            cfg,
+            worker,
+            Some(audit_key),
+            crate::event_transport::EventAdmissions::new(
+                relay_admission,
+                consumer_admission,
+                write_admission,
+            ),
+        ),
     )
     .await?;
     if retain_controller {

@@ -194,17 +194,16 @@ where
     }
 
     pub(crate) fn module_result(&self) -> DomainModuleResult {
-        DomainModuleResult {
-            probes: vec![(
+        let mut output = DomainModuleResult::default();
+        output.push_probe((
+            self.probe_name.clone(),
+            Box::new(DomainTransportReadyProbe::new(
+                self.transport.clone(),
                 self.probe_name.clone(),
-                Box::new(DomainTransportReadyProbe::new(
-                    self.transport.clone(),
-                    self.probe_name.clone(),
-                )),
-            )],
-            resources: vec![DynManagedResource::new_box(self.transport.clone())],
-            workers: Vec::new(),
-        }
+            )),
+        ));
+        output.push_resource(DynManagedResource::new_box(self.transport.clone()));
+        output
     }
 }
 

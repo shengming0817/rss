@@ -111,7 +111,7 @@ sid/jti、token、password/credential material、email/username 或其他 PII。
 | 安全事件不能建立第二事务/append 漏斗 | 唯一 `identity_producer_tx` + private core `producer_tx` + 非互换 `IdentityTx` capability | Hard |
 | wire 只有四字段、十 kind、typed opaque target 且拒绝未知字段 | JSON Schema + codegen `deny_unknown_fields` | Hard |
 | opaque target 不可逆解析 | 无 resolver port、无 mapping relation、无 raw id wire 字段 | Hard + 数据库 Hard |
-| audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-baseline forbidden-side-channel gate | Hard + Medium |
+| audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-assembly-residual forbidden-side-channel gate | Hard + Medium |
 | active topology 不得缺 producer/subscriber/runtime 闭环 | codegen registry + L2 assurance | Hard + Medium |
 | password/status route 不能在无 exact producer receipt 时调用安全 writer | generated route marker + `ProducerAssuranceReceipt` 参数 + provider authorization | Hard |
 | refresh 不能经 store rotate/revoke 或 grant close 形成第二写入口 | Hard：生产 trait（`RefreshTokenStore*` / `AuthGrantLifecycle*`）无写方法可表达 + 唯一 `execute_refresh`；Medium：trait 方法闭集 AST（`producer_assurance`） | Hard + Medium |

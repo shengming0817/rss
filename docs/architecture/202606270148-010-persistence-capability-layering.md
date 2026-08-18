@@ -39,9 +39,9 @@ Phase 4 的 settings/identity/audit `module()` 已返回 `DomainBinding::new(nam
 组合根把 bindings 交给 `compose_bindings`，它先按顺序临时借出 `Vec<&dyn Domain>` 执行 fail-fast compose，只有成功后
 才排空 bindings 并返回聚合 output。compose 失败时 bindings 与 outputs 原样保留。
 
-`DomainModuleResult` 只承载 **probes / resources（`ManagedResource`）/ workers** 三条生命周期出口：
+`DomainModuleResult` 只承载闭枚举 `DomainLifecycleOutput::{Probe, Resource, Worker}` 的单一私有集合：
 
-- `merge` 与 `Extend<DomainModuleResult>` 逐字段直接 `Vec::extend`，严格保留 binding 输入顺序与域内顺序；空输出为 identity，重复项原样保留。
+- typed push/extend 构造出口；`merge` 与 `Extend<DomainModuleResult>` 只追加该单一集合，严格保留 binding 输入顺序与域内顺序；空输出为 identity，重复项原样保留。runtime sink 穷尽匹配闭枚举，新增出口未同步 sink 时直接编译失败。
 - `name` / `domain` 只属于 `DomainBinding` 且不提供 output getter；domain service / routes 不进入 result 或其它 generic service bag。service 留在 typed domain 内，由 `Domain::init` 捕获并注册 typed route。
 - 必填依赖（pool / clock / publisher …）由具体 domain 的 **typed 构造器必填位置参**注入（ADR-005 C5），缺失即编译错误（Hard）；settings/identity/audit 的 `module() -> DomainBinding` 经 generated list 进入 live runtime，跨阶段句柄只经 typed Registry funnel 交接。
 - `Domain: Send + Sync`；binding 与 output 可跨线程转移（`Send`），但包含单 owner resource / `FnOnce` worker 的完整 output 不承诺 `Sync`、`Clone` 或重复消费。
@@ -157,8 +157,8 @@ impl PgRuntimeHandle {
 ## 4. 后果
 
 - **正**：横切接线压成少数 funnel；`DomainBinding` 私有字段 + `compose_bindings` 唯一 output 出口在类型/API 边界
-  强制 compose 成功后才 drain，并守住 single owner、禁止重复消费；三出口保序由 bootstrap 测试锁定，runtime baseline
-  检查三字段 merge 完整性；Redis / S3 / Vault 经 crate-private provider adapter 进入同一个 result merge，不引入 service locator，
+  强制 compose 成功后才 drain，并守住 single owner、禁止重复消费；闭枚举与 sink 穷尽匹配在编译期锁定出口完整性，
+  bootstrap/runtimeexec 行为测试锁定聚合与 shutdown 顺序；Redis / S3 / Vault 经 crate-private provider adapter 进入同一个 result merge，不引入 service locator，
   PG 则由 non-`Clone` owner 直接生成既有 `DomainModuleResult` batch，并经公共注册 helper 保持 monitor/pool 依赖顺序；owner
   只包 handle，能力投影与生命周期权限分离但数据源及 output 类型仍唯一。**零新增 crate / 零新增分层**（沿用 ADR-005 域形 port + diport）。
 - **负 / 代价**：① binding/output 含单 owner worker/resource，不提供 `Clone` 或完整 `Sync`；确需并发共享时必须拆出窄只读视图；
@@ -183,7 +183,7 @@ impl PgRuntimeHandle {
   resources/workers 合并为 completed provider module；Launch 在 domain module 前注册它，LIFO 使
   event/domain/listener 先排空。部分构造失败时 transaction 只注册已存在 resources 并逆序关闭，不启动 worker。
   类型系统 Hard 锁定 role-specific permit/owner 的单次消费；catalog exact join、sealed output batches、finish/async rollback/handoff
-  由 `provider_output` 的 transaction 行为测试补齐，runtime baseline 只拒绝跨文件 raw/legacy/receipt bypass。
+  由 `provider_output` 的 transaction 行为测试补齐，`runtime-assembly-residual` 只拒绝类型边界无法表达的跨文件 raw/legacy/receipt bypass。
 - Event output 分叉威胁收敛：`wire_event_transport` 的 crate-private owned 返回类型使旧 `.module/.infra_guards`
   投影不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；跨文件唯一 resource 派生、run merge 与 launch
   receipt 与 rollback 由 provider transaction 行为测试拥有，跨文件 raw/legacy 绕过由 `RUNTIME-PROVIDER-BYPASS-01` 补齐（Medium）。
@@ -198,11 +198,11 @@ impl PgRuntimeHandle {
 | `DomainBinding` 形状 / domain ownership | **Hard（类型 + 所有权）** | 私有字段 + `DomainBinding::new` 必填位置参 + `Box<dyn Domain>` + owned `DomainModuleResult`；`Domain: Send + Sync + 'static` supertrait；错误 domain 类型或重复 move 均编译失败 |
 | compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
 | 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |
-| result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
+| lifecycle output 完整聚合与保序 | **Hard（闭枚举 + 穷尽匹配）/ Medium（行为测试）** | 私有单一集合 + `DomainLifecycleOutput` typed constructors + runtime sink 穷尽匹配；bootstrap/runtimeexec 单测锁定 `merge`/`Extend`、分类消费与 shutdown 顺序 |
 | provider 输出形状与 live 集合 | **Hard（类型 + 所有权）/ Medium（行为测试 + residual）** | private raw permit + 不可互换的 role-specific consuming permit + non-Clone `ProviderBuild`/`CompletedProviderBuild`；`ProviderOutput` 只能经 sealed constructors 携带 owned `DomainModuleResult` 与对应 receipts，并从实际 module 推导 channel union；`provider_output` transaction 测试锁 catalog exact join、receipt completeness、partial rollback 与 primary error，`RUNTIME-PROVIDER-BYPASS-01` 只守跨文件 raw/legacy/receipt escape |
 | PG owner / handle 权限分离 | **Hard（类型 + 可见性）** | `PgRuntimeDeps` non-`Clone` 且只包 `PgRuntimeHandle`；handle `Clone` 但只暴露能力投影，生命周期字段/API 不可见；compile-fail/pass UI tests 锁 owner 不可克隆、handle 无 lifecycle API、能力投影可用 |
 | PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（行为测试）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费；`build_pg_runtime_module` 在 BuildInfra 生成 `DomainModuleResult` 并立即进入 `ProviderBuild`，不跨 phase 暴露 PG batch；`RUNTIME-PROVIDER-BIJECTION-LIVE-01` 由 provider transaction 行为测试锁 receipt completeness、rollback 与 completed handoff |
-| Event transport 单一 output | **Hard（类型 + 可见性）/ Medium（runtime baseline）** | `EVENT-TRANSPORT-OUTPUT-TYPE-01` 以 crate-private `wire_event_transport -> DomainModuleResult` 禁止旧字段投影；provider transaction 行为测试锁 receipt/rollback，`RUNTIME-PROVIDER-BYPASS-01` 仅守跨文件 raw/legacy provider 与 receipt 绕过（AcceptedMedium） |
+| Event transport 单一 output | **Hard（类型 + 可见性）/ Medium（residual）** | `EVENT-TRANSPORT-OUTPUT-TYPE-01` 以 crate-private `wire_event_transport -> DomainModuleResult` 禁止旧字段投影；provider transaction 行为测试锁 receipt/rollback，`RUNTIME-PROVIDER-BYPASS-01` 仅守跨文件 raw/legacy provider 与 receipt 绕过（AcceptedMedium） |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
 无 Soft 新增 enforcement。

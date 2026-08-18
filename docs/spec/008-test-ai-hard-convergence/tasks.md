@@ -19,7 +19,7 @@ Epic：[#1973](https://dev.azure.com/shengming0923/rss/_workitems/edit/1973)
 | TAH-R3-08 | [#1981](https://dev.azure.com/shengming0923/rss/_workitems/edit/1981) | AMQP/eventing conformance 差量去重 | TAH-R3-01, TAH-R3-06 |
 | TAH-R3-09 | [#1982](https://dev.azure.com/shengming0923/rss/_workitems/edit/1982) | Vault live T2 target | TAH-R3-05 |
 | TAH-R3-10 | [#1983](https://dev.azure.com/shengming0923/rss/_workitems/edit/1983) | T3 carrier convergence | TAH-R3-02, TAH-R3-07, TAH-R3-08, TAH-R3-09 |
-| TAH-R3-11 | [#1984](https://dev.azure.com/shengming0923/rss/_workitems/edit/1984) | runtime_baseline semantic reduction | TAH-R3-10 |
+| TAH-R3-11 | [#1984](https://dev.azure.com/shengming0923/rss/_workitems/edit/1984) | runtime_assembly_residual semantic reduction | TAH-R3-10 |
 | TAH-R3-12 | [#1985](https://dev.azure.com/shengming0923/rss/_workitems/edit/1985) | assembly scanner reduction | TAH-R3-10 |
 | TAH-R3-13 | [#1986](https://dev.azure.com/shengming0923/rss/_workitems/edit/1986) | consistency/localtx scanner reduction | TAH-R3-07 |
 | TAH-R3-14 | [#1987](https://dev.azure.com/shengming0923/rss/_workitems/edit/1987) | event_transport_guard 逐规则收缩 | TAH-R3-08 |

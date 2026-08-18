@@ -1226,14 +1226,17 @@ impl DeviceIdentityPilotAdoption {
             pilot: Arc::clone(&pilot),
             cleanup_armed: AtomicBool::new(true),
         };
-        Ok(bootstrap::DomainModuleResult {
-            probes: vec![(name.clone(), Box::new(PilotReadinessProbe { name, pilot }))],
-            resources: Vec::new(),
-            workers: vec![bootstrap::WorkerSpec::observational_deferred(
+        Ok(bootstrap::DomainModuleResult::from_parts(
+            [(
+                name.clone(),
+                Box::new(PilotReadinessProbe { name, pilot }) as _,
+            )],
+            [],
+            [bootstrap::WorkerSpec::observational_deferred(
                 "composition.identity.src.pilot.01",
                 move |_token| DynManagedResource::new_box(resource),
             )],
-        })
+        ))
     }
 
     /// Cleanup-only path used when generated domain composition fails before lifecycle adoption.

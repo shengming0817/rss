@@ -29,11 +29,11 @@ Validation: `cargo xtask verify --fast`; marker scan over `docs/spec/001-runtime
 ### PR-002 / Issue #1656
 
 - [ ] T006 [US1] Add current runtime assembly baseline document in `docs/architecture/runtime-assembly-baseline.md`.
-- [ ] T007 [US2] Add committed generated baseline at `runtime-baseline/runtime.txt`.
-- [ ] T008 [US2] Add `cargo xtask runtime-baseline update|verify` in `xtask/src/runtime_baseline.rs`, `xtask/src/main.rs`, and `xtask/src/verify.rs`.
+- [ ] T007 [US2] Remove the committed runtime dependency inventory; Cargo manifest remains canonical.
+- [ ] T008 [US2] Add `cargo xtask verify --only runtime-assembly-residual` in `xtask/src/runtime_assembly_residual.rs`, `xtask/src/main.rs`, and `xtask/src/verify.rs`.
 - [ ] T009 [US2] Add red/green tests for command parsing, rendering, drift, missing baseline, empty inputs, and missing anchors.
 
-Validation: `cargo test -p xtask runtime_baseline`; `cargo test -p xtask parse_command_runtime_baseline`; `cargo xtask runtime-baseline verify`; `cargo xtask archrules verify`; `cargo xtask verify --fast`.
+Validation: `cargo test -p xtask runtime_assembly_residual`; `cargo test -p xtask try_parse_archrules_and_runtime_guards`; `cargo xtask verify --only runtime-assembly-residual`; `cargo xtask archrules verify`; `cargo xtask verify --fast`.
 
 ## Phase 1: Decompose Runtime Root
 
@@ -45,7 +45,7 @@ Validation: `cargo test -p xtask runtime_baseline`; `cargo test -p xtask parse_c
 - [ ] T015 [US1] Extract launch plan and `ShutdownStack` registration order into `assemblies/runtime/src/launch.rs`.
 - [ ] T016 [US1] Add no-behavior-change runtime harness and phase order golden.
 
-Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test -p runtime runtime_module_output_harness`; `cargo test -p runtime launch_plan`; `cargo test -p runtime`; `cargo xtask runtime-baseline verify`; `cargo xtask verify --fast`. The harness is pure in-memory and must not call `runtime::run()`, require Docker, or depend on live PG/Vault/Redis/S3/AMQP/SPIFFE state.
+Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test -p runtime runtime_module_output_harness`; `cargo test -p runtime launch_plan`; `cargo test -p runtime`; `cargo xtask verify --only runtime-assembly-residual`; `cargo xtask verify --fast`. The harness is pure in-memory and must not call `runtime::run()`, require Docker, or depend on live PG/Vault/Redis/S3/AMQP/SPIFFE state.
 
 ## Phase 2: Guard Shared Runtime Dependencies
 

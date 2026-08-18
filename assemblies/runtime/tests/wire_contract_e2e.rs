@@ -83,7 +83,7 @@ fn noop_domain_transport() -> std::sync::Arc<dyn distributed::HttpContractTransp
 
 fn probe_identity_multiset(output: &bootstrap::DomainModuleResult) -> BTreeMap<String, usize> {
     let mut identities = BTreeMap::new();
-    for (name, _) in &output.probes {
+    for (name, _) in output.probes() {
         *identities.entry(name.as_str().to_owned()).or_default() += 1;
     }
     identities
@@ -249,15 +249,15 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     let (_, domain_output) = compose_bindings(&mut bindings)?;
     assert!(bindings.is_empty(), "compose 后 binding 必须排空");
     assert!(
-        domain_output.probes.is_empty(),
+        domain_output.probe_count() == 0,
         "domain 不拥有 provider probes"
     );
     assert!(
-        domain_output.resources.is_empty(),
+        domain_output.resource_count() == 0,
         "domain 不拥有 provider resources"
     );
     assert!(
-        domain_output.workers.is_empty(),
+        domain_output.worker_count() == 0,
         "domain 不拥有 provider workers"
     );
 
@@ -266,16 +266,16 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         probe_identity_multiset(&postgres_output),
         BTreeMap::from([(CONFIGS_READY_PROBE_NAME.to_owned(), 1)])
     );
-    assert!(postgres_output.resources.is_empty());
-    assert!(postgres_output.workers.is_empty());
+    assert_eq!(postgres_output.resource_count(), 0);
+    assert_eq!(postgres_output.worker_count(), 0);
 
     let key_provider_output = key_provider_output.into_output();
     assert_eq!(
         probe_identity_multiset(&key_provider_output),
         BTreeMap::from([(KEYPROVIDER_READY_PROBE_NAME.to_owned(), 1)])
     );
-    assert!(key_provider_output.resources.is_empty());
-    assert_eq!(key_provider_output.workers.len(), 1);
+    assert_eq!(key_provider_output.resource_count(), 0);
+    assert_eq!(key_provider_output.worker_count(), 1);
 
     let secret_resolver_output = secret_resolver_output.into_output();
     assert_eq!(
@@ -285,8 +285,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
             1,
         )])
     );
-    assert!(secret_resolver_output.resources.is_empty());
-    assert_eq!(secret_resolver_output.workers.len(), 1);
+    assert_eq!(secret_resolver_output.resource_count(), 0);
+    assert_eq!(secret_resolver_output.worker_count(), 1);
 
     let expected = BTreeMap::from([
         (CONFIGS_READY_PROBE_NAME.to_owned(), 1),
@@ -299,7 +299,7 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     let mut provider_output = bootstrap::DomainModuleResult::default();
     provider_output.extend([postgres_output, key_provider_output, secret_resolver_output]);
     assert_eq!(probe_identity_multiset(&provider_output), expected);
-    assert_eq!(provider_output.workers.len(), 2);
+    assert_eq!(provider_output.worker_count(), 2);
 
     provider_output.merge(domain_output);
     assert_eq!(
@@ -307,6 +307,6 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         expected,
         "最终 carrier 必须保留每个 provider probe identity 恰好一次"
     );
-    assert_eq!(provider_output.workers.len(), 2);
+    assert_eq!(provider_output.worker_count(), 2);
     Ok(())
 }

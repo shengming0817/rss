@@ -335,8 +335,7 @@ impl<'a> ProvidersBuilt<'a> {
             if let Some(provider) = runtime_service_token.as_ref() {
                 uncommitted_provider_module
                     .get_mut()
-                    .resources
-                    .push(provider.managed_resource());
+                    .push_resource(provider.managed_resource());
             }
             let replay_sweeper_module = wire_service_token_replay_sweeper(&pg, &write_admission)
                 .context("wire service-token replay sweeper")?;
@@ -635,28 +634,27 @@ impl<'a> ProvidersBuilt<'a> {
                 ))
             },
         );
+        let mut redis_output = DomainModuleResult::default();
+        redis_output.push_probe((
+            redis_probe_name,
+            Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
+        ));
+        redis_output.extend_resources(redis.runtime_resources());
+        redis_output.push_worker(redis_readiness_worker);
         provider_build
             .record(crate::provider_output::ProviderOutput::redis(
-                DomainModuleResult {
-                    probes: vec![(
-                        redis_probe_name,
-                        Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
-                    )],
-                    resources: redis.runtime_resources(),
-                    workers: vec![redis_readiness_worker],
-                },
+                redis_output,
                 distributed_lock_store_permit,
             ))
             .context("record redis provider output")?;
 
         let runtime_object_store_permit = provider_factories.runtime_object_store()?;
         let s3 = build_s3_runtime_deps(s3_general_config).context("setup s3 deps")?;
+        let mut s3_output = DomainModuleResult::default();
+        s3_output.extend_resources(s3.runtime_resources());
         provider_build
             .record(crate::provider_output::ProviderOutput::s3(
-                DomainModuleResult {
-                    resources: s3.runtime_resources(),
-                    ..DomainModuleResult::default()
-                },
+                s3_output,
                 runtime_object_store_permit,
             ))
             .context("record S3 provider output")?;
@@ -802,9 +800,9 @@ impl<'a> ProvidersBuilt<'a> {
             "vault exposed an undeclared settings provider resource"
         );
         let mut key_module = key_output.into_output();
-        key_module.resources.push(key_resource);
+        key_module.push_resource(key_resource);
         let mut resolver_module = resolver_output.into_output();
-        resolver_module.resources.push(resolver_resource);
+        resolver_module.push_resource(resolver_resource);
         provider_build
             .record(crate::provider_output::ProviderOutput::settings_vault(
                 key_module,

@@ -58,7 +58,7 @@ mod reconcile_outbox_command_guard;
 mod release_surface;
 mod repo_scope_guard;
 mod report_format;
-mod runtime_baseline;
+mod runtime_assembly_residual;
 mod runtime_deps_guard;
 mod runtime_env_guard;
 mod runtime_root_guard;
@@ -79,8 +79,7 @@ use anyhow::{Context, Result};
 use cli::{
     ArchrulesCommand, AssemblyArtifactsCommand, AssemblyCommand, CdcConfigCommand, CiCommand,
     Command, ConsistencyCommand, ContractCommand, GraphCommand, LocaltxCommand,
-    NextestEvidenceCommand, RuntimeBaselineCommand, RuntimeDepsCommand, RuntimeEnvCommand,
-    RuntimeRootCommand,
+    NextestEvidenceCommand, RuntimeDepsCommand, RuntimeEnvCommand, RuntimeRootCommand,
 };
 pub(crate) use report_format::ReportFormat;
 use std::path::{Path, PathBuf};
@@ -164,10 +163,6 @@ fn dispatch(command: Command) -> Result<()> {
             };
             archrules::matrix(action)
         }
-        Command::RuntimeBaseline(RuntimeBaselineCommand::Update) => runtime_baseline::update(),
-        Command::RuntimeBaseline(RuntimeBaselineCommand::Verify) => {
-            diagnostic::run_check(&runtime_baseline::RuntimeBaseline)
-        }
         Command::RuntimeRoot(RuntimeRootCommand::Guard) => {
             diagnostic::run_check(&runtime_root_guard::RuntimeRootGuard)
         }
@@ -229,12 +224,14 @@ fn dispatch(command: Command) -> Result<()> {
         }
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
+            list_gates,
             fast,
             allow_missing_tools,
             against,
             fail_fast,
             only,
         } => verify::run(
+            list_gates,
             fast,
             allow_missing_tools,
             against.as_deref(),

@@ -1058,9 +1058,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
         MacKey::from_bytes(AUDIT_KEY.to_vec()),
     )
     .await?;
-    assert!(demo_module.probes.is_empty());
-    assert!(demo_module.resources.is_empty());
-    assert!(demo_module.workers.is_empty());
+    assert_eq!(demo_module.probe_count(), 0);
+    assert_eq!(demo_module.resource_count(), 0);
+    assert_eq!(demo_module.worker_count(), 0);
 
     let distributed = wire_distributed(&deps)?;
     let event_module = wire_event_transport_with_admission(
@@ -1085,8 +1085,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "consumer topology must exist before the paused worker is spawned"
     );
     let resource_names = event_module
-        .resources
-        .iter()
+        .resources()
         .map(|resource| diport::ManagedResource::name(resource.as_ref()))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1105,13 +1104,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .sum::<usize>();
     let expected_worker_count = generated_subscription_count + 6;
     assert_eq!(
-        event_module.workers.len(),
+        event_module.worker_count(),
         expected_worker_count,
         "identity/settings relays + generated consumers + sampler + outbox sweeper + inbox sweeper"
     );
     let probe_names: Vec<&str> = event_module
-        .probes
-        .iter()
+        .probes()
         .map(|(name, _)| name.as_str())
         .collect();
     assert_eq!(
@@ -1136,10 +1134,19 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 7：统一注册 ShutdownStack（resources 先注册，workers 后注册）────────
 
     let mut stack = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
-    for resource in event_module.resources {
+    let mut resources = Vec::new();
+    let mut workers = Vec::new();
+    for output in event_module.into_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(_, _) => {}
+            bootstrap::DomainLifecycleOutput::Resource(resource) => resources.push(resource),
+            bootstrap::DomainLifecycleOutput::Worker(worker) => workers.push(worker),
+        }
+    }
+    for resource in resources {
         stack.register_detached(resource);
     }
-    for worker in event_module.workers {
+    for worker in workers {
         match worker {
             bootstrap::WorkerSpec::PhaseOne(make) => stack.register_with_token(make.into_factory()),
             bootstrap::WorkerSpec::Deferred(make) => {

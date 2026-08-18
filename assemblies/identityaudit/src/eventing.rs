@@ -232,14 +232,14 @@ fn wire_publisher(
             ))
         },
     );
-    Ok(DomainModuleResult {
-        probes: vec![(
+    Ok(DomainModuleResult::from_parts(
+        [(
             probe_name.clone(),
-            Box::new(WorkerProbe::new(probe_name, health)),
+            Box::new(WorkerProbe::new(probe_name, health)) as Box<dyn bootstrap::HealthProbe>,
         )],
-        resources: vec![resource],
-        workers: vec![worker],
-    })
+        [resource],
+        [worker],
+    ))
 }
 
 fn publisher_plan() -> anyhow::Result<(RelayConfig, primitives::ProbeName)> {
@@ -262,10 +262,7 @@ async fn wire_subscribers(
     admission: primitives::ConsumerAdmission,
     write_admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
-    let mut output = DomainModuleResult {
-        resources: vec![resource],
-        ..Default::default()
-    };
+    let mut output = DomainModuleResult::from_parts([], [resource], []);
     for subscription in subscriptions {
         let topic = Topic::new(subscription.topic());
         amqp.subscriber()
@@ -297,8 +294,8 @@ async fn wire_subscribers(
         )?;
         match subscription.readiness() {
             SubscriberReadiness::Required => {
-                output.workers.push(worker);
-                output.probes.push((
+                output.push_worker(worker);
+                output.push_probe((
                     probe_name.clone(),
                     Box::new(WorkerProbe::new(probe_name, health)),
                 ));
@@ -334,7 +331,7 @@ fn wire_inbox_sweeper(
     let (config, name) = inbox_sweeper_plan(sweeper.retention_seconds())?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    output.workers.push(WorkerSpec::writes_phase_one(
+    output.push_worker(WorkerSpec::writes_phase_one(
         "assemblies.identityaudit.src.eventing.02",
         &admission,
         move |token, write_admission| {
@@ -361,9 +358,7 @@ fn wire_inbox_sweeper(
             ))
         },
     ));
-    output
-        .probes
-        .push((name.clone(), Box::new(WorkerProbe::new(name, health))));
+    output.push_probe((name.clone(), Box::new(WorkerProbe::new(name, health))));
     Ok(())
 }
 
@@ -463,11 +458,11 @@ fn wire_distributed_maintenance(
             Box::new(WorkerProbe::new(sweeper_name, sweeper_health)),
         ),
     ];
-    Ok(DomainModuleResult {
+    Ok(DomainModuleResult::from_parts(
         probes,
-        workers: vec![sampler_worker, sweeper_worker],
-        ..Default::default()
-    })
+        [],
+        [sampler_worker, sweeper_worker],
+    ))
 }
 
 fn maintenance_plan() -> anyhow::Result<(
@@ -496,11 +491,11 @@ fn retain_admission_authority(
     let health = Arc::new(WorkerHealth::starting());
     let probe_name = primitives::ProbeName::parse("identityaudit_dr_admission")
         .context("build identityaudit DR admission probe name")?;
-    output.probes.push((
+    output.push_probe((
         probe_name.clone(),
         Box::new(WorkerProbe::new(probe_name, Arc::clone(&health))),
     ));
-    output.workers.push(WorkerSpec::observational_phase_one(
+    output.push_worker(WorkerSpec::observational_phase_one(
         "assemblies.identityaudit.src.eventing.05",
         move |token| {
             DynManagedResource::new_box(spawn_on_dedicated_runtime(
@@ -630,20 +625,21 @@ mod lifecycle_tests {
         let name = primitives::ProbeName::parse("maintenance-test")?;
         let health = Arc::new(WorkerHealth::healthy());
         let outputs = assemble_role_outputs(
-            DomainModuleResult {
-                probes: vec![(
+            DomainModuleResult::from_parts(
+                [(
                     name.clone(),
-                    Box::new(WorkerProbe::new(name.clone(), Arc::clone(&health))),
+                    Box::new(WorkerProbe::new(name.clone(), Arc::clone(&health))) as _,
                 )],
-                ..Default::default()
-            },
+                [],
+                [],
+            ),
             DomainModuleResult::default(),
             DomainModuleResult::default(),
         );
-        assert_eq!(outputs.distributed_cas.probes.len(), 1);
-        assert!(outputs.event_publisher.probes.is_empty());
-        assert!(outputs.event_subscriber.probes.is_empty());
-        let check = outputs.distributed_cas.probes[0].1.check();
+        assert_eq!(outputs.distributed_cas.probe_count(), 1);
+        assert!(outputs.event_publisher.probe_count() == 0);
+        assert!(outputs.event_subscriber.probe_count() == 0);
+        let check = outputs.distributed_cas.probes().next().unwrap().1.check();
         assert_eq!(check.name(), &name);
         assert_eq!(check.status(), primitives::HealthStatus::Healthy);
 

@@ -592,7 +592,8 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
             select_saga_operator_target(plan.workflow_runtime().sagas(), &parsed.identity)?;
         let config = postgres::PgRuntimeMonitorConfig::new(
             postgres::PgReadinessInterval::try_new(std::time::Duration::from_secs(30))
-                .expect("test readiness interval"),
+                .map_err(anyhow::Error::msg)
+                .context("build Saga operator postgres readiness interval")?,
             postgres::PgRlsAttestationInterval::default(),
         );
         let (resources, _sampler) = serving.into_runtime_parts(config);
@@ -1620,7 +1621,8 @@ mod tests {
             argv("status", &["--operator-service-token", "secret"]),
         ] {
             let err = parse_saga_args(&candidate, &mut Cursor::new("secret\n"))
-                .expect_err("legacy/open-ended argv must fail closed");
+                .err()
+                .unwrap_or_else(|| unreachable!("legacy/open-ended argv must fail closed"));
             assert_operator_cli_err(&err, "sagas");
             let message = err.to_string();
             assert!(
@@ -1769,7 +1771,8 @@ mod tests {
             ],
             &mut Cursor::new("must-not-be-read\n"),
         )
-        .expect_err("InvalidValue must fail closed");
+        .err()
+        .unwrap_or_else(|| unreachable!("InvalidValue must fail closed"));
         assert_operator_cli_err(&err, "sagas");
     }
 
@@ -1780,7 +1783,8 @@ mod tests {
             &argv("status", &["--reason-text", "why"]),
             &mut Cursor::new("secret\n"),
         )
-        .expect_err("status must reject --reason-text");
+        .err()
+        .unwrap_or_else(|| unreachable!("status must reject --reason-text"));
         assert_operator_cli_err(&status_rejects_reason, "sagas");
 
         assert!(
@@ -1807,7 +1811,8 @@ mod tests {
             ),
             &mut Cursor::new("secret\n"),
         )
-        .expect_err("retry-compensation requires --expected-journal-position");
+        .err()
+        .unwrap_or_else(|| unreachable!("retry-compensation requires --expected-journal-position"));
         assert_operator_cli_err(&retry_missing_position, "sagas");
 
         let repair_missing_reason_text = parse_saga_args(
@@ -1822,14 +1827,16 @@ mod tests {
             ),
             &mut Cursor::new("secret\n"),
         )
-        .expect_err("repair requires --reason-text");
+        .err()
+        .unwrap_or_else(|| unreachable!("repair requires --reason-text"));
         assert_operator_cli_err(&repair_missing_reason_text, "sagas");
 
         let terminate_missing_ticket = parse_saga_args(
             &argv("terminate", &["--reason-text", "why"]),
             &mut Cursor::new("secret\n"),
         )
-        .expect_err("terminate requires --change-ticket");
+        .err()
+        .unwrap_or_else(|| unreachable!("terminate requires --change-ticket"));
         assert_operator_cli_err(&terminate_missing_ticket, "sagas");
 
         let unknown = parse_saga_args(
@@ -1840,7 +1847,8 @@ mod tests {
             },
             &mut Cursor::new("secret\n"),
         )
-        .expect_err("unknown subcommand must fail");
+        .err()
+        .unwrap_or_else(|| unreachable!("unknown subcommand must fail"));
         assert_operator_cli_err(&unknown, "sagas");
     }
 
@@ -1896,7 +1904,8 @@ mod tests {
 
         for (name, candidate) in cases {
             let err = parse_saga_args(&candidate, &mut Cursor::new("secret\n"))
-                .expect_err(&format!("case must fail: {name}"));
+                .err()
+                .unwrap_or_else(|| unreachable!("case must fail: {name}"));
             assert_operator_cli_err(&err, "sagas");
         }
     }

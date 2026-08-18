@@ -429,10 +429,10 @@ pub(crate) fn production_dr_admission_identity(
         .value(RUNTIME_INSTANCE_ID_ENV)
         .with_context(|| format!("{RUNTIME_INSTANCE_ID_ENV} is required"))?;
     let instance_id =
-        uuid::Uuid::parse_str(&instance_raw).context("RSS_RUNTIME_INSTANCE_ID must be a UUID")?;
+        uuid::Uuid::parse_str(instance_raw).context("RSS_RUNTIME_INSTANCE_ID must be a UUID")?;
     let required = config
         .value(REQUIRED_ADMISSION_EPOCH_ENV)
-        .map(|raw| primitives::AdmissionEpochId::parse(&raw))
+        .map(primitives::AdmissionEpochId::parse)
         .transpose()
         .context("RSS_DR_REQUIRED_ADMISSION_EPOCH_ID must be a canonical UUID")?;
     let identity = eventexec::DrAdmissionProcessIdentity::new(
@@ -637,10 +637,9 @@ impl DlxLifecycleRuntimeDeps {
     }
 
     fn into_rollback_module(self) -> DomainModuleResult {
-        DomainModuleResult {
-            resources: vec![DynManagedResource::new_box(self.pg_owner)],
-            ..DomainModuleResult::default()
-        }
+        let mut output = DomainModuleResult::default();
+        output.push_resource(DynManagedResource::new_box(self.pg_owner));
+        output
     }
 }
 
@@ -832,17 +831,70 @@ fn resolve_event_decision<T: AsRef<str>>(
 /// - Durable 拓扑（Shared / Isolated）：连接 per-domain AMQP → spawn relay + PG inbox consumer workers。
 ///
 /// `cfg` 按值消费（`TransportConfig` 不 impl Clone）。
-pub(crate) async fn wire_event_transport(
-    pg: &PgRuntimeHandle,
+pub(crate) struct EventAdmissions {
+    relay: primitives::RelayAdmission,
+    consumer: primitives::ConsumerAdmission,
+    write: primitives::WriteAdmission,
+}
+
+impl EventAdmissions {
+    pub(crate) fn new(
+        relay: primitives::RelayAdmission,
+        consumer: primitives::ConsumerAdmission,
+        write: primitives::WriteAdmission,
+    ) -> Self {
+        Self {
+            relay,
+            consumer,
+            write,
+        }
+    }
+}
+
+pub(crate) struct EventTransportWiring<'a> {
+    pg: &'a PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     subscribers: BridgedSubscriptions,
     cfg: EventTransportConfig,
     worker: EventWorkerConfig,
     audit_key: Option<MacKey>,
-    relay_admission: primitives::RelayAdmission,
-    consumer_admission: primitives::ConsumerAdmission,
-    write_admission: primitives::WriteAdmission,
+    admissions: EventAdmissions,
+}
+
+impl<'a> EventTransportWiring<'a> {
+    pub(crate) fn new(
+        pg: &'a PgRuntimeHandle,
+        distributed: DistributedRuntimeDeps,
+        subscribers: BridgedSubscriptions,
+        cfg: EventTransportConfig,
+        worker: EventWorkerConfig,
+        audit_key: Option<MacKey>,
+        admissions: EventAdmissions,
+    ) -> Self {
+        Self {
+            pg,
+            distributed,
+            subscribers,
+            cfg,
+            worker,
+            audit_key,
+            admissions,
+        }
+    }
+}
+
+pub(crate) async fn wire_event_transport(
+    wiring: EventTransportWiring<'_>,
 ) -> anyhow::Result<DomainModuleResult> {
+    let EventTransportWiring {
+        pg,
+        distributed,
+        subscribers,
+        cfg,
+        worker,
+        audit_key,
+        admissions,
+    } = wiring;
     let local_producers = cfg.local_producers.clone();
     let timing = worker.relay;
     let security = match &cfg.decision {
@@ -866,18 +918,18 @@ pub(crate) async fn wire_event_transport(
                 .context("runtime relay budget does not match governed database policy")?;
             wire_durable(
                 pg,
-                distributed,
-                subscribers,
-                DurableEventExecution {
-                    per_domain,
-                    local_producers,
+                DurableWiring {
+                    distributed,
+                    subscribers,
+                    execution: DurableEventExecution {
+                        per_domain,
+                        local_producers,
+                    },
+                    timing,
+                    security,
+                    audit_key,
+                    admissions,
                 },
-                timing,
-                security,
-                audit_key,
-                relay_admission,
-                consumer_admission,
-                write_admission,
             )
             .await
         }
@@ -963,22 +1015,21 @@ pub(crate) fn wire_dlx_lifecycle(
         archive_key_probe_name.clone(),
         archive_key_health,
     ));
+    let mut lifecycle_repository = DomainModuleResult::default();
+    lifecycle_repository.push_probe((probe_name, probe));
+    lifecycle_repository.push_resource(DynManagedResource::new_box(pg_owner));
+    lifecycle_repository.push_worker(lifecycle_worker);
+    let mut archive_store = DomainModuleResult::default();
+    archive_store.push_probe((archive_probe_name, archive_probe));
+    archive_store.push_worker(archive_worker);
+    let mut archive_key_provider_output = DomainModuleResult::default();
+    archive_key_provider_output.push_probe((archive_key_probe_name, archive_key_probe));
+    archive_key_provider_output.push_resource(archive_key_resource);
+    archive_key_provider_output.push_worker(archive_key_worker);
     Ok(DlxRoleOutputs {
-        lifecycle_repository: DomainModuleResult {
-            probes: vec![(probe_name, probe)],
-            resources: vec![DynManagedResource::new_box(pg_owner)],
-            workers: vec![lifecycle_worker],
-        },
-        archive_store: DomainModuleResult {
-            probes: vec![(archive_probe_name, archive_probe)],
-            workers: vec![archive_worker],
-            ..Default::default()
-        },
-        archive_key_provider: DomainModuleResult {
-            probes: vec![(archive_key_probe_name, archive_key_probe)],
-            resources: vec![archive_key_resource],
-            workers: vec![archive_key_worker],
-        },
+        lifecycle_repository,
+        archive_store,
+        archive_key_provider: archive_key_provider_output,
     })
 }
 
@@ -1276,12 +1327,14 @@ where
                     dlx_lifecycle_loop(
                         lifecycle,
                         backlog_repository,
-                        thread_token,
-                        Arc::clone(&health),
-                        Arc::new(MetricsRetentionMetrics),
-                        Arc::new(SystemClock),
-                        config,
-                        worker_admission,
+                        DlxLoopContext {
+                            token: thread_token,
+                            health: Arc::clone(&health),
+                            metrics: Arc::new(MetricsRetentionMetrics),
+                            clock: Arc::new(SystemClock),
+                            config,
+                            write_admission: worker_admission,
+                        },
                     )
                     .await;
                     Ok(())
@@ -1355,19 +1408,28 @@ impl DlxBacklogReader for PgDlxLifecycleRepository {
     }
 }
 
-async fn dlx_lifecycle_loop<L, B>(
-    lifecycle: L,
-    backlog_repository: B,
+struct DlxLoopContext {
     token: tokio_util::sync::CancellationToken,
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn RetentionMetrics>,
     clock: Arc<dyn Clock>,
     config: DlxWorkerConfig,
     write_admission: primitives::WriteAdmission,
-) where
+}
+
+async fn dlx_lifecycle_loop<L, B>(lifecycle: L, backlog_repository: B, context: DlxLoopContext)
+where
     L: DlxTickRunner,
     B: DlxBacklogReader,
 {
+    let DlxLoopContext {
+        token,
+        health,
+        metrics,
+        clock,
+        config,
+        write_admission,
+    } = context;
     let mut ticker = tokio::time::interval(config.lifecycle_interval);
     loop {
         tokio::select! {
@@ -1637,21 +1699,37 @@ fn event_security_for_topology(
 // ── 内部函数 ──────────────────────────────────────────────────────────────────
 
 /// durable 拓扑接线内核（Shared / Isolated）：建立 AMQP，spawn relay + PG inbox consumer workers。
-#[allow(clippy::cognitive_complexity)]
 // reason: wire_durable 是顺序聚合函数，步骤严格有序（AMQP resources → relay → consumers）；
 // 拆分会把 module channel 填充顺序散布到多处，隐藏通用 resources → workers 注册约束。
-async fn wire_durable(
-    pg: &PgRuntimeHandle,
+struct DurableWiring {
     distributed: DistributedRuntimeDeps,
     subscribers: BridgedSubscriptions,
     execution: DurableEventExecution,
     timing: RelayTiming,
     security: EventSecurity,
     audit_key: Option<MacKey>,
-    relay_admission: primitives::RelayAdmission,
-    consumer_admission: primitives::ConsumerAdmission,
-    write_admission: primitives::WriteAdmission,
+    admissions: EventAdmissions,
+}
+
+#[allow(clippy::cognitive_complexity)]
+async fn wire_durable(
+    pg: &PgRuntimeHandle,
+    wiring: DurableWiring,
 ) -> anyhow::Result<DomainModuleResult> {
+    let DurableWiring {
+        distributed,
+        subscribers,
+        execution,
+        timing,
+        security,
+        audit_key,
+        admissions,
+    } = wiring;
+    let EventAdmissions {
+        relay: relay_admission,
+        consumer: consumer_admission,
+        write: write_admission,
+    } = admissions;
     let (subscribers, inbox_backlog_selection) = subscribers.into_runtime_parts();
     let DurableEventExecution {
         per_domain,
@@ -1682,7 +1760,7 @@ async fn wire_durable(
                 return Err(crate::provider_output::abort_uncommitted(module, primary).await);
             }
         };
-        module.resources.extend(amqp_deps.runtime_resources());
+        module.extend_resources(amqp_deps.runtime_resources());
         tracing::info!(domain, "durable event transport: amqp connected");
         amqp_map.insert(domain, amqp_deps);
     }
@@ -1755,14 +1833,16 @@ async fn wire_durable(
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
     if let Err(primary) = wire_consumer_resource_bundle(
-        pg,
         subscribers,
-        &amqp_map,
-        &security,
-        &timing,
-        audit_key.as_ref(),
-        consumer_admission,
-        write_admission,
+        ConsumerWiring {
+            pg,
+            amqp_map: &amqp_map,
+            security: &security,
+            timing: &timing,
+            audit_key: audit_key.as_ref(),
+            admission: consumer_admission,
+            write_admission,
+        },
         &mut module,
     )
     .await
@@ -1793,11 +1873,11 @@ pub(crate) fn retain_admission_authority(
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::starting());
     let probe_name = ProbeName::parse("dr_admission").context("parse DR admission probe name")?;
-    module.probes.push((
+    module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe::new(probe_name, Arc::clone(&health))),
     ));
-    module.workers.push(WorkerSpec::observational_phase_one(
+    module.push_worker(WorkerSpec::observational_phase_one(
         "assemblies.runtime.src.event_transport.04",
         move |token| {
             DynManagedResource::new_box(spawn_on_dedicated_runtime(
@@ -1856,11 +1936,11 @@ fn wire_domain_relay(
             ))
         },
     );
-    module.workers.push(worker);
+    module.push_worker(worker);
     // per-domain 探针名（多 relay 各自唯一）：`{OUTBOX_RELAY_PROBE}_{domain}`。
     let probe_name = ProbeName::parse(&format!("{OUTBOX_RELAY_PROBE}_{domain}"))
         .context("parse relay probe name")?;
-    module.probes.push((
+    module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe {
             name: probe_name,
@@ -1932,11 +2012,11 @@ fn wire_inbox_backlog_sampler(
             ))
         },
     );
-    module.workers.push(worker);
+    module.push_worker(worker);
 
     let probe_name =
         ProbeName::parse(INBOX_SAMPLER_PROBE).context("parse inbox sampler probe name")?;
-    module.probes.push((
+    module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe {
             name: probe_name,
@@ -1989,11 +2069,11 @@ fn wire_sampler_worker(
             ))
         },
     );
-    module.workers.push(worker);
+    module.push_worker(worker);
 
     let probe_name =
         ProbeName::parse(OUTBOX_SAMPLER_PROBE).context("parse outbox sampler probe name")?;
-    module.probes.push((
+    module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe {
             name: probe_name,
@@ -2042,10 +2122,10 @@ where
             ))
         },
     );
-    module.workers.push(worker);
+    module.push_worker(worker);
 
     let probe_name = ProbeName::parse(probe_name).context("parse sweeper probe name")?;
-    module.probes.push((
+    module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe {
             name: probe_name,
@@ -2056,17 +2136,30 @@ where
 }
 
 /// Consumer resource bundle 接线（PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
-async fn wire_consumer_resource_bundle(
-    pg: &PgRuntimeHandle,
-    subscribers: Vec<BridgedSubscription>,
-    amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
-    security: &EventSecurity,
-    timing: &RelayTiming,
-    audit_key: Option<&MacKey>,
+struct ConsumerWiring<'a> {
+    pg: &'a PgRuntimeHandle,
+    amqp_map: &'a BTreeMap<String, amqp::AmqpRuntimeDeps>,
+    security: &'a EventSecurity,
+    timing: &'a RelayTiming,
+    audit_key: Option<&'a MacKey>,
     admission: primitives::ConsumerAdmission,
     write_admission: primitives::WriteAdmission,
+}
+
+async fn wire_consumer_resource_bundle(
+    subscribers: Vec<BridgedSubscription>,
+    wiring: ConsumerWiring<'_>,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
+    let ConsumerWiring {
+        pg,
+        amqp_map,
+        security,
+        timing,
+        audit_key,
+        admission,
+        write_admission,
+    } = wiring;
     let binding_count = subscribers.len();
     for subscription in subscribers {
         let owner = subscription.topic_owner();
@@ -2124,8 +2217,8 @@ async fn wire_consumer_resource_bundle(
             SubscriberReadiness::Required => {
                 // Required 是 generated topology 的强制服务语义：worker 与 readyz probe 必须成对注册。
                 // 穷尽 match 让未来新增 readiness variant 在组合根编译失败，而不是静默降级。
-                module.workers.push(worker);
-                module.probes.push(consumer_probe);
+                module.push_worker(worker);
+                module.push_probe(consumer_probe);
             }
         }
     }
@@ -2224,11 +2317,11 @@ fn wire_inbox_sweeper(
             ))
         },
     );
-    module.workers.push(worker);
+    module.push_worker(worker);
 
     let probe_name =
         ProbeName::parse(INBOX_SWEEPER_PROBE).context("parse inbox sweeper probe name")?;
-    module.probes.push((
+    module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe {
             name: probe_name,
@@ -3729,12 +3822,14 @@ mod tests {
         dlx_lifecycle_loop(
             lifecycle,
             FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(1, 2))),
-            token,
-            Arc::clone(&health),
-            metrics,
-            Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH; 2])),
-            DlxWorkerConfig::canonical(),
-            open_write_admission(),
+            DlxLoopContext {
+                token,
+                health: Arc::clone(&health),
+                metrics,
+                clock: Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH; 2])),
+                config: DlxWorkerConfig::canonical(),
+                write_admission: open_write_admission(),
+            },
         )
         .await;
 
@@ -3755,12 +3850,14 @@ mod tests {
         let handle = tokio::spawn(dlx_lifecycle_loop(
             NeverCompletingDlxTickRunner,
             FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
-            loop_token,
-            Arc::new(WorkerHealth::starting()),
-            Arc::new(RecordingDlxMetrics::default()),
-            Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
-            DlxWorkerConfig::canonical(),
-            open_write_admission(),
+            DlxLoopContext {
+                token: loop_token,
+                health: Arc::new(WorkerHealth::starting()),
+                metrics: Arc::new(RecordingDlxMetrics::default()),
+                clock: Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
+                config: DlxWorkerConfig::canonical(),
+                write_admission: open_write_admission(),
+            },
         ));
         tokio::task::yield_now().await;
         token.cancel();
@@ -4100,10 +4197,11 @@ mod tests {
 
     #[test]
     fn inbox_sampler_registration_follows_local_generated_subscription_inventory() {
-        let empty = InboxBacklogSelection::from_generated(&[]).expect("empty generated selection");
+        let empty = InboxBacklogSelection::from_generated(&[])
+            .unwrap_or_else(|error| unreachable!("empty generated selection: {error}"));
         assert!(
             inbox_sampler_registration(empty, Duration::from_secs(30))
-                .expect("empty registration")
+                .unwrap_or_else(|error| unreachable!("empty registration: {error}"))
                 .is_none(),
             "a runtime without local subscriptions must not register a worker or probe"
         );
@@ -4111,10 +4209,10 @@ mod tests {
         let local = InboxBacklogSelection::from_generated(&[
             generated::event::settings_v1::SETTINGS_SUBSCRIPTION,
         ])
-        .expect("local generated selection");
+        .unwrap_or_else(|error| unreachable!("local generated selection: {error}"));
         let registration = inbox_sampler_registration(local, Duration::from_secs(30))
-            .expect("local registration")
-            .expect("local subscriptions register one sampler");
+            .unwrap_or_else(|error| unreachable!("local registration: {error}"))
+            .unwrap_or_else(|| unreachable!("local subscriptions register one sampler"));
         assert_eq!(registration.selection().groups().len(), 1);
         assert_eq!(registration.sample_interval(), Duration::from_secs(30));
     }

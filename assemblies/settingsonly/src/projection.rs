@@ -42,11 +42,10 @@ impl ProjectionLifecycleBatch {
             name: name.clone(),
             health,
         };
-        Ok(Self(bootstrap::DomainModuleResult {
-            probes: vec![(name, Box::new(probe))],
-            workers: vec![worker],
-            ..Default::default()
-        }))
+        let mut output = bootstrap::DomainModuleResult::default();
+        output.push_probe((name, Box::new(probe)));
+        output.push_worker(worker);
+        Ok(Self(output))
     }
 
     pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
@@ -106,14 +105,17 @@ mod tests {
         let output =
             ProjectionLifecycleBatch::from_runtime_plan(plan.workflow_runtime(), &write_admission)?
                 .into_output();
-        assert!(output.resources.is_empty());
+        assert!(output.resource_count() == 0);
         assert!(matches!(
-            output.workers.as_slice(),
-            [bootstrap::WorkerSpec::Deferred(_)]
+            output.workers().next(),
+            Some(bootstrap::WorkerSpec::Deferred(_))
         ));
-        let [(probe_name, _probe)] = output.probes.as_slice() else {
-            anyhow::bail!("settings active projection must emit exactly one probe");
-        };
+        assert_eq!(output.worker_count(), 1);
+        let (probe_name, _probe) = output
+            .probes()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("settings active projection must emit one probe"))?;
+        assert_eq!(output.probe_count(), 1);
         assert!(
             probe_name
                 .as_str()

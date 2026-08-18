@@ -4,6 +4,8 @@
 //! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_server_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
 //! - `cannot_mint_authenticated`：`AuthenticatedRoutes::new` 是 `pub(crate)`，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
 //! - `authenticated_routes_cannot_bind`：auth-finalized 中间态没有 public transport 出口；业务必须取得 rate-limit receipt。
+//! - `server_service_requires_budget`：最终 rate-limited 状态没有无预算 transport 出口。
+//! - `cannot_construct_server_service`：外部代码不能伪造私有字段封装的 transport capability。
 //! - `cannot_mint_authenticated_evidence`：production `Authenticated::new_*` 需要 `authmint::AuthenticatedMint`，
 //!   缺 mint 首参即 compile_fail（AUTH-EVIDENCE-MINT-01 Hard；本例锁 `new_mtls` arity）。
 //! - `cannot_name_authmint_capability`：`AuthenticatedMint` 字段私有，不可 `AuthenticatedMint(())` 伪造
@@ -35,6 +37,8 @@ fn ui() {
     t.pass("tests/ui/declared_producer_funnel_pass.rs");
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/authenticated_routes_cannot_bind.rs");
+    t.compile_fail("tests/ui/server_service_requires_budget.rs");
+    t.compile_fail("tests/ui/cannot_construct_server_service.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated_evidence.rs");
     t.compile_fail("tests/ui/cannot_name_authmint_capability.rs");

@@ -432,11 +432,21 @@ pub(crate) fn register_probes(
     registry: &mut bootstrap::Registry,
     output: &mut bootstrap::DomainModuleResult,
 ) -> anyhow::Result<()> {
-    for (name, probe) in output.probes.drain(..) {
-        registry
-            .probe(name, probe)
-            .context("register settingsonly lifecycle probe")?;
+    let mut retained = bootstrap::DomainModuleResult::default();
+    for lifecycle in output.drain_outputs() {
+        match lifecycle {
+            bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                registry
+                    .probe(name, probe)
+                    .context("register settingsonly lifecycle probe")?;
+            }
+            bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                retained.push_resource(resource);
+            }
+            bootstrap::DomainLifecycleOutput::Worker(worker) => retained.push_worker(worker),
+        }
     }
+    *output = retained;
     Ok(())
 }
 

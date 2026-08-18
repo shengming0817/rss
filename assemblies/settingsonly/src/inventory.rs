@@ -308,9 +308,19 @@ pub mod test_support {
                 crate::listeners::InventoryJourneyRequestPlan::single(),
             )
         };
-        for (name, probe) in lifecycle.probes.drain(..) {
-            registry.probe(name, probe)?;
+        let mut retained = bootstrap::DomainModuleResult::default();
+        for output in lifecycle.drain_outputs() {
+            match output {
+                bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                    registry.probe(name, probe)?;
+                }
+                bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                    retained.push_resource(resource);
+                }
+                bootstrap::DomainLifecycleOutput::Worker(worker) => retained.push_worker(worker),
+            }
         }
+        lifecycle = retained;
         let reporter = Arc::new(registry.take_health_reporter());
         let (publisher, reader) = model::inventory_channel(seed, Arc::clone(&reporter));
         let mut registry = bootstrap::Registry::new();

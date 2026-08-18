@@ -191,19 +191,22 @@ impl SettingsProviderReadiness {
                 key_provider: Arc::clone(&key_provider),
                 secret_resolver: Arc::clone(&secret_resolver),
             },
-            key_provider: SettingsKeyProviderReadinessOutput(DomainModuleResult {
-                probes: vec![(key_name, Box::new(KeyProviderReadyProbe::new(key_provider)))],
-                workers: vec![key_worker],
-                ..Default::default()
-            }),
-            secret_resolver: SettingsSecretResolverReadinessOutput(DomainModuleResult {
-                probes: vec![(
-                    resolver_name,
-                    Box::new(SecretResolverReadyProbe::new(secret_resolver)),
+            key_provider: SettingsKeyProviderReadinessOutput(DomainModuleResult::from_parts(
+                vec![(
+                    key_name,
+                    Box::new(KeyProviderReadyProbe::new(key_provider)) as _,
                 )],
-                workers: vec![resolver_worker],
-                ..Default::default()
-            }),
+                [],
+                vec![key_worker],
+            )),
+            secret_resolver: SettingsSecretResolverReadinessOutput(DomainModuleResult::from_parts(
+                vec![(
+                    resolver_name,
+                    Box::new(SecretResolverReadyProbe::new(secret_resolver)) as _,
+                )],
+                [],
+                vec![resolver_worker],
+            )),
         })
     }
 
@@ -233,10 +236,11 @@ impl SettingsProviderReadinessAwaitingPostgres {
                 key_provider: self.key_provider,
                 secret_resolver: self.secret_resolver,
             },
-            SettingsPostgresReadinessOutput(DomainModuleResult {
-                probes: vec![(name, Box::new(ConfigsReadyProbe::new(postgres)))],
-                ..Default::default()
-            }),
+            SettingsPostgresReadinessOutput(DomainModuleResult::from_parts(
+                vec![(name, Box::new(ConfigsReadyProbe::new(postgres)) as _)],
+                [],
+                [],
+            )),
         ))
     }
 }
@@ -1169,12 +1173,12 @@ mod tests {
         let (_, output) = compose_bindings(&mut bindings).expect("settings binding composes");
         assert!(bindings.is_empty());
         assert!(
-            output.probes.is_empty(),
+            output.probe_count() == 0,
             "provider probes must not be duplicated by domain wiring"
         );
-        assert!(output.resources.is_empty());
+        assert_eq!(output.resource_count(), 0);
         assert!(
-            output.workers.is_empty(),
+            output.worker_count() == 0,
             "provider samplers must not be duplicated by domain wiring"
         );
     }
@@ -1194,18 +1198,24 @@ mod tests {
         let postgres = postgres.into_output();
         let key = key.into_output();
         let resolver = resolver.into_output();
-        assert_eq!((postgres.probes.len(), postgres.workers.len()), (1, 0));
-        assert_eq!(postgres.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
-        assert!(postgres.resources.is_empty());
-        assert_eq!((key.probes.len(), key.workers.len()), (1, 1));
-        assert_eq!(key.probes[0].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
-        assert!(key.resources.is_empty());
-        assert_eq!((resolver.probes.len(), resolver.workers.len()), (1, 1));
+        assert_eq!((postgres.probe_count(), postgres.worker_count()), (1, 0));
         assert_eq!(
-            resolver.probes[0].0.as_str(),
-            SECRET_RESOLVER_READY_PROBE_NAME
+            postgres.probes().next().map(|(name, _)| name.as_str()),
+            Some(CONFIGS_READY_PROBE_NAME)
         );
-        assert!(resolver.resources.is_empty());
+        assert_eq!(postgres.resource_count(), 0);
+        assert_eq!((key.probe_count(), key.worker_count()), (1, 1));
+        assert_eq!(
+            key.probes().next().map(|(name, _)| name.as_str()),
+            Some(KEYPROVIDER_READY_PROBE_NAME)
+        );
+        assert_eq!(key.resource_count(), 0);
+        assert_eq!((resolver.probe_count(), resolver.worker_count()), (1, 1));
+        assert_eq!(
+            resolver.probes().next().map(|(name, _)| name.as_str()),
+            Some(SECRET_RESOLVER_READY_PROBE_NAME)
+        );
+        assert_eq!(resolver.resource_count(), 0);
         Ok(())
     }
 

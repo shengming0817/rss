@@ -92,7 +92,7 @@ enum PreparedL2DrRecoveryInner {
 
 /// Opaque command whose argv and stdin token have been validated before runtime setup.
 #[cfg(feature = "operator-cli")]
-pub struct PreparedL2DrRecoveryCommand(PreparedL2DrRecoveryInner);
+pub struct PreparedL2DrRecoveryCommand(Box<PreparedL2DrRecoveryInner>);
 
 /// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
 /// clap's own help/version render (already printed when this variant is returned).
@@ -261,10 +261,14 @@ The operator service token is read from stdin after argv validation \
         stdin: &mut impl std::io::BufRead,
     ) -> anyhow::Result<L2DrRecoveryCliArgs> {
         match prepare_l2_dr_recovery_command_with_stdin(args, stdin)? {
-            L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(
-                PreparedL2DrRecoveryInner::Apply(parsed),
-            )) => Ok(parsed),
-            L2DrRecoveryCommandPreparation::Execute(_) => anyhow::bail!("test expected apply"),
+            L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(prepared)) => {
+                match *prepared {
+                    PreparedL2DrRecoveryInner::Apply(parsed) => Ok(parsed),
+                    PreparedL2DrRecoveryInner::Admission(_) => {
+                        anyhow::bail!("test expected apply")
+                    }
+                }
+            }
             L2DrRecoveryCommandPreparation::Help => {
                 anyhow::bail!("test expected an executable L2 DR recovery command")
             }
@@ -347,7 +351,7 @@ The operator service token is read from stdin after argv validation \
             )?,
         };
         Ok(L2DrRecoveryCommandPreparation::Execute(
-            PreparedL2DrRecoveryCommand(prepared),
+            PreparedL2DrRecoveryCommand(Box::new(prepared)),
         ))
     }
 
@@ -1205,7 +1209,7 @@ pub async fn run_l2_dr_recovery_command(
     let config = l2_dr_snapshot.view();
     let operator = runtime_inputs.operator_capability();
     let grants = load_l2_dr_recovery_operator_grants_from_snapshot(config, operator)?;
-    match command.0 {
+    match *command.0 {
         PreparedL2DrRecoveryInner::Apply(parsed) => {
             let command_result = {
                 execute_l2_dr_recovery_with_runtime(
@@ -1391,7 +1395,7 @@ mod tests {
                 clap_cli::prepare_l2_dr_recovery_command_with_stdin(&args, &mut stdin)
                     .expect("help preparation")
             else {
-                panic!("expected help");
+                unreachable!("expected help");
             };
             assert_eq!(stdin.position(), 0);
         }
@@ -1414,7 +1418,7 @@ mod tests {
             let Err(err) =
                 clap_cli::prepare_l2_dr_recovery_command_with_stdin(&candidate, &mut stdin)
             else {
-                panic!("invalid argv must fail closed");
+                unreachable!("invalid argv must fail closed");
             };
             assert_eq!(stdin.position(), 0);
             assert_operator_cli_err(&err, "l2-dr-recovery");
@@ -1434,7 +1438,7 @@ mod tests {
         let Err(err) =
             clap_cli::prepare_l2_dr_recovery_command_with_stdin(&duplicate_event, &mut stdin)
         else {
-            panic!("missing stdin flag must fail closed");
+            unreachable!("missing stdin flag must fail closed");
         };
         assert_eq!(stdin.position(), 0);
         assert_operator_cli_err(&err, "l2-dr-recovery");
@@ -1444,7 +1448,7 @@ mod tests {
             &[COMMAND_NAMESPACE.to_owned(), "status".to_owned()],
             &mut stdin,
         ) else {
-            panic!("unknown subcommand must fail closed");
+            unreachable!("unknown subcommand must fail closed");
         };
         assert_eq!(stdin.position(), 0);
         assert_operator_cli_err(&err, "l2-dr-recovery");
@@ -1463,7 +1467,7 @@ mod tests {
         let Err(err) =
             clap_cli::prepare_l2_dr_recovery_command_with_stdin(&non_positive, &mut stdin)
         else {
-            panic!("non-positive restore point must fail closed");
+            unreachable!("non-positive restore point must fail closed");
         };
         assert_eq!(stdin.position(), 0);
         assert_operator_cli_err(&err, "l2-dr-recovery");
@@ -1477,11 +1481,11 @@ mod tests {
         let flag = args
             .iter()
             .position(|value| value == "--operator-service-token-stdin")
-            .expect("stdin flag");
+            .unwrap_or_else(|| unreachable!("stdin flag"));
         args[flag] = "--operator-service-token-stdin=SECRET_BAIT".to_owned();
         let Err(err) = clap_cli::prepare_l2_dr_recovery_command_with_stdin(&args, &mut stdin)
         else {
-            panic!("TooManyValues must fail closed");
+            unreachable!("TooManyValues must fail closed");
         };
         assert_eq!(stdin.position(), 0);
         assert_operator_cli_err(&err, "l2-dr-recovery");
@@ -1543,19 +1547,21 @@ mod tests {
                 &admission_argv(action),
                 &mut Cursor::new(b"opaque-token\n"),
             )
-            .expect("valid admission command");
-            let L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(
-                PreparedL2DrRecoveryInner::Admission(parsed),
-            )) = prepared
+            .unwrap_or_else(|error| unreachable!("valid admission command: {error}"));
+            let L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(prepared)) =
+                prepared
             else {
-                panic!("expected admission command");
+                unreachable!("expected admission command");
+            };
+            let PreparedL2DrRecoveryInner::Admission(parsed) = *prepared else {
+                unreachable!("expected admission command");
             };
             assert_eq!(parsed.action_label(), expected);
             let grants = parse_l2_dr_recovery_operator_grants(&format!("{expected}|{TENANT}"))
-                .expect("exact action grant");
+                .unwrap_or_else(|error| unreachable!("exact action grant: {error}"));
             assert!(authorize_l2_dr_admission_operator(&parsed, &grants).is_ok());
             let wrong = parse_l2_dr_recovery_operator_grants(&format!("apply|{TENANT}"))
-                .expect("different exact action");
+                .unwrap_or_else(|error| unreachable!("different exact action: {error}"));
             assert!(authorize_l2_dr_admission_operator(&parsed, &wrong).is_err());
         }
     }
@@ -1568,7 +1574,7 @@ mod tests {
             format!("runtime|sha256:z-plan|{second}"),
             format!("identityaudit|sha256:a-plan|{first}"),
         ])
-        .expect("valid declared set");
+        .unwrap_or_else(|error| unreachable!("valid declared set: {error}"));
         assert_eq!(
             parsed,
             serde_json::json!([
@@ -1749,7 +1755,7 @@ mod tests {
                 applied_at,
                 eventexec::L2DrRecoveryOutcome::Applied,
             )?;
-            eventexec::L2DrRecoveryReceipt::from_store(&authorized, durable)
+            eventexec::L2DrRecoveryReceipt::from_store(authorized, durable)
         }
 
         async fn shutdown(&self, _session: Self::Session) -> anyhow::Result<()> {

@@ -2521,7 +2521,14 @@ fn file_has_distributed_consumer_evidence(file: &syn::File) -> bool {
                 if let Some(call) = terminal_path_call(
                     &init.expr,
                     &["crate", "event_transport", "wire_event_transport"],
-                ) && let Some(syn::Expr::Path(path)) = call.args.iter().nth(1)
+                ) && call.args.len() == 1
+                    && let Some(wiring) = call.args.first()
+                    && let Some(constructor) = terminal_path_call(
+                        wiring,
+                        &["crate", "event_transport", "EventTransportWiring", "new"],
+                    )
+                    && constructor.args.len() == 7
+                    && let Some(syn::Expr::Path(path)) = constructor.args.iter().nth(1)
                     && let Some(ident) = path.path.get_ident()
                 {
                     self.consumers.push(ident.to_string());
@@ -6569,12 +6576,19 @@ impl InfraBuilt {
                 crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
                     .context("wire distributed")?;
             let event_module = crate::event_transport::wire_event_transport(
-                &deps.pg,
-                distributed,
-                event_subscribers,
-                event_transport,
-                event_worker,
-                audit_consumer_key,
+                crate::event_transport::EventTransportWiring::new(
+                    &deps.pg,
+                    distributed,
+                    event_subscribers,
+                    event_transport,
+                    event_worker,
+                    audit_consumer_key,
+                    crate::event_transport::EventAdmissions::new(
+                        relay_admission,
+                        consumer_admission,
+                        write_admission,
+                    ),
+                ),
             )
             .await
             .context("wire event transport")?;
@@ -8061,11 +8075,7 @@ impl ListenerPdpJwksLifecycle {
     }
 
     pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
-        bootstrap::DomainModuleResult {
-            probes,
-            resources,
-            workers: Vec::new(),
-        }
+        bootstrap::DomainModuleResult::from_parts(probes, resources, [])
     }
 }
 
@@ -10690,12 +10700,19 @@ impl InfraBuilt {
                 crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
                     .context("wire distributed")?;
             let event_module = crate::event_transport::wire_event_transport(
-                &deps.pg,
-                distributed,
-                event_subscribers,
-                event_transport,
-                event_worker,
-                audit_consumer_key,
+                crate::event_transport::EventTransportWiring::new(
+                    &deps.pg,
+                    distributed,
+                    event_subscribers,
+                    event_transport,
+                    event_worker,
+                    audit_consumer_key,
+                    crate::event_transport::EventAdmissions::new(
+                        relay_admission,
+                        consumer_admission,
+                        write_admission,
+                    ),
+                ),
             )
             .await
             .context("wire event transport")?;
@@ -10723,12 +10740,19 @@ impl InfraBuilt {
             let distributed =
                 crate::distributed_runtime::wire_distributed(&deps, distributed_worker)?;
             let event_module = crate::event_transport::wire_event_transport(
-                &deps.pg,
-                distributed,
-                event_subscribers,
-                event_transport,
-                event_worker,
-                audit_consumer_key,
+                crate::event_transport::EventTransportWiring::new(
+                    &deps.pg,
+                    distributed,
+                    event_subscribers,
+                    event_transport,
+                    event_worker,
+                    audit_consumer_key,
+                    crate::event_transport::EventAdmissions::new(
+                        relay_admission,
+                        consumer_admission,
+                        write_admission,
+                    ),
+                ),
             ).await?;
             Ok::<_, anyhow::Error>(event_module)
         }.await;

@@ -131,9 +131,7 @@ impl runtimeexec::StartupAdapter for FixtureStartup {
         ] {
             let name = primitives::ProbeName::parse(name)
                 .context("build fixture provider readiness probe name")?;
-            provider_output
-                .probes
-                .push((name.clone(), Box::new(HealthyProbe { name })));
+            provider_output.push_probe((name.clone(), Box::new(HealthyProbe { name })));
         }
         transaction.stage_provider_output(provider_output);
         let bindings = vec![

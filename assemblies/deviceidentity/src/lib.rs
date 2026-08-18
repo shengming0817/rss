@@ -142,7 +142,7 @@ async fn compose_generated_domain(
     inputs: domains::DomainModuleInputs,
 ) -> anyhow::Result<(bootstrap::Registry, bootstrap::shutdown::ShutdownStack)> {
     let mut bindings = wire_domains(dependencies, inputs).await?;
-    let (mut registry, output) = match bootstrap::compose_bindings(&mut bindings) {
+    let (mut registry, mut output) = match bootstrap::compose_bindings(&mut bindings) {
         Ok(composed) => composed,
         Err(composition) => {
             let output = bootstrap::drain_binding_outputs(&mut bindings);
@@ -155,14 +155,22 @@ async fn compose_generated_domain(
             };
         }
     };
-    for (name, probe) in output.probes {
-        registry.probe(name, probe)?;
+    let mut resources = Vec::new();
+    let mut workers = Vec::new();
+    for lifecycle in output.drain_outputs() {
+        match lifecycle {
+            bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                registry.probe(name, probe)?;
+            }
+            bootstrap::DomainLifecycleOutput::Resource(resource) => resources.push(resource),
+            bootstrap::DomainLifecycleOutput::Worker(worker) => workers.push(worker),
+        }
     }
     let mut shutdown = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
-    for resource in output.resources {
+    for resource in resources {
         shutdown.register_detached(resource);
     }
-    for worker in output.workers {
+    for worker in workers {
         match worker {
             bootstrap::WorkerSpec::PhaseOne(make) => {
                 shutdown.register_with_token(make.into_factory())
@@ -175,12 +183,21 @@ async fn compose_generated_domain(
     Ok((registry, shutdown))
 }
 
-async fn shutdown_output(output: bootstrap::DomainModuleResult) -> anyhow::Result<()> {
+async fn shutdown_output(mut output: bootstrap::DomainModuleResult) -> anyhow::Result<()> {
     let mut shutdown = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
-    for resource in output.resources {
+    let mut resources = Vec::new();
+    let mut workers = Vec::new();
+    for lifecycle in output.drain_outputs() {
+        match lifecycle {
+            bootstrap::DomainLifecycleOutput::Probe(_, _) => {}
+            bootstrap::DomainLifecycleOutput::Resource(resource) => resources.push(resource),
+            bootstrap::DomainLifecycleOutput::Worker(worker) => workers.push(worker),
+        }
+    }
+    for resource in resources {
         shutdown.register_detached(resource);
     }
-    for worker in output.workers {
+    for worker in workers {
         match worker {
             bootstrap::WorkerSpec::PhaseOne(make) => {
                 shutdown.register_with_token(make.into_factory())
@@ -272,9 +289,9 @@ mod tests {
         );
         let (_, output) = compose_bindings(&mut bindings).expect("identity binding composes");
         assert!(bindings.is_empty());
-        assert!(output.probes.is_empty());
-        assert!(output.resources.is_empty());
-        assert!(output.workers.is_empty());
+        assert_eq!(output.probe_count(), 0);
+        assert_eq!(output.resource_count(), 0);
+        assert_eq!(output.worker_count(), 0);
         assert!(crate::DOMAIN_LISTENER_BINDINGS.is_empty());
     }
 

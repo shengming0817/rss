@@ -62,9 +62,6 @@ pub(crate) enum Command {
     /// ArchRules 派生索引与 funnel 矩阵。
     #[command(subcommand)]
     Archrules(ArchrulesCommand),
-    /// runtime assembly baseline。
-    #[command(subcommand)]
-    RuntimeBaseline(RuntimeBaselineCommand),
     /// runtime composition-root 单调职责。
     #[command(subcommand)]
     RuntimeRoot(RuntimeRootCommand),
@@ -108,6 +105,9 @@ pub(crate) enum Command {
     },
     /// 本地全量治理门聚合入口。
     Verify {
+        /// 列出 registry 派生的合法 gate label 后退出。
+        #[arg(long, conflicts_with_all = ["fast", "allow_missing_tools", "against", "fail_fast", "only"])]
+        list_gates: bool,
         /// 只跑 registry 显式 Always 的本地 meta 门。
         #[arg(long)]
         fast: bool,
@@ -220,14 +220,6 @@ pub(crate) enum ArchrulesCommand {
         #[arg(long, conflicts_with = "write")]
         check: bool,
     },
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum RuntimeBaselineCommand {
-    /// 原子更新 committed runtime assembly baseline。
-    Update,
-    /// runtime assembly baseline 漂移门（CI 门）。
-    Verify,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -624,14 +616,6 @@ mod tests {
         );
         assert!(parse(&["archrules", "matrix", "--write", "--check"]).is_err());
         assert_eq!(
-            parse(&["runtime-baseline", "update"])?,
-            Command::RuntimeBaseline(RuntimeBaselineCommand::Update)
-        );
-        assert_eq!(
-            parse(&["runtime-baseline", "verify"])?,
-            Command::RuntimeBaseline(RuntimeBaselineCommand::Verify)
-        );
-        assert_eq!(
             parse(&["runtime-root", "guard"])?,
             Command::RuntimeRoot(RuntimeRootCommand::Guard)
         );
@@ -645,10 +629,12 @@ mod tests {
         );
         for bad in [
             &["archrules"][..],
-            &["runtime-baseline"][..],
-            &["runtime-baseline", "list"][..],
-            &["runtime-baseline", "write"][..],
-            &["runtime-baseline", "update", "extra"][..],
+            &["runtime-assembly-residual"][..],
+            &["runtime-assembly-residual", "verify"][..],
+            &["runtime-assembly-residual", "update"][..],
+            &["runtime-baseline", "verify"][..],
+            &["runtime-baseline", "update"][..],
+            &["runtime-assembly-residual", "update", "extra"][..],
             &["runtime-root"][..],
             &["runtime-deps", "guard", "extra"][..],
         ] {
@@ -698,8 +684,20 @@ mod tests {
     #[test]
     fn try_parse_verify_business_rules() -> Result<()> {
         assert_eq!(
+            parse(&["verify", "--list-gates"])?,
+            Command::Verify {
+                list_gates: true,
+                fast: false,
+                allow_missing_tools: false,
+                against: None,
+                fail_fast: false,
+                only: vec![],
+            }
+        );
+        assert_eq!(
             parse(&["verify"])?,
             Command::Verify {
+                list_gates: false,
                 fast: false,
                 allow_missing_tools: false,
                 against: None,
@@ -721,6 +719,7 @@ mod tests {
                 "clippy",
             ])?,
             Command::Verify {
+                list_gates: false,
                 fast: true,
                 allow_missing_tools: true,
                 against: Some("origin/develop".into()),

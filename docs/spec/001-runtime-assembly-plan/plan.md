@@ -85,7 +85,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 | PR | Issue | Phase | Summary | Depends | Validation |
 |----|-------|-------|---------|---------|------------|
 | PR-001 | #1655 | Phase 0 | SpecKit foundation and runtime assembly rule document | none | `cargo xtask verify --fast` |
-| PR-002 | #1656 | Phase 0 | Runtime assembly baseline inventory and xtask baseline gate | #1655 | `cargo xtask runtime-baseline verify`; `cargo xtask archrules verify`; `cargo xtask verify --fast` |
+| PR-002 | #1656 | Phase 0 | Runtime assembly baseline inventory and xtask baseline gate | #1655 | `cargo xtask verify --only runtime-assembly-residual`; `cargo xtask archrules verify`; `cargo xtask verify --fast` |
 | PR-003 | future | Phase 1 | Runtime phase skeleton; `run()` remains behavior-preserving | #1656 | focused runtime phase tests |
 | PR-004 | future | Phase 1 | Move infra/env config builders to `runtime::infra` | PR-003 | runtime tests + verify fast |
 | PR-005 | future | Phase 1 | Move listener/auth/health finalization to route modules | PR-003 | route/auth/listener tests |
@@ -117,7 +117,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 |------------|-----------------|----------------|
 | Domains cannot depend on sibling domains | Cargo crate graph + `deny.toml` + `cargo xtask layer-deps` | unchanged |
 | Provider declarations match active dependency graph | `assembly.toml` + `cargo xtask assembly validate` | expanded assembly validation |
-| Runtime wiring facts do not drift silently | none for full wiring baseline | `cargo xtask runtime-baseline verify` in #1656 |
+| Runtime wiring facts do not drift silently | none for full wiring baseline | `cargo xtask verify --only runtime-assembly-residual` in #1656 |
 | `SharedRuntimeDeps` stays infra/provider-only | `cargo xtask runtime-deps guard` | configurable allowlist + rules in PR-009 |
 | Generated domain module list is current | none before generator lands | codegen drift gate in PR-016/017 |
 | PR size and spec drift are visible | review discipline | CI gate in PR-026 |

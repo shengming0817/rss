@@ -178,8 +178,8 @@ impl<'stack> StartupTransaction<'stack> {
     }
 
     fn discard_unregistered_probes(&mut self) {
-        self.provider.probes.clear();
-        self.domain.probes.clear();
+        discard_module_probes(&mut self.provider);
+        discard_module_probes(&mut self.domain);
     }
 
     fn take_lifecycle_batches(&mut self) -> LaunchLifecycleBatches {
@@ -219,9 +219,7 @@ impl Drop for StartupTransaction<'_> {
 }
 
 fn merge_module_output(target: &mut DomainModuleResult, output: DomainModuleResult) {
-    target.probes.extend(output.probes);
-    target.resources.extend(output.resources);
-    target.workers.extend(output.workers);
+    target.merge(output);
 }
 
 /// The only listener activation capability exposed to launch adapters.
@@ -835,7 +833,7 @@ fn register_lifecycle_outputs(
         mut domain,
         expected_workers,
     } = lifecycle_batches;
-    let workers = || provider.0.workers.iter().chain(domain.0.workers.iter());
+    let workers = || provider.0.workers().chain(domain.0.workers());
     let validation: anyhow::Result<bootstrap::WorkerInventory> = match expected_workers.as_ref() {
         Some(expected) => bootstrap::validate_worker_inventory_exact(workers(), expected)
             .map_err(anyhow::Error::from),
@@ -844,8 +842,8 @@ fn register_lifecycle_outputs(
         )),
         None => {
             let inventory = bootstrap::validate_worker_inventory(workers()).map_err(Into::into);
-            provider.0.workers.clear();
-            domain.0.workers.clear();
+            discard_module_workers(&mut provider.0);
+            discard_module_workers(&mut domain.0);
             inventory
         }
     };
@@ -862,43 +860,103 @@ fn register_lifecycle_outputs(
         worker_inventory_digest = format_args!("{:016x}", inventory.digest),
         "validated exact lifecycle worker inventory before spawn"
     );
-    let provider_result = register_module_output(stack, provider.0);
-    let domain_result = register_module_output(stack, domain.0);
-    provider_result?;
-    domain_result
+    let provider = partition_module_output(provider.0);
+    let domain = partition_module_output(domain.0);
+    if provider.has_probes || domain.has_probes {
+        register_partitioned_resources(stack, provider.resources);
+        register_partitioned_resources(stack, domain.resources);
+        anyhow::bail!("launch lifecycle output still contains undrained probes");
+    }
+    register_partitioned_module(stack, provider);
+    register_partitioned_module(stack, domain);
+    Ok(())
 }
 
 fn register_module_resources(stack: &mut ShutdownStack, output: &mut DomainModuleResult) {
-    for resource in std::mem::take(&mut output.resources) {
+    for output in output.drain_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(_, _) => {}
+            bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                stack.register_detached(resource);
+            }
+            bootstrap::DomainLifecycleOutput::Worker(_) => {}
+        }
+    }
+}
+
+fn discard_module_probes(output: &mut DomainModuleResult) {
+    let mut retained = DomainModuleResult::default();
+    for output in output.drain_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(_, _) => {}
+            bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                retained.push_resource(resource);
+            }
+            bootstrap::DomainLifecycleOutput::Worker(worker) => retained.push_worker(worker),
+        }
+    }
+    *output = retained;
+}
+
+fn discard_module_workers(output: &mut DomainModuleResult) {
+    let mut retained = DomainModuleResult::default();
+    for output in output.drain_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(name, probe) => {
+                retained.push_probe((name, probe));
+            }
+            bootstrap::DomainLifecycleOutput::Resource(resource) => {
+                retained.push_resource(resource);
+            }
+            bootstrap::DomainLifecycleOutput::Worker(_) => {}
+        }
+    }
+    *output = retained;
+}
+
+struct PartitionedModuleOutput {
+    has_probes: bool,
+    resources: Vec<Box<DynManagedResource<'static>>>,
+    workers: Vec<WorkerSpec>,
+}
+
+fn partition_module_output(output: DomainModuleResult) -> PartitionedModuleOutput {
+    let mut has_probes = false;
+    let mut resources = Vec::new();
+    let mut workers = Vec::new();
+    for output in output.into_outputs() {
+        match output {
+            bootstrap::DomainLifecycleOutput::Probe(_, _) => has_probes = true,
+            bootstrap::DomainLifecycleOutput::Resource(resource) => resources.push(resource),
+            bootstrap::DomainLifecycleOutput::Worker(worker) => workers.push(worker),
+        }
+    }
+    PartitionedModuleOutput {
+        has_probes,
+        resources,
+        workers,
+    }
+}
+
+fn register_partitioned_resources(
+    stack: &mut ShutdownStack,
+    resources: Vec<Box<DynManagedResource<'static>>>,
+) {
+    for resource in resources {
         stack.register_detached(resource);
     }
 }
 
-fn register_module_output(
-    stack: &mut ShutdownStack,
-    output: DomainModuleResult,
-) -> anyhow::Result<()> {
-    let DomainModuleResult {
-        probes,
-        resources,
-        workers,
-    } = output;
-    for resource in resources {
-        stack.register_detached(resource);
-    }
-    for worker in workers {
+fn register_partitioned_module(stack: &mut ShutdownStack, output: PartitionedModuleOutput) {
+    register_partitioned_resources(stack, output.resources);
+    for worker in output.workers {
         match worker {
             WorkerSpec::PhaseOne(worker) => stack.register_with_token(worker.into_factory()),
             WorkerSpec::Deferred(worker) => {
-                stack.register_deferred_with_token(worker.into_factory())
+                stack.register_deferred_with_token(worker.into_factory());
             }
         }
     }
-    anyhow::ensure!(
-        probes.is_empty(),
-        "launch lifecycle output still contains undrained probes"
-    );
-    Ok(())
 }
 
 fn report_shutdown_failures(

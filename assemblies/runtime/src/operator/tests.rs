@@ -1534,7 +1534,7 @@ async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
         &args(&["projections"]),
         &mut operator_service_token_stdin(),
     ) else {
-        panic!("missing subcommand must fail before runtime setup");
+        unreachable!("missing subcommand must fail before runtime setup");
     };
     assert_operator_cli_err(&err, "projections");
     // Help must not consume stdin and must not require runtime.
@@ -1543,7 +1543,7 @@ async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
         prepare_projection_command_with_stdin(&args(&["projections", "--help"]), &mut stdin)
             .expect("help is local")
     else {
-        panic!("help argv must not execute");
+        unreachable!("help argv must not execute");
     };
     assert_eq!(stdin.position(), 0);
 }
@@ -2644,13 +2644,10 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
     async fn record_dlq_maintenance_audit(
         &self,
         _session: &Self::Session,
-        operator_subject: &str,
-        tenant: rss_request_context::TenantId,
-        start_audit_id: &diport::DlqOperatorStartAuditId,
-        action: &str,
+        context: &super::dlq::DlqMaintenanceAuditContext,
         outcome: MaintenanceAuditOutcome<'_>,
-        resource_id: &str,
     ) -> anyhow::Result<()> {
+        let (subject, tenant, start_audit_id, action, resource_id) = context.test_parts();
         if self.fail_start_audit && action.ends_with(".start") {
             anyhow::bail!("DLQ maintenance start audit failed");
         }
@@ -2664,7 +2661,7 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
             },
         };
         let record = FakeDlqAuditRecord {
-            subject: operator_subject.to_owned(),
+            subject: subject.to_owned(),
             tenant,
             start_audit_id: start_audit_id.as_str().to_owned(),
             action: action.to_owned(),
@@ -2690,46 +2687,55 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
                 DLQ_FIXTURE_OPERATOR,
             )),
             FakeDlqOperator::AuthFailure => {
-                self.record_dlq_maintenance_audit(
-                    session,
+                let context = super::dlq::DlqMaintenanceAuditContext::for_test(
                     UNAUTHENTICATED_DLQ_ATTEMPT,
                     parsed.tenant,
-                    start_audit_id,
-                    &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    start_audit_id.clone(),
+                    format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    resource_id,
+                );
+                self.record_dlq_maintenance_audit(
+                    session,
+                    &context,
                     MaintenanceAuditOutcome::Failure {
                         reason: "operator_auth",
                     },
-                    resource_id,
                 )
                 .await?;
                 anyhow::bail!("DLQ operator auth failed");
             }
             FakeDlqOperator::RoleFailure => {
-                self.record_dlq_maintenance_audit(
-                    session,
+                let context = super::dlq::DlqMaintenanceAuditContext::for_test(
                     UNAUTHENTICATED_DLQ_ATTEMPT,
                     parsed.tenant,
-                    start_audit_id,
-                    &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    start_audit_id.clone(),
+                    format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    resource_id,
+                );
+                self.record_dlq_maintenance_audit(
+                    session,
+                    &context,
                     MaintenanceAuditOutcome::Failure {
                         reason: "operator_role",
                     },
-                    resource_id,
                 )
                 .await?;
                 anyhow::bail!("DLQ operator role failed");
             }
             FakeDlqOperator::GrantFailure => {
-                self.record_dlq_maintenance_audit(
-                    session,
+                let context = super::dlq::DlqMaintenanceAuditContext::for_test(
                     DLQ_FIXTURE_OPERATOR,
                     parsed.tenant,
-                    start_audit_id,
-                    &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    start_audit_id.clone(),
+                    format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    resource_id,
+                );
+                self.record_dlq_maintenance_audit(
+                    session,
+                    &context,
                     MaintenanceAuditOutcome::Failure {
                         reason: "operator_authorization",
                     },
-                    resource_id,
                 )
                 .await?;
                 anyhow::bail!("DLQ operator grant failed");
@@ -3137,7 +3143,7 @@ fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
                     "case {name}: {message}"
                 );
             }
-            _ => panic!("unexpected ensure case: {name}"),
+            _ => unreachable!("unexpected ensure case: {name}"),
         }
         assert!(
             !message.contains("SECRET_BAIT"),

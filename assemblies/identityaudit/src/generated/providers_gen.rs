@@ -199,15 +199,11 @@ impl ListenerPdpJwksLifecycle {
     }
 
     pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
-        let (probes, resources) = std::iter::once(self.head)
+        let (probes, resources): (Vec<_>, Vec<_>) = std::iter::once(self.head)
             .chain(self.tail)
             .map(|entry| (entry.probe, entry.resource))
             .unzip();
-        bootstrap::DomainModuleResult {
-            probes,
-            resources,
-            workers: Vec::new(),
-        }
+        bootstrap::DomainModuleResult::from_parts(probes, resources, [])
     }
 }
 
@@ -614,9 +610,9 @@ impl ProviderRoleBatches {
             );
         }
         anyhow::ensure!(
-            inventory.probes.len() == staged[0]
-                && inventory.resources.len() == staged[1]
-                && inventory.workers.len() == staged[2],
+            inventory.probe_count() == staged[0]
+                && inventory.resource_count() == staged[1]
+                && inventory.worker_count() == staged[2],
             "identityaudit transaction provider lifecycle output differs from exact receipts"
         );
         Ok(CompletedProviderRoles { probe_bindings })
@@ -625,13 +621,13 @@ impl ProviderRoleBatches {
 
 fn lifecycle_channels(output: &bootstrap::DomainModuleResult) -> Vec<LifecycleChannel> {
     let mut channels = Vec::new();
-    if !output.probes.is_empty() {
+    if output.probe_count() != 0 {
         channels.push(LifecycleChannel::Probes);
     }
-    if !output.resources.is_empty() {
+    if output.resource_count() != 0 {
         channels.push(LifecycleChannel::Resources);
     }
-    if !output.workers.is_empty() {
+    if output.worker_count() != 0 {
         channels.push(LifecycleChannel::Workers);
     }
     channels
@@ -666,11 +662,11 @@ impl AuthAuditSinkReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -710,11 +706,11 @@ impl DistributedCasStoreReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -754,11 +750,11 @@ impl DistributedLockStoreReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -798,11 +794,11 @@ impl DlxArchiveKeyProviderReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -842,11 +838,11 @@ impl EventPublisherReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -886,11 +882,11 @@ impl EventSubscriberReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -930,11 +926,11 @@ impl IdentitySignerReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -974,11 +970,11 @@ impl ListenerPdpReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);
@@ -1019,11 +1015,11 @@ impl ListenerRateLimiterReceipt {
         output: bootstrap::DomainModuleResult,
         inventory: &mut bootstrap::DomainModuleResult,
     ) -> Self {
-        let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();
+        let probe_names = output.probes().map(|(name, _)| name.clone()).collect();
         let receipt = Self {
-            probes: output.probes.len(),
-            resources: output.resources.len(),
-            workers: output.workers.len(),
+            probes: output.probe_count(),
+            resources: output.resource_count(),
+            workers: output.worker_count(),
             probe_names,
         };
         inventory.merge(output);

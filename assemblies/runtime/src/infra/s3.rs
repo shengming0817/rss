@@ -677,11 +677,10 @@ pub(crate) fn wire_s3_canary(
             ))
         },
     );
-    Ok(DomainModuleResult {
-        probes: vec![(probe_name, Box::new(S3ReadyProbe::new(probe_ready)))],
-        resources: Vec::new(),
-        workers: vec![worker],
-    })
+    let mut output = DomainModuleResult::default();
+    output.push_probe((probe_name, Box::new(S3ReadyProbe::new(probe_ready))));
+    output.push_worker(worker);
+    Ok(output)
 }
 
 #[cfg(test)]
