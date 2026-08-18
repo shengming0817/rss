@@ -1648,7 +1648,7 @@ mod tests {
                         archive_vault_provider,
                         archive_key,
                     );
-                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker, write_admission.clone());
                 }
             }
         "#
@@ -1674,7 +1674,7 @@ mod tests {
                         archive_vault_provider,
                         archive_key,
                     );
-                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+                    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker, write_admission.clone());
                 }
 
                 async fn phase_a_run_dlx_preflight() {

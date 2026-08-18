@@ -798,7 +798,7 @@ fn collect_release_stage<T>(
 
 /// Canonical ReleaseCheck proof. The Cargo graph and validated positive selection remain the typed
 /// authority; rustdoc token projection only closes residual public-signature leakage.
-/// INVARIANT: RELEASE-API-COMPAT-01 { level = "Medium", exec = "release-check", source = "rustdoc-json", synthetic_red = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection", anti_vacuity = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection" }.
+/// INVARIANT: RELEASE-API-COMPAT-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection", anti_vacuity = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection" }.
 pub(crate) fn run_release_check(
     root: &Path,
     facts: &WorkspaceFacts,

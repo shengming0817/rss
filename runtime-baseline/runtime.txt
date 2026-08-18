@@ -25,7 +25,6 @@ bootstrap = path=../../crates/bootstrap
 clap = workspace=true; optional=true
 consistency = path=../../crates/consistency
 crypto-adapter = path=../../adapters/crypto
-deadpool-redis = workspace=true
 diport = path=../../crates/diport
 distributed = path=../../crates/distributed
 dlqauthmint = path=../../crates/dlqauthmint
@@ -48,6 +47,9 @@ primitives = path=../../crates/primitives
 prometheus-adapter = path=../../adapters/prometheus; features=[backend]
 redis = package=redis-adapter; path=../../adapters/redis; features=[backend]
 reqwest = workspace=true; features=[rustls-tls-webpki-roots]
+rss-contract = workspace=true
+rss-platform = workspace=true
+rss-request-context = workspace=true
 runctx = path=../../crates/runctx
 runtimeexec = path=../../crates/runtimeexec
 runtimeinventorymint = path=../../crates/runtimeinventorymint

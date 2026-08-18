@@ -1397,19 +1397,30 @@ fn event_path_is_trusted(root: &Path, path: &Path) -> bool {
 
 /// Resolve coverage scope for the fixed `test-affected` job in ReleaseCheck mode using the same
 /// base as `ci plan`.
-/// Non-PR → Workspace (full catalog). PR parse/diff/metadata failures → Workspace
-/// FallbackUncertainty (aligns with plan FallbackFull); never hard-red on planner uncertainty.
+/// Non-PR → Workspace (full catalog). PR event/diff uncertainty → Workspace
+/// FallbackUncertainty; canonical Cargo/catalog drift is a hard error before any projection.
 pub(crate) fn coverage_scope_for_typed_job(root: &Path) -> Result<CoverageScope> {
+    let command_facts = CommandWorkspaceFacts::new(root);
+    if matches!(
+        validate_planner_catalog(root, &command_facts)?,
+        PlannerCatalog::FactsUnavailable(_)
+    ) {
+        return Ok(coverage_fallback_uncertainty());
+    }
     let event_name = std::env::var(GITHUB_EVENT_NAME_ENV).unwrap_or_default();
     if event_name != "pull_request" {
         return Ok(CoverageScope::Workspace {
             cause: CoverageWorkspaceCause::MandatoryCatalog,
         });
     }
-    Ok(coverage_scope_for_pull_request(root).unwrap_or_else(coverage_fallback_uncertainty))
+    Ok(coverage_scope_for_pull_request(root, &command_facts)
+        .unwrap_or_else(coverage_fallback_uncertainty))
 }
 
-fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
+fn coverage_scope_for_pull_request(
+    root: &Path,
+    command_facts: &CommandWorkspaceFacts,
+) -> Option<CoverageScope> {
     let event_path = PathBuf::from(std::env::var_os("GITHUB_EVENT_PATH")?);
     if !event_path_is_trusted(root, &event_path) {
         return None;
@@ -1440,8 +1451,7 @@ fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
             CoverageProjection::from(&ImpactSet::escalated(cause)).into_scope_or_fallback(),
         );
     }
-    let command_facts = CommandWorkspaceFacts::new(root);
-    let impact = match workspace_facts_for_impact(&entries, &command_facts).ok()? {
+    let impact = match workspace_facts_for_impact(&entries, command_facts).ok()? {
         Some(facts) => impact_with_facts(root, &entries, facts, merge_base).ok()?,
         None => try_impact_entries(&entries, None, &BTreeSet::new(), &BTreeMap::new()).ok()?,
     };
@@ -1548,28 +1558,43 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
     } else {
         SelectionMode::ReleaseCheck
     };
+    let command_facts = CommandWorkspaceFacts::new(root);
+    let catalog_available = matches!(
+        validate_planner_catalog(root, &command_facts)?,
+        PlannerCatalog::Available
+    );
 
-    let selection = match policy {
-        Err(_) => fallback_selection(
+    let selection = if !catalog_available {
+        fallback_selection_with_code(
             policy_version,
-            DecisionReason::PolicyInvalid,
+            FallbackCode::MetadataUnavailable,
             fallback_mode,
             execution_revision,
-        )?,
-        Ok(policy) if policy.schema_version != POLICY_SCHEMA_VERSION => fallback_selection(
-            policy_version,
-            DecisionReason::PolicyInvalid,
-            fallback_mode,
-            execution_revision,
-        )?,
-        Ok(policy) => plan_event(
-            root,
-            &event_name,
-            event_source.as_deref().unwrap_or("{}"),
-            policy_version,
-            policy.mode,
-            execution_revision,
-        )?,
+        )?
+    } else {
+        match policy {
+            Err(_) => fallback_selection(
+                policy_version,
+                DecisionReason::PolicyInvalid,
+                fallback_mode,
+                execution_revision,
+            )?,
+            Ok(policy) if policy.schema_version != POLICY_SCHEMA_VERSION => fallback_selection(
+                policy_version,
+                DecisionReason::PolicyInvalid,
+                fallback_mode,
+                execution_revision,
+            )?,
+            Ok(policy) => plan_event_with_facts(
+                root,
+                &command_facts,
+                &event_name,
+                event_source.as_deref().unwrap_or("{}"),
+                policy_version,
+                policy.mode,
+                execution_revision,
+            )?,
+        }
     };
 
     if let Some(parent) = options.output_path.parent() {
@@ -1637,8 +1662,46 @@ fn markdown_code(value: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn plan_event(
     root: &Path,
+    event_name: &str,
+    event_source: &str,
+    policy_version: String,
+    _policy_mode: PolicyMode,
+    execution_revision: String,
+) -> Result<SelectionPlan> {
+    let command_facts = CommandWorkspaceFacts::new(root);
+    if matches!(
+        validate_planner_catalog(root, &command_facts)?,
+        PlannerCatalog::FactsUnavailable(_)
+    ) {
+        let fallback_mode = if event_name == "pull_request" {
+            SelectionMode::PrComplete
+        } else {
+            SelectionMode::ReleaseCheck
+        };
+        return fallback_selection_with_code(
+            policy_version,
+            FallbackCode::MetadataUnavailable,
+            fallback_mode,
+            execution_revision,
+        );
+    }
+    plan_event_with_facts(
+        root,
+        &command_facts,
+        event_name,
+        event_source,
+        policy_version,
+        _policy_mode,
+        execution_revision,
+    )
+}
+
+fn plan_event_with_facts(
+    root: &Path,
+    command_facts: &CommandWorkspaceFacts,
     event_name: &str,
     event_source: &str,
     policy_version: String,
@@ -1734,6 +1797,7 @@ fn plan_event(
             };
             let projection = match pull_request_projection(
                 root,
+                command_facts,
                 &pull_request.base.sha,
                 &pull_request.head.sha,
                 &merge_base,
@@ -1899,6 +1963,7 @@ impl PlannerFailure {
 
 fn pull_request_projection(
     root: &Path,
+    command_facts: &CommandWorkspaceFacts,
     base: &str,
     head: &str,
     merge_base: &str,
@@ -1910,8 +1975,7 @@ fn pull_request_projection(
     }
     let entries = read_diff(root, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
-    let command_facts = CommandWorkspaceFacts::new(root);
-    let facts = workspace_facts_for_impact(&entries, &command_facts).map_err(|_| {
+    let facts = workspace_facts_for_impact(&entries, command_facts).map_err(|_| {
         PlannerFailure::new(
             FallbackCode::MetadataUnavailable,
             Some("Cargo.toml".to_owned()),
@@ -2274,6 +2338,11 @@ impl LocalExecutionContext {
         entries: &[DiffEntry],
         command_facts: &CommandWorkspaceFacts,
     ) -> Result<ImpactSet> {
+        if let PlannerCatalog::FactsUnavailable(error) =
+            validate_planner_catalog(self.root(), command_facts)?
+        {
+            return Err(error);
+        }
         match workspace_facts_for_impact(entries, command_facts)? {
             Some(facts) => impact_with_facts(self.root(), entries, facts, &self.merge_base),
             None => try_impact_entries(entries, None, &BTreeSet::new(), &BTreeMap::new()),
@@ -3000,6 +3069,30 @@ fn impact_with_facts(
     merge_base: &str,
 ) -> Result<ImpactSet> {
     impact_with_facts_and_owners(root, entries, facts, merge_base, None)
+}
+
+enum PlannerCatalog {
+    Available,
+    FactsUnavailable(anyhow::Error),
+}
+
+/// Production planning boundary: successful Cargo facts must match the integration catalog.
+/// Facts acquisition failure remains distinct so remote planning can emit its typed conservative
+/// fallback while local impact analysis preserves its fail-closed diagnostic.
+fn validate_planner_catalog(
+    root: &Path,
+    command_facts: &CommandWorkspaceFacts,
+) -> Result<PlannerCatalog> {
+    let facts = match command_facts.get() {
+        Ok(facts) => facts,
+        Err(error) => {
+            return Ok(PlannerCatalog::FactsUnavailable(error.context(
+                "load workspace facts for affected integration catalog closure",
+            )));
+        }
+    };
+    integration_shards::validate_catalog_facts(root, facts)?;
+    Ok(PlannerCatalog::Available)
 }
 
 fn impact_with_facts_and_owners(
@@ -5348,7 +5441,8 @@ mod tests {
         if std::env::var(GITHUB_EVENT_NAME_ENV).as_deref() == Ok("pull_request") {
             return Ok(());
         }
-        let Ok(scope) = coverage_scope_for_typed_job(Path::new(".")) else {
+        let root = crate::workspace_root()?;
+        let Ok(scope) = coverage_scope_for_typed_job(&root) else {
             bail!("non-PR scope must resolve");
         };
         assert_eq!(
@@ -6415,15 +6509,16 @@ mod tests {
         fs::create_dir_all(temporary_root.join("crates/leaf/src"))?;
         let root = fs::canonicalize(temporary_root)?;
         fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nmembers=['crates/leaf']\nresolver='2'\n",
-        )?;
-        fs::write(
             root.join("crates/leaf/Cargo.toml"),
             "[package]\nname='leaf'\nversion='0.0.0'\nedition='2024'\n",
         )?;
         let source_path = root.join("crates/leaf/src/lib.rs");
         fs::write(&source_path, "pub fn value() -> u8 { 1 }\n")?;
+        integration_shards::write_catalog_workspace_fixture(
+            &root,
+            &["crates/leaf"],
+            integration_shards::IntegrationCatalogFixtureDrift::Exact,
+        )?;
         git(&root, &["init"])?;
         let status =
             cargo_cmd(CargoSubcommand::GenerateLockfile, &[], &[], Some(&root)).status()?;
@@ -6601,10 +6696,6 @@ mod tests {
         fs::create_dir_all(temporary_root.join("crates/leaf/src"))?;
         let root = fs::canonicalize(temporary_root)?;
         fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nmembers=['crates/leaf']\nresolver='2'\n",
-        )?;
-        fs::write(
             root.join("crates/leaf/Cargo.toml"),
             "[package]\nname='leaf'\nversion='0.0.0'\nedition='2024'\n\n[lib]\npath='src/entry.rs'\n",
         )?;
@@ -6614,6 +6705,11 @@ mod tests {
             "pub fn value() -> u8 { 1 }\n",
         )?;
         fs::write(root.join("Makefile"), "all:\n\t@true\n")?;
+        integration_shards::write_catalog_workspace_fixture(
+            &root,
+            &["crates/leaf"],
+            integration_shards::IntegrationCatalogFixtureDrift::Exact,
+        )?;
         git(&root, &["init"])?;
         let status =
             cargo_cmd(CargoSubcommand::GenerateLockfile, &[], &[], Some(&root)).status()?;
@@ -6918,7 +7014,7 @@ mod tests {
             (
                 "deviceidentity",
                 "assemblies/deviceidentity/src/lib.rs",
-                BTreeSet::from([convergence]),
+                BTreeSet::from([IntegrationUnitId::PostgresLib, convergence]),
             ),
         ] {
             let impact = impact_with_facts(
@@ -6938,6 +7034,127 @@ mod tests {
                 "{package} must not select the AMQP carrier"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn planning_boundary_rejects_catalog_drift_before_projection() -> Result<()> {
+        for (drift, expected) in [
+            (
+                integration_shards::IntegrationCatalogFixtureDrift::Unassigned,
+                "unassigned=[(\"postgres\", \"unassigned_target\", \"test\")]; stale=[]",
+            ),
+            (
+                integration_shards::IntegrationCatalogFixtureDrift::Stale,
+                "unassigned=[]; stale=[(\"postgres\", \"migration_0107_resource_security_fact_ledger\", \"test\")]",
+            ),
+        ] {
+            let root = crate::testutil::unique_tmp("ci-impact-catalog-drift");
+            fs::create_dir_all(&root)?;
+            integration_shards::write_catalog_workspace_fixture(&root, &[], drift)?;
+            let status =
+                cargo_cmd(CargoSubcommand::GenerateLockfile, &[], &[], Some(&root)).status()?;
+            if !status.success() {
+                bail!("generate catalog fixture Cargo.lock");
+            }
+
+            let error = plan_event(
+                &root,
+                "push",
+                "{}",
+                policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
+                PolicyMode::Adaptive,
+                "a".repeat(40),
+            )
+            .expect_err("catalog drift must fail before SelectionPlan");
+            assert!(error.to_string().contains(expected), "{error:#}");
+
+            let coverage_error = coverage_scope_for_typed_job(&root)
+                .expect_err("coverage projection must share catalog fail-closed boundary");
+            assert!(
+                coverage_error.to_string().contains(expected),
+                "{coverage_error:#}"
+            );
+            let context = LocalExecutionContext {
+                base: "a".repeat(40),
+                head: "b".repeat(40),
+                merge_base: "a".repeat(40),
+                cargo_target: root.join("target/local"),
+                source: LocalSource::Worker(root.clone()),
+            };
+            let local_facts = CommandWorkspaceFacts::new(context.root());
+            let local_error = context
+                .impact_entries(&[], &local_facts)
+                .expect_err("local planning must share catalog fail-closed boundary");
+            assert!(
+                local_error.to_string().contains(expected),
+                "{local_error:#}"
+            );
+            fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_unavailable_remains_a_conservative_planning_fallback() {
+        let root = crate::testutil::unique_tmp("ci-impact-metadata-unavailable");
+        let command_facts = CommandWorkspaceFacts::with_metadata_loader(&root, |_| {
+            Err("synthetic cargo metadata failure".to_owned())
+        });
+        assert!(
+            matches!(
+                validate_planner_catalog(&root, &command_facts),
+                Ok(PlannerCatalog::FactsUnavailable(_))
+            ),
+            "facts acquisition failure must not be confused with catalog drift"
+        );
+    }
+
+    #[test]
+    fn planning_catalog_uses_one_cached_metadata_load_per_command() -> Result<()> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = crate::testutil::unique_tmp("ci-impact-catalog-cache");
+        fs::create_dir_all(&root)?;
+        integration_shards::write_catalog_workspace_fixture(
+            &root,
+            &[],
+            integration_shards::IntegrationCatalogFixtureDrift::Exact,
+        )?;
+        let metadata = cargo_cmd(
+            CargoSubcommand::Metadata,
+            &["--all-features", "--format-version", "1"],
+            &[],
+            Some(&root),
+        )
+        .output()?;
+        if !metadata.status.success() {
+            bail!("load exact catalog fixture metadata");
+        }
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let bytes = metadata.stdout;
+        let command_facts = CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+            counter.set(counter.get() + 1);
+            Ok(bytes.clone())
+        });
+        assert!(matches!(
+            validate_planner_catalog(&root, &command_facts)?,
+            PlannerCatalog::Available
+        ));
+        let plan = plan_event_with_facts(
+            &root,
+            &command_facts,
+            "push",
+            "{}",
+            policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
+            PolicyMode::Adaptive,
+            "b".repeat(40),
+        )?;
+        assert_eq!(plan.mode(), SelectionMode::ReleaseCheck);
+        assert_eq!(calls.get(), 1);
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 

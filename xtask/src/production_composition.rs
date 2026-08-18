@@ -489,14 +489,14 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
             && matches!(
                 result.elems.first(),
                 Some(Pat::Ident(registry))
-                    if registry.ident == "registry" && registry.mutability.is_some()
+                    if registry.ident == "registry" && registry.subpat.is_none()
             )
             && matches!(
                 result.elems.iter().nth(1),
                 Some(Pat::Ident(module))
                     if module.ident == "domains_module" && module.mutability.is_none()
             ),
-        "{RUNTIME_DOMAINS_PHASE}: private validated composition must produce `(mut registry, domains_module)` and drain retained outputs on failure"
+        "{RUNTIME_DOMAINS_PHASE}: private validated composition must produce `(registry, domains_module)` and drain retained outputs on failure"
     );
     ensure!(
         method_call_count_block(block, "validate") == 1

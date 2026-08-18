@@ -3522,11 +3522,8 @@ fn extract_invariants(root: &Path, path: &Path) -> Result<Vec<FoundInvariant>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("读取 INVARIANT carrier `{}`", path.display()))?;
     let mut out = Vec::new();
-    for (line_idx, line) in text.lines().enumerate() {
-        let Some(rest) = declarative_invariant_rest(path, line) else {
-            continue;
-        };
-        push_found_invariant(root, path, line_idx, rest, &mut out);
+    for (line_idx, rest) in logical_invariant_blocks(path, &text, false) {
+        push_found_invariant(root, path, line_idx, &rest, &mut out);
     }
     Ok(out)
 }
@@ -3535,17 +3532,81 @@ fn extract_source_invariants(root: &Path, path: &Path) -> Result<Vec<FoundInvari
     let text = fs::read_to_string(path)
         .with_context(|| format!("读取 source INVARIANT carrier `{}`", path.display()))?;
     let mut out = Vec::new();
-    for (line_idx, line) in text.lines().enumerate() {
-        let Some(rest) = declarative_source_invariant_rest(path, line) else {
-            continue;
-        };
-        if source_invariant_is_future_marker(rest) {
-            push_future_marker_metadata_finding(root, path, line_idx, rest, &mut out);
+    for (line_idx, rest) in logical_invariant_blocks(path, &text, true) {
+        if source_invariant_is_future_marker(&rest) {
+            push_future_marker_metadata_finding(root, path, line_idx, &rest, &mut out);
             continue;
         }
-        push_found_invariant(root, path, line_idx, rest, &mut out);
+        push_found_invariant(root, path, line_idx, &rest, &mut out);
     }
     Ok(out)
+}
+
+fn logical_invariant_blocks(path: &Path, text: &str, source_only: bool) -> Vec<(usize, String)> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let initial = |line| {
+        if source_only {
+            declarative_source_invariant_rest(path, line)
+        } else {
+            declarative_invariant_rest(path, line)
+        }
+    };
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(rest) = initial(lines[index]) else {
+            index += 1;
+            continue;
+        };
+        let start = index;
+        let mut logical = rest.to_owned();
+        if logical.contains('{') && !logical.contains('}') {
+            let Some((comment_kind, _)) = invariant_comment_payload(path, lines[index]) else {
+                blocks.push((start, logical));
+                index += 1;
+                continue;
+            };
+            while index + 1 < lines.len() {
+                let next = lines[index + 1];
+                if initial(next).is_some() {
+                    break;
+                }
+                let Some((next_kind, payload)) = invariant_comment_payload(path, next) else {
+                    break;
+                };
+                if next_kind != comment_kind {
+                    break;
+                }
+                logical.push(' ');
+                logical.push_str(payload.trim());
+                index += 1;
+                if logical.contains('}') {
+                    break;
+                }
+            }
+        }
+        blocks.push((start, logical));
+        index += 1;
+    }
+    blocks
+}
+
+fn invariant_comment_payload<'a>(path: &Path, line: &'a str) -> Option<(&'static str, &'a str)> {
+    let trimmed = line.trim_start();
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("rs") => ["//!", "///", "//", "*"].into_iter().find_map(|prefix| {
+            trimmed
+                .strip_prefix(prefix)
+                .map(|rest| (prefix, rest.trim_start()))
+        }),
+        Some("toml") => trimmed
+            .strip_prefix('#')
+            .map(|rest| ("#", rest.trim_start())),
+        Some("sql") => trimmed
+            .strip_prefix("--")
+            .map(|rest| ("--", rest.trim_start())),
+        _ => None,
+    }
 }
 
 fn push_found_invariant(
@@ -3871,6 +3932,14 @@ const XTASK_SUPPORT_CARRIERS: &[(&str, SupportCarrierBinding)] = &[
     (
         "xtask/src/diffcov.rs",
         SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::ReleaseCheck),
+    ),
+    (
+        "xtask/src/package_proof.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::ReleaseCheck),
+    ),
+    (
+        "xtask/src/release_surface.rs",
+        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
     ),
     ("xtask/src/cmd.rs", SupportCarrierBinding::ManualOptIn),
     (
@@ -4526,6 +4595,58 @@ mod tests {
         let found = extract_invariants(&root, &file)?;
         assert_eq!(rule_ids(&found[0]), vec!["BAZ-QUX-02", "FOO-BAR-01"]);
         assert_eq!(found[0].invalid, vec!["BAD-ID-1"]);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invariant_parser_treats_single_and_multiline_metadata_equally() -> Result<()> {
+        let root = unique_tmp("archrules-multiline-metadata");
+        let single = root.join("xtask/src/single.rs");
+        let multiline = root.join("xtask/src/multiline.rs");
+        write(
+            &single,
+            "//! INVARIANT: DEMO-MULTILINE-01 { level = \"Medium\", exec = \"check\", source = \"code\", synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n",
+        )?;
+        write(
+            &multiline,
+            "//! INVARIANT: DEMO-MULTILINE-01 { level = \"Medium\",\n//! exec = \"check\", source = \"code\",\n//! synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n",
+        )?;
+        let single = extract_invariants(&root, &single)?;
+        let multiline = extract_invariants(&root, &multiline)?;
+        assert_eq!(single[0].rules, multiline[0].rules);
+        assert!(multiline[0].invalid.is_empty(), "{multiline:?}");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invariant_parser_fails_closed_on_broken_multiline_metadata() -> Result<()> {
+        let root = unique_tmp("archrules-broken-multiline-metadata");
+        for (name, source) in [
+            (
+                "eof.rs",
+                "//! INVARIANT: DEMO-EOF-01 { level = \"Medium\",\n//! exec = \"check\", source = \"code\"\n",
+            ),
+            (
+                "code.rs",
+                "//! INVARIANT: DEMO-CODE-01 { level = \"Medium\",\nfn interruption() {}\n//! exec = \"check\", source = \"code\" }\n",
+            ),
+            (
+                "new.rs",
+                "//! INVARIANT: DEMO-FIRST-01 { level = \"Medium\",\n//! INVARIANT: DEMO-SECOND-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
+            ),
+        ] {
+            let path = root.join("xtask/src").join(name);
+            write(&path, source)?;
+            let found = extract_invariants(&root, &path)?;
+            assert!(
+                found.iter().any(|invariant| invariant
+                    .invalid
+                    .contains(&"metadata-missing-closing-brace".to_owned())),
+                "broken block must fail closed: {name}: {found:?}"
+            );
+        }
         fs::remove_dir_all(root)?;
         Ok(())
     }

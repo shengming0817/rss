@@ -1276,7 +1276,7 @@ mod tests {
         fs::write(
             &manifest,
             format!(
-                "{}\n[dev-dependencies]\ntestkit = {{ path = \"../testkit\" }}\n",
+                "{}\n[dev-dependencies]\nrss_conformance = {{ package = \"rss-conformance\", path = \"../conformance\" }}\ntestkit = {{ path = \"../testkit\" }}\n",
                 fs::read_to_string(&manifest)?
             ),
         )?;

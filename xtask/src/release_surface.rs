@@ -688,7 +688,7 @@ pub(crate) fn validate(
     facts: &WorkspaceFacts,
     artifacts: &[ArtifactProjection],
 ) -> (Option<ReleaseSurface>, Vec<Finding>) {
-    // INVARIANT: PREPUBLICATION-PATCH-LINE-01 { level = "Medium", exec = "release-surface", synthetic_red = "tests::release_version_line_rejects_major_or_minor_changes" }.
+    // INVARIANT: PREPUBLICATION-PATCH-LINE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::release_version_line_rejects_major_or_minor_changes", anti_vacuity = "tests::synthetic_nonempty_surface_derives_cargo_facts" }.
     let mut surface = ReleaseSurface {
         packages: Vec::new(),
         profile_artifacts: Vec::new(),

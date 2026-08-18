@@ -54,35 +54,35 @@ done
 expect_failure 'unknown backend fails closed' "$ADAPTER" specs --lane check --backend unknown
 expect_failure 'relative sccache candidate fails closed' "$ADAPTER" verify-sccache --candidate relative/sccache
 
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/rss-tool-adapter-selftest.XXXXXX")
-trap 'rm -rf "$fixture"' EXIT
-fixture=$(CDPATH='' cd -- "$fixture" && pwd -P)
-mkdir -p "$fixture/.install-action/bin" "$fixture/bin"
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/rss-tool-adapter-selftest.XXXXXX")
+trap 'rm -rf "$TMP_ROOT"' EXIT
+TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
+mkdir -p "$TMP_ROOT/.install-action/bin" "$TMP_ROOT/bin"
 for spec in \
   '.install-action/bin/cargo-deny|cargo-deny 0.19.9' \
   '.install-action/bin/cargo-audit|cargo-audit 0.22.2' \
   '.install-action/bin/sccache|sccache 0.15.0'; do
   relative=${spec%%|*}
   version=${spec#*|}
-  printf '#!/usr/bin/env bash\nprintf '\''%%s\\n'\'' '\''%s'\''\n' "$version" > "$fixture/$relative"
-  chmod +x "$fixture/$relative"
+  printf '#!/usr/bin/env bash\nprintf '\''%%s\\n'\'' '\''%s'\''\n' "$version" > "$TMP_ROOT/$relative"
+  chmod +x "$TMP_ROOT/$relative"
 done
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   ': > "$RSS_RG_PROBE_MARKER"' \
   "printf '%s\\n' 'ripgrep 15.2.0 (rev e89fff89ac)'" \
-  "printf '%s\\n' '' 'features:+pcre2'" > "$fixture/bin/rg"
-chmod +x "$fixture/bin/rg"
-marker="$fixture/.rg-probed"
-RSS_RG_PROBE_MARKER="$marker" "$ADAPTER" verify --mode fresh --lane audit --root "$fixture"
+  "printf '%s\\n' '' 'features:+pcre2'" > "$TMP_ROOT/bin/rg"
+chmod +x "$TMP_ROOT/bin/rg"
+marker="$TMP_ROOT/.rg-probed"
+RSS_RG_PROBE_MARKER="$marker" "$ADAPTER" verify --mode fresh --lane audit --root "$TMP_ROOT"
 [ -f "$marker" ] || { printf 'not ok - fresh audit setup probes rg\n' >&2; exit 1; }
 rm -f "$marker"
-RSS_RG_PROBE_MARKER="$marker" "$ADAPTER" verify --mode cache --lane audit --root "$fixture"
+RSS_RG_PROBE_MARKER="$marker" "$ADAPTER" verify --mode cache --lane audit --root "$TMP_ROOT"
 [ -f "$marker" ] || { printf 'not ok - cached audit setup probes rg\n' >&2; exit 1; }
 printf 'ok - fresh and cached audit setup probe pinned rg\n'
 rm -f "$marker"
-printf '\n' >> "$fixture/bin/rg"
+printf '\n' >> "$TMP_ROOT/bin/rg"
 expect_failure 'tampered cached rg fails closed' env RSS_RG_PROBE_MARKER="$marker" \
-  "$ADAPTER" verify --mode cache --lane audit --root "$fixture"
+  "$ADAPTER" verify --mode cache --lane audit --root "$TMP_ROOT"
 [ ! -f "$marker" ] || { printf 'not ok - tampered cached rg executed before seal verification\n' >&2; exit 1; }
 printf 'ok - tampered cached rg is rejected before execution\n'

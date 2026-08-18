@@ -1242,7 +1242,7 @@ fn verify_policy_call_edge_in_syntax(
         "ConsumerTx {stage} must resolve exact production carrier {repo_path}::{function_name} once, got {}",
         functions.len()
     );
-    let calls = reachable_calls_in_block(&functions[0].block);
+    let calls = reachable_consumer_tx_calls_in_block(&functions[0].block);
     ensure!(
         calls.iter().any(|call| required_call.matches(call)),
         "ConsumerTx {stage} carrier {repo_path}::{function_name} is outside the closed execution chain: missing reachable call `{}`",
@@ -1461,7 +1461,15 @@ fn reachable_calls_in_block(block: &syn::Block) -> Vec<ReachableCall> {
     let mut visitor = ReachableCallVisitor::default();
     visitor.visit_block(block);
     if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
-        visit_returned_sanctioned_closure(tail, &mut visitor);
+        visit_returned_sanctioned_closure(tail, &mut visitor, ReturnedClosureLane::BoxOnly);
+    }
+    visitor.calls
+}
+
+fn reachable_consumer_tx_calls_in_block(block: &syn::Block) -> Vec<ReachableCall> {
+    let mut visitor = ReachableCallVisitor::default();
+    if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
+        visit_returned_sanctioned_closure(tail, &mut visitor, ReturnedClosureLane::ConsumerTx);
     }
     visitor.calls
 }
@@ -1472,14 +1480,25 @@ fn reachable_calls_in_expr(expression: &syn::Expr) -> Vec<ReachableCall> {
     visitor.calls
 }
 
-fn visit_returned_sanctioned_closure(expression: &syn::Expr, visitor: &mut ReachableCallVisitor) {
+#[derive(Clone, Copy)]
+enum ReturnedClosureLane {
+    BoxOnly,
+    ConsumerTx,
+}
+
+fn visit_returned_sanctioned_closure(
+    expression: &syn::Expr,
+    visitor: &mut ReachableCallVisitor,
+    lane: ReturnedClosureLane,
+) {
     let syn::Expr::Call(call) = expression else {
         return;
     };
-    if !matches!(
-        policy_tokens(&call.func).as_str(),
-        "Box::new" | "WorkerSpec::deferred"
-    ) {
+    let constructor = policy_tokens(&call.func);
+    if constructor != "Box::new"
+        && !(matches!(lane, ReturnedClosureLane::ConsumerTx)
+            && constructor == "WorkerSpec::consumer_deferred")
+    {
         return;
     }
     for argument in &call.args {
@@ -2532,8 +2551,8 @@ mod tests {
         let green = syn::parse_file(
             r#"
             fn worker_spec() -> WorkerSpec {
-                WorkerSpec::observational_deferred(move |token| {
-                    spawn_consumer_ackable_tx_subscriber(token)
+                WorkerSpec::consumer_deferred(identity, &admission, move |token, consumer_admission| {
+                    spawn_consumer_ackable_tx_subscriber(token, consumer_admission)
                 })
             }
             "#,
@@ -2549,7 +2568,62 @@ mod tests {
         for red in [
             r#"
             fn worker_spec() -> WorkerSpec {
+                let _bait = spawn_consumer_ackable_tx_subscriber(fake_token, fake_admission);
+                WorkerSpec::observational_deferred(move |token| harmless_worker(token))
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::deferred(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::observational_deferred(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::relay_deferred(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::writes_deferred(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
                 WorkerSpec::observational_phase_one(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::consumer_phase_one(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::relay_phase_one(move |token| {
+                    spawn_consumer_ackable_tx_subscriber(token)
+                })
+            }
+            "#,
+            r#"
+            fn worker_spec() -> WorkerSpec {
+                WorkerSpec::writes_phase_one(move |token| {
                     spawn_consumer_ackable_tx_subscriber(token)
                 })
             }

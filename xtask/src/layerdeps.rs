@@ -1137,7 +1137,7 @@ pub(crate) fn check_dlqauthmint_wrapper_coverage(
 /// The HTTP request-id mint is an isolated Basis capability. Only the transport owner may mint
 /// it, and generated response factories may consume it; domains and composition roots stay out.
 ///
-/// INVARIANT: HTTP-REQUEST-ID-AUTHORITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "opaque carrier + exact wrapper allowlist" }
+/// INVARIANT: HTTP-REQUEST-ID-AUTHORITY-01 { level = "Medium", exec = "check", source = "code", facet = "wrapper-exact-set", synthetic_red = "tests::requestidmint_wrapper_widened_to_domain_red", anti_vacuity = "tests::requestidmint_wrapper_exact_green" }
 pub(crate) fn check_requestidmint_wrapper_coverage(
     members: &[Member],
     bans: &[BanEntry],

@@ -13,6 +13,7 @@ CI_WORKFLOW="$SCRIPT_DIR/../workflows/ci.yml"
 FIXED_JOB_WORKFLOW="$SCRIPT_DIR/../workflows/rss-rust-job.yml"
 TMP_BASE=${TMPDIR:-/tmp}
 TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/integration-services-selftest.XXXXXX")
+TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 FAILURES=0
 
 cleanup_tmp() { rm -rf "$TMP_ROOT"; }

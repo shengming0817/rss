@@ -919,6 +919,7 @@ integration_shard_catalog! {
             PostgresMigration0104AbacPolicyOperatorValuesUpgrade => ("postgres-migration-0104-abac-policy-operator-values-upgrade", ReleaseCheck, "postgres", "migration_0104_abac_policy_operator_values_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0105ProjectionGeneration => ("postgres-migration-0105-projection-generation", ReleaseCheck, "postgres", "migration_0105_projection_generation", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0105ProjectionGenerationUpgrade => ("postgres-migration-0105-projection-generation-upgrade", ReleaseCheck, "postgres", "migration_0105_projection_generation_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresMigration0107ResourceSecurityFactLedger => ("postgres-migration-0107-resource-security-fact-ledger", ReleaseCheck, "postgres", "migration_0107_resource_security_fact_ledger", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0108ProjectionWorkerStatus => ("postgres-migration-0108-projection-worker-status", ReleaseCheck, "postgres", "migration_0108_projection_worker_status", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0109InboxBacklogSamples => ("postgres-migration-0109-inbox-backlog-samples", ReleaseCheck, "postgres", "migration_0109_inbox_backlog_samples", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0109InboxBacklogSamplesLive => ("postgres-migration-0109-inbox-backlog-samples-live", ReleaseCheck, "postgres", "migration_0109_inbox_backlog_samples_live", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -1912,6 +1913,17 @@ fn validate_test_target_eligibility(
     Ok(())
 }
 
+/// Validate the single typed integration catalog against one command's cached Cargo facts.
+///
+/// Both shard execution and affected planning cross this boundary; neither owns a second target
+/// registry or may produce work from incomplete/stale Cargo target facts.
+pub(crate) fn validate_catalog_facts(root: &Path, facts: &WorkspaceFacts) -> Result<()> {
+    validate_integration_unit_catalog(INTEGRATION_UNIT_SPECS, SHARD_SPECS)?;
+    validate_local_feature_catalog(SHARD_SPECS)?;
+    validate_facts(facts)?;
+    validate_test_target_eligibility(root, facts, INTEGRATION_UNIT_SPECS)
+}
+
 fn reject_crate_level_feature_cfg(
     root: &Path,
     package: &str,
@@ -2055,13 +2067,10 @@ pub(crate) struct ValidatedIntegrationWorkspace<'facts> {
 impl<'facts> ValidatedIntegrationWorkspace<'facts> {
     fn new(command_facts: &'facts CommandWorkspaceFacts) -> Result<Self> {
         let root = command_facts.root();
-        validate_integration_unit_catalog(INTEGRATION_UNIT_SPECS, SHARD_SPECS)?;
-        validate_local_feature_catalog(SHARD_SPECS)?;
         let facts = command_facts
             .get()
             .context("load workspace facts for integration shard coverage")?;
-        validate_facts(facts)?;
-        validate_test_target_eligibility(root, facts, INTEGRATION_UNIT_SPECS)?;
+        validate_catalog_facts(root, facts)?;
         let nextest_config = std::fs::read_to_string(root.join(".config/nextest.toml"))
             .context("read committed nextest configuration")?;
         crate::nextest::validate_config(&nextest_config)?;
@@ -2091,6 +2100,97 @@ pub(crate) fn validate_current_workspace() -> Result<()> {
     let root = workspace_root()?;
     let command_facts = CommandWorkspaceFacts::new(&root);
     with_validated_workspace(&command_facts, |_| Ok(()))
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum IntegrationCatalogFixtureDrift {
+    Exact,
+    Unassigned,
+    Stale,
+}
+
+/// Materialize a Cargo workspace whose integration packages are derived from the canonical
+/// catalog. Planner tests can then exercise the real cargo-metadata boundary without maintaining
+/// a second hand-written target registry.
+#[cfg(test)]
+pub(crate) fn write_catalog_workspace_fixture(
+    root: &Path,
+    additional_members: &[&str],
+    drift: IntegrationCatalogFixtureDrift,
+) -> Result<()> {
+    let mut members = LocalFeatureScope::ALL
+        .into_iter()
+        .map(LocalFeatureScope::root)
+        .map(str::to_owned)
+        .chain(additional_members.iter().map(|member| (*member).to_owned()))
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    let member_list = members
+        .iter()
+        .map(|member| format!("    \"{member}\","))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [\n{member_list}\n]\n"),
+    )?;
+
+    for scope in LocalFeatureScope::ALL {
+        let package_root = root.join(scope.root());
+        std::fs::create_dir_all(package_root.join("src"))?;
+        std::fs::create_dir_all(package_root.join("tests"))?;
+        let mut manifest = format!(
+            "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\nautolib = false\nautotests = false\n\n[features]\n{} = []\n",
+            scope.package(),
+            scope.feature(),
+        );
+        for unit in INTEGRATION_UNIT_SPECS.iter().filter(|unit| {
+            unit.package == scope.package()
+                && !(matches!(drift, IntegrationCatalogFixtureDrift::Stale)
+                    && unit.id
+                        == IntegrationUnitId::PostgresMigration0107ResourceSecurityFactLedger)
+        }) {
+            match unit.kind {
+                TargetKind::Lib => {
+                    manifest.push_str(&format!(
+                        "\n[lib]\nname = \"{}\"\npath = \"src/lib.rs\"\n",
+                        unit.target
+                    ));
+                    std::fs::write(package_root.join("src/lib.rs"), "// catalog fixture lib\n")?;
+                }
+                TargetKind::Test => {
+                    manifest.push_str(&format!(
+                        "\n[[test]]\nname = \"{}\"\npath = \"tests/{}.rs\"\n",
+                        unit.target, unit.target
+                    ));
+                    if unit.local_eligibility == LocalEligibility::RemoteOnly {
+                        manifest
+                            .push_str(&format!("required-features = [\"{}\"]\n", scope.feature()));
+                    }
+                    std::fs::write(
+                        package_root
+                            .join("tests")
+                            .join(format!("{}.rs", unit.target)),
+                        "// catalog fixture test\n",
+                    )?;
+                }
+            }
+        }
+        if scope == LocalFeatureScope::Postgres
+            && matches!(drift, IntegrationCatalogFixtureDrift::Unassigned)
+        {
+            manifest.push_str(
+                "\n[[test]]\nname = \"unassigned_target\"\npath = \"tests/unassigned_target.rs\"\n",
+            );
+            std::fs::write(
+                package_root.join("tests/unassigned_target.rs"),
+                "// unassigned catalog fixture target\n",
+            )?;
+        }
+        std::fs::write(package_root.join("Cargo.toml"), manifest)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn external_resource_present(resource: Resource) -> bool {
@@ -2173,6 +2273,7 @@ mod tests {
                 ImpactMarker::IdentityPackage,
                 ImpactMarker::MqttPackage,
                 ImpactMarker::PostgresPackage,
+                ImpactMarker::DeviceCertificateCandidate,
             ]
         );
         assert_eq!(
@@ -2218,7 +2319,10 @@ mod tests {
         assert_eq!(spec.scheduling, Scheduling::Serial);
         assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
         assert_eq!(spec.resources, &[Resource::Postgres, Resource::Mqtt]);
-        assert!(spec.impact_markers.is_empty());
+        assert_eq!(
+            spec.impact_markers,
+            &[ImpactMarker::DeviceCertificateCandidate]
+        );
         assert_eq!(id.capability_labels().collect::<Vec<_>>(), ["docker"]);
     }
 
@@ -2703,7 +2807,11 @@ mod tests {
             ),
             (
                 Resource::Redis,
-                BTreeSet::from([Id::EventTransportDurableE2e, Id::RedisIntegrationClaimer]),
+                BTreeSet::from([
+                    Id::EventTransportDurableE2e,
+                    Id::RedisIntegrationClaimer,
+                    Id::RedisIntegrationRateLimit,
+                ]),
             ),
             (
                 Resource::Amqp,

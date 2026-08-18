@@ -87,7 +87,7 @@ fn rust_log_filter_is_fail_fast_and_never_echoes_the_raw_directive() {
 
 #[test]
 #[allow(clippy::cognitive_complexity, clippy::expect_used)] // reason: one envelope contract matrix is easier to audit atomically.
-// INVARIANT: RUNTIME-JSON-SCHEMA-PARITY-01 { level = "Medium", exec = "cargo test -p runtime --lib structured_json_has_a_closed_v1_envelope_and_null_context_without_otel", source = "test", native = "committed JSON Schema validation plus exact envelope key assertions" }
+// INVARIANT: RUNTIME-JSON-SCHEMA-PARITY-01 { level = "Medium", exec = "test", source = "code", native = "committed JSON Schema validation plus exact envelope key assertions" }
 fn structured_json_has_a_closed_v1_envelope_and_null_context_without_otel() {
     let buffer = Buffer::default();
     let subscriber = tracing_subscriber::registry()
@@ -293,7 +293,7 @@ fn explicit_unentered_parent_keeps_json_and_otel_ids_identical() {
 
 #[test]
 #[allow(clippy::cognitive_complexity, clippy::expect_used)] // reason: cross-sink parity is a single atomic contract matrix.
-// INVARIANT: OBSERVATION-SINK-PARITY-01 { level = "Medium", exec = "cargo test -p runtime --lib structured_json_and_otel_share_ids_resource_and_redaction", source = "test", native = "hermetic composed subscriber asserts JSON and OTel identifier, Resource, and redaction parity" }
+// INVARIANT: OBSERVATION-SINK-PARITY-01 { level = "Medium", exec = "test", source = "code", native = "hermetic composed subscriber asserts JSON and OTel identifier, Resource, and redaction parity" }
 fn structured_json_and_otel_share_ids_resource_and_redaction() {
     #[derive(secure::Redact)]
     #[allow(dead_code)]
