@@ -11,6 +11,7 @@
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— owner exact-set 的缺失、漂移、孤儿和异常目录均 fail-closed。
+//! INVARIANT: RELEASE-API-OWNER-PROJECTION-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::checked_in_rustdoc_fixture_filters_only_external_blanket_impl_noise|tests::release_projection_rejects_malformed_blanket_identity", anti_vacuity = "tests::checked_in_rustdoc_fixture_filters_only_external_blanket_impl_noise" }—— leakage proof 只排除 typed identity 证明属于外部 trait owner 的 blanket impl projection；owned signature 与不可解析 identity 保持 fail-closed。
 //! INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "release-check", source = "public-api" }—— rustdoc-json 用钉版 nightly（[`PINNED_NIGHTLY`]，非 rolling）；该 pin 四处
 //!   一致：`PINNED_NIGHTLY` ⇔ `lints/rust-toolchain.toml` channel ⇔ reusable CI `RSS_NIGHTLY_PINNED`（三方功能值，
 //!   `pinned_nightly_single_source_of_truth` 守）+ `verify.rs` public-api install_hint（`verify::tests::
@@ -496,6 +497,7 @@ fn release_api_findings(
         let mut package_items = Vec::new();
         for (profile, rustdoc_json) in &capture.rustdoc_json {
             let api = public_api::Builder::from_rustdoc_json(rustdoc_json)
+                .omit_blanket_impls(false)
                 .build()
                 .with_context(|| {
                     format!("解析 `{package}` {} rustdoc JSON 失败", profile.label())
@@ -510,17 +512,12 @@ fn release_api_findings(
                         profile.label()
                     )
                 })?;
-            package_items.extend(
-                api.items()
-                    .map(|item| {
-                        Ok(ApiItemProjection {
-                            rendered: format!("profile={} {}", profile.label(), item),
-                            tokens: item.tokens().cloned().collect(),
-                            source_paths: source_type_paths(&rustdoc, item.id())?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            );
+            for item in api.items() {
+                match project_release_api_item(&rustdoc, *profile, item)? {
+                    ReleaseApiItemProjection::Owned(item) => package_items.push(item),
+                    ReleaseApiItemProjection::ExternalBlanketImplNoise => {}
+                }
+            }
         }
         items.insert(package.to_owned(), package_items);
     }
@@ -532,6 +529,122 @@ struct ApiItemProjection {
     rendered: String,
     tokens: Vec<public_api::tokens::Token>,
     source_paths: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+enum ReleaseApiItemProjection {
+    Owned(ApiItemProjection),
+    ExternalBlanketImplNoise,
+}
+
+/// Build the only release-leakage projection for one rendered public item.
+///
+/// `rustdoc` materializes dependency blanket impls on local public types and reports those impl
+/// items with the local crate id. The trait path remains the typed identity of the coherence owner,
+/// so it is the only stable discriminator: external owner means rustdoc noise; local owner remains
+/// part of the crate-authored API. Missing parent/trait identities fail closed instead of falling
+/// back to names, source paths, or dependency allowlists.
+fn project_release_api_item(
+    krate: &rustdoc_types::Crate,
+    profile: ApiProfile,
+    item: &public_api::PublicItem,
+) -> Result<ReleaseApiItemProjection> {
+    let rustdoc_item = krate
+        .index
+        .get(&item.id())
+        .with_context(|| format!("public rustdoc item {} 缺 index entry", item.id().0))?;
+    let enclosing_impl = match &rustdoc_item.inner {
+        rustdoc_types::ItemEnum::Impl(implementation) => Some(implementation),
+        _ => match item.parent_id() {
+            Some(parent_id) => {
+                let parent = krate.index.get(&parent_id).with_context(|| {
+                    format!(
+                        "public rustdoc item {} 的 parent {} 缺 index entry",
+                        item.id().0,
+                        parent_id.0
+                    )
+                })?;
+                match &parent.inner {
+                    rustdoc_types::ItemEnum::Impl(implementation) => Some(implementation),
+                    _ => None,
+                }
+            }
+            None => None,
+        },
+    };
+
+    if let Some(implementation) = enclosing_impl
+        && implementation.blanket_impl.is_some()
+    {
+        let trait_path = implementation
+            .trait_
+            .as_ref()
+            .context("blanket impl 缺 trait identity")?;
+        let trait_summary = krate.paths.get(&trait_path.id).with_context(|| {
+            format!(
+                "blanket impl trait {} 缺 path owner identity",
+                trait_path.id.0
+            )
+        })?;
+        anyhow::ensure!(
+            trait_summary.kind == rustdoc_types::ItemKind::Trait,
+            "blanket impl trait {} path kind 不是 trait: {:?}",
+            trait_path.id.0,
+            trait_summary.kind
+        );
+        let root = krate
+            .index
+            .get(&krate.root)
+            .context("rustdoc crate root 缺 index entry")?;
+        anyhow::ensure!(
+            !krate.external_crates.contains_key(&root.crate_id),
+            "rustdoc crate root owner {} 不能同时声明为 external crate",
+            root.crate_id
+        );
+        if trait_summary.crate_id == root.crate_id {
+            let trait_item = krate.index.get(&trait_path.id).with_context(|| {
+                format!(
+                    "local blanket impl trait {} 缺 index entry",
+                    trait_path.id.0
+                )
+            })?;
+            anyhow::ensure!(
+                trait_item.crate_id == trait_summary.crate_id,
+                "blanket impl trait {} owner identity 不一致: index={} path={}",
+                trait_path.id.0,
+                trait_item.crate_id,
+                trait_summary.crate_id
+            );
+            anyhow::ensure!(
+                matches!(trait_item.inner, rustdoc_types::ItemEnum::Trait(_)),
+                "local blanket impl trait {} index kind 不是 trait",
+                trait_path.id.0
+            );
+        } else {
+            anyhow::ensure!(
+                krate.external_crates.contains_key(&trait_summary.crate_id),
+                "blanket impl trait {} 的 external owner {} 未声明",
+                trait_path.id.0,
+                trait_summary.crate_id
+            );
+            if let Some(trait_item) = krate.index.get(&trait_path.id) {
+                anyhow::ensure!(
+                    trait_item.crate_id == trait_summary.crate_id,
+                    "blanket impl trait {} owner identity 不一致: index={} path={}",
+                    trait_path.id.0,
+                    trait_item.crate_id,
+                    trait_summary.crate_id
+                );
+            }
+            return Ok(ReleaseApiItemProjection::ExternalBlanketImplNoise);
+        }
+    }
+
+    Ok(ReleaseApiItemProjection::Owned(ApiItemProjection {
+        rendered: format!("profile={} {}", profile.label(), item),
+        tokens: item.tokens().cloned().collect(),
+        source_paths: source_type_paths(krate, item.id())?,
+    }))
 }
 
 fn release_api_findings_from_items(
@@ -3556,6 +3669,145 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             finding.rule == ReleaseApiRule::PublicDependency
                 && finding.subject.contains("package=alpha-release")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn checked_in_rustdoc_fixture_filters_only_external_blanket_impl_noise() -> Result<()> {
+        let facts = facts_with_nonempty_release_surface()?;
+        let (surface, validation) = crate::release_surface::validate(&facts, &[]);
+        assert!(validation.is_empty(), "{validation:?}");
+        let surface = surface.context("synthetic Release Surface missing")?;
+        let fixture = crate::workspace_root()?
+            .join("xtask/tests/fixtures/release_api/owner-aware-blanket.json");
+        let raw_api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let raw_items = raw_api.items().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(
+            raw_items
+                .iter()
+                .any(|item| item.contains("ExternalBlanket")),
+            "fixture must exercise an external blanket impl: {raw_items:#?}"
+        );
+        assert!(
+            raw_items.iter().any(|item| item.contains("OwnedTrait")),
+            "fixture must exercise a crate-owned blanket impl: {raw_items:#?}"
+        );
+
+        let captures = BTreeMap::from([(
+            "alpha-release".to_owned(),
+            ApiCapture {
+                baseline: String::new(),
+                rustdoc_json: vec![
+                    (ApiProfile::Default, fixture.clone()),
+                    (ApiProfile::AllFeatures, fixture),
+                ],
+            },
+        )]);
+        let findings = release_api_findings(&facts, &surface, &captures)?;
+
+        assert!(
+            findings.iter().all(|finding| {
+                !finding.detail.contains("third_party::ExternalBlanket")
+                    && !finding.subject.contains("ExternalBlanket")
+                    && !finding.subject.contains("provided")
+            }),
+            "external blanket impl header and child must be noise: {findings:#?}"
+        );
+        for profile in ApiProfile::RELEASE {
+            let profile = format!("profile={}", profile.label());
+            assert!(findings.iter().any(|finding| {
+                finding.rule == ReleaseApiRule::ForbiddenType
+                    && finding.subject.contains(&profile)
+                    && finding.subject.contains("OwnedTrait")
+                    && finding.detail.contains("third_party::External")
+            }));
+            assert!(findings.iter().any(|finding| {
+                finding.rule == ReleaseApiRule::ForbiddenType
+                    && finding.subject.contains(&profile)
+                    && finding.subject.contains("Regular")
+                    && finding.detail.contains("third_party::Regular")
+            }));
+            assert!(findings.iter().any(|finding| {
+                finding.rule == ReleaseApiRule::ForbiddenType
+                    && finding.subject.contains(&profile)
+                    && finding.subject.contains("alpha_release::leak")
+                    && finding.detail.contains("third_party::External")
+            }));
+            assert!(findings.iter().any(|finding| {
+                finding.rule == ReleaseApiRule::ForbiddenType
+                    && finding.subject.contains(&profile)
+                    && finding.detail.contains("vocab::Secret")
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn release_projection_rejects_malformed_blanket_identity() -> Result<()> {
+        let fixture = crate::workspace_root()?
+            .join("xtask/tests/fixtures/release_api/owner-aware-blanket.json");
+        let api = public_api::Builder::from_rustdoc_json(&fixture)
+            .omit_blanket_impls(false)
+            .build()?;
+        let external_blanket = api
+            .items()
+            .find(|item| item.to_string().contains("ExternalBlanket"))
+            .context("fixture missing external blanket impl")?;
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc.paths.remove(&rustdoc_types::Id(10));
+
+        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
+            .expect_err("missing blanket trait owner must fail closed");
+        assert!(format!("{error:#}").contains("缺 path owner identity"));
+
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc.external_crates.remove(&1);
+        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
+            .expect_err("unknown external blanket owner must fail closed");
+        assert!(format!("{error:#}").contains("external owner 1 未声明"));
+
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc
+            .paths
+            .get_mut(&rustdoc_types::Id(10))
+            .context("fixture missing external trait path")?
+            .kind = rustdoc_types::ItemKind::Struct;
+        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
+            .expect_err("non-trait blanket path must fail closed");
+        assert!(format!("{error:#}").contains("path kind 不是 trait"));
+
+        let external_child = api
+            .items()
+            .find(|item| item.to_string().contains("::provided"))
+            .context("fixture missing external blanket child")?;
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc.index.remove(&rustdoc_types::Id(2));
+        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_child)
+            .expect_err("missing blanket parent must fail closed");
+        assert!(format!("{error:#}").contains("parent 2 缺 index entry"));
+
+        let owned_blanket = api
+            .items()
+            .find(|item| {
+                item.to_string()
+                    .starts_with("impl<T> alpha_release::OwnedTrait")
+            })
+            .context("fixture missing crate-owned blanket impl")?;
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc.index.remove(&rustdoc_types::Id(4));
+        let error = project_release_api_item(&rustdoc, ApiProfile::Default, owned_blanket)
+            .expect_err("missing local blanket trait must fail closed");
+        assert!(format!("{error:#}").contains("local blanket impl trait 4 缺 index entry"));
+
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc
+            .paths
+            .get_mut(&rustdoc_types::Id(4))
+            .context("fixture missing owned trait path")?
+            .crate_id = 1;
+        let error = project_release_api_item(&rustdoc, ApiProfile::Default, owned_blanket)
+            .expect_err("conflicting blanket trait owners must fail closed");
+        assert!(format!("{error:#}").contains("owner identity 不一致"));
         Ok(())
     }
 

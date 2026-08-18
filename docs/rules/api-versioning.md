@@ -52,6 +52,13 @@ publish closure 与顺序只由现有 Cargo dependency graph、`plan_publish_clo
 package-proof 的 selected/planned/executed 必须保持 exact-set。不得另建 release group、registry、runner、schema
 或手写发布顺序作为第二真源。
 
+exported-symbol baseline 为降低依赖 blanket implementation 噪声可省略 blanket impl；结构化
+forbidden-type leakage proof 不复用该宽过滤，而是保留完整 public API IR，并只排除 rustdoc typed trait owner
+明确属于外部 crate 的 blanket impl projection（包括其 child item）。本 crate trait blanket impl、普通 impl、
+owned function/field/alias/re-export 与任何无法解析 owner identity 的条目仍 fail-closed。该跨 crate ownership
+事实只能在 rustdoc JSON 生成后判定，canonical carrier 为带 synthetic red 与 anti-vacuity 的
+`RELEASE-API-OWNER-PROJECTION-01` Medium ReleaseCheck；不使用 dependency allowlist、源码路径或 finding 数量替代。
+
 根 `Cargo.toml` 的 `[workspace.metadata.release-surface]` 是轴 A 唯一正向发布选择：只有被选 package 及其
 public API owner、API stability 和显式 official-profile artifact 归属进入 Release Surface；未选 package 默认
 internal。package version、MSRV、Cargo publish eligibility 以及 binary/image identity 分别从同一次 Cargo metadata
