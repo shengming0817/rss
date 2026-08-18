@@ -1322,17 +1322,37 @@ fn run_step(
     cwd: &Path,
     execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
+    run_step_with_status_source(lane, label, subcommand, args, execution_policy, |args| {
+        crate::cmd::cargo_cmd(subcommand, args, env, Some(cwd)).status()
+    })
+}
+
+fn run_step_with_status_source(
+    lane: &str,
+    label: &str,
+    subcommand: crate::cmd::CargoSubcommand,
+    args: &[&str],
+    execution_policy: crate::cmd::ExecutionPolicy,
+    status_source: impl FnOnce(&[&str]) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<()> {
     let args = cargo_args_for_policy(subcommand, args, execution_policy);
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let rendered = std::iter::once(subcommand.as_str())
         .chain(args.iter().copied())
         .collect::<Vec<_>>()
         .join(" ");
-    let status = crate::cmd::cargo_cmd(subcommand, &args, env, Some(cwd))
-        .status()
-        .map_err(|e| {
-            anyhow::anyhow!("{lane}: 启动门步 `{label}`（cargo {}）失败: {e}", rendered)
-        })?;
+    let status = status_source(&args).map_err(|e| {
+        anyhow::anyhow!("{lane}: 启动门步 `{label}`（cargo {}）失败: {e}", rendered)
+    })?;
+    step_status_result(lane, label, &rendered, status)
+}
+
+fn step_status_result(
+    lane: &str,
+    label: &str,
+    rendered: &str,
+    status: std::process::ExitStatus,
+) -> Result<()> {
     if status.success() {
         return Ok(());
     }
@@ -4786,19 +4806,28 @@ mod tests {
 
     /// anti-vacuity 红例（INVARIANT VERIFY-AGGREGATE-01）：门步非零退出 ⇒ `Err`，证明门真会 fail。
     #[test]
-    fn run_step_nonzero_is_err() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        assert!(
-            run_step(
-                "verify",
-                "redcase",
-                crate::cmd::CargoSubcommand::Fmt,
-                &["--zzz-not-a-cargo-flag"],
-                &[],
-                &root,
-                crate::cmd::ExecutionPolicy::FailFast,
-            )
-            .is_err()
+    fn run_step_nonzero_is_err_without_spawning_a_noisy_command() -> anyhow::Result<()> {
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(2 << 8);
+        #[cfg(windows)]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(2);
+
+        let Err(error) = run_step_with_status_source(
+            "verify",
+            "redcase",
+            crate::cmd::CargoSubcommand::Fmt,
+            &["--check"],
+            crate::cmd::ExecutionPolicy::FailFast,
+            |args| {
+                assert_eq!(args, ["--check"]);
+                Ok(status)
+            },
+        ) else {
+            anyhow::bail!("nonzero cargo gate must fail closed");
+        };
+        assert_eq!(
+            error.to_string(),
+            "verify: 门步 `redcase` 失败（cargo fmt --check 退出码 2）"
         );
         Ok(())
     }
