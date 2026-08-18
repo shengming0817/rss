@@ -3,14 +3,14 @@ name = "rss_diport_dto_debug_redacted"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：diport DTO 禁裸字节缓冲字段（Vec<u8>/[u8;N]/Box<[u8]>/Option 包装），改用 RedactedBytes newtype（Debug/Display 脱敏，INVARIANT DIPORT-DTO-RAWBYTES-BAN-01）"
+description = "RSS 治理：diport DTO 禁裸字节缓冲字段；动态 payload 用 RedactedBytes，固定宽度用 RedactedFixedBytes<N>（INVARIANT DIPORT-DTO-RAWBYTES-BAN-01）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep）
 
 # 本 lint 按 **LOCAL_CRATE 名 == "diport"** 判守护范围（仅 DI-infra port crate 字节 payload 脱敏边界）。
 # UI fixture 编译为单一 example crate、crate 名 = example target 名，故两个 example target：
-#   - diport（crate 名 == "diport"）→ 红例：struct 持裸字节缓冲字段触发；绿子例（RedactedBytes 豁免 / 非 u8 / #[allow]）内嵌；
+#   - diport（crate 名 == "diport"）→ 红例：struct 持裸字节缓冲字段触发；绿子例（双 carrier 精确放行 / 非 u8 / #[allow]）内嵌；
 #   - not_diport（crate 名不在守护范围）→ 绿例：同形字段不触发（anti-vacuity，验 LOCAL_CRATE 分支非恒报）。
 # golden 随源文件名（ui/diport.stderr / ui/not_diport.stderr）。
 [[example]]

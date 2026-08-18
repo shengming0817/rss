@@ -2,11 +2,27 @@
 
 use rss_request_context::PrincipalKind;
 
-struct MtlsRouteAuthorizer;
+mod routes {
+    use super::PrincipalKind;
 
-impl MtlsRouteAuthorizer {
-    fn authorize(&self, kind: PrincipalKind) -> bool {
-        kind == PrincipalKind::Service
+    pub(super) struct MtlsRouteAuthorizer;
+
+    impl MtlsRouteAuthorizer {
+        pub(super) fn authorize(&self, kind: PrincipalKind) -> bool {
+            kind == PrincipalKind::Service
+        }
+    }
+}
+
+mod shadow {
+    use super::PrincipalKind;
+
+    pub(super) struct MtlsRouteAuthorizer;
+
+    impl MtlsRouteAuthorizer {
+        pub(super) fn authorize(&self, kind: PrincipalKind) -> bool {
+            kind == PrincipalKind::Service
+        }
     }
 }
 
@@ -31,8 +47,10 @@ fn handler_local_role_check(kind: PrincipalKind) -> bool {
 }
 
 fn main() {
-    let authorizer = MtlsRouteAuthorizer;
+    let authorizer = routes::MtlsRouteAuthorizer;
     let _ = authorizer.authorize(PrincipalKind::Service);
+    let shadow_authorizer = shadow::MtlsRouteAuthorizer;
+    let _ = shadow_authorizer.authorize(PrincipalKind::Service);
     let _ = allow_evidence(PrincipalKind::User);
     let _ = verify_maintenance_operator_subject(PrincipalKind::Service);
     let _ = verified_service_maintenance_operator(PrincipalKind::Service);

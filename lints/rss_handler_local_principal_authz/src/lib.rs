@@ -69,9 +69,10 @@ const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "verified_service_maintenance_operator",
     "verified_projection_maintenance_operator_subject",
 ];
-const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_METHODS: &[(&str, &[&str])] =
-    &[("authorize", &["MtlsRouteAuthorizer"])];
-const VOCAB_PRINCIPAL_KIND_REPR_ITEMS: &[&str] = &["fmt", "as_actor_metadata_label"];
+/// 关联方法例外使用 local-crate 内的完整 DefPath，禁止跨模块同名类型误命中。
+const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_METHODS: &[(&str, &str)] =
+    &[("authorize", "routes::MtlsRouteAuthorizer")];
+const REQUEST_CONTEXT_PRINCIPAL_KIND_REPR_ITEMS: &[&str] = &["fmt", "as_actor_metadata_label"];
 const IDENTITY_CONTRACT_AUTHORIZER_METHODS: &[&str] = &[
     "authorize_request",
     "authorize_role_permission",
@@ -93,7 +94,13 @@ const AUDIT_ALLOWED_METHODS: &[&str] = &[
     "principal_kind_tag",
 ];
 /// postgres adapter：audit sink 的 PrincipalKind→DB 标签 mapper（非授权分支）。
-const POSTGRES_ALLOWED_METHODS: &[&str] = &["actor_kind_to_db"];
+const POSTGRES_ALLOWED_ITEMS: &[&str] = &["actor_kind_to_db"];
+/// postgres adapter：canonical device-ingress envelope shape 验证（非授权分支）。
+/// receiver 以 local-crate 内完整 DefPath 登记，短名不足以证明 canonical identity。
+const POSTGRES_ALLOWED_METHODS: &[(&str, &str)] = &[(
+    "from_reviewed_event",
+    "cotx::identity::CanonicalDeviceIngressFact",
+)];
 /// identityaudit 组合根：RSS access verify 后绑定 User（非 primary handler 授权）。
 const IDENTITYAUDIT_ALLOWED_METHODS: &[&str] = &["authenticate"];
 
@@ -280,7 +287,7 @@ fn principal_kind_variant_qpath(cx: &LateContext<'_>, qpath: &QPath<'_>, hir_id:
     let Res::Def(_, did) = cx.qpath_res(qpath, hir_id) else {
         return false;
     };
-    if cx.tcx.crate_name(did.krate).as_str() != "vocab" {
+    if cx.tcx.crate_name(did.krate).as_str() != "rss_request_context" {
         return false;
     }
     let item_name = cx.tcx.item_name(did);
@@ -327,7 +334,9 @@ fn principal_branch_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bo
         return true;
     }
     match crate_name {
-        "vocab" => enclosing_item_is_any(cx, hir_id, VOCAB_PRINCIPAL_KIND_REPR_ITEMS),
+        "rss_request_context" => {
+            enclosing_item_is_any(cx, hir_id, REQUEST_CONTEXT_PRINCIPAL_KIND_REPR_ITEMS)
+        }
         "authn" => enclosing_item_is_any(cx, hir_id, AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
         "diport" => enclosing_item_is_any(cx, hir_id, DIPORT_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
         "runtime" => {
@@ -340,7 +349,10 @@ fn principal_branch_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bo
         }
         "identity" => enclosing_item_is_any(cx, hir_id, IDENTITY_CONTRACT_AUTHORIZER_METHODS),
         "audit" => enclosing_item_is_any(cx, hir_id, AUDIT_ALLOWED_METHODS),
-        "postgres" => enclosing_item_is_any(cx, hir_id, POSTGRES_ALLOWED_METHODS),
+        "postgres" => {
+            enclosing_item_is_any(cx, hir_id, POSTGRES_ALLOWED_ITEMS)
+                || enclosing_method_on_allowed_type_is(cx, hir_id, POSTGRES_ALLOWED_METHODS)
+        }
         "identityaudit" => enclosing_item_is_any(cx, hir_id, IDENTITYAUDIT_ALLOWED_METHODS),
         _ => false,
     }
@@ -360,7 +372,7 @@ fn enclosing_item_is_any(cx: &LateContext<'_>, hir_id: HirId, allowed: &[&str]) 
 fn enclosing_method_on_allowed_type_is(
     cx: &LateContext<'_>,
     hir_id: HirId,
-    allowed: &[(&str, &[&str])],
+    allowed: &[(&str, &str)],
 ) -> bool {
     cx.tcx.hir_parent_owner_iter(hir_id).any(|(owner, _)| {
         let did = owner.def_id.to_def_id();
@@ -368,7 +380,7 @@ fn enclosing_method_on_allowed_type_is(
             return false;
         }
         let item_name = cx.tcx.item_name(did);
-        let Some((_, self_types)) = allowed
+        let Some((_, self_type)) = allowed
             .iter()
             .find(|(method, _)| item_name.as_str() == *method)
         else {
@@ -379,12 +391,9 @@ fn enclosing_method_on_allowed_type_is(
             return false;
         }
         let self_ty = cx.tcx.type_of(parent_did).skip_binder();
-        self_ty.ty_adt_def().is_some_and(|adt_def| {
-            let type_name = cx.tcx.item_name(adt_def.did());
-            self_types
-                .iter()
-                .any(|candidate| type_name.as_str() == *candidate)
-        })
+        self_ty
+            .ty_adt_def()
+            .is_some_and(|adt_def| cx.tcx.def_path_str(adt_def.did()) == *self_type)
     })
 }
 
@@ -475,8 +484,8 @@ fn ui_httpserve_allowed() {
 
 #[test]
 fn ui_runtime_bridge_only_allowed() {
-    // example target 名 `runtime`：runtime bridge / mTLS authorizer 放行，同 crate 其它 handler-local
-    // role literal 分支仍触发，避免整 crate allowlist 误放。
+    // example target 名 `runtime`：真实 DefPath 的 mTLS authorizer 放行；跨模块同名 shadow 与其它
+    // handler-local role literal 分支仍触发，证明 allowlist 绑定 canonical identity。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
 }
 
@@ -495,7 +504,8 @@ fn ui_identity_wire_mappers_only_allowed() {
 
 #[test]
 fn ui_postgres_actor_kind_mapper_only_allowed() {
-    // example target 名 `postgres`：只放行 audit sink actor_kind_to_db；同 crate 其它分支仍触发。
+    // example target 名 `postgres`：只放行 mapper 与真实 DefPath 的 ingress fact；跨模块同名 shadow
+    // 及其它 handler-local 分支仍触发。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "postgres");
 }
 

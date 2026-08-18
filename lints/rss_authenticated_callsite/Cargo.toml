@@ -53,7 +53,7 @@ dylint_linting = "6.0.1"
 [dev-dependencies]
 dylint_testing = "6.0.1"
 # ui fixture 调真 httpserve funnel：lint 按 callee crate 名（httpserve）匹配，本地 stub 无法触发。
-# vocab 供 PrincipalKind、primitives 供 RequiredScheme 实参。
+# request-context 供 PrincipalKind/TenantId，vocab 供 ServiceCallerDomain，primitives 供 RequiredScheme 实参。
 # authmint：UI 须传入 Hard capability token（lints 独立 workspace，不受根 deny.toml wrappers 约束）。
 httpserve = { path = "../../crates/httpserve" }
 authmint = { path = "../../crates/authmint" }
@@ -63,6 +63,7 @@ ids = { path = "../../crates/ids" }
 diport = { path = "../../crates/diport" }
 vocab = { path = "../../crates/vocab" }
 primitives = { path = "../../crates/primitives" }
+rss-request-context = { path = "../../crates/request-context" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

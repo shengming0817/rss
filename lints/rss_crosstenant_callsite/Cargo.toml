@@ -29,6 +29,7 @@ dylint_linting = "6.0.1"
 dylint_testing = "6.0.1"
 # ui fixture 调真 vocab funnel：lint 按 callee crate 名（vocab）匹配，本地 stub 模块 crate 名不为 vocab 无法触发。
 vocab = { path = "../../crates/vocab" }
+rss-request-context = { path = "../../crates/request-context" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

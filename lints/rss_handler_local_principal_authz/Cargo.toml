@@ -56,7 +56,7 @@ dylint_testing = "6.0.1"
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 diport = { path = "../../crates/diport" }
 primitives = { path = "../../crates/primitives" }
-vocab = { path = "../../crates/vocab" }
+rss-request-context = { path = "../../crates/request-context" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

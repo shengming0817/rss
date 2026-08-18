@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use crate::redacted_bytes::RedactedFixedBytes;
 use crate::{CertScope, RedactedBytes, RedactedSource};
 
 /// Maximum accepted PEM CSR size.
@@ -36,16 +37,16 @@ macro_rules! pki_digest {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name([u8; 32]);
+        pub struct $name(RedactedFixedBytes<32>);
 
         impl $name {
             /// Creates a digest from its canonical SHA-256 bytes.
             pub const fn new(bytes: [u8; 32]) -> Self {
-                Self(bytes)
+                Self(RedactedFixedBytes::new(bytes))
             }
             /// Borrows the canonical SHA-256 bytes.
             pub const fn as_bytes(&self) -> &[u8; 32] {
-                &self.0
+                self.0.as_bytes()
             }
         }
 
@@ -530,6 +531,20 @@ mod tests {
         .expect("request");
         assert_eq!(format!("{request:?}"), "PkiArtifactRequest(<redacted>)");
         assert!(!format!("{:?}", request.sans()).contains("device.example"));
+    }
+
+    #[test]
+    fn digest_coordinates_preserve_fixed_width_and_redacted_debug() {
+        let policy = PkiPolicyDigest::new([0xDE; 32]);
+        let spki = PkiSpkiDigest::new([0xAD; 32]);
+        let chain = PkiChainDigest::new([0xBE; 32]);
+
+        assert_eq!(policy.as_bytes(), &[0xDE; 32]);
+        assert_eq!(spki.as_bytes(), &[0xAD; 32]);
+        assert_eq!(chain.as_bytes(), &[0xBE; 32]);
+        assert_eq!(format!("{policy:?}"), "PkiPolicyDigest(<sha256>)");
+        assert_eq!(format!("{spki:?}"), "PkiSpkiDigest(<sha256>)");
+        assert_eq!(format!("{chain:?}"), "PkiChainDigest(<sha256>)");
     }
 
     #[test]

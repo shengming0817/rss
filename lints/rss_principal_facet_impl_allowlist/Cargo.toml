@@ -30,9 +30,9 @@ dylint_linting = "6.0.1"
 [dev-dependencies]
 dylint_testing = "6.0.1"
 # ui fixture impl 真 runctx::PrincipalFacet：lint 按被 impl trait 的 crate 名（runctx）+ trait 名匹配，
-# 本地 stub trait 无法触发。`vocab` 供 facet 方法签名的 `PrincipalKind`。
+# 本地 stub trait 无法触发。`rss-request-context` 供 facet 方法签名的 `PrincipalKind`。
 runctx = { path = "../../crates/runctx" }
-vocab = { path = "../../crates/vocab" }
+rss-request-context = { path = "../../crates/request-context" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

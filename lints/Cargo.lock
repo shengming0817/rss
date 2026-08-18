@@ -184,6 +184,7 @@ dependencies = [
  "diport",
  "ids",
  "primitives",
+ "rss-request-context",
  "runctx",
  "secure",
  "serde",
@@ -421,6 +422,7 @@ name = "consistency"
 version = "0.0.0"
 dependencies = [
  "ids",
+ "rss-request-context",
  "runctx",
  "secure",
  "serde",
@@ -532,6 +534,7 @@ dependencies = [
  "diport",
  "ids",
  "primitives",
+ "rss-request-context",
  "runctx",
  "secure",
  "support",
@@ -567,6 +570,7 @@ dependencies = [
  "futures",
  "ids",
  "primitives",
+ "rss-request-context",
  "sagaauthmint",
  "secure",
  "sha2",
@@ -574,6 +578,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "trait-variant",
+ "url",
  "uuid",
  "vocab",
  "zeroize",
@@ -621,11 +626,13 @@ dependencies = [
  "ids",
  "metrics",
  "primitives",
+ "rss-request-context",
  "runctx",
  "secure",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
+ "sha2",
  "support",
  "thiserror 2.0.18",
  "tokio",
@@ -792,6 +799,7 @@ dependencies = [
  "generated",
  "metrics",
  "primitives",
+ "rss-request-context",
  "rss-trace-context",
  "secure",
  "serde",
@@ -946,6 +954,8 @@ dependencies = [
  "axum",
  "regress",
  "requestidmint",
+ "rss-contract",
+ "rss-request-context",
  "secure",
  "serde",
  "serde_json",
@@ -1140,11 +1150,13 @@ dependencies = [
  "primitives",
  "requestidmint",
  "rss-diag-context",
+ "rss-request-context",
  "runctx",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -1309,6 +1321,7 @@ dependencies = [
  "observ",
  "primitives",
  "regex",
+ "rss-request-context",
  "runctx",
  "secure",
  "serde",
@@ -1814,6 +1827,8 @@ version = "0.0.0"
 dependencies = [
  "subtle",
  "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2000,6 +2015,13 @@ dependencies = [
 [[package]]
 name = "requestidmint"
 version = "0.0.0"
+dependencies = [
+ "rss-request-context",
+]
+
+[[package]]
+name = "rss-contract"
+version = "0.1.0"
 
 [[package]]
 name = "rss-diag-context"
@@ -2007,6 +2029,13 @@ version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "rss-request-context"
+version = "0.1.0"
+dependencies = [
+ "uuid",
 ]
 
 [[package]]
@@ -2042,6 +2071,7 @@ dependencies = [
  "identity",
  "ids",
  "primitives",
+ "rss-request-context",
  "vocab",
 ]
 
@@ -2071,6 +2101,7 @@ dependencies = [
  "clippy_utils",
  "dylint_linting",
  "dylint_testing",
+ "rss-request-context",
  "vocab",
 ]
 
@@ -2144,7 +2175,7 @@ dependencies = [
  "dylint_testing",
  "httpserve",
  "primitives",
- "vocab",
+ "rss-request-context",
 ]
 
 [[package]]
@@ -2167,6 +2198,7 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "eventexec",
+ "rss-request-context",
  "uuid",
  "vocab",
 ]
@@ -2189,6 +2221,7 @@ dependencies = [
  "diport",
  "dylint_linting",
  "dylint_testing",
+ "rss-request-context",
  "vocab",
 ]
 
@@ -2199,8 +2232,8 @@ dependencies = [
  "clippy_utils",
  "dylint_linting",
  "dylint_testing",
+ "rss-request-context",
  "runctx",
- "vocab",
 ]
 
 [[package]]
@@ -2266,6 +2299,7 @@ dependencies = [
 name = "runctx"
 version = "0.0.0"
 dependencies = [
+ "rss-request-context",
  "secure",
  "thiserror 2.0.18",
  "tokio",
@@ -2382,6 +2416,7 @@ dependencies = [
  "argon2",
  "base64",
  "hmac",
+ "rss-request-context",
  "secrecy",
  "securederive",
  "sha2",
@@ -3183,9 +3218,10 @@ name = "vocab"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "rss-contract",
+ "rss-request-context",
  "serde",
  "thiserror 2.0.18",
- "uuid",
 ]
 
 [[package]]

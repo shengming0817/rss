@@ -1,9 +1,8 @@
-//! `RedactedBytes` —— diport DTO 字节 payload 字段的脱敏 newtype。
+//! `RedactedBytes` / `RedactedFixedBytes` —— diport DTO 字节字段的脱敏类型 funnel。
 //!
-//! 把「字节 payload 的 `Debug` 不展开原始字节」从各 DTO 散点手写 `impl Debug` 上移为**单一类型保证**（Hard）：
-//! 本 newtype 的 `Debug` / `Display` 固定输出 `<redacted>`、**不展开内层字节**（payload 可能是 CSR / nonce /
-//! token / 事件体 / 状态快照等敏感物料）。各 DTO 经 `payload: RedactedBytes` + `#[derive(Debug)]` 持有它，
-//! derive(Debug) 即安全——`Message { id, payload: <redacted> }`。
+//! 把「字节字段的 `Debug` 不展开原始字节」从各 DTO 散点手写 `impl Debug` 上移为**类型保证**（Hard）：
+//! 动态 payload 使用 `RedactedBytes`，固定宽度结构字节使用 `RedactedFixedBytes<N>`；两者的 `Debug` /
+//! `Display` 都固定脱敏。各语义 DTO/wrapper 持有匹配 carrier 后，derive(Debug) 也不会展开原始字节。
 //!
 //! **与 [`crate::RedactedSource`] 的关键差异**：`RedactedSource` 是 write-only containment（原始错误 owned 但不经
 //! 任何接口暴露）；`RedactedBytes` 则**暴露受控字节访问**（[`RedactedBytes::as_bytes`] / [`RedactedBytes::into_bytes`]）
@@ -12,16 +11,46 @@
 //! 受控访问）。ref: secrecy secrecy/src/lib.rs@main。
 //!
 //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（`Debug` / `Display` 均不展开原始字节；下游
-//! `rss_diport_dto_debug_redacted` lint（DIPORT-DTO-RAWBYTES-BAN-01）守 diport 内裸字节字段必须采纳本 newtype；
+//! `rss_diport_dto_debug_redacted` lint（DIPORT-DTO-RAWBYTES-BAN-01）守 diport 内裸字节字段必须采纳匹配 carrier；
 //! 回归见本模块 `redacted_bytes` 单测）。
+
+/// 固定宽度结构性字节的 crate-internal Hard carrier。
+///
+/// 与动态 payload 使用的 [`RedactedBytes`] 分离：`[u8; N]` 在类型层锁定长度并保持 [`Copy`]，语义
+/// wrapper 只暴露自身的 typed constructor/accessor。私有字段与唯一 `Debug`/`Display` 实现保证 wrapper
+/// 即使改用 derive，也不会展开原始字节。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct RedactedFixedBytes<const N: usize>([u8; N]);
+
+impl<const N: usize> RedactedFixedBytes<N> {
+    pub(crate) const fn new(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; N] {
+        &self.0
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for RedactedFixedBytes<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl<const N: usize> std::fmt::Display for RedactedFixedBytes<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
 
 /// 包装 DTO 字节 payload 的脱敏字段。私有字段 + 受控构造（[`RedactedBytes::new`]），`Debug` / `Display` 恒
 /// `<redacted>`、不展开内层字节；经 [`RedactedBytes::as_bytes`] / [`RedactedBytes::into_bytes`] 受控读取原始字节
 /// （与 [`crate::RedactedSource`] 的 write-only 不同——payload 需被 adapter 合法收发）。
 ///
 /// 内层 `Vec<u8>` 是本 newtype 的**受控持有点**（脱敏边界本身）——`rss_diport_dto_debug_redacted` lint
-/// （INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）会标记 diport 内任何裸字节字段，但对 `RedactedBytes` 自身
-/// **结构性豁免**（按 enclosing struct 名）：它正是该 lint 守护要采纳的「正确实现」，`Debug` / `Display` 已固定脱敏。
+/// （INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）会标记 diport 内任何裸字节字段，但对 canonical carrier
+/// 按完整 `DefId` path 精确放行：它们正是该 lint 守护要采纳的「正确实现」，`Debug` / `Display` 已固定脱敏。
 // pub（非 pub(crate)）：`pub struct` DTO（如 `pub struct SignRequest { pub message: ... }`、`pub struct
 // Signature(...)`）的 pub 字段须持 public 类型，否则「more private than item」privacy leak。re-export 于
 // crate root（`pub use redacted_bytes::RedactedBytes`）。
@@ -82,7 +111,7 @@ impl std::fmt::Display for RedactedBytes {
 mod redaction {
     //! `RedactedBytes` `Debug` / `Display` 不展开内层字节（payload 可能携敏感物料），但经 `as_bytes` /
     //! `into_bytes` 受控可读（provider 收发 payload）。INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
-    use super::RedactedBytes;
+    use super::{RedactedBytes, RedactedFixedBytes};
 
     // 含 0xDE 字节：裸 `Vec<u8>` 的 `Debug` 把 0xDE 渲染成 "222"（十进制），redacted 后必不含。
     fn secret_bytes() -> Vec<u8> {
@@ -142,5 +171,17 @@ mod redaction {
         assert_eq!(format!("{c:?}"), "<redacted>");
         assert_eq!(c, r);
         assert_eq!(c.as_bytes(), secret_bytes().as_slice());
+    }
+
+    #[test]
+    fn fixed_width_bytes_are_copyable_and_redacted() {
+        fn assert_copy<T: Copy>() {}
+
+        assert_copy::<RedactedFixedBytes<32>>();
+        let bytes = [0xDE; 32];
+        let value = RedactedFixedBytes::new(bytes);
+        assert_eq!(value.as_bytes(), &bytes);
+        assert_eq!(format!("{value:?}"), "<redacted>");
+        assert_eq!(format!("{value}"), "<redacted>");
     }
 }

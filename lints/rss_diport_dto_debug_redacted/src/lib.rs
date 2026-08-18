@@ -1,17 +1,19 @@
 #![feature(rustc_private)]
 //! `rss_diport_dto_debug_redacted` — RSS 治理 dylint lint：`diport` crate 内 struct 字段禁持裸
-//! 字节缓冲（`Vec<u8>` / `[u8; N]` / `Box<[u8]>` 或 `Option` 包一层）；改用 `RedactedBytes`
-//! newtype（`Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）。
+//! 字节缓冲（`Vec<u8>` / `[u8; N]` / `Box<[u8]>` 或 `Option` 包一层）；动态 payload 改用
+//! `RedactedBytes`，固定宽度结构字节改用 crate-internal `RedactedFixedBytes<N>`。
 //!
 //! INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
-//! - 上游（Hard，`diport` 内）：`RedactedBytes` 的 `Debug`/`Display` 实现**强制脱敏**——
-//!   类型系统保证，不可绕过（INVARIANT: DIPORT-DTO-BYTES-REDACT-01， { level = "Medium", exec = "check", source = "dylint" }`crates/diport/src/redacted_bytes.rs`）。
-//! - 下游（本 lint，Medium）：守「`diport` crate 内 struct 的字节缓冲字段必须使用 `RedactedBytes`，
+//! - 上游（Hard，`diport` 内）：`RedactedBytes` / `RedactedFixedBytes<N>` 的 `Debug`/`Display`
+//!   实现**强制脱敏**——
+//!   类型系统保证，不可绕过（INVARIANT: DIPORT-DTO-BYTES-REDACT-01，载体为
+//!   `crates/diport/src/redacted_bytes.rs`）。
+//! - 下游（本 lint，Medium）：守「`diport` crate 内 struct 的字节缓冲字段必须使用匹配形态的 canonical carrier，
 //!   不得裸持 `Vec<u8>` / `[u8; N]` / `Box<[u8]>` 或其 `Option` 包装」——
-//!   `RedactedBytes` 字段是命名 ADT 类型，天然不命中；canonical `redacted_bytes::RedactedBytes`
-//!   定义自身（内层为裸 `Vec<u8>`）按 `DefId` 路径结构性豁免。
+//!   两个 carrier 字段都是命名 ADT 类型，天然不命中；carrier 定义自身的裸字节字段按完整 `DefId`
+//!   路径结构性豁免。
 //!
 //! 守护范围（MANDATORY）：仅当 `cx.tcx.crate_name(LOCAL_CRATE).as_str() == "diport"` 时激活。
 //! `diport` 直接承载 DI port 契约 DTO 的字节 payload 脱敏边界；其它 crate 暂不纳入，避免误报普通
@@ -33,7 +35,7 @@
 //! fail-closed）拦，azure 无 CI ⇒ verify 是唯一实际 gate；② `#[cfg(test)]` 子树默认不被扫（test-only
 //! 字节 field 放行）；③ 守护范围限 `diport`，其它 crate 合法裸持 `Vec<u8>` 不误报；④ 不检测
 //! `#[redact]` derive helper attr（late pass 可能已被消除）——已用 `secure::Redact` 治理的 `SecretMaterial`
-//! 与公开 / 结构性字节类型 `CertSerial`、`ArchiveChecksum` 由 `is_structural_carve_out` 名单豁免
+//! 与公开 / 结构性字节类型 `CertSerial` 由 `is_structural_carve_out` 名单豁免
 //! （非生产 `#[allow]`，避免 `unknown_lints` 噪声）。
 //! anti-vacuity（守卫非恒真 / 恒假，两向 UI golden 锁）：红向由 `ui/diport.rs` 的
 //! `Vec<u8>` / `[u8;N]` / `Box<[u8]>` / `Option<Vec<u8>>` struct **必报** + golden 非空锁；
@@ -54,28 +56,26 @@ use rustc_middle::ty;
 dylint_linting::declare_late_lint! {
     /// ### What it does
     /// 标记 `diport` crate 内 struct 字段类型为裸字节缓冲（`Vec<u8>` / `[u8; N]` / `Box<[u8]>`
-    /// 或 `Option` 包一层）的情形。`RedactedBytes` 是该形状的授权替代（`Debug`/`Display` 固定脱敏）；
-    /// `RedactedBytes` 字段是命名 ADT 类型、本 lint 自动放行。
+    /// 或 `Option` 包一层）的情形。动态 payload 使用 `RedactedBytes`，固定宽度结构字节使用
+    /// crate-internal `RedactedFixedBytes<N>`；两者的 `Debug`/`Display` 都固定脱敏。
     ///
     /// ### Why is this bad?
     /// 裸字节缓冲字段的 `derive(Debug)` 会以十六进制或 UTF-8 字节序列展开，可能把密钥材料、
     /// 证书字节、token payload 泄入日志或 trace（PII 及密钥边界问题）。
-    /// 上游 `RedactedBytes` 已用类型系统（Hard）保证 `Debug`/`Display` 恒脱敏；
-    /// 本 lint 作为下游 Medium gate，确保 `diport` DTO 确实采纳该 newtype。
+    /// 上游 canonical carrier 已用类型系统（Hard）保证 `Debug`/`Display` 恒脱敏；
+    /// 本 lint 作为下游 Medium gate，确保 `diport` DTO 确实采纳对应 carrier。
     /// INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]`
     /// 子树默认不被扫（test-only 字节字段放行）。守护范围限 `diport` crate；其它 crate 的同形字段不命中。
     /// 不检测 `#[redact]` derive helper attr（late pass 中可能已被消除）——已 `derive(secure::Redact)`
-    /// 治理的字段（`SecretMaterial`）与公开 / 结构性字节（`CertSerial`、`ArchiveChecksum`）由
+    /// 治理的字段（`SecretMaterial`）与公开字节（`CertSerial`）由
     /// `is_structural_carve_out` 名单豁免，
     /// **非**生产 `#[allow]`（dylint 未加载时 `#[allow(rss_*)]` 触发 `unknown_lints`、`-D warnings` 红）。
     ///
-    /// canonical `diport::redacted_bytes::RedactedBytes` 自身（脱敏 newtype 的受控持有点）经**结构性豁免**——
-    /// 按 enclosing struct 的 `DefId` 路径判定（`def_path_debug_str` 以 `::redacted_bytes::RedactedBytes`
-    /// 结尾），而非只比末段 item 名。重命名或移动 canonical newtype 会使豁免失配 → 本 lint 对其内层
-    /// 裸字节**误报红**（且 UI golden 漂移），即「路径漂移即被发现」的自救机制。
+    /// canonical `diport::redacted_bytes::{RedactedBytes, RedactedFixedBytes}` 自身是受控持有点，按完整
+    /// `DefId` path 精确豁免。重命名、移动或嵌套同名伪造都会使 UI golden 失败。
     ///
     /// anti-vacuity（两向 UI golden 锁）：红向由 `ui/diport.rs` 的裸字节 struct **必报** + golden 非空锁；
     /// 绿向由 `ui/not_diport.rs`（LOCAL_CRATE 不在守护范围）同形字段 **不报** + 空 golden 锁。
@@ -96,7 +96,7 @@ dylint_linting::declare_late_lint! {
     /// ```
     pub RSS_DIPORT_DTO_DEBUG_REDACTED,
     Warn,
-    "diport DTO 字段不得持裸字节缓冲（Vec<u8>/[u8;N]/Box<[u8]>/Option 包装）：改用 `RedactedBytes` newtype（Debug/Display 脱敏，INVARIANT DIPORT-DTO-RAWBYTES-BAN-01）"
+    "diport DTO 字段不得持裸字节缓冲（Vec<u8>/[u8;N]/Box<[u8]>/Option 包装）：改用 canonical redacted carrier（INVARIANT DIPORT-DTO-RAWBYTES-BAN-01）"
 }
 
 impl<'tcx> LateLintPass<'tcx> for RssDiportDtoDebugRedacted {
@@ -105,11 +105,11 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportDtoDebugRedacted {
         if cx.tcx.crate_name(LOCAL_CRATE).as_str() != "diport" {
             return;
         }
-        // 结构性豁免：canonical `diport::redacted_bytes::RedactedBytes` 是脱敏 newtype 自身（受控持有点），
-        // 其内层裸字节合法。按 DefId 路径豁免，防止 crate root 同名假类型绕过。
+        // 结构性豁免：canonical dynamic/fixed redacted carrier 是受控持有点，其内层裸字节合法。
+        // 按完整 DefId 路径豁免，防止根级或嵌套同名假类型绕过。
         let parent_did = cx.tcx.parent(field.def_id.to_def_id());
-        if is_canonical_redacted_bytes(cx, parent_did) {
-            // reason: RedactedBytes 是授权的受控持有点，其内层 Vec<u8> 即为实现载体
+        if is_canonical_redacted_carrier(cx, parent_did) {
+            // reason: canonical redacted carrier 是授权受控持有点，内层裸字节即实现载体
             return;
         }
         // 结构性 carve-out（公开 / secure-governed 字节，刻意保留裸 `Vec<u8>`）。用 in-lint 名单而非生产
@@ -125,14 +125,13 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportDtoDebugRedacted {
                 RSS_DIPORT_DTO_DEBUG_REDACTED,
                 field.hir_id,
                 field.ty.span,
-                "diport DTO 字段不得持裸字节缓冲（Vec<u8> / [u8;N] / Box<[u8]> 或其 Option 包装）：改用 `RedactedBytes` newtype（Debug/Display 脱敏）",
+                "diport DTO 字段不得持裸字节缓冲（Vec<u8> / [u8;N] / Box<[u8]> 或其 Option 包装）：改用 canonical redacted carrier（Debug/Display 脱敏）",
                 |diag| {
                     diag.help(
-                        "把字段类型换成 `RedactedBytes`\
-                        （`crates/diport/src/redacted_bytes.rs`，\
-                        `Debug`/`Display` 脱敏、经 `as_bytes()`/`into_bytes()` 访问字节）；\
+                        "动态 payload 改用 `RedactedBytes`，固定宽度结构字节改用 crate-internal `RedactedFixedBytes<N>`\
+                        （均位于 `crates/diport/src/redacted_bytes.rs`，`Debug`/`Display` 脱敏）；\
                         极少数公开字节（如 CRL 序列号）或已 `derive(secure::Redact)` 治理的字段，三步同步：\
-                        加 `is_structural_carve_out` 名单 + ADR-013 §4 carve-out registry + `ui/diport.rs` 照 G5/G6 加绿例\
+                        加 `is_structural_carve_out` 名单 + ADR-013 §4 carve-out registry + `ui/diport.rs` 加绿例\
                         （生产代码不用 `#[allow]`——dylint 未加载时触发 `unknown_lints`、`-D warnings` 红）",
                     );
                 },
@@ -193,38 +192,32 @@ fn is_u8_ty(ty: ty::Ty<'_>) -> bool {
     matches!(ty.kind(), ty::Uint(ty::UintTy::U8))
 }
 
-/// enclosing struct 是否为 canonical `diport::redacted_bytes::RedactedBytes`（脱敏 newtype 自身）。
-///
-/// 按 `def_path_debug_str` 路径后缀判定——`::redacted_bytes::RedactedBytes` 结尾即为 canonical。
-/// crate root 同名假类型（不在 `redacted_bytes` module 下）不命中，仍触发 lint；
-/// canonical newtype 重命名或移动会使豁免失配（lint 对其内层裸字节误报红，UI golden 漂移）即自救。
-fn is_canonical_redacted_bytes(cx: &LateContext<'_>, did: DefId) -> bool {
-    // 路径后缀 `::redacted_bytes::RedactedBytes` **且** 前缀只剩 crate 段（无中间 module）——否则
-    // diport 内任意嵌套 `mod ...::redacted_bytes { struct RedactedBytes(Vec<u8>) }` 也会后缀命中、绕过豁免
-    // （其内层裸字节未脱敏，#1155 review F1）。canonical 唯一在 crate 根下 `crates/diport/src/redacted_bytes.rs`。
-    let path = cx.tcx.def_path_debug_str(did);
-    let suffix = "::redacted_bytes::RedactedBytes";
-    let Some(prefix) = path.strip_suffix(suffix) else {
-        return false;
-    };
-    // 前缀为 crate 段（如 `diport[hash]`），无中间 `::` module 路径。
-    !prefix.contains("::")
+/// canonical redacted carrier 的完整 `DefId` path。语义 wrapper 持这些 ADT 后不再直接持裸字节。
+const CANONICAL_REDACTED_CARRIER_PATHS: [&[&str]; 2] = [
+    &["diport", "redacted_bytes", "RedactedBytes"],
+    &["diport", "redacted_bytes", "RedactedFixedBytes"],
+];
+
+fn is_canonical_redacted_carrier(cx: &LateContext<'_>, did: DefId) -> bool {
+    let path = cx.get_def_path(did);
+    CANONICAL_REDACTED_CARRIER_PATHS.iter().any(|expected| {
+        path.iter()
+            .map(|part| part.as_str())
+            .eq(expected.iter().copied())
+    })
 }
 
 /// 公开 / secure-governed 字节字段的结构性 carve-out。每项按 enclosing struct 的完整 `DefId`
 /// canonical path 判定；同 crate 内根级、兄弟或嵌套模块的同名类型均不命中。
 /// 这些类型的裸 `Vec<u8>` 是设计本意、不采纳 `RedactedBytes`：
 /// - `CertSerial`：RFC5280 证书序列号是公开 CRL 字段，`derive(Debug)` 有意可见原值（非机密，与密码学物料相反）。
-/// - `ArchiveChecksum`：SHA-256 完整性值固定为 32 字节；保留 `[u8; 32]` 才能静态锁定长度并提供 `Copy`，
-///   且其手写 `Debug` 固定脱敏，原值只经显式 `as_bytes` / `as_hex` 暴露。
 /// - `SecretMaterial`：已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载
 ///   （`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>`。
 ///
 /// 刻意窄名单（非启发式）。新增 carve-out 须同步本函数 + ADR-013 §4 carve-out registry + `ui/diport.rs` 绿例
 /// （error-handling.md §Carve-out）；重命名这些类型会使豁免失配 → lint 对其内层裸字节误报红（UI golden 漂移）即自救。
 ///
-const STRUCTURAL_CARVE_OUT_PATHS: [&[&str]; 3] = [
-    &["diport", "dlx_lifecycle", "ArchiveChecksum"],
+const STRUCTURAL_CARVE_OUT_PATHS: [&[&str]; 2] = [
     &["diport", "revocation_store", "CertSerial"],
     &["diport", "secret_resolver", "SecretMaterial"],
 ];
@@ -241,7 +234,7 @@ fn is_structural_carve_out(cx: &LateContext<'_>, did: DefId) -> bool {
 #[test]
 fn ui_diport_red() {
     // example target 名 `diport`（LOCAL_CRATE=="diport"）→ struct 持裸字节缓冲字段触发；
-    // 内嵌绿子例（RedactedBytes 结构性豁免 / 非 u8 / 非字节类型 / item-level #[allow]）验 anti-vacuity。
+    // 内嵌绿子例（canonical carrier 精确放行 / 非 u8 / 非字节类型 / item-level #[allow]）验 anti-vacuity。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "diport");
 }
 
@@ -257,9 +250,19 @@ fn structural_carve_out_paths_are_canonical_golden() {
     assert_eq!(
         STRUCTURAL_CARVE_OUT_PATHS,
         [
-            &["diport", "dlx_lifecycle", "ArchiveChecksum"][..],
             &["diport", "revocation_store", "CertSerial"][..],
             &["diport", "secret_resolver", "SecretMaterial"][..],
+        ]
+    );
+}
+
+#[test]
+fn canonical_redacted_carrier_paths_are_exact_golden() {
+    assert_eq!(
+        CANONICAL_REDACTED_CARRIER_PATHS,
+        [
+            &["diport", "redacted_bytes", "RedactedBytes"][..],
+            &["diport", "redacted_bytes", "RedactedFixedBytes"][..],
         ]
     );
 }

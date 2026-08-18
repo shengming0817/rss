@@ -35,6 +35,7 @@ diport = { path = "../../crates/diport" }
 dlqauthmint = { path = "../../crates/dlqauthmint" }
 vocab = { path = "../../crates/vocab" }
 uuid = "1"
+rss-request-context = { path = "../../crates/request-context" }
 
 [package.metadata.rust-analyzer]
 rustc_private = true
