@@ -37,9 +37,9 @@ static STRUCTURED_PANIC_OBSERVATION: AtomicBool = AtomicBool::new(false);
 
 /// Install the process panic boundary before any production worker can be spawned.
 ///
-/// Executable entrypoints call this before parsing or constructing a runtime. Libraries must not
-/// install or replace the process-global hook. Panic payloads are never delegated to the default
-/// hook.
+/// Production assembly façades call this before executable entrypoints parse or construct a
+/// runtime. Binaries and ordinary libraries must not import this capability crate directly or
+/// replace the process-global hook. Panic payloads are never delegated to the default hook.
 pub fn install_redacted_panic_hook() {
     INSTALL_REDACTED_PANIC_HOOK.call_once(|| {
         std::panic::set_hook(Box::new(|_| {

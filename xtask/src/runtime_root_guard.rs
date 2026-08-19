@@ -23,7 +23,9 @@ pub(crate) enum Rule {
     InvalidLifecycleFacade,
 }
 
-const LIFECYCLE_FACADE: [&str; 4] = [
+const LIFECYCLE_FACADE: [&str; 6] = [
+    "activate_structured_panic_observation",
+    "install_redacted_panic_hook",
     "prepare_runtime",
     "report_process_error",
     "run",
@@ -233,7 +235,7 @@ mod tests {
 
     const CANONICAL_ROOT: &str = r#"
 mod lifecycle;
-pub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};
+pub use lifecycle::{activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime, report_process_error, run, shutdown_runtime};
 "#;
 
     #[test]
@@ -243,7 +245,7 @@ pub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime
 #[cfg(test)]
 mod tests;
 mod lifecycle;
-pub use crate::lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};
+pub use crate::lifecycle::{activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime, report_process_error, run, shutdown_runtime};
 use lifecycle::prepare_runtime;
 "#;
         assert!(scan_source(source)?.is_empty());
@@ -278,10 +280,10 @@ use lifecycle::prepare_runtime;
     #[test]
     fn lifecycle_owner_and_facade_are_non_vacuous() -> Result<()> {
         let red_cases = [
-            "pub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};",
-            "mod lifecycle_owner;\npub use lifecycle_owner::{prepare_runtime, report_process_error, run, shutdown_runtime};",
-            "pub mod lifecycle;\npub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};",
-            "#[cfg(test)] mod lifecycle;\npub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};",
+            "pub use lifecycle::{activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime, report_process_error, run, shutdown_runtime};",
+            "mod lifecycle_owner;\npub use lifecycle_owner::{activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime, report_process_error, run, shutdown_runtime};",
+            "pub mod lifecycle;\npub use lifecycle::{activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime, report_process_error, run, shutdown_runtime};",
+            "#[cfg(test)] mod lifecycle;\npub use lifecycle::{activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime, report_process_error, run, shutdown_runtime};",
             "mod lifecycle;\npub use lifecycle::{prepare_runtime, report_process_error, run};",
             "mod lifecycle;\npub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime as shutdown};",
             "mod lifecycle;\n#[cfg(test)] pub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};",

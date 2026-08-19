@@ -77,10 +77,13 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 /// through the committed generated module list.
 #[cfg(feature = "integration")]
 pub mod test_support;
+pub use lifecycle::{
+    activate_structured_panic_observation, install_redacted_panic_hook, prepare_runtime,
+    report_process_error, run, shutdown_runtime,
+};
 pub(crate) use lifecycle::{
     prepare_operator_local, prepare_runtime_kernel, shutdown_prepared_runtime,
 };
-pub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};
 pub(crate) use module::LocalDomainProviderCatalog;
 pub use module::SharedRuntimeDeps;
 pub use phase::ServingRuntimeInputs;

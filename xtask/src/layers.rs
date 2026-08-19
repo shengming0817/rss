@@ -86,9 +86,8 @@ pub(crate) const SERVICE_CRATES: &[&str] = &[
 /// 域层（依赖基础 + 引擎 + 服务 + generated；兄弟域互不依赖）。
 pub(crate) const DOMAIN_CRATES: &[&str] = assembly_schema::REGISTERED_DOMAIN_LABELS;
 
-/// dev/test-only adapter（demo / in-mem provider）：**禁生产 bin 依赖**，只准 test/tooling 组合根
-/// （[`DEV_ADAPTER_ROOTS`]）依赖。普通 adapter 须被全部组合根 wrapper 覆盖（LAYER-DEPS-06）；dev adapter
-/// 例外——正向只要求 [`DEV_ADAPTER_ROOTS`]、且 wrapper **不得**含生产 bin（`INVARIANT: LAYER-DEPS-07` { level = "Medium", exec = "check", source = "code" }）。
+/// dev/test-only adapter（demo / in-mem provider）：**禁生产 bin 依赖**，wrapper consumer 类别只准
+/// [`DEV_ADAPTER_ROOTS`]；真实 parent exact-set 由 cargo-deny 证明（`INVARIANT: LAYER-DEPS-07` { level = "Medium", exec = "check", source = "code" }）。
 pub(crate) const DEV_ADAPTERS: &[&str] = &["memory"];
 /// 允许消费 dev/test adapter 的组合根（验收 journey + tooling，排除 `server`/`rss` 生产 bin）。
 pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["journeys", "xtask"];
@@ -321,15 +320,6 @@ pub(crate) fn generated_seam_allows(from_crate: &str, to_crate: &str) -> bool {
     to_crate == "generated" && matches!(from_crate, "eventexec" | "bootstrap")
 }
 
-/// `cargo-deny` 对 dev-dependency 也要求列出 wrapper；只允许 postgres 的生成契约测试依赖。
-///
-/// 这不是生产分层边。`layerdeps::check_layers` 不调用本函数，因此
-/// `postgres → generated` 一旦出现在 shipped dependency 中仍会被 `AdapterScope` 拒绝。
-/// fail-closed：仅供 `check_wrappers` 核验 deny.toml 中这一条测试 wrapper。
-pub(crate) fn generated_dev_wrapper_allows(wrapper: &str, banned_crate: &str) -> bool {
-    (wrapper, banned_crate) == ("postgres", "generated")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,19 +537,6 @@ mod tests {
         #[case] want: bool,
     ) {
         assert_eq!(generated_seam_allows(from, to), want);
-    }
-
-    #[rstest]
-    #[case("postgres", "generated", true)]
-    #[case("redis", "generated", false)]
-    #[case("postgres", "identity", false)]
-    #[case("generated", "postgres", false)]
-    fn generated_dev_wrapper_allows_postgres_contract_tests_only(
-        #[case] wrapper: &str,
-        #[case] banned_crate: &str,
-        #[case] want: bool,
-    ) {
-        assert_eq!(generated_dev_wrapper_allows(wrapper, banned_crate), want);
     }
 
     #[rstest]

@@ -53,6 +53,21 @@ pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
     ServingRuntimeInputs::new(prepared, telemetry_plan)
 }
 
+/// Install the process-wide panic hook through the production assembly boundary.
+///
+/// Binary entrypoints depend on this façade instead of importing the lower-level lifecycle
+/// capability crate directly.
+pub fn install_redacted_panic_hook() {
+    runtimeexec::install_redacted_panic_hook();
+}
+
+/// Mark the current process subscriber as capable of structured panic observation.
+///
+/// Operator entrypoints use this after installing their local tracing subscriber.
+pub fn activate_structured_panic_observation() {
+    runtimeexec::activate_structured_panic_observation();
+}
+
 /// Emit a process-terminal failure through the installed JSON subscriber.
 ///
 /// Preparation failures before subscriber installation use one redacted CLI line; a process

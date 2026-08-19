@@ -130,7 +130,7 @@ cargo xtask codegen --check                            # 契约 codegen 漂移�
 ./hack/cargo.sh xtask provider-capabilities --check    # 声明、runner、shard 与 committed matrix 漂移门
 cargo build --workspace                                # 编译全 workspace（分层有环即失败）
 cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / panic 纪律）
-cargo deny check                                       # 分层禁依赖 + license + advisory
+cargo deny check -D unused-wrapper                     # 分层闭集 + license + advisory（过期 wrapper 失败）
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
 
@@ -141,8 +141,9 @@ cargo dylint --all                                     # AST 级自写 lint（do
 运行 inventory 可成对报告启动方声明的 source revision 与 image digest，但不在进程内验证 OCI/SLSA
 provenance，也不把这些声明并入 RuntimePlan、workload 或 deployment fingerprint。
 
-`runtime::operator::*` 是 operator 命令的唯一 Rust API 路径，serving 继续只使用
-`runtime::{prepare_runtime, run, shutdown_runtime}`。共享时钟与审计 sink 只从
+`runtime::operator::*` 是 operator 命令的唯一 Rust API 路径；binary 的 serving、错误报告与进程 panic
+边界只使用 `runtime::{prepare_runtime, run, shutdown_runtime, report_process_error,
+install_redacted_panic_hook, activate_structured_panic_observation}`，不得直接依赖 `runtimeexec`。共享时钟与审计 sink 只从
 `runtime::support::{SystemClock, TracingAuthAuditSink}` 导入。旧 root operator/support 路径没有 alias 或兼容 shim；
 `runtime-root guard` 只允许 crate root 包含外置 module 声明与 import/re-export；启动、
 关停与错误报告实现必须留在私有 lifecycle owner，不使用 LOC 或当前数量 golden。

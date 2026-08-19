@@ -35,7 +35,7 @@ fn init_migration_tracing() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .try_init()
         .map_err(|_| anyhow::anyhow!("initialize postgres migration tracing subscriber"))?;
-    runtimeexec::activate_structured_panic_observation();
+    runtime::activate_structured_panic_observation();
     Ok(())
 }
 
@@ -234,7 +234,7 @@ async fn run_main() -> anyhow::Result<()> {
 }
 
 fn install_process_hooks() {
-    runtimeexec::install_redacted_panic_hook()
+    runtime::install_redacted_panic_hook()
 }
 
 fn process_exit(_hooks: (), result: anyhow::Result<()>) -> std::process::ExitCode {

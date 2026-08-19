@@ -53,7 +53,7 @@ fn process_exit(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 fn main() -> std::process::ExitCode {
-    runtimeexec::install_redacted_panic_hook();
+    runtime::install_redacted_panic_hook();
     process_exit(run_main())
 }
 

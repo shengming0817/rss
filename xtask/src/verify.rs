@@ -600,7 +600,7 @@ fn step_defer_gate() -> Step {
 fn step_deny() -> Step {
     Step {
         id: GateId::Deny,
-        args: &["deny", "check"],
+        args: &["deny", "check", "-D", "unused-wrapper"],
         kind: StepKind::Cargo,
         env: &[],
     }
@@ -2445,6 +2445,11 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_gate_fails_on_unused_wrappers() {
+        assert_eq!(step_deny().args, &["deny", "check", "-D", "unused-wrapper"]);
+    }
 
     #[test]
     fn identityaudit_runtime_image_batch_has_exact_provisioning_and_environment() {

@@ -1353,7 +1353,7 @@ fn runtime_binary_installs_hook(
     };
     hook.args.is_empty()
         && canonical_lifecycle_call_path(&hook.func, module_aliases).as_deref()
-            == Some("runtimeexec::install_redacted_panic_hook")
+            == Some("runtime::install_redacted_panic_hook")
 }
 
 fn local_call_name(expression: &syn::Expr) -> Option<String> {
@@ -2389,7 +2389,7 @@ mod tests {
         };
         anyhow::ensure!(
             call.args.is_empty()
-                && compact_tokens(&call.func) == "runtimeexec::install_redacted_panic_hook",
+                && compact_tokens(&call.func) == "runtime::install_redacted_panic_hook",
             "install_process_hooks must call the canonical redacted panic hook"
         );
         match mutation {
@@ -2405,7 +2405,7 @@ mod tests {
             }
             ProcessHookMutation::Replace => {
                 installer.block.stmts[0] = syn::parse_quote! {
-                    runtimeexec::activate_structured_panic_observation();
+                    runtime::activate_structured_panic_observation();
                 };
             }
         }

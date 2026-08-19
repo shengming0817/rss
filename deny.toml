@@ -2,10 +2,12 @@
 # 分层强制分级（见 plan / docs/rules/architecture.md §Rust 原生强制）：
 #   Hard① crate 依赖图：未声明就 import 不到。
 #   Hard② cargo 无环：下层依赖上层会闭环 → cargo 拒绝。
-#   Medium 本文件 wrappers：域 / adapter crate 只能被组合根依赖——补「同层互斥」「上层误依赖 leaf」。
+#   Medium 本文件 wrappers：按 all-features resolved graph 精确列出受管 target 的真实 direct parents；
+#     verify 固定以 `cargo deny check -D unused-wrapper` 同时拒绝缺失、未匹配和过期 wrapper。
 #   Medium `cargo xtask layer-deps`（source-centric，接入 verify）：读各成员 Cargo.toml [dependencies]，
 #     按 §分层 矩阵全覆盖（含本 wrappers 表达不了的「无 back-path 基础/引擎→上层」反向边），
-#     并守本文件 wrappers ⟷ 源分类一致性（LAYER-DEPS-06）。免疫裸名×crates.io 命名冲突。
+#     并守有真实 source consumer 的受管 target 必须有 ban、wrapper 类别与特殊 capability exact-set；
+#     不复制 cargo-deny 的 resolved parent 集合证明。免疫裸名×crates.io 命名冲突。
 #   下列 wrappers 是分层 defense-in-depth（与 layer-deps 并存）。adapter package 名须与其依赖的同名
 #     crates.io crate **不同**（如 redis adapter 的 package = `redis-adapter`，`[lib] name = "redis"` 保留裸导入），
 #     否则 bare-name ban 会误伤传递引入的同名外部 crate。详见 architecture.md §扁平 workspace 结构 命名约定。
@@ -96,20 +98,13 @@ deny = [
   #   承载；adapter→域 impl 域 repo port 经分层 wrapper（见下 identity 行加 postgres）+ source edge 校验放行。
   { crate = "dynosaur", wrappers = ["diport", "identity", "settings", "audit"] },
   { crate = "trait-variant", wrappers = ["diport", "identity", "settings", "audit"] },
-  # WORKSPACEFACTS-CONFINEMENT-01：唯一 tooling facts 链路 xtask → workspacefacts → guppy。
-  # 集合相等与真实 source edge 由 `cargo xtask layer-deps` 守，禁止生产 crate 消费 facts，
-  # 也禁止 xtask 绕过 façade 直接依赖 guppy。
-  { crate = "workspacefacts", wrappers = ["xtask"] },
+  # WORKSPACEFACTS-CONFINEMENT-01：唯一 shipped tooling facts 链路 xtask → workspacefacts → guppy；
+  # dev 图只准 xtask 与 workspacefacts 自测消费，禁止生产 crate 消费或 xtask 绕过 façade 依赖 guppy。
+  { crate = "workspacefacts", wrappers = ["workspacefacts", "xtask"] },
   { crate = "guppy", wrappers = ["workspacefacts"] },
-  # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖，
-  # **外加**实现该域 repo/service port 的 adapter（adapter→域 = DIP 内向边，Option 2/ADR-005；如 identity
-  # 的 RoleRepo 由 postgres impl）。覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。
-  # ⚠ INVARIANT(LAYER-WRAP-01)：新增任何组合根 crate（assembly/bin/journeys）须同步加入下列每条 wrappers，
-  #   否则其对域/adapter/generated 的合法依赖会被 deny 误拦。此一致性的持久守卫 = `cargo xtask layer-deps`
-  #   的 LAYER-DEPS-06（wrappers ⟷ 源分类交叉核对，接入 verify CI 门；issue #1022 落地）。
-  #   `journeys` 是验收 journey 组合根（RW-G1，#999）——故出现在每条域/adapter/generated wrappers。
-  #   `examples/*` 是收窄示例层，只能依赖基础/引擎/DI-infra/服务；不进这些全权限 wrappers。
-  #   adapter wrapper 经 LAYER-DEPS-06 反向②补强：必须有真实 adapter→domain source edge。
+  # 分层（target-centric wrappers）：只列 all-features 最终图中的真实 direct parents。
+  # 集合相等由 cargo-deny 独占证明；layer-deps 只守 source 分层、wrapper 类别和特殊安全边界。
+  # adapter→domain wrapper 仍必须有 shipped source edge。
   # RuntimeExec 启动内核只准三个 assembly 直接消费；不是一般 Root wrapper。集合相等由
   # RUNTIMEEXEC-LAYER-01 守，禁止 bins/composition/journeys/xtask 绕过 assembly phase funnel。
   { crate = "runtimeexec", wrappers = ["runtime", "settingsonly", "identityaudit"] },
@@ -129,40 +124,36 @@ deny = [
   { crate = "runtimeinventorymint", wrappers = ["assembly-schema", "runtimeexec", "runtime"] },
   # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
-  { crate = "identity", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },
+  { crate = "identity", wrappers = ["deviceidentity", "identity-composition", "identityaudit", "journeys", "memory", "mqtt", "postgres", "runtime"] },
   # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
   # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
-  { crate = "settings", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
+  { crate = "settings", wrappers = ["eventing-composition", "journeys", "postgres", "runtime", "settings-composition", "settingsonly"] },
   # postgres impl AuditWriteRepo + AuditReadRepo（per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
-  { crate = "audit", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
-  { crate = "contractreg", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "syshealth", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "audit", wrappers = ["audit-composition", "eventing-composition", "identityaudit", "journeys", "postgres", "runtime"] },
   # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。ban 按 **package 名** 匹配——
   # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`、
   # prometheus adapter package = `prometheus-adapter`，见各自 Cargo.toml），避免误伤同名 crates.io crate。
-  { crate = "postgres", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "postgres", wrappers = ["audit-composition", "deviceidentity", "eventing-composition", "identity-composition", "identityaudit", "journeys", "journeys-fault-matrix", "runtime", "settings-composition", "settingsonly"] },
   # Forward-only schema migration implementation is operator-only. Serving assemblies cannot name
   # this crate, making migration capability absent from their production crate graphs.
   { crate = "postgres-migration", wrappers = ["rss"] },
-  { crate = "redis-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "amqp", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "mqtt", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "s3", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "oidc", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "grpc", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "redis-adapter", wrappers = ["identityaudit", "journeys-fault-matrix", "runtime", "settingsonly"] },
+  { crate = "amqp", wrappers = ["identityaudit", "journeys", "journeys-fault-matrix", "runtime", "settingsonly"] },
+  { crate = "mqtt", wrappers = ["deviceidentity", "identity-composition", "journeys"] },
+  { crate = "s3", wrappers = ["runtime", "settingsonly"] },
+  { crate = "oidc", wrappers = ["identityaudit", "journeys", "runtime", "settingsonly"] },
   # httpd HTTP 传输 adapter（#1320 运行时入口）：HttpServer + ManagedResource，只被组合根依赖。
-  { crate = "httpd", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "otel", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "prometheus-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "vault", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "softca", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "ratelimit", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "httpd", wrappers = ["identityaudit", "runtime", "settingsonly"] },
+  { crate = "otel", wrappers = ["runtime"] },
+  { crate = "prometheus-adapter", wrappers = ["identityaudit", "runtime", "settingsonly"] },
+  { crate = "vault", wrappers = ["identityaudit", "journeys", "runtime", "settings-composition", "settingsonly"] },
+  { crate = "ratelimit", wrappers = ["identityaudit", "settingsonly"] },
   # MacVerifier 生产 backend（package = `crypto-adapter`，lib = `crypto`；#1230）：只被组合根注入。
-  { crate = "crypto-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "crypto-adapter", wrappers = ["eventing-composition", "identity-composition", "identityaudit", "journeys", "runtime", "settingsonly"] },
   # in-mem DI port provider adapter（RW-G1 追踪弹）：dev/test-only——**禁生产 bin（server/rss）依赖**，
   # 只准验收 journey + tooling（DEV_ADAPTER_ROOTS）依赖。机器边界 = xtask layers.rs DEV_ADAPTERS +
-  # layer-deps LAYER-DEPS-07（正向收窄 required + 反向排除生产 bin）。wrapper 须恰为 dev 组合根。
-  { crate = "memory", wrappers = ["journeys", "xtask"] },
+  # layer-deps LAYER-DEPS-07 反向排除生产 bin；精确 consumer 由 cargo-deny 证明。
+  { crate = "memory", wrappers = ["journeys"] },
   # 注：testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层 test-support 库，
   # 不在此 ban——其「只准 [dev-dependencies] 消费」由 xtask layers.rs TEST_SUPPORT_CRATES + layer-deps
   # LAYER-DEPS-08（check_test_support_confinement：任一 shipped 边指向 testkit 即报）守，testcontainers 树经
@@ -171,7 +162,7 @@ deny = [
   # runtime seam 的 eventexec 与 typed subscription registrar 的 bootstrap 依赖。两条均为 exact crate
   # edge；bootstrap 的 production item surface 另由 LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01
   # 收窄到 registrar vocabulary，其它 Service→Generated 仍由 layer-deps 拒绝。
-  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "eventexec", "bootstrap", "postgres", "server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "generated", wrappers = ["amqp", "audit", "bootstrap", "contractreg", "eventexec", "eventing-composition", "httpserve", "identity", "identityaudit", "journeys", "journeys-fault-matrix", "memory", "postgres", "runtime", "settings", "settingsonly", "syshealth", "xtask"] },
 ]
 
 # 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml

@@ -29,7 +29,7 @@
 //!   `bootstrap → generated` 的 crate edge 只承载 sealed subscription registrar vocabulary；production source
 //!   引用 event authoring、command/workflow、catalog、per-event module 或宽 module/glob import 均 fail-closed。
 //! INVARIANT: LAYER-DEPS-05 { level = "Medium", exec = "check", source = "code" }—— 每个 workspace 成员必落唯一分层（anti-drift：新增 crate 须登记层）。
-//! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
+//! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::check_wrappers_red_missing_ban_entry|tests::check_wrappers_red_disallowed_wrapper|tests::check_wrappers_rejects_generated_dev_wrapper_without_source_edge", anti_vacuity = "tests::check_wrappers_requires_only_actual_consumers|tests::check_wrappers_allows_zero_consumer_target_without_ban|tests::real_workspace_passes" }—— 有真实 source consumer 的受管 target 必须有 deny ban，wrapper 必须符合源码分层和特殊边界；普通 resolved parent exact-set 由 cargo-deny 独占证明。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
 //! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit`、`tracewiretest` 与 `iotdevice`）只准经
@@ -188,12 +188,18 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
         findings.extend(scan_bootstrap_generated_sources(&root)?);
-        findings.extend(check_wrappers(&members, &bans, &scan.shipped_edges));
+        findings.extend(check_wrappers(
+            &members,
+            &bans,
+            &scan.shipped_edges,
+            &scan.dev_edges,
+        ));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_workspacefacts_confinement(
             &members,
             &bans,
             &scan.shipped_edges,
+            &scan.dev_edges,
             &shipped_deps,
         ));
         findings.extend(check_test_support_confinement(&scan.shipped_edges));
@@ -562,8 +568,8 @@ const POSTGRES_MIGRATION_OPERATOR_CRATE: &str = "postgres-migration";
 const POSTGRES_MIGRATION_OPERATOR_ROOT: &str = "rss";
 
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
-/// 正向：每个 Domain/Adapter/Generated 成员须有 ban entry 且 wrappers ⊇ 所需消费者
-/// （Domain/Adapter ⊇ 全部组合根；Generated ⊇ 全部域 + 组合根）。
+/// 正向：有真实 shipped/dev 消费者的 Domain/Adapter/Generated 成员须有 ban entry；零消费者
+/// 不制造虚假 entry。最终 resolved graph 的 wrapper 集合相等由 cargo-deny 独占证明。
 /// 反向：① 每条带 wrappers 的 ban 须对应现存 Domain/Adapter/Generated 成员（无 stale），
 /// **例外** [`EXTERNAL_CONFINEMENT_WRAPPERS`]（外部 crate 收敛）与 RuntimeExec / authmint 精确 target wrapper，均单独校验；
 /// ② wrappers 中每个消费者须是 `layers::allows` 允许依赖被 ban crate 的层（防过宽 wrapper 开洞,
@@ -573,51 +579,6 @@ const POSTGRES_MIGRATION_OPERATOR_ROOT: &str = "rss";
 /// repo port 实现方」的 source-centric 代理（强代理：adapter 依赖域 crate 仅为 impl 其 port——域逻辑
 /// `pub(crate)` 不外泄）；「仅 adapter 可 impl」的完整 implementer-allowlist 仍待 #1060。与 `check_layers`
 /// 的 AdapterScope/SiblingDomain 互为两条 Medium 防线，须同绿。
-/// 成员所需的 wrapper 消费者集（正向覆盖）：Domain/Adapter ⊇ 全组合根、Generated ⊇ 全域 + 组合根；
-/// 非这三层返回 `None`（跳过；RuntimeExec / authmint 由精确 target wrapper 校验单独覆盖）。dev/test adapter（[`layers::is_dev_adapter`]）正向只要 dev 组合根
-/// （[`layers::DEV_ADAPTER_ROOTS`]，LAYER-DEPS-07）——生产 bin 不在 required。
-fn required_consumers<'a>(
-    layer: Option<Layer>,
-    name: &str,
-    roots: &[&'a str],
-    domains: &[&'a str],
-    services: &[&'a str],
-) -> Option<Vec<&'a str>> {
-    if layer == Some(Layer::Adapter) && name == POSTGRES_MIGRATION_OPERATOR_CRATE {
-        return Some(
-            roots
-                .iter()
-                .copied()
-                .filter(|root| *root == POSTGRES_MIGRATION_OPERATOR_ROOT)
-                .collect(),
-        );
-    }
-    match layer {
-        Some(Layer::Adapter) if layers::is_dev_adapter(name) => Some(
-            roots
-                .iter()
-                .copied()
-                .filter(|r| layers::DEV_ADAPTER_ROOTS.contains(r))
-                .collect(),
-        ),
-        Some(Layer::Domain | Layer::Adapter) => Some(roots.to_vec()),
-        Some(Layer::Generated) => Some(
-            domains
-                .iter()
-                .chain(roots)
-                .copied()
-                .chain(
-                    services
-                        .iter()
-                        .copied()
-                        .filter(|service| layers::generated_seam_allows(service, name)),
-                )
-                .collect(),
-        ),
-        _ => None,
-    }
-}
-
 /// LAYER-DEPS-07 反向排除：dev/test adapter 的 wrapper 须 ⊆ [`layers::DEV_ADAPTER_ROOTS`]
 /// （禁 server/rss 生产 bin）。非 dev adapter 返回空。
 fn dev_adapter_exclusions(b: &BanEntry, banned: Layer) -> Vec<Finding> {
@@ -643,64 +604,47 @@ fn dev_adapter_exclusions(b: &BanEntry, banned: Layer) -> Vec<Finding> {
 pub(crate) fn check_wrappers(
     members: &[Member],
     bans: &[BanEntry],
-    edges: &[Edge],
+    shipped_edges: &[Edge],
+    dev_edges: &[Edge],
 ) -> Vec<Finding> {
     let layer_of: BTreeMap<&str, Layer> = members
         .iter()
         .filter_map(|m| m.layer.map(|l| (m.name.as_str(), l)))
         .collect();
-    let names_in = |layer: Layer| -> Vec<&str> {
-        members
-            .iter()
-            .filter(|m| m.layer == Some(layer))
-            .map(|m| m.name.as_str())
-            .collect()
-    };
-    let roots = names_in(Layer::Root);
-    let domains = names_in(Layer::Domain);
-    let services = names_in(Layer::Service);
     let ban_of: BTreeMap<&str, &[String]> = bans
         .iter()
         .map(|b| (b.crate_name.as_str(), b.wrappers.as_slice()))
         .collect();
 
-    let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
+    let mut findings = check_runtimeexec_wrapper_coverage(members, bans, shipped_edges, dev_edges);
     findings.extend(check_authmint_wrapper_coverage(members, bans));
     findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
     findings.extend(check_dlqauthmint_wrapper_coverage(members, bans));
     findings.extend(check_requestidmint_wrapper_coverage(members, bans));
     findings.extend(check_runtimeinventorymint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
-        members, bans, edges,
+        members,
+        bans,
+        shipped_edges,
     ));
     for m in members {
-        let Some(required) = required_consumers(m.layer, &m.name, &roots, &domains, &services)
-        else {
+        if !matches!(
+            m.layer,
+            Some(Layer::Domain | Layer::Adapter | Layer::Generated)
+        ) || m.name == POSTGRES_MIGRATION_OPERATOR_CRATE
+        {
             continue;
-        };
-        match ban_of.get(m.name.as_str()) {
-            None => findings.push(finding(
+        }
+        let has_source_consumer = shipped_edges
+            .iter()
+            .chain(dev_edges)
+            .any(|edge| edge.to == m.name);
+        if has_source_consumer && !ban_of.contains_key(m.name.as_str()) {
+            findings.push(finding(
                 Rule::WrapperCoverage,
                 m.name.clone(),
-                "deny.toml 缺该 crate 的分层 ban entry（应被组合根 wrappers 守）",
-            )),
-            Some(wraps) => {
-                let missing: Vec<&str> = required
-                    .iter()
-                    .copied()
-                    .filter(|r| !wraps.iter().any(|w| w == r))
-                    .collect();
-                if !missing.is_empty() {
-                    findings.push(finding(
-                        Rule::WrapperCoverage,
-                        m.name.clone(),
-                        format!(
-                            "deny.toml [bans.deny] 该 crate wrappers 缺组合根/消费者: {}",
-                            missing.join(", ")
-                        ),
-                    ));
-                }
-            }
+                "deny.toml 缺该 crate 的分层 ban entry（存在真实 shipped/dev source consumer）",
+            ));
         }
     }
 
@@ -744,13 +688,18 @@ pub(crate) fn check_wrappers(
                 Some(&wl)
                     if layers::allows(wl, banned)
                         || layers::generated_seam_allows(w, &b.crate_name)
-                        || layers::generated_dev_wrapper_allows(w, &b.crate_name) =>
+                        || (banned == Layer::Generated
+                            && dev_edges
+                                .iter()
+                                .any(|edge| edge.from == *w && edge.to == b.crate_name)) =>
                 {
                     // ②补强（ADR-005）：adapter→域 wrapper 须有真实 source edge（adapter 实际依赖该域），
                     // 否则空泛放过任意 adapter。仅对 Adapter→Domain 这条 DIP 内向边校验（其它放行边不变）。
                     if wl == Layer::Adapter
                         && banned == Layer::Domain
-                        && !edges.iter().any(|e| e.from == *w && e.to == b.crate_name)
+                        && !shipped_edges
+                            .iter()
+                            .any(|e| e.from == *w && e.to == b.crate_name)
                     {
                         findings.push(finding(
                             Rule::WrapperCoverage,
@@ -843,6 +792,8 @@ fn check_postgres_migration_operator_confinement(
 pub(crate) fn check_runtimeexec_wrapper_coverage(
     members: &[Member],
     bans: &[BanEntry],
+    shipped_edges: &[Edge],
+    dev_edges: &[Edge],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let target = members.iter().find(|m| m.name == RUNTIMEEXEC_CRATE);
@@ -902,6 +853,27 @@ pub(crate) fn check_runtimeexec_wrapper_coverage(
                 ));
             }
         }
+    }
+    let actual = shipped_edges
+        .iter()
+        .chain(dev_edges)
+        .filter(|edge| edge.to == RUNTIMEEXEC_CRATE)
+        .map(|edge| edge.from.as_str())
+        .collect::<BTreeSet<_>>();
+    let allowed = RUNTIMEEXEC_ALLOWED_WRAPPERS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if actual != allowed {
+        let unauthorized = actual.difference(&allowed).copied().collect::<Vec<_>>();
+        let missing = allowed.difference(&actual).copied().collect::<Vec<_>>();
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            RUNTIMEEXEC_CRATE,
+            format!(
+                "runtimeexec 实际 shipped/dev source consumers 必须与批准 assembly 集合相等：未授权 {unauthorized:?} / 缺失 {missing:?}"
+            ),
+        ));
     }
     findings
 }
@@ -1279,12 +1251,14 @@ pub(crate) fn check_external_confinement(members: &[Member], bans: &[BanEntry]) 
 }
 
 /// INVARIANT: WORKSPACEFACTS-CONFINEMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "workspacefacts_confinement_rejects_widening_and_missing_edges|workspacefacts_confinement_rejects_actual_workspace_consumer_with_exact_wrappers|workspacefacts_confinement_rejects_direct_guppy_consumer_with_exact_wrappers|workspacefacts_confinement_rejects_noncanonical_xtask_path", anti_vacuity = "workspacefacts_confinement_exact_green|real_workspace_green" }
-/// ——唯一合法链路为 `xtask → workspacefacts → guppy`。Cargo graph/visibility 是 Hard 基线，
+/// ——唯一合法 shipped 链路为 `xtask → workspacefacts → guppy`，dev 图只准 xtask 与
+/// workspacefacts 自测消费。Cargo graph/visibility 是 Hard 基线，
 /// deny wrappers 与 source edge anti-vacuity 防止未来 manifest 绕过 façade 或把 tooling crate 引入生产层。
 pub(crate) fn check_workspacefacts_confinement(
     members: &[Member],
     bans: &[BanEntry],
-    edges: &[Edge],
+    shipped_edges: &[Edge],
+    dev_edges: &[Edge],
     deps: &[ShippedDep],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1307,8 +1281,11 @@ pub(crate) fn check_workspacefacts_confinement(
     }
 
     for (target, expected) in [
-        (WORKSPACEFACTS_CRATE, WORKSPACEFACTS_CONSUMER),
-        (GUPPY_CRATE, WORKSPACEFACTS_CRATE),
+        (
+            WORKSPACEFACTS_CRATE,
+            BTreeSet::from([WORKSPACEFACTS_CONSUMER, WORKSPACEFACTS_CRATE]),
+        ),
+        (GUPPY_CRATE, BTreeSet::from([WORKSPACEFACTS_CRATE])),
     ] {
         let have = bans
             .iter()
@@ -1320,16 +1297,16 @@ pub(crate) fn check_workspacefacts_confinement(
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        if have != BTreeSet::from([expected]) {
+        if have != expected {
             findings.push(finding(
                 Rule::WorkspaceFactsConfinement,
                 target,
-                format!("deny wrapper 必须精确为 `{target}` ← [`{expected}`]，实际 {have:?}"),
+                format!("deny wrapper 必须精确为 `{target}` ← {expected:?}，实际 {have:?}"),
             ));
         }
     }
 
-    let workspace_consumers = edges
+    let workspace_consumers = shipped_edges
         .iter()
         .filter(|edge| edge.to == WORKSPACEFACTS_CRATE)
         .map(|edge| edge.from.as_str())
@@ -1341,6 +1318,23 @@ pub(crate) fn check_workspacefacts_confinement(
             WORKSPACEFACTS_CRATE,
             format!(
                 "workspacefacts 实际 shipped workspace consumers 必须精确为 {expected_workspace_consumers:?}，实际 {workspace_consumers:?}"
+            ),
+        ));
+    }
+
+    let dev_workspace_consumers = dev_edges
+        .iter()
+        .filter(|edge| edge.to == WORKSPACEFACTS_CRATE)
+        .map(|edge| edge.from.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_dev_workspace_consumers =
+        BTreeSet::from([WORKSPACEFACTS_CONSUMER, WORKSPACEFACTS_CRATE]);
+    if dev_workspace_consumers != expected_dev_workspace_consumers {
+        findings.push(finding(
+            Rule::WorkspaceFactsConfinement,
+            WORKSPACEFACTS_CRATE,
+            format!(
+                "workspacefacts 实际 dev workspace consumers 必须精确为 {expected_dev_workspace_consumers:?}，实际 {dev_workspace_consumers:?}"
             ),
         ));
     }
@@ -3546,6 +3540,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         ]
     }
 
+    fn runtimeexec_allowed_edges() -> Vec<Edge> {
+        RUNTIMEEXEC_ALLOWED_WRAPPERS
+            .iter()
+            .map(|consumer| e(consumer, "runtimeexec"))
+            .collect()
+    }
+
     #[test]
     fn runtimeexec_wrapper_exact_green() {
         let bans = vec![ban(
@@ -3553,7 +3554,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             &["runtime", "settingsonly", "identityaudit"],
         )];
         assert!(
-            check_runtimeexec_wrapper_coverage(&runtimeexec_fixture_members(), &bans).is_empty()
+            check_runtimeexec_wrapper_coverage(
+                &runtimeexec_fixture_members(),
+                &bans,
+                &runtimeexec_allowed_edges(),
+                &[],
+            )
+            .is_empty()
         );
     }
 
@@ -3563,7 +3570,12 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             "runtimeexec",
             &["runtime", "settingsonly", "identityaudit", "server"],
         )];
-        let findings = check_runtimeexec_wrapper_coverage(&runtimeexec_fixture_members(), &bans);
+        let findings = check_runtimeexec_wrapper_coverage(
+            &runtimeexec_fixture_members(),
+            &bans,
+            &runtimeexec_allowed_edges(),
+            &[],
+        );
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "runtimeexec");
@@ -3572,10 +3584,35 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     #[test]
     fn runtimeexec_wrapper_missing_assembly_red() {
         let bans = vec![ban("runtimeexec", &["runtime", "settingsonly"])];
-        let findings = check_runtimeexec_wrapper_coverage(&runtimeexec_fixture_members(), &bans);
+        let findings = check_runtimeexec_wrapper_coverage(
+            &runtimeexec_fixture_members(),
+            &bans,
+            &runtimeexec_allowed_edges(),
+            &[],
+        );
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "runtimeexec");
+    }
+
+    #[test]
+    fn runtimeexec_actual_bin_consumer_is_rejected_even_with_exact_wrappers() {
+        let bans = vec![ban(
+            "runtimeexec",
+            &["runtime", "settingsonly", "identityaudit"],
+        )];
+        let findings = check_wrappers(
+            &runtimeexec_fixture_members(),
+            &bans,
+            &[e("server", "runtimeexec")],
+            &[],
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "runtimeexec" && finding.detail.contains("server")
+            }),
+            "an actual bin consumer must fail closed: {findings:?}"
+        );
     }
 
     fn authmint_fixture_members() -> Vec<Member> {
@@ -3931,31 +3968,48 @@ tracing = { package = "tower", version = "1" }
             ban("redis", &["server", "rss", "xtask"]),
             ban("generated", &["identity", "server", "rss", "xtask"]),
         ];
-        assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[]).is_empty());
+        assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]).is_empty());
     }
 
     #[test]
-    fn check_wrappers_red_missing_root() {
-        // identity 的 wrappers 漏了 xtask（新增组合根未同步）。
+    fn check_wrappers_requires_only_actual_consumers() {
+        let bans = vec![ban("identity", &["server"])];
+        let findings = check_wrappers(
+            &wrapper_fixture_members(),
+            &bans,
+            &[e("server", "identity")],
+            &[],
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn check_wrappers_allows_zero_consumer_target_without_ban() {
+        let members = vec![m("identity", "crates/identity", Some(Layer::Domain))];
+        assert!(check_wrappers(&members, &[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn check_wrappers_leaves_resolved_parent_exactness_to_cargo_deny() {
+        // wrapper 分类合法即可；最终 resolved parent 是否缺失由 cargo-deny 独占证明。
         let bans = vec![
             ban("identity", &["server", "rss"]),
             ban("redis", &["server", "rss", "xtask"]),
             ban("generated", &["identity", "server", "rss", "xtask"]),
         ];
-        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[]);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
-        assert_eq!(findings[0].subject, "identity");
+        assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]).is_empty());
     }
 
     #[test]
     fn check_wrappers_red_missing_ban_entry() {
-        // identity（Domain）完全没有 ban entry → None arm（缺分层守卫）。
-        let bans = vec![
-            ban("redis", &["server", "rss", "xtask"]),
-            ban("generated", &["identity", "server", "rss", "xtask"]),
-        ];
-        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[]);
+        // identity 有真实 consumer 但没有 ban entry → 缺分层守卫。
+        let bans = vec![];
+        let findings = check_wrappers(
+            &wrapper_fixture_members(),
+            &bans,
+            &[e("server", "identity")],
+            &[],
+        );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "identity");
@@ -3975,14 +4029,14 @@ tracing = { package = "tower", version = "1" }
     fn check_wrappers_dev_adapter_green() {
         // LAYER-DEPS-07 green：dev adapter `memory` 只被 dev 组合根（journeys/xtask）依赖。
         let bans = vec![ban("memory", &["journeys", "xtask"])];
-        assert!(check_wrappers(&dev_adapter_fixture_members(), &bans, &[]).is_empty());
+        assert!(check_wrappers(&dev_adapter_fixture_members(), &bans, &[], &[]).is_empty());
     }
 
     #[test]
     fn check_wrappers_dev_adapter_red_production_bin() {
         // LAYER-DEPS-07 red（anti-vacuity）：dev adapter `memory` 的 wrapper 含生产 bin `server` → 红。
         let bans = vec![ban("memory", &["server", "journeys", "xtask"])];
-        let findings = check_wrappers(&dev_adapter_fixture_members(), &bans, &[]);
+        let findings = check_wrappers(&dev_adapter_fixture_members(), &bans, &[], &[]);
         assert!(
             findings
                 .iter()
@@ -3992,17 +4046,14 @@ tracing = { package = "tower", version = "1" }
     }
 
     #[test]
-    fn check_wrappers_red_generated_missing_domain() {
-        // generated 的 wrappers 漏了域消费者 identity。
+    fn check_wrappers_does_not_duplicate_missing_generated_parent_proof() {
+        // generated 的 resolved parent 精确性由 cargo-deny 负责。
         let bans = vec![
             ban("identity", &["server", "rss", "xtask"]),
             ban("redis", &["server", "rss", "xtask"]),
             ban("generated", &["server", "rss", "xtask"]),
         ];
-        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[]);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
-        assert_eq!(findings[0].subject, "generated");
+        assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]).is_empty());
     }
 
     #[test]
@@ -4015,7 +4066,7 @@ tracing = { package = "tower", version = "1" }
             ban("redis", &["server", "rss", "xtask"]),
             ban("generated", &["identity", "server", "rss", "xtask"]),
         ];
-        let findings = check_wrappers(&members, &bans, &[]);
+        let findings = check_wrappers(&members, &bans, &[], &[]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "identity");
@@ -4034,7 +4085,23 @@ tracing = { package = "tower", version = "1" }
                 &["identity", "postgres", "server", "rss", "xtask"],
             ),
         ];
-        assert!(check_wrappers(&members, &bans, &[]).is_empty());
+        assert!(check_wrappers(&members, &bans, &[], &[e("postgres", "generated")],).is_empty());
+    }
+
+    #[test]
+    fn check_wrappers_rejects_generated_dev_wrapper_without_source_edge() {
+        let members = vec![
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+            m("generated", "generated", Some(Layer::Generated)),
+        ];
+        let bans = vec![ban("postgres", &[]), ban("generated", &["postgres"])];
+        let findings = check_wrappers(&members, &bans, &[], &[]);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "generated" && finding.detail.contains("postgres")
+            }),
+            "a dev exception requires a real dev source edge: {findings:?}"
+        );
     }
 
     #[test]
@@ -4057,7 +4124,7 @@ tracing = { package = "tower", version = "1" }
             ban("generated", &["identity", "server", "rss", "xtask"]),
             ban("ghost", &["server", "rss", "xtask"]),
         ];
-        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[]);
+        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "ghost");
@@ -4069,7 +4136,7 @@ tracing = { package = "tower", version = "1" }
     #[test]
     fn check_wrappers_diport_layer_needs_no_ban_entry() {
         let members = vec![m("diport", "crates/diport", Some(Layer::DiPort))];
-        assert!(check_wrappers(&members, &[], &[]).is_empty());
+        assert!(check_wrappers(&members, &[], &[], &[]).is_empty());
     }
 
     /// F1（ADR-005 #1083）：域 ban 的 adapter wrapper **有真实 adapter→域 edge** → 绿（postgres 实现
@@ -4085,7 +4152,7 @@ tracing = { package = "tower", version = "1" }
             ban("generated", &["identity", "server", "rss", "xtask"]),
         ];
         let edges = vec![e("postgres", "identity")];
-        assert!(check_wrappers(&members, &bans, &edges).is_empty());
+        assert!(check_wrappers(&members, &bans, &edges, &[]).is_empty());
     }
 
     /// F1（ADR-005 #1083）：域 ban 的 adapter wrapper **无 adapter→域 edge** → 红（redis 未依赖 identity、
@@ -4098,7 +4165,7 @@ tracing = { package = "tower", version = "1" }
             ban("generated", &["identity", "server", "rss", "xtask"]),
         ];
         // 无 redis→identity edge。
-        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[]);
+        let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "identity");
@@ -4200,7 +4267,7 @@ tracing = { package = "tower", version = "1" }
         );
     }
 
-    fn workspacefacts_fixture() -> (Vec<Member>, Vec<Edge>, Vec<ShippedDep>) {
+    fn workspacefacts_fixture() -> (Vec<Member>, Vec<Edge>, Vec<Edge>, Vec<ShippedDep>) {
         (
             vec![
                 m("xtask", "xtask", Some(Layer::Root)),
@@ -4211,6 +4278,10 @@ tracing = { package = "tower", version = "1" }
                 ),
             ],
             vec![e("xtask", "workspacefacts")],
+            vec![
+                e("workspacefacts", "workspacefacts"),
+                e("xtask", "workspacefacts"),
+            ],
             vec![ShippedDep {
                 from: "workspacefacts".to_owned(),
                 manifest_file: "crates/workspacefacts/Cargo.toml".to_owned(),
@@ -4225,24 +4296,27 @@ tracing = { package = "tower", version = "1" }
 
     #[test]
     fn workspacefacts_confinement_exact_green() {
-        let (members, edges, deps) = workspacefacts_fixture();
+        let (members, shipped_edges, dev_edges, deps) = workspacefacts_fixture();
         let bans = vec![
-            ban("workspacefacts", &["xtask"]),
+            ban("workspacefacts", &["xtask", "workspacefacts"]),
             ban("guppy", &["workspacefacts"]),
         ];
-        assert!(check_workspacefacts_confinement(&members, &bans, &edges, &deps).is_empty());
+        assert!(
+            check_workspacefacts_confinement(&members, &bans, &shipped_edges, &dev_edges, &deps,)
+                .is_empty()
+        );
     }
 
     #[test]
     fn workspacefacts_confinement_rejects_widening_and_missing_edges() {
-        let (mut members, _, _) = workspacefacts_fixture();
+        let (mut members, _, _, _) = workspacefacts_fixture();
         members.push(m("server", "bins/server", Some(Layer::Root)));
         let bans = vec![
             ban("workspacefacts", &["xtask", "server"]),
             ban("guppy", &["workspacefacts", "xtask"]),
         ];
-        let findings = check_workspacefacts_confinement(&members, &bans, &[], &[]);
-        assert_eq!(findings.len(), 4, "{findings:?}");
+        let findings = check_workspacefacts_confinement(&members, &bans, &[], &[], &[]);
+        assert_eq!(findings.len(), 5, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -4252,15 +4326,16 @@ tracing = { package = "tower", version = "1" }
 
     #[test]
     fn workspacefacts_confinement_rejects_actual_workspace_consumer_with_exact_wrappers() {
-        let (mut members, mut edges, deps) = workspacefacts_fixture();
+        let (mut members, mut shipped_edges, dev_edges, deps) = workspacefacts_fixture();
         members.push(m("server", "bins/server", Some(Layer::Root)));
-        edges.push(e("server", "workspacefacts"));
+        shipped_edges.push(e("server", "workspacefacts"));
         let bans = vec![
-            ban("workspacefacts", &["xtask"]),
+            ban("workspacefacts", &["xtask", "workspacefacts"]),
             ban("guppy", &["workspacefacts"]),
         ];
 
-        let findings = check_workspacefacts_confinement(&members, &bans, &edges, &deps);
+        let findings =
+            check_workspacefacts_confinement(&members, &bans, &shipped_edges, &dev_edges, &deps);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings
@@ -4271,7 +4346,7 @@ tracing = { package = "tower", version = "1" }
 
     #[test]
     fn workspacefacts_confinement_rejects_direct_guppy_consumer_with_exact_wrappers() {
-        let (members, edges, mut deps) = workspacefacts_fixture();
+        let (members, shipped_edges, dev_edges, mut deps) = workspacefacts_fixture();
         deps.push(ShippedDep {
             from: "xtask".to_owned(),
             manifest_file: "xtask/Cargo.toml".to_owned(),
@@ -4282,11 +4357,12 @@ tracing = { package = "tower", version = "1" }
             is_workspace_internal: false,
         });
         let bans = vec![
-            ban("workspacefacts", &["xtask"]),
+            ban("workspacefacts", &["xtask", "workspacefacts"]),
             ban("guppy", &["workspacefacts"]),
         ];
 
-        let findings = check_workspacefacts_confinement(&members, &bans, &edges, &deps);
+        let findings =
+            check_workspacefacts_confinement(&members, &bans, &shipped_edges, &dev_edges, &deps);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
             findings
@@ -4297,18 +4373,19 @@ tracing = { package = "tower", version = "1" }
 
     #[test]
     fn workspacefacts_confinement_rejects_noncanonical_xtask_path() {
-        let (mut members, edges, deps) = workspacefacts_fixture();
+        let (mut members, shipped_edges, dev_edges, deps) = workspacefacts_fixture();
         let xtask = members.iter_mut().find(|member| member.name == "xtask");
         assert!(xtask.is_some(), "fixture must contain xtask");
         if let Some(xtask) = xtask {
             xtask.path = "tools/xtask".to_owned();
         }
         let bans = vec![
-            ban("workspacefacts", &["xtask"]),
+            ban("workspacefacts", &["xtask", "workspacefacts"]),
             ban("guppy", &["workspacefacts"]),
         ];
 
-        let findings = check_workspacefacts_confinement(&members, &bans, &edges, &deps);
+        let findings =
+            check_workspacefacts_confinement(&members, &bans, &shipped_edges, &dev_edges, &deps);
         assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
@@ -4351,12 +4428,18 @@ tracing = { package = "tower", version = "1" }
         let mut findings = check_layers(&members, &scan.shipped_edges);
         findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
-        findings.extend(check_wrappers(&members, &bans, &scan.shipped_edges));
+        findings.extend(check_wrappers(
+            &members,
+            &bans,
+            &scan.shipped_edges,
+            &scan.dev_edges,
+        ));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_workspacefacts_confinement(
             &members,
             &bans,
             &scan.shipped_edges,
+            &scan.dev_edges,
             &shipped_deps,
         ));
         findings.extend(check_test_support_confinement(&scan.shipped_edges));
@@ -4538,7 +4621,12 @@ dev_external = { package = "axum", version = "1" }
             m("postgres", "adapters/postgres", Some(Layer::Adapter)),
         ];
         let wrapper_bans = vec![ban("identity", &["postgres"]), ban("postgres", &[])];
-        let wrappers = check_wrappers(&wrapper_members, &wrapper_bans, &scan.shipped_edges);
+        let wrappers = check_wrappers(
+            &wrapper_members,
+            &wrapper_bans,
+            &scan.shipped_edges,
+            &scan.dev_edges,
+        );
         assert_eq!(wrappers.len(), 1, "{wrappers:#?}");
         assert!(wrappers[0].detail.contains("无 adapter→域 source edge"));
         assert!(
