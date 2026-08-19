@@ -323,17 +323,22 @@ fn fixture_projection_runtime(
         std::sync::Arc<std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>>,
     >,
 ) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError> {
+    let workflow = binding.definition().contract_id().to_owned();
     let definition = eventexec::ProjectionTargetDefinition::new(
         binding.definition(),
         binding.input_generation(),
     )
-    .expect("generated settings projection identity must be canonical");
+    .map_err(
+        |_| eventexec::WorkflowRuntimeError::CapabilityBindingRejected {
+            workflow: workflow.clone(),
+        },
+    )?;
     let target = eventexec::ConformingProjectionTarget::new(
         definition,
         binding.inputs().to_vec(),
         std::sync::Arc::new(FixtureProjectionStore),
     )
-    .expect("generated settings projection bindings must be canonical");
+    .map_err(|_| eventexec::WorkflowRuntimeError::CapabilityBindingRejected { workflow })?;
     binding.issue_runtime(
         std::sync::Arc::new(target),
         move |_target, _token, _health, _admission, publisher| {

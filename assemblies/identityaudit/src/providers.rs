@@ -163,7 +163,8 @@ pub(crate) async fn build(
     );
     let monitor_config = postgres::PgRuntimeMonitorConfig::new(
         postgres::PgReadinessInterval::try_new(PG_READINESS_PERIOD)
-            .expect("identityaudit postgres readiness interval"),
+            .map_err(anyhow::Error::msg)
+            .context("build identityaudit Postgres readiness interval")?,
         postgres::PgRlsAttestationInterval::default(),
     );
     let (mut pg_resources, pg_sampler) = pg_owner.into_runtime_parts(monitor_config);
@@ -1199,20 +1200,18 @@ mod tests {
         ));
         std::fs::create_dir(&root)?;
         let secret_path = root.join("operator-secret-ca-name.pem");
-        for load in
-            [load_amqp_private_ca as fn(&std::path::Path) -> anyhow::Result<amqp::AmqpPrivateCa>]
-        {
-            let error = load(&secret_path).err().expect("missing AMQP CA must fail");
-            let rendered = format!("{error:#}");
-            assert!(rendered.contains("read identityaudit AMQP CA certificate"));
-            assert!(!rendered.contains("operator-secret-ca-name"));
-        }
+        let error = load_amqp_private_ca(&secret_path)
+            .err()
+            .context("missing identityaudit AMQP CA unexpectedly loaded")?;
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("read identityaudit AMQP CA certificate"));
+        assert!(!rendered.contains("operator-secret-ca-name"));
 
         let directory = root.join("ca-directory");
         std::fs::create_dir(&directory)?;
         let error = load_redis_private_ca(&directory)
             .err()
-            .expect("directory must fail");
+            .context("identityaudit Redis CA directory unexpectedly loaded")?;
         let rendered = format!("{error:#}");
         assert!(rendered.contains("read identityaudit Redis CA certificate"));
         assert!(!rendered.contains("ca-directory"));
@@ -1221,10 +1220,10 @@ mod tests {
         std::fs::write(&malformed, b"private-ca-credential-sentinel")?;
         let amqp_error = load_amqp_private_ca(&malformed)
             .err()
-            .expect("malformed CA must fail");
+            .context("malformed identityaudit AMQP CA unexpectedly loaded")?;
         let redis_error = load_redis_private_ca(&malformed)
             .err()
-            .expect("malformed CA must fail");
+            .context("malformed identityaudit Redis CA unexpectedly loaded")?;
         for (error, context) in [
             (amqp_error, "parse identityaudit AMQP CA certificate"),
             (redis_error, "parse identityaudit Redis CA certificate"),
@@ -1733,12 +1732,9 @@ mod tests {
     fn identity_vault_key_mismatch_is_rejected_during_config_parse_before_external_io() {
         let document = include_str!("../identityaudit.example.toml")
             .replace("keyId = \"identity-access-es256\"", "keyId = \"wrong-key\"");
-        let Err(error) = crate::config::parse_for_test(&document) else {
-            panic!("mismatched identity and Vault key IDs must be rejected");
-        };
         assert_eq!(
-            error,
-            crate::config::ConfigError::InvalidValue("identity.keyId")
+            crate::config::parse_for_test(&document).err(),
+            Some(crate::config::ConfigError::InvalidValue("identity.keyId"))
         );
     }
 
@@ -1972,26 +1968,30 @@ mod tests {
             jwks,
         };
         let (provider, _grants, lifecycle) = build_rss_listener_pdp_jwks_lifecycle(products);
-        let mut output = lifecycle.into_output();
+        let output = lifecycle.into_output();
         assert_eq!(probe_name.as_str(), "identityaudit_rss_jwks_ready");
         assert_eq!(output.probe_count(), 1);
-        assert_eq!(output.probes().next().unwrap().0, &probe_name);
+        let (actual_probe, _) = output
+            .probes()
+            .next()
+            .context("identityaudit listener PDP lifecycle omitted its probe")?;
+        assert_eq!(actual_probe, &probe_name);
         assert_eq!(output.resource_count(), 1);
-        assert_eq!(
-            output.resources().next().unwrap().name(),
-            "identityaudit-rss-access-verifier"
-        );
+        let resource = output
+            .resources()
+            .next()
+            .context("identityaudit listener PDP lifecycle omitted its resource")?;
+        assert_eq!(resource.name(), "identityaudit-rss-access-verifier");
         assert!(output.worker_count() == 0);
-        output
+        let resource = output
             .into_outputs()
             .find_map(|output| match output {
                 bootstrap::DomainLifecycleOutput::Probe(_, _)
                 | bootstrap::DomainLifecycleOutput::Worker(_) => None,
                 bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
             })
-            .unwrap()
-            .shutdown()
-            .await?;
+            .context("identityaudit listener PDP lifecycle omitted its shutdown resource")?;
+        resource.shutdown().await?;
         SharedManagedResource::new(provider, "identityaudit-oidc-test")
             .shutdown()
             .await?;

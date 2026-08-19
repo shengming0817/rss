@@ -161,7 +161,8 @@ pub(crate) async fn build(
     let pg_handle = pg.handle();
     let monitor_config = postgres::PgRuntimeMonitorConfig::new(
         postgres::PgReadinessInterval::try_new(pg_readiness)
-            .expect("settingsonly postgres readiness interval"),
+            .map_err(anyhow::Error::msg)
+            .context("build settingsonly Postgres readiness interval")?,
         postgres::PgRlsAttestationInterval::default(),
     );
     let (pg_resources, pg_monitor) = pg.into_runtime_parts(monitor_config);
@@ -1387,55 +1388,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_listener_pdp_jwks_lifecycle_is_exact_probe_and_resource() {
+    async fn production_listener_pdp_jwks_lifecycle_is_exact_probe_and_resource()
+    -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!(
             "rss-settingsonly-pdp-lifecycle-{}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&root).expect("temp root");
+        std::fs::create_dir_all(&root)?;
         let jwks = root.join("federated.jwks.json");
         std::fs::write(
             &jwks,
             r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"settings-federated-es256","alg":"ES256","x":"axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY","y":"T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"}]}"#,
-        )
-        .expect("write JWKS");
+        )?;
         let document = include_str!("../settingsonly.example.toml").replace(
             "/run/rss/federated.jwks.json",
-            jwks.to_str().expect("JWKS path is UTF-8"),
+            jwks.to_str().context("JWKS path is not UTF-8")?,
         );
-        let federated_config = crate::config::federated_production_config_from_document(&document)
-            .expect("federated config");
-        let mut roles = crate::plan::SettingsOnlyPlan::bundled()
-            .expect("bundled plan")
-            .provider_build()
-            .expect("exact provider join");
-        let listener_pdp = roles.listener_pdp().expect("listener-pdp constructor");
-        let federated =
-            build_federated_access_provider(federated_config, listener_pdp).expect("federated");
+        let federated_config = crate::config::federated_production_config_from_document(&document)?;
+        let mut roles = crate::plan::SettingsOnlyPlan::bundled()?.provider_build()?;
+        let listener_pdp = roles.listener_pdp()?;
+        let federated = build_federated_access_provider(federated_config, listener_pdp)?;
         let expected_probe = federated.probe_name.clone();
         let (_constructor, lifecycle) = build_federated_listener_pdp_jwks_lifecycle(federated);
         let output = lifecycle.into_output();
         assert_eq!(expected_probe.as_str(), crate::readiness::FEDERATED_JWKS);
         assert_eq!(output.probe_count(), 1);
-        assert_eq!(output.probes().next().unwrap().0, &expected_probe);
+        let (actual_probe, _) = output
+            .probes()
+            .next()
+            .context("settingsonly listener PDP lifecycle omitted its probe")?;
+        assert_eq!(actual_probe, &expected_probe);
         assert_eq!(output.resource_count(), 1);
-        assert_eq!(
-            output.resources().next().unwrap().name(),
-            "settingsonly-federated-verifier"
-        );
+        let resource = output
+            .resources()
+            .next()
+            .context("settingsonly listener PDP lifecycle omitted its resource")?;
+        assert_eq!(resource.name(), "settingsonly-federated-verifier");
         assert!(output.worker_count() == 0);
-        output
+        let resource = output
             .into_outputs()
             .find_map(|output| match output {
                 bootstrap::DomainLifecycleOutput::Probe(_, _)
                 | bootstrap::DomainLifecycleOutput::Worker(_) => None,
                 bootstrap::DomainLifecycleOutput::Resource(resource) => Some(resource),
             })
-            .unwrap()
-            .shutdown()
-            .await
-            .expect("shutdown federated verifier");
-        std::fs::remove_dir_all(root).expect("cleanup");
+            .context("settingsonly listener PDP lifecycle omitted its shutdown resource")?;
+        resource.shutdown().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

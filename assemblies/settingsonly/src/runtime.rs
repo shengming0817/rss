@@ -348,12 +348,15 @@ where
     let framework_routes = crate::inventory::InventoryFrameworkRoutes::new(inventory_reader);
     let (finalized, receipt) = listeners::finalize(
         &mut registry,
-        inputs.verifier,
-        inputs.limiter,
-        inputs.trusted_proxy_config,
-        inputs.metrics,
-        inputs.audit_sink,
-        reporter,
+        listeners::FinalizeInputs {
+            verifier: inputs.verifier,
+            limiter: inputs.limiter,
+            trusted_proxy_config: inputs.trusted_proxy_config,
+            metrics: inputs.metrics,
+            audit_sink: inputs.audit_sink,
+            audit_clock: Arc::new(crate::SystemClock),
+            reporter,
+        },
         &framework_routes,
     )?;
     let adapter = listeners::LaunchAdapter::new(

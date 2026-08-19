@@ -639,7 +639,12 @@ mod lifecycle_tests {
         assert_eq!(outputs.distributed_cas.probe_count(), 1);
         assert!(outputs.event_publisher.probe_count() == 0);
         assert!(outputs.event_subscriber.probe_count() == 0);
-        let check = outputs.distributed_cas.probes().next().unwrap().1.check();
+        let (_, probe) = outputs
+            .distributed_cas
+            .probes()
+            .next()
+            .context("identityaudit distributed CAS output omitted its probe")?;
+        let check = probe.check();
         assert_eq!(check.name(), &name);
         assert_eq!(check.status(), primitives::HealthStatus::Healthy);
 

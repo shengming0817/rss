@@ -783,20 +783,18 @@ mod tests {
         assert_eq!(outputs.distributed_cas.probe_count(), 1);
         assert_eq!(outputs.event_publisher.probe_count(), 1);
         assert_eq!(outputs.event_subscriber.probe_count(), 2);
-        assert_eq!(
-            outputs.event_publisher.probes().next().unwrap().0.as_str(),
-            crate::readiness::OUTBOX_RELAY
-        );
-        assert!(
-            outputs
-                .event_subscriber
-                .probes()
-                .next()
-                .unwrap()
-                .0
-                .as_str()
-                .starts_with(EVENT_CONSUMER_PROBE)
-        );
+        let (publisher_probe, _) = outputs
+            .event_publisher
+            .probes()
+            .next()
+            .context("settingsonly event publisher output omitted its probe")?;
+        assert_eq!(publisher_probe.as_str(), crate::readiness::OUTBOX_RELAY);
+        let (subscriber_probe, _) = outputs
+            .event_subscriber
+            .probes()
+            .next()
+            .context("settingsonly event subscriber output omitted its probe")?;
+        assert!(subscriber_probe.as_str().starts_with(EVENT_CONSUMER_PROBE));
         Ok(())
     }
 }

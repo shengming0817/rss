@@ -99,19 +99,33 @@ impl FinalizedProbeReceipt {
     }
 }
 
+pub(crate) struct FinalizeInputs<S> {
+    pub(crate) verifier: FederatedVerifier,
+    pub(crate) limiter: Arc<S>,
+    pub(crate) trusted_proxy_config: httpserve::TrustedProxyConfig,
+    pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
+    pub(crate) audit_sink: httpserve::AuditSinkHandle,
+    pub(crate) audit_clock: Arc<dyn diport::Clock>,
+    pub(crate) reporter: Arc<bootstrap::HealthReporter>,
+}
+
 pub(crate) fn finalize<S>(
     registry: &mut bootstrap::WriteAdmittedRegistry,
-    verifier: FederatedVerifier,
-    limiter: Arc<S>,
-    trusted_proxy_config: httpserve::TrustedProxyConfig,
-    metrics: Arc<dyn diport::MetricsExporter>,
-    audit_sink: httpserve::AuditSinkHandle,
-    reporter: Arc<bootstrap::HealthReporter>,
+    inputs: FinalizeInputs<S>,
     framework_routes: &impl bootstrap::FrameworkRoutes,
 ) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)>
 where
     S: diport::RateLimiter + Send + Sync + 'static,
 {
+    let FinalizeInputs {
+        verifier,
+        limiter,
+        trusted_proxy_config,
+        metrics,
+        audit_sink,
+        audit_clock,
+        reporter,
+    } = inputs;
     registry
         .register_primary_authorizer(Arc::new(FederatedPermissionAuthorizer))
         .context("register settingsonly federated permission authorizer")?;
@@ -135,12 +149,11 @@ where
         routes.is_empty(),
         "settingsonly produced extra live listeners"
     );
-    let clock: Arc<dyn diport::Clock> = Arc::new(crate::SystemClock);
     let primary = httpserve::finalize_primary_auth_with_audit(
         primary,
         primary_auth_plan()?,
         audit_sink.clone(),
-        Arc::clone(&clock),
+        Arc::clone(&audit_clock),
         primary_authorizer,
     )
     .context("finalize settingsonly Primary auth")?;
@@ -148,7 +161,7 @@ where
         admin,
         admin_auth_plan()?,
         audit_sink,
-        clock,
+        audit_clock,
         Arc::new(FederatedPermissionAuthorizer),
     )
     .context("finalize settingsonly Admin auth")?;
@@ -805,7 +818,7 @@ mod tests {
             runtimeexec::LaunchLifecycleBatches::new(
                 runtimeexec::ProviderLifecycleBatch::from_provider_output(provider_output),
                 runtimeexec::DomainLifecycleBatch::from_domain_output(domain_output),
-                Some(bootstrap::ExpectedWorkerInventory::closed([]).expect("empty inventory")),
+                Some(bootstrap::ExpectedWorkerInventory::closed([])?),
             ),
             crate::runtime::total_drain_budget()?,
         );

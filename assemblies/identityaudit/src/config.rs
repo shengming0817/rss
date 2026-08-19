@@ -1106,6 +1106,8 @@ fn schema_bytes() -> Vec<u8> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use anyhow::Context as _;
+
     use super::*;
 
     const SECRET_SENTINEL: &str = "do-not-leak-identityaudit-secret";
@@ -1401,10 +1403,7 @@ caCertPemPath = "/run/rss/redis-ca.pem"
         }
     }
 
-    #[test]
-    fn capture_reads_document_and_closed_environments_exactly_once() {
-        let mut source = TestSource::complete(VALID_CONFIG);
-        let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
+    fn assert_capture_source_reads(source: &TestSource) {
         assert_eq!(source.document_reads, 1);
         assert_eq!(source.environment_reads.len(), 22);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
@@ -1416,9 +1415,12 @@ caCertPemPath = "/run/rss/redis-ca.pem"
         ] {
             assert_eq!(source.environment_reads[key], 1);
         }
+    }
+
+    fn assert_captured_runtime_inputs(captured: CapturedConfig) -> anyhow::Result<()> {
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
         let (_, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
-        let build_metadata = build_metadata.expect("build metadata");
+        let build_metadata = build_metadata.context("identityaudit build metadata is missing")?;
         assert_eq!(
             build_metadata.source_revision(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1434,6 +1436,15 @@ caCertPemPath = "/run/rss/redis-ca.pem"
         assert_eq!(&*material.3, SECRET_SENTINEL);
         assert_eq!(material.7.as_bytes().len(), 32);
         assert_eq!(material.8.as_bytes().len(), 32);
+        Ok(())
+    }
+
+    #[test]
+    fn capture_reads_document_and_closed_environments_exactly_once() -> anyhow::Result<()> {
+        let mut source = TestSource::complete(VALID_CONFIG);
+        let captured = capture_from(Path::new("ignored"), &mut source)?;
+        assert_capture_source_reads(&source);
+        assert_captured_runtime_inputs(captured)
     }
 
     #[test]
