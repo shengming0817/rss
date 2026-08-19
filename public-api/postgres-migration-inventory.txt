@@ -44,7 +44,7 @@ impl core::marker::Unpin for postgres_migration_inventory::ProjectionInputIdenti
 impl core::marker::UnsafeUnpin for postgres_migration_inventory::ProjectionInputIdentity
 impl core::panic::unwind_safe::RefUnwindSafe for postgres_migration_inventory::ProjectionInputIdentity
 impl core::panic::unwind_safe::UnwindSafe for postgres_migration_inventory::ProjectionInputIdentity
-pub fn postgres_migration_inventory::migration_head_fingerprint() -> alloc::string::String
+pub const postgres_migration_inventory::MIGRATION_HEAD_FINGERPRINT: &str
 pub fn postgres_migration_inventory::migrations() -> &'static [postgres_migration_inventory::MigrationIdentity]
 pub const fn postgres_migration_inventory::projection_input_generation() -> &'static str
 pub const fn postgres_migration_inventory::projection_inputs() -> &'static [postgres_migration_inventory::ProjectionInputIdentity]

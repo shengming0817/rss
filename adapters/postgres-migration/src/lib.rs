@@ -122,7 +122,7 @@ async fn migrate_all(config: &MigrationConfig) -> Result<(), MigrationError> {
 async fn migrate_all_inner(config: &MigrationConfig) -> Result<(), MigrationError> {
     tracing::info!(
         target: "postgres-migration",
-        migration_head = %embedded_migration_head_fingerprint(),
+        migration_head = postgres_migration_inventory::MIGRATION_HEAD_FINGERPRINT,
         "postgres migrate-all started"
     );
     let pool = connect(config).await?;
@@ -133,11 +133,6 @@ async fn migrate_all_inner(config: &MigrationConfig) -> Result<(), MigrationErro
 
 fn embedded_migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("../postgres/migrations")
-}
-
-/// Domain-separated identity for the embedded application migration inventory.
-pub fn embedded_migration_head_fingerprint() -> String {
-    postgres_migration_inventory::migration_head_fingerprint()
 }
 
 async fn close_and_report(

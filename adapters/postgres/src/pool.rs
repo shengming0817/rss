@@ -1136,10 +1136,39 @@ WITH capabilities AS (
 SELECT capability FROM capabilities ORDER BY capability
 "#;
 
-// Byte-level golden of the complete effective capability catalog after the committed migration
-// head. Any migration that intentionally changes writer authority must update this reviewed value.
-const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:43d11f5e6a83f0a48a9054f9db05bb71ceb9932c4e98dc98c04488d29514b8ea";
+struct ReviewedWriterCapability {
+    migration_head: &'static str,
+    capability_fingerprint: &'static str,
+}
+
+// Byte-level review receipt for the complete writer capability catalog at one exact migration
+// head. A migration change cannot compile until its writer authority has been reviewed in the same
+// delivery.
+const REVIEWED_WRITER_CAPABILITY: ReviewedWriterCapability = ReviewedWriterCapability {
+    migration_head: "sha256:be54b8abfda8f94562ea6eaa5bf2f68e4571516d0433246b54711f1cbed6b512",
+    capability_fingerprint: "sha256:5e3443424a964aeeb9b7f67a9e25dabbcbec129719a9e712ead74ffb4a3bfec4",
+};
+
+const fn const_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(const_str_eq(
+    postgres_migration_inventory::MIGRATION_HEAD_FINGERPRINT,
+    REVIEWED_WRITER_CAPABILITY.migration_head,
+));
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
@@ -1197,6 +1226,19 @@ async fn load_effective_capability_fingerprint(pool: &sqlx::PgPool) -> Result<St
         .fetch_all(pool)
         .await?;
     Ok(effective_capability_fingerprint(&capabilities))
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn load_writer_effective_capabilities(
+    pool: &sqlx::PgPool,
+) -> Result<std::collections::BTreeSet<String>, sqlx::Error> {
+    let capabilities: Vec<(String,)> = sqlx::query_as(WRITER_EFFECTIVE_CAPABILITIES_SQL)
+        .fetch_all(pool)
+        .await?;
+    Ok(capabilities
+        .into_iter()
+        .map(|(capability,)| capability)
+        .collect())
 }
 
 /// Capabilities outside the application-schema fingerprint that can still persist cluster state.
@@ -3051,7 +3093,7 @@ async fn ensure_writer_effective_privileges(
         });
     }
     let actual_fingerprint = effective_capability_fingerprint(&capabilities);
-    if actual_fingerprint == EXPECTED_WRITER_CAPABILITY_FINGERPRINT {
+    if actual_fingerprint == REVIEWED_WRITER_CAPABILITY.capability_fingerprint {
         Ok(())
     } else {
         tracing::error!(target: "postgres", %actual_fingerprint, "writer effective capability fingerprint mismatch");
@@ -4223,7 +4265,7 @@ mod tests {
         );
         assert_eq!(
             effective_capability_fingerprint(&capabilities),
-            EXPECTED_WRITER_CAPABILITY_FINGERPRINT,
+            REVIEWED_WRITER_CAPABILITY.capability_fingerprint,
             "the committed migration head must match its reviewed writer capability inventory"
         );
 
@@ -4268,7 +4310,10 @@ mod tests {
                 .into());
             }
         };
-        assert_ne!(drift_fingerprint, EXPECTED_WRITER_CAPABILITY_FINGERPRINT);
+        assert_ne!(
+            drift_fingerprint,
+            REVIEWED_WRITER_CAPABILITY.capability_fingerprint
+        );
 
         let recovered = PgStore::connect_verified_writer(&serving_config).await?;
         recovered.store_arc().shutdown().await?;

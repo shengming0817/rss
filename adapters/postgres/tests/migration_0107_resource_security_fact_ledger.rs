@@ -26,7 +26,7 @@ fn migration_installs_one_append_only_typed_ledger() {
 }
 
 #[test]
-fn bootstrap_is_one_fixed_typed_function_with_no_table_acl() {
+fn bootstrap_is_one_fixed_typed_function_with_no_table_acl() -> Result<(), &'static str> {
     for required in [
         "rss_resource_fact_bootstrap NOLOGIN NOINHERIT NOBYPASSRLS",
         "rss_apply_resource_security_fact_revision(",
@@ -53,7 +53,7 @@ fn bootstrap_is_one_fixed_typed_function_with_no_table_acl() {
         .split("CREATE FUNCTION public.rss_apply_resource_security_fact_revision(")
         .nth(1)
         .and_then(|tail| tail.split(") RETURNS").next())
-        .expect("bootstrap signature");
+        .ok_or("bootstrap signature")?;
     assert!(
         !bootstrap_signature.contains("jsonb"),
         "bootstrap ingress must not accept JSON"
@@ -62,19 +62,20 @@ fn bootstrap_is_one_fixed_typed_function_with_no_table_acl() {
     assert!(!MIGRATION.contains(
         "GRANT SELECT ON TABLE public.resource_security_fact_revisions TO rss_app, rss_app_read, rss_audit_admin"
     ));
+    Ok(())
 }
 
 #[test]
-fn migration_hard_fails_legacy_data_and_replaces_policy_authority() {
+fn migration_hard_fails_legacy_data_and_replaces_policy_authority() -> Result<(), &'static str> {
     let lock = MIGRATION
         .find("LOCK TABLE public.resource_attributes")
-        .unwrap();
+        .ok_or("migration locks legacy resource attributes")?;
     let preflight = MIGRATION
         .find("legacy resource_attributes require external re-authoring")
-        .unwrap();
+        .ok_or("migration rejects legacy resource attributes")?;
     let drop_legacy = MIGRATION
         .find("DROP TABLE public.resource_attributes")
-        .unwrap();
+        .ok_or("migration drops legacy resource attributes")?;
     assert!(lock < preflight && preflight < drop_legacy);
     for required in [
         "unsupported resource facts",
@@ -97,4 +98,5 @@ fn migration_hard_fails_legacy_data_and_replaces_policy_authority() {
             .to_ascii_lowercase()
             .contains("insert into public.resource_security_fact_revisions select")
     );
+    Ok(())
 }

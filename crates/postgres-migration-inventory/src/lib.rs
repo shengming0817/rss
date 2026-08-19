@@ -6,8 +6,6 @@
 //!
 //! INVARIANT: POSTGRES-MIGRATION-INVENTORY-01 { level = "Hard", exec = "native-compile", source = "code", native = "sqlx resolve_blocking derives version/checksum inventory consumed by operator, serving ledger, and deployment generation" }.
 
-use sha2::{Digest as _, Sha256};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationIdentity {
     pub version: i64,
@@ -94,6 +92,9 @@ mod validate_inventory;
 
 static MIGRATIONS: &[MigrationIdentity] = include!(concat!(env!("OUT_DIR"), "/inventory.rs"));
 
+/// SHA-256 identity of the ordered SQLx `(version, SHA-384 checksum)` migration inventory.
+pub const MIGRATION_HEAD_FINGERPRINT: &str = env!("RSS_POSTGRES_MIGRATION_HEAD_FINGERPRINT");
+
 #[must_use]
 pub fn migrations() -> &'static [MigrationIdentity] {
     MIGRATIONS
@@ -107,19 +108,6 @@ pub const fn projection_input_generation() -> &'static str {
 #[must_use]
 pub const fn projection_inputs() -> &'static [ProjectionInputIdentity] {
     projection_inputs::PROJECTION_INPUTS
-}
-
-#[must_use]
-pub fn migration_head_fingerprint() -> String {
-    const TAG: &[u8] = b"rss-postgres-migration-head-v1";
-    let mut head = Sha256::new();
-    head.update(TAG);
-    head.update([0]);
-    for migration in MIGRATIONS {
-        head.update(migration.version.to_be_bytes());
-        head.update(migration.checksum);
-    }
-    format!("sha256:{:x}", head.finalize())
 }
 
 #[cfg(test)]
@@ -141,6 +129,7 @@ mod tests {
         for migration in migrations {
             assert_ne!(migration.checksum, [0; 48]);
         }
-        assert!(migration_head_fingerprint().starts_with("sha256:"));
+        assert_eq!(MIGRATION_HEAD_FINGERPRINT.len(), "sha256:".len() + 64);
+        assert!(MIGRATION_HEAD_FINGERPRINT.starts_with("sha256:"));
     }
 }

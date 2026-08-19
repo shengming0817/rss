@@ -44,7 +44,7 @@ fn inbox_backlog_function_fails_closed_on_unbounded_selections() {
 }
 
 #[test]
-fn migration_allowlist_exactly_matches_generated_event_groups() {
+fn migration_allowlist_exactly_matches_generated_event_groups() -> Result<(), &'static str> {
     let mut generated = generated::event::EVENTS
         .iter()
         .flat_map(|event| event.subscriptions())
@@ -59,13 +59,13 @@ fn migration_allowlist_exactly_matches_generated_event_groups() {
 
     let start = MIGRATION
         .find("v_allowed constant text[] := ARRAY[")
-        .expect("migration defines generated allowlist");
+        .ok_or("migration defines generated allowlist")?;
     let tail = &MIGRATION[start..];
     let body = tail
         .split_once("ARRAY[")
         .and_then(|(_, rest)| rest.split_once("]::text[]"))
         .map(|(body, _)| body)
-        .expect("allowlist has fixed array body");
+        .ok_or("allowlist has fixed array body")?;
     let mut migrated = body
         .split(',')
         .map(str::trim)
@@ -74,4 +74,5 @@ fn migration_allowlist_exactly_matches_generated_event_groups() {
         .collect::<Vec<_>>();
     migrated.sort_unstable();
     assert_eq!(migrated, generated);
+    Ok(())
 }

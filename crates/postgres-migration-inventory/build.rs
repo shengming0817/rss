@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest as _, Sha256};
 use sqlx_core::migrate::MigrationType;
 use validate_inventory::{ensure_forward_migration, validate_inventory_identities};
 
@@ -66,8 +67,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     validate_inventory_identities(&mut identities, &leftovers)?;
 
+    let mut head = Sha256::new();
+    head.update(b"rss-postgres-migration-head-v1");
+    head.update([0]);
+
     let mut generated = String::from("&[\n");
     for (version, checksum, _) in identities {
+        head.update(version.to_be_bytes());
+        head.update(checksum);
         write!(
             generated,
             "    MigrationIdentity {{ version: {version}, checksum: ["
@@ -82,5 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(std::env::var("OUT_DIR")?).join("inventory.rs"),
         generated,
     )?;
+    println!(
+        "cargo:rustc-env=RSS_POSTGRES_MIGRATION_HEAD_FINGERPRINT=sha256:{:x}",
+        head.finalize()
+    );
     Ok(())
 }

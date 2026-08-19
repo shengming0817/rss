@@ -479,36 +479,59 @@ fn apply_rls_attestation(
     last_failure: &mut Option<(RlsAttestationLane, RlsAttestationReason)>,
 ) {
     match outcome {
-        Ok(()) => {
-            health.mark(true);
-            if last_failure.take().is_some() {
-                tracing::info!(target: "postgres", "postgres RLS attestation recovered");
-            }
-        }
-        Err(failure) => {
-            health.mark(false);
-            let key = failure.key();
-            if *last_failure != Some(key) {
-                if let Some(offenders) = failure.offender_tables {
-                    tracing::error!(
-                        target: "postgres",
-                        lane = failure.lane.as_label(),
-                        reason = failure.reason.as_label(),
-                        tables = %offenders.join(","),
-                        "postgres RLS attestation degraded"
-                    );
-                } else {
-                    tracing::error!(
-                        target: "postgres",
-                        lane = failure.lane.as_label(),
-                        reason = failure.reason.as_label(),
-                        "postgres RLS attestation degraded"
-                    );
-                }
-                *last_failure = Some(key);
-            }
-        }
+        Ok(()) => recover_rls_attestation(health, last_failure),
+        Err(failure) => degrade_rls_attestation(health, failure, last_failure),
     }
+}
+
+fn recover_rls_attestation(
+    health: &PgRlsReadiness,
+    last_failure: &mut Option<(RlsAttestationLane, RlsAttestationReason)>,
+) {
+    health.mark(true);
+    if last_failure.take().is_some() {
+        tracing::info!(target: "postgres", "postgres RLS attestation recovered");
+    }
+}
+
+fn degrade_rls_attestation(
+    health: &PgRlsReadiness,
+    failure: RlsAttestationFailure,
+    last_failure: &mut Option<(RlsAttestationLane, RlsAttestationReason)>,
+) {
+    health.mark(false);
+    let key = failure.key();
+    if *last_failure == Some(key) {
+        return;
+    }
+    log_rls_attestation_failure(&failure);
+    *last_failure = Some(key);
+}
+
+fn log_rls_attestation_failure(failure: &RlsAttestationFailure) {
+    match failure.offender_tables.as_ref() {
+        Some(offenders) => log_rls_attestation_failure_with_tables(failure, offenders),
+        None => log_rls_attestation_failure_without_tables(failure),
+    }
+}
+
+fn log_rls_attestation_failure_with_tables(failure: &RlsAttestationFailure, offenders: &[String]) {
+    tracing::error!(
+        target: "postgres",
+        lane = failure.lane.as_label(),
+        reason = failure.reason.as_label(),
+        tables = %offenders.join(","),
+        "postgres RLS attestation degraded"
+    );
+}
+
+fn log_rls_attestation_failure_without_tables(failure: &RlsAttestationFailure) {
+    tracing::error!(
+        target: "postgres",
+        lane = failure.lane.as_label(),
+        reason = failure.reason.as_label(),
+        "postgres RLS attestation degraded"
+    );
 }
 
 pub(crate) async fn pg_rls_attestation_loop(
@@ -630,14 +653,42 @@ fn mark_monitor_down(readiness: &PgDbReadiness, rls_readiness: &PgRlsReadiness) 
     rls_readiness.mark(false);
 }
 
-fn monitor_join_error(error: tokio::task::JoinError) -> diport::ShutdownError {
+fn monitor_join_error(lane: &'static str, error: tokio::task::JoinError) -> diport::ShutdownError {
     let error = diport::ShutdownError::from_join_error(error);
     tracing::error!(
         target: "postgres",
+        lane,
         reason = error.kind().as_str(),
         "postgres runtime monitor lane terminated abnormally"
     );
     error
+}
+
+enum MonitorEvent {
+    Cancelled,
+    Readiness(Result<(), tokio::task::JoinError>),
+    Rls(Result<(), tokio::task::JoinError>),
+}
+
+async fn finish_abnormal_monitor_lane(
+    lane: &'static str,
+    lane_result: Result<(), tokio::task::JoinError>,
+    sibling: JoinHandle<()>,
+    token: &CancellationToken,
+) -> Result<(), diport::ShutdownError> {
+    token.cancel();
+    sibling.abort();
+    let _ = sibling.await;
+    if let Err(error) = lane_result {
+        return Err(monitor_join_error(lane, error));
+    }
+    tracing::error!(
+        target: "postgres",
+        lane,
+        reason = "task-exited",
+        "postgres runtime monitor lane terminated abnormally"
+    );
+    Err(diport::ShutdownError::new(MonitorLaneExited))
 }
 
 pub(crate) async fn supervise_runtime_monitor(
@@ -647,36 +698,25 @@ pub(crate) async fn supervise_runtime_monitor(
     readiness: Arc<PgDbReadiness>,
     rls_readiness: Arc<PgRlsReadiness>,
 ) -> Result<(), diport::ShutdownError> {
-    tokio::select! {
+    let event = tokio::select! {
         biased;
-        () = token.cancelled() => {
-            mark_monitor_down(&readiness, &rls_readiness);
+        () = token.cancelled() => MonitorEvent::Cancelled,
+        readiness_result = &mut readiness_task => MonitorEvent::Readiness(readiness_result),
+        rls_result = &mut rls_task => MonitorEvent::Rls(rls_result),
+    };
+    mark_monitor_down(&readiness, &rls_readiness);
+    match event {
+        MonitorEvent::Cancelled => {
             let (readiness_result, rls_result) = tokio::join!(readiness_task, rls_task);
-            readiness_result.map_err(monitor_join_error)?;
-            rls_result.map_err(monitor_join_error)?;
+            readiness_result.map_err(|error| monitor_join_error("readiness", error))?;
+            rls_result.map_err(|error| monitor_join_error("rls", error))?;
             Ok(())
         }
-        readiness_result = &mut readiness_task => {
-            mark_monitor_down(&readiness, &rls_readiness);
-            token.cancel();
-            rls_task.abort();
-            let _ = rls_task.await;
-            if let Err(error) = readiness_result {
-                return Err(monitor_join_error(error));
-            }
-            tracing::error!(target: "postgres", lane = "readiness", reason = "task-exited", "postgres runtime monitor lane terminated abnormally");
-            Err(diport::ShutdownError::new(MonitorLaneExited))
+        MonitorEvent::Readiness(result) => {
+            finish_abnormal_monitor_lane("readiness", result, rls_task, &token).await
         }
-        rls_result = &mut rls_task => {
-            mark_monitor_down(&readiness, &rls_readiness);
-            token.cancel();
-            readiness_task.abort();
-            let _ = readiness_task.await;
-            if let Err(error) = rls_result {
-                return Err(monitor_join_error(error));
-            }
-            tracing::error!(target: "postgres", lane = "rls", reason = "task-exited", "postgres runtime monitor lane terminated abnormally");
-            Err(diport::ShutdownError::new(MonitorLaneExited))
+        MonitorEvent::Rls(result) => {
+            finish_abnormal_monitor_lane("rls", result, readiness_task, &token).await
         }
     }
 }
@@ -751,7 +791,9 @@ impl diport::ManagedResource for PgRuntimeMonitor {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use diport::ManagedResource;
@@ -762,6 +804,66 @@ mod tests {
     use crate::pool::PoolReadiness;
 
     use super::{PgDbReadiness, PgRlsReadiness, PgRuntimeMonitor, pg_readiness_sampling_loop};
+
+    #[derive(Default)]
+    struct CapturedFields(BTreeMap<String, String>);
+
+    impl tracing::field::Visit for CapturedFields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ErrorCapture {
+        records: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    impl tracing::Subscriber for ErrorCapture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::ERROR
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(fields.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn assert_monitor_error_lane(
+        records: &Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+        expected: &str,
+    ) {
+        let records = records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            records
+                .iter()
+                .any(|fields| fields.get("lane").map(String::as_str) == Some(expected)),
+            "monitor error must identify lane {expected}: {records:?}"
+        );
+    }
 
     // ── 辅助：构造已关闭 lazy pool 的 PgStore（不连 DB）────────────────────────
 
@@ -1079,6 +1181,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::panic)]
     async fn monitor_supervisor_fails_closed_when_a_lane_panics() {
+        let capture = ErrorCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
         let readiness = Arc::new(PgDbReadiness::new());
         readiness.mark(PoolReadiness::Ready);
         let rls = Arc::new(PgRlsReadiness::for_test(true));
@@ -1101,6 +1207,97 @@ mod tests {
         ));
         assert_eq!(readiness.snapshot(), PoolReadiness::Down);
         assert!(!rls.is_ready());
+        assert_monitor_error_lane(&records, "readiness");
+    }
+
+    #[tokio::test]
+    async fn monitor_supervisor_joins_both_lanes_after_external_cancellation() {
+        let readiness = Arc::new(PgDbReadiness::new());
+        readiness.mark(PoolReadiness::Ready);
+        let rls = Arc::new(PgRlsReadiness::for_test(true));
+        let token = CancellationToken::new();
+        let readiness_token = token.clone();
+        let rls_token = token.clone();
+        let readiness_task = tokio::spawn(async move { readiness_token.cancelled().await });
+        let rls_task = tokio::spawn(async move { rls_token.cancelled().await });
+        token.cancel();
+
+        let result = super::supervise_runtime_monitor(
+            readiness_task,
+            rls_task,
+            token,
+            Arc::clone(&readiness),
+            Arc::clone(&rls),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(readiness.snapshot(), PoolReadiness::Down);
+        assert!(!rls.is_ready());
+    }
+
+    #[tokio::test]
+    async fn monitor_supervisor_rejects_each_clean_lane_exit() {
+        for readiness_exits in [true, false] {
+            let readiness = Arc::new(PgDbReadiness::new());
+            readiness.mark(PoolReadiness::Ready);
+            let rls = Arc::new(PgRlsReadiness::for_test(true));
+            let token = CancellationToken::new();
+            let (readiness_task, rls_task) = if readiness_exits {
+                (tokio::spawn(async {}), tokio::spawn(std::future::pending()))
+            } else {
+                (tokio::spawn(std::future::pending()), tokio::spawn(async {}))
+            };
+
+            let result = super::supervise_runtime_monitor(
+                readiness_task,
+                rls_task,
+                token.clone(),
+                Arc::clone(&readiness),
+                Arc::clone(&rls),
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(ref error) if error.kind() == diport::ShutdownErrorKind::Operation
+            ));
+            assert!(token.is_cancelled());
+            assert_eq!(readiness.snapshot(), PoolReadiness::Down);
+            assert!(!rls.is_ready());
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    async fn monitor_supervisor_preserves_rls_lane_panic_kind() {
+        let capture = ErrorCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let readiness = Arc::new(PgDbReadiness::new());
+        readiness.mark(PoolReadiness::Ready);
+        let rls = Arc::new(PgRlsReadiness::for_test(true));
+        let token = CancellationToken::new();
+        let readiness_task = tokio::spawn(std::future::pending());
+        let rls_task = tokio::spawn(async { panic!("synthetic RLS lane panic") });
+
+        let result = super::supervise_runtime_monitor(
+            readiness_task,
+            rls_task,
+            token,
+            Arc::clone(&readiness),
+            Arc::clone(&rls),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ref error) if error.kind() == diport::ShutdownErrorKind::TaskPanicked
+        ));
+        assert_eq!(readiness.snapshot(), PoolReadiness::Down);
+        assert!(!rls.is_ready());
+        assert_monitor_error_lane(&records, "rls");
     }
 
     #[test]

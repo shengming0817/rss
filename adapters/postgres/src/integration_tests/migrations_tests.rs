@@ -1952,6 +1952,91 @@ async fn migration_0107_legacy_resource_fact_aborts_atomically() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0107_writer_capability_delta_is_exact() -> TestResult {
+    use std::collections::BTreeSet;
+
+    let (fixture, owner) = connect_pg().await?;
+    migrations_through(106).run(&owner.pool).await?;
+    let app = connect_pg_rss_app_role(&fixture, &owner).await?;
+    let before = crate::pool::load_writer_effective_capabilities(&app.pool).await?;
+
+    migrations_through(107).run(&owner.pool).await?;
+    let after = crate::pool::load_writer_effective_capabilities(&app.pool).await?;
+    let removed: BTreeSet<_> = before.difference(&after).cloned().collect();
+    let added: BTreeSet<_> = after.difference(&before).cloned().collect();
+
+    let mut expected_removed = BTreeSet::from([
+        "relation:public.resource_attributes:SELECT".to_owned(),
+        "relation:public.resource_attributes:INSERT".to_owned(),
+        "relation:public.resource_attributes:UPDATE".to_owned(),
+        "function:public.rss_abac_policy_operator_values_valid_v1(document jsonb):EXECUTE"
+            .to_owned(),
+    ]);
+    for column in [
+        "tenant_id",
+        "contract_id",
+        "permission",
+        "resource_id",
+        "attribute_key",
+        "attribute_value",
+        "version",
+        "effective_from",
+        "effective_until",
+        "deleted_at",
+        "created_at",
+        "updated_at",
+    ] {
+        for privilege in ["SELECT", "INSERT", "UPDATE"] {
+            expected_removed.insert(format!(
+                "column:public.resource_attributes.{column}:{privilege}"
+            ));
+        }
+    }
+
+    let mut expected_added = BTreeSet::from([
+        "relation:public.resource_security_fact_revisions:SELECT".to_owned(),
+        "function:public.rss_abac_policy_operator_values_valid_v2(document jsonb):EXECUTE"
+            .to_owned(),
+    ]);
+    for column in [
+        "tenant_id",
+        "device_id",
+        "fact_key",
+        "revision",
+        "source_id",
+        "owner_principal_id",
+        "risk_class",
+        "observed_at",
+        "expires_at",
+        "accepted_at",
+    ] {
+        expected_added.insert(format!(
+            "column:public.resource_security_fact_revisions.{column}:SELECT"
+        ));
+    }
+
+    assert_eq!(expected_removed.len(), 40);
+    assert_eq!(expected_added.len(), 12);
+    assert_eq!(
+        removed, expected_removed,
+        "unexpected 0107 capability removals"
+    );
+    assert_eq!(
+        added, expected_added,
+        "unexpected 0107 capability additions"
+    );
+    assert_eq!(
+        before.len() + expected_added.len(),
+        after.len() + expected_removed.len(),
+        "0107 must narrow authority by 28 capabilities"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0107_unsupported_resource_policy_aborts_atomically() -> TestResult {
     let (_fixture, store) = connect_pg().await?;
     migrations_through(106).run(&store.pool).await?;

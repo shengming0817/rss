@@ -152,6 +152,17 @@ Hard / Medium 分工：
 - readiness 同时采样 writer/reader 并取最差状态；任一未验证或不可用返回 503。
 - 注：superuser 连接永远绕过 RLS（含 FORCE），故生产 owner 与 serving role 均须为非 superuser。
 
+### Migration head 与 writer capability review
+
+- 每次 committed migration 增改都必须在同一交付重新审计完整 writer authority；生成的 migration-head
+  identity 必须与 reviewed receipt 在 native compile 时精确相等，不提供运行期跳过或兼容路径。载体：
+  `crates/postgres-migration-inventory/build.rs` + `adapters/postgres/src/pool.rs`（Hard）。
+- serving 仅在完整 effective capability set 与 reviewed fingerprint 精确相等时启动；缺失或额外 grant 均
+  fail-closed，生产日志只输出 fingerprint，不输出 capability catalog。载体：`ensure_writer_effective_privileges`
+  与真实 PostgreSQL owner test（T2）。
+- typed row/command 与 monitor owner 的结构约束由 PostgreSQL affected `clippy -D warnings` 承载（Medium）；
+  该门只证明结构收敛，不替代真实 PostgreSQL ACL 结果态证明。
+
 ### 各 durable 表的 tenant 约束
 
 - **append-only 版本表**（如 `secret_refs`）：`rss_app` 仅 `SELECT, INSERT`，DB CHECK 拒绝直接

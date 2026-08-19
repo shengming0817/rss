@@ -1000,19 +1000,24 @@ impl PgFaultMatrixHarness {
         recovery
             .request_l2_dr_admission_pause(admission_epoch, &plan, &declared_instances, true)
             .await?;
-        let acknowledged = self
-            .deps
-            .handle()
-            .acknowledge_l2_dr_admission(
-                admission_epoch,
-                assembly_identity,
-                runtime_plan_fingerprint,
-                instance_id,
-                boot_id,
-                "drained",
-                Some(admission_epoch),
-            )
-            .await?;
+        let command = eventexec::DrAdmissionCommand {
+            admission_epoch,
+            phase: eventexec::DrAdmissionCommandPhase::PauseRequested,
+            invalidated: false,
+            expired: false,
+        };
+        let identity = eventexec::DrAdmissionProcessIdentity::new(
+            assembly_identity,
+            runtime_plan_fingerprint,
+            instance_id,
+            boot_id,
+            Some(admission_epoch),
+        )?;
+        let handle = self.deps.handle();
+        let acknowledged = eventexec::DrAdmissionCommandStore::acknowledge(
+            &handle, &command, &identity, "drained",
+        )
+        .await?;
         if !acknowledged {
             bail!("fault-matrix L2 DR admission acknowledgement was rejected");
         }

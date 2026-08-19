@@ -9,8 +9,6 @@ build = "build.rs"
 [lints]
 workspace = true
 
-[dependencies]
-sha2 = { workspace = true }
-
 [build-dependencies]
+sha2 = { workspace = true }
 sqlx-core = { workspace = true }
