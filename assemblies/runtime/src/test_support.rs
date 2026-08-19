@@ -242,10 +242,42 @@ pub use crate::domains::identity::IdentityTestValues;
 pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
 pub use crate::runtime_inventory::test_support as runtime_inventory;
 
+/// Move-only evidence that a write-admitted integration registry has installed the production
+/// process security-root authorizer.
+///
+/// INVARIANT: RUNTIME-FIXTURE-SECURITY-ROOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private-field SecurityRootWiredRegistry is minted only by wire_runtime_security_root; access-listener finalizers consume it by value and cannot accept a raw WriteAdmittedRegistry" }.
+#[must_use = "the security-root-wired registry must be consumed by an access-listener finalizer"]
+pub struct SecurityRootWiredRegistry {
+    registry: bootstrap::WriteAdmittedRegistry,
+    authorizer: Arc<dyn httpserve::RouteAuthorizer>,
+}
+
+impl SecurityRootWiredRegistry {
+    /// Clone the exact registered production authorizer for focused policy assertions.
+    #[must_use]
+    pub fn authorizer(&self) -> Arc<dyn httpserve::RouteAuthorizer> {
+        Arc::clone(&self.authorizer)
+    }
+}
+
+/// Install the same durable process authorizer used by production before listener finalization.
+pub fn wire_runtime_security_root(
+    mut registry: bootstrap::WriteAdmittedRegistry,
+    pg: &postgres::PgRuntimeHandle,
+    clock: Arc<dyn diport::Clock>,
+) -> anyhow::Result<SecurityRootWiredRegistry> {
+    let authorizer =
+        crate::phase::register_runtime_security_root_authorizer(&mut registry, pg, clock)?;
+    Ok(SecurityRootWiredRegistry {
+        registry,
+        authorizer,
+    })
+}
+
 /// Finalize one closed listener selected from the committed, fingerprint-verified RuntimePlan
 /// fixture through the production auth finalization core.
 pub fn finalize_rss_listener(
-    registry: &mut bootstrap::WriteAdmittedRegistry,
+    mut registry: SecurityRootWiredRegistry,
     provider: Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     grants: Arc<identity::AuthGrantValidationService>,
     audit_sink: httpserve::AuditSinkHandle,
@@ -253,7 +285,7 @@ pub fn finalize_rss_listener(
     kind: assembly_schema::AssemblyListenerKind,
 ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
     crate::routes::finalize_rss_fixture_listener(
-        registry,
+        &mut registry.registry,
         provider,
         grants,
         audit_sink,
@@ -297,14 +329,14 @@ pub fn always_current_access_grants() -> Arc<identity::AuthGrantValidationServic
 /// The closed function selects Federated Access without accepting a raw profile value. It is for
 /// integration tests of Device/Admin/SuperAdmin principals, which local RSS no longer represents.
 pub fn finalize_federated_listener(
-    registry: &mut bootstrap::WriteAdmittedRegistry,
+    mut registry: SecurityRootWiredRegistry,
     provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
     kind: assembly_schema::AssemblyListenerKind,
 ) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
     crate::routes::finalize_federated_fixture_listener(
-        registry,
+        &mut registry.registry,
         provider,
         audit_sink,
         audit_clock,

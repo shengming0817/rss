@@ -44,7 +44,7 @@ use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_s3_runtime_deps_from_values, build_shared_runtime_deps,
     build_unused_redis_runtime_deps, finalize_federated_listener, finalize_rss_listener,
-    test_private_ca_pem, wire_identity_with, wire_settings,
+    test_private_ca_pem, wire_identity_with, wire_runtime_security_root, wire_settings,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -774,9 +774,10 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
     let (admission_control, _, _, writes) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control.start_running()?;
-    let mut registry = registry.admit_writes(writes);
+    let registry =
+        wire_runtime_security_root(registry.admit_writes(writes), &pg, Arc::new(SystemClock))?;
     let primary = finalize_rss_listener(
-        &mut registry,
+        registry,
         Arc::new(test_provider()),
         runtime::test_support::access_grant_validation_service(
             pg.for_domain::<caps::Identity>().auth_grant_validator(),
@@ -1254,9 +1255,13 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
     let (admission_control_a, _, _, writes_a) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control_a.start_running()?;
-    let mut registry_a = registry_a.admit_writes(writes_a);
+    let registry_a = wire_runtime_security_root(
+        registry_a.admit_writes(writes_a),
+        &pg,
+        Arc::new(SystemClock),
+    )?;
     let router_a = finalize_rss_listener(
-        &mut registry_a,
+        registry_a,
         Arc::new(test_provider()),
         runtime::test_support::access_grant_validation_service(
             pg.for_domain::<caps::Identity>().auth_grant_validator(),
@@ -1272,9 +1277,13 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
     let (admission_control_b, _, _, writes_b) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control_b.start_running()?;
-    let mut registry_b = registry_b.admit_writes(writes_b);
+    let registry_b = wire_runtime_security_root(
+        registry_b.admit_writes(writes_b),
+        &pg,
+        Arc::new(SystemClock),
+    )?;
     let router_b = finalize_rss_listener(
-        &mut registry_b,
+        registry_b,
         Arc::new(test_provider()),
         runtime::test_support::access_grant_validation_service(
             pg.for_domain::<caps::Identity>().auth_grant_validator(),
@@ -1504,9 +1513,10 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let (admission_control, _, _, writes) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control.start_running()?;
-    let mut registry = registry.admit_writes(writes);
+    let registry =
+        wire_runtime_security_root(registry.admit_writes(writes), &pg, Arc::new(SystemClock))?;
     let primary = finalize_federated_listener(
-        &mut registry,
+        registry,
         Arc::new(federated_test_provider()?),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),

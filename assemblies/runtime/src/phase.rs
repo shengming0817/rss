@@ -45,6 +45,8 @@ mod launch;
 pub(crate) mod maintenance;
 mod provider;
 
+#[cfg(feature = "integration")]
+pub(crate) use domains::register_runtime_security_root_authorizer;
 pub(crate) use maintenance::wire_revocation_sweeper;
 
 use crate::config::{RuntimeConfigSnapshot, SnapshotConfig};

@@ -74,6 +74,7 @@ use runtime::test_support::{
     build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
     build_shared_runtime_deps, build_vault_runtime_from_values, finalize_federated_listener,
     wire_distributed, wire_event_transport, wire_event_transport_with_admission,
+    wire_runtime_security_root,
 };
 use settings::{SecretResolveService, SettingsDomain, SettingsService};
 
@@ -951,17 +952,16 @@ async fn event_transport_durable_e2e() -> Result<()> {
         primitives::prepare_dr_admission_controls().into_parts();
     let mut registry =
         bootstrap::compose(&[&identity_domain, &settings_domain, &audit_domain_inst])?;
-    registry.register_primary_authorizer(identity_composition::root_contract_authorizer(
-        &id,
-        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-    ))?;
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
-    let route_authorizer = registry.take_primary_authorizer()?;
     let http_registry = bootstrap::compose(&[&settings_domain])?;
-    let mut http_registry = http_registry.admit_writes(write_admission.clone());
-    http_registry.register_primary_authorizer(Arc::clone(&route_authorizer))?;
+    let http_registry = wire_runtime_security_root(
+        http_registry.admit_writes(write_admission.clone()),
+        &pg,
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+    )?;
+    let route_authorizer = http_registry.authorizer();
     let settings_router = finalize_federated_listener(
-        &mut http_registry,
+        http_registry,
         Arc::new(federated_provider()?),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
@@ -1522,7 +1522,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // readiness 并以原 ID 重试。tracer 使用不同 event/session ID：单 queue 单 consumer FIFO 下 tracer
     // 被 audit，正向证明前面的 same-ID duplicate 已被消费并 Ack；原 session audit count 仍为 1 才证明
     // ConsumerTx 未重复业务写。
-    let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
+    let redeliver_endpoint = amqp_endpoint(vhost_url)?;
     let redeliver_ca = amqp::AmqpPrivateCa::from_pem(rmq.ca_pem().as_bytes().to_vec())?;
     let redeliver_deps = amqp::AmqpRuntimeDeps::connect_with_private_ca(
         &amqp::AmqpPublisherEndpoint::new(redeliver_endpoint.clone()),

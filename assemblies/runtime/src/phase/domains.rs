@@ -8,13 +8,17 @@ use anyhow::{Context as _, Result};
 use primitives::ProbeName;
 use std::sync::Arc;
 
-fn register_runtime_security_root(
+pub(crate) fn register_runtime_security_root_authorizer(
     registry: &mut bootstrap::Registry,
-    authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-) -> anyhow::Result<()> {
+    pg: &postgres::PgRuntimeHandle,
+    clock: Arc<dyn diport::Clock>,
+) -> anyhow::Result<Arc<dyn httpserve::RouteAuthorizer>> {
+    let identity_pg = pg.for_domain::<postgres::caps::Identity>();
+    let authorizer = identity_composition::root_contract_authorizer(&identity_pg, clock);
     registry
-        .register_primary_authorizer(authorizer)
-        .context("register runtime security-root contract authorizer")
+        .register_primary_authorizer(Arc::clone(&authorizer))
+        .context("register runtime security-root contract authorizer")?;
+    Ok(authorizer)
 }
 
 fn wire_runtime_security_root(
@@ -25,11 +29,7 @@ fn wire_runtime_security_root(
     auth_grant_sweep_interval: std::time::Duration,
     write_admission: &primitives::WriteAdmission,
 ) -> anyhow::Result<bootstrap::DomainModuleResult> {
-    let identity_pg = pg.for_domain::<postgres::caps::Identity>();
-    register_runtime_security_root(
-        registry,
-        identity_composition::root_contract_authorizer(&identity_pg, clock),
-    )?;
+    let _authorizer = register_runtime_security_root_authorizer(registry, pg, clock)?;
     wire_auth_grant_sweeper(pg, auth_grant_sweep_interval, write_admission)
         .context("wire process-owned AuthGrant security maintenance")
 }

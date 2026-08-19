@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/raw_registry_cannot_finalize_rss_listener.rs:9:9
+  |
+8 |     let _ = runtime::test_support::finalize_rss_listener(
+  |             -------------------------------------------- arguments to this function are incorrect
+9 |         &mut registry,
+  |         ^^^^^^^^^^^^^ expected `SecurityRootWiredRegistry`, found `&mut WriteAdmittedRegistry`
+  |
+note: function defined here
+ --> src/test_support.rs
+  |
+  | pub fn finalize_rss_listener(
+  |        ^^^^^^^^^^^^^^^^^^^^^
