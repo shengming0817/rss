@@ -1,5 +1,9 @@
 # ADR-011：字段级数据保护边界 — observe redaction 与 storage encryption 分层单源
 
+> **2026-08-19 局部 supersession（#2148）**：本文原有 `vocab::tenant::TenantId` 路径只记录
+> 当时实现；canonical owner 已由 #2107 收敛为 `rss-request-context::TenantId`，并由 ADR-029
+> 冻结。以下涉及 tenant 的密钥派生语义不变，旧路径不得作为 alias、re-export 或新依赖依据。
+
 - **状态**：Accepted（**设计单源**；本 ADR **不实现**任何加解密执行体，只定语义、边界、AAD/envelope 形态与归属。执行体随
   #1465 framework 底座 / #1466 KeyProvider-Vault / #1467 settings ConfigValue 加密逐个落地）
 - **日期**：2026-06-27
@@ -99,7 +103,7 @@ practice）。**RSS 偏离 = 取 Vault 的强制性**：RSS 的 AAD 在类型层
 **实现规范（与已落代码一致）**：
 
 1. **子密钥派生**：每条 blind index 按 (tenant / domain / field / index-name) 四维独立派生子密钥：
-   `tenant` 在 runtime API 中必须先收敛为 `vocab::tenant::TenantId`（canonical UUID，非裸字符串）。
+   `tenant` 在 runtime API 中必须先收敛为 `rss_request_context::TenantId`（canonical UUID，非裸字符串）。
    `derive_subkey = HMAC-SHA256(root_key, lp(CONTEXT) ‖ lp(tenant.to_string()) ‖ lp(domain) ‖ lp(field) ‖ lp(index_name))`，
    `lp(x) = u64-BE(len(x)) ‖ x`（长度前缀防拼接歧义），CONTEXT = `b"rss.blind-index.subkey.v1"` 域分隔（任一
    变更漂移不同子密钥）。子密钥隔离：一个 index 密钥泄漏不影响同字段其他 index 或同租户其他字段。派生维度中

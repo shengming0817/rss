@@ -1,5 +1,9 @@
 # ADR-005：域 repo / 领域服务 DI port 归属（Option 2：域内 port + DIP 内向实现）
 
+> **2026-08-19 局部 supersession（#2148）**：本文示例中的 `pub use vocab::TenantId` 是旧实现
+> 路径，不再是 owner 或 façade 依据。canonical owner 为 `rss-request-context::TenantId`
+>（ADR-029）；consumer 必须直接导入，禁止跨 owner re-export。
+
 - **状态**：Accepted（消解 layer-diport.md ↔ data-model.md 待决项#1 矛盾；amend ADR-003 §6/§7 + ADR-004 C1/C7）；**§9 amended by #1192**（co-tx Unit-of-Work seam 交付 #1083 session 接缝，威胁矩阵重评见 §9.3）；**§10 amended by #1278**（`SessionUnitOfWork` + `SessionRepo` 合并为单一 `SessionLifecycle`，威胁矩阵重评见 §10.3）；**§11 amended by #1168**（DLX provider-neutral port 归位 + associated proof binding）
 - **日期**：2026-06-23（§9 amendment：2026-06-25；§10 amendment：2026-06-26）
 - **关联**：issue #1083 [RW-G0.2] · #1192（§9 co-tx UoW amendment）· #1278（§10 SessionLifecycle 合并 amendment）· epic #991 · spike 来源 PR #1051(PR-4) / #1049(PR-diport) · 解锁 W 阶段（#1000–#1016）repo 接缝单元
@@ -69,7 +73,7 @@ adapter（如 `postgres`）依赖所属域 crate、以 native AFIT impl 其域�
 // crates/identity/src/ports.rs — 域形 repo port（Option 2）
 use dynosaur::dynosaur;
 pub use crate::domain::{IdentityError, Role, RoleId};   // 实体 façade（types pub，构造器 pub(crate) funnel）
-pub use vocab::TenantId;                                // typed tenant scope
+use rss_request_context::TenantId;                      // canonical typed tenant scope；不 re-export
 
 #[trait_variant::make(RoleRepo: Send)]
 #[dynosaur(pub DynRoleRepo = dyn(box) RoleRepo, bridge(dyn))]
@@ -80,7 +84,8 @@ pub trait RoleRepoLocal {
 }
 
 // adapters/postgres/src/lib.rs — adapter→域 DIP 内向边（native AFIT，不 invoke dynosaur 宏）
-use identity::ports::{IdentityError, Role, RoleId, RoleRepo, TenantId};
+use identity::ports::{IdentityError, Role, RoleId, RoleRepo};
+use rss_request_context::TenantId;
 impl RoleRepo for PgStore {                                // postgres 依赖 identity（DIP 内向）
     async fn find(&self, _tenant: TenantId, _id: RoleId) -> Result<Option<Role>, IdentityError> { todo!() }
     async fn save(&self, _tenant: TenantId, _role: Role) -> Result<(), IdentityError> { todo!() }

@@ -133,7 +133,7 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
 - HTTP / gRPC 的 `domain` label 与 outbox relay 的 `domain` label 来自 assembly 或 provider 在声明期
   绑定的 closed set，非请求派生，基数有界。缺失、未知、越界必须归入固定 fallback 或 fail-fast。
 - outbox 可观测路由维度允许 `contract_id` 与 `tenant_id` 入 label，前提是二者分别经 canonical
-  grammar 校验与 typed `vocab::TenantId` 取得。跨域 transport metric 不适用该例外。
+  grammar 校验与 typed `rss_request_context::TenantId` 取得。跨域 transport metric 不适用该例外。
 - inbox stale-claim backlog 的 `inbox_stale_claim_depth` 与
   `inbox_oldest_stale_claim_age_seconds` 仅允许 `{tenant_id,consumer_group}`：tenant 必须是 canonical
   typed `TenantId`，group 必须来自 generated `SubscriptionSpec` 的闭拓扑。emit 只能消费无公共构造器的

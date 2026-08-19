@@ -1,5 +1,10 @@
 # ADR-011：持久化模式 tenant 作用域合约 — RLS 解锁器（PERSIST-016）
 
+> **2026-08-19 局部 supersession（#2148）**：本文关于 `TenantId` 归 `vocab` 以及 adapter
+> 依赖该 owner 的描述只记录当时实现；canonical owner 已由 #2107 收敛为
+> `rss-request-context::TenantId`，并由 ADR-029 冻结。RLS funnel 与 fail-closed 语义不变，旧路径
+> 不得作为 alias、re-export 或新依赖依据。
+
 > ## Amendment（2026-08-05 · #2003；2026-08-05 fix restore schema-rls meta）
 >
 > **状态**：`cargo xtask setlocal-funnel` / `TENANCY-SETLOCAL-FUNNEL-01` 已物理删除且不恢复；
@@ -20,7 +25,7 @@
 - **状态**：Accepted（#1437 落地；#2003 上抬 live catalog/behavior，并保留 `schema-rls` 合入前无 PG meta；`setlocal-funnel` 删除）
 - **日期**：2026-06-27（amendment 2026-08-05）
 - **关联**：issue #1437 [PERSIST-016] · Parent Feature #1418 [PERSIST-EPIC] · 同批 #1405（outbox tenant 注入）· #1426（repo conformance testkit）· #1436（PG tx funnel / raw-pool guard）· amendment #2003（tenant proof lift）
-- **依赖 ADR**：**ADR-002**（tenant 只来自已认证通道，`TenantId` 在 base 层 `vocab`）· **ADR-005**（域形 repo port 归属，`cotx` funnel 是 adapter 层实现）· **ADR-010**（`PgRuntimeDeps::setup` 能力门控是持久化能力分层的自底向上第一步）
+- **依赖 ADR**：**ADR-002**（tenant 只来自已认证通道；现行 `TenantId` owner 见 ADR-029）· **ADR-005**（域形 repo port 归属，`cotx` funnel 是 adapter 层实现）· **ADR-010**（`PgRuntimeDeps::setup` 能力门控是持久化能力分层的自底向上第一步）
 - **归属**：framework（tenant 隔离接缝是 provider-agnostic 持久化治理，非单一域逻辑）
 - **AI-robust 评级**：见 §6；现行规则真源见 `docs/rules/tenancy.md` 与
   [ArchRules typed catalog](../../xtask/src/archrules.rs) 的 `rls` funnel；派生展示可运行
@@ -65,7 +70,7 @@ domain-enroll issue（`outbox` → #1405），不属于本解锁器。
 ### 2.1 类型化 cotx funnel（Hard）
 
 `adapters/postgres/src/cotx.rs` 的三个 helper 参数从裸 `tenant_uuid: &str` 改为
-`tenant: TenantId`（`vocab`）：
+`tenant: rss_request_context::TenantId`：
 
 ```rust
 // 之前（可传任意字符串）
@@ -247,11 +252,12 @@ impl Probe for RlsReadyProbe {
 ## 5. 与 ADR-002 / 005 / 010 的关系（叠加，无 amendment）
 
 - **ADR-002**：本 ADR 复用其「tenant 只来自已认证通道」约定，不新增 tenant source 规则。
-  `TenantId` 归 `vocab::tenant`（ADR-002 §D3），cotx funnel 消费它，依赖方向不变（adapter
-  依赖 `vocab`，Hard）。ADR-002 威胁矩阵无变化。
-- **ADR-005**：`cotx.rs` 是 adapter 层实现（`adapters/postgres/`），依赖 `vocab` 但不被域
-  crate 依赖（`域→adapter` 禁，ADR-005 §2.4）；`verify_rls_capability` 属 infra setup，不引
-  域实体，不触发 DI port 归属二分。ADR-005 威胁矩阵无变化。
+  `TenantId` 的现行 owner 为 `rss-request-context`（ADR-029）；cotx funnel 直接消费该 canonical
+  类型。这里对旧 `vocab` owner 的依赖描述已被 supersede，ADR-002 的来源与威胁语义不变。
+- **ADR-005**：`cotx.rs` 是 adapter 层实现（`adapters/postgres/`），直接消费
+  `rss_request_context::TenantId`，且不被域 crate 依赖（`域→adapter` 禁，ADR-005 §2.4）；
+  `verify_rls_capability` 属 infra setup，不引域实体，不触发 DI port 归属二分。ADR-005
+  威胁矩阵无变化。
 - **ADR-010**：本 ADR 是 ADR-010 §2.6「自底向上能力」序列的第 0 步补全——`PgRuntimeDeps::setup`
   按 ADR-010 §2.3 已是 runtime bundle 初始化入口，本 ADR 在其中追加 `verify_rls_capability`
   调用，语义与分层均在 ADR-010 框架内，无 amendment。ADR-010 §6 AI-robust 分级无变化。

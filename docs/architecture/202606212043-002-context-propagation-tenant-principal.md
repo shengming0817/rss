@@ -2,6 +2,12 @@
 
 > 状态：Accepted · 日期：2026-06-21 · 架构决策序列：**决策 #2** · spike：RW-G0.4（#994）· epic：#991
 >
+> **2026-08-19 局部 supersession**：本文关于 `TenantId` 归 `vocab::tenant`、`AppCtx` 依赖该类型以及
+> `runctx → vocab` 作为 tenant owner 边的历史决策，已由 #2107 的 Platform vNext cutover 与
+> [ADR-029](202608191635-029-foundation-public-primitives-ownership.md) 取代。现行唯一 value owner 是
+> `rss-request-context::TenantId`，`runctx::AppCtx` 直接消费该类型；本文其余 context 传播、principal 擦除、
+> fail-closed 与 diagctx 决策继续有效。下文旧路径保留为历史迁移记录，不构成 alias、shim 或兼容 authority。
+>
 > 上游冻结：`docs/migration-from-gocell/gocell-rust-crate-mapping.md` §二.1 ·
 > `docs/migration-from-gocell/gocell-rewrite-sequence.md` §P1.5
 >

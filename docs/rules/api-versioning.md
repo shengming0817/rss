@@ -37,6 +37,23 @@ Platform Application vNext 是由 #2107 原子激活的 breaking 0.x cutover；�
 shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或 v0.2
 fallback。旧 #2045 executable contract 已原子删除，同样不构成 compatibility authority。
 
+### Internal → Foundation 公共原语提升
+
+[ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md) 分配的 planned
+Timepoint/PageCursor/DataClass/SafeError owner 不因 Markdown、internal `pub`、public-api baseline 或同名 internal
+carrier 而自动激活。提升必须由 owner package 新建 private-representation / closed-value public type，consumer 直接
+切到该 owner，并在同一 cutover 删除语义重叠的 internal generic type；不得保留 alias、deprecated re-export、
+`From`/`TryFrom`、feature flag、双读写或 convenience facade。语义不同的 Deadline、Clock、领域 cursor 与内部错误
+carrier 可以继续 internal，但不获得 Release API 或 compatibility 身份。
+
+该提升进入轴 A 后，构造器、闭值、trait 与公开路径按 Release Surface、default/all-features SemVer、typed rustdoc
+owner projection、release-api exact set 和 package proof 守。任何公开 package 从另一 owner `pub use` 同一类型都视为
+新的兼容路径；FoundationPublic 间由现有 forbidden-type policy 拒绝，Platform 的 owner-aware re-export rejection 由
+#2152 在既有 rustdoc source-identity projection 内扩展，不建立第二 scanner。
+
+轴 A 的 additive type 不授权改变轴 B。时间 wire/range、分页排序/token 失效、DataClass schema label，以及错误
+code/category/message/retryable/status 的 active contract 变化仍按本文件轴 B 规则独立判定，必要时新建 contract ID/version。
+
 Release Surface package 的稳定版本策略单源见 [`RELEASES.md`](../../RELEASES.md)。首次 registry 发布前，已接纳的
 major/minor 版本线冻结，发布准备只允许修改 patch；实验 API 的破坏式替换不要求兼容，也不以此触发 minor
 递增。major/minor 变更必须在 candidate 形成前由独立架构决策接纳，不能混入发布收尾。首次发布后恢复标准 SemVer。
