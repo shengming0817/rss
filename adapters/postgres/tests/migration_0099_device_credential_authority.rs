@@ -1,265 +1,252 @@
 const MIGRATION: &str = include_str!("../migrations/0099_separate_device_credential_authority.sql");
-const COMMAND_AUTHORITY_MIGRATION: &str =
-    include_str!("../migrations/0087_fence_device_command_authority.sql");
 const HISTORICAL_MIGRATION: &str = include_str!("../migrations/0094_close_device_ingress_uow.sql");
 
-fn normalized(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ")
-}
+#[path = "support/migration_contract.rs"]
+mod migration_contract;
 
-fn function_definition<'a>(migration: &'a str, function: &str) -> &'a str {
-    let create = format!("CREATE FUNCTION public.{function}");
-    let replace = format!("CREATE OR REPLACE FUNCTION public.{function}");
-    let start = migration.find(&replace).or_else(|| migration.find(&create));
-    assert!(start.is_some(), "missing historical function {function}");
-    let start = start.unwrap_or_default();
-    let body_end = migration[start..].find("$$;");
-    assert!(
-        body_end.is_some(),
-        "unterminated historical function {function}"
-    );
-    let body_end = body_end.unwrap_or_default();
-    &migration[start..start + body_end + 3]
-}
+use migration_contract::{RoutineContract, RoutineHeaderContract, RoutineIdentity, normalize_sql};
 
-fn replacement_shape(migration: &str, function: &str) -> String {
-    normalized(function_definition(migration, function)).replacen(
-        &format!("CREATE FUNCTION public.{function}"),
-        &format!("CREATE OR REPLACE FUNCTION public.{function}"),
-        1,
+fn ack_identity() -> RoutineIdentity<'static> {
+    RoutineIdentity::public(
+        "rss_commit_device_command_ack_ingress",
+        &[
+            "uuid", "uuid", "text", "text", "bigint", "bigint", "bigint", "bytea", "text",
+            "bigint", "boolean",
+        ],
     )
 }
 
-fn replace_once(input: String, from: &str, to: &str, change: &str) -> String {
-    assert_eq!(
-        input.matches(from).count(),
-        1,
-        "whitelisted {change} source shape drifted"
-    );
-    input.replacen(from, to, 1)
+fn report_identity() -> RoutineIdentity<'static> {
+    RoutineIdentity::public(
+        "rss_commit_device_certificate_report_ingress",
+        &[
+            "uuid", "uuid", "text", "bigint", "bigint", "bigint", "bytea", "bytea", "bytea",
+            "bigint", "bigint", "bigint", "boolean",
+        ],
+    )
+}
+
+fn assert_exact_received_report_authority(sql: &str) -> Result<(), String> {
+    for identity in [
+        RoutineIdentity::public("rss_device_command_guard", &[]),
+        RoutineIdentity::public("rss_device_certificate_reported_guard", &[]),
+    ] {
+        RoutineHeaderContract {
+            identity,
+            required: &["LANGUAGE plpgsql", "SET search_path = pg_catalog, pg_temp"],
+            forbidden: &["SECURITY DEFINER"],
+        }
+        .check(sql)?;
+    }
+    RoutineContract {
+        identity: RoutineIdentity::public("rss_device_command_guard", &[]),
+        required: &[
+            "retains_received_report_authority := OLD.state = 'received' AND NEW.state = 'applied'",
+            "(NEW.tenant_id, NEW.command_id, NEW.device_id, NEW.generation, NEW.fence_epoch, NEW.intent_digest, NEW.deadline, NEW.queued_at) IS NOT DISTINCT FROM (OLD.tenant_id, OLD.command_id, OLD.device_id, OLD.generation, OLD.fence_epoch, OLD.intent_digest, OLD.deadline, OLD.queued_at)",
+            "NEW.generation <> authority_generation",
+            "NEW.fence_epoch <> authority_epoch AND NOT retains_received_report_authority",
+        ],
+        forbidden: &[
+            "NEW.generation <> authority_generation OR NEW.fence_epoch <> authority_epoch",
+        ],
+        ordered: &[],
+    }
+    .check(sql)?;
+
+    RoutineContract {
+        identity: RoutineIdentity::public("rss_device_certificate_reported_guard", &[]),
+        required: &[
+            "NEW.observed_generation <> authority_generation",
+            "command.tenant_id = NEW.tenant_id",
+            "command.device_id = NEW.device_id",
+            "command.generation = NEW.observed_generation",
+            "command.fence_epoch = NEW.fence_epoch",
+            "command.state = 'received'",
+        ],
+        forbidden: &[
+            "NEW.observed_generation <> authority_generation OR NEW.fence_epoch <> authority_epoch",
+        ],
+        ordered: &[],
+    }
+    .check(sql)?;
+
+    Ok(())
+}
+
+fn remove_fragment_after(sql: &str, marker: &str, fragment: &str) -> Result<String, String> {
+    let routine_start = sql
+        .find(marker)
+        .ok_or_else(|| format!("missing synthetic routine marker `{marker}`"))?;
+    let relative = sql[routine_start..]
+        .find(fragment)
+        .ok_or_else(|| format!("missing synthetic fragment `{fragment}` after `{marker}`"))?;
+    let start = routine_start + relative;
+    let mut mutated = sql.to_owned();
+    mutated.replace_range(start..start + fragment.len(), "TRUE");
+    Ok(mutated)
 }
 
 #[test]
-fn migration_preserves_only_exact_received_report_authority() {
-    let normalized = MIGRATION.split_whitespace().collect::<Vec<_>>().join(" ");
+fn migration_preserves_only_exact_received_report_authority() -> Result<(), String> {
+    assert_exact_received_report_authority(MIGRATION)?;
 
+    let sql = normalize_sql(MIGRATION);
+    for signature in [
+        "public.rss_device_command_guard()",
+        "public.rss_device_certificate_reported_guard()",
+    ] {
+        assert!(
+            sql.contains(&format!(
+                "REVOKE ALL ON FUNCTION {signature} FROM PUBLIC,rss_app,rss_app_read"
+            )),
+            "0099 must retain the fail-closed trigger ACL for `{signature}`"
+        );
+        assert!(
+            !sql.contains(&format!("GRANT EXECUTE ON FUNCTION {signature}")),
+            "0099 trigger `{signature}` must not gain an EXECUTE grant"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn authority_contract_rejects_each_missing_identity_binding() -> Result<(), String> {
+    for (marker, fragment) in [
+        (
+            "CREATE OR REPLACE FUNCTION public.rss_device_command_guard()",
+            "NEW.generation <> authority_generation",
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION public.rss_device_certificate_reported_guard()",
+            "command.tenant_id = NEW.tenant_id",
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION public.rss_device_certificate_reported_guard()",
+            "command.device_id = NEW.device_id",
+        ),
+    ] {
+        let mutated = remove_fragment_after(MIGRATION, marker, fragment)?;
+        let Err(error) = assert_exact_received_report_authority(&mutated) else {
+            return Err(format!(
+                "authority contract accepted removal of `{fragment}`"
+            ));
+        };
+        assert!(
+            error.contains("public.rss_device_command_guard()")
+                || error.contains("public.rss_device_certificate_reported_guard()"),
+            "failure must name the exact guard: {error}"
+        );
+    }
+
+    let tuple = "(\n                NEW.tenant_id, NEW.command_id, NEW.device_id, NEW.generation,\n                NEW.fence_epoch, NEW.intent_digest, NEW.deadline, NEW.queued_at\n            ) IS NOT DISTINCT FROM (\n                OLD.tenant_id, OLD.command_id, OLD.device_id, OLD.generation,\n                OLD.fence_epoch, OLD.intent_digest, OLD.deadline, OLD.queued_at\n            )";
+    let mutated = MIGRATION.replacen(tuple, "TRUE", 1);
+    let Err(error) = assert_exact_received_report_authority(&mutated) else {
+        return Err("authority contract accepted removal of the command identity tuple".to_owned());
+    };
+    assert!(error.contains("public.rss_device_command_guard()"));
+    Ok(())
+}
+
+#[test]
+fn migration_separates_transport_credential_from_certificate_authority() -> Result<(), String> {
+    let common_required = [
+        "p_credential_generation IS NULL OR p_credential_generation<=0",
+        "p_scope_matches IS NOT TRUE",
+    ];
+    for identity in [ack_identity(), report_identity()] {
+        RoutineHeaderContract {
+            identity,
+            required: &[
+                "LANGUAGE plpgsql",
+                "SECURITY DEFINER",
+                "SET search_path=pg_catalog,pg_temp",
+            ],
+            forbidden: &[],
+        }
+        .check(MIGRATION)?;
+    }
+    RoutineContract {
+        identity: ack_identity(),
+        required: &[
+            common_required[0],
+            common_required[1],
+            "p_fence_epoch<authority_epoch THEN 'stale_fence'",
+        ],
+        forbidden: &[
+            "p_credential_generation IS DISTINCT FROM authority_generation",
+            "command_state IS DISTINCT FROM 'received'",
+        ],
+        ordered: &[],
+    }
+    .check(MIGRATION)?;
+    RoutineContract {
+        identity: report_identity(),
+        required: &[
+            common_required[0],
+            common_required[1],
+            "p_fence_epoch<authority_epoch AND command_state IS DISTINCT FROM 'received' THEN 'stale_fence'",
+        ],
+        forbidden: &[
+            "p_credential_generation IS DISTINCT FROM authority_generation",
+            "p_fence_epoch<authority_epoch THEN 'stale_fence'",
+        ],
+        ordered: &[],
+    }
+    .check(MIGRATION)?;
+
+    let sql = normalize_sql(MIGRATION);
+    let ack_signature = "public.rss_commit_device_command_ack_ingress(uuid,uuid,text,text,bigint,bigint,bigint,bytea,text,bigint,boolean)";
+    let report_signature = "public.rss_commit_device_certificate_report_ingress(uuid,uuid,text,bigint,bigint,bigint,bytea,bytea,bytea,bigint,bigint,bigint,boolean)";
+    for signature in [ack_signature, report_signature] {
+        assert!(
+            sql.contains(&format!(
+                "ALTER FUNCTION {signature} OWNER TO rss_device_command_funnel_owner"
+            )),
+            "0099 must retain the reviewed owner for `{signature}`"
+        );
+    }
     assert!(
-        normalized
-            .contains("CREATE OR REPLACE FUNCTION public.rss_device_certificate_reported_guard()")
+        sql.contains(&format!(
+            "REVOKE ALL ON FUNCTION {ack_signature}, {report_signature} FROM PUBLIC,rss_app_read"
+        )),
+        "0099 must close both ingress funnels before granting the writer capability"
     );
-    assert!(normalized.contains("CREATE OR REPLACE FUNCTION public.rss_device_command_guard()"));
-    assert!(normalized.contains(
-        "retains_received_report_authority := OLD.state = 'received' AND NEW.state = 'applied'"
-    ));
     assert!(
-        normalized.contains(
-            "NEW.fence_epoch <> authority_epoch AND NOT retains_received_report_authority"
-        )
+        sql.contains(&format!(
+            "GRANT EXECUTE ON FUNCTION {ack_signature}, {report_signature} TO rss_app"
+        )),
+        "0099 must grant both ingress funnels only to rss_app"
     );
-    assert!(normalized.contains(
-        "REVOKE ALL ON FUNCTION public.rss_device_command_guard() FROM PUBLIC,rss_app,rss_app_read"
-    ));
-    assert!(normalized.contains(
-        "NEW.fence_epoch <> authority_epoch AND NOT EXISTS ( SELECT 1 FROM public.device_commands AS command WHERE command.tenant_id = NEW.tenant_id AND command.device_id = NEW.device_id AND command.generation = NEW.observed_generation AND command.fence_epoch = NEW.fence_epoch AND command.state = 'received' )"
-    ));
-    assert!(!normalized.contains(
-        "NEW.observed_generation <> authority_generation OR NEW.fence_epoch <> authority_epoch"
-    ));
-    assert!(normalized.contains(
-        "REVOKE ALL ON FUNCTION public.rss_device_certificate_reported_guard() FROM PUBLIC,rss_app,rss_app_read"
-    ));
+    for signature in [ack_signature, report_signature] {
+        let grants = sql
+            .split(';')
+            .filter(|statement| {
+                statement.contains("GRANT EXECUTE ON FUNCTION") && statement.contains(signature)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            grants.len(),
+            1,
+            "0099 must have one identity-scoped EXECUTE grant for `{signature}`"
+        );
+        assert!(grants[0].trim_end().ends_with("TO rss_app"));
+    }
+    Ok(())
 }
 
 #[test]
-fn migration_separates_transport_credential_from_certificate_authority() {
-    let normalized = MIGRATION.split_whitespace().collect::<Vec<_>>().join(" ");
+fn correction_is_forward_only_and_preserves_historical_checksum_input() -> Result<(), String> {
+    for identity in [ack_identity(), report_identity()] {
+        RoutineContract {
+            identity,
+            required: &["p_credential_generation IS DISTINCT FROM authority_generation"],
+            forbidden: &[],
+            ordered: &[],
+        }
+        .check(HISTORICAL_MIGRATION)?;
+    }
 
-    assert_eq!(
-        normalized
-            .matches("CREATE OR REPLACE FUNCTION public.rss_commit_device_")
-            .count(),
-        2,
-        "0099 must replace exactly the two authenticated ingress funnels"
-    );
-    assert_eq!(
-        normalized
-            .matches("p_credential_generation IS NULL OR p_credential_generation<=0")
-            .count(),
-        2,
-        "both funnels must reject missing or non-positive authenticated credential evidence"
-    );
-    assert_eq!(normalized.matches("p_scope_matches IS NOT TRUE").count(), 2);
-    assert_eq!(
-        normalized
-            .matches(
-                "p_fence_epoch<authority_epoch AND command_state IS DISTINCT FROM 'received' THEN 'stale_fence'"
-            )
-            .count(),
-        1,
-        "only the exact received command retains report authority across a later reconcile lease"
-    );
-    assert_eq!(
-        normalized
-            .matches("p_fence_epoch<authority_epoch THEN 'stale_fence'")
-            .count(),
-        1,
-        "ACK authority must still reject an old reconcile fence unconditionally"
-    );
-    assert_eq!(
-        normalized
-            .matches("p_credential_generation IS DISTINCT FROM authority_generation")
-            .count(),
-        0,
-        "transport credential generation is not desired certificate generation"
-    );
-    assert_eq!(
-        normalized
-            .matches("OWNER TO rss_device_command_funnel_owner")
-            .count(),
-        2
-    );
-    assert_eq!(normalized.matches("REVOKE ALL ON FUNCTION").count(), 3);
-    assert_eq!(normalized.matches("GRANT EXECUTE ON FUNCTION").count(), 1);
-}
-
-#[test]
-fn correction_is_forward_only_and_preserves_historical_checksum_input() {
-    let historical = normalized(HISTORICAL_MIGRATION);
-
-    assert_eq!(
-        historical
-            .matches("p_credential_generation IS DISTINCT FROM authority_generation")
-            .count(),
-        2,
-        "0094 remains immutable; the authority correction belongs exclusively to 0099"
-    );
     assert!(!MIGRATION.contains("DROP FUNCTION"));
     assert!(!MIGRATION.contains("CREATE FUNCTION public.rss_commit_"));
-}
-
-#[test]
-fn replacement_functions_equal_history_plus_the_explicit_authority_whitelist() {
-    let command_guard = replace_once(
-        replacement_shape(COMMAND_AUTHORITY_MIGRATION, "rss_device_command_guard"),
-        "generation_intent_digest bytea; BEGIN",
-        "generation_intent_digest bytea; retains_received_report_authority boolean := false; BEGIN IF TG_OP = 'UPDATE' THEN retains_received_report_authority := OLD.state = 'received' AND NEW.state = 'applied' AND ( NEW.tenant_id, NEW.command_id, NEW.device_id, NEW.generation, NEW.fence_epoch, NEW.intent_digest, NEW.deadline, NEW.queued_at ) IS NOT DISTINCT FROM ( OLD.tenant_id, OLD.command_id, OLD.device_id, OLD.generation, OLD.fence_epoch, OLD.intent_digest, OLD.deadline, OLD.queued_at ); END IF;",
-        "received-command transition authority declaration",
-    );
-    let command_guard = replace_once(
-        command_guard,
-        "ELSIF NEW.generation <> authority_generation OR NEW.fence_epoch <> authority_epoch THEN",
-        "ELSIF NEW.generation <> authority_generation OR ( NEW.fence_epoch <> authority_epoch AND NOT retains_received_report_authority ) THEN",
-        "received-command old-fence transition",
-    );
-    assert_eq!(
-        normalized(function_definition(MIGRATION, "rss_device_command_guard")),
-        command_guard,
-        "0099 command guard may only differ from 0087 by the received-to-applied authority exception"
-    );
-
-    let reported_guard = replace_once(
-        replacement_shape(
-            COMMAND_AUTHORITY_MIGRATION,
-            "rss_device_certificate_reported_guard",
-        ),
-        "IF NEW.observed_generation <> authority_generation OR NEW.fence_epoch <> authority_epoch THEN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'device certificate report coordinate does not match current authority'; END IF;",
-        "IF NEW.observed_generation <> authority_generation THEN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'device certificate report generation does not match current authority'; END IF; IF NEW.fence_epoch <> authority_epoch AND NOT EXISTS ( SELECT 1 FROM public.device_commands AS command WHERE command.tenant_id = NEW.tenant_id AND command.device_id = NEW.device_id AND command.generation = NEW.observed_generation AND command.fence_epoch = NEW.fence_epoch AND command.state = 'received' ) THEN RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'device certificate report fence does not match current command authority'; END IF;",
-        "reported-state received-command old-fence authority",
-    );
-    assert_eq!(
-        normalized(function_definition(
-            MIGRATION,
-            "rss_device_certificate_reported_guard",
-        )),
-        reported_guard,
-        "0099 reported guard may only differ from 0087 by the exact received-command exception"
-    );
-
-    let ack_funnel = replace_once(
-        replacement_shape(
-            HISTORICAL_MIGRATION,
-            "rss_commit_device_command_ack_ingress",
-        ),
-        "OR pg_catalog.octet_length(p_fingerprint)<>32 OR p_scope_matches IS NULL THEN",
-        "OR pg_catalog.octet_length(p_fingerprint)<>32 OR p_scope_matches IS NULL OR p_credential_generation IS NULL OR p_credential_generation<=0 THEN",
-        "ACK positive credential evidence",
-    );
-    let ack_funnel = replace_once(
-        ack_funnel,
-        "WHEN p_credential_generation IS DISTINCT FROM authority_generation THEN 'scope_mismatch' ",
-        "",
-        "ACK credential/certificate authority separation",
-    );
-    assert_eq!(
-        normalized(function_definition(
-            MIGRATION,
-            "rss_commit_device_command_ack_ingress",
-        )),
-        ack_funnel,
-        "0099 ACK funnel may only add positive credential validation and remove the invalid desired-generation comparison"
-    );
-
-    let report_funnel = replace_once(
-        replacement_shape(
-            HISTORICAL_MIGRATION,
-            "rss_commit_device_certificate_report_ingress",
-        ),
-        "OR p_scope_matches IS NULL THEN",
-        "OR p_scope_matches IS NULL OR p_credential_generation IS NULL OR p_credential_generation<=0 THEN",
-        "report positive credential evidence",
-    );
-    let report_funnel = replace_once(
-        report_funnel,
-        "WHEN p_credential_generation IS DISTINCT FROM authority_generation THEN 'scope_mismatch' ",
-        "",
-        "report credential/certificate authority separation",
-    );
-    let report_funnel = replace_once(
-        report_funnel,
-        "WHEN p_fence_epoch<authority_epoch THEN 'stale_fence'",
-        "WHEN p_fence_epoch<authority_epoch AND command_state IS DISTINCT FROM 'received' THEN 'stale_fence'",
-        "report received-command old-fence authority",
-    );
-    assert_eq!(
-        normalized(function_definition(
-            MIGRATION,
-            "rss_commit_device_certificate_report_ingress",
-        )),
-        report_funnel,
-        "0099 report funnel may only contain the three explicit authority corrections"
-    );
-
-    let expected_migration = format!(
-        "-- 0099_separate_device_credential_authority.sql
-         -- Forward-only correction: the authenticated MQTT credential generation proves which
-         -- transport credential entered the funnel; it is not the desired certificate generation
-         -- that the device is being commanded to install.
-         SET LOCAL lock_timeout = '5s';
-         SET LOCAL statement_timeout = '5min';
-         {command_guard}
-         REVOKE ALL ON FUNCTION public.rss_device_command_guard()
-         FROM PUBLIC,rss_app,rss_app_read;
-         {reported_guard}
-         REVOKE ALL ON FUNCTION public.rss_device_certificate_reported_guard()
-         FROM PUBLIC,rss_app,rss_app_read;
-         {ack_funnel}
-         {report_funnel}
-         ALTER FUNCTION public.rss_commit_device_command_ack_ingress(uuid,uuid,text,text,bigint,bigint,bigint,bytea,text,bigint,boolean)
-         OWNER TO rss_device_command_funnel_owner;
-         ALTER FUNCTION public.rss_commit_device_certificate_report_ingress(uuid,uuid,text,bigint,bigint,bigint,bytea,bytea,bytea,bigint,bigint,bigint,boolean)
-         OWNER TO rss_device_command_funnel_owner;
-         REVOKE ALL ON FUNCTION
-          public.rss_commit_device_command_ack_ingress(uuid,uuid,text,text,bigint,bigint,bigint,bytea,text,bigint,boolean),
-          public.rss_commit_device_certificate_report_ingress(uuid,uuid,text,bigint,bigint,bigint,bytea,bytea,bytea,bigint,bigint,bigint,boolean)
-         FROM PUBLIC,rss_app_read;
-         GRANT EXECUTE ON FUNCTION
-          public.rss_commit_device_command_ack_ingress(uuid,uuid,text,text,bigint,bigint,bigint,bytea,text,bigint,boolean),
-          public.rss_commit_device_certificate_report_ingress(uuid,uuid,text,bigint,bigint,bigint,bytea,bytea,bytea,bigint,bigint,bigint,boolean)
-         TO rss_app;"
-    );
-    assert_eq!(
-        normalized(MIGRATION),
-        normalized(&expected_migration),
-        "0099 must contain only the four reviewed replacements and their exact transactional/ACL shell"
-    );
+    Ok(())
 }

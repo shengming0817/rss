@@ -1,7 +1,13 @@
 const MIGRATION: &str = include_str!("../migrations/0098_activate_settings_projection_serving.sql");
-const GENERATED_PROJECTION: &str = include_str!("../../../generated/src/projection/settings_v3.rs");
-const GENERATED_INPUTS: &str =
-    include_str!("../../../crates/postgres-migration-inventory/src/projection_inputs.rs");
+const ACTIVATED_DEFINITION_DIGEST: &str =
+    "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8";
+const ACTIVATED_INPUT_GENERATION: &str =
+    "sha256:ff7c69626735495640031695caf9c053830aa6efdcb8c3efa038d68d0cd25801";
+
+#[path = "support/migration_contract.rs"]
+mod migration_contract;
+
+use migration_contract::{RoutineIdentity, routine_definition_slice};
 
 const DENIED_LOGIN_ROLES: &[&str] = &[
     "PUBLIC",
@@ -13,38 +19,35 @@ const DENIED_LOGIN_ROLES: &[&str] = &[
 ];
 
 fn normalized(source: &str) -> String {
-    source.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn first_sha256_after<'a>(source: &'a str, marker: &str) -> Result<&'a str, String> {
-    let (_, tail) = source
-        .split_once(marker)
-        .ok_or_else(|| format!("generated source omits `{marker}`"))?;
-    let start = tail
-        .find("sha256:")
-        .ok_or_else(|| format!("generated source has no digest after `{marker}`"))?;
-    let digest = &tail[start..start + "sha256:".len() + 64];
-    assert!(
-        digest["sha256:".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-        "generated digest must be canonical lowercase sha256"
-    );
-    Ok(digest)
+    migration_contract::normalize_sql(source)
 }
 
 fn function_section<'a>(sql: &'a str, name: &str) -> Result<&'a str, String> {
-    let create = format!("CREATE FUNCTION public.{name}(");
-    let replace = format!("CREATE OR REPLACE FUNCTION public.{name}(");
-    let tail = sql
-        .split_once(&create)
-        .or_else(|| sql.split_once(&replace))
-        .map(|(_, tail)| tail)
-        .ok_or_else(|| format!("0098 must create fixed function `{name}`"))?;
-    Ok(tail
-        .split_once("$function$;")
-        .or_else(|| tail.split_once("$$;"))
-        .map_or(tail, |(section, _)| section))
+    let identity = match name {
+        "rss_settings_projection_resolve_active" => RoutineIdentity::public(name, &[]),
+        "rss_projection_operator_status_active" => RoutineIdentity::public(name, &["uuid"]),
+        "rss_projection_operator_swap_active" => RoutineIdentity::public(
+            name,
+            &["uuid", "text", "text", "bigint", "text", "text", "text"],
+        ),
+        "rss_settings_projection_apply_worker" | "rss_settings_projection_apply_operator" => {
+            RoutineIdentity::public(
+                name,
+                &[
+                    "uuid", "text", "text", "text", "text", "text", "text", "bigint", "text",
+                    "text", "bigint", "bigint", "bytea",
+                ],
+            )
+        }
+        "rss_settings_projection_worker_tenant_scope_is_active" => {
+            RoutineIdentity::public(name, &["uuid", "text", "text", "text", "text", "text"])
+        }
+        "rss_projection_worker_list_tenants" => {
+            RoutineIdentity::public(name, &["text", "text", "text", "text", "uuid", "integer"])
+        }
+        _ => return Err(format!("0098 has no typed routine identity for `{name}`")),
+    };
+    routine_definition_slice(sql, identity)
 }
 
 fn statements_containing<'a>(sql: &'a str, marker: &str) -> Vec<&'a str> {
@@ -287,18 +290,16 @@ fn legacy_json_pointer_functions_are_hard_dropped_and_reserved_namespace_is_clos
 }
 
 #[test]
-fn worker_apply_is_hard_cut_to_generated_active_identity_and_purpose() -> Result<(), String> {
+fn worker_apply_is_hard_cut_to_activated_identity_and_purpose() -> Result<(), String> {
     let sql = normalized(MIGRATION);
-    let definition_digest = first_sha256_after(GENERATED_PROJECTION, "settings.config-projection")?;
-    let input_generation = first_sha256_after(GENERATED_INPUTS, "PROJECTION_INPUT_GENERATION")?;
 
     assert!(
-        sql.contains(definition_digest),
-        "0098 must bind worker/operator/resolver SQL to the generated Settings v3 definition"
+        sql.contains(ACTIVATED_DEFINITION_DIGEST),
+        "0098 must bind worker/operator/resolver SQL to its activated Settings v3 definition"
     );
     assert!(
-        sql.contains(input_generation),
-        "0098 must bind worker/operator/resolver SQL to the generated projection input generation"
+        sql.contains(ACTIVATED_INPUT_GENERATION),
+        "0098 must bind worker/operator/resolver SQL to its activated projection input generation"
     );
     assert!(
         sql.contains("background-worker"),
@@ -321,8 +322,12 @@ fn worker_apply_is_hard_cut_to_generated_active_identity_and_purpose() -> Result
 
     let operator = function_section(&sql, "rss_settings_projection_apply_operator")?;
     assert!(operator.contains("'operator-replay'"));
-    assert!(operator.contains(definition_digest));
-    assert!(operator.contains(input_generation));
+    assert!(operator.contains(&format!(
+        "p_definition_schema_digest <> '{ACTIVATED_DEFINITION_DIGEST}'"
+    )));
+    assert!(operator.contains(&format!(
+        "p_input_generation <> '{ACTIVATED_INPUT_GENERATION}'"
+    )));
     Ok(())
 }
 

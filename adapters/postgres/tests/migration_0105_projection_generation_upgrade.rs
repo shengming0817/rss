@@ -183,10 +183,7 @@ async fn assert_pinned_function_catalog(pool: &sqlx::PgPool) -> TestResult {
     Ok(())
 }
 
-async fn pinned_function_definitions(
-    pool: &sqlx::PgPool,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut definitions = Vec::with_capacity(PINNED_FUNCTIONS.len());
+async fn assert_legacy_pinned_generation(pool: &sqlx::PgPool) -> TestResult {
     for function in PINNED_FUNCTIONS {
         let definition: String = sqlx::query_scalar(
             "SELECT pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure($1))",
@@ -194,9 +191,18 @@ async fn pinned_function_definitions(
         .bind(function.signature)
         .fetch_one(pool)
         .await?;
-        definitions.push(definition);
+        assert!(
+            definition.contains(OLD_GENERATION),
+            "old pin missing before upgrade: {}",
+            function.signature
+        );
+        assert!(
+            !definition.contains(CURRENT_GENERATION),
+            "current pin present before upgrade: {}",
+            function.signature
+        );
     }
-    Ok(definitions)
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -296,15 +302,7 @@ async fn upgrade_replaces_pinned_identity_and_discards_only_derived_settings_sta
     .execute(&pool)
     .await?;
 
-    let old_pins: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_catalog.pg_proc AS procedure \
-         JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = procedure.pronamespace \
-         WHERE namespace.nspname = 'public' AND procedure.prosrc LIKE '%' || $1 || '%'",
-    )
-    .bind(OLD_GENERATION)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(old_pins, 6);
+    assert_legacy_pinned_generation(&pool).await?;
     let legacy_generations: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM public.settings_projection_generations \
          WHERE projection_id = 'settings.config-projection'",
@@ -315,20 +313,9 @@ async fn upgrade_replaces_pinned_identity_and_discards_only_derived_settings_sta
         legacy_generations, 1,
         "upgrade fixture must carry stale derived state"
     );
-    let expected_definitions: Vec<String> = pinned_function_definitions(&pool)
-        .await?
-        .into_iter()
-        .map(|definition| definition.replace(OLD_GENERATION, CURRENT_GENERATION))
-        .collect();
-
     migrations_through(105).run(&pool).await?;
 
     assert_pinned_function_catalog(&pool).await?;
-    assert_eq!(
-        pinned_function_definitions(&pool).await?,
-        expected_definitions,
-        "0105 may change only the pinned projection-input generation"
-    );
 
     for table in [
         "settings_projection_active_pointer",

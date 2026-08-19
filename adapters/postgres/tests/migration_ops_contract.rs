@@ -4,6 +4,13 @@
 //! SQL probe。面向人的说明散文不做 `contains` 断言——要求散文包含某句话不增加 enforcement 强度，
 //! 见 `docs/rules/README.md` §红线一。
 
+#[path = "support/migration_contract.rs"]
+mod migration_contract;
+
+use migration_contract::{
+    RoutineContract, RoutineHeaderContract, RoutineIdentity, routine_definition,
+};
+
 const SECRET_REFS_HARDENING: &str =
     include_str!("../migrations/0058_harden_secret_refs_append_only.sql");
 const DLX_CUTOVER: &str = include_str!("../migrations/0062_prepare_dead_letter_cutover.sql");
@@ -256,23 +263,24 @@ fn settings_metadata_projection_schema_is_exact_rls_scoped_and_least_privilege()
         );
     }
 
-    assert_eq!(
-        normalized
-            .matches("CREATE POLICY tenant_isolation ON public.settings_projection_")
-            .count()
-            + normalized
-                .matches("CREATE POLICY tenant_isolation ON public.settings_config_projection_rows")
-                .count(),
-        3,
-        "0091 must install exactly one canonical tenant policy on each projection table"
-    );
-    assert_eq!(
-        normalized
-            .matches("CHECK (pg_catalog.octet_length(generation) BETWEEN 1 AND 256)")
-            .count(),
-        3,
-        "0091 must bound generation bytes independently on every projection table"
-    );
+    for table in [
+        "settings_projection_generations",
+        "settings_config_projection_rows",
+        "settings_projection_dedupe_receipts",
+    ] {
+        assert!(
+            normalized.contains(&format!("CREATE POLICY tenant_isolation ON public.{table}")),
+            "0091 must install the canonical tenant policy on `{table}`"
+        );
+        let table_body = create_table_body(SETTINGS_METADATA_PROJECTION, table)?
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            table_body.contains("CHECK (pg_catalog.octet_length(generation) BETWEEN 1 AND 256)"),
+            "0091 must bound generation bytes on `{table}`"
+        );
+    }
     for forbidden in [
         " ON DELETE CASCADE",
         "GRANT DELETE",
@@ -314,7 +322,7 @@ fn settings_metadata_projection_allowlist_rejects_synthetic_payload_column() -> 
 }
 
 #[test]
-fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() {
+fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() -> Result<(), String> {
     let normalized = SETTINGS_PROJECTION_APPLY_FUNNEL
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -346,13 +354,33 @@ fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() {
             "0093 omits Settings apply invariant `{required}`"
         );
     }
-    assert_eq!(
-        normalized
-            .matches("CREATE FUNCTION public.rss_settings_projection_apply(")
-            .count(),
-        1,
-        "0093 must install exactly one mutation funnel"
+    let apply_identity = RoutineIdentity::public(
+        "rss_settings_projection_apply",
+        &[
+            "uuid", "text", "text", "text", "text", "text", "text", "bigint", "text", "text",
+            "bigint", "bigint", "bytea",
+        ],
     );
+    RoutineHeaderContract {
+        identity: apply_identity,
+        required: &[
+            "RETURNS text",
+            "SECURITY DEFINER",
+            "SET search_path = pg_catalog, pg_temp",
+        ],
+        forbidden: &[],
+    }
+    .check(SETTINGS_PROJECTION_APPLY_FUNNEL)?;
+    RoutineContract {
+        identity: apply_identity,
+        required: &[
+            "INSERT INTO public.settings_projection_dedupe_receipts",
+            "UPDATE public.settings_projection_generations SET high_water_lsn",
+        ],
+        forbidden: &["p_payload", "p_raw_payload", "p_config_value"],
+        ordered: &[],
+    }
+    .check(SETTINGS_PROJECTION_APPLY_FUNNEL)?;
     for forbidden in [
         "p_payload",
         "p_raw_payload",
@@ -368,6 +396,7 @@ fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() {
             "0093 exposes forbidden Settings apply surface `{forbidden}`"
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -543,7 +572,7 @@ fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
 }
 
 #[test]
-fn projection_scoped_high_water_is_exact_indexed_and_function_only() {
+fn projection_scoped_high_water_is_exact_indexed_and_function_only() -> Result<(), String> {
     let normalized = PROJECTION_SCOPED_HIGH_WATER
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -614,40 +643,69 @@ fn projection_scoped_high_water_is_exact_indexed_and_function_only() {
         );
     }
 
-    assert_eq!(
-        normalized
-            .matches("DELETE FROM public.projection_source_capabilities AS capability")
-            .count(),
-        2,
-        "0088 must delete capabilities only through the shared consumer and bounded sweeper"
-    );
-    assert_eq!(
-        normalized
-            .matches("SET plan_cache_mode = force_custom_plan")
-            .count(),
-        1,
-        "0088 must pin custom planning only on the high-water function"
-    );
-    assert_projection_generation_receipts(&normalized);
+    for (function, argument_types) in [
+        (
+            "rss_assert_projection_source_scope",
+            &[
+                "boolean", "uuid", "uuid", "uuid", "text", "text", "text", "text",
+            ][..],
+        ),
+        ("rss_projection_operator_sweep_source_capabilities", &[][..]),
+    ] {
+        RoutineContract {
+            identity: RoutineIdentity::public(function, argument_types),
+            required: &["DELETE FROM public.projection_source_capabilities AS capability"],
+            forbidden: &[],
+            ordered: &[],
+        }
+        .check(PROJECTION_SCOPED_HIGH_WATER)?;
+    }
+    RoutineContract {
+        identity: RoutineIdentity::public(
+            "rss_projection_source_high_water_scoped",
+            &["uuid", "uuid", "uuid", "text", "text", "text", "text"],
+        ),
+        required: &["SET plan_cache_mode = force_custom_plan"],
+        forbidden: &["payload"],
+        ordered: &[],
+    }
+    .check(PROJECTION_SCOPED_HIGH_WATER)?;
+    for (function, argument_types) in [
+        (
+            "rss_assert_projection_source_scope",
+            &[
+                "boolean", "uuid", "uuid", "uuid", "text", "text", "text", "text",
+            ][..],
+        ),
+        (
+            "rss_projection_operator_issue_source_capability",
+            &["uuid", "text", "text", "text", "text"][..],
+        ),
+        (
+            "rss_read_projection_events_scoped",
+            &[
+                "uuid", "uuid", "uuid", "text", "text", "text", "text", "bigint", "integer",
+            ][..],
+        ),
+    ] {
+        RoutineContract {
+            identity: RoutineIdentity::public(function, argument_types),
+            required: &[],
+            forbidden: &["SET plan_cache_mode = force_custom_plan"],
+            ordered: &[],
+        }
+        .check(PROJECTION_SCOPED_HIGH_WATER)?;
+    }
+    assert_projection_generation_receipts(PROJECTION_SCOPED_HIGH_WATER)?;
 
-    let high_water_body = normalized
-        .split_once("CREATE FUNCTION public.rss_projection_source_high_water_scoped(")
-        .map_or("", |(_, tail)| tail)
-        .split_once("ALTER FUNCTION public.rss_assert_projection_source_scope(")
-        .map_or("", |(body, _)| body);
-    assert!(
-        !high_water_body.is_empty(),
-        "0088 must carry a bounded high-water function body"
-    );
-    assert!(
-        !high_water_body.contains("payload"),
-        "0088 high-water function must not read or release payload"
-    );
-    assert!(
-        high_water_body.contains("SET plan_cache_mode = force_custom_plan"),
-        "0088 high-water function must retain custom planning after statement-cache warm-up"
-    );
-    assert_projection_high_water_uses_static_composite_tail(high_water_body);
+    let high_water_body = migration_contract::normalize_sql(&routine_definition(
+        PROJECTION_SCOPED_HIGH_WATER,
+        RoutineIdentity::public(
+            "rss_projection_source_high_water_scoped",
+            &["uuid", "uuid", "uuid", "text", "text", "text", "text"],
+        ),
+    )?);
+    assert_projection_high_water_uses_static_composite_tail(&high_water_body);
 
     for forbidden in [
         "CREATE OR REPLACE FUNCTION public.rss_append_projection_event(",
@@ -685,41 +743,61 @@ fn projection_scoped_high_water_is_exact_indexed_and_function_only() {
         ),
         "0088 depends on the transaction-scoped append commit-order guard"
     );
+    Ok(())
 }
 
-fn assert_projection_generation_receipts(normalized: &str) {
-    assert_eq!(
-        normalized
-            .matches("actual_input_generation IS DISTINCT FROM p_input_generation")
-            .count(),
-        1,
-        "0088 must authenticate the complete generation once in the shared validator"
-    );
-    assert_eq!(
-        normalized.matches("pg_catalog.int8send(").count(),
-        8,
-        "0088 must length-prefix all eight UTF-8 fields in the canonical receipt"
-    );
+fn assert_projection_generation_receipts(normalized: &str) -> Result<(), String> {
+    let framing = [
+        "binding.projection_id",
+        "binding.projection_definition_version",
+        "binding.projection_definition_schema_digest",
+        "binding.source_domain",
+        "binding.contract_id",
+        "binding.contract_version",
+        "binding.schema_hash",
+        "binding.topic",
+    ];
+    RoutineContract {
+        identity: RoutineIdentity::public(
+            "rss_assert_projection_source_scope",
+            &[
+                "boolean", "uuid", "uuid", "uuid", "text", "text", "text", "text",
+            ],
+        ),
+        required: &[
+            "actual_input_generation IS DISTINCT FROM p_input_generation",
+            "pg_catalog.int8send(",
+        ],
+        forbidden: &[],
+        ordered: &framing,
+    }
+    .check(normalized)?;
 
-    let validator_body = normalized
-        .split_once("CREATE FUNCTION public.rss_assert_projection_source_scope(")
-        .map_or("", |(_, tail)| tail)
-        .split_once("CREATE FUNCTION public.rss_projection_operator_issue_source_capability(")
-        .map_or("", |(body, _)| body);
-    assert!(
-        validator_body
-            .find("actual_input_generation IS DISTINCT FROM p_input_generation")
-            .zip(validator_body.find("END; $$"))
-            .is_some_and(|(receipt, end)| receipt < end),
-        "0088 must authenticate the complete generation inside the shared validator"
-    );
-    assert_eq!(
-        normalized
-            .matches("PERFORM public.rss_assert_projection_source_scope(")
-            .count(),
-        3,
-        "0088 issuer, read and high-water paths must share one validator"
-    );
+    for (function, argument_types) in [
+        (
+            "rss_projection_operator_issue_source_capability",
+            &["uuid", "text", "text", "text", "text"][..],
+        ),
+        (
+            "rss_read_projection_events_scoped",
+            &[
+                "uuid", "uuid", "uuid", "text", "text", "text", "text", "bigint", "integer",
+            ][..],
+        ),
+        (
+            "rss_projection_source_high_water_scoped",
+            &["uuid", "uuid", "uuid", "text", "text", "text", "text"][..],
+        ),
+    ] {
+        RoutineContract {
+            identity: RoutineIdentity::public(function, argument_types),
+            required: &["PERFORM public.rss_assert_projection_source_scope("],
+            forbidden: &[],
+            ordered: &[],
+        }
+        .check(normalized)?;
+    }
+    Ok(())
 }
 
 fn assert_projection_high_water_uses_static_composite_tail(high_water_body: &str) {
@@ -838,13 +916,18 @@ fn saga_durable_recovery_cutover_is_strict_atomic_and_least_privilege() {
             "0086 omits closed durable Saga invariant `{required}`"
         );
     }
-    assert_eq!(
-        SAGA_DURABLE_RECOVERY_MIGRATION
-            .matches("ADD COLUMN compensation_cause text")
-            .count(),
-        2,
-        "0086 must persist compensation cause on both instance and journal intent rows"
-    );
+    for table in ["saga_instances", "saga_journal"] {
+        let marker = format!("ALTER TABLE public.{table}");
+        let statement = SAGA_DURABLE_RECOVERY_MIGRATION
+            .split_once(&marker)
+            .map_or("", |(_, tail)| tail)
+            .split_once(';')
+            .map_or("", |(statement, _)| statement);
+        assert!(
+            statement.contains("ADD COLUMN compensation_cause text"),
+            "0086 must persist compensation cause on `{table}`"
+        );
+    }
     for forbidden in [
         "GRANT UPDATE ON TABLE public.saga_instances TO rss_app",
         "GRANT INSERT ON TABLE public.saga_journal TO rss_app",

@@ -55,6 +55,9 @@ use crate::pool::PgRuntimeStores;
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::{ProjectionWriteRegistry, append_projection_event_if_bound};
 
+#[cfg(test)]
+#[path = "../tests/support/migration_contract.rs"]
+mod migration_contract_test_support;
 mod settlement;
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
@@ -2410,6 +2413,7 @@ mod tests {
     use std::time::Duration;
 
     // reserved key / subject key 常量来自 diport 单源（#1160 A4）。
+    use super::migration_contract_test_support::{RoutineContract, RoutineIdentity};
     use super::{
         AppendFingerprintObservation, CanonicalOutboxFact, ClaimHydrationError, ClaimedOutboxRow,
         MAX_PUBLISH_ATTEMPTS, OUTBOX_CLAIM_BATCH_MAX, OutboxAppendError, OutboxEnvelope,
@@ -3209,7 +3213,7 @@ mod tests {
     }
 
     #[test]
-    fn outbox_definer_migration_matches_status_and_lease_consts() {
+    fn outbox_definer_migration_matches_status_and_lease_consts() -> Result<(), String> {
         const MIGRATION: &str = include_str!("../migrations/0031_harden_outbox_tenant_scope.sql");
         const MIGRATION_0036: &str =
             include_str!("../migrations/0036_add_outbox_schema_columns.sql");
@@ -3218,11 +3222,19 @@ mod tests {
         const MIGRATION_0047: &str =
             include_str!("../migrations/0047_outbox_partition_blocked_metric.sql");
         let ttl = format!("make_interval(secs => {LEGACY_MIGRATION_LEASE_TTL_SECONDS})");
-        assert_eq!(
-            MIGRATION.matches(&ttl).count(),
-            3,
-            "0031 definer SQL must use the Rust lease TTL constant everywhere"
-        );
+        for (function, argument_types) in [
+            ("rss_outbox_poll_pending", &["text", "bigint"][..]),
+            ("rss_outbox_acquire_lease", &["text"][..]),
+            ("rss_outbox_sample_backlog", &["text"][..]),
+        ] {
+            RoutineContract {
+                identity: RoutineIdentity::unqualified(function, argument_types),
+                required: &[ttl.as_str()],
+                forbidden: &[],
+                ordered: &[],
+            }
+            .check(MIGRATION)?;
+        }
         for status in [STATUS_PENDING, STATUS_PUBLISHING, STATUS_PUBLISHED, "dlx"] {
             assert!(
                 MIGRATION.contains(&format!("'{status}'")),
@@ -3262,11 +3274,18 @@ mod tests {
                 "0036 drift: missing {needle}"
             );
         }
-        assert_eq!(
-            MIGRATION_0037.matches(&ttl).count(),
-            2,
-            "0037 poll/backlog SQL must use the Rust lease TTL constant everywhere"
-        );
+        for (function, argument_types) in [
+            ("rss_outbox_poll_pending", &["text", "bigint"][..]),
+            ("rss_outbox_sample_backlog", &["text"][..]),
+        ] {
+            RoutineContract {
+                identity: RoutineIdentity::unqualified(function, argument_types),
+                required: &[ttl.as_str()],
+                forbidden: &[],
+                ordered: &[],
+            }
+            .check(MIGRATION_0037)?;
+        }
         for needle in [
             "DROP FUNCTION IF EXISTS rss_outbox_poll_pending(text, bigint)",
             "RETURNS TABLE(tenant_id text, contract_id text, topic text, event_id text, payload bytea)",
@@ -3282,11 +3301,13 @@ mod tests {
                 "0037 drift: missing {needle}"
             );
         }
-        assert_eq!(
-            MIGRATION_0047.matches(&ttl).count(),
-            1,
-            "0047 sample_backlog SQL must use the Rust lease TTL constant"
-        );
+        RoutineContract {
+            identity: RoutineIdentity::unqualified("rss_outbox_sample_backlog", &["text"]),
+            required: &[ttl.as_str()],
+            forbidden: &[],
+            ordered: &[],
+        }
+        .check(MIGRATION_0047)?;
         for needle in [
             "DROP FUNCTION IF EXISTS rss_outbox_sample_backlog(text)",
             "partition_blocked_depth bigint",
@@ -3299,6 +3320,7 @@ mod tests {
                 "0047 drift: missing {needle}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -3365,7 +3387,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_claim_migration_is_deadline_fenced_and_breaking() {
+    fn atomic_claim_migration_is_deadline_fenced_and_breaking() -> Result<(), String> {
         const MIGRATION: &str = include_str!("../migrations/0057_atomic_outbox_claim.sql");
         for needle in [
             "SET LOCAL lock_timeout = '5s'",
@@ -3410,38 +3432,34 @@ mod tests {
                 "0057 must remove legacy overload {legacy_signature}"
             );
         }
-        assert_eq!(
-            MIGRATION
-                .matches("WITH claim_clock AS MATERIALIZED")
-                .count(),
-            1,
-            "claim must use one materialized database clock"
-        );
+        RoutineContract {
+            identity: RoutineIdentity::unqualified("rss_outbox_claim_batch", &["text", "bigint"]),
+            required: &["WITH claim_clock AS MATERIALIZED"],
+            forbidden: &[],
+            ordered: &[],
+        }
+        .check(MIGRATION)?;
         assert!(MIGRATION.contains(&format!(
             "p_limit < 1 OR p_limit > {OUTBOX_CLAIM_BATCH_MAX}"
         )));
-        assert_eq!(
-            MIGRATION.matches("INTO locked_id").count(),
-            3,
-            "all settle functions must identify and lock their exact lease row"
-        );
-        assert_eq!(
-            MIGRATION.matches("FOR UPDATE OF o;").count(),
-            3,
-            "all settle functions must acquire the row lock before taking the clock"
-        );
-        assert_eq!(
-            MIGRATION
-                .matches("settled_at := clock_timestamp();")
-                .count(),
-            3,
-            "all settle functions must take their deadline clock after the row lock"
-        );
-        assert_eq!(
-            MIGRATION.matches("SET lock_timeout = '5s'").count(),
-            3,
-            "all settle functions must bound row-lock waits"
-        );
+        for function in [
+            "rss_outbox_settle_published",
+            "rss_outbox_settle_retry",
+            "rss_outbox_mark_dlx",
+        ] {
+            RoutineContract {
+                identity: RoutineIdentity::unqualified(function, &["text", "uuid", "bigint"]),
+                required: &["SET lock_timeout = '5s'"],
+                forbidden: &[],
+                ordered: &[
+                    "INTO locked_id",
+                    "FOR UPDATE OF o;",
+                    "settled_at := clock_timestamp();",
+                ],
+            }
+            .check(MIGRATION)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -3561,9 +3579,11 @@ mod tests {
         );
         const VALIDATION: &str =
             include_str!("../migrations/0061_validate_same_id_delivery_constraints.sql");
-        assert_eq!(VALIDATION.matches("ALTER TABLE outbox").count(), 1);
-        assert_eq!(VALIDATION.matches("VALIDATE CONSTRAINT").count(), 1);
-        assert!(VALIDATION.contains("VALIDATE CONSTRAINT outbox_same_id_state_valid"));
+        let validation = VALIDATION.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            validation
+                .contains("ALTER TABLE outbox VALIDATE CONSTRAINT outbox_same_id_state_valid")
+        );
     }
 
     #[test]
@@ -3593,15 +3613,10 @@ mod tests {
             ") UNIQUE",
             "'sha256:' || pg_catalog.encode(p_plan_digest, 'hex')",
         ] {
-            assert!(MIGRATION.contains(needle), "0098 drift: missing {needle}");
+            assert!(MIGRATION.contains(needle), "0100 drift: missing {needle}");
         }
-        assert_eq!(
-            MIGRATION
-                .matches("CREATE TABLE public.event_l2_dr_recovery_receipt")
-                .count(),
-            1,
-            "recovery keeps one immutable receipt relation instead of plan/result mirrors"
-        );
+        assert!(!MIGRATION.contains("event_l2_dr_recovery_plan"));
+        assert!(!MIGRATION.contains("event_l2_dr_recovery_result"));
         assert!(!MIGRATION.contains("now() +"));
         assert!(!MIGRATION.contains("clock_timestamp() +"));
         assert!(!MIGRATION.contains("GRANT UPDATE"));
@@ -3721,27 +3736,44 @@ mod tests {
     }
 
     #[test]
-    fn sealed_settlement_migration_locks_before_clock_and_keeps_exact_cas() {
+    fn sealed_settlement_migration_locks_before_clock_and_keeps_exact_cas() -> Result<(), String> {
         let migration = include_str!("../migrations/0066_seal_outbox_settlement_outcomes.sql");
-        assert_eq!(migration.matches("FOR UPDATE OF o").count(), 3);
-        assert_eq!(
-            migration
-                .matches("v_settled_at := clock_timestamp()")
-                .count(),
-            3
-        );
-        assert_eq!(migration.matches("RETURN 'expired'").count(), 2);
-        assert!(migration.contains("'expired'::rss_outbox_settlement_outcome"));
-        assert_eq!(
-            migration.matches("o.lease_token = p_lease_token").count(),
-            6
-        );
-        assert_eq!(
-            migration
-                .matches("p_lease_deadline_epoch_micros * interval '1 microsecond'")
-                .count(),
-            6
-        );
+        for function in [
+            "rss_outbox_settle_published",
+            "rss_outbox_settle_retry",
+            "rss_outbox_mark_dlx",
+        ] {
+            RoutineContract {
+                identity: RoutineIdentity::unqualified(function, &["text", "uuid", "bigint"]),
+                required: &[
+                    "o.lease_token = p_lease_token",
+                    "p_lease_deadline_epoch_micros * interval '1 microsecond'",
+                ],
+                forbidden: &[],
+                ordered: &["FOR UPDATE OF o", "v_settled_at := clock_timestamp()"],
+            }
+            .check(migration)?;
+        }
+        for function in ["rss_outbox_settle_published", "rss_outbox_settle_retry"] {
+            RoutineContract {
+                identity: RoutineIdentity::unqualified(function, &["text", "uuid", "bigint"]),
+                required: &["RETURN 'expired'"],
+                forbidden: &[],
+                ordered: &[],
+            }
+            .check(migration)?;
+        }
+        RoutineContract {
+            identity: RoutineIdentity::unqualified(
+                "rss_outbox_mark_dlx",
+                &["text", "uuid", "bigint"],
+            ),
+            required: &["'expired'::rss_outbox_settlement_outcome"],
+            forbidden: &["RETURN 'expired'"],
+            ordered: &[],
+        }
+        .check(migration)?;
+        Ok(())
     }
 
     #[test]

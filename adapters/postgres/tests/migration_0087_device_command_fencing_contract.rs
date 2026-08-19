@@ -1,7 +1,12 @@
 const MIGRATION_0087: &str = include_str!("../migrations/0087_fence_device_command_authority.sql");
 
+#[path = "support/migration_contract.rs"]
+mod migration_contract;
+
+use migration_contract::{RoutineContract, RoutineIdentity};
+
 #[test]
-fn migration_0087_declares_the_closed_hard_cutover_contract() {
+fn migration_0087_declares_the_closed_hard_cutover_contract() -> Result<(), String> {
     let normalized = MIGRATION_0087
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -64,18 +69,39 @@ fn migration_0087_declares_the_closed_hard_cutover_contract() {
         );
     }
 
-    let authority_sql = normalized
-        .split_once("CREATE OR REPLACE FUNCTION public.rss_device_command_guard()")
-        .map_or(normalized.as_str(), |(_, suffix)| suffix);
-    for marker in [
+    let authority_stages = [
         "FROM public.reconcile_targets AS target",
         "FROM public.reconcile_leases AS lease",
         "FROM public.device_certificate_desired_states AS desired",
+    ];
+    for identity in [
+        RoutineIdentity::public("rss_device_command_guard", &[]),
+        RoutineIdentity::public("rss_device_certificate_reported_guard", &[]),
+        RoutineIdentity::public(
+            "rss_install_fenced_device_command",
+            &[
+                "uuid", "uuid", "text", "bigint", "bigint", "bytea", "bigint",
+            ],
+        ),
+        RoutineIdentity::public(
+            "rss_apply_device_command_ack",
+            &["uuid", "uuid", "text", "bigint", "bigint", "text"],
+        ),
+        RoutineIdentity::public(
+            "rss_upsert_device_certificate_report",
+            &[
+                "uuid", "uuid", "bigint", "bigint", "bytea", "bytea", "text", "bigint", "bigint",
+                "bigint",
+            ],
+        ),
     ] {
-        assert_eq!(
-            authority_sql.matches(marker).count(),
-            5,
-            "both triggers and all three fixed funnels must use each authority lock stage"
-        );
+        RoutineContract {
+            identity,
+            required: &authority_stages,
+            forbidden: &[],
+            ordered: &authority_stages,
+        }
+        .check(MIGRATION_0087)?;
     }
+    Ok(())
 }

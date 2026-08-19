@@ -4,9 +4,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-const GENERATED_PROJECTION: &str = include_str!("../../../generated/src/projection/settings_v3.rs");
-const GENERATED_INPUTS: &str =
-    include_str!("../../../crates/postgres-migration-inventory/src/projection_inputs.rs");
+const ACTIVATED_DEFINITION_DIGEST: &str =
+    "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8";
+const ACTIVATED_INPUT_GENERATION: &str =
+    "sha256:ff7c69626735495640031695caf9c053830aa6efdcb8c3efa038d68d0cd25801";
 const READER_PASSWORD: &str = "rss_app_read_upgrade_test_pw";
 const OPERATOR_PASSWORD: &str = "rss_projection_operator_upgrade_test_pw";
 
@@ -18,16 +19,6 @@ struct UpgradeSwapRow {
     active_generation: Option<String>,
     result_token: Option<i64>,
     promoted_high_water_lsn: Option<i64>,
-}
-
-fn first_sha256_after<'a>(source: &'a str, marker: &str) -> &'a str {
-    let (_, tail) = source
-        .split_once(marker)
-        .unwrap_or_else(|| panic!("generated source omits `{marker}`"));
-    let start = tail
-        .find("sha256:")
-        .unwrap_or_else(|| panic!("generated source has no digest after `{marker}`"));
-    &tail[start..start + "sha256:".len() + 64]
 }
 
 fn migrations_through(last_version: i64) -> sqlx::migrate::Migrator {
@@ -76,8 +67,8 @@ async fn upgrade_hard_cuts_legacy_settings_state_without_touching_sources_or_gen
     migrations_through(97).run(&pool).await?;
 
     let tenant = uuid::Uuid::new_v4();
-    let definition_digest = first_sha256_after(GENERATED_PROJECTION, "settings.config-projection");
-    let input_generation = first_sha256_after(GENERATED_INPUTS, "PROJECTION_INPUT_GENERATION");
+    let definition_digest = ACTIVATED_DEFINITION_DIGEST;
+    let input_generation = ACTIVATED_INPUT_GENERATION;
     let checkpoint_owner = format!("projection:{tenant}");
     let checkpoint_id = "settings.config-projection@v3:shadow";
     let unrelated_checkpoint_owner = format!("projection:{}", uuid::Uuid::new_v4());
@@ -90,8 +81,8 @@ async fn upgrade_hard_cuts_legacy_settings_state_without_touching_sources_or_gen
          ) VALUES ($1::uuid, 'settings.config-projection', 'v3', 'v3', $2, $3, 11)",
     )
     .bind(tenant.to_string())
-    .bind(definition_digest)
-    .bind(input_generation)
+    .bind(ACTIVATED_DEFINITION_DIGEST)
+    .bind(ACTIVATED_INPUT_GENERATION)
     .execute(&pool)
     .await?;
     sqlx::query(

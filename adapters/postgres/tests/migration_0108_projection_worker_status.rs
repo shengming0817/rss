@@ -1,23 +1,23 @@
 const MIGRATION: &str = include_str!("../migrations/0108_expose_projection_worker_status.sql");
 
+#[path = "support/migration_contract.rs"]
+mod migration_contract;
+
+use migration_contract::{RoutineIdentity, routine_definition_slice};
+
 fn normalized() -> String {
-    MIGRATION.split_whitespace().collect::<Vec<_>>().join(" ")
+    migration_contract::normalize_sql(MIGRATION)
 }
 
 fn function_section<'a>(sql: &'a str, name: &str) -> Result<&'a str, String> {
-    let marker = format!("CREATE FUNCTION public.{name}(");
-    let (_, tail) = sql
-        .split_once(&marker)
-        .ok_or_else(|| format!("0107 must replace fixed function `{name}`"))?;
-    Ok(tail
-        .split_once("$function$;")
-        .map_or(tail, |(section, _)| section))
+    routine_definition_slice(
+        sql,
+        RoutineIdentity::public(name, &["uuid", "text", "text", "text", "text", "text"]),
+    )
 }
 
-#[test]
-fn worker_observation_restores_durable_quarantine_reason_after_restart() -> Result<(), String> {
-    let sql = normalized();
-    let observation = function_section(&sql, "rss_projection_worker_observe_tenant")?;
+fn assert_worker_observation_contract(sql: &str) -> Result<(), String> {
+    let observation = function_section(sql, "rss_projection_worker_observe_tenant")?;
     for required in [
         "quarantine_reason text",
         "LEFT JOIN public.projection_worker_tenant_quarantine AS quarantine",
@@ -27,15 +27,35 @@ fn worker_observation_restores_durable_quarantine_reason_after_restart() -> Resu
         "quarantine.state = 'quarantined'",
         "quarantine.reason",
     ] {
-        assert!(
-            sql.contains(required) || observation.contains(required),
-            "0107 omits durable restart observation guard `{required}`"
-        );
+        if !observation.contains(required) {
+            return Err(format!(
+                "rss_projection_worker_observe_tenant omits durable restart guard `{required}`"
+            ));
+        }
     }
     assert!(
         !observation.contains("projection_worker_tenant_is_quarantined"),
         "restart posture must recover the durable closed reason, not collapse it to a boolean"
     );
+    Ok(())
+}
+
+#[test]
+fn worker_observation_restores_durable_quarantine_reason_after_restart() -> Result<(), String> {
+    assert_worker_observation_contract(&normalized())
+}
+
+#[test]
+fn worker_observation_rejects_neighbor_quarantine_bait() -> Result<(), String> {
+    let target = "CREATE FUNCTION public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text) RETURNS text AS $$ SELECT 'neutral' $$ LANGUAGE sql;";
+    let neighbor = "CREATE FUNCTION public.neighbor() RETURNS text AS $$ SELECT quarantine.reason FROM public.projection_worker_tenant_quarantine AS quarantine $$ LANGUAGE sql;";
+    let sql = migration_contract::normalize_sql(&format!("{target}\n{neighbor}"));
+    let Err(error) = assert_worker_observation_contract(&sql) else {
+        return Err(
+            "neighboring routine satisfied the exact worker observation contract".to_owned(),
+        );
+    };
+    assert!(error.contains("rss_projection_worker_observe_tenant"));
     Ok(())
 }
 
@@ -57,10 +77,16 @@ fn worker_observation_preserves_exact_security_definer_capability() {
             "0107 capability drift: `{required}`"
         );
     }
+    let grants = sql
+        .split(';')
+        .filter(|statement| {
+            statement
+                .contains("GRANT EXECUTE ON FUNCTION public.rss_projection_worker_observe_tenant(")
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        sql.matches("GRANT EXECUTE ON FUNCTION public.rss_projection_worker_observe_tenant(")
-            .count(),
+        grants.len(),
         1,
-        "worker observation must have one exact execute grant"
+        "worker observation must have one identity-scoped execute grant"
     );
 }

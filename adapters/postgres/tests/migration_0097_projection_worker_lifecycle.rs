@@ -1,5 +1,10 @@
 const MIGRATION: &str = include_str!("../migrations/0097_install_projection_worker_lifecycle.sql");
 
+#[path = "support/migration_contract.rs"]
+mod migration_contract;
+
+use migration_contract::{RoutineIdentity, normalize_sql, routine_definition};
+
 const WORKER_FUNCTIONS: &[&str] = &[
     "rss_projection_worker_list_tenants",
     "rss_projection_worker_quarantine_tenant",
@@ -98,14 +103,64 @@ fn normalized() -> String {
     MIGRATION.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn function_section<'a>(sql: &'a str, name: &str) -> Result<&'a str, String> {
-    let marker = format!("CREATE FUNCTION public.{name}(");
-    let (_, tail) = sql
-        .split_once(&marker)
-        .ok_or_else(|| format!("0097 must create `{name}`"))?;
-    Ok(tail
-        .split_once("$function$;")
-        .map_or(tail, |(section, _)| section))
+fn function_section(_sql: &str, name: &str) -> Result<String, String> {
+    routine_definition(MIGRATION, function_identity(name)?)
+        .map(|definition| normalize_sql(&definition))
+}
+
+fn function_identity(name: &str) -> Result<RoutineIdentity<'_>, String> {
+    let identity = match name {
+        "rss_settings_projection_apply_worker" | "rss_settings_projection_apply_operator" => {
+            RoutineIdentity::public(
+                name,
+                &[
+                    "uuid", "text", "text", "text", "text", "text", "text", "bigint", "text",
+                    "text", "bigint", "bigint", "bytea",
+                ],
+            )
+        }
+        "rss_projection_worker_quarantine_tenant" => RoutineIdentity::public(
+            name,
+            &[
+                "uuid", "text", "text", "text", "text", "text", "text", "bigint",
+            ],
+        ),
+        "rss_projection_worker_has_quarantined_tenants" => {
+            RoutineIdentity::public(name, &["text", "text", "text", "text", "text"])
+        }
+        "rss_projection_operator_recover_tenant" => {
+            RoutineIdentity::public(name, &["uuid", "text", "text", "bigint"])
+        }
+        "rss_projection_worker_list_tenants" => RoutineIdentity::public(
+            name,
+            &["text", "text", "text", "text", "text", "uuid", "integer"],
+        ),
+        "rss_projection_worker_read_events" => RoutineIdentity::public(
+            name,
+            &[
+                "uuid", "text", "text", "text", "text", "text", "bigint", "integer",
+            ],
+        ),
+        "rss_projection_worker_source_high_water" | "rss_projection_worker_get_checkpoint" => {
+            RoutineIdentity::public(name, &["uuid", "text", "text", "text", "text", "text"])
+        }
+        "rss_projection_worker_save_checkpoint" => RoutineIdentity::public(
+            name,
+            &[
+                "uuid", "text", "text", "text", "text", "text", "bigint", "bigint",
+            ],
+        ),
+        "rss_projection_worker_insert_dead_letter" => RoutineIdentity::public(
+            name,
+            &[
+                "uuid", "text", "text", "text", "text", "text", "text", "text", "text", "text",
+                "text", "text", "jsonb", "text", "bigint", "text", "bytea", "text", "integer",
+                "text",
+            ],
+        ),
+        _ => return Err(format!("0097 has no typed routine identity for `{name}`")),
+    };
+    Ok(identity)
 }
 
 fn statements_containing<'a>(sql: &'a str, marker: &str) -> Vec<&'a str> {
@@ -178,12 +233,14 @@ fn hard_cut_replaces_ambiguous_apply_with_fixed_purpose_entrypoints() -> Result<
     ] {
         let section = function_section(&sql, function)?;
         let signature = section
-            .split_once(") RETURNS text")
-            .map_or(section, |(signature, _)| signature);
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once(") RETURNS text"))
+            .map(|(signature, _)| signature)
+            .ok_or_else(|| format!("`{function}` has no typed apply signature"))?;
         assert_eq!(
-            signature.matches("p_").count(),
-            13,
-            "`{function}` must retain the metadata-only 13-argument apply signature"
+            signature,
+            " p_tenant_id uuid, p_projection_id text, p_generation text, p_definition_version text, p_definition_schema_digest text, p_input_generation text, p_config_key text, p_config_version bigint, p_change_kind text, p_source_event_id text, p_source_lsn bigint, p_source_occurred_at_secs bigint, p_fact_digest bytea ",
+            "`{function}` must retain the exact metadata-only apply signature"
         );
         assert!(
             !signature.contains("actor") && !signature.contains("purpose"),
