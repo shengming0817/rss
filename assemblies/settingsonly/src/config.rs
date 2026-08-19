@@ -37,36 +37,6 @@ use runtimeexec::config::{
     SPIFFE_ENDPOINT_ENV,
 };
 use runtimeexec::config::{FrontendConfigError, SecretValue};
-#[cfg(test)]
-const PG_WRITER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_WRITER_PASSWORD";
-#[cfg(test)]
-const PG_READER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_READER_PASSWORD";
-#[cfg(test)]
-const PG_DLX_ARCHIVER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_DLX_ARCHIVER_PASSWORD";
-#[cfg(test)]
-const PG_DLX_VERIFIER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_DLX_VERIFIER_PASSWORD";
-#[cfg(test)]
-const PG_DLX_PURGER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_DLX_PURGER_PASSWORD";
-#[cfg(test)]
-const PG_PROJECTION_WORKER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_PROJECTION_WORKER_PASSWORD";
-#[cfg(test)]
-const VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_VAULT_TOKEN";
-#[cfg(test)]
-const SETTINGS_AMQP_PUBLISHER_URL_ENV: &str = "RSS_SETTINGSONLY_AMQP_PUBLISHER_URL";
-#[cfg(test)]
-const SETTINGS_AMQP_SUBSCRIBER_URL_ENV: &str = "RSS_SETTINGSONLY_AMQP_SUBSCRIBER_URL";
-#[cfg(test)]
-const REDIS_URL_ENV: &str = "RSS_SETTINGSONLY_REDIS_URL";
-#[cfg(test)]
-const TENANT_AUTHORITY_KEY_ENV: &str = "RSS_SETTINGSONLY_TENANT_AUTHORITY_KEY";
-#[cfg(test)]
-const DLX_HOT_VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_DLX_HOT_VAULT_TOKEN";
-#[cfg(test)]
-const DLX_ARCHIVE_VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_DLX_ARCHIVE_VAULT_TOKEN";
-#[cfg(test)]
-const S3_ACCESS_KEY_ID_ENV: &str = "RSS_SETTINGSONLY_S3_ACCESS_KEY_ID";
-#[cfg(test)]
-const S3_SECRET_ACCESS_KEY_ENV: &str = "RSS_SETTINGSONLY_S3_SECRET_ACCESS_KEY";
 const FORBIDDEN_SHARED_AMQP_URL_ENV: &str = "RSS_AMQP_URL";
 
 /// Capture, parse, validate, and resolve one immutable settings-only configuration generation.
@@ -1749,7 +1719,7 @@ fn schema_bytes() -> Vec<u8> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
 
@@ -1853,7 +1823,7 @@ totalSeconds = 60
         document: String,
         secret_document: Option<String>,
         document_reads: usize,
-        environments: BTreeMap<&'static str, OsString>,
+        environments: BTreeMap<&'static str, Option<OsString>>,
         environment_reads: BTreeMap<&'static str, usize>,
     }
 
@@ -1861,67 +1831,62 @@ totalSeconds = 60
         fn complete(document: impl Into<String>) -> Self {
             Self {
                 document: document.into(),
-                secret_document: None,
+                secret_document: Some(valid_secret_bundle_document()),
                 document_reads: 0,
-                environments: [
+                environments: BTreeMap::from([
+                    (FORBIDDEN_SHARED_AMQP_URL_ENV, None),
                     (
-                        PG_WRITER_PASSWORD_ENV,
-                        "do-not-leak-settingsonly-secret-writer",
+                        BUILD_SOURCE_REVISION_ENV,
+                        Some(OsString::from("a".repeat(40))),
                     ),
-                    (
-                        PG_READER_PASSWORD_ENV,
-                        "do-not-leak-settingsonly-secret-reader",
-                    ),
-                    (PG_DLX_ARCHIVER_PASSWORD_ENV, "dlx-archiver-password"),
-                    (PG_DLX_VERIFIER_PASSWORD_ENV, "dlx-verifier-password"),
-                    (PG_DLX_PURGER_PASSWORD_ENV, "dlx-purger-password"),
-                    (
-                        PG_PROJECTION_WORKER_PASSWORD_ENV,
-                        "projection-worker-password",
-                    ),
-                    (VAULT_TOKEN_ENV, "settings-vault-token"),
-                    (
-                        SETTINGS_AMQP_PUBLISHER_URL_ENV,
-                        "amqps://settings-publisher:secret@rabbit.example.test/%2fsettings",
-                    ),
-                    (
-                        SETTINGS_AMQP_SUBSCRIBER_URL_ENV,
-                        "amqps://settings-subscriber:secret@rabbit.example.test/%2fsettings",
-                    ),
-                    (REDIS_URL_ENV, "rediss://redis.example.test:6379/0"),
-                    (
-                        TENANT_AUTHORITY_KEY_ENV,
-                        "tenant-authority-key-material-32-bytes",
-                    ),
-                    (DLX_HOT_VAULT_TOKEN_ENV, "dlx-hot-vault-token"),
-                    (DLX_ARCHIVE_VAULT_TOKEN_ENV, "dlx-archive-vault-token"),
-                    (S3_ACCESS_KEY_ID_ENV, "settingsonly-s3-access"),
-                    (S3_SECRET_ACCESS_KEY_ENV, "settingsonly-s3-secret"),
-                ]
-                .into_iter()
-                .map(|(name, value)| (name, OsString::from(value)))
-                .chain([
-                    (BUILD_SOURCE_REVISION_ENV, OsString::from("a".repeat(40))),
                     (
                         DECLARED_IMAGE_DIGEST_ENV,
-                        OsString::from(format!("sha256:{}", "b".repeat(64))),
+                        Some(OsString::from(format!("sha256:{}", "b".repeat(64)))),
                     ),
-                    (POD_IP_ENV, OsString::from("127.0.0.2")),
-                    (PRIMARY_PORT_ENV, OsString::from("8080")),
-                    (ADMIN_PORT_ENV, OsString::from("8082")),
-                    (HEALTH_PORT_ENV, OsString::from("8083")),
+                    (POD_IP_ENV, Some(OsString::from("127.0.0.2"))),
+                    (PRIMARY_PORT_ENV, Some(OsString::from("8080"))),
+                    (ADMIN_PORT_ENV, Some(OsString::from("8082"))),
+                    (HEALTH_PORT_ENV, Some(OsString::from("8083"))),
                     (
                         MTLS_ALLOW_SET_ENV,
-                        OsString::from("[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]"),
+                        Some(OsString::from(
+                            "[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]",
+                        )),
                     ),
                     (
                         SPIFFE_ENDPOINT_ENV,
-                        OsString::from("unix:///run/spire/sockets/agent.sock"),
+                        Some(OsString::from("unix:///run/spire/sockets/agent.sock")),
                     ),
-                ])
-                .collect(),
+                    (runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV, None),
+                    (runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV, None),
+                    (runtimeexec::config::RATE_LIMIT_BURST_ENV, None),
+                ]),
                 environment_reads: BTreeMap::new(),
             }
+        }
+
+        fn set_environment(&mut self, name: &'static str, value: impl Into<OsString>) {
+            assert!(self.environments.contains_key(name));
+            self.environments.insert(name, Some(value.into()));
+        }
+
+        fn clear_environment(&mut self, name: &'static str) {
+            assert!(self.environments.contains_key(name));
+            self.environments.insert(name, None);
+        }
+
+        fn mutate_secret_bundle(
+            &mut self,
+            mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+        ) {
+            let document = self
+                .secret_document
+                .as_deref()
+                .expect("complete source has one secret document");
+            let mut value: serde_json::Value =
+                serde_json::from_str(document).expect("valid secret fixture JSON");
+            mutate(value.as_object_mut().expect("secret fixture is an object"));
+            self.secret_document = Some(value.to_string());
         }
     }
 
@@ -1932,41 +1897,47 @@ totalSeconds = 60
         }
 
         fn read_secret_bundle(&mut self, _path: &Path) -> std::io::Result<Zeroizing<String>> {
-            if let Some(document) = self.secret_document.take() {
-                return Ok(Zeroizing::new(document));
-            }
-            let value = |source: &mut Self, name| {
-                source
-                    .read_environment(name)
-                    .and_then(|value| value.into_string().ok())
-                    .unwrap_or_default()
-            };
-            Ok(Zeroizing::new(
-                serde_json::json!({
-                    "pgWriterPassword": value(self, PG_WRITER_PASSWORD_ENV),
-                    "pgReaderPassword": value(self, PG_READER_PASSWORD_ENV),
-                    "pgDlxArchiverPassword": value(self, PG_DLX_ARCHIVER_PASSWORD_ENV),
-                    "pgDlxVerifierPassword": value(self, PG_DLX_VERIFIER_PASSWORD_ENV),
-                    "pgDlxPurgerPassword": value(self, PG_DLX_PURGER_PASSWORD_ENV),
-                    "pgProjectionWorkerPassword": value(self, PG_PROJECTION_WORKER_PASSWORD_ENV),
-                    "vaultToken": value(self, VAULT_TOKEN_ENV),
-                    "settingsAmqpPublisherUrl": value(self, SETTINGS_AMQP_PUBLISHER_URL_ENV),
-                    "settingsAmqpSubscriberUrl": value(self, SETTINGS_AMQP_SUBSCRIBER_URL_ENV),
-                    "redisUrl": value(self, REDIS_URL_ENV),
-                    "tenantAuthorityKey": value(self, TENANT_AUTHORITY_KEY_ENV),
-                    "dlxHotVaultToken": value(self, DLX_HOT_VAULT_TOKEN_ENV),
-                    "dlxArchiveVaultToken": value(self, DLX_ARCHIVE_VAULT_TOKEN_ENV),
-                    "s3AccessKeyId": value(self, S3_ACCESS_KEY_ID_ENV),
-                    "s3SecretAccessKey": value(self, S3_SECRET_ACCESS_KEY_ENV),
-                })
-                .to_string(),
-            ))
+            self.secret_document
+                .take()
+                .map(Zeroizing::new)
+                .ok_or_else(|| std::io::Error::other("secret document was read more than once"))
         }
 
         fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
             *self.environment_reads.entry(name).or_default() += 1;
-            self.environments.get(name).cloned()
+            self.environments.get(name).cloned().flatten()
         }
+    }
+
+    fn valid_secret_bundle_document() -> String {
+        serde_json::json!({
+            "pgWriterPassword": "do-not-leak-settingsonly-secret-writer",
+            "pgReaderPassword": "do-not-leak-settingsonly-secret-reader",
+            "pgDlxArchiverPassword": "dlx-archiver-password",
+            "pgDlxVerifierPassword": "dlx-verifier-password",
+            "pgDlxPurgerPassword": "dlx-purger-password",
+            "pgProjectionWorkerPassword": "projection-worker-password",
+            "vaultToken": "settings-vault-token",
+            "settingsAmqpPublisherUrl": "amqps://settings-publisher:secret@rabbit.example.test/%2fsettings",
+            "settingsAmqpSubscriberUrl": "amqps://settings-subscriber:secret@rabbit.example.test/%2fsettings",
+            "redisUrl": "rediss://redis.example.test:6379/0",
+            "tenantAuthorityKey": "tenant-authority-key-material-32-bytes",
+            "dlxHotVaultToken": "dlx-hot-vault-token",
+            "dlxArchiveVaultToken": "dlx-archive-vault-token",
+            "s3AccessKeyId": "settingsonly-s3-access",
+            "s3SecretAccessKey": "settingsonly-s3-secret",
+        })
+        .to_string()
+    }
+
+    fn environment_reads_are_exact(source: &TestSource) -> bool {
+        source.environments.keys().copied().collect::<BTreeSet<_>>()
+            == source
+                .environment_reads
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>()
+            && source.environment_reads.values().all(|reads| *reads == 1)
     }
 
     fn parse(document: &str) -> Result<SettingsOnlyConfig, ConfigError> {
@@ -2196,16 +2167,12 @@ totalSeconds = 60
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 27);
-        assert!(source.environment_reads.values().all(|reads| *reads == 1));
-        for key in [
-            runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV,
-            runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV,
-            runtimeexec::config::RATE_LIMIT_BURST_ENV,
-        ] {
-            assert_eq!(source.environment_reads[key], 1);
-        }
-        assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
+        assert!(
+            environment_reads_are_exact(&source),
+            "environment read closure drift: expected_keys={:?} actual_reads={:?}",
+            source.environments.keys().collect::<Vec<_>>(),
+            source.environment_reads
+        );
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
         let (config, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
         let build_metadata = build_metadata.expect("build metadata");
@@ -2219,6 +2186,36 @@ totalSeconds = 60
         let (vault, secrets) = secrets.into_production_material(config.into_sections().vault);
         assert_eq!(vault.provisioning_view().token, "settings-vault-token");
         assert_secret_material(secrets);
+    }
+
+    #[test]
+    fn environment_read_comparator_rejects_shape_preserving_replacements() {
+        let mut source = TestSource::complete(VALID_CONFIG);
+        source.environment_reads = source
+            .environments
+            .keys()
+            .copied()
+            .map(|key| (key, 1))
+            .collect();
+        assert!(environment_reads_are_exact(&source));
+
+        source.environment_reads.remove(PRIMARY_PORT_ENV);
+        assert!(!environment_reads_are_exact(&source));
+
+        source
+            .environment_reads
+            .insert("RSS_EQUAL_SIZE_REPLACEMENT", 1);
+        assert!(!environment_reads_are_exact(&source));
+
+        source
+            .environment_reads
+            .remove("RSS_EQUAL_SIZE_REPLACEMENT");
+        source.environment_reads.insert(PRIMARY_PORT_ENV, 2);
+        assert!(!environment_reads_are_exact(&source));
+
+        source.environment_reads.insert(PRIMARY_PORT_ENV, 1);
+        source.environment_reads.insert("RSS_EXTRA_INPUT", 1);
+        assert!(!environment_reads_are_exact(&source));
     }
 
     #[test]
@@ -2264,7 +2261,7 @@ totalSeconds = 60
     fn capture_rejects_partial_build_metadata() {
         for missing in [BUILD_SOURCE_REVISION_ENV, DECLARED_IMAGE_DIGEST_ENV] {
             let mut source = TestSource::complete(VALID_CONFIG);
-            source.environments.remove(missing);
+            source.clear_environment(missing);
             assert_eq!(
                 capture_from(Path::new("ignored"), &mut source).unwrap_err(),
                 ConfigError::InvalidValue("buildMetadata")
@@ -2275,9 +2272,7 @@ totalSeconds = 60
     #[test]
     fn frontend_failure_names_the_exact_environment_variable() {
         let mut source = TestSource::complete(VALID_CONFIG);
-        source
-            .environments
-            .insert(PRIMARY_PORT_ENV, OsString::from("not-a-port"));
+        source.set_environment(PRIMARY_PORT_ENV, "not-a-port");
 
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
 
@@ -2287,7 +2282,9 @@ totalSeconds = 60
     #[test]
     fn capture_errors_do_not_expose_secret_material() {
         let mut source = TestSource::complete(VALID_CONFIG);
-        source.environments.remove(VAULT_TOKEN_ENV);
+        source.mutate_secret_bundle(|bundle| {
+            bundle.remove("vaultToken");
+        });
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
         assert_eq!(
             error,
@@ -2321,7 +2318,12 @@ totalSeconds = 60
         }
 
         let mut source = TestSource::complete(VALID_CONFIG);
-        source.environments.insert(VAULT_TOKEN_ENV, OsString::new());
+        source.mutate_secret_bundle(|bundle| {
+            bundle.insert(
+                "vaultToken".to_owned(),
+                serde_json::Value::String(String::new()),
+            );
+        });
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
         assert_eq!(
             error,
@@ -2335,9 +2337,9 @@ totalSeconds = 60
     #[test]
     fn shared_amqp_environment_is_rejected_without_bundle_fallback() {
         let mut source = TestSource::complete(VALID_CONFIG);
-        source.environments.insert(
+        source.set_environment(
             FORBIDDEN_SHARED_AMQP_URL_ENV,
-            OsString::from("amqps://shared.example.test/%2f"),
+            "amqps://shared.example.test/%2f",
         );
         assert_eq!(
             capture_from(Path::new("ignored"), &mut source).unwrap_err(),
@@ -2350,34 +2352,32 @@ totalSeconds = 60
     fn production_transport_secrets_require_tls_and_distinct_vault_tokens() {
         for (name, value, field) in [
             (
-                SETTINGS_AMQP_PUBLISHER_URL_ENV,
+                "settingsAmqpPublisherUrl",
                 "amqp://rabbit.example.test/%2fsettings",
                 "eventing.settingsAmqpPublisherUrl",
             ),
             (
-                SETTINGS_AMQP_SUBSCRIBER_URL_ENV,
+                "settingsAmqpSubscriberUrl",
                 "amqp://rabbit.example.test/%2fsettings",
                 "eventing.settingsAmqpSubscriberUrl",
             ),
+            ("redisUrl", "redis://redis.example.test:6379/0", "redis.url"),
             (
-                REDIS_URL_ENV,
-                "redis://redis.example.test:6379/0",
-                "redis.url",
-            ),
-            (
-                DLX_ARCHIVE_VAULT_TOKEN_ENV,
+                "dlxArchiveVaultToken",
                 "dlx-hot-vault-token",
                 "vault.workloadTokens",
             ),
             (
-                PG_DLX_PURGER_PASSWORD_ENV,
+                "pgDlxPurgerPassword",
                 "do-not-leak-settingsonly-secret-writer",
                 "postgres.rolePasswords",
             ),
-            (TENANT_AUTHORITY_KEY_ENV, "too-short", "tenantAuthority.key"),
+            ("tenantAuthorityKey", "too-short", "tenantAuthority.key"),
         ] {
             let mut source = TestSource::complete(VALID_CONFIG);
-            source.environments.insert(name, OsString::from(value));
+            source.mutate_secret_bundle(|bundle| {
+                bundle.insert(name.to_owned(), serde_json::Value::String(value.to_owned()));
+            });
             assert_eq!(
                 capture_from(Path::new("ignored"), &mut source).unwrap_err(),
                 ConfigError::InvalidValue(field)
@@ -2385,10 +2385,14 @@ totalSeconds = 60
         }
 
         let mut source = TestSource::complete(VALID_CONFIG);
-        let publisher_url = source.environments[SETTINGS_AMQP_PUBLISHER_URL_ENV].clone();
-        source
-            .environments
-            .insert(SETTINGS_AMQP_SUBSCRIBER_URL_ENV, publisher_url);
+        source.mutate_secret_bundle(|bundle| {
+            bundle.insert(
+                "settingsAmqpSubscriberUrl".to_owned(),
+                serde_json::Value::String(
+                    "amqps://settings-publisher:secret@rabbit.example.test/%2fsettings".to_owned(),
+                ),
+            );
+        });
         assert_eq!(
             capture_from(Path::new("ignored"), &mut source).unwrap_err(),
             ConfigError::InvalidValue("eventing.amqpRoleUrls")

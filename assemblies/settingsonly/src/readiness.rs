@@ -20,7 +20,7 @@ pub(crate) const SETTINGS_PROJECTION_WORKER: &str = "projection_worker:settings.
 /// Exact required-probe closure of the production SettingsOnly assembly.
 /// Compiled only for unit tests and the `test-support` façade (artifact acceptance).
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 18] = [
+pub(crate) const PRODUCTION_REQUIRED_PROBES: &[&str] = &[
     RLS,
     settings_composition::CONFIGS_READY_PROBE_NAME,
     settings_composition::KEYPROVIDER_READY_PROBE_NAME,
@@ -48,7 +48,10 @@ mod tests {
     #[test]
     fn production_required_probe_inventory_is_exact_and_unique() {
         let probes = super::PRODUCTION_REQUIRED_PROBES;
-        assert_eq!(probes.len(), 18);
-        assert_eq!(probes.into_iter().collect::<HashSet<_>>().len(), 18);
+        assert!(!probes.is_empty());
+        assert_eq!(
+            probes.iter().copied().collect::<HashSet<_>>().len(),
+            probes.len()
+        );
     }
 }

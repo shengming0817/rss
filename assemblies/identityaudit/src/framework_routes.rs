@@ -297,6 +297,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::*;
@@ -308,6 +309,7 @@ mod tests {
     fn inventory_channel_fixture() -> anyhow::Result<(
         runtimeexec::inventory::InventoryPublisher,
         runtimeexec::inventory::InventoryReader,
+        crate::plan::IdentityAuditPlan,
     )> {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
         let provider_bindings = crate::providers_gen::PROVIDER_CATALOG
@@ -318,12 +320,20 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let seed = plan.inventory_seed_fixture(provider_bindings)?;
         let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
-        Ok(runtimeexec::inventory::inventory_channel(seed, reporter))
+        let (publisher, reader) = runtimeexec::inventory::inventory_channel(seed, reporter);
+        Ok((publisher, reader, plan))
+    }
+
+    fn is_unique_exact<T: Ord>(actual: &[T], expected: &[T]) -> bool {
+        !expected.is_empty()
+            && actual.iter().collect::<BTreeSet<_>>().len() == actual.len()
+            && expected.iter().collect::<BTreeSet<_>>().len() == expected.len()
+            && actual == expected
     }
 
     #[tokio::test]
     async fn unpublished_inventory_returns_retryable_provider_unavailable() -> anyhow::Result<()> {
-        let (_publisher, reader) = inventory_channel_fixture()?;
+        let (_publisher, reader, _plan) = inventory_channel_fixture()?;
         let response = inventory_http_response(
             &reader,
             httpserve::VerifiedRequestId::for_test("inventory-unpublished"),
@@ -348,7 +358,7 @@ mod tests {
     #[test]
     fn framework_route_and_dto_mapping_are_exact() -> anyhow::Result<()> {
         let mut registry = bootstrap::compose(&[])?;
-        let (publisher, reader) = inventory_channel_fixture()?;
+        let (publisher, reader, plan) = inventory_channel_fixture()?;
         crate::modules_gen::register_framework_routes(
             &IdentityAuditFrameworkRoutes::new(reader.clone()),
             &mut registry,
@@ -387,11 +397,85 @@ mod tests {
             wire::RuntimeInventorySchemaVersion::V2
         );
         assert!(response.data.activated_workflows.is_empty());
-        assert_eq!(response.data.listeners.len(), 3);
-        assert_eq!(response.data.provider_posture.len(), 9);
-        assert_eq!(response.data.placements.len(), 2);
+        let expected_listener_ids = plan
+            .as_typed()
+            .listener_plans()
+            .iter()
+            .map(|listener| listener.id().to_owned())
+            .collect::<Vec<_>>();
+        let actual_listener_ids = response
+            .data
+            .listeners
+            .iter()
+            .map(|listener| listener.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            is_unique_exact(&actual_listener_ids, &expected_listener_ids),
+            "listener projection drift: expected={expected_listener_ids:?} actual={actual_listener_ids:?}"
+        );
+
+        let expected_provider_ids = crate::providers_gen::PROVIDER_CATALOG
+            .iter()
+            .map(|entry| entry.role().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let actual_provider_ids = response
+            .data
+            .provider_posture
+            .iter()
+            .map(|provider| provider.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            is_unique_exact(&actual_provider_ids, &expected_provider_ids),
+            "provider projection drift: expected={expected_provider_ids:?} actual={actual_provider_ids:?}"
+        );
+
+        let expected_placements = plan
+            .as_typed()
+            .placement_plans()
+            .iter()
+            .map(|placement| {
+                (
+                    placement.domain().to_string(),
+                    placement.workload().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let actual_placements = response
+            .data
+            .placements
+            .iter()
+            .map(|placement| {
+                (
+                    placement.domain.to_string(),
+                    placement.workload.as_str().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            is_unique_exact(&actual_placements, &expected_placements),
+            "placement projection drift: expected={expected_placements:?} actual={actual_placements:?}"
+        );
         let encoded = serde_json::to_value(response)?;
         assert_eq!(encoded["data"]["activatedWorkflows"], serde_json::json!([]));
         Ok(())
+    }
+
+    #[test]
+    fn dto_identity_comparator_rejects_replacement_and_duplicate_ids() {
+        let expected = vec!["admin-main", "health-main", "primary-main"];
+        assert!(is_unique_exact(&expected, &expected));
+        assert!(!is_unique_exact(
+            &["admin-main", "health-main", "replacement"],
+            &expected
+        ));
+        assert!(!is_unique_exact(
+            &["admin-main", "admin-main", "primary-main"],
+            &expected
+        ));
+        assert!(!is_unique_exact(&["admin-main", "primary-main"], &expected));
+        assert!(!is_unique_exact(
+            &["admin-main", "extra", "health-main", "primary-main"],
+            &expected
+        ));
     }
 }

@@ -23,26 +23,6 @@ use runtimeexec::config::{
     SPIFFE_ENDPOINT_ENV,
 };
 use runtimeexec::config::{FrontendConfigError, SecretDocument, SecretValue};
-#[cfg(test)]
-const PG_WRITER_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_WRITER_PASSWORD";
-#[cfg(test)]
-const PG_READER_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_READER_PASSWORD";
-#[cfg(test)]
-const PG_AUDIT_ADMIN_PASSWORD_ENV: &str = "RSS_IDENTITYAUDIT_PG_AUDIT_ADMIN_PASSWORD";
-#[cfg(test)]
-const VAULT_SIGNER_TOKEN_ENV: &str = "RSS_IDENTITYAUDIT_VAULT_SIGNER_TOKEN";
-#[cfg(test)]
-const VAULT_DLX_TOKEN_ENV: &str = "RSS_IDENTITYAUDIT_VAULT_DLX_TOKEN";
-#[cfg(test)]
-const IDENTITY_AMQP_URL_ENV: &str = "RSS_IDENTITY_AMQP_URL";
-#[cfg(test)]
-const REDIS_URL_ENV: &str = "RSS_REDIS_URL";
-#[cfg(test)]
-const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
-#[cfg(test)]
-const TENANT_AUTHORITY_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
-#[cfg(test)]
-const IDENTITY_PSEUDONYM_KEY_ENV: &str = "RSS_IDENTITY_PSEUDONYM_KEY_B64URL";
 const FORBIDDEN_SHARED_AMQP_URL_ENV: &str = "RSS_AMQP_URL";
 
 /// Read, parse, validate, and resolve one immutable configuration generation.
@@ -1104,7 +1084,7 @@ fn schema_bytes() -> Vec<u8> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use anyhow::Context as _;
 
@@ -1175,54 +1155,75 @@ caCertPemPath = "/run/rss/redis-ca.pem"
 
     struct TestSource {
         document: String,
+        secret_document: Option<String>,
         document_reads: usize,
-        environments: BTreeMap<&'static str, OsString>,
+        environments: BTreeMap<&'static str, Option<OsString>>,
         environment_reads: BTreeMap<&'static str, usize>,
     }
 
     impl TestSource {
         fn complete(document: impl Into<String>) -> Self {
-            let environments = [
-                (PG_WRITER_PASSWORD_ENV, SECRET_SENTINEL),
-                (PG_READER_PASSWORD_ENV, SECRET_SENTINEL),
-                (PG_AUDIT_ADMIN_PASSWORD_ENV, SECRET_SENTINEL),
-                (VAULT_SIGNER_TOKEN_ENV, SECRET_SENTINEL),
-                (VAULT_DLX_TOKEN_ENV, "identityaudit-dlx-token-distinct"),
-                (
-                    IDENTITY_AMQP_URL_ENV,
-                    "amqps://identity:secret@rabbit.example.test/%2fidentity",
-                ),
-                (REDIS_URL_ENV, "rediss://redis.example.test:6379/0"),
-                (AUDIT_CHAIN_KEY_ENV, VALID_KEY),
-                (TENANT_AUTHORITY_KEY_ENV, VALID_KEY),
-                (IDENTITY_PSEUDONYM_KEY_ENV, VALID_KEY),
+            let environments = BTreeMap::from([
+                (FORBIDDEN_SHARED_AMQP_URL_ENV, None),
                 (
                     BUILD_SOURCE_REVISION_ENV,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    Some(OsString::from("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
                 ),
                 (
                     DECLARED_IMAGE_DIGEST_ENV,
-                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    Some(OsString::from(
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    )),
                 ),
-                (POD_IP_ENV, "127.0.0.2"),
-                (PRIMARY_PORT_ENV, "8080"),
-                (ADMIN_PORT_ENV, "8081"),
-                (HEALTH_PORT_ENV, "8083"),
+                (POD_IP_ENV, Some(OsString::from("127.0.0.2"))),
+                (PRIMARY_PORT_ENV, Some(OsString::from("8080"))),
+                (ADMIN_PORT_ENV, Some(OsString::from("8081"))),
+                (HEALTH_PORT_ENV, Some(OsString::from("8083"))),
                 (
                     MTLS_ALLOW_SET_ENV,
-                    "[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]",
+                    Some(OsString::from(
+                        "[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]",
+                    )),
                 ),
-                (SPIFFE_ENDPOINT_ENV, "unix:///run/spire/sockets/agent.sock"),
-            ]
-            .into_iter()
-            .map(|(name, value)| (name, OsString::from(value)))
-            .collect();
+                (
+                    SPIFFE_ENDPOINT_ENV,
+                    Some(OsString::from("unix:///run/spire/sockets/agent.sock")),
+                ),
+                (runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV, None),
+                (runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV, None),
+                (runtimeexec::config::RATE_LIMIT_BURST_ENV, None),
+            ]);
             Self {
                 document: document.into(),
+                secret_document: Some(valid_secret_bundle_document()),
                 document_reads: 0,
                 environments,
                 environment_reads: BTreeMap::new(),
             }
+        }
+
+        fn set_environment(&mut self, name: &'static str, value: impl Into<OsString>) {
+            assert!(self.environments.contains_key(name));
+            self.environments.insert(name, Some(value.into()));
+        }
+
+        fn clear_environment(&mut self, name: &'static str) {
+            assert!(self.environments.contains_key(name));
+            self.environments.insert(name, None);
+        }
+
+        fn mutate_secret_bundle(
+            &mut self,
+            mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+        ) {
+            let document = self
+                .secret_document
+                .as_deref()
+                .expect("complete source has one secret document");
+            let mut value: serde_json::Value =
+                serde_json::from_str(document).expect("valid secret fixture JSON");
+            mutate(value.as_object_mut().expect("secret fixture is an object"));
+            self.secret_document = Some(value.to_string());
         }
     }
 
@@ -1233,42 +1234,42 @@ caCertPemPath = "/run/rss/redis-ca.pem"
         }
 
         fn read_secret_bundle(&mut self, _path: &Path) -> std::io::Result<SecretDocument> {
-            let pg_writer_password = self.read_environment(PG_WRITER_PASSWORD_ENV);
-            let pg_reader_password = self.read_environment(PG_READER_PASSWORD_ENV);
-            let pg_audit_admin_password = self.read_environment(PG_AUDIT_ADMIN_PASSWORD_ENV);
-            let vault_signer_token = self.read_environment(VAULT_SIGNER_TOKEN_ENV);
-            let vault_dlx_token = self.read_environment(VAULT_DLX_TOKEN_ENV);
-            let identity_amqp_url = self.read_environment(IDENTITY_AMQP_URL_ENV);
-            let redis_url = self.read_environment(REDIS_URL_ENV);
-            let audit_chain_key = self.read_environment(AUDIT_CHAIN_KEY_ENV);
-            let tenant_authority_key = self.read_environment(TENANT_AUTHORITY_KEY_ENV);
-            let identity_pseudonym_key = self.read_environment(IDENTITY_PSEUDONYM_KEY_ENV);
-            let text = |value: Option<OsString>| {
-                value
-                    .and_then(|value| value.into_string().ok())
-                    .unwrap_or_default()
-            };
-            Ok(SecretDocument::new(Zeroizing::new(
-                serde_json::json!({
-                    "pgWriterPassword": text(pg_writer_password),
-                    "pgReaderPassword": text(pg_reader_password),
-                    "pgAuditAdminPassword": text(pg_audit_admin_password),
-                    "vaultSignerToken": text(vault_signer_token),
-                    "vaultDlxToken": text(vault_dlx_token),
-                    "identityAmqpUrl": text(identity_amqp_url),
-                    "redisUrl": text(redis_url),
-                    "auditChainKey": text(audit_chain_key),
-                    "tenantAuthorityKey": text(tenant_authority_key),
-                    "identityPseudonymKey": text(identity_pseudonym_key),
-                })
-                .to_string(),
-            )))
+            self.secret_document
+                .take()
+                .map(|document| SecretDocument::new(Zeroizing::new(document)))
+                .ok_or_else(|| std::io::Error::other("secret document was read more than once"))
         }
 
         fn read_environment(&mut self, name: &'static str) -> Option<OsString> {
             *self.environment_reads.entry(name).or_default() += 1;
-            self.environments.get(name).cloned()
+            self.environments.get(name).cloned().flatten()
         }
+    }
+
+    fn valid_secret_bundle_document() -> String {
+        serde_json::json!({
+            "pgWriterPassword": SECRET_SENTINEL,
+            "pgReaderPassword": SECRET_SENTINEL,
+            "pgAuditAdminPassword": SECRET_SENTINEL,
+            "vaultSignerToken": SECRET_SENTINEL,
+            "vaultDlxToken": "identityaudit-dlx-token-distinct",
+            "identityAmqpUrl": "amqps://identity:secret@rabbit.example.test/%2fidentity",
+            "redisUrl": "rediss://redis.example.test:6379/0",
+            "auditChainKey": VALID_KEY,
+            "tenantAuthorityKey": VALID_KEY,
+            "identityPseudonymKey": VALID_KEY,
+        })
+        .to_string()
+    }
+
+    fn environment_reads_are_exact(source: &TestSource) -> bool {
+        source.environments.keys().copied().collect::<BTreeSet<_>>()
+            == source
+                .environment_reads
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>()
+            && source.environment_reads.values().all(|reads| *reads == 1)
     }
 
     fn parse(document: &str) -> Result<IdentityAuditConfig, ConfigError> {
@@ -1405,16 +1406,35 @@ caCertPemPath = "/run/rss/redis-ca.pem"
 
     fn assert_capture_source_reads(source: &TestSource) {
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 22);
-        assert!(source.environment_reads.values().all(|reads| *reads == 1));
-        assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
-        for key in [
-            runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV,
-            runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV,
-            runtimeexec::config::RATE_LIMIT_BURST_ENV,
-        ] {
-            assert_eq!(source.environment_reads[key], 1);
-        }
+        assert!(
+            environment_reads_are_exact(source),
+            "environment read closure drift: expected_keys={:?} actual_reads={:?}",
+            source.environments.keys().collect::<Vec<_>>(),
+            source.environment_reads
+        );
+    }
+
+    #[test]
+    fn environment_read_comparator_rejects_missing_extra_duplicate_and_equal_replacement() {
+        let mut source = TestSource::complete(VALID_CONFIG);
+        source.environment_reads = source
+            .environments
+            .keys()
+            .copied()
+            .map(|key| (key, 1))
+            .collect();
+        assert!(environment_reads_are_exact(&source));
+
+        source.environment_reads.remove(PRIMARY_PORT_ENV);
+        assert!(!environment_reads_are_exact(&source));
+        source.environment_reads.insert("RSS_EQUAL_REPLACEMENT", 1);
+        assert!(!environment_reads_are_exact(&source));
+        source.environment_reads.remove("RSS_EQUAL_REPLACEMENT");
+        source.environment_reads.insert(PRIMARY_PORT_ENV, 2);
+        assert!(!environment_reads_are_exact(&source));
+        source.environment_reads.insert(PRIMARY_PORT_ENV, 1);
+        source.environment_reads.insert("RSS_EXTRA", 1);
+        assert!(!environment_reads_are_exact(&source));
     }
 
     fn assert_captured_runtime_inputs(captured: CapturedConfig) -> anyhow::Result<()> {
@@ -1451,7 +1471,7 @@ caCertPemPath = "/run/rss/redis-ca.pem"
     fn capture_rejects_partial_build_metadata() {
         for missing in [BUILD_SOURCE_REVISION_ENV, DECLARED_IMAGE_DIGEST_ENV] {
             let mut source = TestSource::complete(VALID_CONFIG);
-            source.environments.remove(missing);
+            source.clear_environment(missing);
             assert_eq!(
                 capture_from(Path::new("ignored"), &mut source).unwrap_err(),
                 ConfigError::InvalidValue("buildMetadata")
@@ -1462,9 +1482,7 @@ caCertPemPath = "/run/rss/redis-ca.pem"
     #[test]
     fn frontend_failure_names_the_exact_environment_variable() {
         let mut source = TestSource::complete(VALID_CONFIG);
-        source
-            .environments
-            .insert(PRIMARY_PORT_ENV, OsString::from("not-a-port"));
+        source.set_environment(PRIMARY_PORT_ENV, "not-a-port");
 
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
 
@@ -1474,10 +1492,7 @@ caCertPemPath = "/run/rss/redis-ca.pem"
     #[test]
     fn capture_rejects_shared_amqp_fallback_presence() {
         let mut source = TestSource::complete(VALID_CONFIG);
-        source.environments.insert(
-            FORBIDDEN_SHARED_AMQP_URL_ENV,
-            OsString::from(SECRET_SENTINEL),
-        );
+        source.set_environment(FORBIDDEN_SHARED_AMQP_URL_ENV, SECRET_SENTINEL);
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
         assert_eq!(
             error,
@@ -1489,30 +1504,39 @@ caCertPemPath = "/run/rss/redis-ca.pem"
     #[test]
     fn capture_errors_and_resolved_transport_validation_are_redacted() {
         let mut missing = TestSource::complete(VALID_CONFIG);
-        missing.environments.remove(VAULT_SIGNER_TOKEN_ENV);
+        missing.mutate_secret_bundle(|bundle| {
+            bundle.remove("vaultSignerToken");
+        });
         let error = capture_from(Path::new("ignored"), &mut missing).unwrap_err();
         assert_eq!(error, ConfigError::InvalidSecretBundle);
         assert!(!format!("{error:?} {error}").contains(SECRET_SENTINEL));
 
         let mut plaintext_remote = TestSource::complete(VALID_CONFIG);
-        plaintext_remote.environments.insert(
-            IDENTITY_AMQP_URL_ENV,
-            OsString::from(format!(
-                "amqp://identity:{SECRET_SENTINEL}@rabbit.example.test/%2fidentity"
-            )),
-        );
+        plaintext_remote.mutate_secret_bundle(|bundle| {
+            bundle.insert(
+                "identityAmqpUrl".to_owned(),
+                serde_json::Value::String(format!(
+                    "amqp://identity:{SECRET_SENTINEL}@rabbit.example.test/%2fidentity"
+                )),
+            );
+        });
         let error = capture_from(Path::new("ignored"), &mut plaintext_remote).unwrap_err();
         assert_eq!(error, ConfigError::InvalidValue("eventing.identityAmqpUrl"));
         assert!(!format!("{error:?} {error}").contains(SECRET_SENTINEL));
 
         for (name, field) in [
-            (AUDIT_CHAIN_KEY_ENV, "eventing.auditChainKey"),
-            (TENANT_AUTHORITY_KEY_ENV, "eventing.tenantAuthorityKey"),
-            (IDENTITY_PSEUDONYM_KEY_ENV, "identity.pseudonymKey"),
+            ("auditChainKey", "eventing.auditChainKey"),
+            ("tenantAuthorityKey", "eventing.tenantAuthorityKey"),
+            ("identityPseudonymKey", "identity.pseudonymKey"),
         ] {
             for invalid in ["not-base64", "dGlueQ"] {
                 let mut source = TestSource::complete(VALID_CONFIG);
-                source.environments.insert(name, OsString::from(invalid));
+                source.mutate_secret_bundle(|bundle| {
+                    bundle.insert(
+                        name.to_owned(),
+                        serde_json::Value::String(invalid.to_owned()),
+                    );
+                });
                 let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
                 assert_eq!(error, ConfigError::InvalidValue(field));
                 assert!(!format!("{error:?} {error}").contains(invalid));
@@ -1585,10 +1609,12 @@ caCertPemPath = "/run/rss/redis-ca.pem"
     #[test]
     fn capture_rejects_reused_vault_workload_tokens() {
         let mut source = TestSource::complete(VALID_CONFIG);
-        source.environments.insert(
-            VAULT_DLX_TOKEN_ENV,
-            source.environments[VAULT_SIGNER_TOKEN_ENV].clone(),
-        );
+        source.mutate_secret_bundle(|bundle| {
+            bundle.insert(
+                "vaultDlxToken".to_owned(),
+                serde_json::Value::String(SECRET_SENTINEL.to_owned()),
+            );
+        });
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
         assert_eq!(error, ConfigError::InvalidValue("vault.workloadTokens"));
         assert!(!format!("{error:?} {error}").contains(SECRET_SENTINEL));
@@ -1605,24 +1631,30 @@ caCertPemPath = "/run/rss/redis-ca.pem"
         parse(&document).expect("explicit loopback plaintext config");
 
         let mut source = TestSource::complete(&document);
-        source.environments.insert(
-            IDENTITY_AMQP_URL_ENV,
-            OsString::from("amqp://127.0.0.1:5672/%2fidentity"),
-        );
-        source
-            .environments
-            .insert(REDIS_URL_ENV, OsString::from("redis://[::1]:6379/0"));
+        source.mutate_secret_bundle(|bundle| {
+            bundle.insert(
+                "identityAmqpUrl".to_owned(),
+                serde_json::Value::String("amqp://127.0.0.1:5672/%2fidentity".to_owned()),
+            );
+            bundle.insert(
+                "redisUrl".to_owned(),
+                serde_json::Value::String("redis://[::1]:6379/0".to_owned()),
+            );
+        });
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
         assert_eq!(error, ConfigError::InvalidValue("eventing.identityAmqpUrl"));
 
         let mut source = TestSource::complete(&document);
-        source.environments.insert(
-            IDENTITY_AMQP_URL_ENV,
-            OsString::from("amqps://127.0.0.1:5671/%2fidentity"),
-        );
-        source
-            .environments
-            .insert(REDIS_URL_ENV, OsString::from("redis://[::1]:6379/0"));
+        source.mutate_secret_bundle(|bundle| {
+            bundle.insert(
+                "identityAmqpUrl".to_owned(),
+                serde_json::Value::String("amqps://127.0.0.1:5671/%2fidentity".to_owned()),
+            );
+            bundle.insert(
+                "redisUrl".to_owned(),
+                serde_json::Value::String("redis://[::1]:6379/0".to_owned()),
+            );
+        });
         let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
         assert_eq!(error, ConfigError::InvalidValue("eventing.redisUrl"));
     }

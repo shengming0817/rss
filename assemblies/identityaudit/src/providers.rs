@@ -1185,12 +1185,41 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use crate::providers_gen::ListenerPdpJwksLifecycle;
+    use crate::providers_gen::{ListenerPdpJwksLifecycle, PROVIDER_CATALOG};
     use axum::{Json, Router, routing::post};
     use base64::Engine as _;
     use diport::KeyProvider as _;
     use p256::ecdsa::signature::Signer as _;
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
+    use std::collections::BTreeSet;
+
+    fn assert_provider_bindings_match_catalog(
+        bindings: &[runtimeexec::inventory::ProviderProbeBinding],
+    ) {
+        let actual = bindings
+            .iter()
+            .map(runtimeexec::inventory::ProviderProbeBinding::provider_id)
+            .collect::<Vec<_>>();
+        let expected = PROVIDER_CATALOG
+            .iter()
+            .map(|entry| entry.role().as_str())
+            .collect::<Vec<_>>();
+        let actual_ids = actual.iter().copied().collect::<BTreeSet<_>>();
+        let expected_ids = expected.iter().copied().collect::<BTreeSet<_>>();
+
+        assert!(!expected.is_empty());
+        assert_eq!(
+            actual_ids.len(),
+            actual.len(),
+            "duplicate receipt provider ID"
+        );
+        assert_eq!(
+            expected_ids.len(),
+            expected.len(),
+            "duplicate catalog role ID"
+        );
+        assert_eq!(actual_ids, expected_ids);
+    }
 
     #[test]
     fn private_ca_loading_fails_closed_without_disclosing_input() -> anyhow::Result<()> {
@@ -1555,18 +1584,16 @@ mod tests {
                 listener_rate_limiter,
             )
             .expect("all exact provider roles transferred");
-        let listener_pdp_binding = complete
-            .into_probe_bindings()
-            .into_iter()
+        let bindings = complete.into_probe_bindings();
+        assert_provider_bindings_match_catalog(&bindings);
+        let listener_pdp_binding = bindings
+            .iter()
             .find(|binding| binding.provider_id() == "listener-pdp")
             .expect("listener PDP probe binding");
         assert_eq!(
             listener_pdp_binding.probe_names(),
             std::slice::from_ref(&listener_pdp_probe_name)
         );
-        assert_eq!(inventory.probe_count(), 8);
-        assert_eq!(inventory.resource_count(), 8);
-        assert_eq!(inventory.worker_count(), 7);
     }
 
     #[test]
@@ -1655,7 +1682,7 @@ mod tests {
                 })
                 .expect("CAS resource"),
         };
-        closer
+        let complete = closer
             .finish(
                 EventingRoleOutputs {
                     distributed_cas: lifecycle_output(true, false, true),
@@ -1665,9 +1692,7 @@ mod tests {
                 &mut inventory,
             )
             .expect("eventing roles close exact inventory");
-        assert_eq!(inventory.probe_count(), 8);
-        assert_eq!(inventory.resource_count(), 8);
-        assert_eq!(inventory.worker_count(), 7);
+        assert_provider_bindings_match_catalog(&complete.into_probe_bindings());
     }
 
     #[tokio::test]

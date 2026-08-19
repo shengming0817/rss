@@ -909,7 +909,8 @@ impl Fixture {
             response.overall
         );
         let expected: HashSet<&str> = settingsonly::test_support::production_required_probe_names()
-            .into_iter()
+            .iter()
+            .copied()
             .collect();
         let observed: HashSet<&str> = response
             .checks

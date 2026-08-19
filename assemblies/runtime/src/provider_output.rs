@@ -1419,11 +1419,7 @@ mod tests {
         let mut completed = build
             .finish()
             .expect("all active factories produced exact receipts");
-        // finish() already required one receipt per active catalog factory; pin occupancy shape.
         assert!(!PROVIDER_CATALOG.is_empty());
-        assert_eq!(completed.provider_module.probe_count(), 11);
-        assert_eq!(completed.provider_module.resource_count(), 10);
-        assert_eq!(completed.provider_module.worker_count(), 10);
         assert!(completed.domain_module.probe_count() == 0);
         assert!(completed.domain_module.resource_count() == 0);
         assert!(completed.domain_module.worker_count() == 0);
@@ -1431,7 +1427,19 @@ mod tests {
             .take_inventory_receipt()
             .expect("inventory receipt is present exactly once");
         let bindings = receipt.bindings();
-        assert_eq!(bindings.len(), PROVIDER_CATALOG.len());
+        let actual_ids = bindings
+            .iter()
+            .map(runtimeexec::inventory::ProviderProbeBinding::provider_id)
+            .collect::<Vec<_>>();
+        let expected_ids = PROVIDER_CATALOG
+            .iter()
+            .map(|entry| entry.role().as_str())
+            .collect::<Vec<_>>();
+        let actual_set = actual_ids.iter().copied().collect::<BTreeSet<_>>();
+        let expected_set = expected_ids.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(actual_set.len(), actual_ids.len());
+        assert_eq!(expected_set.len(), expected_ids.len());
+        assert_eq!(actual_set, expected_set);
         let provider_binding = |provider_id| {
             bindings
                 .iter()

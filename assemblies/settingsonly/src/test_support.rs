@@ -10,7 +10,7 @@ use crate::{auth_bridge, listeners, runtime};
 
 /// Exact production readiness closure used by artifact acceptance.
 #[must_use]
-pub const fn production_required_probe_names() -> [&'static str; 18] {
+pub const fn production_required_probe_names() -> &'static [&'static str] {
     crate::readiness::PRODUCTION_REQUIRED_PROBES
 }
 
