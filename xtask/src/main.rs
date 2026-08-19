@@ -77,7 +77,7 @@ mod verify;
 mod workspace_facts;
 mod wsdeps;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use cli::{
     ArchrulesCommand, AssemblyArtifactsCommand, AssemblyCommand, CdcConfigCommand, CiCommand,
     Command, ConsistencyCommand, ContractCommand, GraphCommand, LocaltxCommand,
@@ -162,16 +162,10 @@ fn dispatch(command: Command) -> Result<()> {
             let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
             diagnostic::run_check(&archrules::ArchRules::new(command_facts.get()?))
         }
-        Command::Archrules(ArchrulesCommand::Matrix { write, check }) => {
-            let action = match (write, check) {
-                (false, false) => archrules::MatrixAction::Print,
-                (true, false) => archrules::MatrixAction::Write,
-                (false, true) => archrules::MatrixAction::Check,
-                (true, true) => bail!("matrix write and check are mutually exclusive"),
-            };
+        Command::Archrules(ArchrulesCommand::Matrix) => {
             let root = workspace_root()?;
             let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            archrules::matrix(action, command_facts.get()?)
+            archrules::matrix(command_facts.get()?)
         }
         Command::RuntimeRoot(RuntimeRootCommand::Guard) => {
             diagnostic::run_check(&runtime_root_guard::RuntimeRootGuard)

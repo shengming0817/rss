@@ -211,15 +211,10 @@ pub(crate) enum GraphCommand {
 pub(crate) enum ArchrulesCommand {
     /// 列出 ArchRules 派生索引。
     List,
-    /// ArchRules 漂移门（CI 门）。
+    /// ArchRules 语义 closure 门（CI 门）。
     Verify,
-    /// 持久化 funnel 单源矩阵；`--write` / `--check` 互斥。
-    Matrix {
-        #[arg(long, conflicts_with = "check")]
-        write: bool,
-        #[arg(long, conflicts_with = "write")]
-        check: bool,
-    },
+    /// 按需生成持久化 funnel 报告到 target/xtask。
+    Matrix,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -614,13 +609,19 @@ mod tests {
             Command::Archrules(ArchrulesCommand::List)
         );
         assert_eq!(
-            parse(&["archrules", "matrix", "--check"])?,
-            Command::Archrules(ArchrulesCommand::Matrix {
-                write: false,
-                check: true,
-            })
+            parse(&["archrules", "matrix"])?,
+            Command::Archrules(ArchrulesCommand::Matrix)
         );
-        assert!(parse(&["archrules", "matrix", "--write", "--check"]).is_err());
+        for bad in [
+            &["archrules", "matrix", "--write"][..],
+            &["archrules", "matrix", "--check"][..],
+            &["archrules", "matrix", "--write", "--check"][..],
+        ] {
+            assert!(
+                parse(bad).is_err(),
+                "legacy matrix flags must be rejected: {bad:?}"
+            );
+        }
         assert_eq!(
             parse(&["runtime-root", "guard"])?,
             Command::RuntimeRoot(RuntimeRootCommand::Guard)

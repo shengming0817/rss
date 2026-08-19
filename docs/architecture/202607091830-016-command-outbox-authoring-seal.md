@@ -48,5 +48,5 @@ event 与 command 使用两条互不转换的写入路径：
 - command producer 必须经 generated policy wrapper 与对应 dispatcher；provider 不再接收 raw topic/payload。
 - event producer、持久化 hydration 与 command authoring 三种能力无法相互转换。
 - 新增 command policy 或 store 必须先扩展生成 seam 与 reviewed DTO；编译器会暴露所有迁移点。
-- 完整 carrier/evidence/gate 由生成的
-  [`Persistence Funnel AI-Robust Matrix`](202607091830-015-persistence-funnel-ai-robust-matrix.md) 派生展示。
+- 完整 carrier/evidence/gate 由 [ArchRules typed catalog](../../xtask/src/archrules.rs) 反向校验；
+  需要派生展示时运行 `cargo xtask archrules matrix`，报告只写入 `target/xtask/`。

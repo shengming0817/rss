@@ -57,9 +57,10 @@ Go 的 `ContextCloser`/`ManagedResource` LIFO 停止，在 Rust 里 **Drop 不�
 
 ### 7. archtest 大规模蒸发，残留改 dylint
 
-现行持久化边界的强度与 carrier 不在本归档快照复制；请以生成的
-[`Persistence Funnel AI-Robust Matrix`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)
-为准。
+现行持久化边界的强度与 carrier 不在本归档快照复制；请以
+[`docs/rules/architecture.md`](../rules/architecture.md)、[`docs/rules/ai-robust.md`](../rules/ai-robust.md)
+与 [ArchRules typed catalog](../../xtask/src/archrules.rs) 为准；需要派生展示时运行
+`cargo xtask archrules matrix`。
 分层 → **crate 边界 + Cargo.toml 依赖图 + `cargo-deny`**（禁依赖）硬性保证；sealed 构造/newtype funnel → 私有字段 + `nutype`；少数真要 AST 级的（如某调用点 funnel）→ **`dylint`**（自写 clippy lint，Rust 版 archtest）。治理 YAML 校验是语言无关的，**保留**。净效：~200 archtest 砍到个位数。
 
 ### 8. 后台环与状态机

@@ -22,8 +22,9 @@
 - **关联**：issue #1437 [PERSIST-016] · Parent Feature #1418 [PERSIST-EPIC] · 同批 #1405（outbox tenant 注入）· #1426（repo conformance testkit）· #1436（PG tx funnel / raw-pool guard）· amendment #2003（tenant proof lift）
 - **依赖 ADR**：**ADR-002**（tenant 只来自已认证通道，`TenantId` 在 base 层 `vocab`）· **ADR-005**（域形 repo port 归属，`cotx` funnel 是 adapter 层实现）· **ADR-010**（`PgRuntimeDeps::setup` 能力门控是持久化能力分层的自底向上第一步）
 - **归属**：framework（tenant 隔离接缝是 provider-agnostic 持久化治理，非单一域逻辑）
-- **AI-robust 评级**：见 §6；现行矩阵见
-  `docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md` 的 `rls` funnel
+- **AI-robust 评级**：见 §6；现行规则真源见 `docs/rules/tenancy.md` 与
+  [ArchRules typed catalog](../../xtask/src/archrules.rs) 的 `rls` funnel；派生展示可运行
+  `cargo xtask archrules matrix` 按需生成
 
 ---
 

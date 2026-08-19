@@ -79,7 +79,8 @@ Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度。层级
 8. runtime fail-fast。
 
 机器 metadata 与 Rust source/rustdoc carrier 配置 synthetic red case 与 anti-vacuity。Hard 化后的投影从权威来源派生；
-文件路径参与 semantic evidence identity，诊断行号不参与 identity、排序或 committed projection。
+文件路径参与 semantic evidence identity，诊断行号不参与 identity、排序或 equality。按需生成的展示报告不是
+enforcement carrier，不参与 verify/ci verdict。
 
 ## 审查要求
 

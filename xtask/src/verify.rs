@@ -161,7 +161,7 @@ enum InternalCheck {
     RuntimeEnvGuard,
     /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
     RuntimeDepsGuard,
-    /// ArchRules 派生索引 + 14 行持久化 funnel matrix 文档漂移门。
+    /// ArchRules 派生索引 + 持久化 funnel 语义 closure 门。
     ArchRules,
     CodegenCheck,
     /// committed L2 assurance inventory raw-byte drift gate.
@@ -3594,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn archrules_matrix_is_full_only_no_compile_internal_gate() -> anyhow::Result<()> {
+    fn archrules_semantics_is_full_only_no_compile_internal_gate() -> anyhow::Result<()> {
         assert!(
             !verify_plan(&opts(true, false))
                 .iter()

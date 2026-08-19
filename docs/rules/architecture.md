@@ -313,10 +313,10 @@ rule id → carrier → source → fixture/baseline → gate；`cargo xtask arch
 no-compile meta gate。Hard 只接纳 Cargo-reachable production Rust、build script 与 production 类型边界；
 trybuild/external compile 是 support evidence，JSON/Markdown/Mermaid/golden/report
 漂移是 Medium presentation evidence。索引 identity 与稳定输出使用 carrier path，不使用仅供诊断的行号。
-本文档只描述载体原则，不维护落地实例清单。
-持久化 funnel 的强度与证据同样是派生展示，落在
-[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
-由 `cargo xtask archrules matrix --check` 与同一 ArchRules gate 一起进入 verify/ci。
+本文档只描述载体原则，不维护落地实例清单。持久化 funnel 的单一真源是
+[`xtask/src/archrules.rs`](../../xtask/src/archrules.rs) 的 typed catalog；`cargo xtask archrules verify`
+在内存中完成语义校验并随同一 ArchRules gate 进入 verify/ci。需要阅读派生展示时运行
+`cargo xtask archrules matrix`，报告仅写入 `target/xtask/`，不参与 identity、equality 或 gate verdict。
 
 ## 关键模式的 Rust 形态
 
