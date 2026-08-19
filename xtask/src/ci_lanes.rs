@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn local_meta_policy_is_exact_9_25_6_partition() {
+    fn local_meta_policy_is_an_exact_partition() {
         let labels = |policy: fn(LocalMetaPolicy) -> bool| {
             GateId::ALL
                 .iter()
@@ -1519,9 +1519,6 @@ mod tests {
                 "saga-durable-recovery-guard",
             ])
         );
-        assert_eq!(always.len(), 9);
-        assert_eq!(affected.len(), 25);
-        assert_eq!(full_only.len(), 6);
         assert!(
             !GateId::ALL
                 .iter()

@@ -1337,33 +1337,32 @@ role = "fact"
         std::fs::write(&schema, br#"{"title":"IdentityChanged""#)?;
 
         let inspection = ContractGovernanceIr::inspect_contracts_root(&contracts_root)?;
+        let finding_identities = inspection
+            .findings()
+            .iter()
+            .map(|finding| (finding.rule, finding.subject.as_str()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            inspection.findings().len(),
-            1,
+            finding_identities,
+            [(
+                ContractRuleId::MissingSchema,
+                "event/identity/v1/changed/payload.schema.json"
+            )],
             "source-stage failure must suppress downstream semantic noise: {:?}",
             inspection.findings()
         );
-        let parse_findings = inspection
-            .findings()
-            .iter()
-            .filter(|finding| finding.rule == ContractRuleId::MissingSchema)
-            .collect::<Vec<_>>();
-        assert_eq!(parse_findings.len(), 1, "{:?}", inspection.findings());
-        assert_eq!(
-            parse_findings[0].subject,
-            "event/identity/v1/changed/payload.schema.json"
+        let parse_finding = &inspection.findings()[0];
+        assert!(
+            parse_finding.detail.contains("JSON")
+                && parse_finding.detail.contains("payload.schema.json"),
+            "{:?}",
+            parse_finding
         );
         assert!(
-            parse_findings[0].detail.contains("JSON")
-                && parse_findings[0].detail.contains("payload.schema.json"),
+            parse_finding.detail.contains("category=eof")
+                && parse_finding.detail.contains("line=1 column="),
             "{:?}",
-            parse_findings[0]
-        );
-        assert!(
-            parse_findings[0].detail.contains("category=eof")
-                && parse_findings[0].detail.contains("line=1 column="),
-            "{:?}",
-            parse_findings[0]
+            parse_finding
         );
 
         std::fs::remove_dir_all(contracts_root)?;
@@ -1378,8 +1377,25 @@ role = "fact"
 
         let missing = ContractGovernanceIr::inspect_contracts_root(&contracts_root)?;
         assert_eq!(missing.sources().len(), 0);
-        assert_eq!(missing.findings().len(), 1, "{:?}", missing.findings());
-        assert_eq!(missing.findings()[0].rule, ContractRuleId::MissingSchema);
+        assert_eq!(
+            missing
+                .findings()
+                .iter()
+                .map(|finding| (finding.rule, finding.subject.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                ContractRuleId::MissingSchema,
+                "event/identity/v1/changed/payload.schema.json"
+            )],
+            "{:?}",
+            missing.findings()
+        );
+        assert!(
+            missing.findings()[0].detail.contains("schema source 缺失")
+                && missing.findings()[0].detail.contains("payload.schema.json"),
+            "{:?}",
+            missing.findings()[0]
+        );
 
         std::fs::write(&schema, r#"{"title":"IdentityChanged","type":"object"}"#)?;
         let source = std::fs::read_to_string(&manifest)?;
@@ -1393,14 +1409,27 @@ role = "fact"
         let unsafe_name = ContractGovernanceIr::inspect_contracts_root(&contracts_root)?;
         assert_eq!(unsafe_name.sources().len(), 0);
         assert_eq!(
-            unsafe_name.findings().len(),
-            1,
+            unsafe_name
+                .findings()
+                .iter()
+                .map(|finding| (finding.rule, finding.subject.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                ContractRuleId::UnsafeSchemaPath,
+                "event/identity/v1/changed"
+            )],
             "{:?}",
             unsafe_name.findings()
         );
-        assert_eq!(
-            unsafe_name.findings()[0].rule,
-            ContractRuleId::UnsafeSchemaPath
+        assert!(
+            unsafe_name.findings()[0]
+                .detail
+                .contains("不是安全单路径段")
+                && unsafe_name.findings()[0]
+                    .detail
+                    .contains("../payload.schema.json"),
+            "{:?}",
+            unsafe_name.findings()[0]
         );
 
         std::fs::remove_dir_all(contracts_root)?;

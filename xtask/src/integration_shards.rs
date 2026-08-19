@@ -3007,7 +3007,13 @@ mod tests {
             .flat_map(IntegrationJobGroup::shards)
             .collect::<Vec<_>>();
         let unique = flattened.iter().copied().collect::<BTreeSet<_>>();
-        assert_eq!(IntegrationJobGroup::ALL.len(), 4);
+        assert_eq!(
+            IntegrationJobGroup::ALL
+                .into_iter()
+                .map(IntegrationJobGroup::as_str)
+                .collect::<Vec<_>>(),
+            ["postgres", "transport", "runtime", "artifact"]
+        );
         assert!(
             IntegrationJobGroup::ALL
                 .into_iter()

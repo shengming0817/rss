@@ -2220,9 +2220,45 @@ mod tests {
     #[test]
     fn workspace_provider_capability_wrappers_and_behaviors_are_exact_and_live() -> Result<()> {
         let matrix = build_matrix(&crate::workspace_root()?)?;
-        assert_eq!(matrix.provider_count, 3);
-        assert_eq!(matrix.capability_count, 7);
-        assert_eq!(matrix.enrollment_count, 14);
+        let actual = matrix
+            .providers
+            .iter()
+            .map(|provider| {
+                (
+                    provider.provider,
+                    provider
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.capability)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = ProviderId::ALL
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider.as_str(),
+                    provider
+                        .capabilities()
+                        .iter()
+                        .copied()
+                        .map(CapabilityId::as_str)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(matrix.provider_count, matrix.providers.len());
+        assert_eq!(matrix.capability_count, CapabilityId::ALL.len());
+        assert_eq!(
+            matrix.enrollment_count,
+            matrix
+                .providers
+                .iter()
+                .map(|provider| provider.capabilities.len())
+                .sum::<usize>()
+        );
         Ok(())
     }
 }

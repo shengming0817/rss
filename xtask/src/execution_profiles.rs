@@ -320,7 +320,6 @@ mod tests {
             .map(|spec| (spec.source_path, spec.selector))
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(ids.len(), DeviceLatentEvidenceId::ALL.len());
-        assert_eq!(ids.len(), 10);
         assert_eq!(selectors.len(), specs.len());
         assert_eq!(
             specs
