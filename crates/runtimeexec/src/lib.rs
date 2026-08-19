@@ -404,7 +404,6 @@ impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHo
     }
 
     /// Attach the sole RuntimeExec-owned Platform host projection to this launch lifecycle.
-    #[must_use]
     pub fn with_platform_host(mut self, host: RuntimeHostView) -> Self {
         self.platform_host = Some(host);
         self
