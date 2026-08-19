@@ -186,6 +186,7 @@ impl PgInboxSweeper {
     }
 }
 
+/// INVARIANT: ADAPTER-PORT-FREEZE-08 { level = "Hard", exec = "native-compile", source = "code", native = "production RetentionSweeper implementation on PgInboxSweeper" }.
 impl RetentionSweeper for PgInboxSweeper {
     /// 删除 `status='done'` 且 `committed_at` 早于保留期的去重记录，返回删除条数。
     /// `claimed` 行（活跃 claim / 进行中）不删；保留期内的 `done` 行不删。
@@ -459,7 +460,7 @@ impl InboxStore for PgInboxStore {
 #[cfg(test)]
 mod sweep_smoke {
     //! `PgInboxSweeper: RetentionSweeper` 编译期冻结 + sweep 入口 fail-closed 守卫单测（免 PG，#327 review F1/F4）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-08 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— RetentionSweeper on PgInboxSweeper；去掉 impl 即编译失败（anti-vacuity）。
+    //! ADAPTER-PORT-FREEZE-08 support：RetentionSweeper on PgInboxSweeper 的 anti-vacuity。
     use core::marker::PhantomData;
 
     use consistency::{EngineErrorKind, RetentionSweeper};

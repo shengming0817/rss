@@ -326,6 +326,7 @@ impl WriteLane for FaultMatrixWriteLane {}
 /// Commit/rollback remain owned by the read/write lifecycle funnels.
 ///
 /// # INVARIANT: POSTGRES-TX-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private mint, branded tenant identity, HRTB borrow, and no raw connection or settlement projection" }
+/// # INVARIANT: PG-TX-CAPABILITY-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private TenantTx fields and mint plus sealed lane traits make external construction, raw execution, settlement, and cross-lane use unrepresentable" }
 pub struct TenantTx<'tx, L: TenantLane> {
     conn: &'tx mut PgConnection,
     tenant: TenantId,

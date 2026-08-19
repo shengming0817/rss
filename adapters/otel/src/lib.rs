@@ -127,6 +127,7 @@ pub fn to_key_value(label: &impl observ::MetricLabel) -> opentelemetry::KeyValue
     opentelemetry::KeyValue::new(label.key(), value)
 }
 
+/// INVARIANT: ADAPTER-PORT-FREEZE-05 { level = "Hard", exec = "native-compile", source = "code", native = "sealed ManagedResource implementation on the production provider" }.
 impl ManagedResource for OtelExporter {
     fn name(&self) -> &str {
         "otel"
@@ -156,7 +157,7 @@ impl ManagedResource for OtelExporter {
 mod smoke {
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait（PhantomData 绑定检查，
     //! 不构造、不执行 body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-05 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— sealed-marker `OtelExporter` impl 冻结的 diport DI port trait
+    //! ADAPTER-PORT-FREEZE-05 support：sealed-marker `OtelExporter` impl 冻结的 diport DI port trait
     //! （ManagedResource 始终）；去掉该 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

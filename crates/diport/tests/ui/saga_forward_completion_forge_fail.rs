@@ -1,4 +1,4 @@
-//! INVARIANT: SAGA-RECEIPT-COMPLETION-TYPE-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: SAGA-RECEIPT-COMPLETION-TYPE-01 { level = "Medium", exec = "test", source = "trybuild" }
 //! Private fields: external crates cannot forge [`diport::SagaForwardCompletion`] via struct literal.
 
 fn main() {

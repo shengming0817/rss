@@ -1491,6 +1491,8 @@ impl OutboxRelay for PgOutbox {
     /// publish 成功、settle 前崩溃仍允许 broker duplicate，须由 consumer inbox 幂等收口。
     /// parse 失败（topic / idem_key 无效）→ `EngineErrorKind::Invariant`（我们写入的数据不该无效）。
     ///
+    /// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Hard", exec = "native-compile", source = "code", native = "production claim query scopes partition ordering by tenant_id, domain, and partition_key" }.
+    ///
     /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
     async fn claim_batch(&self, limit: usize) -> Result<Vec<Self::Claim>, EngineError> {
         if !(1..=OUTBOX_CLAIM_BATCH_MAX).contains(&limit) {

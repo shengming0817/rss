@@ -152,9 +152,15 @@ fn dispatch(command: Command) -> Result<()> {
                 .context("assembly graph: load command-scoped workspace facts")?;
             graph::run(&root, &options, facts)
         }
-        Command::Archrules(ArchrulesCommand::List) => archrules::list(),
+        Command::Archrules(ArchrulesCommand::List) => {
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            archrules::list(command_facts.get()?)
+        }
         Command::Archrules(ArchrulesCommand::Verify) => {
-            diagnostic::run_check(&archrules::ArchRules)
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            diagnostic::run_check(&archrules::ArchRules::new(command_facts.get()?))
         }
         Command::Archrules(ArchrulesCommand::Matrix { write, check }) => {
             let action = match (write, check) {
@@ -163,7 +169,9 @@ fn dispatch(command: Command) -> Result<()> {
                 (false, true) => archrules::MatrixAction::Check,
                 (true, true) => bail!("matrix write and check are mutually exclusive"),
             };
-            archrules::matrix(action)
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            archrules::matrix(action, command_facts.get()?)
         }
         Command::RuntimeRoot(RuntimeRootCommand::Guard) => {
             diagnostic::run_check(&runtime_root_guard::RuntimeRootGuard)

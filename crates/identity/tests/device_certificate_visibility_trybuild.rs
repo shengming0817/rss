@@ -1,4 +1,4 @@
-//! INVARIANT: IDENTITY-DEVICE-CERTIFICATE-FACADE-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: IDENTITY-DEVICE-CERTIFICATE-FACADE-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 #[test]
 fn device_certificate_is_exposed_only_through_the_ports_facade() {

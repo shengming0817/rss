@@ -181,6 +181,7 @@ impl GrpcServer {
     }
 }
 
+/// INVARIANT: ADAPTER-PORT-FREEZE-02 { level = "Hard", exec = "native-compile", source = "code", native = "sealed ManagedResource implementation on the production provider" }.
 impl ManagedResource for GrpcServer {
     fn name(&self) -> &str {
         "grpc"
@@ -229,7 +230,7 @@ impl GrpcServer {
 mod smoke {
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait
     //! （PhantomData 绑定检查，不构造、不执行 body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— sealed-marker impl 冻结的 diport DI port trait；去掉任一 impl 即编译失败（anti-vacuity）。
+    //! ADAPTER-PORT-FREEZE-02 support：sealed-marker impl 的编译期 anti-vacuity。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}

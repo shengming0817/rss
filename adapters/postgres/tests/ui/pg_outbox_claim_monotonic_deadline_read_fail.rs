@@ -1,4 +1,4 @@
-//! INVARIANT: PG-OUTBOX-CLAIM-SEAL-01 · PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: PG-OUTBOX-CLAIM-SEAL-01 · PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 type Claim = <postgres::PgOutbox as consistency::OutboxRelay>::Claim;
 

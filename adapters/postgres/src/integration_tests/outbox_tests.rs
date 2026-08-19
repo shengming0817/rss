@@ -5772,7 +5772,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
 /// t27b：跨租户同 `(domain, partition_key)` 不互阻。
 ///
 /// tenant A 队头进 dlx 后，只能阻塞 tenant A 同 partition 后继；tenant B 使用相同业务 key 的行仍可投递。
-/// INVARIANT: OUTBOX-TENANT-PARTITION-ORDER-01 { level = "Hard", exec = "native-compile", source = "code", native = "migration 0031 tenant-scopes outbox partition ordering keys" }
+/// OUTBOX-TENANT-PARTITION-ORDER-01 support: real-backend cross-tenant anti-vacuity.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。

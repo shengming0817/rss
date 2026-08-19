@@ -17,11 +17,17 @@ RSS 的 AI-robust 治理保护安全、正确性、兼容性和生产运行不�
 
 | 级别 | 定义 | 典型载体 |
 |------|------|----------|
-| **Hard** | 违规不可表达，或修改必然导致编译、生成或构造失败 | Cargo 图、visibility、private field、newtype、sealed trait、typestate、必填构造器、schema/codegen |
+| **Hard** | 违规不可表达，或修改必然导致 production consumer 编译、构建或构造失败 | Cargo 图、visibility、private field、newtype、sealed trait、typestate、必填构造器、被 production target 编译的 generated Rust |
 | **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy/Dylint、cargo-deny、type-aware gate、bootstrap guard、provider conformance |
 | **Soft** | 面向设计与 review 的说明 | 文档、注释、命名与 review guidance |
 
 关键约束采用 Hard 或 Medium；可由类型和依赖图表达的约束采用 Hard。
+
+Hard admission 是 fail-closed 的语义判定：必须能从 Cargo production target、build script 或 production
+类型边界派生唯一 owner 与真实 consumer。trybuild/compile-fail 是 external consumer 支持证据，不能声明 Hard；
+用于证明 Hard 时复用 production carrier 的 invariant identity。JSON、Markdown、Mermaid、snapshot、golden 与 drift report
+均为 presentation/support artifact，最高为 Medium。codegen 只有产物为 Cargo-reachable generated Rust
+并实际进入 production 编译时才可作为 Hard truth source。
 
 ## 非永久 AI Hard
 
@@ -72,7 +78,8 @@ Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度。层级
 7. production join T3；
 8. runtime fail-fast。
 
-机器 metadata 与 Rust source/rustdoc carrier 配置 synthetic red case 与 anti-vacuity。Hard 化后的投影从权威来源派生。
+机器 metadata 与 Rust source/rustdoc carrier 配置 synthetic red case 与 anti-vacuity。Hard 化后的投影从权威来源派生；
+文件路径参与 semantic evidence identity，诊断行号不参与 identity、排序或 committed projection。
 
 ## 审查要求
 

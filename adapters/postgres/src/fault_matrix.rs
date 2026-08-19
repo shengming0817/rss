@@ -4,7 +4,7 @@
 //! journey out of `sqlx` by crate graph while still letting the postgres adapter own the tiny
 //! amount of privileged setup and typed observation needed by the real-backend lane.
 //!
-//! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard", exec = "native-compile", source = "code", native = "feature-gated module exposes closed enums/newtypes while keeping raw PgPool and SQL private to the postgres adapter" }
+//! CONSISTENCY-FAULT-MATRIX-SEAM-01 is a feature-gated T2 support seam, not production Hard evidence.
 //!
 //! External fault-matrix tests cannot name `PgPool` or raw SQL through this module. The public
 //! surface is closed enums/newtypes and runtime-seam methods; all pool access remains inside the

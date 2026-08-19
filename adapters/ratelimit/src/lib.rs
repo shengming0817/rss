@@ -88,6 +88,7 @@ where
     }
 }
 
+/// INVARIANT: ADAPTER-PORT-FREEZE-08 { level = "Hard", exec = "native-compile", source = "code", native = "sealed ManagedResource implementation on the production provider" }.
 impl<C> ManagedResource for GovernorLimiter<C>
 where
     C: Clock + Clone + Send + Sync,
@@ -105,7 +106,7 @@ where
 #[cfg(test)]
 mod tests {
     //! 限流行为矩阵（表驱动 + FakeRelativeClock）+ dyn-injection smoke + 生命周期 + anti-vacuity。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-08 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— sealed-marker impl 冻结的 diport DI port trait（ManagedResource
+    //! ADAPTER-PORT-FREEZE-08 support：sealed-marker impl 冻结的 diport DI port trait（ManagedResource
     //! + RateLimiter）；去掉任一 impl 即编译失败（anti-vacuity，见 `impls_frozen_ports`）。
     use super::*;
     use core::marker::PhantomData;

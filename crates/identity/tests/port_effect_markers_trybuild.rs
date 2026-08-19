@@ -1,4 +1,4 @@
-//! INVARIANT: IDENTITY-PORT-CLASSIFICATION-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: IDENTITY-PORT-CLASSIFICATION-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 #[test]
 fn identity_port_effect_markers_are_closed_and_exact() {

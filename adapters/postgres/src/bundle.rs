@@ -137,6 +137,7 @@ mod sealed {
 ///
 /// 实现集封闭在本 crate（[`caps`] 下的 ZST）；外部 crate 既不能命名内层 `Sealed`、也不能新增 marker，
 /// 故 `PgDomainDeps<D>` 的 `D` 只能是本 crate 声明的域（PG-BUNDLE-DOMAIN-02）。
+/// INVARIANT: PG-BUNDLE-DOMAIN-02 { level = "Hard", exec = "native-compile", source = "code", native = "sealed production PgDomain capability marker" }.
 pub trait PgDomain: sealed::Sealed {
     /// 与 sealed capability marker 一一绑定的 durable event domain。
     const NAME: &'static str;
@@ -190,6 +191,7 @@ impl PgDomain for caps::Audit {
 ///
 /// 该类型刻意不实现 `Clone`。能力经 [`Self::handle`] 克隆为 [`PgRuntimeHandle`]；生命周期经
 /// [`Self::into_runtime_parts`] 按值消费，类型层禁止第二次交接。
+/// INVARIANT: PG-BUNDLE-FUNNEL-01 / PG-BUNDLE-POOL-03 { level = "Hard", exec = "native-compile", source = "code", native = "production bundle owns the construction funnel without exposing PgStore or PgPool" }.
 pub struct PgRuntimeDeps {
     handle: PgRuntimeHandle,
 }
@@ -3085,7 +3087,7 @@ impl PgInfraDeps {
 ))]
 mod tests {
     //! bundle 单元测：lazy pool 旁路 `setup`（免真连 DB），覆盖 funnel 派发 + per-domain accessor 构造。
-    //! INVARIANT: PG-BUNDLE-FUNNEL-01 / PG-BUNDLE-DOMAIN-02 / PG-BUNDLE-POOL-03 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（compile_fail doctest 见
+    //! PG-BUNDLE-FUNNEL-01 / PG-BUNDLE-DOMAIN-02 / PG-BUNDLE-POOL-03 support（compile_fail doctest 见
     //! `PgDomainDeps` rustdoc）。
 
     use super::*;

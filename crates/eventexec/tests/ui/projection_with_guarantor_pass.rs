@@ -1,6 +1,6 @@
 //! compile-pass：传 `SerialInOrderGuarantor` witness（第 6 参）→ ProjectionHarness 正常构造。
 //!
-//! 覆盖 INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Hard", exec = "test", source = "trybuild" }（Hard）绿向：串行 source 铸造 witness 可通过门禁。
+//! 覆盖 INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Medium", exec = "test", source = "trybuild" }，作为 production 类型 Hard 的绿向支持：串行 source 铸造 witness 可通过门禁。
 
 use std::sync::Arc;
 

@@ -402,6 +402,7 @@ fn parse_mount_segments(mount: &str) -> Result<Vec<String>, VaultConfigError> {
     Ok(segments)
 }
 
+/// INVARIANT: ADAPTER-PORT-FREEZE-12 { level = "Hard", exec = "native-compile", source = "code", native = "sealed ManagedResource implementation on the production provider" }.
 impl ManagedResource for VaultSigner {
     fn name(&self) -> &str {
         "vault"
@@ -539,7 +540,7 @@ impl diport::KeyProvider for VaultKeyProvider {
 mod smoke {
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait（PhantomData 绑定检查，
     //! 不构造、不执行 body）。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-12 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— sealed-marker impl 冻结的 diport DI port trait（ManagedResource
+    //! ADAPTER-PORT-FREEZE-12 support：sealed-marker impl 冻结的 diport DI port trait（ManagedResource
     //! 始终；Signer 于 backend；SecretResolver + ManagedResource 于 backend）；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 

@@ -1934,7 +1934,7 @@ mod principal_derive_tests {
 
 #[cfg(test)]
 mod verified_token_seal {
-    //! INVARIANT: AUTHN-VERIFIEDJWT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 「未验签派生 Principal」类型层不可表达。
+    //! AUTHN-VERIFIEDJWT-SEAL-01 support：「未验签派生 Principal」类型层不可表达。
     //!
     //! `VerifiedJwt` / `VerifiedServiceToken` 私有内层 + `pub(crate)` `seal`：外部 crate 无法 mint，
     //! 故收紧后的 `from_verified_jwt(&VerifiedJwt)` / `from_verified_service_token(&VerifiedServiceToken)`

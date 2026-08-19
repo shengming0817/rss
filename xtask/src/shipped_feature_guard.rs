@@ -111,7 +111,7 @@ impl GovernanceCheck for ShippedFeatureGuard<'_> {
     }
 }
 
-fn production_root_packages(root: &std::path::Path) -> Result<Vec<String>> {
+pub(crate) fn production_root_packages(root: &std::path::Path) -> Result<Vec<String>> {
     let declaration = load_artifact_declaration(root)?;
     let mut packages = declaration
         .assemblies

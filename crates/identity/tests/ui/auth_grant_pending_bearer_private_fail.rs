@@ -1,4 +1,4 @@
-//! INVARIANT: AUTH-GRANT-BEARER-RELEASE-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: AUTH-GRANT-BEARER-RELEASE-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 use identity::application::{
     PendingLoginSecrets, PersistedLoginGrantReceipt,

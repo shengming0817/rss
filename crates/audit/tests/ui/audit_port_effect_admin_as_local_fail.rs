@@ -1,4 +1,4 @@
-//! INVARIANT: AUDIT-PORT-CLASSIFICATION-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: AUDIT-PORT-CLASSIFICATION-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 use audit::ports::{AuditPortEffect, DynAuditAdminRepo};
 use diport::LocalPrivilege;

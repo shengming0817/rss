@@ -1,6 +1,6 @@
 //! Exact-lane tenant transaction external-boundary compile lock.
 //!
-//! INVARIANT: PG-TX-CAPABILITY-SEAL-01 · PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Hard", exec = "test", source = "trybuild" }：
+//! INVARIANT: PG-TX-CAPABILITY-SEAL-01 · PG-OUTBOX-SETTLEMENT-CAPABILITY-01 { level = "Medium", exec = "test", source = "trybuild" }：
 //! 外部 crate 不能构造 `TenantDb` / `TenantTx`，也不能构造 / mint 全局 postgres 事务能力令牌；
 //! 租户能力只能由 postgres adapter 在完成 tenant setup 的真实事务内部铸造。LocalTxAttempt mint 密封另由 `cotx::settlement` 的
 //! PG-LOCALTX-SETTLEMENT-01（`pub(super)` + 下列 trybuild）守住；outbox claim 的 monotonic

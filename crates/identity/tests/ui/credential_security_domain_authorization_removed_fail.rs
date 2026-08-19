@@ -1,4 +1,4 @@
-//! INVARIANT: IDENTITY-SECURITY-ROUTE-RECEIPT-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: IDENTITY-SECURITY-ROUTE-RECEIPT-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 use identity::ports::CredentialSecurityFactAuthorization;
 

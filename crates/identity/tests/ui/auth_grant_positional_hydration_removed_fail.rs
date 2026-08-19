@@ -1,4 +1,4 @@
-//! INVARIANT: AUTH-GRANT-NAMED-SNAPSHOT-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: AUTH-GRANT-NAMED-SNAPSHOT-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 use std::time::SystemTime;
 

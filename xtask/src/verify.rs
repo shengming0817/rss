@@ -1692,7 +1692,12 @@ fn run_internal(
         InternalCheck::SagaDurableRecoveryGuard => {
             run_check(&crate::saga_durable_recovery_guard::SagaDurableRecoveryGuard)
         }
-        InternalCheck::ArchRules => run_check(&archrules::ArchRules),
+        InternalCheck::ArchRules => {
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("archrules"))?;
+            run_check(&archrules::ArchRules::new(facts))
+        }
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::L2AssuranceCheck => {
             let facts = command_facts

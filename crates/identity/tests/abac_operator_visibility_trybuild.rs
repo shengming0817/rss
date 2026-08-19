@@ -1,4 +1,4 @@
-//! INVARIANT: IDENTITY-ABAC-OPERATOR-OPAQUE-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: IDENTITY-ABAC-OPERATOR-OPAQUE-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 #[test]
 fn operator_representation_is_not_an_adapter_api() {

@@ -459,7 +459,7 @@ mod smoke {
     //! read/write ports on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
     //! PgAuthGrantSweeper concrete maintenance type（不新增 identity 域端口）；
     //! 去掉任一即编译失败（anti-vacuity）。
-    //! INVARIANT: PG-BUNDLE-DOMAIN-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
+    //! PG-BUNDLE-DOMAIN-02 support：`caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
     //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
     use core::marker::PhantomData;
 

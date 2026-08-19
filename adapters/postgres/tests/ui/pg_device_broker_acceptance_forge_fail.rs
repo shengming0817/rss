@@ -1,4 +1,4 @@
-//! INVARIANT: MQTT-BROKER-ACCEPTANCE-MINT-01 { level = "Hard", exec = "test", source = "trybuild" }
+//! INVARIANT: MQTT-BROKER-ACCEPTANCE-MINT-01 { level = "Medium", exec = "test", source = "trybuild" }
 
 fn forge_receipt() -> diport::BrokerAccepted {
     diport::BrokerAccepted(())

@@ -61,6 +61,7 @@ mod sealed {
 ///
 /// 实现集封闭在本 crate（[`caps`] 下的 ZST）；外部 crate 既不能命名内层 `Sealed`、也不能新增 marker，
 /// 故 `VaultDomainDeps<D>` 的 `D` 只能是本 crate 声明的域（VAULT-BUNDLE-DOMAIN-01）。
+/// INVARIANT: VAULT-BUNDLE-DOMAIN-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed production VaultDomain capability marker" }.
 pub trait VaultDomain: sealed::Sealed {}
 
 /// per-domain 能力 marker ZST。
@@ -80,6 +81,7 @@ impl VaultDomain for caps::Settings {}
 /// 经 [`VaultRuntimeDeps::new`] 构造（resolver 由组合根 DI 注入，vault TLS-agnostic 模型）。`Clone` 廉价
 /// （仅 `Arc` clone）。不暴露 `Arc<VaultSecretResolver>`（VAULT-BUNDLE-RESOLVER-02）。
 #[derive(Clone)]
+/// INVARIANT: VAULT-BUNDLE-RESOLVER-02 { level = "Hard", exec = "native-compile", source = "code", native = "production bundle privately owns and shares the resolver Arc" }.
 pub struct VaultRuntimeDeps {
     resolver: Arc<VaultSecretResolver>,
     key_provider: Arc<VaultKeyProvider>,
@@ -267,7 +269,7 @@ impl ManagedResource for VaultKeyProviderGuard {
 mod tests {
     //! bundle 单元测：wiremock-free（构造合法 resolver + allowlist），覆盖 funnel 派发 + 单源
     //! runtime_resources + sealed-caps 共享 Arc。
-    //! INVARIANT: VAULT-BUNDLE-DOMAIN-01 / VAULT-BUNDLE-RESOLVER-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（compile_fail doctest 见
+    //! VAULT-BUNDLE-DOMAIN-01 / VAULT-BUNDLE-RESOLVER-02 support（compile_fail doctest 见
     //! `VaultDomainDeps` rustdoc）。
 
     use super::*;

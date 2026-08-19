@@ -15,7 +15,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use syn::parse::Parser;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
+use workspacefacts::{
+    BuildPlatforms, BuildSelection, BuildSide, CargoPlatform, FeatureSelection, ResolverVersion,
+    WorkspaceFacts,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -30,6 +35,7 @@ pub(crate) enum Rule {
     MissingAntiVacuity,
     MissingInvariantMetadata,
     InvalidInvariantMetadata,
+    InvalidHardAdmission,
     CarrierBindingMismatch,
     MissingNativeHardSource,
     MissingCodegenHardProof,
@@ -43,9 +49,17 @@ pub(crate) enum Rule {
     ApplicationDeliveryResidual,
 }
 
-pub(crate) struct ArchRules;
+pub(crate) struct ArchRules<'a> {
+    facts: &'a WorkspaceFacts,
+}
 
-impl GovernanceCheck for ArchRules {
+impl<'a> ArchRules<'a> {
+    pub(crate) const fn new(facts: &'a WorkspaceFacts) -> Self {
+        Self { facts }
+    }
+}
+
+impl GovernanceCheck for ArchRules<'_> {
     type Rule = Rule;
 
     fn name(&self) -> &'static str {
@@ -54,11 +68,12 @@ impl GovernanceCheck for ArchRules {
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
         let root = workspace_root()?;
-        let index = build_index(&root)?;
+        let index = build_index(&root, Some(self.facts))?;
         let mut findings = index.findings;
         findings.extend(validate_matrix(
             &root,
             &index.records,
+            &index.hard_admissions,
             &index.test_evidence,
             true,
         )?);
@@ -481,7 +496,7 @@ const FUNNELS: &[FunnelSpec] = &[
         ],
         residual: ResidualDisposition::AcceptedMedium {
             risk: "SQL policy / ACL / RLS catalog 与 serving-pool 租户隔离属于跨编译单元、跨后端的运行时集合事实",
-            why_no_low_cost_hardening: "事务 capability 由 trybuild Hard 封闭；真实 PostgreSQL catalog 与 A/B tenant 行为只能由 live catalog + behavior Medium proof 验证",
+            why_no_low_cost_hardening: "事务 capability 由 production 类型 Hard 封闭并由 trybuild 支持；真实 PostgreSQL catalog 与 A/B tenant 行为只能由 live catalog + behavior Medium proof 验证",
         },
     },
     FunnelSpec {
@@ -547,7 +562,7 @@ const FUNNELS: &[FunnelSpec] = &[
         downstream: &[invariant("SAGA-RECEIPT-CATALOG-GATE-01")],
         residual: ResidualDisposition::AcceptedMedium {
             risk: "数据库 catalog 与 Rust receipt capability 是跨编译单元、跨后端的集合事实",
-            why_no_low_cost_hardening: "Completed 构造面由 trybuild Hard 封闭；真实 PostgreSQL catalog 的 trigger、RLS、ACL 与函数体只能由启动期 exact fingerprint 和正反集成测试验证",
+            why_no_low_cost_hardening: "Completed 构造面由 production 类型 Hard 封闭并由 trybuild 支持；真实 PostgreSQL catalog 的 trigger、RLS、ACL 与函数体只能由启动期 exact fingerprint 和正反集成测试验证",
         },
     },
     FunnelSpec {
@@ -616,19 +631,304 @@ struct RuleRecord {
     anti_vacuity: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SemanticEvidenceIdentity {
+    invariant_id: String,
+    facet: Option<String>,
+    carrier: String,
+    source_path: String,
+    source_kind: SourceKind,
+    execution: ExecutionLevel,
+}
+
+fn diagnostic_source_path(source: &str) -> &str {
+    source
+        .rsplit_once(':')
+        .filter(|(_, line)| line.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(source, |(path, _)| path)
+}
+
+fn diagnostic_source_line(source: &str) -> Option<usize> {
+    source
+        .rsplit_once(':')
+        .and_then(|(_, line)| line.parse::<usize>().ok())
+}
+
+fn semantic_evidence_identity(record: &RuleRecord) -> SemanticEvidenceIdentity {
+    SemanticEvidenceIdentity {
+        invariant_id: record.id.clone(),
+        facet: record.facet.clone(),
+        carrier: record.carrier.clone(),
+        source_path: diagnostic_source_path(&record.source).to_string(),
+        source_kind: record.source_kind,
+        execution: record.exec,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardConsumer {
+    ProductionCompile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardMechanism {
+    CargoOrRustc,
+    BuildScript,
+    CompiledGeneratedRust,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HardAdmission {
+    identity: SemanticEvidenceIdentity,
+    truth_source: String,
+    canonical_owner: String,
+    consumer: HardConsumer,
+    mechanism: HardMechanism,
+}
+
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct HardSourceCoordinate {
+    path: PathBuf,
+    line: Option<usize>,
+}
+
+type HardOwnerIndex = BTreeMap<HardSourceCoordinate, BTreeMap<String, String>>;
+
+#[derive(Debug, Default)]
+struct HardAdmissionIndex {
+    production_owners: HardOwnerIndex,
+}
+
+impl HardAdmissionIndex {
+    fn build(root: &Path, records: &[RuleRecord]) -> Result<Self> {
+        Ok(Self {
+            production_owners: hard_owner_index(root, records, None)?,
+        })
+    }
+
+    fn build_with_facts(
+        root: &Path,
+        records: &[RuleRecord],
+        facts: &WorkspaceFacts,
+    ) -> Result<Self> {
+        let shipped_features = shipped_production_features(root, facts)?;
+        Ok(Self {
+            production_owners: hard_owner_index(root, records, Some(&shipped_features))?,
+        })
+    }
+
+    fn admit(&self, record: &RuleRecord) -> Option<HardAdmission> {
+        hard_admission_from_owners(record, &self.production_owners)
+    }
+}
+
+fn insert_production_owner(
+    owners: &mut HardOwnerIndex,
+    path: PathBuf,
+    owner: &str,
+    truth_source: &str,
+) {
+    insert_production_source_owner(owners, path, None, owner, truth_source);
+}
+
+fn insert_production_source_owner(
+    owners: &mut HardOwnerIndex,
+    path: PathBuf,
+    line: Option<usize>,
+    owner: &str,
+    truth_source: &str,
+) {
+    owners
+        .entry(HardSourceCoordinate { path, line })
+        .or_default()
+        .entry(owner.to_string())
+        .or_insert_with(|| truth_source.to_string());
+}
+
+fn unique_production_owner(
+    owners: &HardOwnerIndex,
+    path: &Path,
+    line: Option<usize>,
+) -> Option<(String, String)> {
+    let candidates = owners.get(&HardSourceCoordinate {
+        path: path.to_path_buf(),
+        line,
+    })?;
+    (candidates.len() == 1)
+        .then(|| candidates.iter().next())
+        .flatten()
+        .map(|(owner, truth_source)| (owner.clone(), truth_source.clone()))
+}
+
+fn hard_owner_index(
+    root: &Path,
+    records: &[RuleRecord],
+    shipped_features: Option<&BTreeMap<String, BTreeSet<String>>>,
+) -> Result<HardOwnerIndex> {
+    let mut manifests = BTreeSet::new();
+    for record in records
+        .iter()
+        .filter(|record| record.level == RuleLevel::Hard)
+    {
+        let carrier = root.join(diagnostic_source_path(&record.source));
+        if let Some(manifest) = nearest_package_manifest(root, &carrier) {
+            manifests.insert(manifest);
+        }
+        if let Some(golden) = record.golden.as_deref()
+            && let Some(manifest) = nearest_package_manifest(root, &root.join(golden))
+        {
+            manifests.insert(manifest);
+        }
+    }
+
+    let mut production_owners = BTreeMap::new();
+    for manifest in manifests {
+        let crate_root = manifest.parent().unwrap_or(root);
+        let owner = rel(root, &manifest);
+        let value = parse_toml(&manifest)?;
+        let package = value
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        let production_cfg = ProductionCfgContext::from_manifest(
+            &value,
+            shipped_features.and_then(|features| features.get(package)),
+        );
+        let targets = cargo_target_inventory(crate_root, &manifest)?;
+        for target in targets
+            .iter()
+            .filter(|target| matches!(target.class, CargoTargetClass::Lib | CargoTargetClass::Bin))
+            .filter(|target| target.required_features.is_subset(&production_cfg.features))
+        {
+            let truth_source = rel(root, &target.path);
+            for path in cargo_target_production_reachable_files(target, &production_cfg)? {
+                let relative = PathBuf::from(rel(root, &path));
+                for record in records
+                    .iter()
+                    .filter(|record| Path::new(diagnostic_source_path(&record.source)) == relative)
+                {
+                    let line = diagnostic_source_line(&record.source);
+                    if let Some(line) = line
+                        && production_source_line_active(&path, line, &production_cfg)?
+                    {
+                        insert_production_source_owner(
+                            &mut production_owners,
+                            relative.clone(),
+                            Some(line),
+                            &owner,
+                            &truth_source,
+                        );
+                    }
+                }
+                if records.iter().any(|record| {
+                    record.golden.as_deref().is_some_and(|golden| {
+                        Path::new(golden) == relative
+                            && relative.extension().is_some_and(|ext| ext == "rs")
+                    })
+                }) {
+                    insert_production_owner(
+                        &mut production_owners,
+                        relative.clone(),
+                        &owner,
+                        &truth_source,
+                    );
+                }
+            }
+        }
+        let build = value
+            .get("package")
+            .and_then(|package| package.get("build"));
+        let build_script = match build {
+            None => Some(crate_root.join("build.rs")),
+            Some(toml::Value::String(build)) => Some(crate_root.join(build)),
+            Some(toml::Value::Boolean(false)) => None,
+            Some(_) => None,
+        };
+        if let Some(build_script) = build_script.filter(|path| path.is_file()) {
+            insert_production_owner(
+                &mut production_owners,
+                PathBuf::from(rel(root, &build_script)),
+                &owner,
+                &rel(root, &build_script),
+            );
+        }
+    }
+    Ok(production_owners)
+}
+
+fn hard_admission_from_owners(
+    record: &RuleRecord,
+    production_owners: &HardOwnerIndex,
+) -> Option<HardAdmission> {
+    if record.level != RuleLevel::Hard {
+        return None;
+    }
+    let identity = semantic_evidence_identity(record);
+    let source_path = PathBuf::from(diagnostic_source_path(&record.source));
+    match (record.exec, record.source_kind) {
+        (ExecutionLevel::NativeCompile, SourceKind::Code | SourceKind::Rustdoc) => {
+            let line = diagnostic_source_line(&record.source);
+            unique_production_owner(production_owners, &source_path, line)
+                .or_else(|| {
+                    (source_path.file_name().and_then(|name| name.to_str()) == Some("build.rs"))
+                        .then(|| unique_production_owner(production_owners, &source_path, None))
+                        .flatten()
+                })
+                .map(|(owner, truth_source)| {
+                    let mechanism = if source_path.file_name().and_then(|name| name.to_str())
+                        == Some("build.rs")
+                    {
+                        HardMechanism::BuildScript
+                    } else {
+                        HardMechanism::CargoOrRustc
+                    };
+                    HardAdmission {
+                        identity,
+                        truth_source,
+                        canonical_owner: owner,
+                        consumer: HardConsumer::ProductionCompile,
+                        mechanism,
+                    }
+                })
+        }
+        (
+            ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check),
+            SourceKind::Codegen,
+        ) => {
+            let golden = record.golden.as_deref().filter(|golden| {
+                Path::new(golden).extension().and_then(|ext| ext.to_str()) == Some("rs")
+            });
+            match golden {
+                Some(golden) => unique_production_owner(production_owners, Path::new(golden), None)
+                    .map(|(owner, truth_source)| HardAdmission {
+                        identity,
+                        truth_source,
+                        canonical_owner: owner,
+                        consumer: HardConsumer::ProductionCompile,
+                        mechanism: HardMechanism::CompiledGeneratedRust,
+                    }),
+                None => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 struct Index {
     records: Vec<RuleRecord>,
     findings: Vec<Finding<Rule>>,
+    hard_admissions: HardAdmissionIndex,
     test_evidence: TestEvidenceIndex,
 }
 
 type FacetKey = (String, String, Option<String>);
 type RuleBinding = (RuleLevel, ExecutionLevel, SourceKind);
 
-pub(crate) fn list() -> Result<()> {
+pub(crate) fn list(facts: &WorkspaceFacts) -> Result<()> {
     let root = workspace_root()?;
-    let index = build_index(&root)?;
+    let index = build_index(&root, Some(facts))?;
     println!(
         "id | facet | level | exec | source_kind | carrier | source | evidence | gate | status"
     );
@@ -657,13 +957,14 @@ pub(crate) fn list() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
+pub(crate) fn matrix(action: MatrixAction, facts: &WorkspaceFacts) -> Result<()> {
     let root = workspace_root()?;
-    let index = build_index(&root)?;
+    let index = build_index(&root, Some(facts))?;
     let mut findings = index.findings;
     findings.extend(validate_matrix(
         &root,
         &index.records,
+        &index.hard_admissions,
         &index.test_evidence,
         action == MatrixAction::Check,
     )?);
@@ -751,6 +1052,7 @@ fn validate_funnel_catalog(funnels: &[FunnelSpec]) -> Vec<Finding<Rule>> {
 fn validate_matrix(
     root: &Path,
     records: &[RuleRecord],
+    hard_admissions: &HardAdmissionIndex,
     test_evidence: &TestEvidenceIndex,
     check_doc_drift: bool,
 ) -> Result<Vec<Finding<Rule>>> {
@@ -778,9 +1080,14 @@ fn validate_matrix(
                 continue;
             };
             match record.level {
-                RuleLevel::Hard => {
-                    validate_hard_evidence(root, test_evidence, funnel.key, record, &mut findings)?
-                }
+                RuleLevel::Hard => validate_hard_evidence(
+                    root,
+                    hard_admissions,
+                    test_evidence,
+                    funnel.key,
+                    record,
+                    &mut findings,
+                )?,
                 RuleLevel::Medium => {
                     has_medium = true;
                     validate_medium_evidence(
@@ -850,11 +1157,20 @@ fn select_record(records: &[RuleRecord], key: InvariantKey) -> Option<&RuleRecor
 
 fn validate_hard_evidence(
     root: &Path,
+    hard_admissions: &HardAdmissionIndex,
     test_evidence: &TestEvidenceIndex,
     funnel: &str,
     record: &RuleRecord,
     findings: &mut Vec<Finding<Rule>>,
 ) -> Result<()> {
+    if hard_admissions.admit(record).is_none() {
+        return push_matrix_evidence(
+            findings,
+            funnel,
+            record,
+            "Hard 必须由 production compile consumer 的唯一 truth source 承载；presentation/test artifact 只能作为支持证据",
+        );
+    }
     let valid = match record.source_kind {
         SourceKind::Codegen => {
             let Some(golden) = record.golden.as_deref() else {
@@ -868,13 +1184,10 @@ fn validate_hard_evidence(
                 && green
                     .is_some_and(|raw| evidence_field_fully_bound(test_evidence, root, record, raw))
         }
-        SourceKind::Code | SourceKind::Rustdoc | SourceKind::Trybuild => {
-            record
-                .native
-                .as_deref()
-                .is_some_and(|native| !native.trim().is_empty())
-                || record.source_kind == SourceKind::Trybuild
-        }
+        SourceKind::Code | SourceKind::Rustdoc => record
+            .native
+            .as_deref()
+            .is_some_and(|native| !native.trim().is_empty()),
         _ => false,
     };
     if !valid {
@@ -886,6 +1199,21 @@ fn validate_hard_evidence(
         )?;
     }
     Ok(())
+}
+
+fn validate_hard_admissions(index: &mut Index) {
+    for record in &index.records {
+        if record.level == RuleLevel::Hard && index.hard_admissions.admit(record).is_none() {
+            index.findings.push(finding(
+                Rule::InvalidHardAdmission,
+                record.source.clone(),
+                format!(
+                    "INVARIANT `{}` Hard 缺可验证 production compile truth source；test、doc、JSON/Markdown golden 与 drift report 只能作为支持证据",
+                    record.id
+                ),
+            ));
+        }
+    }
 }
 
 fn push_matrix_evidence(
@@ -1090,7 +1418,7 @@ impl TestEvidenceIndex {
             if record.synthetic_red.is_none() && record.anti_vacuity.is_none() {
                 continue;
             }
-            let relative = record.source.split(':').next().unwrap_or(&record.source);
+            let relative = diagnostic_source_path(&record.source);
             if let Some(manifest) = nearest_package_manifest(root, &root.join(relative)) {
                 manifests.entry(manifest).or_default().insert(record.exec);
             }
@@ -1124,7 +1452,7 @@ impl TestEvidenceIndex {
 
     fn contains(&self, root: &Path, record: &RuleRecord, symbol: &str) -> bool {
         debug_assert!(self.parse_counts.values().all(|count| *count == 1));
-        let relative = record.source.split(':').next().unwrap_or(&record.source);
+        let relative = diagnostic_source_path(&record.source);
         self.symbols_by_source
             .get(&(root.join(relative), record.exec))
             .is_some_and(|symbols| symbols.contains(symbol))
@@ -1441,6 +1769,253 @@ const fn truth(value: bool) -> CfgTruth {
     }
 }
 
+#[derive(Debug, Default)]
+struct ProductionCfgContext {
+    features: BTreeSet<String>,
+}
+
+impl ProductionCfgContext {
+    fn from_manifest(manifest: &toml::Value, shipped_features: Option<&BTreeSet<String>>) -> Self {
+        let declarations = manifest.get("features").and_then(toml::Value::as_table);
+        let mut features = shipped_features.cloned().unwrap_or_default();
+        let mut pending = vec!["default".to_string()];
+        while let Some(feature) = pending.pop() {
+            if !features.insert(feature.clone()) {
+                continue;
+            }
+            let Some(members) = declarations
+                .and_then(|table| table.get(&feature))
+                .and_then(toml::Value::as_array)
+            else {
+                continue;
+            };
+            for member in members.iter().filter_map(toml::Value::as_str) {
+                let candidate = member
+                    .strip_suffix('?')
+                    .unwrap_or(member)
+                    .split_once('/')
+                    .map_or(member, |(feature, _)| feature);
+                if !candidate.starts_with("dep:")
+                    && declarations.is_some_and(|table| table.contains_key(candidate))
+                {
+                    pending.push(candidate.to_string());
+                }
+            }
+        }
+        Self { features }
+    }
+}
+
+fn shipped_production_features(
+    root: &Path,
+    facts: &WorkspaceFacts,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let platform = CargoPlatform::build_target()
+        .context("archrules: resolve canonical production build platform")?;
+    let platforms = BuildPlatforms::new(platform.clone(), platform);
+    let mut features = BTreeMap::<String, BTreeSet<String>>::new();
+    for package in crate::shipped_feature_guard::production_root_packages(root)? {
+        let root_package = facts
+            .package_key(&package)
+            .with_context(|| format!("archrules: shipped package `{package}` missing"))?;
+        let build = facts
+            .resolve_build(BuildSelection::new(
+                root_package,
+                ResolverVersion::V2,
+                FeatureSelection::Default,
+                platforms.clone(),
+                BTreeSet::new(),
+            ))
+            .with_context(|| format!("archrules: resolve shipped build `{package}`"))?;
+        for feature in build.enabled_features(BuildSide::Target) {
+            features
+                .entry(feature.package().as_str().to_string())
+                .or_default()
+                .insert(feature.name().to_string());
+        }
+    }
+    Ok(features)
+}
+
+fn cfg_truth_for_production(meta: &syn::Meta, context: &ProductionCfgContext) -> CfgTruth {
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("test") => CfgTruth::False,
+        syn::Meta::Path(path) if path.is_ident("unix") => truth(cfg!(unix)),
+        syn::Meta::Path(path) if path.is_ident("windows") => truth(cfg!(windows)),
+        syn::Meta::Path(_) => CfgTruth::Unknown,
+        syn::Meta::NameValue(name_value) => {
+            let syn::Expr::Lit(value) = &name_value.value else {
+                return CfgTruth::Unknown;
+            };
+            let syn::Lit::Str(value) = &value.lit else {
+                return CfgTruth::Unknown;
+            };
+            if name_value.path.is_ident("feature") {
+                truth(context.features.contains(&value.value()))
+            } else if name_value.path.is_ident("target_os") {
+                truth(value.value() == std::env::consts::OS)
+            } else if name_value.path.is_ident("target_arch") {
+                truth(value.value() == std::env::consts::ARCH)
+            } else if name_value.path.is_ident("target_family") {
+                truth(
+                    (cfg!(unix) && value.value() == "unix")
+                        || (cfg!(windows) && value.value() == "windows"),
+                )
+            } else {
+                CfgTruth::Unknown
+            }
+        }
+        syn::Meta::List(list) => production_cfg_list_truth(list, context),
+    }
+}
+
+fn production_cfg_list_truth(list: &syn::MetaList, context: &ProductionCfgContext) -> CfgTruth {
+    let Ok(items) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+    else {
+        return CfgTruth::Unknown;
+    };
+    let evaluate = |item: &syn::Meta| cfg_truth_for_production(item, context);
+    if list.path.is_ident("all") {
+        if items.iter().any(|item| evaluate(item) == CfgTruth::False) {
+            CfgTruth::False
+        } else if items.iter().all(|item| evaluate(item) == CfgTruth::True) {
+            CfgTruth::True
+        } else {
+            CfgTruth::Unknown
+        }
+    } else if list.path.is_ident("any") {
+        if items.iter().any(|item| evaluate(item) == CfgTruth::True) {
+            CfgTruth::True
+        } else if items.iter().all(|item| evaluate(item) == CfgTruth::False) {
+            CfgTruth::False
+        } else {
+            CfgTruth::Unknown
+        }
+    } else if list.path.is_ident("not") && items.len() == 1 {
+        match evaluate(&items[0]) {
+            CfgTruth::True => CfgTruth::False,
+            CfgTruth::False => CfgTruth::True,
+            CfgTruth::Unknown => CfgTruth::Unknown,
+        }
+    } else {
+        CfgTruth::Unknown
+    }
+}
+
+fn attrs_prove_production(attrs: &[syn::Attribute], context: &ProductionCfgContext) -> bool {
+    attrs.iter().all(|attr| {
+        if attr.path().is_ident("cfg") {
+            return attr
+                .meta
+                .require_list()
+                .ok()
+                .and_then(|list| syn::parse2::<syn::Meta>(list.tokens.clone()).ok())
+                .is_some_and(|meta| cfg_truth_for_production(&meta, context) == CfgTruth::True);
+        }
+        if !attr.path().is_ident("cfg_attr") {
+            return true;
+        }
+        let Ok(list) = attr.meta.require_list() else {
+            return false;
+        };
+        let Ok(items) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+            .parse2(list.tokens.clone())
+        else {
+            return false;
+        };
+        let Some(condition) = items.first() else {
+            return false;
+        };
+        match cfg_truth_for_production(condition, context) {
+            CfgTruth::False => true,
+            CfgTruth::Unknown => false,
+            CfgTruth::True => items.iter().skip(1).all(|meta| {
+                !meta.path().is_ident("cfg")
+                    || meta
+                        .require_list()
+                        .ok()
+                        .and_then(|list| syn::parse2::<syn::Meta>(list.tokens.clone()).ok())
+                        .is_some_and(|condition| {
+                            cfg_truth_for_production(&condition, context) == CfgTruth::True
+                        })
+            }),
+        }
+    })
+}
+
+fn production_item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        syn::Item::Verbatim(_) | _ => &[],
+    }
+}
+
+fn production_source_line_active(
+    path: &Path,
+    line: usize,
+    context: &ProductionCfgContext,
+) -> Result<bool> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("读取 production Hard carrier `{}`", path.display()))?;
+    let file = syn::parse_file(&text)
+        .with_context(|| format!("解析 production Hard carrier `{}`", path.display()))?;
+    let inner_doc = text
+        .lines()
+        .nth(line.saturating_sub(1))
+        .is_some_and(|source| source.trim_start().starts_with("//!"));
+    Ok(production_line_active_in_items(
+        &file.items,
+        line,
+        inner_doc,
+        context,
+    ))
+}
+
+fn production_line_active_in_items(
+    items: &[syn::Item],
+    line: usize,
+    inner_doc: bool,
+    context: &ProductionCfgContext,
+) -> bool {
+    let mut next = None;
+    for item in items {
+        let span = item.span();
+        let start = span.start().line;
+        let end = span.end().line;
+        if start <= line && line <= end {
+            if !attrs_prove_production(production_item_attrs(item), context) {
+                return false;
+            }
+            if let syn::Item::Mod(module) = item
+                && let Some((_, nested)) = &module.content
+            {
+                return production_line_active_in_items(nested, line, inner_doc, context);
+            }
+            return true;
+        }
+        if start > line && next.is_none() {
+            next = Some(item);
+        }
+    }
+    inner_doc
+        || next.is_none_or(|item| attrs_prove_production(production_item_attrs(item), context))
+}
+
 fn cfg_truth(meta: &syn::Meta) -> CfgTruth {
     match meta {
         syn::Meta::Path(path) if path.is_ident("test") => CfgTruth::True,
@@ -1527,6 +2102,7 @@ impl CargoTargetClass {
 pub(crate) struct CargoTargetRoot {
     pub(crate) path: PathBuf,
     pub(crate) class: CargoTargetClass,
+    required_features: BTreeSet<String>,
 }
 
 /// Returns the same closed target inventory used by archrules reachability, including custom and
@@ -1548,11 +2124,13 @@ pub(crate) fn cargo_target_inventory(
         roots.insert(CargoTargetRoot {
             path: explicit_path(lib).unwrap_or_else(|| crate_root.join("src/lib.rs")),
             class: CargoTargetClass::Lib,
+            required_features: BTreeSet::new(),
         });
     } else if crate_root.join("src/lib.rs").is_file() {
         roots.insert(CargoTargetRoot {
             path: crate_root.join("src/lib.rs"),
             class: CargoTargetClass::Lib,
+            required_features: BTreeSet::new(),
         });
     }
     for (kind, default_dir, class) in [
@@ -1563,8 +2141,18 @@ pub(crate) fn cargo_target_inventory(
     ] {
         if let Some(targets) = value.get(kind).and_then(toml::Value::as_array) {
             roots.extend(targets.iter().filter_map(|target| {
-                explicit_target_path(crate_root, kind, target)
-                    .map(|path| CargoTargetRoot { path, class })
+                explicit_target_path(crate_root, kind, target).map(|path| CargoTargetRoot {
+                    path,
+                    class,
+                    required_features: target
+                        .get("required-features")
+                        .and_then(toml::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                })
             }));
         }
         let automatic = value
@@ -1577,11 +2165,16 @@ pub(crate) fn cargo_target_inventory(
             for entry in fs::read_dir(&dir)? {
                 let path = entry?.path();
                 if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                    roots.insert(CargoTargetRoot { path, class });
+                    roots.insert(CargoTargetRoot {
+                        path,
+                        class,
+                        required_features: BTreeSet::new(),
+                    });
                 } else if path.is_dir() && path.join("main.rs").is_file() {
                     roots.insert(CargoTargetRoot {
                         path: path.join("main.rs"),
                         class,
+                        required_features: BTreeSet::new(),
                     });
                 }
             }
@@ -1597,6 +2190,7 @@ pub(crate) fn cargo_target_inventory(
         roots.insert(CargoTargetRoot {
             path: crate_root.join("src/main.rs"),
             class: CargoTargetClass::Bin,
+            required_features: BTreeSet::new(),
         });
     }
     roots.retain(|target| target.path.is_file());
@@ -1608,6 +2202,77 @@ pub(crate) fn cargo_target_reachable_files(target: &CargoTargetRoot) -> Result<B
     let mut reachable = BTreeSet::new();
     collect_reachable_modules(&target.path, &mut reachable)?;
     Ok(reachable)
+}
+
+fn cargo_target_production_reachable_files(
+    target: &CargoTargetRoot,
+    context: &ProductionCfgContext,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut reachable = BTreeSet::new();
+    collect_production_reachable_modules(&target.path, &mut reachable, context)?;
+    Ok(reachable)
+}
+
+fn collect_production_reachable_modules(
+    module_file: &Path,
+    reachable: &mut BTreeSet<PathBuf>,
+    context: &ProductionCfgContext,
+) -> Result<()> {
+    if !reachable.insert(module_file.to_path_buf()) {
+        return Ok(());
+    }
+    let text = fs::read_to_string(module_file).with_context(|| {
+        format!(
+            "读取 production Cargo target module `{}`",
+            module_file.display()
+        )
+    })?;
+    let file = syn::parse_file(&text).with_context(|| {
+        format!(
+            "解析 production Cargo target module `{}`",
+            module_file.display()
+        )
+    })?;
+    collect_production_reachable_items(
+        &module_search_base(module_file),
+        module_file.parent().unwrap_or(Path::new("")),
+        &file.items,
+        reachable,
+        context,
+    )
+}
+
+fn collect_production_reachable_items(
+    search_base: &Path,
+    path_attr_base: &Path,
+    items: &[syn::Item],
+    reachable: &mut BTreeSet<PathBuf>,
+    context: &ProductionCfgContext,
+) -> Result<()> {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        if !attrs_prove_production(&module.attrs, context) {
+            continue;
+        }
+        if let Some((_, items)) = &module.content {
+            let inline_base = search_base.join(module.ident.to_string());
+            collect_production_reachable_items(
+                &inline_base,
+                &inline_base,
+                items,
+                reachable,
+                context,
+            )?;
+        } else {
+            let external = external_module_path(search_base, path_attr_base, module);
+            if external.is_file() {
+                collect_production_reachable_modules(&external, reachable, context)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_reachable_modules(module_file: &Path, reachable: &mut BTreeSet<PathBuf>) -> Result<()> {
@@ -1857,7 +2522,11 @@ fn render_boundaries(records: &[RuleRecord], keys: &[InvariantKey]) -> Result<St
                     record.synthetic_red.as_deref().unwrap_or("-"),
                     record.anti_vacuity.as_deref().unwrap_or("-")
                 ),
-                RuleLevel::Hard => record.native.as_deref().unwrap_or("trybuild").to_string(),
+                RuleLevel::Hard => record
+                    .native
+                    .as_deref()
+                    .unwrap_or("compiled generated Rust")
+                    .to_string(),
                 RuleLevel::Medium => format!(
                     "red={}, green={}",
                     record.synthetic_red.as_deref().unwrap_or("-"),
@@ -1871,7 +2540,7 @@ fn render_boundaries(records: &[RuleRecord], keys: &[InvariantKey]) -> Result<St
                 record.level.as_str(),
                 record.carrier,
                 record.gate,
-                record.source,
+                diagnostic_source_path(&record.source),
                 record.evidence,
                 proof
             ))
@@ -1880,7 +2549,7 @@ fn render_boundaries(records: &[RuleRecord], keys: &[InvariantKey]) -> Result<St
         .map(|parts| parts.join("<br>"))
 }
 
-fn build_index(root: &Path) -> Result<Index> {
+fn build_index(root: &Path, facts: Option<&WorkspaceFacts>) -> Result<Index> {
     let mut index = Index::default();
     scan_xtask(root, &mut index)?;
     scan_dylint(root, &mut index)?;
@@ -1898,6 +2567,11 @@ fn build_index(root: &Path) -> Result<Index> {
     scan_trybuild_and_native(root, &mut index)?;
     reject_conflicting_facets(&mut index);
     require_anti_vacuity(&mut index);
+    index.hard_admissions = match facts {
+        Some(facts) => HardAdmissionIndex::build_with_facts(root, &index.records, facts)?,
+        None => HardAdmissionIndex::build(root, &index.records)?,
+    };
+    validate_hard_admissions(&mut index);
     if index.records.is_empty() {
         index.findings.push(finding(
             Rule::EmptyIndex,
@@ -1905,12 +2579,7 @@ fn build_index(root: &Path) -> Result<Index> {
             "未从真实 carrier 派生出任何规则",
         ));
     }
-    index.records.sort_by(|a, b| {
-        a.id.cmp(&b.id)
-            .then_with(|| a.facet.cmp(&b.facet))
-            .then_with(|| a.carrier.cmp(&b.carrier))
-            .then_with(|| a.source.cmp(&b.source))
-    });
+    index.records.sort_by_key(semantic_evidence_identity);
     index.test_evidence = TestEvidenceIndex::build(root, &index.records)?;
     Ok(index)
 }
@@ -3332,11 +4001,7 @@ fn validated_metadata(
 fn reject_conflicting_facets(index: &mut Index) {
     let mut seen: BTreeMap<FacetKey, RuleBinding> = BTreeMap::new();
     for record in &index.records {
-        let file = record
-            .source
-            .rsplit_once(':')
-            .map_or(record.source.as_str(), |(file, _)| file)
-            .to_string();
+        let file = diagnostic_source_path(&record.source).to_string();
         let key = (file, record.id.clone(), record.facet.clone());
         let binding = (record.level, record.exec, record.source_kind);
         if seen.get(&key).is_some_and(|prior| *prior != binding) {
@@ -3400,11 +4065,6 @@ impl RuleLevel {
                         (
                             ExecutionLevel::NativeCompile,
                             SourceKind::Code | SourceKind::Rustdoc
-                        ) | (
-                            ExecutionLevel::Profile(
-                                crate::execution_profiles::ExecutionProfile::Test
-                            ),
-                            SourceKind::Trybuild
                         )
                     ))
                     || (carrier == "xtask"
@@ -3453,7 +4113,7 @@ impl ExecutionLevel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum SourceKind {
     Code,
     Rustdoc,
@@ -4796,6 +5456,7 @@ mod tests {
         let mut index = Index {
             records: vec![record(RuleLevel::Medium), record(RuleLevel::Hard)],
             findings: Vec::new(),
+            hard_admissions: HardAdmissionIndex::default(),
             test_evidence: TestEvidenceIndex::default(),
         };
         reject_conflicting_facets(&mut index);
@@ -4830,7 +5491,7 @@ mod tests {
     }
 
     #[test]
-    fn hard_level_requires_native_or_trybuild_carrier() -> Result<()> {
+    fn hard_level_requires_native_compile_or_compiled_codegen_carrier() -> Result<()> {
         let root = unique_tmp("archrules-hard-binding");
         let file = root.join("xtask/src/demo.rs");
         write(
@@ -5480,11 +6141,11 @@ fn ui() {
         )?;
         write(
             &root.join("crates/demo/tests/ui/fail.rs"),
-            "//! INVARIANT: TRYBUILD-FAIL-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
+            "//! INVARIANT: TRYBUILD-FAIL-01 { level = \"Medium\", exec = \"test\", source = \"trybuild\" }\n",
         )?;
         write(
             &root.join("crates/demo/tests/ui/pass.rs"),
-            "//! INVARIANT: TRYBUILD-PASS-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
+            "//! INVARIANT: TRYBUILD-PASS-01 { level = \"Medium\", exec = \"test\", source = \"trybuild\" }\n",
         )?;
         let mut index = Index::default();
         scan_trybuild_and_native(&root, &mut index)?;
@@ -5519,11 +6180,11 @@ fn ui() {
         )?;
         write(
             &root.join("crates/demo/tests/ui/used.rs"),
-            "//! INVARIANT: TRYBUILD-USED-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
+            "//! INVARIANT: TRYBUILD-USED-01 { level = \"Medium\", exec = \"test\", source = \"trybuild\" }\n",
         )?;
         write(
             &root.join("crates/demo/tests/ui/orphan.rs"),
-            "//! INVARIANT: TRYBUILD-ORPHAN-01 { level = \"Hard\", exec = \"test\", source = \"trybuild\" }\n",
+            "//! INVARIANT: TRYBUILD-ORPHAN-01 { level = \"Medium\", exec = \"test\", source = \"trybuild\" }\n",
         )?;
         let fixtures = trybuild_fixtures(&root)?;
         assert!(
@@ -5677,7 +6338,7 @@ members = ["rss_demo"]
         )?;
         write(&root.join("lints/rss_demo/ui/main.rs"), "fn main() {}\n")?;
         write(&root.join("lints/rss_demo/ui/main.stderr"), "error\n")?;
-        let index = build_index(&root)?;
+        let index = build_index(&root, None)?;
         assert!(index.findings.is_empty(), "{:?}", index.findings);
         for id in [
             "DENY-DEMO-01",
@@ -5883,13 +6544,16 @@ members = ["rss_demo"]
 
     #[test]
     fn real_workspace_archrules_and_derived_matrix_pass() -> Result<()> {
-        let (summary, findings) = ArchRules.check()?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let (summary, findings) = ArchRules::new(facts).check()?;
         assert!(findings.is_empty(), "{findings:?}");
         assert!(
             summary.contains(&format!("{} 行持久化 funnel", FUNNELS.len())),
             "{summary}"
         );
-        matrix(MatrixAction::Check)?;
+        matrix(MatrixAction::Check, facts)?;
         Ok(())
     }
 
@@ -6023,7 +6687,7 @@ fn unrelated_green_accepted() { assert!(true); }
 
     #[test]
     fn ci_lane_invariants_use_record_granular_carriers() -> Result<()> {
-        let index = build_index(&crate::workspace_root()?)?;
+        let index = build_index(&crate::workspace_root()?, None)?;
         let Some(registry) = index.records.iter().find(|record| {
             record.id == "CI-LANE-REGISTRY-01" && record.source.contains("ci_lanes.rs")
         }) else {
@@ -6072,7 +6736,7 @@ fn unrelated_green_accepted() { assert!(true); }
 
     #[test]
     fn ci_result_gate_is_a_single_medium_external_runtime_carrier() -> Result<()> {
-        let index = build_index(&crate::workspace_root()?)?;
+        let index = build_index(&crate::workspace_root()?, None)?;
         let records = index
             .records
             .iter()
@@ -6098,7 +6762,7 @@ fn unrelated_green_accepted() { assert!(true); }
 
     #[test]
     fn compiler_cache_invariants_use_record_granular_carriers() -> Result<()> {
-        let index = build_index(&crate::workspace_root()?)?;
+        let index = build_index(&crate::workspace_root()?, None)?;
         let policy = index
             .records
             .iter()
@@ -6401,11 +7065,236 @@ fn real_green() { assert!(true); }
         };
         let mut findings = Vec::new();
         let test_evidence = TestEvidenceIndex::build(&root, std::slice::from_ref(&record))?;
-        validate_hard_evidence(&root, &test_evidence, "demo", &record, &mut findings)?;
+        let mut hard_admissions = HardAdmissionIndex::default();
+        insert_production_owner(
+            &mut hard_admissions.production_owners,
+            PathBuf::from("generated/demo.rs"),
+            "generated/Cargo.toml",
+            "generated/src/lib.rs",
+        );
+        validate_hard_evidence(
+            &root,
+            &hard_admissions,
+            &test_evidence,
+            "demo",
+            &record,
+            &mut findings,
+        )?;
         assert_eq!(
             findings.len(),
             1,
             "comment/string symbol 不得充当 test 证明"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn presentation_artifact_cannot_satisfy_hard_admission() -> Result<()> {
+        let root = unique_tmp("archrules-presentation-not-hard");
+        write(&root.join("generated/report.json"), "{}\n")?;
+        write(
+            &root.join("xtask/src/demo.rs"),
+            "#[test] fn red() { assert!(true); }\n#[test] fn green() { assert!(true); }\n",
+        )?;
+        let record = RuleRecord {
+            id: "DEMO-PRESENTATION-01".to_string(),
+            facet: None,
+            level: RuleLevel::Hard,
+            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check),
+            source_kind: SourceKind::Codegen,
+            carrier: "xtask".to_string(),
+            source: "xtask/src/demo.rs:1".to_string(),
+            evidence: "presentation drift".to_string(),
+            gate: "check".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: Some("generated/report.json".to_string()),
+            synthetic_red: Some("tests::red".to_string()),
+            anti_vacuity: Some("tests::green".to_string()),
+        };
+        let test_evidence = TestEvidenceIndex::build(&root, std::slice::from_ref(&record))?;
+        let mut hard_admissions = HardAdmissionIndex::default();
+        insert_production_owner(
+            &mut hard_admissions.production_owners,
+            PathBuf::from("generated/report.json"),
+            "generated/Cargo.toml",
+            "generated/src/lib.rs",
+        );
+        let mut findings = Vec::new();
+        validate_hard_evidence(
+            &root,
+            &hard_admissions,
+            &test_evidence,
+            "presentation",
+            &record,
+            &mut findings,
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MatrixEvidence),
+            "JSON/report drift may be Medium evidence but cannot satisfy Hard"
+        );
+
+        let mut compiled = record.clone();
+        compiled.golden = Some("generated/demo.rs".to_string());
+        let mut ambiguous = HardAdmissionIndex::default();
+        for owner in ["crates/a/Cargo.toml", "crates/b/Cargo.toml"] {
+            insert_production_owner(
+                &mut ambiguous.production_owners,
+                PathBuf::from("generated/demo.rs"),
+                owner,
+                "generated/src/lib.rs",
+            );
+        }
+        assert!(
+            ambiguous.admit(&compiled).is_none(),
+            "cross-package owner conflicts must fail closed"
+        );
+
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = false\n",
+        )?;
+        write(&root.join("crates/demo/src/lib.rs"), "pub fn live() {}\n")?;
+        write(&root.join("crates/demo/build.rs"), "fn main() {}\n")?;
+        let disabled_build = RuleRecord {
+            id: "DEMO-DISABLED-BUILD-01".to_string(),
+            facet: None,
+            level: RuleLevel::Hard,
+            exec: ExecutionLevel::NativeCompile,
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: "crates/demo/build.rs:1".to_string(),
+            evidence: "source invariant".to_string(),
+            gate: "native-compile".to_string(),
+            status: "ok".to_string(),
+            native: Some("build script".to_string()),
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        assert!(
+            HardAdmissionIndex::build(&root, std::slice::from_ref(&disabled_build))?
+                .admit(&disabled_build)
+                .is_none(),
+            "package.build=false must keep a dormant build.rs out of Hard admission"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn line_shift_preserves_semantic_evidence_identity() {
+        let record = |line| RuleRecord {
+            id: "DEMO-STABLE-IDENTITY-01".to_string(),
+            facet: Some("owner".to_string()),
+            level: RuleLevel::Hard,
+            exec: ExecutionLevel::NativeCompile,
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: format!("crates/demo/src/lib.rs:{line}"),
+            evidence: "source invariant".to_string(),
+            gate: "native-compile".to_string(),
+            status: "ok".to_string(),
+            native: Some("private constructor".to_string()),
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+
+        assert_eq!(
+            semantic_evidence_identity(&record(7)),
+            semantic_evidence_identity(&record(71)),
+            "diagnostic line movement must not change semantic evidence identity"
+        );
+    }
+
+    #[test]
+    fn hard_admission_requires_production_cfg_and_target_eligibility() -> Result<()> {
+        let root = unique_tmp("archrules-production-hard-admission");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+default = ["production"]
+production = []
+test-support = []
+
+[[bin]]
+name = "disabled"
+path = "src/disabled.rs"
+required-features = ["test-support"]
+"#,
+        )?;
+        write(
+            &root.join("crates/demo/src/lib.rs"),
+            &r#"#[cfg(test)]
+mod test_only {
+    //! MARKER: DEMO-TEST-ONLY-01
+}
+
+#[cfg(feature = "test-support")]
+mod disabled_feature {
+    //! MARKER: DEMO-DISABLED-FEATURE-01
+}
+
+mod mixed {
+    //! MARKER: DEMO-PRODUCTION-01
+
+    #[cfg(test)]
+    mod test_only {
+        //! MARKER: DEMO-SAME-FILE-TEST-01
+    }
+}
+"#
+            .replace("MARKER:", "INVARIANT:"),
+        )?;
+        write(
+            &root.join("crates/demo/src/disabled.rs"),
+            &"//! MARKER: DEMO-REQUIRED-FEATURE-01\nfn main() {}\n"
+                .replace("MARKER:", "INVARIANT:"),
+        )?;
+        let record = |id: &str, source: &str| RuleRecord {
+            id: id.to_string(),
+            facet: None,
+            level: RuleLevel::Hard,
+            exec: ExecutionLevel::NativeCompile,
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: source.to_string(),
+            evidence: "source invariant".to_string(),
+            gate: "native-compile".to_string(),
+            status: "ok".to_string(),
+            native: Some("production type boundary".to_string()),
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        let records = [
+            record("DEMO-TEST-ONLY-01", "crates/demo/src/lib.rs:3"),
+            record("DEMO-DISABLED-FEATURE-01", "crates/demo/src/lib.rs:8"),
+            record("DEMO-PRODUCTION-01", "crates/demo/src/lib.rs:12"),
+            record("DEMO-SAME-FILE-TEST-01", "crates/demo/src/lib.rs:16"),
+            record("DEMO-REQUIRED-FEATURE-01", "crates/demo/src/disabled.rs:1"),
+        ];
+        let admissions = HardAdmissionIndex::build(&root, &records)?;
+
+        for rejected in [&records[0], &records[1], &records[3], &records[4]] {
+            assert!(
+                admissions.admit(rejected).is_none(),
+                "non-production carrier escaped: {}",
+                rejected.id
+            );
+        }
+        assert!(
+            admissions.admit(&records[2]).is_some(),
+            "real production carrier must remain admitted"
         );
         fs::remove_dir_all(root)?;
         Ok(())
