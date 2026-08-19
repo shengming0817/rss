@@ -57,5 +57,5 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 rstest = { workspace = true }
 # round-trip 测试：SimpleSpanProcessor + InMemorySpanExporter 确定性捕获导出 span（无 live collector、
 # 不拉额外 TLS crypto）。与上方 [dependencies] 的 optional 条目同名共存：cargo 仅在测试构建叠加 `testing`
-# feature（production lib 依赖面不含 testing），无歧义——镜像 s3 adapter 的 aws-sdk-s3 test-util 双声明范式。
+# feature（production lib 依赖面不含 testing）；Cargo 会合并同一 package 的 normal/dev feature 集。
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

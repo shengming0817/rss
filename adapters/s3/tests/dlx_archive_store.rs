@@ -20,7 +20,7 @@ use aws_sdk_s3::types::{
     LifecycleRuleFilter, NoncurrentVersionExpiration, ObjectLockConfiguration, ObjectLockEnabled,
     ObjectLockMode, ObjectLockRetentionMode, ObjectLockRule,
 };
-use aws_smithy_mocks::{Rule, mock, mock_client};
+use aws_smithy_mocks::{MockResponseInterceptor, Rule, RuleMode, create_mock_http_client, mock};
 use base64::Engine as _;
 use diport::{
     ArchiveChecksum, ArchiveVersionId, Clock, DlxArchiveCiphertext, DlxArchiveHeadOutcome,
@@ -36,6 +36,27 @@ const CANARY_BODY: &[u8] = b"rss-dlx-worm-capability-v2";
 const NOW: i64 = 1_900_000_000;
 const RETAIN_UNTIL: i64 = NOW + 31 * SECONDS_PER_DAY;
 const VERSION_ID: &str = "archive-version-1";
+
+fn mock_client(rules: &[&Rule]) -> aws_sdk_s3::Client {
+    let interceptor = rules.iter().fold(
+        MockResponseInterceptor::new().rule_mode(RuleMode::Sequential),
+        |interceptor, rule| interceptor.with_rule(rule),
+    );
+    let config = aws_sdk_s3::config::Config::builder()
+        .behavior_version_latest()
+        .region(aws_sdk_s3::config::Region::new("us-east-1"))
+        .credentials_provider(aws_sdk_s3::config::Credentials::new(
+            "test-access-key",
+            "test-secret-key",
+            None,
+            None,
+            "rss-s3-dlx-tests",
+        ))
+        .http_client(create_mock_http_client())
+        .interceptor(interceptor)
+        .build();
+    aws_sdk_s3::Client::from_conf(config)
+}
 
 struct FixedClock(i64);
 
@@ -275,7 +296,7 @@ fn archive_ciphertext(body: &[u8]) -> DlxArchiveCiphertext {
 fn unverified_store_rejects_empty_archive_bucket() {
     let rule =
         mock!(aws_sdk_s3::Client::put_object).then_output(|| PutObjectOutput::builder().build());
-    let client = mock_client!(aws_sdk_s3, &[&rule]);
+    let client = mock_client(&[&rule]);
 
     assert!(S3DlxArchiveStore::new(client, "", Arc::new(FixedClock(NOW))).is_err());
 }
@@ -283,7 +304,7 @@ fn unverified_store_rejects_empty_archive_bucket() {
 #[tokio::test]
 async fn capability_probe_verifies_versioning_compliance_conditional_create_and_head() {
     let rules = ProbeRules::healthy();
-    let client = mock_client!(aws_sdk_s3, rules.refs().as_slice());
+    let client = mock_client(rules.refs().as_slice());
 
     assert!(unverified(client).verify().await.is_ok());
     assert_eq!(rules.versioning.num_calls(), 1);
@@ -302,7 +323,7 @@ async fn capability_probe_rejects_disabled_versioning() {
             .status(BucketVersioningStatus::Suspended)
             .build()
     });
-    let client = mock_client!(aws_sdk_s3, &[&rule]);
+    let client = mock_client(&[&rule]);
 
     assert!(matches!(
         unverified(client).verify().await,
@@ -323,7 +344,7 @@ async fn capability_probe_rejects_governance_or_thirty_day_default() {
         });
         let object_lock = mock!(aws_sdk_s3::Client::get_object_lock_configuration)
             .then_output(move || object_lock_output(days, mode.clone()));
-        let client = mock_client!(aws_sdk_s3, &[&versioning, &object_lock]);
+        let client = mock_client(&[&versioning, &object_lock]);
         let result = unverified(client).verify().await;
         if expected_compliance {
             assert!(matches!(
@@ -357,7 +378,7 @@ async fn capability_probe_rejects_missing_or_incomplete_lifecycle_expiration() {
             .then_output(|| object_lock_output(31, ObjectLockRetentionMode::Compliance));
         let lifecycle = mock!(aws_sdk_s3::Client::get_bucket_lifecycle_configuration)
             .then_output(move || lifecycle_output(current_days, noncurrent_days, status.clone()));
-        let client = mock_client!(aws_sdk_s3, &[&versioning, &object_lock, &lifecycle]);
+        let client = mock_client(&[&versioning, &object_lock, &lifecycle]);
 
         assert!(matches!(
             unverified(client).verify().await,
@@ -377,7 +398,7 @@ async fn capability_probe_rejects_lifecycle_without_modern_bucket_wide_filter() 
         .then_output(|| object_lock_output(31, ObjectLockRetentionMode::Compliance));
     let lifecycle = mock!(aws_sdk_s3::Client::get_bucket_lifecycle_configuration)
         .then_output(lifecycle_output_without_modern_filter);
-    let client = mock_client!(aws_sdk_s3, &[&versioning, &object_lock, &lifecycle]);
+    let client = mock_client(&[&versioning, &object_lock, &lifecycle]);
 
     assert!(matches!(
         unverified(client).verify().await,
@@ -403,7 +424,7 @@ async fn capability_probe_rejects_overwriting_second_canary_put() {
         &rules.canary_created_head,
         &overwrite,
     ];
-    let client = mock_client!(aws_sdk_s3, refs.as_slice());
+    let client = mock_client(refs.as_slice());
 
     assert!(matches!(
         unverified(client).verify().await,
@@ -425,7 +446,7 @@ async fn capability_probe_accepts_an_existing_generation_canary_on_restart() {
         &second_exists,
         &rules.canary_existing_head,
     ];
-    let client = mock_client!(aws_sdk_s3, refs.as_slice());
+    let client = mock_client(refs.as_slice());
 
     assert!(unverified(client).verify().await.is_ok());
     assert_eq!(first_exists.num_calls(), 1);
@@ -437,7 +458,7 @@ async fn capability_probe_rotates_generation_after_retention_period() {
     let after_retention = NOW + 32 * SECONDS_PER_DAY;
     assert_ne!(canary_key(NOW), canary_key(after_retention));
     let rules = ProbeRules::healthy_at(after_retention);
-    let client = mock_client!(aws_sdk_s3, rules.refs().as_slice());
+    let client = mock_client(rules.refs().as_slice());
 
     assert!(
         unverified_at(client, after_retention)
@@ -468,7 +489,7 @@ async fn verified_store_readiness_rechecks_only_read_only_capabilities() {
         &readiness_object_lock,
         &readiness_lifecycle,
     ]);
-    let client = mock_client!(aws_sdk_s3, refs.as_slice());
+    let client = mock_client(refs.as_slice());
     let store = verified(client).await;
 
     assert!(store.probe_readiness().await.is_ok());
@@ -513,7 +534,7 @@ async fn verified_put_heads_object_before_reporting_created() {
     );
     let mut refs = rules.refs();
     refs.extend([&put, &head]);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     let outcome = store
         .put_if_absent(DlxArchivePutRequest::new(key, archive_ciphertext(body)))
@@ -540,7 +561,7 @@ async fn verified_put_maps_precondition_to_already_exists() {
     );
     let mut refs = rules.refs();
     refs.extend([&put, &head]);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     let outcome = store
         .put_if_absent(DlxArchivePutRequest::new(
@@ -574,7 +595,7 @@ async fn verified_put_rejects_missing_key_reference_on_created_head() {
     );
     let mut refs = rules.refs();
     refs.extend([&put, &head]);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store
@@ -606,7 +627,7 @@ async fn verified_put_rejects_only_thirty_days_of_remaining_worm_retention() {
     );
     let mut refs = rules.refs();
     refs.extend([&put, &head]);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store
@@ -625,7 +646,7 @@ async fn verified_put_maps_provider_failure_to_transient() {
     let put = mock!(aws_sdk_s3::Client::put_object).then_error(access_denied);
     let mut refs = rules.refs();
     refs.push(&put);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store
@@ -651,7 +672,7 @@ async fn verified_get_rejects_checksum_mismatch_as_invariant() {
     });
     let mut refs = rules.refs();
     refs.push(&get);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store
@@ -669,7 +690,7 @@ async fn verified_head_maps_provider_missing_without_a_destructive_capability() 
         .then_error(|| HeadObjectError::NotFound(NotFound::builder().build()));
     let mut refs = rules.refs();
     refs.push(&head);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store.head(&object_key(), &archive_version_id()).await,
@@ -684,7 +705,7 @@ async fn verified_get_maps_no_such_key_to_none() {
         .then_error(|| GetObjectError::NoSuchKey(NoSuchKey::builder().build()));
     let mut refs = rules.refs();
     refs.push(&get);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store
@@ -717,6 +738,7 @@ testkit::provider_conformance_catalog! {
 }
 
 mod provider_conformance_cases {
+    use crate::mock_client;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -726,7 +748,7 @@ mod provider_conformance_cases {
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::primitives::{ByteStream, DateTime};
     use aws_sdk_s3::types::ObjectLockMode;
-    use aws_smithy_mocks::{mock, mock_client};
+    use aws_smithy_mocks::mock;
     use diport::{
         ArchiveClaimSettleOutcome, ClaimedArchiveCandidate, DlxArchiveBacklog, DlxArchiveStore,
         DlxLifecycleError, DlxLifecycleOperation, DlxLifecycleReason, DlxLifecycleRepository,
@@ -762,7 +784,7 @@ mod provider_conformance_cases {
             });
         let mut refs = rules.refs();
         refs.push(&get);
-        let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+        let store = verified(mock_client(refs.as_slice())).await;
 
         let result = store
             .get_ciphertext(&object_key(), &archive_version_id())
@@ -823,9 +845,7 @@ mod provider_conformance_cases {
         let probes = ProbeRules::healthy();
         let mut refs = probes.refs();
         refs.extend([&put, &head, &get]);
-        let store = unverified(mock_client!(aws_sdk_s3, refs.as_slice()))
-            .verify()
-            .await?;
+        let store = unverified(mock_client(refs.as_slice())).verify().await?;
         let repository = LifecycleRepository::new(conflicting);
         let lifecycle = DlxLifecycle::new(
             repository.clone(),
@@ -895,9 +915,7 @@ mod provider_conformance_cases {
         let probes = ProbeRules::healthy();
         let mut refs = probes.refs();
         refs.extend([&put, &head]);
-        let store = unverified(mock_client!(aws_sdk_s3, refs.as_slice()))
-            .verify()
-            .await?;
+        let store = unverified(mock_client(refs.as_slice())).verify().await?;
         let repository = LifecycleRepository::new(candidate);
         let lifecycle = DlxLifecycle::new(
             repository.clone(),
@@ -1145,7 +1163,7 @@ async fn version_observation_drift_is_transient() {
     });
     let mut refs = rules.refs();
     refs.push(&get);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store
@@ -1164,7 +1182,7 @@ async fn already_exists_with_current_delete_marker_is_transient() {
         .then_error(|| HeadObjectError::NotFound(NotFound::builder().build()));
     let mut refs = rules.refs();
     refs.extend([&put, &current_head]);
-    let store = verified(mock_client!(aws_sdk_s3, refs.as_slice())).await;
+    let store = verified(mock_client(refs.as_slice())).await;
 
     assert!(matches!(
         store

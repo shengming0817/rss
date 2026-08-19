@@ -49,12 +49,12 @@ required-features = ["integration"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
-# dev-only 经 test-util 传递引入 hyper 作 mock http client 载体；受管 ObjectStorage shard 的 MinIO
-# capability test 消费 production adapter 的 private-CA typed factory，不复制 TLS connector。
+# 本 crate 直接组装 aws-smithy-mocks 的 HTTP 1.x client/interceptor，避免 SDK test-util 经
+# legacy-test-util 拉入 hyper 0.14 / h2 0.3；受管 ObjectStorage shard 的 MinIO capability test
+# 消费 production adapter 的 private-CA typed factory，不复制 TLS connector。
 aws-smithy-mocks = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-# test-util 仅测试启用（with_test_defaults_v2 + mock http client 由 mock_client! 注入）；不进 production lib
-# 依赖面（production lib 仍不持 HTTP connector / hyper）。
-aws-sdk-s3 = { workspace = true, features = ["test-util"] }
+# 测试复用 production SDK feature 闭包；确定性 defaults 与 mock HTTP client 由测试私有 helper 注入。
+aws-sdk-s3 = { workspace = true }
 testkit = { path = "../../crates/testkit" }
 vocab = { path = "../../crates/vocab" }

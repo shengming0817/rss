@@ -277,9 +277,10 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # 承载 ADR-011 D5 no-decrypt-in-debug（FIELDPROT-NODBG-DECRYPT-01）。0.10 已去掉 alloc/std feature gate，
 # 默认即提供 SecretBox/SecretSlice/ExposeSecret + 传递 zeroize；serde 默认 off（不给 secret 类型上 serde，Apache-2.0 OR MIT）。
 secrecy = { version = "0.10" }
-# aws-sdk-s3 客户端测试 mock（dev-only，adapters/s3）：canned 响应规则注入确定性单测。经 test-util 传递
-# 引入 hyper（MIT，dev-only mock http client 载体），但**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls
-# 均不进树，deny 全绿）。production lib 仍 crypto-free。smithy-rs 官方非实验 mock crate。
+# aws-sdk-s3 客户端测试 mock（dev-only，adapters/s3）：canned 响应规则注入确定性单测。只复用
+# aws-smithy-mocks 的 HTTP 1.x client/interceptor seam；禁止为便利宏开启 aws-sdk-s3/test-util，后者会经
+# Smithy legacy-test-util 重新拉入 hyper 0.14 / h2 0.3。production lib 仍 crypto-free。
+# smithy-rs 官方非实验 mock crate。
 aws-smithy-mocks = "0.2"
 # reqwest 客户端测试 mock server（dev-only，adapters/vault）：loopback canned 响应 endpoint，让 reqwest 真发
 # 请求、测真实编排（URL percent-encode / X-Vault-Token header / 非 2xx 状态分支 / timeout），不抽 transport

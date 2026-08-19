@@ -186,10 +186,33 @@ mod backend_tests {
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::primitives::ByteStream;
     use aws_sdk_s3::types::error::{InvalidObjectState, NoSuchKey};
-    use aws_smithy_mocks::{mock, mock_client};
+    use aws_smithy_mocks::{
+        MockResponseInterceptor, Rule, RuleMode, create_mock_http_client, mock,
+    };
     use diport::{ManagedResource, ObjectKey, ObjectPayload, ObjectStore};
 
     const BUCKET: &str = "test-bucket";
+
+    fn mock_client(rules: &[&Rule]) -> aws_sdk_s3::Client {
+        let interceptor = rules.iter().fold(
+            MockResponseInterceptor::new().rule_mode(RuleMode::Sequential),
+            |interceptor, rule| interceptor.with_rule(rule),
+        );
+        let config = aws_sdk_s3::config::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test-access-key",
+                "test-secret-key",
+                None,
+                None,
+                "rss-s3-unit-tests",
+            ))
+            .http_client(create_mock_http_client())
+            .interceptor(interceptor)
+            .build();
+        aws_sdk_s3::Client::from_conf(config)
+    }
 
     // 构造 helper：mock_client + S3Store::new。expect 的 item-level carve-out 集中于此一处
     // （error-handling.md §Carve-out 要求 item-level），测试体不再散落 `expect`。
@@ -213,7 +236,7 @@ mod backend_tests {
     async fn put_object_succeeds() {
         let rule = mock!(aws_sdk_s3::Client::put_object)
             .then_output(|| PutObjectOutput::builder().build());
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(
             store
                 .put_object(ObjectKey::new("k"), b"hello".to_vec())
@@ -229,7 +252,7 @@ mod backend_tests {
                 .body(ByteStream::from_static(b"hello"))
                 .build()
         });
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         // 命中 → stream-first payload → 有界 collect 收齐字节。
         let collected = get_hit(&store, "k").await.collect_limited(64).await;
         assert!(matches!(collected, Ok(ref b) if b.as_slice() == b"hello"));
@@ -243,7 +266,7 @@ mod backend_tests {
                 .body(ByteStream::from_static(b"hello"))
                 .build()
         });
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(get_hit(&store, "k").await.collect_limited(2).await.is_err());
     }
 
@@ -251,7 +274,7 @@ mod backend_tests {
     async fn get_object_no_such_key_is_none() {
         let rule = mock!(aws_sdk_s3::Client::get_object)
             .then_error(|| GetObjectError::NoSuchKey(NoSuchKey::builder().build()));
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(matches!(
             store.get_object(ObjectKey::new("missing")).await,
             Ok(None)
@@ -264,7 +287,7 @@ mod backend_tests {
         let rule = mock!(aws_sdk_s3::Client::get_object).then_error(|| {
             GetObjectError::InvalidObjectState(InvalidObjectState::builder().build())
         });
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(store.get_object(ObjectKey::new("k")).await.is_err());
     }
 
@@ -272,7 +295,7 @@ mod backend_tests {
     async fn delete_object_succeeds() {
         let rule = mock!(aws_sdk_s3::Client::delete_object)
             .then_output(|| DeleteObjectOutput::builder().build());
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(store.delete_object(ObjectKey::new("k")).await.is_ok());
     }
 
@@ -282,7 +305,7 @@ mod backend_tests {
         // 重复删除安全。mock 返回成功输出即模拟该幂等语义。
         let rule = mock!(aws_sdk_s3::Client::delete_object)
             .then_output(|| DeleteObjectOutput::builder().build());
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(
             store
                 .delete_object(ObjectKey::new("never-existed"))
@@ -296,7 +319,7 @@ mod backend_tests {
         // 边界：零字节对象（合法 S3 PUT，如空占位对象）。
         let rule = mock!(aws_sdk_s3::Client::put_object)
             .then_output(|| PutObjectOutput::builder().build());
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert!(
             store
                 .put_object(ObjectKey::new("empty"), Vec::new())
@@ -309,7 +332,7 @@ mod backend_tests {
     async fn new_rejects_empty_bucket() {
         let rule = mock!(aws_sdk_s3::Client::put_object)
             .then_output(|| PutObjectOutput::builder().build());
-        let client = mock_client!(aws_sdk_s3, &[&rule]);
+        let client = mock_client(&[&rule]);
         assert!(S3Store::new(client, "").is_err());
     }
 
@@ -317,7 +340,7 @@ mod backend_tests {
     async fn lifecycle_name_and_shutdowns() {
         let rule = mock!(aws_sdk_s3::Client::put_object)
             .then_output(|| PutObjectOutput::builder().build());
-        let store = store_with(mock_client!(aws_sdk_s3, &[&rule]));
+        let store = store_with(mock_client(&[&rule]));
         assert_eq!(ManagedResource::name(&store), "s3");
         assert!(ManagedResource::shutdown(&store).await.is_ok());
         assert!(ObjectStore::shutdown(&store).await.is_ok());
@@ -327,7 +350,7 @@ mod backend_tests {
     async fn runtime_deps_single_sources_store_and_resource_guard() {
         let rule = mock!(aws_sdk_s3::Client::put_object)
             .then_output(|| PutObjectOutput::builder().build());
-        let deps = S3RuntimeDeps::new(store_with(mock_client!(aws_sdk_s3, &[&rule])));
+        let deps = S3RuntimeDeps::new(store_with(mock_client(&[&rule])));
         let store = deps.object_store();
         assert!(
             store
