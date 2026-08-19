@@ -538,7 +538,9 @@ mod tests {
                 "expected trailing reject: {cmd}"
             );
         }
-        let err = parse(&["setlocal-funnel"]).expect_err("retired subcommand must fail");
+        let Err(err) = parse(&["setlocal-funnel"]) else {
+            bail!("retired subcommand must fail")
+        };
         assert!(
             err.to_string().contains("unknown subcommand"),
             "retired `setlocal-funnel` must be unknown subcommand, got: {err}"
@@ -546,28 +548,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn try_parse_nested_exact_shapes() -> Result<()> {
-        assert_eq!(
-            parse(&["cdc-config", "debezium"])?,
-            Command::CdcConfig(CdcConfigCommand::Debezium)
-        );
-        assert!(parse(&["cdc-config"]).is_err());
-        assert_eq!(
-            parse(&["contract", "validate"])?,
-            Command::Contract(ContractCommand::Validate)
-        );
-        assert_eq!(
-            parse(&["contract", "breaking"])?,
-            Command::Contract(ContractCommand::Breaking { against: None })
-        );
-        assert_eq!(
-            parse(&["contract", "breaking", "--against", "HEAD~1"])?,
-            Command::Contract(ContractCommand::Breaking {
-                against: Some("HEAD~1".into()),
-            })
-        );
-        assert!(parse(&["contract", "breaking", "--against"]).is_err());
+    fn assert_assembly_and_graph_parse_shapes() -> Result<()> {
         assert_eq!(
             parse(&["assembly", "validate"])?,
             Command::Assembly(AssemblyCommand::Validate)
@@ -599,6 +580,31 @@ mod tests {
         assert!(parse(&["graph", "assembly", "--check", "--format", "json"]).is_err());
         assert!(parse(&["graph", "assembly", "--assembly", "../x"]).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn try_parse_nested_exact_shapes() -> Result<()> {
+        assert_eq!(
+            parse(&["cdc-config", "debezium"])?,
+            Command::CdcConfig(CdcConfigCommand::Debezium)
+        );
+        assert!(parse(&["cdc-config"]).is_err());
+        assert_eq!(
+            parse(&["contract", "validate"])?,
+            Command::Contract(ContractCommand::Validate)
+        );
+        assert_eq!(
+            parse(&["contract", "breaking"])?,
+            Command::Contract(ContractCommand::Breaking { against: None })
+        );
+        assert_eq!(
+            parse(&["contract", "breaking", "--against", "HEAD~1"])?,
+            Command::Contract(ContractCommand::Breaking {
+                against: Some("HEAD~1".into()),
+            })
+        );
+        assert!(parse(&["contract", "breaking", "--against"]).is_err());
+        assert_assembly_and_graph_parse_shapes()
     }
 
     #[test]
@@ -735,8 +741,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn try_parse_public_api_and_ci_surface() -> Result<()> {
+    fn assert_public_api_parse_surface() -> Result<()> {
         assert_eq!(
             parse(&["public-api", "internal"])?,
             Command::PublicApi(publicapi::Command::Internal {
@@ -760,6 +765,10 @@ mod tests {
         assert!(parse(&["public-api", "internal", "--allow-missing"]).is_err());
         assert!(parse(&["public-api", "release", "--layer", "basis"]).is_err());
         assert!(parse(&["public-api", "internal", "--layer", "nope"]).is_err());
+        Ok(())
+    }
+
+    fn assert_ci_local_parse_surface() -> Result<()> {
         assert!(parse(&["ci"]).is_err());
         assert_eq!(
             parse(&["ci", "full", "--fail-fast"])?,
@@ -792,9 +801,12 @@ mod tests {
         assert!(parse(&["ci", "preflight"]).is_err());
         assert!(parse(&["ci", "run"]).is_err());
         assert!(parse(&["ci", "run", "--job", "check"]).is_err());
-        let selection = serde_json::to_string(&crate::ci_impact::test_selection_plan()?)?;
+        Ok(())
+    }
+
+    fn assert_ci_fixed_parse_surface(selection: &str) -> Result<()> {
         assert!(matches!(
-            parse(&["ci", "preflight", "--selection", &selection])?,
+            parse(&["ci", "preflight", "--selection", selection])?,
             Command::Ci(CiCommand::Preflight { .. })
         ));
         assert!(
@@ -804,7 +816,7 @@ mod tests {
                 "--job",
                 "integration-critical",
                 "--selection",
-                &selection,
+                selection,
             ])
             .is_err()
         );
@@ -815,7 +827,7 @@ mod tests {
                 "--job",
                 "check",
                 "--selection",
-                &selection,
+                selection,
                 "--integration-group",
                 "postgres",
             ])
@@ -828,7 +840,7 @@ mod tests {
                 "--job",
                 "integration-critical",
                 "--selection",
-                &selection,
+                selection,
                 "--integration-group",
                 "postgres",
             ])?,
@@ -844,12 +856,16 @@ mod tests {
                 "--job",
                 "integration-critical",
                 "--selection",
-                &selection,
+                selection,
                 "--integration-group",
                 "all",
             ])
             .is_err()
         );
+        Ok(())
+    }
+
+    fn assert_ci_evidence_parse_surface() -> Result<()> {
         // legacy 平铺 argv（无 subcommand）必须拒绝。
         assert!(parse(&["ci", "--base", "origin/develop"]).is_err());
         assert!(parse(&["ci", "localonly-evidence"]).is_err());
@@ -867,6 +883,19 @@ mod tests {
             Command::NextestEvidence(NextestEvidenceCommand::Inspect { .. })
         ));
         Ok(())
+    }
+
+    fn assert_ci_parse_surface() -> Result<()> {
+        assert_ci_local_parse_surface()?;
+        let selection = serde_json::to_string(&crate::ci_impact::test_selection_plan()?)?;
+        assert_ci_fixed_parse_surface(&selection)?;
+        assert_ci_evidence_parse_surface()
+    }
+
+    #[test]
+    fn try_parse_public_api_and_ci_surface() -> Result<()> {
+        assert_public_api_parse_surface()?;
+        assert_ci_parse_surface()
     }
 
     #[test]
@@ -925,30 +954,35 @@ mod tests {
             );
         }
 
-        let unknown_sub = parse(&["SECRET_BAIT"])
-            .expect_err("unknown subcommand")
-            .to_string();
+        let Err(unknown_sub) = parse(&["SECRET_BAIT"]) else {
+            bail!("unknown subcommand")
+        };
+        let unknown_sub = unknown_sub.to_string();
         assert!(
             unknown_sub.contains("unknown subcommand"),
             "subcommand path: {unknown_sub}"
         );
-        let unknown_flag = parse(&["codegen", "--SECRET_BAIT"])
-            .expect_err("unknown flag")
-            .to_string();
+        let Err(unknown_flag) = parse(&["codegen", "--SECRET_BAIT"]) else {
+            bail!("unknown flag")
+        };
+        let unknown_flag = unknown_flag.to_string();
         assert!(
             unknown_flag.contains("unexpected argument"),
             "flag path: {unknown_flag}"
         );
-        let invalid_value = parse(&["consistency", "report", "--format", "SECRET_BAIT"])
-            .expect_err("invalid value")
-            .to_string();
+        let Err(invalid_value) = parse(&["consistency", "report", "--format", "SECRET_BAIT"])
+        else {
+            bail!("invalid value")
+        };
+        let invalid_value = invalid_value.to_string();
         assert!(
             invalid_value.contains("invalid value"),
             "value path: {invalid_value}"
         );
-        let trailing = parse(&["codegen", "SECRET_BAIT"])
-            .expect_err("trailing unknown")
-            .to_string();
+        let Err(trailing) = parse(&["codegen", "SECRET_BAIT"]) else {
+            bail!("trailing unknown")
+        };
+        let trailing = trailing.to_string();
         assert!(
             !trailing.contains("SECRET_BAIT"),
             "trailing leaked bait: {trailing}"

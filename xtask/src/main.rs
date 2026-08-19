@@ -2,6 +2,8 @@
 //!
 //! 命令目录以 clap `--help` / [`cli`] 为单源；此处不维护长命令清单。
 
+#![deny(clippy::unreachable)]
+
 mod archrules;
 mod assembly;
 mod assembly_artifacts;
@@ -75,7 +77,7 @@ mod verify;
 mod workspace_facts;
 mod wsdeps;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use cli::{
     ArchrulesCommand, AssemblyArtifactsCommand, AssemblyCommand, CdcConfigCommand, CiCommand,
     Command, ConsistencyCommand, ContractCommand, GraphCommand, LocaltxCommand,
@@ -159,7 +161,7 @@ fn dispatch(command: Command) -> Result<()> {
                 (false, false) => archrules::MatrixAction::Print,
                 (true, false) => archrules::MatrixAction::Write,
                 (false, true) => archrules::MatrixAction::Check,
-                (true, true) => unreachable!("clap conflicts_with prevents write+check"),
+                (true, true) => bail!("matrix write and check are mutually exclusive"),
             };
             archrules::matrix(action)
         }

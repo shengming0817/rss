@@ -87,6 +87,10 @@ pub(crate) fn disposition(lifecycle: Lifecycle) -> Disposition {
     }
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "the typed BreakingRule catalog never assigns Medium enforcement"
+)]
 fn rule_disposition(rule: BreakingRule, lifecycle: Lifecycle) -> Disposition {
     match rule.spec().enforcement() {
         super::governance::Enforcement::ReviewOnly => Disposition::Warn,
@@ -3617,7 +3621,7 @@ effects = ["read"]
             .schemas
             .iter()
             .find(|schema| schema.file == "response:200")
-            .expect("normalized success slot participates in the full comparator");
+            .context("normalized success slot must participate in the full comparator")?;
         assert_eq!(success.old.as_ref(), Some(&success_schema));
         assert_eq!(success.new, success_schema);
         assert!(!success.removed);
@@ -3785,7 +3789,7 @@ lifecycle = "active"
             match expected_disposition {
                 Some(disposition) => {
                     let [finding] = result.findings.as_slice() else {
-                        panic!(
+                        bail!(
                             "kind change must produce exactly one finding: {:?}",
                             result.findings
                         );
@@ -4674,12 +4678,14 @@ effects = []
 "#,
         )?;
 
-        let working_error =
+        let Err(working_error) =
             super::super::governance::ContractGovernanceIr::load_breaking_working_root(
                 &contracts_root,
             )
-            .expect_err("empty working effect profile unexpectedly passed")
-            .to_string();
+        else {
+            bail!("empty working effect profile unexpectedly passed")
+        };
+        let working_error = working_error.to_string();
         assert!(
             working_error.contains("cargo xtask contract validate")
                 && working_error.contains("http/identity/v1"),
@@ -4930,7 +4936,7 @@ ingressReceiptEvent = "identity.device-ingress-receipted"
                 "ingressReceiptEvent" => {
                     projected.ingress_receipt_event = "identity.changed-ingress".into();
                 }
-                _ => unreachable!("closed test table"),
+                _ => bail!("closed DeviceLatent link fixture `{field}` escaped"),
             }
 
             let breaks = compare_manifests(&old, &new);
@@ -5215,7 +5221,8 @@ effects = ["read"]
     }
 
     #[test]
-    fn component_resolution_keeps_inline_migration_clean_and_detects_component_narrowing() {
+    fn component_resolution_keeps_inline_migration_clean_and_detects_component_narrowing()
+    -> anyhow::Result<()> {
         let id = "rss://component/identity/v1/operator";
         let inline = json!({
             "type": "object",
@@ -5248,7 +5255,7 @@ effects = ["read"]
             referenced.clone(),
             |_| Ok(component(false)),
         )
-        .expect("resolved working schema")
+        .context("resolve working component schema")?
         .into_value();
         assert!(compare_schemas(&inline, &working).is_empty());
 
@@ -5256,17 +5263,18 @@ effects = ["read"]
             referenced.clone(),
             |_| Ok(component(false)),
         )
-        .expect("resolved base schema")
+        .context("resolve base component schema")?
         .into_value();
         let narrowed =
             assembly_schema::repository_contract::resolve_component_references(referenced, |_| {
                 Ok(component(true))
             })
-            .expect("resolved narrowed schema")
+            .context("resolve narrowed component schema")?
             .into_value();
         assert!(
             rules(&compare_schemas(&base, &narrowed)).contains(&BreakingRule::RequiredFieldAdded)
         );
+        Ok(())
     }
 
     #[test]

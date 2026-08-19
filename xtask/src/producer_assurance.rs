@@ -4289,7 +4289,6 @@ mod tests {
         Ok(())
     }
 
-    #[allow(clippy::cognitive_complexity)]
     #[test]
     #[allow(clippy::cognitive_complexity)] // reason: anti-vacuity matrix over NoMutation mutation-branch shapes.
     fn no_mutation_requires_a_proven_absent_business_mutation_branch() -> anyhow::Result<()> {

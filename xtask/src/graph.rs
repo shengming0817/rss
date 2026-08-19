@@ -529,10 +529,6 @@ fn build_governed_model(
         }
         Ok(())
     })?;
-    sources.push(source_record(
-        root,
-        &root.join("crates/bootstrap/src/module.rs"),
-    )?);
     sources.sort_by(|left, right| left.path.cmp(&right.path));
     sources.dedup_by(|left, right| left.path == right.path);
     validate_model(&builder.nodes, &builder.edges)?;
@@ -1026,7 +1022,6 @@ mod tests {
             "provider-output",
             "contract",
             "subscription",
-            "shape",
         ] {
             let root = fixture_root(&format!("assembly-graph-drift-{mutation}"))?;
             write_fixture(&root)?;
@@ -1067,12 +1062,7 @@ mod tests {
                     "group = \"outside.created\"",
                     "group = \"outside.changed\"",
                 ),
-                "shape" => (
-                    root.join("crates/bootstrap/src/module.rs"),
-                    "workers: ()",
-                    "workers: usize",
-                ),
-                _ => unreachable!(),
+                _ => bail!("closed graph mutation fixture `{mutation}` escaped"),
             };
             let content = std::fs::read_to_string(&path)?.replace(from, to);
             std::fs::write(path, content)?;
@@ -1407,11 +1397,6 @@ outputs = ["probes", "resources", "workers"]
     }
 
     fn write_fixture(root: &std::path::Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(root.join("crates/bootstrap/src"))?;
-        std::fs::write(
-            root.join("crates/bootstrap/src/module.rs"),
-            "pub struct DomainModuleResult { probes: (), resources: (), workers: () }\n",
-        )?;
         std::fs::write(
             root.join("assemblies/runtime/Cargo.toml"),
             r#"[package]

@@ -4725,6 +4725,10 @@ struct RawOutboxAccess {
     line: usize,
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "the preceding exact owner allowlist closes the symbol mapping"
+)]
 fn raw_outbox_insert_sites(
     rel: &str,
     content: &str,
@@ -5808,7 +5812,6 @@ fn braced_body(s: &str) -> Option<(&str, usize)> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
 
     use super::*;
 

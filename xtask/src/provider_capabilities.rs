@@ -1247,6 +1247,10 @@ struct BehaviorSpec {
     trusted_assertion_call: Option<&'static str>,
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "the typed provider/capability registry closes the supported pair set"
+)]
 fn behavior_spec(provider: ProviderId, capability: CapabilityId) -> BehaviorSpec {
     match (provider, capability) {
         (ProviderId::Postgres, CapabilityId::Identity) => BehaviorSpec {

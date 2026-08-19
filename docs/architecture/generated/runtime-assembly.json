@@ -62,13 +62,6 @@
         "algorithm": "sha256",
         "value": "be904f6c21b60260b3f7d1848572e8547cb0baf39d11c440042552313c30cad1"
       }
-    },
-    {
-      "path": "crates/bootstrap/src/module.rs",
-      "digest": {
-        "algorithm": "sha256",
-        "value": "7de72c83df3e55088d5aa1ad1a2783aa570d31cfe752bba8bcccf2099992ecb9"
-      }
     }
   ],
   "nodes": [

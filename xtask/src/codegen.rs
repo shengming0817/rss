@@ -948,7 +948,7 @@ fn render_contract_body(
             render_runtime_inventory_projection(c)?
         )),
         ContractKind::Saga => Ok(format!("{}{}", payload, render_saga_glue(c, sup)?)),
-        ContractKind::Projection => unreachable!("projection returned before DTO generation"),
+        ContractKind::Projection => bail!("projection returned before DTO generation"),
     }
 }
 
@@ -5330,8 +5330,9 @@ mod tests {
         let sentinel = gen_src.join("sentinel.rs");
         std::fs::write(&sentinel, "preserve\n")?;
 
-        let error = generate(&root.join("contracts"), &gen_src, false)
-            .expect_err("malformed schema must block typed governance promotion");
+        let Err(error) = generate(&root.join("contracts"), &gen_src, false) else {
+            anyhow::bail!("malformed schema unexpectedly passed code generation")
+        };
         assert!(
             error.to_string().contains("invalid schema source"),
             "{error:#}"
@@ -6598,7 +6599,7 @@ mod tests {
                     schema["properties"]["error"]["properties"]["details"]["type"] =
                         serde_json::json!("object")
                 }
-                _ => unreachable!(),
+                _ => bail!("closed invalid-schema fixture index escaped"),
             }
             let dir = root.join("contracts/http/_seed/v1");
             std::fs::write(
@@ -7367,7 +7368,6 @@ mod tests {
     ///
     /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
     /// + `version` + declared schema hash 同源派生（domain 取自 manifest 而非 id 前缀），golden 锁。
-    #[allow(clippy::cognitive_complexity)]
     #[test]
     #[allow(clippy::cognitive_complexity)] // reason: golden glue emission asserts many sealed carriers in one fixture.
     fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
@@ -7614,11 +7614,10 @@ mod tests {
         let mut changed = saga.clone();
         changed.steps.swap(0, 1);
         variants.push(changed);
+        let mut changed = saga.clone();
+        changed.steps[0].name = vocab::StepName::parse(&format!("{}x", changed.steps[0].name))?;
+        variants.push(changed);
         for mutate in [
-            |s: &mut crate::contract::manifest::SagaStep| {
-                s.name = vocab::StepName::parse(&format!("{}x", s.name))
-                    .expect("mutated test step remains canonical")
-            },
             |s: &mut crate::contract::manifest::SagaStep| s.receipt_schema.push('x'),
             |s: &mut crate::contract::manifest::SagaStep| s.effect_scope.push('x'),
             |s: &mut crate::contract::manifest::SagaStep| s.compensation_effect_scope.push('x'),
@@ -8647,14 +8646,14 @@ mod tests {
             touched: Vec::new(),
         };
 
-        let error = transaction
-            .apply_with_hook(|index, _| {
-                if index == 1 {
-                    bail!("synthetic final output failure")
-                }
-                Ok(())
-            })
-            .expect_err("late failure must abort the batch");
+        let Err(error) = transaction.apply_with_hook(|index, _| {
+            if index == 1 {
+                bail!("synthetic final output failure")
+            }
+            Ok(())
+        }) else {
+            anyhow::bail!("late output failure unexpectedly committed the batch")
+        };
         assert!(error.to_string().contains("synthetic final output failure"));
         transaction.rollback()?;
         assert_eq!(std::fs::read(&first)?, b"old-first\n");
@@ -8669,10 +8668,12 @@ mod tests {
         let contracts = root.join("contracts");
         let sentinel = root.join("generated/src/sentinel.rs");
         std::fs::create_dir_all(&contracts)?;
-        std::fs::create_dir_all(sentinel.parent().expect("sentinel parent"))?;
+        std::fs::create_dir_all(sentinel.parent().context("sentinel path has no parent")?)?;
         std::fs::write(&sentinel, b"preserve me\n")?;
 
-        let error = run_root(&root, false).expect_err("empty production corpus must fail closed");
+        let Err(error) = run_root(&root, false) else {
+            anyhow::bail!("empty production corpus unexpectedly passed code generation")
+        };
         assert!(
             error.to_string().contains("contains no contracts"),
             "unexpected error: {error:#}"
@@ -8728,23 +8729,19 @@ mod tests {
                     .into_iter()
                     .any(|candidate| contract.id() == candidate.spec().id)
             });
-            assert!(
-                render_all(&all_missing)
-                    .expect_err("entirely missing candidate set must fail closed")
-                    .to_string()
-                    .contains("entirely missing")
-            );
+            let Err(error) = render_all(&all_missing) else {
+                anyhow::bail!("entirely missing candidate set unexpectedly rendered")
+            };
+            assert!(error.to_string().contains("entirely missing"));
 
             let mut missing = contracts.to_vec();
             missing.retain(|contract| {
                 contract.id() != DeviceCertificateCandidateId::CommandAcked.spec().id
             });
-            assert!(
-                render_device_certificate_candidates(&missing, true)
-                    .expect_err("missing candidate must fail closed")
-                    .to_string()
-                    .contains("must occur exactly once")
-            );
+            let Err(error) = render_device_certificate_candidates(&missing, true) else {
+                anyhow::bail!("missing candidate unexpectedly rendered")
+            };
+            assert!(error.to_string().contains("must occur exactly once"));
 
             let mut duplicate = contracts.to_vec();
             duplicate.push(
@@ -8756,12 +8753,10 @@ mod tests {
                     .context("reported candidate exists")?
                     .clone(),
             );
-            assert!(
-                render_device_certificate_candidates(&duplicate, true)
-                    .expect_err("duplicate candidate must fail closed")
-                    .to_string()
-                    .contains("must occur exactly once")
-            );
+            let Err(error) = render_device_certificate_candidates(&duplicate, true) else {
+                anyhow::bail!("duplicate candidate unexpectedly rendered")
+            };
+            assert!(error.to_string().contains("must occur exactly once"));
 
             for candidate in DeviceCertificateCandidateId::ALL {
                 let spec = candidate.spec();

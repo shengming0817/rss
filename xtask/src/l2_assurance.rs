@@ -1607,7 +1607,7 @@ fn validate_repo_relative_path(root: &Path, value: &str) -> Result<()> {
     let mut current = root.to_path_buf();
     for component in path.components() {
         let Component::Normal(part) = component else {
-            unreachable!("components checked above")
+            bail!("validated carrier path retained a non-normal component")
         };
         current.push(part);
         let metadata = fs::symlink_metadata(&current)
@@ -2360,7 +2360,6 @@ impl RepoRelativePath {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
 
     use super::*;
 

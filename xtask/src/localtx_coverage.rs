@@ -6126,7 +6126,7 @@ mod tests {
         fs::write(root.join("crates/leaf/src/lib.rs"), "")?;
         fs::write(root.join("crates/consumer/src/lib.rs"), "")?;
         fs::write(root.join("crates/consumer/tests/integration.rs"), "")?;
-        let root_str = root.to_str().expect("utf8 temp root");
+        let root_str = root.to_str().context("temporary root must be UTF-8")?;
         let leaf_path = format!("{root_str}/crates/leaf");
         let consumer_path = format!("{root_str}/crates/consumer");
         let leaf = path_package(
@@ -6145,11 +6145,13 @@ mod tests {
         let mut unconditional = path_dependency("leaf", &leaf_path);
         unconditional
             .as_object_mut()
-            .unwrap()
+            .context("path dependency fixture must be an object")?
             .insert("rename".into(), "vocab".into());
         let mut conditional = path_dependency("leaf", &leaf_path);
         {
-            let object = conditional.as_object_mut().unwrap();
+            let object = conditional
+                .as_object_mut()
+                .context("conditional dependency fixture must be an object")?;
             object.insert("rename".into(), "vocab".into());
             object.insert("target".into(), "cfg(unix)".into());
         }
@@ -6201,7 +6203,7 @@ mod tests {
         let consumer = crates
             .iter()
             .find(|member| member.name == "consumer")
-            .expect("consumer");
+            .context("consumer workspace member must exist")?;
         assert_eq!(consumer.relative, Path::new("crates/consumer"));
         assert!(
             consumer
@@ -6217,13 +6219,13 @@ mod tests {
         let alias = consumer
             .normal_dependencies
             .get("vocab")
-            .expect("aggregated protected rename key");
+            .context("aggregated protected rename key must exist")?;
         assert_eq!(alias.package, "leaf");
         assert!(
             alias.unconditional,
             "unconditional+conditional declarations aggregate to unconditional"
         );
-        assert_eq!(alias.path.as_deref(), Some(Path::new(&leaf_path).as_ref()));
+        assert_eq!(alias.path.as_deref(), Some(Path::new(&leaf_path)));
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
@@ -8366,8 +8368,10 @@ impl ::bootstrap::Domain for Demo {
             dev_test_dependencies: BTreeMap::new(),
         };
         let expected_packages = BTreeMap::from([("generated".to_owned(), package_relative)]);
-        let error = validate_dependency(&member, "generated", false, &expected_packages)
-            .expect_err("DependencySource::Path must fail-closed even when root matches");
+        let Err(error) = validate_dependency(&member, "generated", false, &expected_packages)
+        else {
+            bail!("DependencySource::Path must fail-closed even when root matches")
+        };
         assert!(
             format!("{error:#}").contains("workspace"),
             "path source rejection must name workspace requirement: {error:#}"
@@ -8411,8 +8415,9 @@ impl ::bootstrap::Domain for Demo {
             &manifest,
             valid_manifest.replace("owner = \"demo\"", "owner = \"../demo\""),
         )?;
-        let owner_error = check_fixture_root(&temp.path)
-            .expect_err("unsafe owner must fail during manifest-backed owner promotion");
+        let Err(owner_error) = check_fixture_root(&temp.path) else {
+            bail!("unsafe owner must fail during manifest-backed owner promotion")
+        };
         assert!(
             format!("{owner_error:#}").contains("contract owner must be a canonical domain name")
         );
@@ -8512,13 +8517,16 @@ impl ::bootstrap::Domain for Demo {
     }
 
     #[test]
-    fn compiled_local_tx_keys_reject_duplicate_mount_keys() {
-        let err = compiled_local_tx_keys_from_mount_keys(["demo_v1::write", "demo_v1::write"])
-            .expect_err("duplicate mount keys must fail closed");
+    fn compiled_local_tx_keys_reject_duplicate_mount_keys() -> anyhow::Result<()> {
+        let Err(err) = compiled_local_tx_keys_from_mount_keys(["demo_v1::write", "demo_v1::write"])
+        else {
+            bail!("duplicate mount keys must fail closed")
+        };
         assert!(
             format!("{err:#}").contains("duplicate mount_key `demo_v1::write`"),
             "{err:#}"
         );
+        Ok(())
     }
     #[test]
     fn orphan_marker_and_non_utf8_source_fail_closed() -> anyhow::Result<()> {
@@ -8801,7 +8809,7 @@ impl ::bootstrap::Domain for Demo {
                         .iter()
                         .any(|profile| !profile.missing_probes.is_empty())
                 ),
-                _ => unreachable!(),
+                _ => bail!("closed localtx parity rule `{expected_rule:?}` escaped"),
             }
         }
         Ok(())

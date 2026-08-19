@@ -2989,7 +2989,7 @@ fn parse_diff(source: &[u8]) -> Result<Vec<DiffEntry>> {
                     "A" => DiffStatus::Added,
                     "M" => DiffStatus::Modified,
                     "D" => DiffStatus::Deleted,
-                    _ => unreachable!(),
+                    _ => bail!("validated diff status `{status}` escaped closed mapping"),
                 };
                 entries.push(DiffEntry {
                     status,
@@ -5728,7 +5728,7 @@ mod tests {
     }
 
     #[test]
-    fn local_impact_domain_catalog_matches_real_scanner_closures() {
+    fn local_impact_domain_catalog_matches_real_scanner_closures() -> Result<()> {
         use LocalImpactDomain as Domain;
 
         let cases = [
@@ -5809,9 +5809,8 @@ mod tests {
             );
             if path == "crates/workspacefacts/Cargo.toml" {
                 let steps = local_steps(&impact);
-                let meta = match steps.first() {
-                    Some(LocalStep::Meta(gates)) => gates,
-                    other => panic!("workspacefacts Cargo.toml must project Meta, got {other:?}"),
+                let Some(LocalStep::Meta(meta)) = steps.first() else {
+                    bail!("workspacefacts Cargo.toml must project Meta")
                 };
                 assert!(
                     meta.contains(&GateId::LocalTxCoverage),
@@ -5844,6 +5843,7 @@ mod tests {
             Domain::ALL.into_iter().collect(),
             "report format ADT is shared CLI policy"
         );
+        Ok(())
     }
 
     #[test]
@@ -6113,7 +6113,7 @@ mod tests {
     }
 
     #[test]
-    fn local_executor_supports_keep_going_and_fail_fast() {
+    fn local_executor_supports_keep_going_and_fail_fast() -> Result<()> {
         let steps = vec![
             LocalStep::Meta(local_meta_gates(None)),
             LocalStep::Packages {
@@ -6156,10 +6156,10 @@ mod tests {
             execute_local_steps(&steps, crate::cmd::ExecutionPolicy::KeepGoing, |step| {
                 executed.push(step.clone());
                 Ok(())
-            })
-            .expect("selected local steps must execute on every invocation");
+            })?;
         }
         assert_eq!(executed, [steps.clone(), steps].concat());
+        Ok(())
     }
 
     #[test]
@@ -6470,7 +6470,7 @@ mod tests {
             ..
         } = check_step
         else {
-            unreachable!("matched Check Packages step");
+            bail!("matched Check step changed variant before extraction");
         };
         assert!(!step_includes_lib);
         let check_args = package_operation_args(
@@ -7058,19 +7058,21 @@ mod tests {
                 bail!("generate catalog fixture Cargo.lock");
             }
 
-            let error = plan_event(
+            let Err(error) = plan_event(
                 &root,
                 "push",
                 "{}",
                 policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
                 PolicyMode::Adaptive,
                 "a".repeat(40),
-            )
-            .expect_err("catalog drift must fail before SelectionPlan");
+            ) else {
+                bail!("catalog drift must fail before SelectionPlan")
+            };
             assert!(error.to_string().contains(expected), "{error:#}");
 
-            let coverage_error = coverage_scope_for_typed_job(&root)
-                .expect_err("coverage projection must share catalog fail-closed boundary");
+            let Err(coverage_error) = coverage_scope_for_typed_job(&root) else {
+                bail!("coverage projection must share catalog fail-closed boundary")
+            };
             assert!(
                 coverage_error.to_string().contains(expected),
                 "{coverage_error:#}"
@@ -7083,9 +7085,9 @@ mod tests {
                 source: LocalSource::Worker(root.clone()),
             };
             let local_facts = CommandWorkspaceFacts::new(context.root());
-            let local_error = context
-                .impact_entries(&[], &local_facts)
-                .expect_err("local planning must share catalog fail-closed boundary");
+            let Err(local_error) = context.impact_entries(&[], &local_facts) else {
+                bail!("local planning must share catalog fail-closed boundary")
+            };
             assert!(
                 local_error.to_string().contains(expected),
                 "{local_error:#}"
@@ -7348,12 +7350,11 @@ mod tests {
 
     #[test]
     fn undeclared_journey_support_fails_closed() {
-        for path in ["journeys/tests/support/new_shared_fixture.rs"] {
-            assert!(
-                classify_diff(&[DiffEntry::modified(path)]).mode == SelectionMode::PrComplete,
-                "{path} must require the complete PR set without a declared critical carrier"
-            );
-        }
+        let path = "journeys/tests/support/new_shared_fixture.rs";
+        assert!(
+            classify_diff(&[DiffEntry::modified(path)]).mode == SelectionMode::PrComplete,
+            "{path} must require the complete PR set without a declared critical carrier"
+        );
     }
 
     #[test]
@@ -8347,8 +8348,9 @@ mod tests {
             contract.join("request.schema.json"),
         )?;
         let component = ComponentId::parse("rss://component/identity/v1/shared")?;
-        let error = working_component_consumers(&root, &component)
-            .expect_err("schema symlink must fail closed");
+        let Err(error) = working_component_consumers(&root, &component) else {
+            bail!("schema symlink must fail closed")
+        };
         assert!(error.to_string().contains("rejects symlink"), "{error:#}");
         fs::remove_dir_all(root)?;
         Ok(())
@@ -8499,26 +8501,7 @@ readiness = "required"
         }
     }
 
-    #[test]
-    fn policy_digest_is_deterministic_and_binds_config() {
-        let compact = b"schemaVersion=3\nmode='adaptive'\n";
-        let formatted =
-            b"# operator comment\nschemaVersion = 3\n\nmode = \"adaptive\" # same policy\n";
-        assert_eq!(
-            policy_version(compact),
-            policy_version(formatted),
-            "formatting and comments are not policy semantics"
-        );
-        assert_ne!(
-            policy_version(compact),
-            policy_version(b"schemaVersion=1\nmode='adaptive'\n")
-        );
-        assert!(toml::from_str::<PolicyWire>("schemaVersion=3\nmode='shadow'\n").is_err());
-        assert!(matches!(
-            toml::from_str::<PolicyWire>("schemaVersion=2\nmode='adaptive'\n"),
-            Ok(legacy) if legacy.schema_version != POLICY_SCHEMA_VERSION
-        ));
-        let catalog = policy_semantic_catalog();
+    fn assert_policy_catalog_shape(catalog: &[String]) {
         assert_eq!(
             catalog
                 .iter()
@@ -8580,10 +8563,13 @@ readiness = "required"
             catalog.iter().all(|field| !field.starts_with("job-")),
             "dynamic job and receipt identities must not remain policy semantics"
         );
-        let mut changed_catalog = catalog.clone();
+    }
+
+    fn assert_policy_selector_mutations_rotate(compact: &[u8], catalog: &[String]) -> Result<()> {
+        let mut changed_catalog = catalog.to_vec();
         changed_catalog.push("impact-rule=new-semantic-rule".to_owned());
         assert_ne!(
-            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &changed_catalog),
             "an explicit catalog semantic change must rotate policyVersion"
         );
@@ -8599,7 +8585,7 @@ readiness = "required"
             None,
         );
         assert_ne!(
-            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &resource_mutation),
             "integration execution-resource mutation must rotate policyVersion"
         );
@@ -8613,7 +8599,7 @@ readiness = "required"
             None,
         );
         assert_ne!(
-            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &adapter_relation_mutation),
             "adapter package-to-resource mutation must rotate policyVersion"
         );
@@ -8629,18 +8615,18 @@ readiness = "required"
             None,
         );
         assert_ne!(
-            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &provider_relation_mutation),
             "security-provider projection mutation must rotate policyVersion"
         );
-        let mut shared_source_mutation = catalog.clone();
+        let mut shared_source_mutation = catalog.to_vec();
         let source = shared_source_mutation
             .iter_mut()
             .find(|field| field.contains("journeys/tests/common/mod.rs"))
-            .expect("shared journey source policy field");
+            .context("shared journey source policy field")?;
         source.push_str(",settings-config-publish-durable-e2e");
         assert_ne!(
-            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &shared_source_mutation),
             "shared source-to-carrier mutation must rotate policyVersion"
         );
@@ -8651,16 +8637,18 @@ readiness = "required"
             Some(("postgres", ImpactMarker::RedisAdapterPackage)),
         );
         assert_ne!(
-            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &impact_relation_mutation),
             "impact package-to-marker mutation must rotate policyVersion"
         );
+        Ok(())
+    }
 
-        let semantically_same_behavior = serde_json::to_string_pretty(
-            &serde_json::from_str::<serde_json::Value>(POLICY_BEHAVIOR_SPEC)
-                .unwrap_or(serde_json::Value::Null),
-        )
-        .unwrap_or_default();
+    fn assert_policy_behavior_formatting_semantics(compact: &[u8]) -> Result<()> {
+        let semantically_same_behavior =
+            serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(
+                POLICY_BEHAVIOR_SPEC,
+            )?)?;
         assert_eq!(
             policy_semantic_catalog(),
             policy_semantic_catalog_with_behavior(&semantically_same_behavior),
@@ -8676,6 +8664,32 @@ readiness = "required"
             ),
             "behavior truth-table changes must rotate policyVersion"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn policy_digest_is_deterministic_and_binds_config() -> Result<()> {
+        let compact = b"schemaVersion=3\nmode='adaptive'\n";
+        let formatted =
+            b"# operator comment\nschemaVersion = 3\n\nmode = \"adaptive\" # same policy\n";
+        assert_eq!(
+            policy_version(compact),
+            policy_version(formatted),
+            "formatting and comments are not policy semantics"
+        );
+        assert_ne!(
+            policy_version(compact),
+            policy_version(b"schemaVersion=1\nmode='adaptive'\n")
+        );
+        assert!(toml::from_str::<PolicyWire>("schemaVersion=3\nmode='shadow'\n").is_err());
+        assert!(matches!(
+            toml::from_str::<PolicyWire>("schemaVersion=2\nmode='adaptive'\n"),
+            Ok(legacy) if legacy.schema_version != POLICY_SCHEMA_VERSION
+        ));
+        let catalog = policy_semantic_catalog();
+        assert_policy_catalog_shape(&catalog);
+        assert_policy_selector_mutations_rotate(compact, &catalog)?;
+        assert_policy_behavior_formatting_semantics(compact)
     }
 
     #[test]

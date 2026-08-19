@@ -6123,8 +6123,6 @@ fn rel_label(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::panic)]
-
     use super::*;
     use crate::testutil::unique_tmp;
     use std::fs;
@@ -6230,8 +6228,9 @@ mod tests {
 
             let workspace_root = crate::workspace_root()?;
             let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&workspace_root);
-            let error = super::validate_root(&root, command_facts.get()?)
-                .expect_err("production assembly validation must require a contracts directory");
+            let Err(error) = super::validate_root(&root, command_facts.get()?) else {
+                anyhow::bail!("production assembly validation accepted an invalid contracts path")
+            };
             let message = format!("{error:#}");
             assert!(
                 message.contains("contracts")
@@ -7379,7 +7378,7 @@ outputs = ["probes", "resources", "workers"]
             let needle = format!("[[diportProviders]]\nid = \"{role}\"");
             let start = DEVICEIDENTITY_PILOT_PROVIDERS
                 .find(&needle)
-                .expect("pilot role fixture");
+                .with_context(|| format!("pilot fixture omitted provider role `{role}`"))?;
             let remainder = &DEVICEIDENTITY_PILOT_PROVIDERS[start + needle.len()..];
             let end = remainder
                 .find("\n[[diportProviders]]")
@@ -8528,7 +8527,8 @@ fn mtls_config_from_env() {
     }
 
     #[test]
-    fn runtime_inventory_listener_provenance_rejects_detached_dead_or_swapped_flow() {
+    fn runtime_inventory_listener_provenance_rejects_detached_dead_or_swapped_flow()
+    -> anyhow::Result<()> {
         const PREFIX: &str = r#"
 struct Server;
 struct UnrelatedPublisher;
@@ -8545,52 +8545,49 @@ struct Adapter { publisher: InventoryPublisher, primary: Server, admin: Server }
             kind: "Kind::Admin",
             auth: "Auth::Token",
         }];
-        let accepts = |body: &str| {
+        let accepts = |body: &str| -> anyhow::Result<bool> {
             let file = syn::parse_file(&format!(
                 "{PREFIX} impl LaunchAdapter for Adapter {{ fn activate(self) {{ {body} }} }}"
-            ))
-            .expect("listener flow fixture parses");
+            ))?;
             let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
-            evidence.listener_publish_flow
-                && listener_observations_match(&evidence.listener_observations, &expected)
+            Ok(evidence.listener_publish_flow
+                && listener_observations_match(&evidence.listener_observations, &expected))
         };
 
         assert!(accepts(
             "self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr())]));"
-        ));
+        )?);
         assert!(!accepts(
             "let address = self.admin.local_addr(); self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), address)]));"
-        ));
+        )?);
         assert!(!accepts(
             "let _ = Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr()); self.publisher.publish(Vec::new());"
-        ));
+        )?);
         assert!(!accepts(
             "self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.primary.local_addr())]));"
-        ));
+        )?);
 
         let unrelated = syn::parse_file(&format!(
             "{PREFIX} struct WrongAdapter {{ publisher: UnrelatedPublisher, admin: Server }} impl LaunchAdapter for WrongAdapter {{ fn activate(self) {{ self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr())])); }} }}"
-        ))
-        .expect("unrelated publish fixture parses");
+        ))?;
         let evidence = file_security_closeout_program(&unrelated).reachable_evidence_from_run();
         assert!(!evidence.listener_publish_sink_seen);
         assert!(!evidence.listener_publish_flow);
 
         let suffix_bait = syn::parse_file(&format!(
             "{PREFIX} struct SuffixBaitAdapter {{ publisher: FakeInventoryPublisher, admin: Server }} impl LaunchAdapter for SuffixBaitAdapter {{ fn activate(self) {{ self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr())])); }} }}"
-        ))
-        .expect("inventory publisher suffix bait parses");
+        ))?;
         let evidence = file_security_closeout_program(&suffix_bait).reachable_evidence_from_run();
         assert!(!evidence.listener_publish_sink_seen);
         assert!(!evidence.listener_publish_flow);
 
         let dead = syn::parse_file(&format!(
             "{PREFIX} fn dead(server: Server) -> Vec<Observation> {{ Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), server.local_addr())]) }} impl LaunchAdapter for Adapter {{ fn activate(self) {{ self.publisher.publish(Vec::new()); }} }}"
-        ))
-        .expect("dead listener fixture parses");
+        ))?;
         let evidence = file_security_closeout_program(&dead).reachable_evidence_from_run();
         assert!(!evidence.listener_publish_flow);
         assert!(evidence.listener_observations.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -8603,7 +8600,8 @@ struct Adapter { publisher: InventoryPublisher, primary: Server, admin: Server }
     }
 
     #[test]
-    fn settingsonly_raw_jwt_reparse_rejects_cfg_test_alias_and_pointer_bait() {
+    fn settingsonly_raw_jwt_reparse_rejects_cfg_test_alias_and_pointer_bait() -> anyhow::Result<()>
+    {
         for source in [
             "#[cfg(test)] mod bait { fn raw(raw: &str) { let _ = authn::Jwt::parse(raw); } }",
             "fn raw(raw: &str) { let parse = authn::Jwt::parse; let _ = parse(raw); }",
@@ -8613,17 +8611,18 @@ struct Adapter { publisher: InventoryPublisher, primary: Server, admin: Server }
             "type J = authn::Jwt; fn raw(raw: &str) { let _ = J::parse(raw); }",
             "fn raw(jwt: authn::VerifiedJwt) { let _ = jwt.raw(); }",
         ] {
-            let syntax = syn::parse_file(source).expect("raw JWT mutation fixture parses");
+            let syntax = syn::parse_file(source)?;
             assert_ne!(
                 file_raw_jwt_reparse_count(&syntax),
                 0,
                 "raw JWT mutation must fail closed: {source}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn settingsonly_raw_jwt_aliases_are_lexically_scoped() {
+    fn settingsonly_raw_jwt_aliases_are_lexically_scoped() -> anyhow::Result<()> {
         for (source, expected) in [
             (
                 "mod jwt { use authn::Jwt as J; fn no_call() {} } mod other { use other::Parser as J; fn parse(raw: &str) { let _ = J::parse(raw); } }",
@@ -8638,13 +8637,14 @@ struct Adapter { publisher: InventoryPublisher, primary: Server, admin: Server }
                 1,
             ),
         ] {
-            let syntax = syn::parse_file(source).expect("scoped JWT alias fixture parses");
+            let syntax = syn::parse_file(source)?;
             assert_eq!(
                 file_raw_jwt_reparse_count(&syntax),
                 expected,
                 "JWT alias evidence must not leak into a sibling lexical scope: {source}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -8956,7 +8956,7 @@ identity = { path = "../../crates/identity", features = ["test-support"] }
     }
 
     #[test]
-    fn provider_construction_live_join_rejects_bypassed_or_dead_stages() {
+    fn provider_construction_live_join_rejects_bypassed_or_dead_stages() -> anyhow::Result<()> {
         for source in [
             r#"
 struct ProviderRoleBatches; struct RoleConstructor; struct RoleReceipt;
@@ -8993,7 +8993,7 @@ impl ProviderRoleBatches { fn exact_join() -> Self { Self } fn finish(self) {} }
 fn run() { ProviderRoleBatches::exact_join().finish(); }
 "#,
         ] {
-            let file = syn::parse_file(source).expect("provider live-join fixture parses");
+            let file = syn::parse_file(source)?;
             let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
             assert!(!evidence.has_provider_construction_live_join());
         }
@@ -9017,13 +9017,13 @@ fn run() {
     closer.finish();
 }
 "#,
-        )
-        .expect("provider live-join green fixture parses");
+        )?;
         let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
         assert!(
             evidence.has_provider_construction_live_join(),
             "typed generated carrier fixture must close the selected batch: {evidence:?}"
         );
+        Ok(())
     }
 
     #[test]
@@ -9265,8 +9265,9 @@ postgres = { path = "../../adapters/postgres" }
 redis = { path = "../../adapters/redis", features = ["backend"] }
 "#,
         )?;
-        let error = validate_test_fixture_root_without_contracts(&root)
-            .expect_err("ephemeral production limiter must fail closed");
+        let Err(error) = validate_test_fixture_root_without_contracts(&root) else {
+            anyhow::bail!("ephemeral production limiter unexpectedly passed validation")
+        };
         let message = format!("{error:#}");
         assert!(
             message.contains("does not match canonical registry"),

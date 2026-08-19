@@ -775,6 +775,10 @@ fn step_clippy_workspace() -> Step {
         env: &[],
     }
 }
+#[allow(
+    clippy::unreachable,
+    reason = "typed GateId catalog closes core-test executor ownership at compile time"
+)]
 fn core_test_step(id: GateId) -> Step {
     let GateExecutor::CoreTest = id.spec().executor() else {
         unreachable!("{id:?} must use the typed core-test executor")
@@ -2197,7 +2201,7 @@ fn execution_selection_for_shard(
         }
         ExecutionProfile::ReleaseCheck => Ok(selection.clone()),
         ExecutionProfile::Check | ExecutionProfile::Test => {
-            unreachable!("IntegrationSelection excludes non-integration profiles")
+            bail!("IntegrationSelection excludes non-integration profiles")
         }
     }
 }
@@ -2226,6 +2230,10 @@ fn fixed_gate_plan(job: FixedCiJob, selection: &crate::ci_impact::SelectionPlan)
             match job {
                 FixedCiJob::Check => ExecutionProfile::Check,
                 FixedCiJob::TestAffected => ExecutionProfile::Test,
+                #[allow(
+                    clippy::unreachable,
+                    reason = "the integration-critical job returns before fixed profile projection"
+                )]
                 FixedCiJob::IntegrationCritical => unreachable!(),
             }
         }
@@ -2452,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn identityaudit_runtime_image_batch_has_exact_provisioning_and_environment() {
+    fn identityaudit_runtime_image_batch_has_exact_provisioning_and_environment() -> Result<()> {
         let selection = IntegrationSelection::release_check();
         let batch = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
             .into_iter()
@@ -2461,7 +2469,7 @@ mod tests {
                     .unit_ids
                     .contains(&IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
             })
-            .expect("runtime image batch remains in the release-check plan");
+            .context("runtime image batch must remain in the release-check plan")?;
 
         assert_eq!(batch.package, "identityaudit");
         assert_eq!(batch.feature, "artifact-acceptance");
@@ -2481,10 +2489,11 @@ mod tests {
             "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE",
             "rss-identityaudit:artifact-acceptance"
         )));
+        Ok(())
     }
 
     #[test]
-    fn identityaudit_provisioning_plan_is_exact_and_excludes_unrelated_batches() {
+    fn identityaudit_provisioning_plan_is_exact_and_excludes_unrelated_batches() -> Result<()> {
         let selection = IntegrationSelection::release_check();
         let journey = integration_shards::batches(&selection, IntegrationShard::EventTransport)
             .into_iter()
@@ -2493,7 +2502,7 @@ mod tests {
                     .unit_ids
                     .contains(&IntegrationUnitId::IdentityAuditRuntimeJourney)
             })
-            .expect("identityaudit runtime journey remains in the release-check plan");
+            .context("identityaudit runtime journey must remain in the release-check plan")?;
         assert_eq!(
             integration_provisioning(&journey),
             [IntegrationProvisioning::IdentityAuditServerBinary]
@@ -2521,7 +2530,7 @@ mod tests {
                     .unit_ids
                     .contains(&IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
             })
-            .expect("identityaudit runtime image remains in the release-check plan");
+            .context("identityaudit runtime image must remain in the release-check plan")?;
         assert_eq!(
             integration_provisioning(&image),
             [IntegrationProvisioning::IdentityAuditRuntimeImage]
@@ -2534,8 +2543,9 @@ mod tests {
                     .unit_ids
                     .contains(&IntegrationUnitId::IdentityAuditLib)
             })
-            .expect("identityaudit library batch remains in the release-check plan");
+            .context("identityaudit library batch must remain in the release-check plan")?;
         assert!(integration_provisioning(&unrelated).is_empty());
+        Ok(())
     }
 
     #[test]
@@ -4292,34 +4302,33 @@ mod tests {
     #[test]
     fn runtime_deps_guard_is_no_compile_internal_gate_between_baseline_and_archrules()
     -> anyhow::Result<()> {
-        for (name, plan) in [("ci", plan_for(RELEASE_CHECK))] {
-            let labels = labels(&plan);
-            let baseline_pos = labels
-                .iter()
-                .position(|label| *label == "runtime-assembly-residual")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-assembly-residual 步"))?;
-            let guard_pos = labels
-                .iter()
-                .position(|label| *label == "runtime-deps-guard")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-deps-guard 步"))?;
-            let archrules_pos = labels
-                .iter()
-                .position(|label| *label == "archrules")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
-            assert!(
-                baseline_pos < guard_pos && guard_pos < archrules_pos,
-                "runtime-deps-guard 必须位于 runtime-assembly-residual 之后、archrules 之前，确保 archrules 能索引 guard carrier"
-            );
-            let step = &plan[guard_pos];
-            assert!(
-                !step.needs_compile(),
-                "runtime-deps-guard 须是 no-compile gate"
-            );
-            assert!(matches!(
-                step.kind,
-                StepKind::Internal(InternalCheck::RuntimeDepsGuard)
-            ));
-        }
+        let (name, plan) = ("ci", plan_for(RELEASE_CHECK));
+        let labels = labels(&plan);
+        let baseline_pos = labels
+            .iter()
+            .position(|label| *label == "runtime-assembly-residual")
+            .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-assembly-residual 步"))?;
+        let guard_pos = labels
+            .iter()
+            .position(|label| *label == "runtime-deps-guard")
+            .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-deps-guard 步"))?;
+        let archrules_pos = labels
+            .iter()
+            .position(|label| *label == "archrules")
+            .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
+        assert!(
+            baseline_pos < guard_pos && guard_pos < archrules_pos,
+            "runtime-deps-guard 必须位于 runtime-assembly-residual 之后、archrules 之前，确保 archrules 能索引 guard carrier"
+        );
+        let step = &plan[guard_pos];
+        assert!(
+            !step.needs_compile(),
+            "runtime-deps-guard 须是 no-compile gate"
+        );
+        assert!(matches!(
+            step.kind,
+            StepKind::Internal(InternalCheck::RuntimeDepsGuard)
+        ));
         Ok(())
     }
 
@@ -4676,8 +4685,10 @@ mod tests {
                 Err("synthetic metadata failure".to_owned())
             });
         let reported = Cell::new(false);
-        let error = run_assembly_artifacts_check(&root, &command_facts, || reported.set(true))
-            .expect_err("metadata failure must fail the aggregate artifact check");
+        let Err(error) = run_assembly_artifacts_check(&root, &command_facts, || reported.set(true))
+        else {
+            bail!("metadata failure must fail the aggregate artifact check")
+        };
         assert!(
             reported.get(),
             "metadata failure must emit the stable FAILED view"
@@ -4981,21 +4992,78 @@ mod tests {
 
     // ---- ci 超集计划（issue #1132）----
 
-    /// ci 的 build/clippy 升 `--all-features --all-targets`（issue 验收：编译态全覆盖）。
+    /// Check / ReleaseCheck 的 typed Clippy owner 必须 exact-once 且参数闭合；release 以
+    /// `ClippyAllFeatures` 精确替代 `ClippyWorkspace`，不允许双 owner 或参数漂移。
     #[test]
     fn ci_build_clippy_use_all_features_all_targets() -> anyhow::Result<()> {
-        let plan = plan_for(RELEASE_CHECK);
-        for label in ["build", "clippy"] {
-            let step = plan
+        let check = plan_for(PlanProjection::Profile(ExecutionProfile::Check));
+        let check_clippy = check
+            .iter()
+            .filter(|step| step.id == GateId::ClippyWorkspace)
+            .collect::<Vec<_>>();
+        assert_eq!(check_clippy.len(), 1, "Check must own ClippyWorkspace once");
+        assert_eq!(
+            check_clippy[0].args,
+            [
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings"
+            ]
+        );
+        assert!(
+            check
                 .iter()
-                .find(|s| s.label() == label)
-                .ok_or_else(|| anyhow::anyhow!("release-check 缺 `{label}` 步"))?;
-            assert!(
-                step.args.contains(&"--all-features") && step.args.contains(&"--all-targets"),
-                "ci `{label}` 须 --all-features --all-targets，实际 {:?}",
-                step.args
-            );
-        }
+                .all(|step| step.id != GateId::ClippyAllFeatures),
+            "Check must not project the release-only Clippy owner"
+        );
+
+        let release = plan_for(RELEASE_CHECK);
+        let release_clippy = release
+            .iter()
+            .filter(|step| step.id == GateId::ClippyAllFeatures)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            release_clippy.len(),
+            1,
+            "ReleaseCheck must own ClippyAllFeatures once"
+        );
+        assert_eq!(
+            release_clippy[0].args,
+            [
+                "clippy",
+                "--workspace",
+                "--all-features",
+                "--all-targets",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ]
+        );
+        assert!(
+            release
+                .iter()
+                .all(|step| step.id != GateId::ClippyWorkspace),
+            "ReleaseCheck must subsume ClippyWorkspace with the all-features owner"
+        );
+
+        let build = release
+            .iter()
+            .find(|step| step.label() == "build")
+            .context("release-check missing build step")?;
+        assert_eq!(
+            build.args,
+            [
+                "build",
+                "--workspace",
+                "--all-features",
+                "--all-targets",
+                "--locked",
+            ]
+        );
         Ok(())
     }
 
@@ -5502,6 +5570,10 @@ mod tests {
         typed_steps_in_lines(&lines)
     }
 
+    #[allow(
+        clippy::unreachable,
+        reason = "the outer closed mapping-key arm limits the inner key mapping"
+    )]
     fn parse_typed_step(lines: &[(usize, &str)], item_indent: usize) -> TypedStep {
         let mut step = TypedStep::default();
         let field_indent = item_indent + 2;
@@ -6702,9 +6774,7 @@ mod tests {
         }
     }
 
-    fn cache_action_steps<'a>(
-        root: &'a serde_yaml_ng::Mapping,
-    ) -> Option<&'a Vec<serde_yaml_ng::Value>> {
+    fn cache_action_steps(root: &serde_yaml_ng::Mapping) -> Option<&Vec<serde_yaml_ng::Value>> {
         yaml_field(root, "runs")?
             .as_mapping()
             .and_then(|runs| yaml_field(runs, "steps"))?

@@ -1438,6 +1438,10 @@ fn unit_requires_docker(unit: &IntegrationUnitSpec) -> bool {
 }
 
 impl fmt::Display for IntegrationSelection {
+    #[allow(
+        clippy::unreachable,
+        reason = "IntegrationSelection private constructors exclude non-integration profiles"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.profile {
             ExecutionProfile::IntegrationCritical => {
@@ -1451,9 +1455,9 @@ impl fmt::Display for IntegrationSelection {
                 Ok(())
             }
             ExecutionProfile::ReleaseCheck => formatter.write_str("release-check"),
-            ExecutionProfile::Check | ExecutionProfile::Test => unreachable!(
-                "IntegrationSelection private constructor excludes non-integration profiles"
-            ),
+            ExecutionProfile::Check | ExecutionProfile::Test => {
+                unreachable!("IntegrationSelection excludes non-integration profiles")
+            }
         }
     }
 }
@@ -2232,7 +2236,6 @@ pub(crate) fn missing_external_resources(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
 
     use super::*;
     use serde_json::{Value, json};
@@ -2345,13 +2348,7 @@ mod tests {
             Some(ChangedIntegrationSource::ReleaseCheck)
         );
 
-        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
-        assert!(!critical.unit_ids().contains(&id));
-        assert!(
-            IntegrationSelection::release_check()
-                .unit_ids()
-                .contains(&id)
-        );
+        assert_release_check_only(id)?;
         assert_eq!(
             IntegrationUnitId::ALL
                 .into_iter()
@@ -2363,6 +2360,17 @@ mod tests {
                 .count(),
             1,
             "mqtt backpressure fault must have one canonical registry owner"
+        );
+        Ok(())
+    }
+
+    fn assert_release_check_only(id: IntegrationUnitId) -> Result<()> {
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
+        assert!(!critical.unit_ids().contains(&id));
+        assert!(
+            IntegrationSelection::release_check()
+                .unit_ids()
+                .contains(&id)
         );
         Ok(())
     }
@@ -2400,13 +2408,7 @@ mod tests {
                 .is_empty()
         );
 
-        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
-        assert!(!critical.unit_ids().contains(&id));
-        assert!(
-            IntegrationSelection::release_check()
-                .unit_ids()
-                .contains(&id)
-        );
+        assert_release_check_only(id)?;
         Ok(())
     }
 
@@ -2651,7 +2653,7 @@ mod tests {
             }
             for child in children {
                 let relative = child
-                    .strip_prefix(&root)
+                    .strip_prefix(root)
                     .context("journey module escaped workspace")?
                     .to_string_lossy()
                     .into_owned();
@@ -2736,7 +2738,7 @@ mod tests {
         let mut missing_nested_edge = declared.clone();
         missing_nested_edge
             .get_mut("journeys/tests/support/device_mtls_pg_harness.rs")
-            .expect("registered nested harness")
+            .context("registered nested harness must exist")?
             .0
             .clear();
         assert_ne!(
@@ -2746,7 +2748,7 @@ mod tests {
         let mut missing_release_edge = declared.clone();
         missing_release_edge
             .get_mut("journeys/tests/support/device_mtls_pg_harness.rs")
-            .expect("registered nested harness")
+            .context("registered nested harness must exist")?
             .1 = false;
         assert_ne!(
             discovered, missing_release_edge,
@@ -3268,9 +3270,37 @@ mod tests {
         assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
     }
 
+    fn assert_vault_and_closeout_carriers(units: &[IntegrationUnitSpec]) -> Result<()> {
+        let vault_units = units
+            .iter()
+            .filter(|unit| unit.package == "vault")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vault_units.len(),
+            2,
+            "Vault must have exactly lib and live carriers"
+        );
+        let live = vault_units
+            .iter()
+            .find(|unit| unit.id == IntegrationUnitId::VaultLive)
+            .context("Vault live carrier must remain catalog-owned")?;
+        assert_eq!(live.target, "live_vault");
+        assert_eq!(live.primary_owner, ExecutionProfile::IntegrationCritical);
+        assert_eq!(live.scheduling, Scheduling::Serial);
+        assert_eq!(live.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(live.resources, &[Resource::Vault]);
+        assert_eq!(live.capabilities, &[Capability::Docker]);
+
+        let closeout = units
+            .iter()
+            .find(|unit| unit.id == IntegrationUnitId::SecurityProviderCloseoutJourney)
+            .context("security-provider closeout journey must remain registry-owned")?;
+        assert_eq!(closeout.scheduling, Scheduling::Parallel);
+        Ok(())
+    }
+
     #[test]
-    #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
-    fn settingsonly_and_vault_carriers_are_unique_and_feature_enabled() {
+    fn settingsonly_and_vault_carriers_are_unique_and_feature_enabled() -> Result<()> {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
         let release = IntegrationSelection::release_check();
         assert!(
@@ -3286,27 +3316,7 @@ mod tests {
             spec.local_feature_scopes
                 .contains(&LocalFeatureScope::Vault)
         );
-
-        let vault_units = spec
-            .units
-            .iter()
-            .filter(|unit| unit.package == "vault")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            vault_units.len(),
-            2,
-            "Vault must have exactly lib and live carriers"
-        );
-        let live = vault_units
-            .iter()
-            .find(|unit| unit.id == IntegrationUnitId::VaultLive)
-            .expect("Vault live carrier remains catalog-owned");
-        assert_eq!(live.target, "live_vault");
-        assert_eq!(live.primary_owner, ExecutionProfile::IntegrationCritical);
-        assert_eq!(live.scheduling, Scheduling::Serial);
-        assert_eq!(live.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(live.resources, &[Resource::Vault]);
-        assert_eq!(live.capabilities, &[Capability::Docker]);
+        assert_vault_and_closeout_carriers(spec.units)?;
 
         let units = spec
             .units
@@ -3321,19 +3331,12 @@ mod tests {
         assert_eq!(units[0].target, "settingsonly");
         assert_eq!(units[0].kind, TargetKind::Lib);
         assert_eq!(units[0].scheduling, Scheduling::Serial);
-
-        let closeout = spec
-            .units
-            .iter()
-            .find(|unit| unit.id == IntegrationUnitId::SecurityProviderCloseoutJourney)
-            .expect("security-provider closeout journey remains registry-owned");
-        assert_eq!(closeout.scheduling, Scheduling::Parallel);
+        Ok(())
     }
 
     #[test]
-    fn scheduling_plan_rejects_dangerous_target_parallelism() {
-        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)
-            .expect("release selection");
+    fn scheduling_plan_rejects_dangerous_target_parallelism() -> Result<()> {
+        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
             ("postgres", "migration_0067_historical_artifact"),
@@ -3408,6 +3411,7 @@ mod tests {
                     .any(|batch| batch.scheduling == Scheduling::Parallel)
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -3491,19 +3495,21 @@ mod tests {
     }
 
     #[test]
-    fn localtx_required_selection_preserves_owner_profile_drift_error() {
-        let error = localtx_required_selection_from([
+    fn localtx_required_selection_preserves_owner_profile_drift_error() -> Result<()> {
+        let Err(error) = localtx_required_selection_from([
             IntegrationUnitId::PostgresFeatureManifest,
             IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
             IntegrationUnitId::IdentityPasswordSecurityEventJourney,
             IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
             IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
         ])
-        .context("derive required LocalTx catalog selection")
-        .expect_err("release-check owner drift must fail closed");
+        .context("derive required LocalTx catalog selection") else {
+            bail!("release-check owner drift must fail closed")
+        };
         let chain = format!("{error:#}");
         assert!(chain.contains("derive required LocalTx catalog selection"));
         assert!(chain.contains("release-check unit `postgres-feature-manifest`"));
+        Ok(())
     }
 
     #[test]
@@ -3534,7 +3540,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_plan_freezes_resources_and_dangerous_targets() {
+    fn workspace_plan_freezes_resources_and_dangerous_targets() -> Result<()> {
         let release = IntegrationSelection::release_check();
         let expected = [
             (IntegrationShard::PostgresDomain, &[Resource::Postgres][..]),
@@ -3573,8 +3579,7 @@ mod tests {
         assert!(release.requires_docker_for_shard(IntegrationShard::ProductionRuntime));
         assert!(release.requires_docker_for_shard(IntegrationShard::CdcProjectionSaga));
 
-        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)
-            .expect("critical selection");
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
         let critical_expected = [
             (IntegrationShard::PostgresDomain, vec![Resource::Postgres]),
             (
@@ -3606,6 +3611,7 @@ mod tests {
         }
         assert!(critical.requires_docker_for_shard(IntegrationShard::EventTransport));
         assert!(critical.requires_docker_for_shard(IntegrationShard::ObjectStorage));
+        Ok(())
     }
 
     #[test]
@@ -3617,10 +3623,14 @@ mod tests {
         );
     }
 
-    fn metadata_target(root: &Path, unit: &IntegrationUnitSpec) -> Value {
+    fn metadata_target(root: &Path, unit: &IntegrationUnitSpec) -> Result<Value> {
         let kind = unit.kind.as_str();
-        let scope = LocalFeatureScope::for_package(unit.package)
-            .expect("synthetic metadata requires local feature scope");
+        let scope = LocalFeatureScope::for_package(unit.package).with_context(|| {
+            format!(
+                "synthetic metadata requires local feature scope for {}",
+                unit.package
+            )
+        })?;
         let src_path = match unit.kind {
             TargetKind::Lib => root.join(scope.root()).join("src/lib.rs"),
             TargetKind::Test => root
@@ -3632,7 +3642,7 @@ mod tests {
             (TargetKind::Test, LocalEligibility::RemoteOnly) => vec![scope.feature()],
             _ => Vec::new(),
         };
-        json!({
+        Ok(json!({
             "name": unit.target,
             "kind": [kind],
             "crate_types": [if kind == "lib" { "lib" } else { "bin" }],
@@ -3642,10 +3652,14 @@ mod tests {
             "doctest": kind == "lib",
             "test": true,
             "doc": kind == "lib",
-        })
+        }))
     }
 
-    fn metadata_from_at(root: &Path, targets: &[IntegrationUnitSpec], packages: &[&str]) -> String {
+    fn metadata_from_at(
+        root: &Path,
+        targets: &[IntegrationUnitSpec],
+        packages: &[&str],
+    ) -> Result<String> {
         let mut targets_by_package: BTreeMap<&str, Vec<&IntegrationUnitSpec>> = BTreeMap::new();
         for unit in targets {
             targets_by_package
@@ -3658,36 +3672,44 @@ mod tests {
             .iter()
             .map(|package| format!("path+file://{}/{package}#0.0.0", root.display()))
             .collect::<Vec<_>>();
-        json!({
-            "packages": package_names.iter().map(|package| {
-                let package_targets = targets_by_package.get(package).cloned().unwrap_or_default();
-                json!({
-                    "name": package,
-                    "version": "0.0.0",
-                    "id": format!("path+file://{}/{package}#0.0.0", root.display()),
-                    "license": null,
-                    "license_file": null,
-                    "description": null,
-                    "source": null,
-                    "dependencies": [],
-                    "targets": package_targets.into_iter().map(|unit| metadata_target(root, unit)).collect::<Vec<_>>(),
-                    "features": {"integration": [], "broker-tests": []},
-                    "manifest_path": root.join(package).join("Cargo.toml"),
-                    "metadata": null,
-                    "publish": [],
-                    "authors": [],
-                    "categories": [],
-                    "keywords": [],
-                    "readme": null,
-                    "repository": null,
-                    "homepage": null,
-                    "documentation": null,
-                    "edition": "2024",
-                    "links": null,
-                    "default_run": null,
-                    "rust_version": "1.86",
-                })
-            }).collect::<Vec<_>>(),
+        let mut package_metadata = Vec::new();
+        for package in package_names {
+            let package_targets = targets_by_package
+                .get(package)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|unit| metadata_target(root, unit))
+                .collect::<Result<Vec<_>>>()?;
+            package_metadata.push(json!({
+                "name": package,
+                "version": "0.0.0",
+                "id": format!("path+file://{}/{package}#0.0.0", root.display()),
+                "license": null,
+                "license_file": null,
+                "description": null,
+                "source": null,
+                "dependencies": [],
+                "targets": package_targets,
+                "features": {"integration": [], "broker-tests": []},
+                "manifest_path": root.join(package).join("Cargo.toml"),
+                "metadata": null,
+                "publish": [],
+                "authors": [],
+                "categories": [],
+                "keywords": [],
+                "readme": null,
+                "repository": null,
+                "homepage": null,
+                "documentation": null,
+                "edition": "2024",
+                "links": null,
+                "default_run": null,
+                "rust_version": "1.86",
+            }));
+        }
+        Ok(json!({
+            "packages": package_metadata,
             "workspace_members": members,
             "workspace_default_members": members,
             "resolve": {
@@ -3705,17 +3727,17 @@ mod tests {
             "metadata": null,
             "version": 1,
         })
-        .to_string()
+        .to_string())
     }
 
-    fn metadata_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> String {
+    fn metadata_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> Result<String> {
         metadata_from_at(Path::new("/workspace"), targets, packages)
     }
 
     fn facts_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> Result<WorkspaceFacts> {
         WorkspaceFacts::from_metadata_json(
             Path::new("/workspace"),
-            &metadata_from(targets, packages),
+            &metadata_from(targets, packages)?,
         )
         .map_err(Into::into)
     }
@@ -3734,8 +3756,9 @@ mod tests {
 
         let mut missing = units.clone();
         let missing_unit = missing.pop().context("synthetic catalog is non-empty")?;
-        let error = validate_facts(&facts_from(&missing, INTEGRATION_PACKAGES)?)
-            .expect_err("missing integration target must fail closed");
+        let Err(error) = validate_facts(&facts_from(&missing, INTEGRATION_PACKAGES)?) else {
+            bail!("missing integration target must fail closed")
+        };
         assert_eq!(
             error.to_string(),
             format!(
@@ -3760,8 +3783,9 @@ mod tests {
             LocalEligibility::RemoteOnly,
         );
         unknown.push(unknown_unit);
-        let error = validate_facts(&facts_from(&unknown, INTEGRATION_PACKAGES)?)
-            .expect_err("unassigned integration target must fail closed");
+        let Err(error) = validate_facts(&facts_from(&unknown, INTEGRATION_PACKAGES)?) else {
+            bail!("unassigned integration target must fail closed")
+        };
         assert_eq!(
             error.to_string(),
             format!(
@@ -3774,11 +3798,12 @@ mod tests {
             )
         );
 
-        let error = validate_facts(&facts_from(
+        let Err(error) = validate_facts(&facts_from(
             &all_units(),
             &INTEGRATION_PACKAGES[..INTEGRATION_PACKAGES.len() - 1],
-        )?)
-        .expect_err("missing integration package must fail closed");
+        )?) else {
+            bail!("missing integration package must fail closed")
+        };
         assert_eq!(
             error.to_string(),
             "workspace facts missing legacy integration packages: [\"vault\"]"
@@ -3791,8 +3816,9 @@ mod tests {
             duplicate[0].target.to_owned(),
             duplicate[0].kind.as_str().to_owned(),
         );
-        let error = unique_targets(duplicate)
-            .expect_err("duplicate integration target assignment must fail closed");
+        let Err(error) = unique_targets(duplicate) else {
+            bail!("duplicate integration target assignment must fail closed")
+        };
         assert_eq!(
             error.to_string(),
             format!("integration target assigned more than once: {duplicate_id:?}")
@@ -3925,6 +3951,13 @@ mod tests {
         validate_test_target_eligibility(root, &facts, units)
     }
 
+    fn eligibility_rejection<T>(result: Result<T>, reason: &str) -> Result<anyhow::Error> {
+        let Err(error) = result else {
+            bail!("{reason}")
+        };
+        Ok(error)
+    }
+
     #[test]
     fn cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift() -> Result<()> {
         let root = eligibility_sandbox()?;
@@ -3938,32 +3971,39 @@ mod tests {
         let postgres_remote_path = expected_test_src_path(remote.package, remote.target)?;
         let postgres_affected_path = expected_test_src_path(affected.package, affected.target)?;
         let mqtt_path = expected_test_src_path(mqtt_remote.package, mqtt_remote.target)?;
+        let postgres_remote_src = postgres_remote_path
+            .to_str()
+            .context("postgres remote test path must be UTF-8")?;
+        let postgres_affected_src = postgres_affected_path
+            .to_str()
+            .context("postgres affected test path must be UTF-8")?;
+        let mqtt_src = mqtt_path.to_str().context("mqtt test path must be UTF-8")?;
         let postgres_feature = LocalFeatureScope::for_package(remote.package)
-            .expect("postgres scope")
+            .context("postgres scope must exist")?
             .feature();
         let mqtt_feature = LocalFeatureScope::for_package(mqtt_remote.package)
-            .expect("mqtt scope")
+            .context("mqtt scope must exist")?
             .feature();
 
         let valid = [
             EligibilityFixture {
                 package: remote.package,
                 name: remote.target,
-                src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                src_path: postgres_remote_src,
                 required_features: &[postgres_feature],
                 test: true,
             },
             EligibilityFixture {
                 package: affected.package,
                 name: affected.target,
-                src_path: postgres_affected_path.to_str().expect("utf-8 path"),
+                src_path: postgres_affected_src,
                 required_features: &[],
                 test: true,
             },
             EligibilityFixture {
                 package: mqtt_remote.package,
                 name: mqtt_remote.target,
-                src_path: mqtt_path.to_str().expect("utf-8 path"),
+                src_path: mqtt_src,
                 required_features: &[mqtt_feature],
                 test: true,
             },
@@ -3974,13 +4014,16 @@ mod tests {
         let affected_typed = eligibility_unit("runtime", "auth_e2e", LocalEligibility::Affected);
         let affected_typed_path =
             expected_test_src_path(affected_typed.package, affected_typed.target)?;
+        let affected_typed_src = affected_typed_path
+            .to_str()
+            .context("runtime affected test path must be UTF-8")?;
         let runtime_feature = LocalFeatureScope::for_package(affected_typed.package)
-            .expect("runtime scope")
+            .context("runtime scope must exist")?
             .feature();
         let affected_typed_ok = [EligibilityFixture {
             package: affected_typed.package,
             name: affected_typed.target,
-            src_path: affected_typed_path.to_str().expect("utf-8 path"),
+            src_path: affected_typed_src,
             required_features: &[runtime_feature],
             test: true,
         }];
@@ -3990,12 +4033,14 @@ mod tests {
         let missing = [EligibilityFixture {
             package: affected.package,
             name: affected.target,
-            src_path: postgres_affected_path.to_str().expect("utf-8 path"),
+            src_path: postgres_affected_src,
             required_features: &[],
             test: true,
         }];
-        let error = check_eligibility(&root, &missing, &[remote, affected])
-            .expect_err("missing catalog test target must fail closed");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &missing, &[remote, affected]),
+            "missing catalog test target must fail closed",
+        )?;
         assert!(
             error.to_string().contains(remote.target),
             "missing target diagnostic must name the target: {error}"
@@ -4007,7 +4052,7 @@ mod tests {
                 EligibilityFixture {
                     package: remote.package,
                     name: remote.target,
-                    src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                    src_path: postgres_remote_src,
                     required_features: &[postgres_feature],
                     test: true,
                 },
@@ -4020,9 +4065,10 @@ mod tests {
                 },
             ],
         );
-        let error = duplicate.expect_err(
+        let error = eligibility_rejection(
+            duplicate,
             "duplicate Test target names must fail closed at WorkspaceFacts construction",
-        );
+        )?;
         assert!(
             error.to_string().contains(remote.target),
             "duplicate name diagnostic must name the target: {error}"
@@ -4032,14 +4078,14 @@ mod tests {
             EligibilityFixture {
                 package: remote.package,
                 name: remote.target,
-                src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                src_path: postgres_remote_src,
                 required_features: &[postgres_feature],
                 test: true,
             },
             EligibilityFixture {
                 package: remote.package,
                 name: "migration_0087_device_command_fencing",
-                src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                src_path: postgres_remote_src,
                 required_features: &[postgres_feature],
                 test: true,
             },
@@ -4049,8 +4095,10 @@ mod tests {
             "migration_0087_device_command_fencing",
             LocalEligibility::RemoteOnly,
         );
-        let error = check_eligibility(&root, &alias, &[remote, alias_unit])
-            .expect_err("source path alias must fail closed");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &alias, &[remote, alias_unit]),
+            "source path alias must fail closed",
+        )?;
         assert!(
             error.to_string().contains("source path"),
             "path alias diagnostic must mention source path: {error}"
@@ -4063,8 +4111,10 @@ mod tests {
             required_features: &[postgres_feature],
             test: true,
         }];
-        let error = check_eligibility(&root, &wrong_path, &[remote])
-            .expect_err("src_path must equal LocalFeatureScope::root()/tests/{{target}}.rs");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &wrong_path, &[remote]),
+            "src_path must equal LocalFeatureScope::root()/tests/{target}.rs",
+        )?;
         assert!(
             error.to_string().contains("src_path"),
             "path mismatch diagnostic must mention src_path: {error}"
@@ -4073,12 +4123,14 @@ mod tests {
         let missing_features = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+            src_path: postgres_remote_src,
             required_features: &[],
             test: true,
         }];
-        let error = check_eligibility(&root, &missing_features, &[remote])
-            .expect_err("RemoteOnly required_features must be present");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &missing_features, &[remote]),
+            "RemoteOnly required_features must be present",
+        )?;
         assert!(
             error.to_string().contains("required_features"),
             "missing feature diagnostic must mention required_features: {error}"
@@ -4087,12 +4139,14 @@ mod tests {
         let wrong_features = [EligibilityFixture {
             package: mqtt_remote.package,
             name: mqtt_remote.target,
-            src_path: mqtt_path.to_str().expect("utf-8 path"),
+            src_path: mqtt_src,
             required_features: &["integration"],
             test: true,
         }];
-        let error = check_eligibility(&root, &wrong_features, &[mqtt_remote])
-            .expect_err("RemoteOnly required_features must equal LocalFeatureScope::feature()");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &wrong_features, &[mqtt_remote]),
+            "RemoteOnly required_features must equal LocalFeatureScope::feature()",
+        )?;
         assert!(
             error.to_string().contains(mqtt_feature),
             "wrong feature diagnostic must mention typed feature `{mqtt_feature}`: {error}"
@@ -4101,12 +4155,14 @@ mod tests {
         let extra_features = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+            src_path: postgres_remote_src,
             required_features: &[postgres_feature, "extra-gate"],
             test: true,
         }];
-        let error = check_eligibility(&root, &extra_features, &[remote])
-            .expect_err("RemoteOnly required_features must be a singleton");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &extra_features, &[remote]),
+            "RemoteOnly required_features must be a singleton",
+        )?;
         assert!(
             error.to_string().contains("required_features"),
             "extra feature diagnostic must mention required_features: {error}"
@@ -4115,12 +4171,14 @@ mod tests {
         let test_disabled = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+            src_path: postgres_remote_src,
             required_features: &[postgres_feature],
             test: false,
         }];
-        let error = check_eligibility(&root, &test_disabled, &[remote])
-            .expect_err("test_by_default=false must fail closed");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &test_disabled, &[remote]),
+            "test_by_default=false must fail closed",
+        )?;
         assert!(
             error.to_string().contains("test_by_default"),
             "disabled test diagnostic must mention test_by_default: {error}"
@@ -4129,12 +4187,14 @@ mod tests {
         let affected_wrong = [EligibilityFixture {
             package: affected_typed.package,
             name: affected_typed.target,
-            src_path: affected_typed_path.to_str().expect("utf-8 path"),
+            src_path: affected_typed_src,
             required_features: &["broker-tests"],
             test: true,
         }];
-        let error = check_eligibility(&root, &affected_wrong, &[affected_typed])
-            .expect_err("Affected wrong feature must fail closed");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &affected_wrong, &[affected_typed]),
+            "Affected wrong feature must fail closed",
+        )?;
         assert!(
             error.to_string().contains(runtime_feature),
             "Affected wrong-feature diagnostic must mention typed feature `{runtime_feature}`: {error}"
@@ -4143,12 +4203,14 @@ mod tests {
         let affected_extra = [EligibilityFixture {
             package: affected_typed.package,
             name: affected_typed.target,
-            src_path: affected_typed_path.to_str().expect("utf-8 path"),
+            src_path: affected_typed_src,
             required_features: &[runtime_feature, "extra-gate"],
             test: true,
         }];
-        let error = check_eligibility(&root, &affected_extra, &[affected_typed])
-            .expect_err("Affected extra features must fail closed");
+        let error = eligibility_rejection(
+            check_eligibility(&root, &affected_extra, &[affected_typed]),
+            "Affected extra features must fail closed",
+        )?;
         assert!(
             error.to_string().contains("required_features"),
             "Affected extra-feature diagnostic must mention required_features: {error}"
@@ -4161,7 +4223,9 @@ mod tests {
         let root = eligibility_sandbox()?;
         let unit = eligibility_unit("postgres", "feature_manifest", LocalEligibility::Affected);
         let src_path = expected_test_src_path(unit.package, unit.target)?;
-        let src = src_path.to_str().expect("utf-8 path");
+        let src = src_path
+            .to_str()
+            .context("eligibility source path must be UTF-8")?;
         let fixtures = [EligibilityFixture {
             package: unit.package,
             name: unit.target,
@@ -4176,8 +4240,10 @@ mod tests {
             "#![cfg(feature = \"integration\")]\nfn case() {}\n",
         )?;
         let facts = eligibility_facts(&root, &fixtures)?;
-        let error = validate_test_target_eligibility(&root, &facts, &[unit])
-            .expect_err("crate-level cfg(feature) must fail closed");
+        let error = eligibility_rejection(
+            validate_test_target_eligibility(&root, &facts, &[unit]),
+            "crate-level cfg(feature) must fail closed",
+        )?;
         let message = error.to_string();
         assert!(
             message.contains(unit.package)
@@ -4193,8 +4259,10 @@ mod tests {
             "#![cfg_attr(feature = \"integration\", allow(dead_code))]\nfn case() {}\n",
         )?;
         let facts = eligibility_facts(&root, &fixtures)?;
-        let error = validate_test_target_eligibility(&root, &facts, &[unit])
-            .expect_err("crate-level cfg_attr(feature) must fail closed");
+        let error = eligibility_rejection(
+            validate_test_target_eligibility(&root, &facts, &[unit]),
+            "crate-level cfg_attr(feature) must fail closed",
+        )?;
         let message = error.to_string();
         assert!(
             message.contains(unit.package)
@@ -4274,11 +4342,11 @@ mod tests {
             let rel = expected_test_src_path(unit.package, unit.target)?;
             write_eligibility_source(
                 &root,
-                rel.to_str().expect("utf-8 path"),
+                rel.to_str().context("catalog target path must be UTF-8")?,
                 "// clean synthetic catalog target\n",
             )?;
         }
-        let metadata = metadata_from_at(&root, &all_units(), INTEGRATION_PACKAGES).into_bytes();
+        let metadata = metadata_from_at(&root, &all_units(), INTEGRATION_PACKAGES)?.into_bytes();
         let success_calls = Rc::new(Cell::new(0));
         let success_counter = Rc::clone(&success_calls);
         let success = CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {

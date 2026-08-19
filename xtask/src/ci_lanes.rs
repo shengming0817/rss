@@ -1340,24 +1340,25 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn fixed_ci_invocation_rejects_every_job_group_mismatch() {
+    fn fixed_ci_invocation_rejects_every_job_group_mismatch() -> anyhow::Result<()> {
         assert_eq!(
-            FixedCiInvocation::new(FixedCiJob::Check, None).unwrap(),
+            FixedCiInvocation::new(FixedCiJob::Check, None)?,
             FixedCiInvocation::Check
         );
         assert_eq!(
-            FixedCiInvocation::new(FixedCiJob::TestAffected, None).unwrap(),
+            FixedCiInvocation::new(FixedCiJob::TestAffected, None)?,
             FixedCiInvocation::TestAffected
         );
         for group in IntegrationJobGroup::ALL {
             assert_eq!(
-                FixedCiInvocation::new(FixedCiJob::IntegrationCritical, Some(group)).unwrap(),
+                FixedCiInvocation::new(FixedCiJob::IntegrationCritical, Some(group))?,
                 FixedCiInvocation::Integration { group }
             );
             assert!(FixedCiInvocation::new(FixedCiJob::Check, Some(group)).is_err());
             assert!(FixedCiInvocation::new(FixedCiJob::TestAffected, Some(group)).is_err());
         }
         assert!(FixedCiInvocation::new(FixedCiJob::IntegrationCritical, None).is_err());
+        Ok(())
     }
 
     #[test]

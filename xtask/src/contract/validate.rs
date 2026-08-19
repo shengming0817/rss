@@ -1952,6 +1952,10 @@ fn rule_path_match(c: &RepositoryContract, label: &str) -> Option<Finding> {
 }
 
 /// R4：kind→schema 形态一致。返回缺失的必需 schema 声明（可多条）。
+#[allow(
+    clippy::unreachable,
+    reason = "the projection branch returns before the closed non-projection schema mapping"
+)]
 fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let s = &m.schemas;
     if m.kind == ContractKind::Projection {
@@ -3282,6 +3286,10 @@ mod tests {
         Framework,
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "fixed-valid base manifest keeps the test fixture API infallible"
+    )]
     fn manifest(
         kind: ContractKind,
         level: ConsistencyLevel,
@@ -3643,10 +3651,16 @@ lifecycle = "draft"
     }
 
     /// 合法 saga block（1 step、reverse、完整执行语义）——R10 绿基线，红用例在其上变异。
+    #[allow(
+        clippy::expect_used,
+        reason = "fixed canonical step keeps saga fixture construction infallible"
+    )]
     fn valid_saga_block() -> SagaBlock {
+        let step_name =
+            vocab::StepName::parse("reserve_funds").expect("canonical test step must parse");
         SagaBlock {
             steps: vec![SagaStep {
-                name: vocab::StepName::parse("reserve_funds").expect("canonical test step"),
+                name: step_name,
                 receipt_schema: "reserve.schema.json".to_string(),
                 effect_scope: "billing.reserve".to_string(),
                 compensation_effect_scope: "billing.release".to_string(),
@@ -3713,6 +3727,10 @@ lifecycle = "draft"
         event
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "fixture builder synthesizes every declared schema before promotion"
+    )]
     fn discovered(m: ContractManifest, dir: PathBuf) -> RepositoryContract {
         fixture_builder(m, dir)
             .build()
@@ -3739,6 +3757,10 @@ lifecycle = "draft"
         builder
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "rebuild preserves the already validated synthetic fixture shape"
+    )]
     fn rebuild_contract(
         contract: &RepositoryContract,
         manifest: ContractManifest,
@@ -4168,7 +4190,8 @@ lifecycle = "draft"
             "kind=projection without schemas.projection must fail closed"
         );
 
-        let forbidden_slots: [(&str, fn(&mut Schemas)); 4] = [
+        type SchemaMutation = fn(&mut Schemas);
+        let forbidden_slots: [(&str, SchemaMutation); 4] = [
             ("request", |schemas: &mut Schemas| {
                 schemas.request = Some("request.schema.json".to_string());
             }),
@@ -4235,20 +4258,21 @@ lifecycle = "draft"
     #[case("")]
     #[case("_seed")]
     #[case("Bad")]
-    fn owner_provenance_rejects_malformed_domain(#[case] owner: &str) {
+    fn owner_provenance_rejects_malformed_domain(#[case] owner: &str) -> anyhow::Result<()> {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
             RawContractOwner::Domain(owner.to_string()),
             http_schemas(),
         );
-        let error = RepositoryContractTestBuilder::new(m, PathBuf::from("/x"))
-            .build()
-            .expect_err("malformed owner must fail before governance projection");
+        let Err(error) = RepositoryContractTestBuilder::new(m, PathBuf::from("/x")).build() else {
+            anyhow::bail!("malformed owner must fail before governance projection")
+        };
         assert!(
             error.to_string().contains("canonical domain name"),
             "{error}"
         );
+        Ok(())
     }
 
     /// R7 anti-vacuity（正向）：合法 framework / domain 契约不产生 IdentSyntax finding。
@@ -5768,7 +5792,7 @@ lifecycle = "draft"
     #[case("subscriptions")]
     #[case("command")]
     #[case("saga")]
-    fn projection_rejects_http_command_event_and_saga_fields(#[case] field: &str) {
+    fn projection_rejects_http_command_event_and_saga_fields(#[case] field: &str) -> Result<()> {
         let mut manifest = projection_manifest(
             "settings.config-projection",
             "settings",
@@ -5790,7 +5814,7 @@ lifecycle = "draft"
                 });
             }
             "saga" => manifest.saga = Some(valid_saga_block()),
-            _ => unreachable!("closed field fixture"),
+            _ => anyhow::bail!("closed consistency field fixture `{field}` escaped"),
         }
 
         let rejected = match field {
@@ -5809,6 +5833,7 @@ lifecycle = "draft"
                 .any(|finding| finding.rule == Rule::PerKindFieldScope),
         };
         assert!(rejected, "kind=projection accepted forbidden field {field}");
+        Ok(())
     }
 
     // ── R10 SagaBlock（内部良构）──────────────────────────────────────────
@@ -5822,10 +5847,12 @@ lifecycle = "draft"
     }
 
     #[test]
-    fn r10_saga_duplicate_step_rejected() {
+    fn r10_saga_duplicate_step_rejected() -> Result<()> {
         let mut b = valid_saga_block();
+        let step_name = vocab::StepName::parse("reserve_funds")
+            .context("canonical duplicate test step must parse")?;
         b.steps.push(SagaStep {
-            name: vocab::StepName::parse("reserve_funds").expect("canonical test step"), // 与首 step 重名
+            name: step_name, // 与首 step 重名
             receipt_schema: "other.schema.json".to_string(),
             effect_scope: "billing.other".to_string(),
             compensation_effect_scope: "billing.undo_other".to_string(),
@@ -5835,6 +5862,7 @@ lifecycle = "draft"
         });
         let findings = rule_saga_block(&saga_manifest(Some(b)), "x");
         assert!(findings.iter().any(|f| f.rule == Rule::SagaBlock));
+        Ok(())
     }
 
     #[rstest]
@@ -6821,16 +6849,19 @@ lifecycle = "draft"
     }
 
     #[test]
-    fn r22_consistency_saga_workflow_rejects_projection_only_fields() {
+    fn r22_consistency_saga_workflow_rejects_projection_only_fields() -> Result<()> {
         let mut m = saga_manifest(Some(valid_saga_block()));
         m.capabilities = workflow_saga_capability();
-        let Some(workflow) = m.capabilities.workflow.as_mut() else {
-            unreachable!("workflow_saga_capability sets workflow");
-        };
+        let workflow = m
+            .capabilities
+            .workflow
+            .as_mut()
+            .context("workflow_saga_capability sets workflow")?;
         workflow.inputs = vec!["identity.session-created".to_string()];
         workflow.ordering = Some(WorkflowOrdering::SerialInOrder);
         let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
         assert_r22_detail(&findings, "billing.checkout", CAP_WORKFLOW_FIELD_SCOPE);
+        Ok(())
     }
 
     #[test]
@@ -6981,7 +7012,7 @@ lifecycle = "draft"
     }
 
     #[test]
-    fn r22_consistency_projection_missing_evidence_fields_rejected() {
+    fn r22_consistency_projection_missing_evidence_fields_rejected() -> Result<()> {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::WorkflowEventual,
@@ -6990,9 +7021,11 @@ lifecycle = "draft"
         );
         m.id = "audit.session-projection".to_string();
         m.capabilities = workflow_projection_capability_with_inputs(&[]);
-        let Some(workflow) = m.capabilities.workflow.as_mut() else {
-            unreachable!("workflow_projection_capability_with_inputs sets workflow");
-        };
+        let workflow = m
+            .capabilities
+            .workflow
+            .as_mut()
+            .context("workflow_projection_capability_with_inputs sets workflow")?;
         workflow.ordering = None;
         workflow.checkpoint = None;
         workflow.replay = None;
@@ -7005,6 +7038,7 @@ lifecycle = "draft"
             CAP_WORKFLOW_CHECKPOINT,
         );
         assert_r22_detail(&findings, "audit.session-projection", CAP_WORKFLOW_REPLAY);
+        Ok(())
     }
 
     #[test]
@@ -7335,7 +7369,7 @@ lifecycle = "draft"
         id: &str,
         kind: ContractKind,
         lifecycle: Lifecycle,
-    ) -> RepositoryContract {
+    ) -> anyhow::Result<RepositoryContract> {
         let schemas = match kind {
             ContractKind::Command => Schemas {
                 request: Some("request.schema.json".to_string()),
@@ -7355,47 +7389,54 @@ lifecycle = "draft"
         let source_dir = DeviceCertificateCandidateId::ALL
             .into_iter()
             .find(|candidate| candidate.spec().id == id)
-            .expect("R25 target must be a canonical candidate")
+            .with_context(|| format!("R25 target `{id}` must be a canonical candidate"))?
             .spec()
             .source_dir;
         let mut contract = discovered(target, PathBuf::from("/fixture").join(source_dir));
         let mut segments = source_dir
             .strip_prefix("contracts/")
-            .expect("candidate sourceDir is repository-relative")
+            .context("candidate sourceDir must be repository-relative")?
             .split('/');
-        let kind = segments.next().expect("candidate kind");
-        let domain = segments.next().expect("candidate domain");
-        let version = segments.next().expect("candidate version");
+        let kind = segments
+            .next()
+            .context("candidate sourceDir missing kind")?;
+        let domain = segments
+            .next()
+            .context("candidate sourceDir missing domain")?;
+        let version = segments
+            .next()
+            .context("candidate sourceDir missing version")?;
         set_contract_path(&mut contract, kind, domain, version, segments.next());
-        contract
+        Ok(contract)
     }
 
     fn append_device_certificate_targets(
         contracts: &mut Vec<RepositoryContract>,
         lifecycle: Lifecycle,
-    ) {
+    ) -> anyhow::Result<()> {
         contracts.extend([
             device_certificate_target(
                 "identity.apply-device-certificate",
                 ContractKind::Command,
                 lifecycle,
-            ),
+            )?,
             device_certificate_target(
                 "identity.device-command-acked",
                 ContractKind::Event,
                 lifecycle,
-            ),
+            )?,
             device_certificate_target(
                 "identity.device-certificate-reported",
                 ContractKind::Event,
                 lifecycle,
-            ),
+            )?,
             device_certificate_target(
                 "identity.device-ingress-receipted",
                 ContractKind::Event,
                 lifecycle,
-            ),
+            )?,
         ]);
+        Ok(())
     }
 
     fn r25_schema_value(
@@ -7461,7 +7502,7 @@ lifecycle = "draft"
             Ok(vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead)
         );
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
-        append_device_certificate_targets(&mut contracts, Lifecycle::Draft);
+        append_device_certificate_targets(&mut contracts, Lifecycle::Draft)?;
         let findings = rule_device_certificate_http_closure(&contracts);
         std::fs::remove_dir_all(root)?;
         assert!(findings.is_empty(), "{findings:?}");
@@ -7472,7 +7513,7 @@ lifecycle = "draft"
     fn r25_device_certificate_exact_set_rejects_duplicate_and_equal_count_replacement()
     -> anyhow::Result<()> {
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
-        append_device_certificate_targets(&mut contracts, Lifecycle::Draft);
+        append_device_certificate_targets(&mut contracts, Lifecycle::Draft)?;
 
         let mut duplicate = contracts.clone();
         duplicate.push(contracts[2].clone());
@@ -7497,7 +7538,7 @@ lifecycle = "draft"
     #[test]
     fn r25_device_certificate_rejects_extra_operator_route_or_permission() -> anyhow::Result<()> {
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
-        append_device_certificate_targets(&mut contracts, Lifecycle::Draft);
+        append_device_certificate_targets(&mut contracts, Lifecycle::Draft)?;
         let mut mutation = contracts[1].clone();
         mutate_contract(&mut mutation, |manifest| {
             manifest.id = "identity.device-certificate-resync-post".to_string();
@@ -7526,7 +7567,7 @@ lifecycle = "draft"
     #[test]
     fn r25_device_certificate_rejects_noncanonical_source_directory() -> anyhow::Result<()> {
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
-        append_device_certificate_targets(&mut contracts, Lifecycle::Draft);
+        append_device_certificate_targets(&mut contracts, Lifecycle::Draft)?;
         let source = &contracts[2];
         contracts[2] = fixture_builder(
             source.manifest().clone(),
@@ -7817,7 +7858,7 @@ lifecycle = "draft"
                     "ingressReceiptEvent" => {
                         links.ingress_receipt_event = "identity.wrong-receipt".to_string()
                     }
-                    _ => unreachable!("closed R25 link field"),
+                    _ => anyhow::bail!("closed R25 link field `{field}` escaped"),
                 }
                 Ok(())
             })?;
@@ -7926,7 +7967,7 @@ lifecycle = "draft"
             "identity.apply-device-certificate",
             ContractKind::Event,
             Lifecycle::Draft,
-        ));
+        )?);
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
             "identity.apply-device-certificate 必须 kind=command",
@@ -7937,7 +7978,7 @@ lifecycle = "draft"
             "identity.device-command-acked",
             ContractKind::Event,
             Lifecycle::Draft,
-        );
+        )?;
         mutate_contract(&mut wrong_consistency, |manifest| {
             manifest.consistency_level = ConsistencyLevel::LocalOnly;
         });
@@ -7956,7 +7997,7 @@ lifecycle = "draft"
     {
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
         let mut target =
-            device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft);
+            device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft)?;
         let target_subject = contract_label(&target);
         mutate_contract(&mut target, |manifest| {
             manifest.domain = "settings".to_string();
@@ -7968,7 +8009,7 @@ lifecycle = "draft"
 
         contracts.pop();
         let mut target =
-            device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft);
+            device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft)?;
         let target_subject = contract_label(&target);
         mutate_contract(&mut target, |manifest| {
             manifest.test_set_domain_owner("settings");
@@ -8027,7 +8068,7 @@ lifecycle = "draft"
     #[test]
     fn r25_active_device_certificate_exact_set_is_rejected() -> anyhow::Result<()> {
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Active)?;
-        append_device_certificate_targets(&mut contracts, Lifecycle::Active);
+        append_device_certificate_targets(&mut contracts, Lifecycle::Active)?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
             "lifecycle=draft",
@@ -8492,7 +8533,7 @@ lifecycle = "draft"
             slug: &str,
             nested_in_rules: bool,
             lifecycle: Lifecycle,
-        ) -> RepositoryContract {
+        ) -> anyhow::Result<RepositoryContract> {
             let uses_component = operator.get("$ref").and_then(serde_json::Value::as_str)
                 == Some(IDENTITY_ABAC_OPERATOR_COMPONENT);
             let properties = if nested_in_rules {
@@ -8514,10 +8555,8 @@ lifecycle = "draft"
                     "title": "IdentityPolicySyntheticRequest",
                     "type": "object",
                     "properties": properties
-                }))
-                .expect("schema json"),
-            )
-            .expect("write schema");
+                }))?,
+            )?;
             let mut manifest = manifest(
                 ContractKind::Http,
                 ConsistencyLevel::LocalOnly,
@@ -8545,7 +8584,7 @@ lifecycle = "draft"
                     }),
                 );
             }
-            builder.build().expect("synthetic policy contract")
+            builder.build().context("build synthetic policy contract")
         }
 
         let dir = unique_tmp("abac-operator-ssot");
@@ -8556,7 +8595,7 @@ lifecycle = "draft"
             "policies-synthetic",
             true,
             Lifecycle::Active,
-        );
+        )?;
         let inline_findings = rule_identity_abac_operator_ssot(std::slice::from_ref(&inline));
         assert!(
             inline_findings
@@ -8570,7 +8609,7 @@ lifecycle = "draft"
             "policies-synthetic",
             true,
             Lifecycle::Active,
-        );
+        )?;
         assert!(
             rule_identity_abac_operator_ssot(std::slice::from_ref(&referenced)).is_empty(),
             "exact component ref is the only accepted carrier"
@@ -8587,7 +8626,7 @@ lifecycle = "draft"
             "renamed-abac",
             false,
             Lifecycle::Active,
-        );
+        )?;
         assert!(
             rule_identity_abac_operator_ssot(&[renamed]).is_empty(),
             "carrier discovery must not depend on policy slug naming"
@@ -8598,7 +8637,7 @@ lifecycle = "draft"
             "draft-abac",
             false,
             Lifecycle::Draft,
-        );
+        )?;
         assert_eq!(
             rule_identity_abac_operator_ssot(&[draft_only]).len(),
             1,

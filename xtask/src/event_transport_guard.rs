@@ -7581,6 +7581,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unreachable,
+        reason = "the dedicated runtime target constant is a closed static list"
+    )]
     fn workspace_dedicated_runtime_funnel_is_closed() {
         let sources = DEDICATED_RUNTIME_ASSEMBLY_TARGETS
             .iter()
@@ -7808,6 +7812,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unreachable,
+        reason = "the subscribe supervise target constant is a closed static list"
+    )]
     fn workspace_subscribe_supervise_is_closed() {
         let sources = SUBSCRIBE_SUPERVISE_TARGETS
             .iter()
@@ -10381,27 +10389,34 @@ impl<'a> ProvidersBuilt<'a> {{
         }
     }
 
-    fn canonical_amqp_publisher_source() -> String {
-        let root = workspace_root().expect("workspace root");
+    fn canonical_amqp_publisher_source() -> Result<String> {
+        let root = workspace_root()?;
         std::fs::read_to_string(root.join("adapters/amqp/src/publisher.rs"))
-            .expect("canonical adapters/amqp/src/publisher.rs")
+            .context("read canonical adapters/amqp/src/publisher.rs")
+    }
+
+    fn assert_amqp_publish_bypass_rejected(canonical: &str, name: &str, mutated: &str) {
+        assert_ne!(mutated, canonical, "{name}: mutation anchor");
+        assert!(
+            !scan_amqp_publish_bypass(mutated).is_empty(),
+            "synthetic-red `{name}` must break AMQP-PUBLISH-BYPASS-01"
+        );
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn amqp_publish_bypass_accepts_canonical_publisher() {
-        let canonical = canonical_amqp_publisher_source();
+    fn amqp_publish_bypass_accepts_canonical_publisher() -> Result<()> {
+        let canonical = canonical_amqp_publisher_source()?;
         assert!(
             scan_amqp_publish_bypass(&canonical).is_empty(),
             "canonical Publisher::publish must pass AMQP-PUBLISH-BYPASS-01: {:#?}",
             scan_amqp_publish_bypass(&canonical)
         );
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn amqp_publish_bypass_synthetic_red_rejects_direct_bypasses() {
-        let canonical = canonical_amqp_publisher_source();
+    fn amqp_publish_bypass_synthetic_red_rejects_direct_bypasses() -> Result<()> {
+        let canonical = canonical_amqp_publisher_source()?;
         assert!(
             scan_amqp_publish_bypass(&canonical).is_empty(),
             "anti-vacuity baseline must be green before mutation"
@@ -10426,11 +10441,7 @@ impl<'a> ProvidersBuilt<'a> {{
         ];
         for (name, from, to) in direct_error_cases {
             let mutated = canonical.replacen(from, to, 1);
-            assert_ne!(mutated, canonical, "{name}: mutation anchor");
-            assert!(
-                !scan_amqp_publish_bypass(&mutated).is_empty(),
-                "synthetic-red `{name}` must break AMQP-PUBLISH-BYPASS-01"
-            );
+            assert_amqp_publish_bypass_rejected(&canonical, name, &mutated);
         }
 
         let direct_retirement = canonical.replacen(
@@ -10438,13 +10449,10 @@ impl<'a> ProvidersBuilt<'a> {{
             "self.retire_transport(snapshot.generation); if let Err(source) = validate_transport_admission(",
             1,
         );
-        assert_ne!(
-            direct_retirement, canonical,
-            "retire_transport mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&direct_retirement).is_empty(),
-            "direct retire_transport inside Publisher::publish must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "direct retire_transport inside Publisher::publish",
+            &direct_retirement,
         );
 
         let try_bypass = canonical.replacen(
@@ -10452,10 +10460,10 @@ impl<'a> ProvidersBuilt<'a> {{
             "let _unchecked = validate_transport_admission(true, true)?; let snapshot = match self.transport_snapshot() {",
             1,
         );
-        assert_ne!(try_bypass, canonical, "? mutation anchor");
-        assert!(
-            !scan_amqp_publish_bypass(&try_bypass).is_empty(),
-            "outer `?` inside Publisher::publish must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "outer `?` inside Publisher::publish",
+            &try_bypass,
         );
 
         let macro_bypass = canonical.replacen(
@@ -10463,10 +10471,10 @@ impl<'a> ProvidersBuilt<'a> {{
             r#"bypass_macro!(PublisherError::ambiguous("hidden")); if let Err(source) = validate_transport_admission("#,
             1,
         );
-        assert_ne!(macro_bypass, canonical, "macro mutation anchor");
-        assert!(
-            !scan_amqp_publish_bypass(&macro_bypass).is_empty(),
-            "macro-hidden PublisherError construction must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "macro-hidden PublisherError construction",
+            &macro_bypass,
         );
 
         let bare_macro_bypass = canonical.replacen(
@@ -10474,13 +10482,10 @@ impl<'a> ProvidersBuilt<'a> {{
             r#"bypass_macro!(transient("hidden")); if let Err(source) = validate_transport_admission("#,
             1,
         );
-        assert_ne!(
-            bare_macro_bypass, canonical,
-            "bare macro constructor mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&bare_macro_bypass).is_empty(),
-            "bare macro `transient(...)` must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "bare macro `transient(...)`",
+            &bare_macro_bypass,
         );
 
         let bare_import = canonical.replacen(
@@ -10488,13 +10493,10 @@ impl<'a> ProvidersBuilt<'a> {{
             "use PublisherError::transient; return Err(transient(error));",
             1,
         );
-        assert_ne!(
-            bare_import, canonical,
-            "bare PublisherError constructor mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&bare_import).is_empty(),
-            "bare `transient(...)` after use-import must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "bare `transient(...)` after use-import",
+            &bare_import,
         );
 
         let type_alias = canonical.replacen(
@@ -10502,13 +10504,10 @@ impl<'a> ProvidersBuilt<'a> {{
             "type PE = PublisherError; return Err(PE::permanent(error));",
             1,
         );
-        assert_ne!(
-            type_alias, canonical,
-            "type-alias PublisherError constructor mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&type_alias).is_empty(),
-            "`PE::permanent(...)` type-alias constructor must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "`PE::permanent(...)` type-alias constructor",
+            &type_alias,
         );
 
         let async_error = canonical.replacen(
@@ -10516,13 +10515,10 @@ impl<'a> ProvidersBuilt<'a> {{
             "async {\n                return Err(PublisherError::transient(\"async bypass\"));\n                let pending = transport",
             1,
         );
-        assert_ne!(
-            async_error, canonical,
-            "async PublisherError mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&async_error).is_empty(),
-            "direct PublisherError inside publish async block must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "direct PublisherError inside publish async block",
+            &async_error,
         );
 
         let async_retire = canonical.replacen(
@@ -10530,13 +10526,10 @@ impl<'a> ProvidersBuilt<'a> {{
             "async {\n                self.retire_transport(snapshot.generation);\n                let pending = transport",
             1,
         );
-        assert_ne!(
-            async_retire, canonical,
-            "async retire_transport mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&async_retire).is_empty(),
-            "direct retire_transport inside publish async block must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "direct retire_transport inside publish async block",
+            &async_retire,
         );
 
         let closure_error = canonical.replacen(
@@ -10544,13 +10537,10 @@ impl<'a> ProvidersBuilt<'a> {{
             r#"let _bait = || PublisherError::ambiguous("closure"); if let Err(source) = validate_transport_admission("#,
             1,
         );
-        assert_ne!(
-            closure_error, canonical,
-            "closure PublisherError mutation anchor"
-        );
-        assert!(
-            !scan_amqp_publish_bypass(&closure_error).is_empty(),
-            "direct PublisherError inside publish closure must break AMQP-PUBLISH-BYPASS-01"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "direct PublisherError inside publish closure",
+            &closure_error,
         );
 
         let reachable_local = canonical.replacen(
@@ -10562,20 +10552,17 @@ impl<'a> ProvidersBuilt<'a> {{
                     let inject_post_send_close = self.take_post_send_connection_close_fault();"#,
             1,
         );
-        assert_ne!(
-            reachable_local, canonical,
-            "reachable nested local function-item alias mutation anchor"
+        assert_amqp_publish_bypass_rejected(
+            &canonical,
+            "reachable nested local function-item alias PublisherError constructor",
+            &reachable_local,
         );
-        assert!(
-            !scan_amqp_publish_bypass(&reachable_local).is_empty(),
-            "reachable nested local function-item alias PublisherError constructor must break AMQP-PUBLISH-BYPASS-01"
-        );
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn amqp_publish_bypass_does_not_lock_helper_pipeline_shape() {
-        let canonical = canonical_amqp_publisher_source();
+    fn amqp_publish_bypass_does_not_lock_helper_pipeline_shape() -> Result<()> {
+        let canonical = canonical_amqp_publisher_source()?;
 
         let renamed_helper = canonical
             .replace("handle_publish_failure", "apply_publish_decision")
@@ -10664,6 +10651,7 @@ impl<'a> ProvidersBuilt<'a> {{
             "AmqpPublisher sibling method bodies must stay outside AMQP-PUBLISH-BYPASS-01: {:#?}",
             scan_amqp_publish_bypass(&sibling_evil)
         );
+        Ok(())
     }
 
     #[test]

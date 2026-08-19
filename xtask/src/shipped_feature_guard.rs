@@ -510,7 +510,7 @@ mod tests {
     fn server_direct_clap_dependency_is_rejected() -> anyhow::Result<()> {
         let facts = WorkspaceFacts::from_metadata_json(
             Path::new("/workspace"),
-            &metadata_with_direct_clap_on_server(),
+            &metadata_with_direct_clap_on_server()?,
         )?;
         let (_, findings) = findings_for_builds(&facts, &synthetic_shipped_packages())?;
         assert!(
@@ -554,9 +554,8 @@ mod tests {
         metadata_graph("server", None, operator_cli_root)
     }
 
-    fn metadata_with_direct_clap_on_server() -> String {
-        let mut metadata: Value =
-            serde_json::from_str(&metadata_graph("server", None, "rss")).expect("metadata");
+    fn metadata_with_direct_clap_on_server() -> anyhow::Result<String> {
+        let mut metadata: Value = serde_json::from_str(&metadata_graph("server", None, "rss"))?;
         let clap = registry_package(
             "clap",
             "4.5.0",
@@ -569,20 +568,20 @@ mod tests {
                 &[],
             )],
         );
-        let clap_id = clap["id"].as_str().expect("clap id").to_owned();
+        let clap_id = clap["id"].as_str().context("clap id")?.to_owned();
         metadata["packages"]
             .as_array_mut()
-            .expect("packages")
+            .context("metadata packages")?
             .push(clap);
         let server = metadata["packages"]
             .as_array_mut()
-            .expect("packages")
+            .context("metadata packages")?
             .iter_mut()
             .find(|package| package["name"] == "server")
-            .expect("server");
+            .context("server package")?;
         server["dependencies"]
             .as_array_mut()
-            .expect("deps")
+            .context("server dependencies")?
             .push(json!({
                 "name": "clap",
                 "source": "registry+https://github.com/rust-lang/crates.io-index",
@@ -597,21 +596,21 @@ mod tests {
             }));
         let server_resolve = metadata["resolve"]["nodes"]
             .as_array_mut()
-            .expect("nodes")
+            .context("resolve nodes")?
             .iter_mut()
             .find(|node| {
                 node["id"]
                     .as_str()
                     .is_some_and(|id| id.contains("bins/server"))
             })
-            .expect("server resolve");
+            .context("server resolve")?;
         server_resolve["dependencies"]
             .as_array_mut()
-            .expect("deps")
+            .context("server resolved dependencies")?
             .push(json!(clap_id));
         server_resolve["deps"]
             .as_array_mut()
-            .expect("deps")
+            .context("server resolved dependency records")?
             .push(json!({
                 "name": "clap",
                 "pkg": clap_id,
@@ -619,9 +618,9 @@ mod tests {
             }));
         metadata["resolve"]["nodes"]
             .as_array_mut()
-            .expect("nodes")
+            .context("resolve nodes")?
             .push(resolve_node_with_features(&clap_id, &[], &[]));
-        serde_json::to_string(&metadata).expect("serialize")
+        serde_json::to_string(&metadata).map_err(Into::into)
     }
 
     /// `operator_cli_root`: which shipped binary enables `runtime/operator-cli` (`server` / `rss` / `none`).

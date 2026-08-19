@@ -9129,8 +9129,9 @@ classify_ports! {
 "#,
             "pub use signer::DynSigner;\n",
         )?;
-        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
-            .expect_err("obsolete dyn/sync must fail");
+        let Err(err) = collect_diport_capabilities(&root, &mut BTreeMap::new()) else {
+            bail!("obsolete dyn/sync must fail")
+        };
         let message = err.to_string();
         assert!(
             message.contains("obsolete classify_ports lexeme"),
@@ -9156,8 +9157,9 @@ classify_ports! {
 "#,
             "pub use signer::DynSigner;\n",
         )?;
-        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
-            .expect_err("missing Dyn* export must fail");
+        let Err(err) = collect_diport_capabilities(&root, &mut BTreeMap::new()) else {
+            bail!("missing Dyn* export must fail")
+        };
         let message = err.to_string();
         assert!(
             message.contains("identity mismatch") && message.contains("DynPublisher"),
@@ -9176,8 +9178,9 @@ classify_ports! {
 "#,
             "pub use signer::DynSigner;\npub use publisher::DynPublisher;\n",
         )?;
-        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
-            .expect_err("extra Dyn* export must fail");
+        let Err(err) = collect_diport_capabilities(&root, &mut BTreeMap::new()) else {
+            bail!("extra Dyn* export must fail")
+        };
         let message = err.to_string();
         assert!(
             message.contains("identity mismatch") && message.contains("DynPublisher"),
@@ -9202,8 +9205,9 @@ classify_ports! {
 "#,
             "pub use signer::*;\n",
         )?;
-        let err = collect_diport_capabilities(&root, &mut BTreeMap::new())
-            .expect_err("glob Dyn* export must fail-closed");
+        let Err(err) = collect_diport_capabilities(&root, &mut BTreeMap::new()) else {
+            bail!("glob Dyn* export must fail-closed")
+        };
         let message = err.to_string();
         assert!(
             message.contains("glob") && message.contains("fail-closed"),

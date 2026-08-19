@@ -814,6 +814,10 @@ fn load_nonempty_repository(contracts_root: &Path) -> Result<Vec<RepositoryContr
     Ok(repository)
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "the typed source-issue rule mapping closes projector ownership"
+)]
 fn inspect_repository(
     contracts_root: &Path,
     require_nonempty: bool,
@@ -864,6 +868,10 @@ fn source_issue_subject(
     issue.path().display().to_string()
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "unsafe names are owned by the disjoint R6 source projector"
+)]
 fn project_r5_source_issue(
     issue: &assembly_schema::repository_contract::SchemaSourceIssue,
     contracts_root: &Path,
@@ -1182,14 +1190,14 @@ role = "fact"
         let projected = readme
             .split_once(BEGIN)
             .and_then(|(_, rest)| rest.split_once(END).map(|(section, _)| section))
-            .expect("contracts/README.md must contain one governance projection block");
+            .context("contracts/README.md must contain one governance projection block")?;
 
         assert_eq!(projected, render_rule_docs());
         Ok(())
     }
 
     #[test]
-    fn validation_diagnostics_and_ir_bail_share_canonical_rule_identity() {
+    fn validation_diagnostics_and_ir_bail_share_canonical_rule_identity() -> Result<()> {
         let finding = crate::diagnostic::finding(
             ContractRuleId::PathMismatch,
             "contracts/event/identity/v1/changed",
@@ -1207,48 +1215,57 @@ role = "fact"
             repository: Vec::new(),
             findings: vec![finding],
         };
-        let error = ContractGovernanceIr::from_inspection(inspection, false)
-            .expect_err("semantic finding must reject governed IR")
-            .to_string();
+        let Err(error) = ContractGovernanceIr::from_inspection(inspection, false) else {
+            bail!("semantic finding must reject governed IR")
+        };
+        let error = error.to_string();
         assert!(error.contains(&canonical), "{error}");
         assert!(!error.contains("PathMismatch"), "{error}");
+        Ok(())
     }
 
     #[test]
-    fn exact_relation_rejects_duplicate_ids_before_set_collapse() {
-        let error = exact_id_projection("synthetic", &["a", "b"], &["a", "a"])
-            .expect_err("duplicate projection must fail");
+    fn exact_relation_rejects_duplicate_ids_before_set_collapse() -> Result<()> {
+        let Err(error) = exact_id_projection("synthetic", &["a", "b"], &["a", "a"]) else {
+            bail!("duplicate projection must fail")
+        };
         assert!(
             error
                 .to_string()
                 .contains("projected stable IDs contain duplicates")
         );
 
-        let error = exact_id_projection("synthetic", &["a", "a"], &["a"])
-            .expect_err("duplicate canonical IDs must fail");
+        let Err(error) = exact_id_projection("synthetic", &["a", "a"], &["a"]) else {
+            bail!("duplicate canonical IDs must fail")
+        };
         assert!(
             error
                 .to_string()
                 .contains("canonical stable IDs contain duplicates")
         );
+        Ok(())
     }
 
     #[test]
-    fn exact_relation_reports_missing_and_extra_ids() {
-        let error = exact_id_projection("synthetic", &["a", "b", "c"], &["a", "d"])
-            .expect_err("missing and extra IDs must fail");
+    fn exact_relation_reports_missing_and_extra_ids() -> Result<()> {
+        let Err(error) = exact_id_projection("synthetic", &["a", "b", "c"], &["a", "d"]) else {
+            bail!("missing and extra IDs must fail")
+        };
         let message = error.to_string();
         assert!(message.contains("missing=[\"b\", \"c\"]"), "{message}");
         assert!(message.contains("extra=[\"d\"]"), "{message}");
+        Ok(())
     }
 
     #[test]
-    fn exact_relation_rejects_equal_cardinality_wrong_id() {
-        let error = exact_id_projection("synthetic", &["a", "b"], &["a", "c"])
-            .expect_err("equal cardinality does not prove closure");
+    fn exact_relation_rejects_equal_cardinality_wrong_id() -> Result<()> {
+        let Err(error) = exact_id_projection("synthetic", &["a", "b"], &["a", "c"]) else {
+            bail!("equal cardinality does not prove closure")
+        };
         let message = error.to_string();
         assert!(message.contains("missing=[\"b\"]"), "{message}");
         assert!(message.contains("extra=[\"c\"]"), "{message}");
+        Ok(())
     }
 
     #[test]
@@ -1296,8 +1313,9 @@ role = "fact"
             "{:?}",
             inspection.findings()
         );
-        let error = ContractGovernanceIr::load_contracts_root(&contracts_root)
-            .expect_err("semantic findings must block validated IR construction");
+        let Err(error) = ContractGovernanceIr::load_contracts_root(&contracts_root) else {
+            bail!("semantic findings must block validated IR construction")
+        };
         assert!(
             error.to_string().contains("  [R3] http/identity/v1:"),
             "{error}"
@@ -1409,8 +1427,9 @@ role = "fact"
             std::fs::read_to_string(&manifest_path)?.replace("maxAttempts = 2", "maxAttempts = 0");
         std::fs::write(&manifest_path, manifest)?;
 
-        let error = ContractGovernanceIr::load_codegen_fixture_root(&contracts_root)
-            .expect_err("invalid Saga retry semantics must block fixture codegen");
+        let Err(error) = ContractGovernanceIr::load_codegen_fixture_root(&contracts_root) else {
+            bail!("invalid Saga retry semantics must block fixture codegen")
+        };
         assert!(error.to_string().contains("maxAttempts"), "{error}");
 
         std::fs::remove_dir_all(contracts_root)?;
@@ -1448,14 +1467,16 @@ role = "fact"
     fn production_workspace_rejects_missing_and_empty_contract_roots() -> Result<()> {
         let missing = crate::testutil::unique_tmp("contract-governance-missing-root");
         std::fs::create_dir_all(&missing)?;
-        let missing_error = ContractGovernanceIr::load_consumer_workspace(&missing)
-            .expect_err("missing contracts root must fail");
+        let Err(missing_error) = ContractGovernanceIr::load_consumer_workspace(&missing) else {
+            bail!("missing contracts root must fail")
+        };
         assert!(missing_error.to_string().contains("root is missing"));
 
         let empty = crate::testutil::unique_tmp("contract-governance-empty-root");
         std::fs::create_dir_all(empty.join("contracts"))?;
-        let empty_error = ContractGovernanceIr::load_consumer_workspace(&empty)
-            .expect_err("empty contracts root must fail");
+        let Err(empty_error) = ContractGovernanceIr::load_consumer_workspace(&empty) else {
+            bail!("empty contracts root must fail")
+        };
         assert!(empty_error.to_string().contains("contains no contracts"));
 
         let breaking = ContractGovernanceIr::load_breaking_working_root(&empty.join("contracts"))?;
@@ -1472,21 +1493,21 @@ role = "fact"
                 crate::testutil::unique_tmp(&format!("contract-governance-closeout-{mutation}"));
             let (manifest, schema) = write_snapshot_fixture(&contracts_root)?;
             let governance = ContractGovernanceIr::load_test_fixture_root(&contracts_root)?;
-            let error = governance
-                .read(|_| {
-                    match mutation {
-                        "manifest" => std::fs::write(&manifest, "changed")?,
-                        "schema" => std::fs::write(&schema, r#"{"changed":true}"#)?,
-                        "universe" => {
-                            let added = contracts_root.join("event/identity/v2/added");
-                            std::fs::create_dir_all(&added)?;
-                            std::fs::write(added.join("contract.toml"), "added")?;
-                        }
-                        _ => unreachable!(),
+            let Err(error) = governance.read(|_| {
+                match mutation {
+                    "manifest" => std::fs::write(&manifest, "changed")?,
+                    "schema" => std::fs::write(&schema, r#"{"changed":true}"#)?,
+                    "universe" => {
+                        let added = contracts_root.join("event/identity/v2/added");
+                        std::fs::create_dir_all(&added)?;
+                        std::fs::write(added.join("contract.toml"), "added")?;
                     }
-                    Ok(())
-                })
-                .expect_err("source mutation must fail the mandatory closeout");
+                    _ => bail!("unsupported closeout mutation {mutation}"),
+                }
+                Ok(())
+            }) else {
+                bail!("source mutation must fail the mandatory closeout")
+            };
             assert!(
                 format!("{error:#}").contains("changed after snapshot")
                     || format!("{error:#}").contains("universe differs"),

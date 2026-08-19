@@ -1263,7 +1263,7 @@ mod tests {
                             || !failed[0].missing_probes.is_empty()
                     );
                 }
-                _ => unreachable!(),
+                _ => bail!("closed localtx report fixture `{name}` escaped"),
             }
         }
         Ok(())

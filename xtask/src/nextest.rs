@@ -1580,6 +1580,10 @@ fn prepare_canonical_junit(canonical: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "the exhaustive u32 search has no recoverable suffix after numeric exhaustion"
+)]
 fn unique_invocation_id(dir: &Path, base: &str) -> String {
     for suffix in 1_u32.. {
         let candidate = if suffix == 1 {
@@ -3014,8 +3018,9 @@ mod tests {
         let mut missing_packages = expected_packages.clone();
         missing_packages.remove("grpc");
         let missing = deterministic_feature_fixture_facts(&missing_packages, &[])?;
-        let missing_err = validate_deterministic_features(&missing)
-            .expect_err("missing catalog package-feature must fail closed");
+        let Err(missing_err) = validate_deterministic_features(&missing) else {
+            bail!("missing catalog package-feature must fail closed")
+        };
         let missing_msg = format!("{missing_err:#}");
         assert!(
             missing_msg.contains("missing=") && missing_msg.contains("grpc/backend"),
@@ -3027,8 +3032,9 @@ mod tests {
         );
 
         let extra = deterministic_feature_fixture_facts(&expected_packages, &["demo"])?;
-        let extra_err = validate_deterministic_features(&extra)
-            .expect_err("extra backend feature outside the typed catalog must fail closed");
+        let Err(extra_err) = validate_deterministic_features(&extra) else {
+            bail!("extra backend feature outside the typed catalog must fail closed")
+        };
         let extra_msg = format!("{extra_err:#}");
         assert!(
             extra_msg.contains("extra=") && extra_msg.contains("demo/backend"),
@@ -3278,7 +3284,7 @@ mod tests {
 
         let mut contradiction: Evidence = serde_json::from_str(golden)?;
         let ReplaySpec::Integration { selection, .. } = &mut contradiction.replay else {
-            unreachable!("committed integration golden must carry integration replay")
+            bail!("committed integration golden must carry integration replay")
         };
         *selection = "integration-critical:amqp-integration".parse()?;
         assert!(

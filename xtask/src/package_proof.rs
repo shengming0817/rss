@@ -357,7 +357,9 @@ impl PackageProofPlan {
             let kind = match dependency.kind() {
                 DependencyKind::Normal => "normal",
                 DependencyKind::Build => "build",
-                DependencyKind::Dev => unreachable!(),
+                DependencyKind::Dev => bail!(
+                    "release package proof admitted a dev dependency into the production closure"
+                ),
             };
             dependencies.push(json!({
                 "name": dependency.name(),
@@ -1448,16 +1450,16 @@ mod tests {
     }
 
     #[test]
-    fn receipt_mismatch_reports_stable_field_sets_without_echoing_values() {
+    fn receipt_mismatch_reports_stable_field_sets_without_echoing_values() -> Result<()> {
         let mut receipt = platform_receipt();
-        let object = receipt.as_object_mut().expect("receipt object");
+        let object = receipt.as_object_mut().context("platform receipt object")?;
         object.remove("contract");
         object.insert("unexpected".to_owned(), json!("secret-value"));
         object.insert("asyncHandlerImplemented".to_owned(), json!(false));
-        let error = ProofBehavior::Platform
-            .validate_receipt(&receipt)
-            .expect_err("receipt must differ")
-            .to_string();
+        let Err(error) = ProofBehavior::Platform.validate_receipt(&receipt) else {
+            bail!("receipt must differ")
+        };
+        let error = error.to_string();
         assert!(error.contains("behavior=platform"), "{error}");
         assert!(error.contains("missing=[\"contract\"]"), "{error}");
         assert!(error.contains("unexpected=[\"unexpected\"]"), "{error}");
@@ -1466,6 +1468,7 @@ mod tests {
             "{error}"
         );
         assert!(!error.contains("secret"), "{error}");
+        Ok(())
     }
 
     #[test]
@@ -1531,8 +1534,8 @@ mod tests {
     }
 
     #[test]
-    fn every_release_surface_archive_has_a_non_vacuous_doctest_source() {
-        let root = crate::workspace_root().expect("workspace root");
+    fn every_release_surface_archive_has_a_non_vacuous_doctest_source() -> Result<()> {
+        let root = crate::workspace_root()?;
         for (package, path) in [
             ("rss-contract", "crates/contract"),
             ("rss-request-context", "crates/request-context"),
@@ -1540,13 +1543,22 @@ mod tests {
             ("rss-diag-context", "crates/diagctx"),
             ("rss-trace-context", "crates/tracewire"),
         ] {
-            let library = fs::read_to_string(root.join(path).join("src/lib.rs")).unwrap();
-            let readme = fs::read_to_string(root.join(path).join("README.md")).unwrap();
+            let library_path = root.join(path).join("src/lib.rs");
+            let library = fs::read_to_string(&library_path).with_context(|| {
+                format!(
+                    "read {package} library source from {}",
+                    library_path.display()
+                )
+            })?;
+            let readme_path = root.join(path).join("README.md");
+            let readme = fs::read_to_string(&readme_path)
+                .with_context(|| format!("read {package} README from {}", readme_path.display()))?;
             assert!(
                 validate_doctest_source(package, &library, &readme).is_ok(),
                 "{package}"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -1625,28 +1637,29 @@ mod tests {
     }
 
     #[test]
-    fn proof_behavior_is_closed_and_unknown_release_packages_fail() {
+    fn proof_behavior_is_closed_and_unknown_release_packages_fail() -> Result<()> {
         assert_eq!(
-            ProofBehavior::for_package("rss-conformance").expect("conformance behavior"),
+            ProofBehavior::for_package("rss-conformance")?,
             ProofBehavior::Conformance
         );
         assert_eq!(
-            ProofBehavior::for_package("rss-platform").expect("platform behavior"),
+            ProofBehavior::for_package("rss-platform")?,
             ProofBehavior::Platform
         );
         assert_eq!(
-            ProofBehavior::for_package("rss-diag-context").expect("diag behavior"),
+            ProofBehavior::for_package("rss-diag-context")?,
             ProofBehavior::DiagContext
         );
         assert_eq!(
-            ProofBehavior::for_package("rss-trace-context").expect("trace behavior"),
+            ProofBehavior::for_package("rss-trace-context")?,
             ProofBehavior::TraceContext
         );
         assert!(ProofBehavior::for_package("future-release").is_err());
+        Ok(())
     }
 
     #[test]
-    fn conformance_receipt_requires_all_five_behaviors_and_sanitization() {
+    fn conformance_receipt_requires_all_five_behaviors_and_sanitization() -> Result<()> {
         let green = conformance_receipt();
         assert!(ProofBehavior::Conformance.validate_receipt(&green).is_ok());
         for field in [
@@ -1658,9 +1671,13 @@ mod tests {
             "sanitizedErrors",
         ] {
             let mut red = green.clone();
-            red.as_object_mut().expect("receipt object").remove(field);
+            let Some(object) = red.as_object_mut() else {
+                bail!("conformance receipt fixture must be an object")
+            };
+            object.remove(field);
             assert!(ProofBehavior::Conformance.validate_receipt(&red).is_err());
         }
+        Ok(())
     }
 
     #[test]
@@ -1686,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_bundle_manifest_is_sorted_and_rejects_duplicates() {
+    fn candidate_bundle_manifest_is_sorted_and_rejects_duplicates() -> Result<()> {
         let manifest = candidate_bundle_manifest(
             "0123456789abcdef0123456789abcdef01234567",
             vec![
@@ -1701,8 +1718,7 @@ mod tests {
                     checksum: "aa".repeat(32),
                 },
             ],
-        )
-        .expect("valid candidate bundle manifest");
+        )?;
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.packages[0].name, "rss-diag-context");
         assert_eq!(manifest.packages[1].name, "rss-trace-context");
@@ -1715,11 +1731,12 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn candidate_bundle_export_is_atomic_and_portable() {
-        let temp = TempProof::new().expect("temporary bundle fixture");
+    fn candidate_bundle_export_is_atomic_and_portable() -> Result<()> {
+        let temp = TempProof::new()?;
         let registry = temp.root.join("registry");
         let index = registry.join("index");
         let crates = registry.join("crates");
@@ -1729,31 +1746,27 @@ mod tests {
             checksum: format!("{:x}", Sha256::digest(b"crate archive")),
         };
         let index_entry = index.join(index_relative_path(&package.name));
-        fs::create_dir_all(index_entry.parent().expect("index parent"))
-            .expect("create index parent");
-        fs::write(&index_entry, "index-record\n").expect("write index record");
-        fs::write(index.join("config.json"), r#"{"dl":"file:///host-only"}"#)
-            .expect("write non-portable config");
-        fs::create_dir_all(index.join(".git")).expect("create git metadata");
-        fs::write(index.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write git metadata");
+        fs::create_dir_all(index_entry.parent().context("index parent")?)?;
+        fs::write(&index_entry, "index-record\n")?;
+        fs::write(index.join("config.json"), r#"{"dl":"file:///host-only"}"#)?;
+        fs::create_dir_all(index.join(".git"))?;
+        fs::write(index.join(".git/HEAD"), "ref: refs/heads/main\n")?;
         let archive = crates
             .join(&package.name)
             .join(&package.version)
             .join("download");
-        fs::create_dir_all(archive.parent().expect("archive parent"))
-            .expect("create archive parent");
-        fs::write(&archive, b"crate archive").expect("write archive");
+        fs::create_dir_all(archive.parent().context("archive parent")?)?;
+        fs::write(&archive, b"crate archive")?;
 
         let output = temp.root.join("candidate-bundle");
         let materialized_registry = temp.root.join("materialized-registry");
         export_candidate_bundle(
             &output,
             "0123456789abcdef0123456789abcdef01234567",
-            &[package.clone()],
+            std::slice::from_ref(&package),
             &registry,
             |bundle| materialize_candidate_bundle_registry(bundle, &materialized_registry),
-        )
-        .expect("export bundle");
+        )?;
 
         assert!(output.join("candidate-bundle.json").is_file());
         assert!(
@@ -1772,32 +1785,26 @@ mod tests {
         assert!(materialized_registry.join("index/config.json").is_file());
         assert!(materialized_registry.join("index/.git/HEAD").is_file());
         let materialized_config =
-            fs::read_to_string(materialized_registry.join("index/config.json"))
-                .expect("read relocated registry config");
-        assert!(materialized_config.contains(
-            &file_url(&materialized_registry.join("crates")).expect("materialized crates URL")
-        ));
+            fs::read_to_string(materialized_registry.join("index/config.json"))?;
+        assert!(materialized_config.contains(&file_url(&materialized_registry.join("crates"))?));
         assert!(!materialized_config.contains("host-only"));
 
         let proof_failure = temp.root.join("proof-failure-bundle");
-        assert!(
+        assert_bundle_export_failed(
             export_candidate_bundle(
                 &proof_failure,
                 "0123456789abcdef0123456789abcdef01234567",
-                &[package.clone()],
+                std::slice::from_ref(&package),
                 &registry,
                 |_| bail!("synthetic portable consumer failure"),
-            )
-            .is_err()
-        );
-        assert!(
-            !proof_failure.exists(),
-            "portable consumer failure must not publish a bundle"
-        );
-        assert_no_bundle_staging(&temp.root);
+            ),
+            &proof_failure,
+            &temp.root,
+            "portable consumer failure must not publish a bundle",
+        )?;
 
         let checksum_mismatch = temp.root.join("checksum-mismatch-bundle");
-        assert!(
+        assert_bundle_export_failed(
             export_candidate_bundle(
                 &checksum_mismatch,
                 "0123456789abcdef0123456789abcdef01234567",
@@ -1808,34 +1815,31 @@ mod tests {
                 }],
                 &registry,
                 |_| Ok(()),
-            )
-            .is_err()
-        );
-        assert!(
-            !checksum_mismatch.exists(),
-            "checksum mismatch must not publish a bundle"
-        );
-        assert_no_bundle_staging(&temp.root);
+            ),
+            &checksum_mismatch,
+            &temp.root,
+            "checksum mismatch must not publish a bundle",
+        )?;
 
         let extra = temp.root.join("extra-bundle");
-        fs::write(index.join("unexpected-record"), "unexpected\n").expect("write extra record");
-        assert!(
+        fs::write(index.join("unexpected-record"), "unexpected\n")?;
+        assert_bundle_export_failed(
             export_candidate_bundle(
                 &extra,
                 "0123456789abcdef0123456789abcdef01234567",
-                &[package.clone()],
+                std::slice::from_ref(&package),
                 &registry,
                 |_| Ok(()),
-            )
-            .is_err()
-        );
-        assert!(!extra.exists(), "extra registry artifacts must fail closed");
-        assert_no_bundle_staging(&temp.root);
-        fs::remove_file(index.join("unexpected-record")).expect("remove extra record");
+            ),
+            &extra,
+            &temp.root,
+            "extra registry artifacts must fail closed",
+        )?;
+        fs::remove_file(index.join("unexpected-record"))?;
 
         let missing = temp.root.join("missing-bundle");
-        fs::remove_file(index_entry).expect("remove required index entry");
-        assert!(
+        fs::remove_file(index_entry)?;
+        assert_bundle_export_failed(
             export_candidate_bundle(
                 &missing,
                 "0123456789abcdef0123456789abcdef01234567",
@@ -1846,16 +1850,27 @@ mod tests {
                 }],
                 &registry,
                 |_| Ok(()),
-            )
-            .is_err()
-        );
-        assert!(!missing.exists(), "failed exports must not publish output");
-        assert_no_bundle_staging(&temp.root);
+            ),
+            &missing,
+            &temp.root,
+            "failed exports must not publish output",
+        )?;
+        Ok(())
     }
 
-    fn assert_no_bundle_staging(root: &Path) {
-        let staging = fs::read_dir(root)
-            .expect("read fixture root")
+    fn assert_bundle_export_failed(
+        result: Result<()>,
+        output: &Path,
+        fixture_root: &Path,
+        reason: &str,
+    ) -> Result<()> {
+        assert!(result.is_err(), "{reason}");
+        assert!(!output.exists(), "{reason}");
+        assert_no_bundle_staging(fixture_root)
+    }
+
+    fn assert_no_bundle_staging(root: &Path) -> Result<()> {
+        let staging = fs::read_dir(root)?
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
                 entry
@@ -1865,6 +1880,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(staging.is_empty(), "failed export left staging behind");
+        Ok(())
     }
 
     #[test]

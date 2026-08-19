@@ -691,8 +691,6 @@ fn atomic_replace_fallback(path: &Path, content: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
-
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -838,8 +836,16 @@ mod tests {
         fs::write(outside.join("stale.txt"), b"outside\n")?;
 
         remove_regular_file_unix_with_hook(&owner.join("stale.txt"), || {
-            fs::rename(&owner, &moved_owner).expect("move opened owner");
-            symlink(&outside, &owner).expect("replace owner with symlink");
+            let rename = fs::rename(&owner, &moved_owner);
+            assert!(
+                rename.is_ok(),
+                "opened owner must move before replacement: {rename:?}"
+            );
+            let replace = symlink(&outside, &owner);
+            assert!(
+                replace.is_ok(),
+                "owner must be replaced with a symlink: {replace:?}"
+            );
         })?;
         assert!(!moved_owner.join("stale.txt").exists());
         assert_eq!(fs::read(outside.join("stale.txt"))?, b"outside\n");
@@ -870,16 +876,18 @@ mod tests {
 
         let output = fixture.root.join("generated.json");
         atomic_replace_unix_with_hook(&output, b"new\n", |temporary| {
-            assert_eq!(
-                temporary
-                    .metadata()
-                    .expect("temporary metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600,
-                "named temporary inode must remain private before publication"
+            let metadata = temporary.metadata();
+            assert!(
+                metadata.is_ok(),
+                "temporary metadata must remain readable: {metadata:?}"
             );
+            if let Ok(metadata) = metadata {
+                assert_eq!(
+                    metadata.permissions().mode() & 0o777,
+                    0o600,
+                    "named temporary inode must remain private before publication"
+                );
+            }
         })?;
         assert_eq!(
             fs::metadata(&output)?.permissions().mode() & 0o777,

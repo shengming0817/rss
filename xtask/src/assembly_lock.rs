@@ -453,8 +453,6 @@ impl fmt::Display for DisplayPaths<'_> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
-
     use super::*;
     use anyhow::Context;
     use assembly_schema::{AssemblyManifest, AssemblyTopology, ParsedAssemblyLock};
@@ -654,8 +652,9 @@ mod tests {
                 other => anyhow::bail!("unknown fixture case: {other}"),
             }
             let before = fs::read(&path).ok();
-            let error = run_fixture_root!(&fixture.root, AssemblyLockAction::Check)
-                .expect_err("drift must fail");
+            let Err(error) = run_fixture_root!(&fixture.root, AssemblyLockAction::Check) else {
+                anyhow::bail!("{case} lock drift unexpectedly passed validation")
+            };
             let CommandError::Drift(paths) = &error else {
                 anyhow::bail!("expected drift error, got {error}");
             };
@@ -677,8 +676,9 @@ mod tests {
             let fixture = Fixture::new(name)?;
             generate_fixture(&fixture.root)?;
             invalidate(&fixture.root)?;
-            let error = run_fixture_root!(&fixture.root, AssemblyLockAction::Check)
-                .expect_err("invalid preflight input must fail");
+            let Err(error) = run_fixture_root!(&fixture.root, AssemblyLockAction::Check) else {
+                anyhow::bail!("{name} invalid preflight input unexpectedly passed validation")
+            };
             assert_safe_diagnostic(&format!("{error:?} {error}"));
         }
         Ok(())

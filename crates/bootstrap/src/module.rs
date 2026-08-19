@@ -650,7 +650,7 @@ mod result_tests {
     }
 
     #[test]
-    fn worker_inventory_is_order_independent_and_lane_exact() {
+    fn worker_inventory_is_order_independent_and_lane_exact() -> Result<(), WorkerInventoryError> {
         let (_, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
         let first = WorkerSpec::observational_phase_one("crates.bootstrap.src.module.02", |_| {
             DynManagedResource::new_box(NoopResource)
@@ -668,12 +668,9 @@ mod result_tests {
                 "crates.bootstrap.src.module.03",
                 WorkerAdmissionLane::Relay,
             ),
-        ])
-        .expect("valid expected inventory");
-        let forward =
-            validate_worker_inventory_exact([&first, &second], &expected).expect("valid inventory");
-        let reverse =
-            validate_worker_inventory_exact([&second, &first], &expected).expect("valid inventory");
+        ])?;
+        let forward = validate_worker_inventory_exact([&first, &second], &expected)?;
+        let reverse = validate_worker_inventory_exact([&second, &first], &expected)?;
         assert_eq!(forward.digest, reverse.digest);
         assert_eq!(
             forward
@@ -686,30 +683,30 @@ mod result_tests {
                 WorkerAdmissionLane::Relay
             ]
         );
+        Ok(())
     }
 
     #[test]
-    fn worker_inventory_rejects_duplicate_identity() {
+    fn worker_inventory_rejects_duplicate_identity() -> Result<(), WorkerInventoryError> {
         let first = WorkerSpec::observational_phase_one("duplicate", |_| {
             DynManagedResource::new_box(NoopResource)
         });
         let second = WorkerSpec::observational_deferred("duplicate", |_| {
             DynManagedResource::new_box(NoopResource)
         });
+        let expected = ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
+            "duplicate",
+            WorkerAdmissionLane::Observational,
+        )])?;
         assert!(matches!(
-            validate_worker_inventory_exact(
-                [&first, &second],
-                &ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
-                    "duplicate",
-                    WorkerAdmissionLane::Observational,
-                )]).expect("valid expected inventory"),
-            ),
+            validate_worker_inventory_exact([&first, &second], &expected),
             Err(WorkerInventoryError::DuplicateIdentity(identity)) if identity == "duplicate"
         ));
+        Ok(())
     }
 
     #[test]
-    fn worker_inventory_rejects_missing_extra_and_wrong_lane() {
+    fn worker_inventory_rejects_missing_extra_and_wrong_lane() -> Result<(), WorkerInventoryError> {
         let (_, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
         let actual = WorkerSpec::relay_deferred("actual", &relay, |_, _| {
             DynManagedResource::new_box(NoopResource)
@@ -717,8 +714,7 @@ mod result_tests {
         let expected = ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
             "expected",
             WorkerAdmissionLane::Relay,
-        )])
-        .expect("valid expected inventory");
+        )])?;
         assert!(matches!(
             validate_worker_inventory_exact([&actual], &expected),
             Err(WorkerInventoryError::Unexpected(_))
@@ -727,8 +723,7 @@ mod result_tests {
         let missing = ExpectedWorkerInventory::closed([
             WorkerDescriptor::expected("actual", WorkerAdmissionLane::Relay),
             WorkerDescriptor::expected("missing", WorkerAdmissionLane::Writes),
-        ])
-        .expect("valid expected inventory");
+        ])?;
         assert!(matches!(
             validate_worker_inventory_exact([&actual], &missing),
             Err(WorkerInventoryError::Missing(_))
@@ -737,12 +732,12 @@ mod result_tests {
         let wrong_lane = ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
             "actual",
             WorkerAdmissionLane::Consumer,
-        )])
-        .expect("valid expected inventory");
+        )])?;
         assert!(matches!(
             validate_worker_inventory_exact([&actual], &wrong_lane),
             Err(WorkerInventoryError::WrongLane { .. })
         ));
+        Ok(())
     }
 
     struct DeclaringDomain(&'static str);

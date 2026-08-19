@@ -2474,9 +2474,15 @@ mod tests {
         let metadata = fs::symlink_metadata(&dir)?;
         let identity = directory_identity(&dir, &metadata)?;
         let result = scan_baseline_files_with_hook(&dir, Some(identity), || {
-            fs::rename(&dir, &moved).expect("move original baseline dir");
-            fs::create_dir(&dir).expect("create replacement baseline dir");
-            fs::write(dir.join("vocab.txt"), b"same").expect("write same-content replacement");
+            let rename = fs::rename(&dir, &moved);
+            assert!(rename.is_ok(), "move original baseline dir: {rename:?}");
+            let create = fs::create_dir(&dir);
+            assert!(
+                create.is_ok(),
+                "create replacement baseline dir: {create:?}"
+            );
+            let write = fs::write(dir.join("vocab.txt"), b"same");
+            assert!(write.is_ok(), "write same-content replacement: {write:?}");
         });
         assert!(result.is_err());
         fs::remove_dir_all(root)?;
@@ -3756,14 +3762,18 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
         rustdoc.paths.remove(&rustdoc_types::Id(10));
 
-        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
-            .expect_err("missing blanket trait owner must fail closed");
+        let Err(error) = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
+        else {
+            bail!("missing blanket trait owner must fail closed")
+        };
         assert!(format!("{error:#}").contains("缺 path owner identity"));
 
         let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
         rustdoc.external_crates.remove(&1);
-        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
-            .expect_err("unknown external blanket owner must fail closed");
+        let Err(error) = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
+        else {
+            bail!("unknown external blanket owner must fail closed")
+        };
         assert!(format!("{error:#}").contains("external owner 1 未声明"));
 
         let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
@@ -3772,8 +3782,10 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             .get_mut(&rustdoc_types::Id(10))
             .context("fixture missing external trait path")?
             .kind = rustdoc_types::ItemKind::Struct;
-        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
-            .expect_err("non-trait blanket path must fail closed");
+        let Err(error) = project_release_api_item(&rustdoc, ApiProfile::Default, external_blanket)
+        else {
+            bail!("non-trait blanket path must fail closed")
+        };
         assert!(format!("{error:#}").contains("path kind 不是 trait"));
 
         let external_child = api
@@ -3782,8 +3794,10 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             .context("fixture missing external blanket child")?;
         let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
         rustdoc.index.remove(&rustdoc_types::Id(2));
-        let error = project_release_api_item(&rustdoc, ApiProfile::Default, external_child)
-            .expect_err("missing blanket parent must fail closed");
+        let Err(error) = project_release_api_item(&rustdoc, ApiProfile::Default, external_child)
+        else {
+            bail!("missing blanket parent must fail closed")
+        };
         assert!(format!("{error:#}").contains("parent 2 缺 index entry"));
 
         let owned_blanket = api
@@ -3795,8 +3809,10 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             .context("fixture missing crate-owned blanket impl")?;
         let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
         rustdoc.index.remove(&rustdoc_types::Id(4));
-        let error = project_release_api_item(&rustdoc, ApiProfile::Default, owned_blanket)
-            .expect_err("missing local blanket trait must fail closed");
+        let Err(error) = project_release_api_item(&rustdoc, ApiProfile::Default, owned_blanket)
+        else {
+            bail!("missing local blanket trait must fail closed")
+        };
         assert!(format!("{error:#}").contains("local blanket impl trait 4 缺 index entry"));
 
         let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
@@ -3805,8 +3821,10 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             .get_mut(&rustdoc_types::Id(4))
             .context("fixture missing owned trait path")?
             .crate_id = 1;
-        let error = project_release_api_item(&rustdoc, ApiProfile::Default, owned_blanket)
-            .expect_err("conflicting blanket trait owners must fail closed");
+        let Err(error) = project_release_api_item(&rustdoc, ApiProfile::Default, owned_blanket)
+        else {
+            bail!("conflicting blanket trait owners must fail closed")
+        };
         assert!(format!("{error:#}").contains("owner identity 不一致"));
         Ok(())
     }

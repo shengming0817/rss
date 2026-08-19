@@ -1906,7 +1906,7 @@ fn ensure_regular_path(root: &Path, relative: &str) -> Result<()> {
     let mut current = root.to_path_buf();
     for component in path.components() {
         let Component::Normal(segment) = component else {
-            unreachable!();
+            bail!("validated artifact path retained a non-normal component");
         };
         current.push(segment);
         let metadata = std::fs::symlink_metadata(&current)
@@ -2102,15 +2102,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_grammar_keeps_redirected_process_substitution_loop_in_current_scope() {
+    fn shell_grammar_keeps_redirected_process_substitution_loop_in_current_scope() -> Result<()> {
         let source =
             "scan() {\nwhile IFS= read -r domain; do\nseen=1\ndone < <(python3 domains.py)\n}\n";
-        let commands = shell_semantic_lines(source).expect("closed redirected loop grammar");
+        let commands = shell_semantic_lines(source).context("closed redirected loop grammar")?;
         assert!(commands.iter().any(|command| {
             command.function == Some("scan")
                 && command.scopes == [ShellScope::Loop]
                 && command.text == "seen=1"
         }));
+        Ok(())
     }
 
     fn compose_service_block<'a>(compose: &'a str, service: &str) -> Option<&'a str> {
@@ -2207,7 +2208,7 @@ mod tests {
                 "configSchema" => row.config_schema = None,
                 "healthInventory" => row.health_inventory = None,
                 "journey" => row.journey = None,
-                _ => unreachable!(),
+                _ => bail!("closed lifecycle fixture field `{field}` escaped validation"),
             }
             let mut errors = Vec::new();
             validate_lifecycle_shape(&row, &mut errors);
@@ -3083,7 +3084,7 @@ services:
             "runtimeexec",
             "crates/support/Cargo.toml"
         )?);
-        assert!(has_exact_normal_dependency(
+        assert!(!has_exact_normal_dependency(
             facts,
             "server",
             "runtimeexec",

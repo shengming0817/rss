@@ -2135,7 +2135,7 @@ domains = [{domains}]
         root.join("assemblies/runtime/src/generated/modules_gen.rs")
     }
 
-    fn assert_runtime_uses_typed_domain_inputs(rendered: &str, domains: &[&str]) {
+    fn assert_runtime_uses_typed_domain_inputs(rendered: &str, domains: &[&str]) -> Result<()> {
         assert!(rendered.contains("inputs: PreparedLocalDomainInputs"));
         assert!(rendered.contains("pub(crate) struct PreparedLocalDomainInputs"));
         assert!(rendered.contains("pub(crate) enum LocalDomainModuleInput"));
@@ -2143,10 +2143,13 @@ domains = [{domains}]
         assert!(rendered.contains("for input in inputs.into_inputs()"));
         for domain in domains {
             let variant = match *domain {
-                "settings" => "Settings",
-                "identity" => "Identity",
-                "audit" => "Audit",
-                other => panic!("unsupported runtime fixture domain {other}"),
+                "settings" => Some("Settings"),
+                "identity" => Some("Identity"),
+                "audit" => Some("Audit"),
+                _ => None,
+            };
+            let Some(variant) = variant else {
+                bail!("unsupported runtime fixture domain {domain}")
             };
             assert!(rendered.contains(&format!("LocalDomainModuleInput::{variant}(input)")));
             let call = if *domain == "audit" {
@@ -2156,6 +2159,7 @@ domains = [{domains}]
             };
             assert!(rendered.contains(&call));
         }
+        Ok(())
     }
 
     fn assert_non_runtime_preserves_shared_deps_signature(rendered: &str, domains: &[&str]) {
@@ -2421,7 +2425,7 @@ domains = [{domains}]
         assert!(runtime.contains("domains::identity"));
         assert!(runtime.contains("domains::audit"));
         assert!(!runtime.contains("domains::settings"));
-        assert_runtime_uses_typed_domain_inputs(&runtime, &["identity", "audit"]);
+        assert_runtime_uses_typed_domain_inputs(&runtime, &["identity", "audit"])?;
         assert!(settings.contains("domains::settings"));
         assert!(!settings.contains("domains::identity"));
         assert!(!settings.contains("domains::audit"));
@@ -2694,6 +2698,158 @@ mod provider_catalog;
         root.join("assemblies/runtime/src/generated/providers_gen.rs")
     }
 
+    fn assert_provider_catalog_excludes_banned_tokens(rendered: &str) {
+        for banned in [
+            "std::env",
+            "Secret",
+            "Config",
+            "Any",
+            "TypeId",
+            "HashMap",
+            "BTreeMap",
+            "callback",
+            "service_locator",
+        ] {
+            assert!(
+                !rendered.contains(banned),
+                "generated provider catalog contains banned token `{banned}`"
+            );
+        }
+    }
+
+    fn assert_settingsonly_role_batch_surface(rendered: &str) {
+        for required in [
+            "pub(crate) struct ProviderRoleBatches",
+            "pub(crate) struct ListenerPdpConstructor",
+            "pub(crate) struct ListenerPdpBatch",
+            "pub(crate) struct ListenerPdpReceipt",
+            "pub(crate) struct DlxHotKeyProviderConstructor",
+            "pub(crate) struct DlxHotKeyProviderBatch",
+            "pub(crate) struct DlxHotKeyProviderReceipt",
+            "pub(crate) fn exact_join(",
+            "pub(crate) fn finish(",
+        ] {
+            assert!(
+                rendered.contains(required),
+                "settingsonly generated provider output omitted `{required}`"
+            );
+        }
+    }
+
+    fn assert_exact_residual_guards(
+        rendered: &str,
+        compact_rendered: &str,
+        manifest: &CanonicalAssemblyManifestV2,
+    ) -> Result<()> {
+        for (channel, counter, staged_index) in [
+            ("probes", "probe_count", 0),
+            ("resources", "resource_count", 1),
+            ("workers", "worker_count", 2),
+        ] {
+            let exact = format!("inventory.{counter}()==staged[{staged_index}]");
+            assert!(
+                compact_rendered.contains(&exact),
+                "anti-vacuity: generated finish omitted exact {channel} residual guard"
+            );
+            let marker = format!("inventory.{counter}()");
+            let start = rendered
+                .find(&marker)
+                .context("missing residual channel marker")?;
+            let operator = rendered[start..]
+                .find("==")
+                .map(|offset| start + offset)
+                .context("missing exact residual operator")?;
+            let mut weakened = rendered.to_owned();
+            weakened.replace_range(operator..operator + 2, ">=");
+            assert!(
+                validate_provider_catalog_for_manifest(&weakened, manifest).is_err(),
+                "synthetic red: weakened {channel} residual guard was accepted"
+            );
+        }
+        Ok(())
+    }
+
+    fn settingsonly_finish_shape_evidence(
+        rendered: &str,
+        compact_rendered: &str,
+    ) -> Result<(ProviderFinishShape, ProviderFinishShape, &'static str)> {
+        let listener_shape = provider_finish_shape(ProviderRole::ListenerPdp);
+        let rate_limiter_shape = provider_finish_shape(ProviderRole::ListenerRateLimiter);
+        let default_shape = provider_finish_shape(ProviderRole::SettingsKeyProvider);
+        assert_eq!(listener_shape, LISTENER_PDP_FINISH_SHAPE);
+        assert_eq!(rate_limiter_shape, LISTENER_RATE_LIMITER_FINISH_SHAPE);
+        assert_eq!(default_shape, DEFAULT_PROVIDER_FINISH_SHAPE);
+        let listener_materializer = listener_shape
+            .materializer
+            .context("ListenerPdp finish shape must declare into_output")?;
+        assert!(compact_rendered.contains(&format!("output:{}", listener_shape.input_type)));
+        assert!(
+            compact_rendered.contains(&format!("letoutput=output.{listener_materializer}();")),
+            "listener-pdp constructor must consume the sealed JWKS lifecycle receipt via closed shape"
+        );
+        assert!(compact_rendered.contains("output:redis::RedisRateLimiterCapability"));
+        assert!(compact_rendered.contains("letvalue=output.into_limiter();"));
+        assert!(rendered.contains("ProviderRole::ListenerPdp"));
+        Ok((listener_shape, default_shape, listener_materializer))
+    }
+
+    fn assert_settingsonly_shape_rejections(
+        rendered: &str,
+        manifest: &CanonicalAssemblyManifestV2,
+        listener_shape: ProviderFinishShape,
+        default_shape: ProviderFinishShape,
+        listener_materializer: &str,
+    ) -> Result<()> {
+        let mut ordinary_role_with_listener_shape = rendered.to_owned();
+        let start = ordinary_role_with_listener_shape
+            .find("impl DlxHotKeyProviderConstructor")
+            .context("missing DLX hot constructor impl")?;
+        let relative = ordinary_role_with_listener_shape[start..]
+            .find("output: bootstrap::DomainModuleResult")
+            .context("missing DLX hot output type")?;
+        let output_start = start + relative;
+        ordinary_role_with_listener_shape.replace_range(
+            output_start..output_start + "output: bootstrap::DomainModuleResult".len(),
+            "output: ListenerPdpJwksLifecycle",
+        );
+        assert!(
+            validate_provider_catalog_for_manifest(&ordinary_role_with_listener_shape, manifest)
+                .is_err(),
+            "synthetic red: ordinary role inherited the listener-PDP lifecycle shape"
+        );
+
+        let untyped_listener_pdp = rendered.replacen(
+            &format!("output: {}", listener_shape.input_type),
+            &format!("output: {}", default_shape.input_type),
+            1,
+        );
+        assert!(
+            validate_provider_catalog_for_manifest(&untyped_listener_pdp, manifest).is_err(),
+            "synthetic red: untyped listener-pdp lifecycle output was accepted"
+        );
+
+        let dematerialized = rendered.replacen(
+            &format!("let output = output.{listener_materializer}();\n"),
+            "",
+            1,
+        );
+        assert!(
+            validate_provider_catalog_for_manifest(&dematerialized, manifest).is_err(),
+            "synthetic red: ListenerPdp finish without materializer was accepted"
+        );
+
+        let aliased_materializer = rendered.replacen(
+            &format!("let output = output.{listener_materializer}();"),
+            "let output = output.into_module();",
+            1,
+        );
+        assert!(
+            validate_provider_catalog_for_manifest(&aliased_materializer, manifest).is_err(),
+            "synthetic red: ListenerPdp finish materializer alias was accepted"
+        );
+        Ok(())
+    }
+
     #[test]
     fn assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean()
     -> Result<()> {
@@ -2714,22 +2870,7 @@ mod provider_catalog;
         assert!(rendered.contains("Some(assembly_schema::ProviderFailurePosture::FailOpen)"));
         assert!(rendered.contains("&[]"));
         assert!(!rendered.contains("SECRET_BAIT"));
-        for banned in [
-            "std::env",
-            "Secret",
-            "Config",
-            "Any",
-            "TypeId",
-            "HashMap",
-            "BTreeMap",
-            "callback",
-            "service_locator",
-        ] {
-            assert!(
-                !rendered.contains(banned),
-                "generated provider catalog contains banned token `{banned}`"
-            );
-        }
+        assert_provider_catalog_excludes_banned_tokens(&rendered);
         let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
         let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         validate_provider_catalog_for_manifest(&rendered, &manifest)?;
@@ -2757,22 +2898,7 @@ mod provider_catalog;
         let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
         let rendered = render_providers(&manifest, "assemblies/settingsonly/assembly.toml")?;
 
-        for required in [
-            "pub(crate) struct ProviderRoleBatches",
-            "pub(crate) struct ListenerPdpConstructor",
-            "pub(crate) struct ListenerPdpBatch",
-            "pub(crate) struct ListenerPdpReceipt",
-            "pub(crate) struct DlxHotKeyProviderConstructor",
-            "pub(crate) struct DlxHotKeyProviderBatch",
-            "pub(crate) struct DlxHotKeyProviderReceipt",
-            "pub(crate) fn exact_join(",
-            "pub(crate) fn finish(",
-        ] {
-            assert!(
-                rendered.contains(required),
-                "settingsonly generated provider output omitted `{required}`"
-            );
-        }
+        assert_settingsonly_role_batch_surface(&rendered);
         assert!(rendered.contains("ProviderRole::ListenerPdp"));
         assert!(rendered.contains("ProviderRole::DlxArchiveKeyProvider"));
         assert!(rendered.contains("ProviderRole::DlxHotKeyProvider"));
@@ -2782,24 +2908,8 @@ mod provider_catalog;
         assert!(rendered.contains("ProviderRole::SettingsKeyProvider"));
         assert!(rendered.contains("ProviderRole::SettingsSecretResolver"));
         let compact_rendered = rendered.split_whitespace().collect::<String>();
-        let listener_shape = provider_finish_shape(ProviderRole::ListenerPdp);
-        let rate_limiter_shape = provider_finish_shape(ProviderRole::ListenerRateLimiter);
-        let default_shape = provider_finish_shape(ProviderRole::SettingsKeyProvider);
-        assert_eq!(listener_shape, LISTENER_PDP_FINISH_SHAPE);
-        assert_eq!(rate_limiter_shape, LISTENER_RATE_LIMITER_FINISH_SHAPE);
-        assert_eq!(default_shape, DEFAULT_PROVIDER_FINISH_SHAPE);
-        let typed_listener_pdp = format!("output:{}", listener_shape.input_type);
-        let listener_materializer = listener_shape
-            .materializer
-            .expect("ListenerPdp finish shape must declare into_output");
-        assert!(
-            compact_rendered.contains(&typed_listener_pdp)
-                && compact_rendered
-                    .contains(&format!("letoutput=output.{listener_materializer}();")),
-            "listener-pdp constructor must consume the sealed JWKS lifecycle receipt via closed shape"
-        );
-        assert!(compact_rendered.contains("output:redis::RedisRateLimiterCapability"));
-        assert!(compact_rendered.contains("letvalue=output.into_limiter();"));
+        let (listener_shape, default_shape, listener_materializer) =
+            settingsonly_finish_shape_evidence(&rendered, &compact_rendered)?;
         assert!(
             compact_rendered.contains(
                 "implDlxHotKeyProviderConstructor{pub(crate)fnfinish(self,output:bootstrap::DomainModuleResult,"
@@ -2812,74 +2922,14 @@ mod provider_catalog;
             ),
             "ordinary roles must not inherit ListenerPdp finish input"
         );
-        let mut ordinary_role_with_listener_shape = rendered.clone();
-        let start = ordinary_role_with_listener_shape
-            .find("impl DlxHotKeyProviderConstructor")
-            .expect("DLX hot constructor impl");
-        let relative = ordinary_role_with_listener_shape[start..]
-            .find("output: bootstrap::DomainModuleResult")
-            .expect("DLX hot output type");
-        let output_start = start + relative;
-        ordinary_role_with_listener_shape.replace_range(
-            output_start..output_start + "output: bootstrap::DomainModuleResult".len(),
-            "output: ListenerPdpJwksLifecycle",
-        );
-        assert!(
-            validate_provider_catalog_for_manifest(&ordinary_role_with_listener_shape, &manifest)
-                .is_err(),
-            "synthetic red: ordinary role inherited the listener-PDP lifecycle shape"
-        );
-        let mut untyped_listener_pdp = rendered.clone();
-        untyped_listener_pdp = untyped_listener_pdp.replacen(
-            &format!("output: {}", listener_shape.input_type),
-            &format!("output: {}", default_shape.input_type),
-            1,
-        );
-        assert!(
-            validate_provider_catalog_for_manifest(&untyped_listener_pdp, &manifest).is_err(),
-            "synthetic red: untyped listener-pdp lifecycle output was accepted"
-        );
-        let mut dematerialized = rendered.clone();
-        dematerialized = dematerialized.replacen(
-            &format!("let output = output.{listener_materializer}();\n"),
-            "",
-            1,
-        );
-        assert!(
-            validate_provider_catalog_for_manifest(&dematerialized, &manifest).is_err(),
-            "synthetic red: ListenerPdp finish without materializer was accepted"
-        );
-        let mut aliased_materializer = rendered.clone();
-        aliased_materializer = aliased_materializer.replacen(
-            &format!("let output = output.{listener_materializer}();"),
-            "let output = output.into_module();",
-            1,
-        );
-        assert!(
-            validate_provider_catalog_for_manifest(&aliased_materializer, &manifest).is_err(),
-            "synthetic red: ListenerPdp finish materializer alias was accepted"
-        );
-        for channel in ["probes", "resources", "workers"] {
-            let exact = format!("inventory.{channel}.len()==staged");
-            assert!(
-                compact_rendered.contains(&exact),
-                "anti-vacuity: generated finish omitted exact {channel} residual guard"
-            );
-            let marker = format!("inventory.{channel}.len()");
-            let start = rendered
-                .find(&marker)
-                .context("missing residual channel marker")?;
-            let operator = rendered[start..]
-                .find("==")
-                .map(|offset| start + offset)
-                .context("missing exact residual operator")?;
-            let mut weakened = rendered.clone();
-            weakened.replace_range(operator..operator + 2, ">=");
-            assert!(
-                validate_provider_catalog_for_manifest(&weakened, &manifest).is_err(),
-                "synthetic red: weakened {channel} residual guard was accepted"
-            );
-        }
+        assert_settingsonly_shape_rejections(
+            &rendered,
+            &manifest,
+            listener_shape,
+            default_shape,
+            listener_materializer,
+        )?;
+        assert_exact_residual_guards(&rendered, &compact_rendered, &manifest)?;
         Ok(())
     }
 
@@ -2955,8 +3005,8 @@ mod provider_catalog;
                 (
                     "surplus worker materialization",
                     rendered.replacen(
-                        "            workers: Vec::new(),",
-                        "            workers: output.workers,",
+                        "bootstrap::DomainModuleResult::from_parts(probes, resources, [])",
+                        "bootstrap::DomainModuleResult::from_parts(probes, resources, [todo!()])",
                         1,
                     ),
                 ),
@@ -3454,14 +3504,14 @@ mod provider_catalog;
         };
         let mut transaction = AssemblyGenerationTransaction::new(&root, plan)?;
 
-        let error = transaction
-            .apply_with_hook(&root, |index, _| {
-                if index == 1 {
-                    bail!("synthetic final output failure")
-                }
-                Ok(())
-            })
-            .expect_err("late failure must abort the batch");
+        let Err(error) = transaction.apply_with_hook(&root, |index, _| {
+            if index == 1 {
+                bail!("synthetic final output failure")
+            }
+            Ok(())
+        }) else {
+            bail!("late output failure unexpectedly committed the batch")
+        };
         assert!(error.to_string().contains("synthetic final output failure"));
         transaction.rollback()?;
         assert_eq!(fs::read(&first)?, b"old-first\n");

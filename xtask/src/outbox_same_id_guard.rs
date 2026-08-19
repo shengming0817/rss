@@ -765,7 +765,6 @@ fn token_key(tokens: &impl ToTokens) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
 
     use super::*;
 
@@ -886,12 +885,11 @@ fn run() {
     }
 
     #[test]
-    #[allow(clippy::expect_used)] // reason: complete_sources must carry the eventing façade fixture.
-    fn scan_rejects_expired_resolution_authority_moved_outside_closed_facade() {
+    fn scan_rejects_expired_resolution_authority_moved_outside_closed_facade() -> Result<()> {
         let mut sources = complete_sources();
         let content = sources
             .get_mut(EVENTING_FACADE_PATH)
-            .expect("eventing façade fixture carrier");
+            .context("eventing façade fixture carrier must exist")?;
         *content = content.replace(
             "DlqCallableRoutine::ResolveExpired.sql()",
             "moved_resolution_authority()",
@@ -907,14 +905,15 @@ fn run() {
                 .any(|finding| { finding.subject == EVENTING_FACADE_PATH }),
             "moving the typed resolution authority outside the closed façade must be red"
         );
+        Ok(())
     }
 
     #[test]
-    fn scan_rejects_fake_resolution_receiver_and_comment_bait() {
+    fn scan_rejects_fake_resolution_receiver_and_comment_bait() -> Result<()> {
         let mut sources = complete_sources();
         let content = sources
             .get_mut(EVENTING_FACADE_PATH)
-            .expect("eventing façade fixture carrier");
+            .context("eventing façade fixture carrier must exist")?;
         *content = content.replace(
             "DlqCallableRoutine::ResolveExpired.sql()",
             "fake::DlqCallableRoutine::ResolveExpired.sql()",
@@ -927,14 +926,15 @@ fn run() {
                 .any(|finding| finding.subject == EVENTING_FACADE_PATH),
             "fake receiver plus comment bait must not satisfy the closed façade witness"
         );
+        Ok(())
     }
 
     #[test]
-    fn scan_rejects_catalog_identity_drift_with_comment_bait() {
+    fn scan_rejects_catalog_identity_drift_with_comment_bait() -> Result<()> {
         let mut sources = complete_sources();
         let catalog = sources
             .get_mut("adapters/postgres/src/outbox_routine.rs")
-            .expect("outbox routine catalog fixture");
+            .context("outbox routine catalog fixture must exist")?;
         *catalog = catalog.replace(
             "function: rss_outbox_resolve_expired",
             "function: rss_outbox_resolve_expired_broken",
@@ -945,6 +945,7 @@ fn run() {
             finding.subject == "adapters/postgres/src/outbox_routine.rs"
                 && finding.detail.contains("structurally bind")
         }));
+        Ok(())
     }
 
     #[test]
@@ -965,21 +966,22 @@ fn run() {
     }
 
     #[test]
-    fn scan_rejects_serving_lane_resolution_owner() {
+    fn scan_rejects_serving_lane_resolution_owner() -> Result<()> {
         let mut sources = complete_sources();
         let eventing = sources
             .get_mut(EVENTING_FACADE_PATH)
-            .expect("eventing façade fixture");
+            .context("eventing façade fixture must exist")?;
         *eventing = eventing.replace("MaintenanceWriteLane", "ServingWriteLane");
         assert!(
             scan_sources(&sources)
                 .iter()
                 .any(|finding| finding.subject.starts_with(EVENTING_FACADE_PATH))
         );
+        Ok(())
     }
 
     #[test]
-    fn scan_rejects_resolution_alias_macro_and_operator_chain_breaks() {
+    fn scan_rejects_resolution_alias_macro_and_operator_chain_breaks() -> Result<()> {
         for mutation in [
             "use self::DlqCallableRoutine as Routine;",
             "macro_rules! bypass { () => { DlqCallableRoutine::ResolveExpired.sql() } }",
@@ -987,33 +989,38 @@ fn run() {
             let mut sources = complete_sources();
             sources
                 .get_mut(EVENTING_FACADE_PATH)
-                .expect("eventing fixture")
+                .context("eventing fixture must exist")?
                 .push_str(mutation);
             assert!(!scan_sources(&sources).is_empty(), "must reject {mutation}");
         }
 
         for path in [RESOLUTION_REQUEST_PATH, RESOLUTION_OPERATOR_PATH] {
             let mut sources = complete_sources();
-            *sources.get_mut(path).expect("consumer fixture") = "fn detached() {}".to_owned();
+            *sources
+                .get_mut(path)
+                .with_context(|| format!("consumer fixture `{path}` must exist"))? =
+                "fn detached() {}".to_owned();
             assert!(
                 scan_sources(&sources)
                     .iter()
                     .any(|finding| finding.subject == path)
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn unrelated_query_binds_do_not_pollute_resolution_chain() {
+    fn unrelated_query_binds_do_not_pollute_resolution_chain() -> Result<()> {
         let mut sources = complete_sources();
         let eventing = sources
             .get_mut(EVENTING_FACADE_PATH)
-            .expect("eventing fixture");
+            .context("eventing fixture must exist")?;
         *eventing = eventing.replace(
             "sqlx::query_scalar(",
             "let _ = sqlx::query_scalar(\"SELECT 1 WHERE $1\").bind(7).fetch_one(&mut *self.conn).await; sqlx::query_scalar(",
         );
         assert!(scan_sources(&sources).is_empty());
+        Ok(())
     }
 
     #[test]

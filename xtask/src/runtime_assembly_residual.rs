@@ -2248,6 +2248,10 @@ fn parse_rust_file(path: &Path) -> Result<syn::File> {
     syn::parse_file(&source).with_context(|| format!("解析 {} 失败", path.display()))
 }
 
+#[allow(
+    clippy::unreachable,
+    reason = "the preceding iterator filter retains only inherent impl items"
+)]
 fn unique_production_inherent_method<'a>(
     file: &'a syn::File,
     owner: &str,
@@ -2397,7 +2401,7 @@ mod tests {
             ProcessHookMutation::Duplicate => {
                 let mut first = statement.clone();
                 let syn::Stmt::Expr(_, semicolon) = &mut first else {
-                    unreachable!("validated hook statement must remain an expression")
+                    anyhow::bail!("validated hook statement changed from an expression")
                 };
                 *semicolon = Some(Default::default());
                 installer.block.stmts[0] = first;

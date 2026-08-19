@@ -2366,8 +2366,9 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
 ];
 "#,
         )?;
-        let error = journey_runner_mappings(&root)
-            .expect_err("duplicate runner identity in a typed target must fail closed");
+        let Err(error) = journey_runner_mappings(&root) else {
+            anyhow::bail!("duplicate runner identity in a typed target must fail closed")
+        };
         assert!(
             error.contains(
                 "duplicate journey runner mapping `saga-forward-effect-before-completion`"
@@ -2452,12 +2453,13 @@ async fn saga_retry_exhaustion() { renamed_private_router(); }
     #[test]
     fn red_saga_case_without_catalog_test_symbol_is_rejected() -> Result<()> {
         let syntax = syn::parse_file("fn private_implementation() {}")?;
-        let error = ensure_saga_catalog_registry(
+        let Err(error) = ensure_saga_catalog_registry(
             &syntax,
             &retry_exhaustion_runner(),
             &retry_exhaustion_catalog(),
-        )
-        .expect_err("missing catalog test symbol must fail closed");
+        ) else {
+            anyhow::bail!("missing catalog test symbol must fail closed")
+        };
         assert!(error.contains("exactly one independent test"));
         Ok(())
     }
@@ -2468,10 +2470,13 @@ async fn saga_retry_exhaustion() { renamed_private_router(); }
         let mut runners = retry_exhaustion_runner();
         runners
             .get_mut("saga-retry-exhaustion")
-            .expect("fixture runner")
+            .context("fixture runner must exist")?
             .generated_contract = "generated::saga::billing_v2::CONTRACT".to_string();
-        let error = ensure_saga_catalog_registry(&syntax, &runners, &retry_exhaustion_catalog())
-            .expect_err("catalog contract drift must fail closed");
+        let Err(error) =
+            ensure_saga_catalog_registry(&syntax, &runners, &retry_exhaustion_catalog())
+        else {
+            anyhow::bail!("catalog contract drift must fail closed")
+        };
         assert!(error.contains("must exactly match stable catalog"));
         Ok(())
     }
@@ -2616,9 +2621,11 @@ async fn saga_retry_exhaustion() { renamed_private_router(); }
         let root = temp_root("invalid-evidence")?;
         write_fixture(&root, "one", VALID)?;
 
-        let error =
+        let Err(error) =
             crate::contract::governance::ContractGovernanceIr::load_consumer_workspace(&root)
-                .expect_err("incomplete fixture corpus must fail the production validation funnel");
+        else {
+            anyhow::bail!("incomplete fixture corpus must fail the production validation funnel")
+        };
         assert!(
             error.to_string().contains("contract governance rejected"),
             "unexpected error: {error}"
@@ -3021,7 +3028,9 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         assert_eq!(fixture_ids, expected_ids);
         assert_eq!(runner_ids, expected_ids);
         for (id, entry, saga) in expected {
-            let runner = runners.get(&id).expect("catalog runner");
+            let runner = runners
+                .get(&id)
+                .with_context(|| format!("catalog runner `{id}` must exist"))?;
             assert_eq!(runner.fault_spec, entry.fault_spec);
             assert_eq!(runner.runner, entry.runner);
             assert_eq!(runner.generated_contract, saga.generated_contract);
