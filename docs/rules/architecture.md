@@ -188,10 +188,11 @@ rss/
   `contracts/**/contract.toml`、env/secrets、listener bind 配置或 Rust 构造器接线；跨域 wire contract 单源仍是 contracts。
   `assembly.toml → private generated provider catalog → AssemblyLock → RuntimePlan` 是已接纳 provider 的唯一事实链；
   未来候选 package metadata 即使存在，也必须先经同一 governance/compiler 验证，不能自动注册或建立平行 registry。
-  `cargo xtask graph assembly` 从该 manifest、匹配的 committed `modules_gen.rs` carrier 与 active event
-  contract/subscription 派生同一 typed model 的 Mermaid/JSON。默认 runtime 双产物提交在
-  `docs/architecture/generated/runtime-assembly.{mmd,json}`，`--check` 作为字节级漂移门；显式
-  `--assembly <name>` 的临时图只写 `target/xtask/`。`modules_gen.rs` 同时携 typed domain-listener / provider-output
+  assembly graph 从该 manifest、匹配的 committed `modules_gen.rs` carrier 与 active event
+  contract/subscription 按需构造 typed presentation model；构造过程复用 canonical source 校验并防御性拒绝
+  node ID 冲突或悬空 edge，但不注册独立 verify/CI gate。需要人工阅读时运行
+  `cargo xtask graph assembly [--assembly <name>]`，Mermaid/JSON 只覆盖写入 `target/xtask/`，不参与
+  identity、equality 或 gate verdict。`modules_gen.rs` 同时携 typed domain-listener / provider-output
   evidence；runtime 将 observed domain route registration 与 colocated provider output metadata 对照该 carrier，漂移 fail-closed。
   图证明 domain→listener surface 与 provider→lifecycle channel kind，不证明具体 route path、授权、网络可达性、
   provider 实例数量、资源名、关停次序或运行健康状态，也不读取环境变量、endpoint 或 secret。

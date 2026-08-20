@@ -334,17 +334,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
-                gate(
-                        GateId::AssemblyGraphCheck,
-                        "assembly-graph-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             ContractBreaking => (step_contract_breaking, Some("xtask/src/contract/breaking.rs"),
                 gate(
                         GateId::ContractBreaking,
@@ -958,8 +947,7 @@ impl GateId {
             | Self::AssemblyModulesCheck
             | Self::AssemblyProvidersCheck
             | Self::AssemblyLockCheck
-            | Self::AssemblyRuntimePlanCheck
-            | Self::AssemblyGraphCheck => Policy::OnImpact(Domain::AssemblyGeneration),
+            | Self::AssemblyRuntimePlanCheck => Policy::OnImpact(Domain::AssemblyGeneration),
 
             Self::ConsistencyFixtures | Self::LocalTxCoverage | Self::LocalOnlyEffects => {
                 Policy::OnImpact(Domain::Consistency)
@@ -1430,7 +1418,6 @@ mod tests {
                 "assembly-providers-check",
                 "assembly-lock-check",
                 "assembly-runtime-plan-check",
-                "assembly-graph-check",
                 "consistency-fixtures",
                 "localtx-coverage",
                 "local-only-effects",
@@ -1474,7 +1461,6 @@ mod tests {
                     "assembly-providers-check",
                     "assembly-lock-check",
                     "assembly-runtime-plan-check",
-                    "assembly-graph-check",
                 ],
             ),
             (

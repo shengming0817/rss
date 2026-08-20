@@ -30,8 +30,8 @@ owner/contract 不得替换成 `billing.checkout` 来证明生产能力。
    definition 仍可由 immutable exact registry 解析。
 2. 在目标 assembly manifest v2 中把该精确 workflow activation 设为 `active`。topology、环境变量、generated
    definition 存在或 `billing.checkout` fixture 都不能替代 activation。
-3. 生成并提交与 manifest 同步的 AssemblyLock、RuntimePlan 和 graph artifact；deployment 只使用这组 sealed
-   artifact。
+3. 生成并提交与 manifest 同步的 AssemblyLock 和 RuntimePlan；deployment 只使用这组 sealed artifact。assembly
+   graph 是按需 review presentation，不是 deployment artifact。
 
 运行完整 assembly carrier 检查：
 
@@ -43,8 +43,11 @@ owner/contract 不得替换成 `billing.checkout` 来证明生产能力。
 ./hack/cargo.sh xtask assembly generate-providers --check
 ./hack/cargo.sh xtask assembly lock check
 ./hack/cargo.sh xtask assembly generate-runtime-plans --check
-./hack/cargo.sh xtask graph assembly --check
+./hack/cargo.sh xtask verify --fast
 ```
+
+需要人工查看 assembly graph 时运行 `./hack/cargo.sh xtask graph assembly`；输出只落在 ignored 的
+`target/xtask/`，不提交、不部署，也不参与 carrier verdict。
 
 ### 2. Exact capability closure
 

@@ -203,7 +203,7 @@ pub(crate) enum AssemblyArtifactsCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum GraphCommand {
-    /// assembly 静态声明图；`--check` 守 runtime 双格式漂移。
+    /// 按需生成 assembly 静态声明图到 target/xtask。
     Assembly(graph::Options),
 }
 
@@ -567,12 +567,8 @@ mod tests {
             parse(&["graph", "assembly"])?,
             Command::Graph(GraphCommand::Assembly(graph::Options::default()))
         );
-        assert_eq!(
-            parse(&["graph", "assembly", "--check"])?,
-            Command::Graph(GraphCommand::Assembly(graph::Options::check_runtime()))
-        );
+        assert!(parse(&["graph", "assembly", "--check"]).is_err());
         assert!(parse(&["graph"]).is_err());
-        assert!(parse(&["graph", "assembly", "--check", "--format", "json"]).is_err());
         assert!(parse(&["graph", "assembly", "--assembly", "../x"]).is_err());
         Ok(())
     }

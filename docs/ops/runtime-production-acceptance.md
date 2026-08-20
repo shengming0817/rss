@@ -19,7 +19,7 @@ and is cluster-global.
 
 ## Required evidence
 
-1. Run the assembly validation, generated-file checks, AssemblyLock check, graph check and runtime
+1. Run the assembly validation, generated-file checks, AssemblyLock check and runtime
    baseline verification on the release commit.
 2. Run `RSS_SMOKE_MODE=release ./deploy/smoke.sh` without `KEEP_UP=1`. Release mode cannot skip a
    missing fixture, retain the stack or tolerate an unavailable dependency. A successful run emits

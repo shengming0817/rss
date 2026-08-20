@@ -128,8 +128,6 @@ enum InternalCheck {
     AssemblyLockCheck,
     /// committed runtime-plan.json raw-byte drift gate.
     AssemblyRuntimePlanCheck,
-    /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
-    AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
     /// active 默认 deny；三个固定 review rules 为 warn，但未确认 fail-closed；against = origin/develop。
     ContractBreaking,
@@ -322,14 +320,6 @@ fn step_assembly_runtime_plan_check() -> Step {
         id: GateId::AssemblyRuntimePlanCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyRuntimePlanCheck),
-        env: &[],
-    }
-}
-fn step_assembly_graph_check() -> Step {
-    Step {
-        id: GateId::AssemblyGraphCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyGraphCheck),
         env: &[],
     }
 }
@@ -1649,13 +1639,6 @@ fn run_internal(
                 .context(command_scope_facts_context("assembly-lock-check"))?,
         ),
         InternalCheck::AssemblyRuntimePlanCheck => crate::assembly_runtime_plan::run(true),
-        InternalCheck::AssemblyGraphCheck => crate::graph::run(
-            root,
-            &crate::graph::Options::check_runtime(),
-            command_facts
-                .get()
-                .context(command_scope_facts_context("assembly-graph-check"))?,
-        ),
         // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
         InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
@@ -3734,7 +3717,6 @@ mod tests {
             GateId::AssemblyProvidersCheck,
             GateId::AssemblyLockCheck,
             GateId::AssemblyRuntimePlanCheck,
-            GateId::AssemblyGraphCheck,
         ]
         .map(|id| {
             let members = plan
@@ -3940,20 +3922,13 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyLockCheck)
             .context("plan lacks lock check")?;
-        let graph = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyGraphCheck)
-            .context("plan lacks graph check")?;
         let runtime_plan = plan
             .iter()
             .position(|step| step.id == GateId::AssemblyRuntimePlanCheck)
             .context("plan lacks runtime plan check")?;
         anyhow::ensure!(
-            providers == modules + 1
-                && lock == providers + 1
-                && runtime_plan == lock + 1
-                && graph == runtime_plan + 1,
-            "assembly order must be modules -> providers -> lock -> runtime-plan -> graph"
+            providers == modules + 1 && lock == providers + 1 && runtime_plan == lock + 1,
+            "assembly order must be modules -> providers -> lock -> runtime-plan"
         );
         Ok(())
     }
@@ -4026,13 +4001,9 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyLockCheck)
             .context("plan lacks assembly lock check")?;
-        let graph = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyGraphCheck)
-            .context("plan lacks assembly graph check")?;
         anyhow::ensure!(
-            runtime_plan == lock + 1 && graph == runtime_plan + 1,
-            "assembly runtime plan must be exactly between lock and graph"
+            runtime_plan == lock + 1,
+            "assembly runtime plan must immediately follow the lock check"
         );
         Ok(())
     }
@@ -4263,45 +4234,17 @@ mod tests {
     }
 
     #[test]
-    fn assembly_graph_is_no_compile_internal_gate_after_modules_in_all_lanes() -> anyhow::Result<()>
-    {
+    fn assembly_graph_presentation_is_not_registered_as_a_gate() {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
             ("ci", plan_for(RELEASE_CHECK)),
         ] {
             let labels = labels(&plan);
-            let modules = labels
-                .iter()
-                .position(|label| *label == "assembly-modules-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-modules-check"))?;
-            let graph = labels
-                .iter()
-                .position(|label| *label == "assembly-graph-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-graph-check"))?;
-            let providers = labels
-                .iter()
-                .position(|label| *label == "assembly-providers-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-providers-check"))?;
-            let lock = labels
-                .iter()
-                .position(|label| *label == "assembly-lock-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-lock-check"))?;
-            let runtime_plan = labels
-                .iter()
-                .position(|label| *label == "assembly-runtime-plan-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-runtime-plan-check"))?;
-            assert_eq!(providers, modules + 1, "{name} providers lane order drift");
-            assert_eq!(lock, providers + 1, "{name} lock lane order drift");
-            assert_eq!(runtime_plan, lock + 1, "{name} runtime plan order drift");
-            assert_eq!(graph, runtime_plan + 1, "{name} graph lane order drift");
-            assert!(!plan[graph].needs_compile());
-            assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
-            assert!(matches!(
-                plan[graph].kind,
-                StepKind::Internal(InternalCheck::AssemblyGraphCheck)
-            ));
+            assert!(
+                !labels.contains(&"assembly-graph-check"),
+                "{name} must not promote the on-demand graph presentation to a gate"
+            );
         }
-        Ok(())
     }
 
     #[test]
@@ -4672,7 +4615,6 @@ mod tests {
             InternalCheck::AssemblyValidate,
             InternalCheck::AssemblyArtifactsCheck,
             InternalCheck::AssemblyLockCheck,
-            InternalCheck::AssemblyGraphCheck,
         ] {
             run_internal(check, &opts(false, false), &root, &command_facts)?;
         }

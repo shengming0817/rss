@@ -3546,7 +3546,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "deploy/",
         "journeys/",
         "journeys-fault-matrix/",
-        "docs/architecture/generated/runtime-assembly",
     ];
     const ASSEMBLY_CARRIERS: &[&str] = &[
         "xtask/src/assembly_artifacts.rs",
