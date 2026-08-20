@@ -14,9 +14,10 @@
 //! ## L2 provider conformance catalog
 //!
 //! Adapter owners enroll exact capability wrappers with [`provider_conformance_catalog!`]
-//! (`eventing_conformance` 模块)。Macro token 为 snake_case，wire/matrix 为 kebab-case；compile-fail
-//! 负例见 `tests/ui/provider_catalog_*.rs`（经 `tests/provider_catalog_trybuild.rs`）。受控矩阵入口：
-//! `./hack/cargo.sh xtask provider-capabilities` / `--check`（语义见 `docs/rules/eventbus.md`）。
+//! (`eventing_conformance` 模块)。Macro token 为 snake_case，稳定 label 为 kebab-case；compile-fail
+//! 负例见 `tests/ui/provider_catalog_*.rs`（经 `tests/provider_catalog_trybuild.rs`）。语义门入口为
+//! `./hack/cargo.sh xtask provider-capabilities --check`；裸命令只生成 ignored target 诊断报告
+//! （语义见 `docs/rules/eventbus.md`）。
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉

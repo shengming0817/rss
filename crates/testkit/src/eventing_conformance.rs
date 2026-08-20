@@ -26,7 +26,7 @@ impl ProviderId {
     /// Closed provider universe.
     pub const ALL: [Self; 3] = [Self::Postgres, Self::Amqp, Self::S3];
 
-    /// Stable wire identifier.
+    /// Stable catalog identifier.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
@@ -86,7 +86,7 @@ impl CapabilityId {
         Self::ArchiveReceipt,
     ];
 
-    /// Stable wire identifier.
+    /// Stable catalog identifier.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Identity => "identity",
@@ -181,18 +181,17 @@ pub mod __catalog {
 /// The capability tuple must exactly match [`ProviderId::capabilities`]; unsupported, missing,
 /// duplicate, or reordered entries do not satisfy the sealed [`__catalog::CompleteSet`] bound.
 /// Every wrapper is generated here and awaits exactly one canonical provider behavior. The
-/// repository drift gate validates the wrapper attributes, the unique capability-to-behavior
-/// edge, the behavior's semantic anchors, and its test-binary reachability before projecting the
-/// declaration into the committed capability matrix. There is deliberately no public or
-/// owner-local catalog receipt/mint API to forge.
+/// repository semantic gate validates the wrapper attributes, the unique capability-to-behavior
+/// edge, the behavior's semantic anchors, owner/reachability, and typed integration shard. There
+/// is deliberately no public or owner-local catalog receipt/mint API to forge.
 ///
 /// # Capability tokens
 ///
-/// Macro enrollment keys are **snake_case Rust idents**. Wire / matrix labels remain **kebab-case**
-/// (`CapabilityId::as_str`). Keep this table next to `docs/rules/eventbus.md` when adding a
-/// capability:
+/// Macro enrollment keys are **snake_case Rust idents**. Stable diagnostic labels remain
+/// **kebab-case** (`CapabilityId::as_str`). Keep this table next to `docs/rules/eventbus.md` when
+/// adding a capability:
 ///
-/// | macro token (`snake`) | wire (`kebab`) |
+/// | macro token (`snake`) | diagnostic label (`kebab`) |
 /// |-----------------------|----------------|
 /// | `identity` | `identity` |
 /// | `conflict` | `conflict` |

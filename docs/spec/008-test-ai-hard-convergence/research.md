@@ -43,8 +43,9 @@
 
 ### 复用现有 conformance
 
-不新建 universal suite 平台。现有 testkit 与 provider capability matrix 是当前载体；每个去重 PBI必须先列出
-重复行为、canonical behavior symbol 与 provider-specific residual。
+不新建 universal suite 平台。现有 testkit typed catalog、provider semantic gate 与 integration shard
+是当前载体；按需诊断报告不是 proof。每个去重 PBI必须先列出重复行为、canonical behavior symbol 与
+provider-specific residual。
 
 ### T3 分两步
 

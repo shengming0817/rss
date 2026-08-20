@@ -111,9 +111,12 @@ PostgreSQL adapter 只有两条显式模式，二者不得 fallback 或双写：
 - provider-neutral 能力闭集：`identity / conflict / fencing / budget / commit-ack / ambiguity / archive-receipt`。
   provider 不得以 `unsupported`、空 runner 或 noop 测试冒充不适用能力。
 - 每个 provider owner 只有一个 enrollment；宏在编译期拒绝缺失、重复、额外或重排能力。
-- committed matrix 的 `enrolled` 只表示存在可执行 carrier，不表示测试已通过；通过状态只由对应 shard 回执证明。
+- `provider-capabilities --check` 在内存中校验 wrapper→behavior、owner、可达性与 typed shard closure；
+  它不生成运行回执，通过状态只由对应 integration shard 的真实执行证明。
 - 测试 API 不提供 claim、archive receipt、AMQP channel/connection/generation 的构造或注入入口。
-- 载体：`cargo xtask provider-capabilities --check` → `generated/provider-capability-matrix.json`。
+- Hard 载体是 sealed capability tuple 与宏生成 wrapper；跨文件 join 的唯一 Medium 载体是
+  `cargo xtask provider-capabilities --check`。裸命令只写 `target/xtask/` 下的按需诊断视图，
+  不参与 identity、equality、receipt 或 gate verdict。
 
 ### Outbox relay 投递语义
 

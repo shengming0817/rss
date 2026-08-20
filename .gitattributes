@@ -9,4 +9,3 @@ assemblies/*/src/generated/** text eol=lf
 assemblies/*/assembly.lock.json text eol=lf
 assemblies/*/runtime-plan.json text eol=lf
 generated/l2-assurance.json text eol=lf
-generated/provider-capability-matrix.json text eol=lf

@@ -164,7 +164,7 @@ enum InternalCheck {
     CodegenCheck,
     /// committed L2 assurance inventory raw-byte drift gate.
     L2AssuranceCheck,
-    /// provider declaration ↔ live runner ↔ integration shard ↔ committed matrix drift gate.
+    /// provider declaration ↔ live behavior runner ↔ owner/reachability ↔ typed integration shard.
     ProviderCapabilitiesCheck,
     /// active LocalTx manifest/generated/owner route/test typed marker closure.
     LocalTxCoverage,

@@ -1,12 +1,11 @@
-//! Provider-neutral L2 conformance enrollment and committed capability matrix.
+//! Provider-neutral L2 conformance enrollment semantic gate.
 //!
 //! The adapter-side macro invocation is the declaration and generates every live wrapper. This
 //! gate proves each exact wrapper-to-behavior edge, behavior semantic anchors and digest, tracked
-//! source closure, and test-binary reachability before rendering the declaration set. The matrix
-//! therefore means `enrolled`, never "this test passed in the current checkout".
+//! source closure, and test-binary reachability. An on-demand diagnostic report may project the
+//! validated catalog, but that presentation is not an identity, equality, receipt, or gate carrier.
 //!
 //! INVARIANT: L2-PROVIDER-CAPABILITY-ENROLLMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "declared_capability_without_behavior_fails|duplicate_unknown_or_wrong_order_enrollment_fails|noop_unrelated_and_decorated_behaviors_fail|testkit_catalog_projection_drift_fails|untracked_invocation_is_outside_canonical_scan|detached_carrier_and_feature_drift_fail_closed|tracked_nonordinary_or_oversized_sources_fail_closed", anti_vacuity = "workspace_provider_capability_wrappers_and_behaviors_are_exact_and_live" }.
-//! INVARIANT: L2-PROVIDER-CAPABILITY-WIRE-01 { level = "Medium", exec = "check", source = "codegen", golden = "generated/provider-capability-matrix.json", synthetic_red = "check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "render_twice_is_byte_identical" }.
 
 use crate::cmd::{ExternalProgram, external_cmd};
 use crate::generated_file;
@@ -27,8 +26,7 @@ use syn::{
     Type, braced,
 };
 
-const OUTPUT: &str = "generated/provider-capability-matrix.json";
-const LF_DECLARATION: &str = "generated/provider-capability-matrix.json text eol=lf";
+const DIAGNOSTIC_OUTPUT: &str = "target/xtask/provider-capability-matrix.json";
 const TESTKIT_CATALOG: &str = "crates/testkit/src/eventing_conformance.rs";
 const MAX_TRACKED_RUST_FILES: usize = 2_048;
 const MAX_TRACKED_RUST_BYTES: u64 = 64 * 1024 * 1024;
@@ -186,43 +184,19 @@ pub(crate) fn run(check: bool) -> Result<()> {
 }
 
 fn run_at(root: &Path, check: bool) -> Result<()> {
-    let output = root.join(OUTPUT);
-    validate_output_path(root, &output)?;
-    generated_file::verify_lf_checkout(root, LF_DECLARATION, std::slice::from_ref(&output))
-        .map_err(lf_checkout_error)?;
-    let matrix = build_matrix(root)?;
-    let expected = render(&matrix)?;
+    let catalog = validate_catalog(root)?;
     if check {
-        check_rendered_file(&output, &expected)
-    } else {
-        generated_file::atomic_replace(&output, &expected)
+        return Ok(());
     }
+    let output = publish_diagnostic(root, &catalog)?;
+    eprintln!(
+        "provider capabilities: diagnostic report written to {}",
+        output.display()
+    );
+    Ok(())
 }
 
-fn lf_checkout_error(stage: generated_file::LfCheckoutFailure) -> anyhow::Error {
-    let detail = match stage {
-        generated_file::LfCheckoutFailure::AttributesRead => {
-            "cannot read repository .gitattributes"
-        }
-        generated_file::LfCheckoutFailure::DeclarationMismatch => {
-            "expected exactly one `generated/provider-capability-matrix.json text eol=lf` declaration"
-        }
-        generated_file::LfCheckoutFailure::Input => {
-            "the fixed generated/provider-capability-matrix.json target is not repository-local"
-        }
-        generated_file::LfCheckoutFailure::GitInvocation => {
-            "`/usr/bin/git check-attr` failed or returned an invalid response"
-        }
-        generated_file::LfCheckoutFailure::EffectivePolicyMismatch => {
-            "effective Git attributes for generated/provider-capability-matrix.json are not `text eol=lf`"
-        }
-    };
-    anyhow::anyhow!(
-        "provider capability LF checkout policy failed: {detail}; restore `.gitattributes`, then run `./hack/cargo.sh xtask provider-capabilities`"
-    )
-}
-
-fn build_matrix(root: &Path) -> Result<CapabilityMatrix> {
+fn validate_catalog(root: &Path) -> Result<ValidatedProviderCatalog> {
     validate_testkit_catalog(root)?;
     let invocations = discover_invocations(root)?;
     ensure!(
@@ -284,40 +258,28 @@ fn build_matrix(root: &Path) -> Result<CapabilityMatrix> {
             validate_wrapper_attrs(provider, capability, &entry.attrs)?;
             let behavior_sha256 =
                 validate_behavior(provider, capability, &entry.behavior, &behaviors)?;
-            capabilities.push(CapabilityEnrollment {
+            capabilities.push(CatalogCapability {
                 capability: capability.as_str(),
-                receipt: CapabilityReceipt {
-                    status: EnrollmentStatus::Enrolled,
-                    carrier: Carrier {
-                        package: owner.package,
-                        target: owner.target,
-                        kind: target_kind(owner.kind),
-                        path: owner.path,
-                        symbol: runner,
-                        behavior: entry.behavior,
-                        behavior_sha256,
-                        shard: owner.shard.as_str(),
-                    },
+                carrier: ValidatedCarrier {
+                    package: owner.package,
+                    target: owner.target,
+                    kind: target_kind(owner.kind),
+                    path: owner.path,
+                    symbol: runner,
+                    behavior: entry.behavior,
+                    behavior_sha256,
+                    shard: owner.shard.as_str(),
                 },
             });
         }
-        providers.push(ProviderEnrollment {
+        providers.push(ValidatedProvider {
             provider: provider.as_str(),
             capabilities,
         });
     }
     ensure!(by_provider.is_empty(), "unknown provider catalog remained");
 
-    Ok(CapabilityMatrix {
-        schema_version: 1,
-        provider_count: providers.len(),
-        capability_count: CapabilityId::ALL.len(),
-        enrollment_count: providers
-            .iter()
-            .map(|provider| provider.capabilities.len())
-            .sum(),
-        providers,
-    })
+    Ok(ValidatedProviderCatalog { providers })
 }
 
 fn validate_testkit_catalog(root: &Path) -> Result<()> {
@@ -1586,25 +1548,12 @@ fn is_tokio_test_attribute(attr: &Attribute) -> bool {
     matches!(segments.as_slice(), [runtime, test] if runtime == "tokio" && test == "test")
 }
 
-fn validate_output_path(root: &Path, output: &Path) -> Result<()> {
-    ensure!(
-        output == root.join(OUTPUT),
-        "provider capability output path is fixed"
-    );
-    if let Ok(metadata) = fs::symlink_metadata(output) {
-        ensure!(
-            metadata.is_file() && !metadata.file_type().is_symlink(),
-            "provider capability output must be a regular non-symlink file"
-        );
-    }
-    Ok(())
-}
-
-fn render(matrix: &CapabilityMatrix) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(matrix)?;
+fn render_diagnostic(catalog: &ValidatedProviderCatalog) -> Result<Vec<u8>> {
+    let report = DiagnosticReport::from(catalog);
+    let mut bytes = serde_json::to_vec_pretty(&report)?;
     ensure!(
         !bytes.contains(&b'\r'),
-        "rendered capability matrix contains CR"
+        "rendered provider capability diagnostic contains CR"
     );
     while bytes.last() == Some(&b'\n') {
         bytes.pop();
@@ -1613,62 +1562,36 @@ fn render(matrix: &CapabilityMatrix) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn check_rendered_file(path: &Path, expected: &[u8]) -> Result<()> {
-    let limit = u64::try_from(expected.len()).context("provider capability matrix is too large")?;
-    let actual =
-        generated_file::read_stable_utf8_file(path, limit, "provider capability committed matrix")
-            .with_context(|| {
-                format!(
-                    "cannot read {}; run `./hack/cargo.sh xtask provider-capabilities`",
-                    path.display()
-                )
-            })?
-            .into_bytes();
-    ensure!(
-        actual == expected,
-        "{} drifted; run `./hack/cargo.sh xtask provider-capabilities`",
-        path.display()
-    );
-    Ok(())
+fn publish_diagnostic(root: &Path, catalog: &ValidatedProviderCatalog) -> Result<PathBuf> {
+    let output = root.join(DIAGNOSTIC_OUTPUT);
+    generated_file::atomic_replace(&output, &render_diagnostic(catalog)?)?;
+    Ok(output)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CapabilityMatrix {
-    schema_version: u8,
-    provider_count: usize,
-    capability_count: usize,
-    enrollment_count: usize,
-    providers: Vec<ProviderEnrollment>,
+struct ValidatedProviderCatalog {
+    providers: Vec<ValidatedProvider>,
 }
 
-#[derive(Serialize)]
-struct ProviderEnrollment {
+impl ValidatedProviderCatalog {
+    fn enrollment_count(&self) -> usize {
+        self.providers
+            .iter()
+            .map(|provider| provider.capabilities.len())
+            .sum()
+    }
+}
+
+struct ValidatedProvider {
     provider: &'static str,
-    capabilities: Vec<CapabilityEnrollment>,
+    capabilities: Vec<CatalogCapability>,
 }
 
-#[derive(Serialize)]
-struct CapabilityEnrollment {
+struct CatalogCapability {
     capability: &'static str,
-    receipt: CapabilityReceipt,
+    carrier: ValidatedCarrier,
 }
 
-#[derive(Serialize)]
-struct CapabilityReceipt {
-    status: EnrollmentStatus,
-    carrier: Carrier,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum EnrollmentStatus {
-    Enrolled,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Carrier {
+struct ValidatedCarrier {
     package: &'static str,
     target: &'static str,
     kind: &'static str,
@@ -1677,6 +1600,92 @@ struct Carrier {
     behavior: String,
     behavior_sha256: String,
     shard: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticReport<'a> {
+    provider_count: usize,
+    capability_count: usize,
+    enrollment_count: usize,
+    providers: Vec<DiagnosticProvider<'a>>,
+}
+
+impl<'a> From<&'a ValidatedProviderCatalog> for DiagnosticReport<'a> {
+    fn from(catalog: &'a ValidatedProviderCatalog) -> Self {
+        Self {
+            provider_count: catalog.providers.len(),
+            capability_count: CapabilityId::ALL.len(),
+            enrollment_count: catalog.enrollment_count(),
+            providers: catalog
+                .providers
+                .iter()
+                .map(DiagnosticProvider::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DiagnosticProvider<'a> {
+    provider: &'a str,
+    capabilities: Vec<DiagnosticCapability<'a>>,
+}
+
+impl<'a> From<&'a ValidatedProvider> for DiagnosticProvider<'a> {
+    fn from(provider: &'a ValidatedProvider) -> Self {
+        Self {
+            provider: provider.provider,
+            capabilities: provider
+                .capabilities
+                .iter()
+                .map(DiagnosticCapability::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DiagnosticCapability<'a> {
+    capability: &'a str,
+    carrier: DiagnosticCarrier<'a>,
+}
+
+impl<'a> From<&'a CatalogCapability> for DiagnosticCapability<'a> {
+    fn from(capability: &'a CatalogCapability) -> Self {
+        Self {
+            capability: capability.capability,
+            carrier: DiagnosticCarrier::from(&capability.carrier),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticCarrier<'a> {
+    package: &'a str,
+    target: &'a str,
+    kind: &'a str,
+    path: &'a str,
+    symbol: &'a str,
+    behavior: &'a str,
+    behavior_sha256: &'a str,
+    shard: &'a str,
+}
+
+impl<'a> From<&'a ValidatedCarrier> for DiagnosticCarrier<'a> {
+    fn from(carrier: &'a ValidatedCarrier) -> Self {
+        Self {
+            package: carrier.package,
+            target: carrier.target,
+            kind: carrier.kind,
+            path: carrier.path,
+            symbol: &carrier.symbol,
+            behavior: &carrier.behavior,
+            behavior_sha256: &carrier.behavior_sha256,
+            shard: carrier.shard,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2190,28 +2199,51 @@ mod tests {
     }
 
     #[test]
-    fn render_twice_is_byte_identical() -> Result<()> {
-        let matrix = build_matrix(&crate::workspace_root()?)?;
-        assert_eq!(render(&matrix)?, render(&matrix)?);
+    fn semantic_check_does_not_publish_report() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let diagnostic = root.join(DIAGNOSTIC_OUTPUT);
+        let diagnostic_before = fs::read(&diagnostic).ok();
+
+        run_at(&root, true)?;
+        assert_eq!(fs::read(&diagnostic).ok(), diagnostic_before);
         Ok(())
     }
 
     #[test]
-    fn check_rejects_missing_tampered_and_crlf_without_writing() -> Result<()> {
-        let root = crate::testutil::unique_tmp("provider-capability-check");
-        fs::create_dir_all(&root)?;
-        let path = root.join("matrix.json");
-        let expected = b"{}\n";
+    fn diagnostic_render_is_deterministic_but_not_a_versioned_receipt() -> Result<()> {
+        let catalog = validate_catalog(&crate::workspace_root()?)?;
+        let first = render_diagnostic(&catalog)?;
+        assert_eq!(first, render_diagnostic(&catalog)?);
+        assert!(first.ends_with(b"\n"));
+        assert!(!first.ends_with(b"\n\n"));
+        let rendered = std::str::from_utf8(&first)?;
+        for retired in ["\"schemaVersion\"", "\"receipt\"", "\"status\""] {
+            assert!(
+                !rendered.contains(retired),
+                "diagnostic retained retired contract token `{retired}`"
+            );
+        }
+        Ok(())
+    }
 
-        assert!(check_rendered_file(&path, expected).is_err());
+    #[test]
+    fn diagnostic_publish_is_target_local_exact_and_overwrites() -> Result<()> {
+        let catalog = validate_catalog(&crate::workspace_root()?)?;
+        let rendered = render_diagnostic(&catalog)?;
+        let root = crate::testutil::unique_tmp("provider-capability-diagnostic");
+        let expected = root.join(DIAGNOSTIC_OUTPUT);
+        fs::create_dir_all(expected.parent().context("diagnostic parent missing")?)?;
+        fs::write(&expected, b"stale\n")?;
 
-        fs::write(&path, b"[]\n")?;
-        assert!(check_rendered_file(&path, expected).is_err());
-        assert_eq!(fs::read(&path)?, b"[]\n");
+        let path = publish_diagnostic(&root, &catalog)?;
+        assert_eq!(path, expected);
+        assert_eq!(fs::read(&path)?, rendered);
 
-        fs::write(&path, b"{}\r\n")?;
-        assert!(check_rendered_file(&path, expected).is_err());
-        assert_eq!(fs::read(&path)?, b"{}\r\n");
+        fs::write(&expected, b"tampered\n")?;
+        let path = publish_diagnostic(&root, &catalog)?;
+        assert_eq!(path, expected);
+        assert_eq!(fs::read(&path)?, rendered);
+        assert!(!root.join("generated").exists());
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -2219,8 +2251,8 @@ mod tests {
 
     #[test]
     fn workspace_provider_capability_wrappers_and_behaviors_are_exact_and_live() -> Result<()> {
-        let matrix = build_matrix(&crate::workspace_root()?)?;
-        let actual = matrix
+        let catalog = validate_catalog(&crate::workspace_root()?)?;
+        let actual = catalog
             .providers
             .iter()
             .map(|provider| {
@@ -2249,16 +2281,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
-        assert_eq!(matrix.provider_count, matrix.providers.len());
-        assert_eq!(matrix.capability_count, CapabilityId::ALL.len());
-        assert_eq!(
-            matrix.enrollment_count,
-            matrix
-                .providers
-                .iter()
-                .map(|provider| provider.capabilities.len())
-                .sum::<usize>()
-        );
+        assert_eq!(catalog.providers.len(), ProviderId::ALL.len());
         Ok(())
     }
 }

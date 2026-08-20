@@ -98,7 +98,7 @@ pub(crate) enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// deterministic L2 provider conformance enrollment matrix。
+    /// L2 provider conformance 语义校验；裸命令按需生成 target 诊断报告。
     ProviderCapabilities {
         #[arg(long)]
         check: bool,
@@ -905,7 +905,21 @@ mod tests {
             parse(&["provider-capabilities", "--check"])?,
             Command::ProviderCapabilities { check: true }
         );
+        assert_eq!(
+            parse(&["provider-capabilities"])?,
+            Command::ProviderCapabilities { check: false }
+        );
         assert!(parse(&["l2-assurance", "extra"]).is_err());
+        for invalid in [
+            &["provider-capabilities", "extra"][..],
+            &["provider-capabilities", "--output", "report.json"][..],
+            &["provider-capabilities", "--check", "--check"][..],
+        ] {
+            assert!(
+                parse(invalid).is_err(),
+                "provider capability CLI must reject {invalid:?}"
+            );
+        }
         Ok(())
     }
 

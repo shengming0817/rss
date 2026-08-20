@@ -3145,14 +3145,6 @@ const PROVIDER_CAPABILITIES_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "exact provider declaration, live runner, owner target, and typed integration shard closure",
         binding: CHECK_UNIT_BINDING,
     },
-    InvariantCarrierBinding {
-        path: "xtask/src/provider_capabilities.rs",
-        id: "L2-PROVIDER-CAPABILITY-WIRE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "typed schema v1 capability receipts with raw-byte golden drift and no-write synthetic reds",
-        binding: CHECK_UNIT_BINDING,
-    },
 ];
 
 const PRODUCER_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
@@ -6511,6 +6503,28 @@ members = ["rss_demo"]
                 "matrix configuration remains duplicated: {scattered}"
             );
         }
+    }
+
+    #[test]
+    fn provider_capability_binding_has_single_semantic_owner() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let path = root.join("xtask/src/provider_capabilities.rs");
+        let found = extract_invariants(&root, &path)?;
+
+        assert_eq!(PROVIDER_CAPABILITIES_INVARIANT_BINDINGS.len(), 1);
+        assert_eq!(
+            PROVIDER_CAPABILITIES_INVARIANT_BINDINGS[0].id,
+            "L2-PROVIDER-CAPABILITY-ENROLLMENT-01"
+        );
+        let mut index = Index::default();
+        validate_closed_invariant_bindings(
+            &mut index,
+            &path,
+            &found,
+            PROVIDER_CAPABILITIES_INVARIANT_BINDINGS,
+        );
+        assert!(index.findings.is_empty(), "{:?}", index.findings);
+        Ok(())
     }
 
     #[test]
