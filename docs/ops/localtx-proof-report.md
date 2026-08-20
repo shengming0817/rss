@@ -14,8 +14,9 @@ cargo xtask localtx report --format markdown > localtx-proof.md
 ```
 
 同一 revision、同一 workspace 状态下，两个格式都从同一 static inventory 渲染，排序稳定；同一格式连续生成的
-结果可以做 byte-for-byte 比较。报告不包含时间戳、Git SHA、主机名、绝对路径、tenant/device 实例、secret、
-payload、SQL 或运行时结果。仓库不提交 live proof snapshot；CI artifact 或本地临时输出才是消费载体。
+结果保持确定性，便于操作者复核同一次诊断，但完整输出不是 canonical baseline。报告不包含时间戳、Git SHA、
+主机名、绝对路径、tenant/device 实例、secret、payload、SQL 或运行时结果。仓库不提交 report snapshot；当前
+CI 也不生成或上传这份静态报告。需要时由操作者按需生成本地临时诊断输出。
 
 ## JSON schema v1
 
@@ -34,11 +35,10 @@ JSON 顶层对象恰好包含下列 required fields；字段缺失、类型错�
 
 `contracts` 按 `contractId`，`findings` 按 `(rule, subject, detail)`，backend profiles 按
 `(provider, fixture)`，scenarios 按 `kind`，所有 sources/probes 按 wire string 严格升序；这些集合禁止重复。
-报告生成器会先规范化再校验，消费者可据此 byte-compare。
+报告生成器会先规范化再校验；消费者应按 schema、关键字段、状态与排序语义解析，而不是依赖整份文档快照。
 
-Schema v1 的 exact golden 是
-[`xtask/tests/golden/localtx-proof.json`](../../xtask/tests/golden/localtx-proof.json)。它是用于冻结字段、类型和
-排序的 synthetic fixture，不是当前 workspace 的 live proof，也不能当作 CI 或生产 verdict。
+Schema v1 由结构化测试覆盖 version、关键字段、失败状态、serde value roundtrip 与确定性排序；Markdown
+测试只锁独立有价值的状态、section 与 escaping 行为，不冻结整份排版。
 
 ## Verdict and publication
 
@@ -55,8 +55,9 @@ Schema v1 的 exact golden 是
 `operations.includedInReportStatus = false`：运维引用、promtool、真实 backend 和 CI job/artifact 状态都不参与
 报告 verdict，不能从 `status = "passed"` 推断它们已执行或通过。
 
-推荐把两个格式写到同一临时目录，确认两条命令均成功且 JSON 可完整解析、`status` 已判定之后，再在同一文件
-系统中 rename 临时目录。若 status 为 failed，可以保存报告用于诊断，但不得把它当作通过证明。
+操作者若需要留存或转交报告，推荐把两个格式写到同一临时目录，确认两条命令均成功且 JSON 可完整解析、
+`status` 已判定之后，再在同一文件系统中 rename 临时目录。若 status 为 failed，可以保存报告用于诊断，
+但不得把它当作通过证明。
 
 ## Evidence boundary
 
@@ -106,5 +107,5 @@ Azure carrier 同样不拥有这份报告。真实 Postgres 结论必须来自 p
 1. 用 canonical CLI 生成到临时位置并检查进程退出码。
 2. 完整解析结果，验证 schema version、`evidenceScope`，再 parse `status`；unknown schema 必须 fail closed。
 3. status 为 failed 时消费 `findings` 定位静态证据缺口，不把 exit code 0 解释为 pass。
-4. 只有结构完整且 verdict 已明确的文件才能 atomic 发布；Markdown 与 JSON 应来自同一 revision。
+4. 需要人工留存或转交时，只有结构完整且 verdict 已明确的文件才能 atomic 发布；Markdown 与 JSON 应来自同一 revision。
 5. 需要真实 Postgres 结论时转到 #1776 的 postgres carrier 执行，不从静态报告推断运行期结果。

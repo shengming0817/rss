@@ -920,6 +920,17 @@ mod tests {
         project_inventory(&inventory, operations)
     }
 
+    fn assert_json_object_keys(value: &serde_json::Value, expected: &[&str]) {
+        let actual = value
+            .as_object()
+            .expect("schema projection must be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+    }
+
     fn sample_report() -> LocalTxReport {
         LocalTxReport {
             schema_version: 1,
@@ -987,16 +998,205 @@ mod tests {
     }
 
     #[test]
-    fn exact_golden_formats_and_markdown_escaping() -> Result<()> {
+    fn structured_report_formats_preserve_schema_status_and_escaping() -> Result<()> {
         let report = sample_report();
+        let rendered_json = render_report(&report, ReportFormat::Json)?;
+        assert_eq!(rendered_json, render_report(&report, ReportFormat::Json)?);
+        let json: serde_json::Value = serde_json::from_str(&rendered_json)?;
+        assert_json_object_keys(
+            &json,
+            &[
+                "schemaVersion",
+                "status",
+                "evidenceScope",
+                "activeLocalTxContractCount",
+                "operations",
+                "findings",
+                "contracts",
+            ],
+        );
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["evidenceScope"], "staticInventory");
+        assert_eq!(json["activeLocalTxContractCount"], 1);
+        assert_eq!(json["operations"]["validation"], "referenceOnly");
+        assert_eq!(json["operations"]["includedInReportStatus"], false);
+        assert_json_object_keys(
+            &json["operations"],
+            &[
+                "validation",
+                "includedInReportStatus",
+                "metrics",
+                "alerts",
+                "retryPressure",
+                "rules",
+                "runbook",
+            ],
+        );
+        assert_json_object_keys(&json["operations"]["metrics"][0], &["name", "purpose"]);
         assert_eq!(
-            render_report(&report, ReportFormat::Json)?,
-            include_str!("../tests/golden/localtx-proof.json")
+            json["operations"]["metrics"][0],
+            serde_json::json!({
+                "name": "localtx_retry_attempts_total",
+                "purpose": "retry-pressure-diagnostic"
+            })
         );
         assert_eq!(
-            render_report(&report, ReportFormat::Markdown)?,
-            include_str!("../tests/golden/localtx-proof.md")
+            json["operations"]["alerts"][0],
+            serde_json::json!({
+                "name": "LocalTxCommitUnknown",
+                "finalStatus": "commit_unknown"
+            })
         );
+        assert_json_object_keys(&json["operations"]["alerts"][0], &["name", "finalStatus"]);
+        assert_json_object_keys(
+            &json["operations"]["retryPressure"],
+            &["classification", "metric"],
+        );
+        assert_eq!(
+            json["operations"]["retryPressure"],
+            serde_json::json!({
+                "classification": "diagnosticOnly",
+                "metric": "localtx_retry_attempts_total"
+            })
+        );
+        assert_eq!(
+            json["operations"]["rules"],
+            "docs/ops/localtx-alerts.rules.yaml"
+        );
+        assert_eq!(
+            json["operations"]["runbook"],
+            "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md"
+        );
+        assert_eq!(json["contracts"][0]["contractId"], "demo.write");
+        assert_eq!(json["contracts"][0]["owner"], "demo");
+        assert_json_object_keys(
+            &json["contracts"][0],
+            &[
+                "contractId",
+                "owner",
+                "capability",
+                "evidence",
+                "backendProfiles",
+                "journey",
+            ],
+        );
+        assert_json_object_keys(
+            &json["contracts"][0]["capability"],
+            &["boundary", "txModel", "retry", "commitUnknown"],
+        );
+        assert_eq!(
+            json["contracts"][0]["capability"],
+            serde_json::json!({
+                "boundary": "single-domain",
+                "txModel": "tenant-scoped-uow",
+                "retry": "bounded-transient",
+                "commitUnknown": "not-retryable"
+            })
+        );
+        assert_eq!(
+            json["contracts"][0]["evidence"]["manifest"],
+            serde_json::json!({
+                "status": "complete",
+                "sources": ["contracts/http/demo/v1/write/contract.toml"]
+            })
+        );
+        assert_json_object_keys(
+            &json["contracts"][0]["evidence"],
+            &["manifest", "generated", "route", "test"],
+        );
+        for evidence in ["manifest", "generated", "route", "test"] {
+            assert_json_object_keys(
+                &json["contracts"][0]["evidence"][evidence],
+                &["status", "sources"],
+            );
+        }
+        assert_eq!(
+            json["contracts"][0]["evidence"]["route"]["status"],
+            "missing"
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["provider"],
+            "demo-pg"
+        );
+        assert_json_object_keys(
+            &json["contracts"][0]["backendProfiles"][0],
+            &[
+                "provider",
+                "fixture",
+                "providerStatus",
+                "status",
+                "sources",
+                "requiredProbes",
+                "observedProbes",
+                "missingProbes",
+            ],
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["fixture"],
+            "postgres"
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["providerStatus"],
+            "valid"
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["status"],
+            "complete"
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["sources"],
+            serde_json::json!(["adapters/demo-pg/tests/localtx.rs"])
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["requiredProbes"],
+            serde_json::json!(["commit"])
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["observedProbes"][0],
+            serde_json::json!({"probe": "commit", "count": 1})
+        );
+        assert_json_object_keys(
+            &json["contracts"][0]["backendProfiles"][0]["observedProbes"][0],
+            &["probe", "count"],
+        );
+        assert_eq!(
+            json["contracts"][0]["backendProfiles"][0]["missingProbes"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json["contracts"][0]["journey"],
+            serde_json::json!({
+                "spec": "journeys/demo-localtx-journey.toml",
+                "fixture": "fixtures/demo-localtx.toml",
+                "runner": "journeys/tests/demo_journey.rs",
+                "scenarios": [{"kind": "happy", "applicable": true, "reason": null}]
+            })
+        );
+        assert_json_object_keys(
+            &json["contracts"][0]["journey"],
+            &["spec", "fixture", "runner", "scenarios"],
+        );
+        assert_json_object_keys(
+            &json["contracts"][0]["journey"]["scenarios"][0],
+            &["kind", "applicable", "reason"],
+        );
+        assert_eq!(json["findings"][0]["rule"], "MissingRouteBinding");
+        assert_json_object_keys(&json["findings"][0], &["rule", "subject", "detail"]);
+        assert_eq!(
+            json["findings"][0]["subject"],
+            "contracts/http/demo/v1/write/contract.toml"
+        );
+        assert_eq!(json["findings"][0]["detail"], "route | missing\nsynthetic");
+        let roundtripped: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&json)?)?;
+        assert_eq!(roundtripped, json);
+
+        let markdown = render_report(&report, ReportFormat::Markdown)?;
+        assert!(markdown.contains("Static inventory status: **failed**"));
+        for section in ["## Operations", "## Contracts", "## Findings"] {
+            assert!(markdown.contains(section), "missing section {section}");
+        }
+        assert!(markdown.contains("route &#124; missing<br>synthetic"));
         Ok(())
     }
 

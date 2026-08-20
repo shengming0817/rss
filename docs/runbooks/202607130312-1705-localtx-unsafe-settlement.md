@@ -25,9 +25,9 @@ The [LocalTx static proof report](../ops/localtx-proof-report.md) inventories th
 routes, probes, journeys, metrics, alerts, and this runbook. Generate the machine-readable form with
 `cargo xtask localtx report --format json`, check the command exit code, fully parse the document, and
 parse `status` before using it. A policy failure is represented by `status = "failed"` even though the
-command exits successfully; structural failures exit non-zero with empty stdout. Publish only a
-complete parsed report by an atomic rename, because a stdout writer failure can leave a truncated
-redirected file.
+command exits successfully; structural failures exit non-zero with empty stdout. Current CI does not
+generate or upload this static report. If an operator retains or transfers one, publish only a complete
+parsed report by an atomic rename, because a stdout writer failure can leave a truncated redirected file.
 
 The report has `evidenceScope = "staticInventory"`: it does not execute `promtool`, a real backend, or
 the alert. It does not replace #1776 required real-backend evidence and cannot prove the outcome of the

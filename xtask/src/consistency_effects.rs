@@ -7561,16 +7561,77 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     }
 
     #[test]
-    fn synthetic_report_renderers_match_exact_golden() -> Result<()> {
+    fn structured_report_formats_preserve_schema_status_and_escaping() -> Result<()> {
         let report = synthetic_report_fixture();
+        let rendered_json = render_report(&report, ReportFormat::Json)?;
+        assert_eq!(rendered_json, render_report(&report, ReportFormat::Json)?);
+        let json: serde_json::Value = serde_json::from_str(&rendered_json)?;
+        assert_eq!(json["schemaVersion"], 4);
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["activeHttpContractCount"], 2);
         assert_eq!(
-            render_report(&report, ReportFormat::Json)?,
-            include_str!("../tests/golden/consistency-posture.json")
+            json["localOnlyReceiptCoverage"]["enforcement"],
+            "failClosed"
         );
         assert_eq!(
-            render_report(&report, ReportFormat::Markdown)?,
-            include_str!("../tests/golden/consistency-posture.md")
+            json["localOnlyReceiptCoverage"]["evidence"],
+            "sourceRegistered"
         );
+        assert_eq!(json["localOnlyReceiptCoverage"]["status"], "partial");
+        assert_eq!(
+            json["localOnlyReceiptCoverage"]["missingContracts"],
+            serde_json::json!(["a.local"])
+        );
+        assert_eq!(
+            json["contracts"]
+                .as_array()
+                .context("structured contracts")?
+                .iter()
+                .map(|contract| contract["contractId"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("a.local"), Some("z.remote")]
+        );
+        assert_eq!(json["contracts"][0]["route"]["mountStatus"], "mounted");
+        assert_eq!(json["contracts"][0]["effectProof"]["status"], "failed");
+        assert_eq!(
+            json["contracts"][0]["sourceReceiptRegistration"]["status"],
+            "missing"
+        );
+        assert_eq!(
+            json["findings"]
+                .as_array()
+                .context("structured findings")?
+                .iter()
+                .map(|finding| finding["rule"].as_str())
+                .collect::<Vec<_>>(),
+            [
+                Some("forbiddenStateEffect"),
+                Some("missingLocalOnlyReceipt"),
+                Some("missingRouteBinding")
+            ]
+        );
+        let roundtripped: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&json)?)?;
+        assert_eq!(roundtripped, json);
+
+        let markdown = render_report(&report, ReportFormat::Markdown)?;
+        assert!(markdown.contains("Static status: **failed**"));
+        assert!(markdown.contains(
+            "Source receipt registration (fail-closed; tests not executed): **0/1 registered**"
+        ));
+        assert!(markdown.contains(
+            "| Contract | Owner | Method | Path | Consistency | Effects | Mount | LocalOnly Proof | Source Receipt Registration | Findings |"
+        ));
+        assert!(markdown.contains("escaped &#124; cell&#92;path<br>line"));
+        assert!(markdown.ends_with('\n'));
+        assert!(!markdown.ends_with("\n\n"));
+        for forbidden in [
+            "timestamp",
+            "hostname",
+            "gitSha",
+            env!("CARGO_MANIFEST_DIR"),
+        ] {
+            assert!(!markdown.contains(forbidden), "leaked {forbidden}");
+        }
         Ok(())
     }
 
