@@ -17,9 +17,7 @@ use futures::future::BoxFuture;
 use crate::PgStore;
 use crate::cotx::eventing::{CommandAliasClaim, CommandAliasKey, CommandTerminalUpdate, CommandTx};
 use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
-use crate::outbox::{
-    OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
-};
+use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient};
 use crate::pool::VerifiedPgWriteStore;
 
 #[cfg(all(test, feature = "integration"))]
@@ -74,9 +72,13 @@ impl PgCommandJournal {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor),
+            metadata_with_ambient(
+                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                tenant,
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -152,9 +154,13 @@ impl CommandDispatchStore for PgCommandJournal {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor),
+            metadata_with_ambient(
+                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                tenant,
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

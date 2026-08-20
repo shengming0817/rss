@@ -30,7 +30,7 @@ use crate::account_security_repo::status_to_db;
 use crate::auth_grant_lifecycle::{GrantCloseCas, apply_grant_close_cas};
 use crate::cotx::identity::IdentityTx;
 use crate::cotx::{ProducerFactAuthorization, ProducerTxOutcome, ServingWriteLane, TenantDb};
-use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
+use crate::outbox::{OutboxEnvelope, metadata_with_ambient};
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -462,9 +462,13 @@ impl PgIdentitySecurityLifecycle {
         let envelope = OutboxEnvelope::new(
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
-            metadata_with_ambient(unix_secs(event.occurred_at()), event.tenant(), contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor),
+            metadata_with_ambient(
+                vocab::UnixEpochSeconds::saturating_from_system_time(event.occurred_at()).get(),
+                event.tenant(),
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -618,9 +622,13 @@ fn security_envelope(
     Ok(OutboxEnvelope::new(
         contract.domain().to_owned(),
         contract.contract_id().to_owned(),
-        metadata_with_ambient(unix_secs(event.occurred_at()), event.tenant(), contract)
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+        metadata_with_ambient(
+            vocab::UnixEpochSeconds::saturating_from_system_time(event.occurred_at()).get(),
+            event.tenant(),
+            contract,
+        )
+        .with_subject_id(subject_id)
+        .with_actor(actor),
     )
     .with_partition_key_opt(partition_key)
     .with_causation_id_opt(causation_id))
@@ -980,7 +988,8 @@ impl TryFrom<(AccountSecurityMutation, &CredentialSecurityEvent)> for AccountSec
         }
         Ok(Self {
             state: AccountStateCasRow::from_states(expected, next)?,
-            occurred_at: unix_secs(event.occurred_at()),
+            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(event.occurred_at())
+                .get(),
             reason: event.kind().as_db_str(),
         })
     }

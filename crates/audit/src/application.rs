@@ -456,13 +456,6 @@ fn policy_updated_record_from_message(
     })
 }
 
-/// `SystemTime` → i64 unix 秒（epoch 前 / 溢出收口为 0 / i64::MAX）。
-fn to_unix_secs(time: SystemTime) -> i64 {
-    time.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
-
 /// `rss_request_context::PrincipalKind` → wire 字符串（camelCase）。
 fn principal_kind_wire(kind: rss_request_context::PrincipalKind) -> &'static str {
     match kind {
@@ -523,7 +516,8 @@ fn project_audit_entry(entry: &AuditEntry, projection: ResourceProjection) -> Pr
             entry.resource().id(),
         ),
         outcome: outcome_wire(entry.outcome()).to_string(),
-        recorded_at: to_unix_secs(entry.recorded_at()),
+        recorded_at: vocab::UnixEpochSeconds::saturating_from_system_time(entry.recorded_at())
+            .get(),
         entry_hash: encode_hash(entry.entry_hash().as_bytes()),
     }
 }

@@ -26,7 +26,7 @@ use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{EventWireProjectionError, unix_secs};
+use super::EventWireProjectionError;
 use crate::domain::{
     AttributeKey, EqualityPredicate, IdentityError, MembershipPredicate, Operator, OperatorInput,
     OperatorInputError, OperatorRef, OrderingPredicate, Policy, PolicyCondition, PolicyEffect,
@@ -452,7 +452,8 @@ impl PolicyManageService {
             updated_by: actor.as_uuid(),
             actor_kind: actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
-            occurred_at: unix_secs(self.clock.now()),
+            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now())
+                .get(),
         };
         // #1235 / #648 F1：canonical UserId typed funnel（actor = 策略变更操作者，非 login/PII）。
         crate::outbox_emit::emit_policy_updated(
@@ -1503,8 +1504,13 @@ impl WirePolicyView {
             version: policy.version().get(),
             contract_id: policy.route_scope().contract_id().to_string(),
             permission: policy.route_scope().permission().as_str().to_string(),
-            effective_from: unix_secs(policy.effective_from()),
-            effective_until: policy.effective_until().map(unix_secs),
+            effective_from: vocab::UnixEpochSeconds::saturating_from_system_time(
+                policy.effective_from(),
+            )
+            .get(),
+            effective_until: policy
+                .effective_until()
+                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
             rules: policy
                 .rules()
                 .iter()

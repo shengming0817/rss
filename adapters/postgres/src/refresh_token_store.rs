@@ -62,7 +62,7 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-/// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`（与写路径 `unix_secs` 编码对称；
+/// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`（与写路径 canonical typed epoch 编码对称；
 /// 负值——早于 epoch，理论不可达——收口为 epoch 0，不 panic）。
 fn epoch_secs_to_time(secs: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))

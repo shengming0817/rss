@@ -9,7 +9,6 @@ use authn::AccessGrantValidationInput;
 use identity::ports::{AuthGrantValidator, IdentityError, TenantRepoScope};
 
 use crate::cotx::{ServingReadLane, TenantDb};
-use crate::outbox::unix_secs;
 use crate::pool::VerifiedPgReadStore;
 
 /// Read-only PostgreSQL implementation of the durable RSS access-token fence.
@@ -93,7 +92,7 @@ impl AuthGrantValidator for PgAuthGrantValidator {
             .map_err(|_| corruption("authentication time exceeds persistence boundary"))?;
         let expected_epoch = i64::try_from(input.authn_epoch().get())
             .map_err(|_| corruption("authentication epoch exceeds persistence boundary"))?;
-        let observed_at = unix_secs(observed_at);
+        let observed_at = vocab::UnixEpochSeconds::saturating_from_system_time(observed_at).get();
         let grant_id = input.grant_id().clone();
         let user_id = input.user_id();
 

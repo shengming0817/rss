@@ -1508,7 +1508,7 @@ async fn run_dlx_lifecycle_tick<L, B>(
 {
     let started = clock.now();
     let report = lifecycle
-        .tick_observation(epoch_secs_from_system_time(started))
+        .tick_observation(vocab::UnixEpochSeconds::saturating_from_system_time(started).get())
         .await;
     let lifecycle_health = match backlog_repository.read_archive_backlog().await {
         Ok(backlog) => {
@@ -2455,13 +2455,7 @@ fn parse_required_u64_env(
 }
 
 fn system_epoch_secs() -> i64 {
-    epoch_secs_from_system_time(SystemClock.now())
-}
-
-fn epoch_secs_from_system_time(now: SystemTime) -> i64 {
-    now.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    vocab::UnixEpochSeconds::saturating_from_system_time(SystemClock.now()).get()
 }
 
 fn build_tenant_authority_from(
@@ -4090,11 +4084,7 @@ mod tests {
     }
 
     #[test]
-    fn dlx_clock_helpers_fail_closed_for_pre_epoch_and_backwards_time() {
-        assert_eq!(
-            epoch_secs_from_system_time(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
-            0
-        );
+    fn dlx_elapsed_seconds_clamps_backwards_time() {
         assert_eq!(
             elapsed_seconds(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(2),

@@ -269,14 +269,6 @@ fn map_account_transition_error(
     }
 }
 
-/// `SystemTime` → UNIX epoch 秒（i64）。负偏移（早于 epoch）收口为 0；溢出收口为 `i64::MAX`。
-/// 不取系统时钟（`now` 经注入 [`Clock`]）；`SystemTime::duration_since` 不在 clippy disallowed-methods。
-pub(crate) fn unix_secs(t: SystemTime) -> i64 {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
-}
-
 /// 登录应用服务。必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）。
 ///
 /// 认证授权根生命周期由**单一** [`DynAuthGrantLifecycle`] provider 承载：login 经
@@ -477,7 +469,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             // 收紧后非 UUID subject 在 wire decode 即不可表达，consumer 无需 parse）。
             subject: user_id.as_uuid(),
             tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
-            occurred_at: unix_secs(now),
+            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(now).get(),
         };
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
         let event_id = Uuid::new_v4().to_string();
@@ -519,7 +511,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         Ok(IdentityLoginResponse {
             data: IdentityLoginData {
                 session_id: grant_id.to_wire(),
-                expires_at: unix_secs(expires_at),
+                expires_at: vocab::UnixEpochSeconds::saturating_from_system_time(expires_at).get(),
                 access_token: bundle.access.as_str().to_string(),
                 refresh_token: bundle.refresh.as_str().to_string(),
                 access_expires_at: bundle.access.expires_at(),

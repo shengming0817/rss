@@ -23,7 +23,7 @@ use crate::cotx::eventing::OutboxTx;
 use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::outbox::{
     AppendFingerprintObservation, CanonicalOutboxFact, OutboxAppendError, OutboxEnvelope,
-    classify_append_fingerprint, metadata_with_ambient, unix_secs,
+    classify_append_fingerprint, metadata_with_ambient,
 };
 use crate::pool::VerifiedPgWriteStore;
 
@@ -62,9 +62,13 @@ impl ReviewedEventWriter for PgOutboxCdcEmitter {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor),
+            metadata_with_ambient(
+                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                tenant,
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

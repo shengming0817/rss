@@ -48,7 +48,7 @@ impl CanonicalDeviceIngressFact {
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let mut metadata = crate::outbox::OutboxMetadata::new(
-            crate::outbox::unix_secs(occurred_at),
+            vocab::UnixEpochSeconds::saturating_from_system_time(occurred_at).get(),
             tenant,
             contract,
         )
@@ -825,7 +825,7 @@ impl IdentityRead<'_, '_> {
         )
         .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
-        .bind(crate::outbox::unix_secs(observed_at))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(observed_at).get())
         .fetch_optional(&mut *self.tx.conn)
         .await
     }
@@ -1024,7 +1024,7 @@ impl IdentityRead<'_, '_> {
         .bind(self.tx.tenant.to_string())
         .bind(scope.contract_id())
         .bind(scope.permission().as_str())
-        .bind(crate::outbox::unix_secs(at))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(at).get())
         .fetch_all(&mut *self.tx.conn)
         .await?;
         rows.into_iter()
@@ -1271,8 +1271,8 @@ impl IdentityWrite<'_, '_> {
         .bind(record.parent_id().map(|id| id.as_str()))
         .bind(record.lineage_id().as_str())
         .bind(record.status().as_db_str())
-        .bind(crate::outbox::unix_secs(record.issued_at()))
-        .bind(crate::outbox::unix_secs(record.expires_at()))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(record.issued_at()).get())
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(record.expires_at()).get())
         .execute(&mut *self.tx.conn)
         .await
         .map(|_| ())
@@ -1445,8 +1445,12 @@ impl IdentityWrite<'_, '_> {
         .bind(version)
         .bind(policy.route_scope().contract_id())
         .bind(policy.route_scope().permission().as_str())
-        .bind(crate::outbox::unix_secs(policy.effective_from()))
-        .bind(policy.effective_until().map(crate::outbox::unix_secs))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(policy.effective_from()).get())
+        .bind(
+            policy
+                .effective_until()
+                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
+        )
         .bind(rules_json)
         .execute(&mut *self.tx.conn)
         .await
@@ -1485,8 +1489,12 @@ impl IdentityWrite<'_, '_> {
         .bind(expected)
         .bind(policy.route_scope().contract_id())
         .bind(policy.route_scope().permission().as_str())
-        .bind(crate::outbox::unix_secs(policy.effective_from()))
-        .bind(policy.effective_until().map(crate::outbox::unix_secs))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(policy.effective_from()).get())
+        .bind(
+            policy
+                .effective_until()
+                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
+        )
         .bind(rules_json)
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -1577,8 +1585,12 @@ impl IdentityWrite<'_, '_> {
         .bind(self.tx.tenant.to_string())
         .bind(login)
         .bind(i64::from(lockout.failure_count()))
-        .bind(crate::outbox::unix_secs(lockout.window_start()))
-        .bind(lockout.locked_until().map(crate::outbox::unix_secs))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(lockout.window_start()).get())
+        .bind(
+            lockout
+                .locked_until()
+                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
+        )
         .execute(&mut *self.tx.conn)
         .await
         .map(|_| ())
@@ -1743,11 +1755,11 @@ impl IdentityWrite<'_, '_> {
         .bind(self.tx.tenant.to_string())
         .bind(grant.id().to_wire())
         .bind(grant.user_id().as_uuid().to_string())
-        .bind(crate::outbox::unix_secs(grant.auth_time()))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(grant.auth_time()).get())
         .bind(epoch)
         .bind(grant.status().as_db_str())
-        .bind(crate::outbox::unix_secs(grant.expires_at()))
-        .bind(crate::outbox::unix_secs(grant.created_at()))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(grant.expires_at()).get())
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(grant.created_at()).get())
         .execute(&mut *self.tx.conn)
         .await
         .map(|_| ())
@@ -1784,8 +1796,8 @@ impl IdentityWrite<'_, '_> {
         .bind(record.token_hash().as_bytes() as &[u8])
         .bind(record.lineage_id().as_str())
         .bind(record.status().as_db_str())
-        .bind(crate::outbox::unix_secs(record.issued_at()))
-        .bind(crate::outbox::unix_secs(record.expires_at()))
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(record.issued_at()).get())
+        .bind(vocab::UnixEpochSeconds::saturating_from_system_time(record.expires_at()).get())
         .execute(&mut *self.tx.conn)
         .await
         .map(|_| ())

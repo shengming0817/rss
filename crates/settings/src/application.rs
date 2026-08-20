@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::SystemTime;
 
 use ::generated::http::settings_v1::{
@@ -329,14 +330,6 @@ impl From<ConfigRepoError> for SettingsServiceError {
     }
 }
 
-/// `SystemTime` → UNIX epoch 秒（i64）。负偏移收口为 0；溢出收口为 `i64::MAX`。不取系统时钟（经注入 [`Clock`]）。
-fn unix_secs(t: SystemTime) -> i64 {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        // reason: 时钟早于 UNIX_EPOCH（容器时间错误）→ 收口 0，不 panic
-        .unwrap_or(0)
-}
-
 /// u64 版本号 → wire i64（溢出收口 `i64::MAX`）。config / secret handler 共用。
 pub(crate) fn wire_version(version: u64) -> i64 {
     i64::try_from(version).unwrap_or(i64::MAX)
@@ -526,7 +519,8 @@ impl SettingsService {
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.as_str().to_string(),
-            occurred_at: unix_secs(self.clock.now()),
+            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now())
+                .get(),
             source_version: source_version.map(wire_version),
             tenant_id: tenant.to_string(),
             version: wire_version(version),

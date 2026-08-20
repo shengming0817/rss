@@ -718,7 +718,7 @@ pub(in super::super) const CRED_USER_BOB: &str = "22222222-3333-4444-8555-666666
 // 锁定 TTL（域 AccountLockout 单源镜像；仅供测试时间步进推算，非生产复刻）。
 pub(in super::super) const LOCK_TTL_SECS: u64 = 15 * 60;
 
-// 测试基准时刻（well-after-epoch，避开 unix_secs 的 epoch 前钳零边界）。
+// 测试基准时刻（well-after-epoch，避开 canonical typed epoch 编码的 epoch 前钳零边界）。
 pub(in super::super) const CRED_BASE_SECS: u64 = 1_700_000_000;
 
 pub(in super::super) type CredHelperResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

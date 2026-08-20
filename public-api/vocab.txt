@@ -1288,6 +1288,7 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSecondsError
 pub struct vocab::time::UnixEpochSeconds(_)
 impl vocab::time::UnixEpochSeconds
 pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64
+pub fn vocab::time::UnixEpochSeconds::saturating_from_system_time(std::time::SystemTime) -> Self
 pub fn vocab::time::UnixEpochSeconds::to_system_time(self) -> core::result::Result<std::time::SystemTime, vocab::time::UnixEpochSecondsError>
 pub fn vocab::time::UnixEpochSeconds::try_from_duration(core::time::Duration) -> core::result::Result<Self, vocab::time::UnixEpochSecondsError>
 impl core::clone::Clone for vocab::time::UnixEpochSeconds
@@ -2450,6 +2451,7 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepName
 pub struct vocab::UnixEpochSeconds(_)
 impl vocab::time::UnixEpochSeconds
 pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64
+pub fn vocab::time::UnixEpochSeconds::saturating_from_system_time(std::time::SystemTime) -> Self
 pub fn vocab::time::UnixEpochSeconds::to_system_time(self) -> core::result::Result<std::time::SystemTime, vocab::time::UnixEpochSecondsError>
 pub fn vocab::time::UnixEpochSeconds::try_from_duration(core::time::Duration) -> core::result::Result<Self, vocab::time::UnixEpochSecondsError>
 impl core::clone::Clone for vocab::time::UnixEpochSeconds

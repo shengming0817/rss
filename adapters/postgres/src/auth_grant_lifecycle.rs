@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use crate::cotx::identity::IdentityTx;
 use crate::cotx::{ProducerTxOutcome, ServingReadLane, ServingWriteLane, TenantDb};
-use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
+use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -153,9 +153,13 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         let env = OutboxEnvelope::new(
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
-            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor),
+            metadata_with_ambient(
+                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                tenant,
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -365,13 +369,16 @@ impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
             epoch: i64::try_from(next.authn_epoch_at_issue().get())
                 .map_err(|_| corrupt("auth grant epoch exceeds PostgreSQL bigint"))?,
             expected_status: expected.status().as_db_str(),
-            expected_closed_at: expected.closed_at().map(unix_secs),
+            expected_closed_at: expected
+                .closed_at()
+                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
             expected_reason: expected.close_reason().map(|reason| reason.as_db_str()),
             next_status: next.status().as_db_str(),
-            closed_at: unix_secs(
+            closed_at: vocab::UnixEpochSeconds::saturating_from_system_time(
                 next.closed_at()
                     .ok_or_else(|| corrupt("closed auth grant lacks closed_at"))?,
-            ),
+            )
+            .get(),
             reason: next
                 .close_reason()
                 .ok_or_else(|| corrupt("closed auth grant lacks close_reason"))?

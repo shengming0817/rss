@@ -378,7 +378,10 @@ pub mod test_support {
                 session_id: grant.id().as_uuid(),
                 subject: grant.user_id().as_uuid(),
                 tenant_id: uuid::Uuid::from_bytes(grant.tenant().octets()),
-                occurred_at: crate::application::unix_secs(grant.created_at()),
+                occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(
+                    grant.created_at(),
+                )
+                .get(),
             };
         let subject = grant.user_id();
         crate::outbox_emit::emit_session_created(

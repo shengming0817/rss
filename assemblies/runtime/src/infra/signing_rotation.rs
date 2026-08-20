@@ -4,6 +4,7 @@
 //! keys past `verify_until` signal operator cleanup debt (degraded). In-window retiring
 //! kids missing from JWKS fail closed (planned: unhealthy; emergency: degraded).
 
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oidc::JwksReadinessHandle;
@@ -72,7 +73,7 @@ impl SigningKeyRotationProbe {
     }
 
     fn now_unix(&self) -> i64 {
-        system_time_unix_secs(self.clock.now())
+        vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get()
     }
 
     fn nearest_deadline(&self) -> Option<i64> {
@@ -158,12 +159,6 @@ impl KidPresence for JwksReadinessHandle {
     fn has_kid(&self, kid: &str) -> bool {
         JwksReadinessHandle::has_kid(self, kid)
     }
-}
-
-fn system_time_unix_secs(now: SystemTime) -> i64 {
-    now.duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

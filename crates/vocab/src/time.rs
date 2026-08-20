@@ -1,4 +1,4 @@
-//! Fallible Unix-epoch time vocabulary shared by event producers and consumers.
+//! Unix-epoch time vocabulary shared by event producers and consumers.
 
 use std::time::{Duration, SystemTime};
 
@@ -16,6 +16,22 @@ pub enum UnixEpochSecondsError {
 }
 
 impl UnixEpochSeconds {
+    /// Convert `SystemTime` into wire epoch seconds, saturating to the representable range.
+    ///
+    /// Values before the Unix epoch become zero. Values after the epoch that exceed the wire
+    /// `int64` range become [`i64::MAX`]. Protocol boundaries that must reject either condition
+    /// should use the fallible [`TryFrom<SystemTime>`] implementation instead.
+    #[must_use]
+    pub fn saturating_from_system_time(value: SystemTime) -> Self {
+        value
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(Self(0), Self::saturating_from_duration)
+    }
+
+    fn saturating_from_duration(duration: Duration) -> Self {
+        Self(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+    }
+
     /// Convert an elapsed duration since the epoch without saturating.
     pub fn try_from_duration(duration: Duration) -> Result<Self, UnixEpochSecondsError> {
         i64::try_from(duration.as_secs())
@@ -87,6 +103,33 @@ mod tests {
         assert_eq!(
             value.to_system_time().expect("representable system time"),
             SystemTime::UNIX_EPOCH + Duration::from_secs(42)
+        );
+    }
+
+    #[test]
+    fn saturating_conversion_clamps_to_the_wire_int64_range() {
+        assert_eq!(
+            UnixEpochSeconds::saturating_from_system_time(SystemTime::UNIX_EPOCH).get(),
+            0
+        );
+        assert_eq!(
+            UnixEpochSeconds::saturating_from_system_time(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(42),
+            )
+            .get(),
+            42
+        );
+        assert_eq!(
+            UnixEpochSeconds::saturating_from_system_time(
+                SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+            )
+            .get(),
+            0
+        );
+        assert_eq!(
+            UnixEpochSeconds::saturating_from_duration(Duration::from_secs(i64::MAX as u64 + 1,))
+                .get(),
+            i64::MAX
         );
     }
 }

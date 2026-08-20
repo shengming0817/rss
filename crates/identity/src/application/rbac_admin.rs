@@ -24,7 +24,7 @@ use generated::event::identity_v1::role_revoked::{
 use rss_request_context::TenantId;
 use uuid::Uuid;
 
-use super::{EventWireProjectionError, unix_secs};
+use super::EventWireProjectionError;
 use crate::domain::{IdentityError, RoleBinding, RoleId};
 use crate::ports::{
     DynRoleBindingLifecycle, DynRoleReadRepo, RoleBindingLifecycle, RoleReadRepo,
@@ -125,7 +125,7 @@ impl RbacAdminService {
             assigned_by: actor.as_uuid(),
             actor_kind: role_assigned_actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
-            occurred_at: unix_secs(now),
+            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(now).get(),
         };
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
         // #1235 / #648 F1：经 outbox_emit UserId funnel。
@@ -178,7 +178,7 @@ impl RbacAdminService {
             revoked_by: actor.as_uuid(),
             actor_kind: role_revoked_actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
-            occurred_at: unix_secs(now),
+            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(now).get(),
         };
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
         // #1235 / #648 F1：经 outbox_emit UserId funnel。

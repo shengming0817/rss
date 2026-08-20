@@ -683,10 +683,10 @@ pub(in super::super) fn fixed_clock_time() -> std::time::SystemTime {
     std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(TEST_OCCURRED_SECS)
 }
 
-/// DB 中 `occurred_at` 的期望编码值——经与生产**同一** `crate::outbox::unix_secs` 编码路径求得（`i64`），
+/// DB 中 `occurred_at` 的期望编码值——经生产共享的 typed epoch 编码 owner 求得（`i64`），
 /// 避免断言端 `u64` 字面量与写入端 `i64` 在边界值上漂移（review F4）。
 pub(in super::super) fn expected_occurred_at() -> i64 {
-    crate::outbox::unix_secs(fixed_clock_time())
+    vocab::UnixEpochSeconds::saturating_from_system_time(fixed_clock_time()).get()
 }
 
 pub(in super::super) fn assert_metadata_text_has_standard_schema_header(

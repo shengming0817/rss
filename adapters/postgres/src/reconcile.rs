@@ -20,7 +20,7 @@ use crate::cotx::reconcile::{
 use crate::cotx::{
     MaintenanceReadLane, MaintenanceWriteLane, ServingWriteLane, TenantDb, TenantScopeHandle,
 };
-use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
+use crate::outbox::{OutboxEnvelope, metadata_with_ambient};
 use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
 use diport::{Clock, RedactedSource};
 use eventexec::reconcile::{
@@ -911,9 +911,13 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(unix_secs(self.clock.now()), command_tenant, contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor),
+            metadata_with_ambient(
+                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                command_tenant,
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
