@@ -2848,14 +2848,13 @@ pub(in super::super) async fn settlement_pool_wait_fixture(
     set_test_relay_budget_policy(&owner, budget).await?;
 
     let p = pg.owner_params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(1)
     .with_acquire_timeout(Duration::from_secs(5));
     let single = PgStore::connect(&config).await?;

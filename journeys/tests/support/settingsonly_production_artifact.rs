@@ -1967,7 +1967,6 @@ trustedKinds = ["user", "admin"]
 host = "{}"
 port = {}
 database = "{}"
-sslMode = "verifyFull"
 sslRootCertPath = "/fixtures/postgres-ca.pem"
 readinessSeconds = 5
 [postgres.writer]

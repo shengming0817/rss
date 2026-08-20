@@ -1,11 +1,11 @@
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use anyhow::Context as _;
 use postgres::{
-    PgConfig, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
-    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSagaOperatorConfig, PgSslMode,
+    PgConfig, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword, PgPrivateCa,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSagaOperatorConfig,
     PgTenantReadConfig,
 };
 
@@ -182,7 +182,12 @@ struct PgSharedValues {
     host: String,
     port: u16,
     database: String,
-    ssl_root_cert: PathBuf,
+    private_ca: PgPrivateCa,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PRIVATE_CA_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl PgSharedValues {
@@ -193,14 +198,19 @@ impl PgSharedValues {
             format!("{PG_PORT_ENV} must be a valid port number (1-65535): {port_raw}")
         })?;
         let database = required_value(config, PG_DATABASE_ENV)?;
-        // Production egress: RSS_PG_SSL_MODE is banned (#1710); always VerifyFull.
-        let ssl_root_cert =
-            pg_ssl_root_cert_path_from_value(config.value(PG_SSL_ROOT_CERT_PATH_ENV))?;
+        #[cfg(test)]
+        PRIVATE_CA_FILE_READS.with(|reads| reads.set(reads.get() + 1));
+        let ca_pem = super::read_required_ca_pem(
+            config.value(PG_SSL_ROOT_CERT_PATH_ENV),
+            PG_SSL_ROOT_CERT_PATH_ENV,
+        )?;
+        let private_ca = PgPrivateCa::from_pem(ca_pem)
+            .context("parse RSS_PG_SSL_ROOT_CERT_PATH PEM CA bundle")?;
         Ok(Self {
             host,
             port,
             database,
-            ssl_root_cert,
+            private_ca,
         })
     }
 
@@ -261,9 +271,8 @@ impl PgSharedValues {
             self.database.clone(),
             username,
             PgPassword::new(password),
+            self.private_ca.clone(),
         )
-        .with_ssl_mode(PgSslMode::VerifyFull)
-        .with_ssl_root_cert(self.ssl_root_cert.clone())
     }
 }
 
@@ -375,26 +384,61 @@ pub(crate) fn build_pg_migrator_config(config: SnapshotConfig<'_>) -> anyhow::Re
     PgSharedValues::from_snapshot(config)?.role_config(config, PG_MIGRATOR_ROLE_KEYS)
 }
 
-/// Build the sole tenant-reader credential used by DeviceLatent inspection.
-pub(crate) fn build_pg_device_latent_read_config(
+/// DeviceLatent operator credentials derived from one private-CA file snapshot.
+pub(crate) struct PgDeviceLatentCommandConfigs {
+    pub(crate) operator: PgConfig,
+    pub(crate) reader: PgTenantReadConfig,
+}
+
+/// Build both DeviceLatent PostgreSQL lanes without rereading the private-CA path.
+pub(crate) fn build_pg_device_latent_command_configs(
     config: SnapshotConfig<'_>,
-) -> anyhow::Result<PgTenantReadConfig> {
+) -> anyhow::Result<PgDeviceLatentCommandConfigs> {
     let shared = PgSharedValues::from_snapshot(config)?;
-    apply_pool_limit_from_value(
+    let operator = shared.role_config(config, PG_MIGRATOR_ROLE_KEYS)?;
+    let reader = apply_pool_limit_from_value(
         shared.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
         config.value(PG_READER_MAX_CONNECTIONS_ENV),
         PG_READER_MAX_CONNECTIONS_ENV,
-    )
-    .map(PgTenantReadConfig::new)
+    )?;
+    Ok(PgDeviceLatentCommandConfigs {
+        operator,
+        reader: PgTenantReadConfig::new(reader),
+    })
 }
 
-/// Build the dedicated function-only Saga operator credential.
-pub(crate) fn build_pg_saga_operator_config(
+/// Saga command credentials derived from one private-CA file snapshot.
+pub(crate) struct PgSagaCommandConfigs {
+    pub(crate) control: PgSagaOperatorConfig,
+    pub(crate) writer: PgConfig,
+    pub(crate) reader: PgTenantReadConfig,
+    pub(crate) audit_admin: Option<PgConfig>,
+}
+
+/// Build the Saga control and target lanes without rereading the private-CA path.
+pub(crate) fn build_pg_saga_command_configs(
     config: SnapshotConfig<'_>,
-) -> anyhow::Result<PgSagaOperatorConfig> {
-    PgSharedValues::from_snapshot(config)?
-        .role_config(config, PG_SAGA_OPERATOR_ROLE_KEYS)
-        .map(PgSagaOperatorConfig::new)
+) -> anyhow::Result<PgSagaCommandConfigs> {
+    let shared = PgSharedValues::from_snapshot(config)?;
+    let control =
+        PgSagaOperatorConfig::new(shared.role_config(config, PG_SAGA_OPERATOR_ROLE_KEYS)?);
+    let writer = apply_pool_limit_from_value(
+        shared.role_config(config, PG_SERVING_ROLE_KEYS)?,
+        config.value(PG_WRITER_MAX_CONNECTIONS_ENV),
+        PG_WRITER_MAX_CONNECTIONS_ENV,
+    )?;
+    let reader = apply_pool_limit_from_value(
+        shared.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
+        config.value(PG_READER_MAX_CONNECTIONS_ENV),
+        PG_READER_MAX_CONNECTIONS_ENV,
+    )?;
+    let audit_admin = shared.optional_audit_config(config)?;
+    Ok(PgSagaCommandConfigs {
+        control,
+        writer,
+        reader: PgTenantReadConfig::new(reader),
+        audit_admin,
+    })
 }
 
 /// Build the independent function-only L2 DR audit and executor credentials.
@@ -430,26 +474,6 @@ pub(crate) fn build_pg_l2_dr_recovery_configs(
     ))
 }
 
-/// Build the serving writer/tenant-reader pair used by a plan-selected Saga operator target.
-/// The operator still uses its independent maintenance lane for authentication audit.
-pub(crate) fn build_pg_saga_serving_configs(
-    config: SnapshotConfig<'_>,
-) -> anyhow::Result<(PgConfig, PgTenantReadConfig, Option<PgConfig>)> {
-    let shared = PgSharedValues::from_snapshot(config)?;
-    let writer = apply_pool_limit_from_value(
-        shared.role_config(config, PG_SERVING_ROLE_KEYS)?,
-        config.value(PG_WRITER_MAX_CONNECTIONS_ENV),
-        PG_WRITER_MAX_CONNECTIONS_ENV,
-    )?;
-    let reader = apply_pool_limit_from_value(
-        shared.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
-        config.value(PG_READER_MAX_CONNECTIONS_ENV),
-        PG_READER_MAX_CONNECTIONS_ENV,
-    )?;
-    let audit_admin = shared.optional_audit_config(config)?;
-    Ok((writer, PgTenantReadConfig::new(reader), audit_admin))
-}
-
 /// Build the independent Projection operator and scoped source-reader credentials from one
 /// immutable configuration generation. Neither lane accepts inline plaintext secrets.
 pub(crate) fn build_pg_projection_operator_config(
@@ -483,34 +507,6 @@ fn required_value(config: SnapshotConfig<'_>, name: &'static str) -> anyhow::Res
 
 fn missing_required_value(name: &'static str) -> anyhow::Error {
     anyhow::anyhow!("missing required env var: {name}")
-}
-
-fn pg_ssl_root_cert_path_from_value(raw: Option<&str>) -> anyhow::Result<PathBuf> {
-    let raw = raw.ok_or_else(|| missing_required_value(PG_SSL_ROOT_CERT_PATH_ENV))?;
-    let trimmed = raw.trim();
-    anyhow::ensure!(
-        !trimmed.is_empty(),
-        "{PG_SSL_ROOT_CERT_PATH_ENV} must not be empty"
-    );
-    let path = PathBuf::from(trimmed);
-    let metadata = fs::metadata(&path)
-        .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a readable file"))?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "{PG_SSL_ROOT_CERT_PATH_ENV} must point to a file"
-    );
-    let pem = fs::read(&path)
-        .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a readable file"))?;
-    // Assembly-time PEM parse (≥1 cert) so invalid bait like `b"test ca"` cannot silent-pass
-    // into sqlx webpki-roots overlay (#1710 / PR #642 F4). Exclusive RootCertStore remains
-    // adapter-level follow-up when sqlx exposes an empty-store constructor.
-    let certs = reqwest::Certificate::from_pem_bundle(&pem)
-        .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a PEM CA bundle"))?;
-    anyhow::ensure!(
-        !certs.is_empty(),
-        "{PG_SSL_ROOT_CERT_PATH_ENV} must contain at least one PEM CA certificate"
-    );
-    Ok(path)
 }
 
 /// 默认 DB readiness 采样周期（5 秒）。
@@ -580,6 +576,7 @@ fn pg_rls_attestation_interval_from_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
@@ -715,6 +712,34 @@ mod tests {
             }
             .to_owned(),
         )
+    }
+
+    fn reset_private_ca_file_reads() {
+        PRIVATE_CA_FILE_READS.with(|reads| reads.set(0));
+    }
+
+    fn private_ca_file_reads() -> usize {
+        PRIVATE_CA_FILE_READS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn command_pg_lanes_share_exactly_one_private_ca_file_snapshot() {
+        reset_private_ca_file_reads();
+        let saga_snapshot = snapshot_from_get(|name| match name {
+            PG_SAGA_OPERATOR_USERNAME_ENV => Some("rss_saga_operator_snapshot".to_owned()),
+            PG_SAGA_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            _ => full_runtime_get(name),
+        })
+        .expect("saga snapshot");
+        build_pg_saga_command_configs(saga_snapshot.view()).expect("saga command configs");
+        assert_eq!(private_ca_file_reads(), 1);
+
+        reset_private_ca_file_reads();
+        let device_snapshot = snapshot_from_get(full_runtime_get).expect("device snapshot");
+        build_pg_device_latent_command_configs(device_snapshot.view())
+            .expect("device latent command configs");
+        assert_eq!(private_ca_file_reads(), 1);
     }
 
     #[test]
@@ -1428,21 +1453,15 @@ mod tests {
         );
     }
 
-    /// 默认 TLS 模式 = VerifyFull（零信任；禁 localhost 回退）。
     #[test]
     #[allow(clippy::expect_used)]
-    fn build_pg_config_defaults_ssl_verify_full() {
-        use postgres::PgSslMode;
+    fn build_pg_config_carries_typed_private_ca() {
         let cfg = build_pg_config_from(full_pg_get).expect("ok");
-        // PgConfig 的 ssl_mode 字段私有，经 connect_options() 读取；此处通过 debug 输出检查（适度）。
-        // VerifyFull 是安全默认值（rust-standards §安全检查点）。
         let debug = format!("{cfg:?}");
         assert!(
-            debug.contains("VerifyFull"),
-            "默认 TLS = VerifyFull，但 debug 输出为: {debug}"
+            debug.contains("PgPrivateCa(<redacted>)"),
+            "production config must carry typed private CA: {debug}"
         );
-        // 通过 fn-pointer smoke 绑定确认 PgSslMode::VerifyFull 变体可构造（Anti-vacuity）。
-        let _mode: PgSslMode = PgSslMode::VerifyFull;
     }
 
     #[test]
@@ -1479,8 +1498,8 @@ mod tests {
         .expect("valid pg config with root cert");
         let debug = format!("{cfg:?}");
         assert!(
-            debug.contains("pg-root-ca.pem"),
-            "root cert path must be captured in PgConfig: {debug}"
+            debug.contains("PgPrivateCa(<redacted>)") && !debug.contains("pg-root-ca.pem"),
+            "PgConfig must snapshot and redact the configured private CA: {debug}"
         );
     }
 
@@ -1500,8 +1519,8 @@ mod tests {
         .expect("valid pg migrator config with root cert");
         let debug = format!("{cfg:?}");
         assert!(
-            debug.contains("pg-migrator-root-ca.pem"),
-            "root cert path must be shared by serving and migrator configs: {debug}"
+            debug.contains("PgPrivateCa(<redacted>)") && !debug.contains("pg-migrator-root-ca.pem"),
+            "migrator config must share the redacted private-CA snapshot: {debug}"
         );
     }
 

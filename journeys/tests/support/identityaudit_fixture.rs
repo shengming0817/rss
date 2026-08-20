@@ -109,6 +109,7 @@ pub struct FixtureProviders {
     postgres_reader_password: String,
     postgres_audit_admin_username: String,
     postgres_audit_admin_password: String,
+    postgres_ca_pem: String,
     identity_amqp_url: String,
     amqp_ca_pem: String,
     redis_url: String,
@@ -121,6 +122,7 @@ impl FixtureProviders {
         writer: &testkit::PgConnParams,
         reader: &testkit::PgConnParams,
         audit_admin: &testkit::PgConnParams,
+        postgres_ca_pem: impl Into<String>,
         identity_amqp_url: impl Into<String>,
         amqp_ca_pem: impl Into<String>,
         redis_url: impl Into<String>,
@@ -152,6 +154,7 @@ impl FixtureProviders {
             postgres_reader_password: reader.password.clone(),
             postgres_audit_admin_username: audit_admin.username.clone(),
             postgres_audit_admin_password: audit_admin.password.clone(),
+            postgres_ca_pem: postgres_ca_pem.into(),
             identity_amqp_url: literal_loopback_url(identity_amqp_url.into())?,
             amqp_ca_pem: amqp_ca_pem.into(),
             redis_url: literal_loopback_url(redis_url.into())?,
@@ -551,6 +554,7 @@ impl RuntimeFixture {
         let config_path = root.join("identityaudit.toml");
         let amqp_ca_path = root.join("amqp-ca.pem");
         let redis_ca_path = root.join("redis-ca.pem");
+        let postgres_ca_path = root.join("postgres-ca.pem");
         fs::write(&jwks_path, jwks).context("write fixture JWKS")?;
         fs::write(
             &blocklist_path,
@@ -559,6 +563,8 @@ impl RuntimeFixture {
         .context("write fixture password blocklist")?;
         fs::write(&amqp_ca_path, &providers.amqp_ca_pem).context("write fixture AMQP CA")?;
         fs::write(&redis_ca_path, &providers.redis_ca_pem).context("write fixture Redis CA")?;
+        fs::write(&postgres_ca_path, &providers.postgres_ca_pem)
+            .context("write fixture PostgreSQL CA")?;
         let ca_path = system_ca_path()?;
         fs::write(
             &config_path,
@@ -570,6 +576,7 @@ impl RuntimeFixture {
                 health,
                 &jwks_path,
                 &blocklist_path,
+                &postgres_ca_path,
                 &ca_path,
                 &amqp_ca_path,
                 &redis_ca_path,
@@ -963,12 +970,16 @@ fn fixture_config(
     health: SocketAddr,
     jwks: &Path,
     blocklist: &Path,
+    postgres_ca: &Path,
     ca: &Path,
     amqp_ca: &Path,
     redis_ca: &Path,
 ) -> anyhow::Result<String> {
     let jwks = jwks.to_str().context("JWKS path is not UTF-8")?;
     let blocklist = blocklist.to_str().context("blocklist path is not UTF-8")?;
+    let postgres_ca = postgres_ca
+        .to_str()
+        .context("PostgreSQL CA path is not UTF-8")?;
     let ca = ca.to_str().context("CA path is not UTF-8")?;
     let amqp_ca = amqp_ca.to_str().context("AMQP CA path is not UTF-8")?;
     let redis_ca = redis_ca.to_str().context("Redis CA path is not UTF-8")?;
@@ -1003,7 +1014,7 @@ refreshSeconds = 5
 host = "{}"
 port = {}
 database = "{}"
-sslMode = "disable"
+sslRootCertPath = "{postgres_ca}"
 [postgres.writer]
 username = "{}"
 maxConnections = 5

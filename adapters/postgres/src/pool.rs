@@ -2,12 +2,15 @@
 //!
 //! `ref: sqlx sqlx-core/src/pool/options.rs@v0.8.6`（`PgPoolOptions` builder + `connect_with`）。
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rss_request_context::TenantId;
+use rustls::RootCertStore;
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use sqlx_core::net::tls::{ExclusiveExplicitRoots, exclusive_explicit_roots};
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
@@ -29,12 +32,6 @@ pub(crate) const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_IDLE_TIMEOUT: Option<Duration> = Some(Duration::from_secs(600));
 /// 默认连接最大存活时间（与 sqlx 0.8.6 缺省同值）。
 pub(crate) const DEFAULT_MAX_LIFETIME: Option<Duration> = Some(Duration::from_secs(1_800));
-/// 默认 TLS 模式：`VerifyFull`（零信任 / MDM：强制 TLS **且**校验服务端证书链 + 主机名——杜绝静默明文
-/// 回退与 MITM）。sqlx 0.8 仅 `VerifyCa`/`VerifyFull` 拒无效证书、仅 `VerifyFull` 校验主机名；`Require`
-/// 只加密不验证身份（可被 MITM），`Prefer`（sqlx 缺省）更会回退明文，故均**不**用作 RSS 默认。内部 /
-/// 私有 CA 经 [`PgConfig::with_ssl_root_cert`] 注入根证书；本地无 TLS 开发经 [`PgConfig::with_ssl_mode`]
-/// 显式降级——不静默。
-pub(crate) const DEFAULT_SSL_MODE: PgSslMode = PgSslMode::VerifyFull;
 /// Default `application_name` for explicit maintenance/test connections.
 const APPLICATION_NAME: &str = "rss-postgres-maintenance";
 const WRITER_APPLICATION_NAME: &str = "rss-postgres-writer";
@@ -373,10 +370,60 @@ impl std::fmt::Debug for PgPassword {
     }
 }
 
+/// Explicit, non-empty PostgreSQL private-CA bundle.
+///
+/// The PEM and capability witness are private so production composition cannot construct a
+/// VerifyFull connection without the audited exclusive-root SQLx implementation.
+#[derive(Clone)]
+pub struct PgPrivateCa {
+    pem: Arc<[u8]>,
+    _exclusive_roots: ExclusiveExplicitRoots,
+}
+
+/// Invalid explicit PostgreSQL private-CA bundle. The fixed message never contains PEM contents.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid PostgreSQL private CA PEM")]
+pub struct PgPrivateCaError;
+
+impl PgPrivateCa {
+    /// Parse at least one PEM certificate and validate every certificate as a rustls trust anchor.
+    pub fn from_pem(pem: Vec<u8>) -> Result<Self, PgPrivateCaError> {
+        let certificates = CertificateDer::pem_slice_iter(&pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| PgPrivateCaError)?;
+        if certificates.is_empty() {
+            return Err(PgPrivateCaError);
+        }
+        let mut roots = RootCertStore::empty();
+        for certificate in certificates {
+            roots
+                .add(certificate.into_owned())
+                .map_err(|_| PgPrivateCaError)?;
+        }
+        Ok(Self {
+            pem: Arc::from(pem),
+            _exclusive_roots: exclusive_explicit_roots(),
+        })
+    }
+}
+
+impl std::fmt::Debug for PgPrivateCa {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PgPrivateCa(<redacted>)")
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PgTlsTrust {
+    PrivateCa(PgPrivateCa),
+    #[cfg(any(test, feature = "test-support"))]
+    PlaintextForTest,
+}
+
 /// postgres adapter 连接 + 连接池配置——adapter 拥有的稳定配置面，组合根据此构造（无需识 sqlx 类型）。
 ///
-/// 连接参数（host / port / database / username / password）必填经 [`PgConfig::new`]；TLS 模式默认
-/// [`DEFAULT_SSL_MODE`]（`VerifyFull`，零信任）、池 tuning 取默认，均经 `with_*` 累加调整。最终由
+/// 连接参数与 [`PgPrivateCa`] 必填经 [`PgConfig::new`]；TLS 固定 `VerifyFull`，池 tuning 取默认并经
+/// `with_*` 累加调整。最终由
 /// `PgStore::connect`（`pub(crate)` funnel，经 [`crate::PgRuntimeDeps::setup`]）调 [`PgConfig::validate`]
 /// fail-fast 校验。
 #[derive(Clone, Debug)]
@@ -386,8 +433,7 @@ pub struct PgConfig {
     database: String,
     username: String,
     password: PgPassword,
-    ssl_mode: PgSslMode,
-    ssl_root_cert: Option<PathBuf>,
+    tls: PgTlsTrust,
     min_connections: u32,
     max_connections: u32,
     acquire_timeout: Duration,
@@ -396,8 +442,7 @@ pub struct PgConfig {
 }
 
 impl PgConfig {
-    /// 由必填连接参数构造；TLS 默认 [`DEFAULT_SSL_MODE`]，池 tuning 显式固定为 sqlx 0.8.6
-    /// 缺省值。连接借出前的健康检查恒为开启且不提供关闭开关。
+    /// 由必填连接参数与独占私有 CA 构造；TLS 固定 VerifyFull。连接借出前的健康检查恒为开启且不提供关闭开关。
     #[must_use]
     pub fn new(
         host: impl Into<String>,
@@ -405,6 +450,45 @@ impl PgConfig {
         database: impl Into<String>,
         username: impl Into<String>,
         password: PgPassword,
+        private_ca: PgPrivateCa,
+    ) -> Self {
+        Self::new_with_tls(
+            host,
+            port,
+            database,
+            username,
+            password,
+            PgTlsTrust::PrivateCa(private_ca),
+        )
+    }
+
+    /// Construct an explicitly plaintext PostgreSQL config for test-only container fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn new_for_test_plaintext(
+        host: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        username: impl Into<String>,
+        password: PgPassword,
+    ) -> Self {
+        Self::new_with_tls(
+            host,
+            port,
+            database,
+            username,
+            password,
+            PgTlsTrust::PlaintextForTest,
+        )
+    }
+
+    fn new_with_tls(
+        host: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        username: impl Into<String>,
+        password: PgPassword,
+        tls: PgTlsTrust,
     ) -> Self {
         Self {
             host: host.into(),
@@ -412,30 +496,13 @@ impl PgConfig {
             database: database.into(),
             username: username.into(),
             password,
-            ssl_mode: DEFAULT_SSL_MODE,
-            ssl_root_cert: None,
+            tls,
             min_connections: DEFAULT_MIN_CONNECTIONS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_lifetime: DEFAULT_MAX_LIFETIME,
         }
-    }
-
-    /// 调整 TLS 模式（默认 [`DEFAULT_SSL_MODE`] = `VerifyFull`）。本地无 TLS 开发须**显式**降级
-    /// （如 `PgSslMode::Prefer`），不静默。
-    #[must_use]
-    pub fn with_ssl_mode(mut self, mode: PgSslMode) -> Self {
-        self.ssl_mode = mode;
-        self
-    }
-
-    /// 注入服务端证书校验用的根 CA 证书（PEM/DER 路径）。内部 / 私有 CA 部署下，`VerifyFull` 需此才能
-    /// 校验非公共 CA 签发的服务端证书（否则只信 webpki-roots 公共根）。
-    #[must_use]
-    pub fn with_ssl_root_cert(mut self, path: impl Into<PathBuf>) -> Self {
-        self.ssl_root_cert = Some(path.into());
-        self
     }
 
     /// 调整每个池尽力维持的最小连接数（默认 0）。
@@ -519,25 +586,27 @@ impl PgConfig {
             .test_before_acquire(true)
     }
 
-    /// 映射为 sqlx 连接描述（密码经 [`PgPassword::expose`] 仅在此传入 sqlx，不外泄；TLS 模式显式注入）。
+    /// 映射为 sqlx 连接描述（密码经 [`PgPassword::expose`] 仅在此传入 sqlx，不外泄）。
     #[cfg(test)]
     pub(crate) fn connect_options(&self) -> PgConnectOptions {
         self.connect_options_for(APPLICATION_NAME)
     }
 
     fn connect_options_for(&self, application_name: &'static str) -> PgConnectOptions {
-        let mut opts = PgConnectOptions::new()
+        let opts = PgConnectOptions::new()
             .host(&self.host)
             .port(self.port)
             .database(&self.database)
             .username(&self.username)
             .password(self.password.expose())
-            .ssl_mode(self.ssl_mode)
             .application_name(application_name);
-        if let Some(ref cert) = self.ssl_root_cert {
-            opts = opts.ssl_root_cert(cert);
+        match &self.tls {
+            PgTlsTrust::PrivateCa(private_ca) => opts
+                .ssl_mode(PgSslMode::VerifyFull)
+                .ssl_root_cert_from_pem(private_ca.pem.to_vec()),
+            #[cfg(any(test, feature = "test-support"))]
+            PgTlsTrust::PlaintextForTest => opts.ssl_mode(PgSslMode::Disable),
         }
-        opts
     }
 }
 
@@ -3859,7 +3928,7 @@ mod tests {
     use super::*;
 
     fn sample() -> PgConfig {
-        PgConfig::new(
+        PgConfig::new_for_test_plaintext(
             "db.internal",
             5432,
             "rss",
@@ -3894,31 +3963,31 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_host() {
-        let cfg = PgConfig::new("", 5432, "rss", "u", PgPassword::new("p"));
+        let cfg = PgConfig::new_for_test_plaintext("", 5432, "rss", "u", PgPassword::new("p"));
         assert!(matches!(cfg.validate(), Err(PgError::EmptyHost)));
     }
 
     #[test]
     fn validate_rejects_blank_database() {
-        let cfg = PgConfig::new("h", 5432, "   ", "u", PgPassword::new("p"));
+        let cfg = PgConfig::new_for_test_plaintext("h", 5432, "   ", "u", PgPassword::new("p"));
         assert!(matches!(cfg.validate(), Err(PgError::EmptyDatabase)));
     }
 
     #[test]
     fn validate_rejects_blank_username() {
-        let cfg = PgConfig::new("h", 5432, "rss", "  ", PgPassword::new("p"));
+        let cfg = PgConfig::new_for_test_plaintext("h", 5432, "rss", "  ", PgPassword::new("p"));
         assert!(matches!(cfg.validate(), Err(PgError::EmptyUsername)));
     }
 
     #[test]
     fn validate_rejects_empty_password() {
-        let cfg = PgConfig::new("h", 5432, "rss", "u", PgPassword::new(""));
+        let cfg = PgConfig::new_for_test_plaintext("h", 5432, "rss", "u", PgPassword::new(""));
         assert!(matches!(cfg.validate(), Err(PgError::EmptyPassword)));
     }
 
     #[test]
     fn validate_rejects_zero_port() {
-        let cfg = PgConfig::new("h", 0, "rss", "u", PgPassword::new("p"));
+        let cfg = PgConfig::new_for_test_plaintext("h", 0, "rss", "u", PgPassword::new("p"));
         assert!(matches!(cfg.validate(), Err(PgError::ZeroPort)));
     }
 
@@ -4070,31 +4139,48 @@ mod tests {
     }
 
     #[test]
-    fn connect_options_defaults_to_verify_full_tls() {
-        // 零信任默认：未显式降级时 ssl_mode = VerifyFull（强制 TLS + 校验证书链/主机名，杜绝明文回退与 MITM）。
+    fn test_only_plaintext_constructor_disables_tls() {
         assert!(matches!(
             sample().connect_options().get_ssl_mode(),
-            PgSslMode::VerifyFull
+            PgSslMode::Disable
         ));
     }
 
     #[test]
-    fn with_ssl_mode_overrides_default() {
-        let opts = sample().with_ssl_mode(PgSslMode::Disable).connect_options();
-        assert!(matches!(opts.get_ssl_mode(), PgSslMode::Disable));
+    fn private_ca_rejects_empty_and_malformed_pem() {
+        assert!(PgPrivateCa::from_pem(Vec::new()).is_err());
+        assert!(PgPrivateCa::from_pem(b"not a certificate".to_vec()).is_err());
+        assert!(
+            PgPrivateCa::from_pem(
+                b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n".to_vec()
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn with_ssl_root_cert_preserves_path_and_verify_full_default() {
-        let opts = sample()
-            .with_ssl_root_cert("/run/rss/pg-root-ca.pem")
-            .connect_options();
-        assert!(matches!(opts.get_ssl_mode(), PgSslMode::VerifyFull));
-        let rendered = format!("{opts:?}");
-        assert!(
-            rendered.contains("pg-root-ca.pem"),
-            "root cert path must be passed to sqlx connect options: {rendered}"
+    fn private_ca_config_is_fixed_verify_full() -> Result<(), Box<dyn std::error::Error>> {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate()?;
+        let pem = params.self_signed(&key)?.pem().into_bytes();
+        let private_ca = PgPrivateCa::from_pem(pem)?;
+        let config = PgConfig::new(
+            "db.internal",
+            5432,
+            "rss",
+            "rss_app",
+            PgPassword::new("s3cr3t-value"),
+            private_ca,
         );
+
+        assert!(matches!(
+            config.connect_options().get_ssl_mode(),
+            PgSslMode::VerifyFull
+        ));
+        Ok(())
     }
 
     #[test]
@@ -4103,7 +4189,6 @@ mod tests {
         assert!(sample().validate().is_ok());
         assert_eq!(DEFAULT_MAX_CONNECTIONS, 10);
         assert_eq!(DEFAULT_ACQUIRE_TIMEOUT, Duration::from_secs(30));
-        assert!(matches!(DEFAULT_SSL_MODE, PgSslMode::VerifyFull));
     }
 
     #[test]
@@ -4274,14 +4359,13 @@ mod tests {
         );
 
         let params = fixture.owner_params();
-        let serving_config = PgConfig::new(
+        let serving_config = PgConfig::new_for_test_plaintext(
             params.host.clone(),
             params.port,
             params.database.clone(),
             "rss_app",
             PgPassword::new("rss_app_test_pw"),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(Duration::from_secs(5));
         let verified = PgStore::connect_verified_writer(&serving_config).await?;
         verified.store_arc().shutdown().await?;

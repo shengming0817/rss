@@ -21,7 +21,7 @@ use postgres::{
     UNVERIFIED_DEVICE_LATENT_OPERATOR,
 };
 
-use crate::infra::pg::{build_pg_device_latent_read_config, build_pg_migrator_config};
+use crate::infra::pg::{PgDeviceLatentCommandConfigs, build_pg_device_latent_command_configs};
 use crate::phase::OperatorRuntimeInputs;
 
 const STATUS_CONTRACT_ID: &str =
@@ -454,6 +454,7 @@ pub(super) trait DeviceLatentInspectionRuntime {
 
 struct ProductionDeviceLatentInspectionRuntime<'a> {
     runtime_inputs: &'a OperatorRuntimeInputs,
+    pg: PgDeviceLatentCommandConfigs,
 }
 
 impl DeviceLatentInspectionRuntime for ProductionDeviceLatentInspectionRuntime<'_> {
@@ -461,23 +462,15 @@ impl DeviceLatentInspectionRuntime for ProductionDeviceLatentInspectionRuntime<'
     type ReaderSession = PgDeviceLatentInspectionDeps;
 
     async fn connect_operator(&self) -> Result<Self::OperatorSession, DeviceLatentInspectionError> {
-        let migrator_config = close_error(
-            build_pg_migrator_config(self.runtime_inputs.config()),
-            DeviceLatentInspectionError::Configuration,
-        )?;
         close_error(
-            PgDeviceLatentOperatorDeps::connect(&migrator_config).await,
+            PgDeviceLatentOperatorDeps::connect(&self.pg.operator).await,
             DeviceLatentInspectionError::Storage,
         )
     }
 
     async fn connect_reader(&self) -> Result<Self::ReaderSession, DeviceLatentInspectionError> {
-        let reader_config = close_error(
-            build_pg_device_latent_read_config(self.runtime_inputs.config()),
-            DeviceLatentInspectionError::Configuration,
-        )?;
         close_error(
-            PgDeviceLatentInspectionDeps::connect(&reader_config).await,
+            PgDeviceLatentInspectionDeps::connect(&self.pg.reader).await,
             DeviceLatentInspectionError::Storage,
         )
     }
@@ -596,7 +589,9 @@ pub async fn run_device_latent_inspection_command(
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let parsed = prepared.0;
-    let runtime = ProductionDeviceLatentInspectionRuntime { runtime_inputs };
+    let pg = build_pg_device_latent_command_configs(runtime_inputs.config())
+        .map_err(|_| DeviceLatentInspectionError::Configuration)?;
+    let runtime = ProductionDeviceLatentInspectionRuntime { runtime_inputs, pg };
     run_device_latent_inspection_command_with_runtime(parsed, &runtime)
         .await
         .map_err(anyhow::Error::from)

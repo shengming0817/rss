@@ -15,12 +15,17 @@ integration = ["testkit/containers"]
 [dependencies]
 postgres-migration-inventory = { path = "../../crates/postgres-migration-inventory" }
 sqlx = { workspace = true }
+sqlx-core = { workspace = true, features = ["rss-exclusive-explicit-roots"] }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 secure = { path = "../../crates/secure" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 testkit = { path = "../../crates/testkit" }
+rcgen = { workspace = true }

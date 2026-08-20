@@ -4543,14 +4543,13 @@ async fn t9e_published_settle_pool_wait_is_bounded_and_preserves_state() -> Test
     )?;
     set_test_relay_budget_policy(&owner, budget).await?;
     let p = pg.owner_params();
-    let single_config = PgConfig::new(
+    let single_config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(1)
     .with_acquire_timeout(Duration::from_secs(5));
     let single = PgStore::connect(&single_config).await?;
@@ -4627,14 +4626,13 @@ async fn t9e_expired_settlement_preflight_performs_no_pool_io() -> TestResult {
     )?;
     set_test_relay_budget_policy(&owner, budget).await?;
     let p = pg.owner_params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(1)
     .with_acquire_timeout(Duration::from_secs(5));
     let single = PgStore::connect(&config).await?;
@@ -4688,14 +4686,13 @@ async fn t9e_claim_pool_wait_does_not_consume_an_unminted_local_lease() -> TestR
     set_test_relay_budget_policy(&owner, budget).await?;
 
     let p = pg.owner_params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(1)
     .with_acquire_timeout(Duration::from_secs(5));
     let single = PgStore::connect(&config).await?;
@@ -4729,14 +4726,13 @@ async fn t9e_claim_sql_delay_exhausts_local_budget_before_any_publish_io() -> Te
     set_test_relay_budget_policy(&owner, budget).await?;
 
     let p = pg.owner_params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(1)
     .with_acquire_timeout(Duration::from_secs(5));
     let single = PgStore::connect(&config).await?;

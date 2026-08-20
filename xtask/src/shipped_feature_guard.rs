@@ -54,6 +54,11 @@ const GUARDED_FEATURES: &[GuardedFeature] = &[
         feature: "fault-matrix-test-support",
         rule: Rule::RedisFaultMatrixTestSupport,
     },
+    GuardedFeature {
+        crate_name: "postgres",
+        feature: "test-support",
+        rule: Rule::PostgresTestSupport,
+    },
 ];
 const OPERATOR_CLI_CRATE: &str = "runtime";
 const OPERATOR_CLI_FEATURE: &str = "operator-cli";
@@ -72,6 +77,8 @@ pub(crate) enum Rule {
     AmqpIntegrationTestSupport,
     /// Production graph enabled raw Redis pool fault-matrix constructors.
     RedisFaultMatrixTestSupport,
+    /// Production graph enabled the plaintext-only Postgres test constructor.
+    PostgresTestSupport,
     /// Serving binary enabled `runtime/operator-cli` (pulls clap).
     ServerOperatorCli,
     /// Serving binary selected the external `clap` package (direct or transitive).
@@ -326,6 +333,11 @@ mod tests {
                     feature: "fault-matrix-test-support",
                     rule: Rule::RedisFaultMatrixTestSupport,
                 },
+                GuardedFeature {
+                    crate_name: "postgres",
+                    feature: "test-support",
+                    rule: Rule::PostgresTestSupport,
+                },
             ]
         );
         Ok(())
@@ -484,7 +496,7 @@ mod tests {
             "artifact/operator production graphs must stay clean: {findings:?}"
         );
         assert!(summary.contains("4 shipped binaries"));
-        assert!(summary.contains("6 个登记的非生产 feature"));
+        assert!(summary.contains("7 个登记的非生产 feature"));
         assert!(summary.contains("server 未启用 operator-cli"));
         assert!(summary.contains("未选中 clap"));
         Ok(())
@@ -641,6 +653,7 @@ mod tests {
             ("settings", package_path("settings")),
             ("amqp", package_path("amqp")),
             ("redis-adapter", package_path("redis-adapter")),
+            ("postgres", package_path("postgres")),
         ];
         let ids = package_paths
             .iter()
@@ -777,6 +790,7 @@ mod tests {
             "settings" => "/workspace/crates/settings",
             "amqp" => "/workspace/adapters/amqp",
             "redis-adapter" => "/workspace/adapters/redis",
+            "postgres" => "/workspace/adapters/postgres",
             _ => "/workspace/invalid",
         }
     }

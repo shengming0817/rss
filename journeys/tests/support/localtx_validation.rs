@@ -36,7 +36,7 @@ use identity::{CredentialSecurityService, LoginService};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
     ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
-    PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
+    PgRuntimeDeps, PgTenantReadConfig, caps,
 };
 use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey};
 use rss_request_context::{PrincipalKind, TenantId};
@@ -829,14 +829,13 @@ fn test_authenticated(
 }
 
 fn pg_config(params: &testkit::PgConnParams) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         params.host.clone(),
         params.port,
         params.database.clone(),
         params.username.clone(),
         PgPassword::new(params.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
@@ -859,14 +858,13 @@ struct ProvisionedTestPgCredential {
 impl ProvisionedTestPgCredential {
     fn config(&self) -> PgConfig {
         let params = self.role.params();
-        PgConfig::new(
+        PgConfig::new_for_test_plaintext(
             params.host.clone(),
             params.port,
             params.database.clone(),
             params.username.clone(),
             PgPassword::new(params.password.clone()),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(Duration::from_secs(5))
     }
 }

@@ -223,7 +223,7 @@
         "database",
         "host",
         "port",
-        "sslMode"
+        "sslRootCertPath"
       ],
       "properties": {
         "database": {
@@ -241,14 +241,9 @@
           "format": "uint16",
           "minimum": 1.0
         },
-        "sslMode": {
-          "$ref": "#/definitions/PgSslMode"
-        },
         "sslRootCertPath": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false
@@ -273,13 +268,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "PgSslMode": {
-      "type": "string",
-      "enum": [
-        "disable",
-        "verifyFull"
-      ]
     },
     "PgWriterRoleConfig": {
       "type": "object",

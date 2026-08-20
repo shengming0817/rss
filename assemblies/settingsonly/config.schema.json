@@ -318,7 +318,6 @@
         "projectionWorker",
         "reader",
         "readinessSeconds",
-        "sslMode",
         "sslRootCertPath",
         "writer"
       ],
@@ -359,12 +358,9 @@
           "maximum": 300.0,
           "minimum": 1.0
         },
-        "sslMode": {
-          "type": "string",
-          "const": "verifyFull"
-        },
         "sslRootCertPath": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "writer": {
           "$ref": "#/definitions/PgWriterRoleConfig"

@@ -26,8 +26,7 @@ use diport::{
     SecretResolverError,
 };
 use postgres::{
-    ConfigValueProtections, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,
-    caps,
+    ConfigValueProtections, PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig, caps,
 };
 use rss_request_context::TenantId;
 use settings::SecretService;
@@ -203,14 +202,13 @@ async fn connect_pg_and_setup()
 }
 
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

@@ -46,9 +46,7 @@ use sqlx::{PgPool, Row};
 
 use crate::cotx::eventing::SagaFaultObservationRow;
 use crate::cotx::{FaultMatrixReadLane, FaultMatrixWriteLane, TenantDb, infra_tenant_scope};
-use crate::{
-    DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,
-};
+use crate::{DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig};
 
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
@@ -1968,14 +1966,13 @@ impl FaultMatrixPublishOutcome {
 }
 
 fn pg_config(host: &str, port: u16, database: &str, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         host.to_string(),
         port,
         database.to_string(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

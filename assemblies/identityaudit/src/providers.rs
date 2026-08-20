@@ -357,7 +357,7 @@ async fn build_postgres(
         writer_password,
         reader_password,
         audit_admin_password,
-    );
+    )?;
     let owner = postgres::PgRuntimeDeps::connect_serving(
         &serving,
         &reader,
@@ -374,30 +374,27 @@ fn postgres_setup_configs(
     writer_password: zeroize::Zeroizing<String>,
     reader_password: zeroize::Zeroizing<String>,
     audit_admin_password: zeroize::Zeroizing<String>,
-) -> (
+) -> anyhow::Result<(
     postgres::PgConfig,
     postgres::PgTenantReadConfig,
     postgres::PgConfig,
-) {
+)> {
     let (connection, writer, reader, audit_admin) = config.into_postgres_inputs();
-    let (host, port, database, ssl_mode, root_cert) = connection.into_connect_options();
+    let (host, port, database, root_cert) = connection.into_connect_options();
+    let private_ca = postgres::PgPrivateCa::from_pem(
+        std::fs::read(&root_cert).context("read identityaudit PostgreSQL private CA PEM")?,
+    )
+    .context("parse identityaudit PostgreSQL private CA PEM")?;
     let make = |username: String, password: String, max_connections: u32| {
-        let mut value = postgres::PgConfig::new(
+        postgres::PgConfig::new(
             host.clone(),
             port,
             database.clone(),
             username,
             postgres::PgPassword::new(password),
+            private_ca.clone(),
         )
-        .with_ssl_mode(match ssl_mode {
-            config::PgSslMode::Disable => postgres::PgSslMode::Disable,
-            config::PgSslMode::VerifyFull => postgres::PgSslMode::VerifyFull,
-        })
-        .with_max_connections(max_connections);
-        if let Some(path) = root_cert.clone() {
-            value = value.with_ssl_root_cert(path);
-        }
-        value
+        .with_max_connections(max_connections)
     };
     let (writer_name, writer_max) = writer.into_writer_pool();
     let (reader_name, reader_max) = reader.into_reader_pool();
@@ -413,7 +410,7 @@ fn postgres_setup_configs(
         audit_admin_password.to_string(),
         audit_admin_max,
     );
-    (serving, reader, audit_admin)
+    Ok((serving, reader, audit_admin))
 }
 
 async fn build_redis(
@@ -1888,18 +1885,15 @@ mod tests {
     async fn provider_connection_builders_fail_closed_without_live_backends() -> anyhow::Result<()>
     {
         let document = include_str!("../identityaudit.example.toml")
-            .replace("postgres.example.com", "127.0.0.1")
-            .replace("sslMode = \"verifyFull\"", "sslMode = \"disable\"")
-            .replace("sslRootCertPath = \"/run/rss/postgres-ca.pem\"\n", "");
+            .replace("postgres.example.com", "127.0.0.1");
         let config = crate::config::parse_for_test(&document)?;
         let (_, _, _, postgres, _, _, _) = config.into_sections();
         let secret = || zeroize::Zeroizing::new("coverage-secret".to_owned());
         let configs = postgres_setup_configs(postgres, secret(), secret(), secret());
-        let rendered = format!("{:?} {:?} {:?}", configs.0, configs.1, configs.2);
-        assert!(rendered.contains("127.0.0.1"));
-        assert!(rendered.contains("rss_identity_writer"));
-        assert!(rendered.contains("rss_audit_admin"));
-        assert!(!rendered.contains("coverage-secret"));
+        assert!(
+            configs.is_err(),
+            "unreadable PostgreSQL private CA must fail closed"
+        );
         let ca = redis::RedisPrivateCa::from_pem(
             b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n".to_vec(),
         )?;

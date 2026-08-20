@@ -722,14 +722,13 @@ pub(in super::super) fn runtime_pg_config(
     username: &str,
     password: &str,
 ) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(std::time::Duration::from_secs(5))
 }
 
@@ -774,7 +773,10 @@ pub(in super::super) async fn provision_runtime_logins(
     Ok(())
 }
 
-pub(in super::super) struct TestCaFile(std::path::PathBuf);
+pub(in super::super) struct TestCaFile {
+    path: std::path::PathBuf,
+    pem: Vec<u8>,
+}
 
 impl TestCaFile {
     pub(in super::super) fn write(label: &str, pem: &str) -> Result<Self, std::io::Error> {
@@ -783,18 +785,19 @@ impl TestCaFile {
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
-        std::fs::write(&path, pem)?;
-        Ok(Self(path))
+        let pem = pem.as_bytes().to_vec();
+        std::fs::write(&path, &pem)?;
+        Ok(Self { path, pem })
     }
 
-    pub(in super::super) fn path(&self) -> &std::path::Path {
-        &self.0
+    pub(in super::super) fn private_ca(&self) -> Result<PgPrivateCa, crate::PgPrivateCaError> {
+        PgPrivateCa::from_pem(self.pem.clone())
     }
 }
 
 impl Drop for TestCaFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -803,17 +806,16 @@ pub(in super::super) fn private_ca_pg_config(
     username: &str,
     password: &str,
     ca_file: &TestCaFile,
-) -> PgConfig {
-    PgConfig::new(
+) -> Result<PgConfig, crate::PgPrivateCaError> {
+    Ok(PgConfig::new(
         params.host.clone(),
         params.port,
         params.database.clone(),
         username,
         PgPassword::new(password),
+        ca_file.private_ca()?,
     )
-    .with_ssl_mode(PgSslMode::VerifyFull)
-    .with_ssl_root_cert(ca_file.path())
-    .with_acquire_timeout(std::time::Duration::from_secs(5))
+    .with_acquire_timeout(std::time::Duration::from_secs(5)))
 }
 
 pub(in super::super) async fn setup_runtime_deps_with_projection_inputs(
@@ -862,14 +864,13 @@ pub(in super::super) fn isolated_database_config(
     p: &testkit::PgConnParams,
     database: &str,
 ) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         database.to_string(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(std::time::Duration::from_secs(5))
 }
 
@@ -879,14 +880,13 @@ pub(in super::super) fn isolated_database_role_config(
     username: &str,
     password: &str,
 ) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         database.to_string(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(std::time::Duration::from_secs(5))
 }
 
@@ -895,14 +895,13 @@ pub(in super::super) fn isolated_tenant_read_config(
     database: &str,
 ) -> crate::pool::PgTenantReadConfig {
     crate::pool::PgTenantReadConfig::new(
-        PgConfig::new(
+        PgConfig::new_for_test_plaintext(
             p.host.clone(),
             p.port,
             database.to_string(),
             TEST_READ_ROLE,
             PgPassword::new(TEST_READ_PASSWORD),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(std::time::Duration::from_secs(5)),
     )
 }

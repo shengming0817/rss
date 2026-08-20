@@ -34,11 +34,11 @@ use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
 use generated::http::settings_v1::SettingsConfigPublishRequest;
+use postgres::caps;
 use postgres::{
     ConfigValueProtections, DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps,
     PgTenantReadConfig,
 };
-use postgres::{PgSslMode, caps};
 use primitives::healthz::{HealthCheck, ProbeName};
 use rss_request_context::RowScope;
 use rss_request_context::{PrincipalKind, TenantId};
@@ -359,14 +359,13 @@ async fn connect_pg() -> Result<(testkit::OwnedPgFixture, PgRuntimeDeps)> {
 }
 
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

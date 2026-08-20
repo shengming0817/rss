@@ -128,14 +128,13 @@ fn full_dlx_bootstrap_env(name: &str) -> Option<String> {
 }
 
 fn test_dlx_pg_config(username: &str) -> ::postgres::PgConfig {
-    ::postgres::PgConfig::new(
+    ::postgres::PgConfig::new_for_test_plaintext(
         "postgres.internal",
         5432,
         "rss",
         username,
         ::postgres::PgPassword::new("test-only-password"),
     )
-    .with_ssl_mode(::postgres::PgSslMode::Disable)
 }
 
 #[allow(clippy::expect_used)]

@@ -12,9 +12,11 @@ settingsonly 只接受 `schemaVersion = 2`、`profile = "production"`、
 S3 WORM DLX archive、federated OIDC、rate limit、Prometheus 与 `runtimeexec`；v1、demo topology、缺失
 section、未知字段、别名和 ambient fallback 均拒绝。
 
-PostgreSQL TLS 策略只接受 `sslMode = "verifyFull"`；其他模式在文档反序列化阶段拒绝。五个 workload role
-由组合根固定为 `rss_app`、`rss_app_read`、`rss_dlx_archiver`、`rss_dlx_verifier`、`rss_dlx_purger`，
-TOML 只配置各 role 的 `maxConnections`。旧 `username` 字段属于未知字段并直接拒绝，不提供 alias、默认值或兼容路径。
+PostgreSQL TLS 不再暴露 mode 配置：`sslRootCertPath` 必填并在启动时解析为独占 `PgPrivateCa`，连接固定
+`VerifyFull`，公共 WebPKI roots 不会叠加；旧 `sslMode` 是未知字段并在文档反序列化阶段拒绝。六个 workload role
+由组合根固定为 `rss_app`、`rss_app_read`、`rss_dlx_archiver`、`rss_dlx_verifier`、`rss_dlx_purger`、
+`rss_projection_worker`。TOML 只配置各 role 的 `maxConnections`，连接预算必须按六个独立 pool 的
+`maxConnections` 总和计算。旧 `username` 字段属于未知字段并直接拒绝，不提供 alias、默认值或兼容路径。
 
 该 binary 有三个独立 loopback listener：Primary 默认 `127.0.0.1:8080`；Admin 默认
 `127.0.0.1:8082`，仅承载 `GET /api/v1/runtime/inventory`；Health 默认 `127.0.0.1:8083`。inventory 要求
@@ -104,7 +106,7 @@ matrix、CRUD、ACL、rollback 和下层 settlement 语义仍由既有 T1/T2 own
 
 - settingsonly TOML；
 - federated ES256 JWKS；
-- PostgreSQL 私有 CA（配置 `verifyFull` 时）；
+- PostgreSQL 私有 CA（无条件必填；连接固定 `VerifyFull`，旧 `sslMode` 不可配置）；
 - Vault、Settings AMQP、Redis 与 S3 私有 CA。
 
 secret 只经 `/var/run/rss/secrets/serving-secret-bundle` 的固定闭合字段注入；不得写入 TOML、Docker argv、

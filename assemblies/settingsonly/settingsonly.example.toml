@@ -28,7 +28,6 @@ trustedKinds = ["user", "device", "admin", "superAdmin"]
 host = "postgres.example.com"
 port = 5432
 database = "rss"
-sslMode = "verifyFull"
 sslRootCertPath = "/run/rss/postgres-ca.pem"
 readinessSeconds = 15
 

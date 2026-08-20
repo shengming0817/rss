@@ -9,7 +9,11 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 
+use rustls::RootCertStore;
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use sqlx_core::net::tls::{ExclusiveExplicitRoots, exclusive_explicit_roots};
 use tracing::Instrument as _;
 use zeroize::Zeroizing;
 
@@ -28,6 +32,14 @@ pub enum MigrationError {
     InvalidDatabaseUrl(#[source] sqlx::Error),
     #[error("postgres migration database URL must use sslmode=verify-full")]
     WeakTransport,
+    #[error("postgres migration database URL must contain exactly one sslrootcert path")]
+    MissingPrivateCa,
+    #[error("postgres migration sslrootcert path is invalid")]
+    InvalidPrivateCaPath,
+    #[error("postgres migration private CA file cannot be read")]
+    PrivateCaFile(#[source] std::io::Error),
+    #[error("postgres migration private CA PEM is invalid")]
+    InvalidPrivateCa,
     #[error("postgres migration connection failed")]
     Connect(#[source] sqlx::Error),
     #[error("postgres migration failed")]
@@ -52,6 +64,7 @@ pub enum MigrationError {
 
 struct MigrationConfig {
     options: PgConnectOptions,
+    _exclusive_roots: ExclusiveExplicitRoots,
 }
 
 impl MigrationConfig {
@@ -81,18 +94,61 @@ impl MigrationConfig {
             });
         }
         let url = read_secret_file(&url_path)?;
-        let options = PgConnectOptions::from_str(url.as_str())
+        let mut options = PgConnectOptions::from_str(url.as_str())
             .map_err(MigrationError::InvalidDatabaseUrl)?
             .application_name("rss-postgres-migrate-all");
         if !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
             return Err(MigrationError::WeakTransport);
         }
-        Ok(Self { options })
+        let ca_pem = private_ca_pem_from_database_url(url.as_str())?;
+        options = options.ssl_root_cert_from_pem(ca_pem);
+        Ok(Self {
+            options,
+            _exclusive_roots: exclusive_explicit_roots(),
+        })
     }
 
     fn connect_options(&self) -> PgConnectOptions {
         self.options.clone()
     }
+}
+
+fn private_ca_pem_from_database_url(url: &str) -> Result<Vec<u8>, MigrationError> {
+    let parsed = url::Url::parse(url).map_err(|_| MigrationError::InvalidPrivateCaPath)?;
+    let root_paths = parsed
+        .query_pairs()
+        .filter_map(|(key, value)| (key == "sslrootcert").then_some(value.into_owned()))
+        .collect::<Vec<_>>();
+    let [root_path] = root_paths.as_slice() else {
+        return Err(MigrationError::MissingPrivateCa);
+    };
+    let path = PathBuf::from(root_path.trim());
+    if root_path.trim().is_empty()
+        || !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(MigrationError::InvalidPrivateCaPath);
+    }
+    let metadata = std::fs::metadata(&path).map_err(MigrationError::PrivateCaFile)?;
+    if !metadata.is_file() {
+        return Err(MigrationError::InvalidPrivateCaPath);
+    }
+    let pem = std::fs::read(path).map_err(MigrationError::PrivateCaFile)?;
+    let certificates = CertificateDer::pem_slice_iter(&pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| MigrationError::InvalidPrivateCa)?;
+    if certificates.is_empty() {
+        return Err(MigrationError::InvalidPrivateCa);
+    }
+    let mut roots = RootCertStore::empty();
+    for certificate in certificates {
+        roots
+            .add(certificate.into_owned())
+            .map_err(|_| MigrationError::InvalidPrivateCa)?;
+    }
+    Ok(pem)
 }
 
 fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, MigrationError> {
@@ -300,6 +356,22 @@ mod tests {
         HashMap::from([(DATABASE_URL_FILE_ENV, path.display().to_string())])
     }
 
+    #[allow(clippy::expect_used)]
+    fn write_private_ca(label: &str) -> PathBuf {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate().expect("generate CA key");
+        let pem = params.self_signed(&key).expect("self-sign CA").pem();
+        let path = std::env::temp_dir().join(format!(
+            "rss-postgres-migration-{label}-{}-ca.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, pem).expect("write CA fixture");
+        path
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn database_url_is_file_only_and_trailing_newline_is_removed() {
@@ -307,9 +379,13 @@ mod tests {
             "rss-postgres-migration-secret-{}",
             std::process::id()
         ));
+        let ca_path = write_private_ca("valid-url");
         std::fs::write(
             &path,
-            "postgres://rss_migrator:secret-value@postgres.internal:5432/rss?sslmode=verify-full\n",
+            format!(
+                "postgres://rss_migrator:secret-value@postgres.internal:5432/rss?sslmode=verify-full&sslrootcert={}\n",
+                ca_path.display()
+            ),
         )
         .expect("write secret fixture");
         let values = base(&path);
@@ -317,6 +393,110 @@ mod tests {
             .expect("file-backed migration config");
         assert!(format!("{:?}", config.connect_options()).contains("rss_migrator"));
         std::fs::remove_file(path).expect("remove secret fixture");
+        std::fs::remove_file(ca_path).expect("remove CA fixture");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn verify_full_database_url_requires_one_valid_absolute_private_ca() {
+        let url_file = std::env::temp_dir().join(format!(
+            "rss-postgres-migration-root-policy-{}",
+            std::process::id()
+        ));
+        let ca_path = write_private_ca("root-policy");
+        let directory_path = std::env::temp_dir().join(format!(
+            "rss-postgres-migration-root-directory-{}",
+            std::process::id()
+        ));
+        let empty_path = std::env::temp_dir().join(format!(
+            "rss-postgres-migration-empty-root-{}",
+            std::process::id()
+        ));
+        let malformed_path = std::env::temp_dir().join(format!(
+            "rss-postgres-migration-malformed-root-{}",
+            std::process::id()
+        ));
+        let missing_path = std::env::temp_dir().join(format!(
+            "rss-postgres-migration-missing-root-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory_path).expect("create directory root fixture");
+        std::fs::write(&empty_path, []).expect("write empty root fixture");
+        std::fs::write(
+            &malformed_path,
+            b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write malformed root fixture");
+        let cases = [
+            (
+                "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full"
+                    .to_owned(),
+                "missing",
+            ),
+            (
+                format!(
+                    "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full&sslrootcert={}&sslrootcert={}",
+                    ca_path.display(),
+                    ca_path.display()
+                ),
+                "duplicate",
+            ),
+            (
+                "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full&sslrootcert=relative/ca.pem"
+                    .to_owned(),
+                "relative",
+            ),
+            (
+                format!(
+                    "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full&sslrootcert={}",
+                    directory_path.display()
+                ),
+                "directory",
+            ),
+            (
+                format!(
+                    "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full&sslrootcert={}",
+                    empty_path.display()
+                ),
+                "empty",
+            ),
+            (
+                format!(
+                    "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full&sslrootcert={}",
+                    malformed_path.display()
+                ),
+                "malformed",
+            ),
+            (
+                format!(
+                    "postgres://rss_migrator:secret@postgres.internal/rss?sslmode=verify-full&sslrootcert={}",
+                    missing_path.display()
+                ),
+                "missing file",
+            ),
+        ];
+        for (url, label) in cases {
+            std::fs::write(&url_file, url).expect("write URL fixture");
+            let values = base(&url_file);
+            let error = MigrationConfig::from_getter(|name| values.get(name).cloned())
+                .err()
+                .expect("invalid root policy must fail");
+            assert!(
+                matches!(
+                    error,
+                    MigrationError::MissingPrivateCa
+                        | MigrationError::InvalidPrivateCaPath
+                        | MigrationError::PrivateCaFile(_)
+                        | MigrationError::InvalidPrivateCa
+                ),
+                "unexpected {label} error: {error}"
+            );
+        }
+        std::fs::remove_file(url_file).expect("remove URL fixture");
+        std::fs::remove_file(ca_path).expect("remove CA fixture");
+        std::fs::remove_dir(directory_path).expect("remove directory root fixture");
+        std::fs::remove_file(empty_path).expect("remove empty root fixture");
+        std::fs::remove_file(malformed_path).expect("remove malformed root fixture");
     }
 
     #[test]
@@ -459,27 +639,71 @@ mod tests {
 mod integration_tests {
     use super::*;
     use sqlx::migrate::Migrate as _;
-    use sqlx::postgres::PgSslMode;
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-    fn config(params: &testkit::PgConnParams) -> MigrationConfig {
-        MigrationConfig {
-            options: PgConnectOptions::new()
-                .host(&params.host)
-                .port(params.port)
-                .database(&params.database)
-                .username(&params.username)
-                .password(&params.password)
-                .ssl_mode(PgSslMode::Prefer)
-                .application_name("rss-postgres-migrate-all-integration"),
+    struct TlsMigrationHarness {
+        _fixture: testkit::PgTlsFixture,
+        _network: testkit::BridgeNetwork,
+        config: MigrationConfig,
+        url_path: PathBuf,
+        ca_path: PathBuf,
+    }
+
+    impl Drop for TlsMigrationHarness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.url_path);
+            let _ = std::fs::remove_file(&self.ca_path);
         }
     }
 
-    async fn connection_pool(params: &testkit::PgConnParams) -> Result<sqlx::PgPool, sqlx::Error> {
+    fn config_from_tls_fixture(
+        params: &testkit::PgConnParams,
+        ca_pem: &str,
+        label: &str,
+    ) -> HarnessResult<(MigrationConfig, PathBuf, PathBuf)> {
+        let suffix = format!("{}-{label}", std::process::id());
+        let ca_path = std::env::temp_dir().join(format!("rss-migration-{suffix}-ca.pem"));
+        let url_path = std::env::temp_dir().join(format!("rss-migration-{suffix}-url"));
+        std::fs::write(&ca_path, ca_pem)?;
+        let mut url = url::Url::parse(&format!(
+            "postgres://{}:{}@{}:{}/{}",
+            params.username, params.password, params.host, params.port, params.database
+        ))?;
+        url.query_pairs_mut()
+            .append_pair("sslmode", "verify-full")
+            .append_pair("sslrootcert", &ca_path.display().to_string());
+        std::fs::write(&url_path, url.as_str())?;
+        let config = MigrationConfig::from_getter(|name| {
+            (name == DATABASE_URL_FILE_ENV).then(|| url_path.display().to_string())
+        })?;
+        Ok((config, url_path, ca_path))
+    }
+
+    async fn tls_harness(label: &str) -> HarnessResult<TlsMigrationHarness> {
+        let network = testkit::bridge_network(&format!("rss-pg-migration-{label}")).await?;
+        let dns_name = format!("{}-postgres", network.name());
+        let fixture = testkit::postgres_tls(testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: &dns_name,
+        })
+        .await?;
+        let (config, url_path, ca_path) =
+            config_from_tls_fixture(fixture.params(), fixture.ca_pem(), label)?;
+        Ok(TlsMigrationHarness {
+            _fixture: fixture,
+            _network: network,
+            config,
+            url_path,
+            ca_path,
+        })
+    }
+
+    async fn connection_pool(config: &MigrationConfig) -> Result<sqlx::PgPool, sqlx::Error> {
         PgPoolOptions::new()
             .max_connections(1)
-            .connect_with(config(params).connect_options())
+            .connect_with(config.connect_options())
             .await
     }
 
@@ -495,14 +719,13 @@ mod integration_tests {
         for statement in [
             "CREATE ROLE rss_app NOLOGIN NOBYPASSRLS",
             "CREATE ROLE rss_app_read NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-            "CREATE ROLE legacy_ledger_reader NOLOGIN",
         ] {
             sqlx::query(statement).execute(pool).await?;
         }
         Ok(())
     }
 
-    async fn assert_minimal_ledger_grants(pool: &sqlx::PgPool) -> TestResult {
+    async fn assert_closed_ledger_grants(pool: &sqlx::PgPool) -> TestResult {
         let grants: Vec<(String, String)> = sqlx::query_as(
             "SELECT grantee, privilege_type \
              FROM information_schema.table_privileges \
@@ -518,6 +741,13 @@ mod integration_tests {
             vec![
                 ("rss_app".to_owned(), "SELECT".to_owned()),
                 ("rss_app_read".to_owned(), "SELECT".to_owned()),
+                ("rss_l2_dr_recovery_auditor".to_owned(), "SELECT".to_owned(),),
+                (
+                    "rss_l2_dr_recovery_executor".to_owned(),
+                    "SELECT".to_owned(),
+                ),
+                ("rss_projection_reader".to_owned(), "SELECT".to_owned()),
+                ("rss_saga_operator".to_owned(), "SELECT".to_owned()),
             ]
         );
         Ok(())
@@ -552,17 +782,16 @@ mod integration_tests {
 
     #[tokio::test]
     async fn empty_database_reaches_exact_head_and_all_ledger_drifts_fail_closed() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?.into_owned()?;
-        let params = fixture.owner_params();
-        let config = config(params);
-        let pool = connection_pool(params).await?;
+        let harness = tls_harness("exact-head").await?;
+        let config = &harness.config;
+        let pool = connection_pool(config).await?;
         provision_closed_roles(&pool).await?;
         pool.close().await;
-        migrate_all(&config).await?;
-        let pool = connection_pool(params).await?;
+        migrate_all(config).await?;
+        let pool = connection_pool(config).await?;
         let migrator = embedded_migrator();
         verify_exact_ledger(&pool).await?;
-        assert_minimal_ledger_grants(&pool).await?;
+        assert_closed_ledger_grants(&pool).await?;
         assert_generated_projection_bindings(&pool).await?;
 
         let head = migrator
@@ -624,9 +853,9 @@ mod integration_tests {
 
     #[tokio::test]
     async fn historical_ledger_is_advanced_by_the_production_operator() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?.into_owned()?;
-        let params = fixture.owner_params();
-        let pool = connection_pool(params).await?;
+        let harness = tls_harness("historical-ledger").await?;
+        let config = &harness.config;
+        let pool = connection_pool(config).await?;
         provision_closed_roles(&pool).await?;
         let migrator = embedded_migrator();
         let mut connection = pool.acquire().await?;
@@ -638,15 +867,12 @@ mod integration_tests {
         }
         connection.unlock().await?;
         drop(connection);
-        sqlx::query("GRANT ALL ON public._sqlx_migrations TO legacy_ledger_reader")
-            .execute(&pool)
-            .await?;
         pool.close().await;
 
-        migrate_all(&config(params)).await?;
-        let pool = connection_pool(params).await?;
+        migrate_all(config).await?;
+        let pool = connection_pool(config).await?;
         verify_exact_ledger(&pool).await?;
-        assert_minimal_ledger_grants(&pool).await?;
+        assert_closed_ledger_grants(&pool).await?;
         assert_generated_projection_bindings(&pool).await?;
         pool.close().await;
         Ok(())
@@ -654,15 +880,14 @@ mod integration_tests {
 
     #[tokio::test]
     async fn migration_phase_rejects_legacy_plaintext_zero_stock_drift() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?.into_owned()?;
-        let params = fixture.owner_params();
-        let config = config(params);
-        let pool = connection_pool(params).await?;
+        let harness = tls_harness("plaintext-drift").await?;
+        let config = &harness.config;
+        let pool = connection_pool(config).await?;
         provision_closed_roles(&pool).await?;
         pool.close().await;
-        migrate_all(&config).await?;
+        migrate_all(config).await?;
 
-        let pool = connection_pool(params).await?;
+        let pool = connection_pool(config).await?;
         sqlx::query(
             "INSERT INTO public.config_entries \
              (tenant_id, config_key, version, value, protection_scheme) \
@@ -674,9 +899,29 @@ mod integration_tests {
         pool.close().await;
 
         assert!(matches!(
-            migrate_all(&config).await,
+            migrate_all(config).await,
             Err(MigrationError::LegacyPlaintextPresent { count: 1 })
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn production_tls_config_accepts_only_its_private_ca() -> TestResult {
+        let harness = tls_harness("private-ca-policy").await?;
+        let pool = connection_pool(&harness.config).await?;
+        pool.close().await;
+
+        let (wrong, wrong_url_path, wrong_ca_path) = config_from_tls_fixture(
+            harness._fixture.params(),
+            harness._fixture.wrong_ca_pem(),
+            "wrong-private-ca-policy",
+        )?;
+        assert!(matches!(
+            connect(&wrong).await,
+            Err(MigrationError::Connect(_))
+        ));
+        std::fs::remove_file(wrong_url_path)?;
+        std::fs::remove_file(wrong_ca_path)?;
         Ok(())
     }
 }

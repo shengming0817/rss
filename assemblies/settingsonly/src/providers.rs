@@ -911,23 +911,23 @@ async fn build_postgres(
         projection_worker,
         readiness_interval: readiness,
     } = config.into_postgres_inputs();
-    let (host, port, database, ssl_mode, root_cert) = connection.into_connect_options();
+    let (host, port, database, root_cert) = connection.into_connect_options();
+    let private_ca = postgres::PgPrivateCa::from_pem(
+        std::fs::read(&root_cert).context("read settingsonly PostgreSQL private CA PEM")?,
+    )
+    .context("parse settingsonly PostgreSQL private CA PEM")?;
     let (writer_name, writer_max) = writer.into_writer_pool();
     let (reader_name, reader_max) = reader.into_reader_pool();
     let make = |username: String, password: String, max_connections: u32| {
-        let mut value = postgres::PgConfig::new(
+        postgres::PgConfig::new(
             host.clone(),
             port,
             database.clone(),
             username,
             postgres::PgPassword::new(password),
+            private_ca.clone(),
         )
-        .with_ssl_mode(pg_ssl_mode(ssl_mode))
-        .with_max_connections(max_connections);
-        if let Some(path) = root_cert.clone() {
-            value = value.with_ssl_root_cert(path);
-        }
-        value
+        .with_max_connections(max_connections)
     };
     let serving = make(
         writer_name,
@@ -976,12 +976,6 @@ async fn build_postgres(
         projection_worker,
         readiness,
     })
-}
-
-const fn pg_ssl_mode(mode: config::PgSslMode) -> postgres::PgSslMode {
-    match mode {
-        config::PgSslMode::VerifyFull => postgres::PgSslMode::VerifyFull,
-    }
 }
 
 struct VaultProvider {

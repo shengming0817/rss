@@ -13,7 +13,7 @@ use generated::http::identity_v1::login::SPEC as LOGIN_SPEC;
 use generated::http::identity_v1::refresh::SPEC as REFRESH_SPEC;
 use identity::ports::{Credential, CredentialRepo as _, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig, caps};
 use rss_request_context::TenantId;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
@@ -197,14 +197,13 @@ impl distributed::HttpContractTransport for NoopDomainTransport {
 }
 
 fn pg_config(params: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         params.host.clone(),
         params.port,
         params.database.clone(),
         username.to_owned(),
         PgPassword::new(password.to_owned()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

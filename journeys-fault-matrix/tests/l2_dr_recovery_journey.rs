@@ -26,7 +26,7 @@ use postgres::fault_matrix::{
 };
 use postgres::{
     MaintenanceAuditOutcome, PgConfig, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryDeps,
-    PgL2DrRecoveryExecutorConfig, PgPassword, PgSslMode,
+    PgL2DrRecoveryExecutorConfig, PgPassword,
 };
 use testkit::eventing_conformance::{
     ConsumerDuplicateEffectObservation, EventingIds, SettleAction,
@@ -105,25 +105,23 @@ impl JourneyHarness {
             ])
             .await?;
         let auditor_params = auditor_role.params();
-        let auditor = PgConfig::new(
+        let auditor = PgConfig::new_for_test_plaintext(
             auditor_params.host.clone(),
             auditor_params.port,
             auditor_params.database.clone(),
             auditor_params.username.clone(),
             PgPassword::new(auditor_params.password.clone()),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_max_connections(2)
         .with_acquire_timeout(Duration::from_secs(5));
         let executor_params = executor_role.params();
-        let executor = PgConfig::new(
+        let executor = PgConfig::new_for_test_plaintext(
             executor_params.host.clone(),
             executor_params.port,
             executor_params.database.clone(),
             executor_params.username.clone(),
             PgPassword::new(executor_params.password.clone()),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_max_connections(2)
         .with_acquire_timeout(Duration::from_secs(5));
         let recovery = PgL2DrRecoveryDeps::connect(

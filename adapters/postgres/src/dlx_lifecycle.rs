@@ -1378,7 +1378,7 @@ mod tests {
             Err(PgError::DlxLifecycleCapability(_))
         ));
 
-        let invalid = PgConfig::new(
+        let invalid = PgConfig::new_for_test_plaintext(
             "",
             5432,
             "rss",

@@ -20,7 +20,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 // `ManagedResource` 提供 `PgRuntimeMonitor::shutdown`（trait 方法，须在 scope 内才可调）。
 use diport::ManagedResource as _;
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig};
 use primitives::ProbeName;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
@@ -65,14 +65,13 @@ async fn connect_pg()
 }
 
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

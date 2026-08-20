@@ -39,14 +39,13 @@ async fn verify_rls_capability_rejects_owner_session_set_role_rss_app() -> TestR
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let p = pg.owner_params();
-    let switched_config = PgConfig::new(
+    let switched_config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(1)
     .with_acquire_timeout(std::time::Duration::from_secs(5));
     let switched = PgStore::connect(&switched_config).await?;

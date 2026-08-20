@@ -19,13 +19,8 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
     let wrong_ca_file = TestCaFile::write("wrong-ca", fixture.wrong_ca_pem())?;
     let params = fixture.params();
 
-    let owner = PgStore::connect(&private_ca_pg_config(
-        params,
-        &params.username,
-        &params.password,
-        &ca_file,
-    ))
-    .await?;
+    let owner_config = private_ca_pg_config(params, &params.username, &params.password, &ca_file)?;
+    let owner = PgStore::connect(&owner_config).await?;
     owner.run_migrations().await?;
     let [
         writer_role,
@@ -53,27 +48,27 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
         &writer_params.username,
         &writer_params.password,
         &wrong_ca_file,
-    );
+    )?;
     let rejected = PgStore::connect(&wrong_ca).await;
     assert!(
         matches!(rejected, Err(PgError::Connect { .. })),
         "an untrusted private CA must fail during PostgreSQL connection"
     );
 
-    let writer = PgStore::connect_verified_writer(&private_ca_pg_config(
+    let writer_config = private_ca_pg_config(
         writer_params,
         &writer_params.username,
         &writer_params.password,
         &ca_file,
-    ))
-    .await?;
+    )?;
+    let writer = PgStore::connect_verified_writer(&writer_config).await?;
     let reader = PgStore::connect_verified_read(&crate::pool::PgTenantReadConfig::new(
         private_ca_pg_config(
             reader_params,
             &reader_params.username,
             &reader_params.password,
             &ca_file,
-        ),
+        )?,
     ))
     .await?;
     let archiver = private_ca_pg_config(
@@ -81,19 +76,19 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
         &archiver_params.username,
         &archiver_params.password,
         &ca_file,
-    );
+    )?;
     let verifier = private_ca_pg_config(
         verifier_params,
         &verifier_params.username,
         &verifier_params.password,
         &ca_file,
-    );
+    )?;
     let purger = private_ca_pg_config(
         purger_params,
         &purger_params.username,
         &purger_params.password,
         &ca_file,
-    );
+    )?;
     crate::PgDlxLifecycleRuntime::preflight_identities(&archiver, &verifier, &purger).await?;
     let dlx_runtime = crate::PgDlxLifecycleRuntime::setup(
         &archiver,

@@ -43,12 +43,17 @@ identityaudit-server --config /etc/rss/identityaudit.toml
 
 当前文档只接受 `schemaVersion = 2`；v1、未知字段、未知 schema 版本、明文 secret、任意环境变量名和兼容别名均拒绝。所有 secret 只能使用 schema
 列出的 typed reference，并由部署密管注入对应环境；不得把 secret 写入 TOML、argv、镜像层或日志。JWKS、
-密码 blocklist 与私有 CA 等文件按配置路径只读挂载。`eventing.amqpCaCertPemPath` 和
-`redis.caCertPemPath` 均为必填、非空文件路径；对应 secret URL 必须分别使用 `amqps://` 和
+密码 blocklist 与私有 CA 等文件按配置路径只读挂载。升级时必须删除旧 `postgres.connection.sslMode`；该字段现在是
+未知字段。`postgres.connection.sslRootCertPath`、`eventing.amqpCaCertPemPath` 和
+`redis.caCertPemPath` 均为必填、非空文件路径。PostgreSQL 连接固定 `VerifyFull`，且显式 PG CA 是独占
+trust store，不会叠加公共 WebPKI roots；对应 AMQP/Redis secret URL 必须分别使用 `amqps://` 和
 `rediss://`，loopback 也没有明文例外。缺失、不可读、畸形或错误 CA 在接流量前 fail closed。
-配置与这些文件必须作为同一 generation 原子发布。
 
-外部 delivery 系统必须将镜像、配置、secret、AMQP CA 和 Redis CA 作为同一 generation 发布与回滚。OCI provenance 与不可变
+PG CA 双根轮换必须分三步发布：先把旧根与新根同时写入 bundle 并滚动重启全部 identityaudit 实例，再切换
+PostgreSQL 服务端 leaf，最后发布仅含新根的 bundle 并再次滚动重启。任何一步失败都回滚整个 generation；
+不得只替换挂载文件，因为启动时读取的 `PgPrivateCa` 快照不会热加载。
+
+外部 delivery 系统必须将镜像、配置、secret、PG CA、AMQP CA 和 Redis CA 作为同一 generation 发布与回滚。OCI provenance 与不可变
 镜像选择由外部 builder/release 流程证明；应用不读取外部 delivery manifest，也不提供旧 schema 双读、别名
 或 fallback。
 

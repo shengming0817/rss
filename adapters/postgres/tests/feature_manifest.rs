@@ -4,8 +4,12 @@
 //! domain capabilities. Cargo/rustc then reject any domain API compiled without its matching feature.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 fn manifest() -> Result<toml::Value, Box<dyn std::error::Error>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -109,6 +113,7 @@ fn domain_dependencies_are_optional_and_features_are_explicit()
     expected_integration.insert("auth-audit-sink".to_owned());
     expected_integration.insert("dep:serde_json_canonicalizer".to_owned());
     expected_integration.insert("eventexec/test-support".to_owned());
+    expected_integration.insert("test-support".to_owned());
     expected_integration.insert("testkit/containers".to_owned());
     assert_eq!(
         feature_set(features, "integration")?,
@@ -232,8 +237,190 @@ fn fault_matrix_support_closes_its_shipped_dependency_graph()
             "domain-settings".to_owned(),
             "eventexec/test-support".to_owned(),
             "identity/fault-matrix-test-support".to_owned(),
+            "test-support".to_owned(),
         ]),
         "fault support must compile from its declared shipped feature alone"
+    );
+    Ok(())
+}
+
+fn sha256(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    let digest = Sha256::digest(fs::read(path)?);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}")?;
+    }
+    Ok(hex)
+}
+
+fn collect_vendor_files(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_vendor_files(root, &path, files)?;
+        } else {
+            files.push(path.strip_prefix(root)?.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&source_path, &destination_path)?;
+        } else {
+            fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn exclusive_root_vendor_matches_the_audited_crates_io_delta()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let vendor = root.join("../../vendor/sqlx-core-0.8.6");
+    let modified = BTreeSet::from([
+        "Cargo.toml",
+        "Cargo.toml.orig",
+        "src/lib.rs",
+        "src/net/tls/mod.rs",
+        "src/net/tls/tls_rustls.rs",
+    ]);
+    // Complete code/manifest delta against the crates.io 0.8.6 archive. Every other upstream file
+    // is covered by the aggregate tree receipt below.
+    let expected_delta = [
+        (
+            "Cargo.toml",
+            "05446ffc84fbeb8dffca4dd61138911f53b044792889400e9244529e44b3b22e",
+            "e15ff012a980f27416146561573e7011e022f05db817bfb7365e70a2fe110c16",
+        ),
+        (
+            "Cargo.toml.orig",
+            "e9f6cb3c07e434a902dff58029c6ef7289009951f31c2eae1ae240d2465e3470",
+            "7a0cdd6dacff2176ca7088125b621c03802912f23855026283e21dc07a7bc821",
+        ),
+        (
+            "src/lib.rs",
+            "7189282445ae36a313b70d71263ce41a80e64d939de7c60318cc4e5f010b16f0",
+            "b6f6c6eb6efd2ec30fffd4bf4f8c2b9edd79f77bfb6b6f5cd2eeef953df4b7b3",
+        ),
+        (
+            "src/net/tls/mod.rs",
+            "01696d72da790695731b565f9473e3047ff5651b4d71781ef38e9e53fe104c81",
+            "fd174c34f469e58f724b4a2808ee55339b44fab79728399da598a2b2377ed926",
+        ),
+        (
+            "src/net/tls/tls_rustls.rs",
+            "c0d2428e5c5e8610856b44f50c1553eca8956297ca21269347571d29c2e08807",
+            "aa1da2086ef820b0b425b73c7b9b82f757ebf6478aa815fa46c176b6be129d00",
+        ),
+    ];
+    for (path, upstream, patched) in expected_delta {
+        let actual = sha256(&vendor.join(path))?;
+        assert_ne!(
+            actual, upstream,
+            "{path} unexpectedly reverted to upstream bytes"
+        );
+        assert_eq!(actual, patched, "unexpected patched bytes in {path}");
+    }
+    assert_eq!(
+        sha256(&vendor.join(".cargo-ok"))?,
+        "afbf9d0f3560b0fd7795e81c42a0a79ee6b6fc67e064f77826aee642cad28d91"
+    );
+    assert_eq!(
+        sha256(&vendor.join("RSS-PATCH.md"))?,
+        "ef622e8e045425ed0a5721d19aa629495057c6b5345411079e824afe5a217177"
+    );
+
+    let mut files = Vec::new();
+    collect_vendor_files(&vendor, &vendor, &mut files)?;
+    files.sort();
+    let mut unmodified_tree = Sha256::new();
+    for relative in files {
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("vendor path must be UTF-8"))?;
+        if modified.contains(relative) || matches!(relative, ".cargo-ok" | "RSS-PATCH.md") {
+            continue;
+        }
+        unmodified_tree.update(relative.as_bytes());
+        unmodified_tree.update([0]);
+        unmodified_tree.update(Sha256::digest(fs::read(vendor.join(relative))?));
+    }
+    let mut actual_tree = String::new();
+    for byte in unmodified_tree.finalize() {
+        write!(&mut actual_tree, "{byte:02x}")?;
+    }
+    assert_eq!(
+        actual_tree, "8c915906ac162b2a49e74c4fde70e3a43da5c1477d3e063ce87dc4558accd136",
+        "unmodified files must exactly match the sqlx-core 0.8.6 archive (sha256 ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6)"
+    );
+    Ok(())
+}
+
+#[test]
+fn exclusive_root_vendor_tests_and_feature_union_compile_fail_are_executable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sandbox = std::env::temp_dir().join(format!(
+        "rss-vendor-sqlx-core-policy-{}",
+        std::process::id()
+    ));
+    if sandbox.exists() {
+        fs::remove_dir_all(&sandbox)?;
+    }
+    let source = sandbox.join("source");
+    copy_tree(&root.join("vendor/sqlx-core-0.8.6"), &source)?;
+    let manifest = source.join("Cargo.toml");
+    let target = sandbox.join("target");
+    let positive = Command::new(env!("CARGO"))
+        .args(["test", "--manifest-path"])
+        .arg(&manifest)
+        .args([
+            "--features",
+            "rss-exclusive-explicit-roots",
+            "rss_exclusive_explicit_roots_tests",
+            "--quiet",
+        ])
+        .env("CARGO_TARGET_DIR", &target)
+        .output()?;
+    let negative = Command::new(env!("CARGO"))
+        .args(["check", "--manifest-path"])
+        .arg(&manifest)
+        .args([
+            "--no-default-features",
+            "--features",
+            "rss-exclusive-explicit-roots,_tls-native-tls",
+        ])
+        .env("CARGO_TARGET_DIR", &target)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&negative.stderr);
+    fs::remove_dir_all(&sandbox)?;
+    assert!(
+        positive.status.success(),
+        "vendored exclusive-root tests failed:\n{}",
+        String::from_utf8_lossy(&positive.stderr)
+    );
+    assert!(
+        !negative.status.success(),
+        "forbidden TLS feature union compiled"
+    );
+    assert!(
+        stderr.contains(
+            "rss-exclusive-explicit-roots cannot be combined with native-tls because native roots are ambient"
+        ),
+        "feature union failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }

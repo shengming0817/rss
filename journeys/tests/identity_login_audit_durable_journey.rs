@@ -56,7 +56,7 @@ use identity::ports::{
 };
 use identity::{CredentialSecurityService, LoginService};
 use memory::{FixedClock, MemBus};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig, caps};
 use primitives::MacKey;
 use rss_request_context::TenantId;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -139,14 +139,13 @@ fn signed_metadata_at(
 /// 库名严格校验已由 `testkit::env_or_postgres` 单源执行（外部路径须 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`
 /// + `PGDATABASE` 以 `_test` 结尾或 `== "test"`），此处不重复。
 fn pg_config(p: &testkit::PgConnParams) -> Result<PgConfig> {
-    Ok(PgConfig::new(
+    Ok(PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5)))
 }
 

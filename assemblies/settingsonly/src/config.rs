@@ -879,31 +879,6 @@ impl FederatedConfig {
     }
 }
 
-/// Closed PostgreSQL TLS policy.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum PgSslMode {
-    VerifyFull,
-}
-
-impl JsonSchema for PgSslMode {
-    fn is_referenceable() -> bool {
-        false
-    }
-
-    fn schema_name() -> String {
-        "SettingsOnlyPgVerifyFull".to_owned()
-    }
-
-    fn json_schema(_generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            const_value: Some(serde_json::json!("verifyFull")),
-            ..schemars::schema::SchemaObject::default()
-        })
-    }
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(transparent)]
 struct RequiredCaPath(PathBuf);
@@ -911,10 +886,6 @@ struct RequiredCaPath(PathBuf);
 impl RequiredCaPath {
     fn validate(&self, field: &'static str) -> Result<(), ConfigError> {
         non_empty_path(&self.0, field)
-    }
-
-    fn into_optional(self) -> Option<PathBuf> {
-        Some(self.0)
     }
 
     fn into_path(self) -> PathBuf {
@@ -931,7 +902,7 @@ pub(crate) struct PostgresConfig {
     port: u16,
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     database: String,
-    ssl_mode: PgSslMode,
+    #[schemars(length(min = 1))]
     ssl_root_cert_path: RequiredCaPath,
     writer: PgWriterRoleConfig,
     reader: PgReaderRoleConfig,
@@ -970,8 +941,7 @@ impl PostgresConfig {
                 host: self.host,
                 port: self.port,
                 database: self.database,
-                ssl_mode: self.ssl_mode,
-                ssl_root_cert_path: self.ssl_root_cert_path.into_optional(),
+                ssl_root_cert_path: self.ssl_root_cert_path.into_path(),
             },
             writer: self.writer,
             reader: self.reader,
@@ -999,19 +969,12 @@ pub(crate) struct PgConnectionConfig {
     host: String,
     port: u16,
     database: String,
-    ssl_mode: PgSslMode,
-    ssl_root_cert_path: Option<PathBuf>,
+    ssl_root_cert_path: PathBuf,
 }
 
 impl PgConnectionConfig {
-    pub(crate) fn into_connect_options(self) -> (String, u16, String, PgSslMode, Option<PathBuf>) {
-        (
-            self.host,
-            self.port,
-            self.database,
-            self.ssl_mode,
-            self.ssl_root_cert_path,
-        )
+    pub(crate) fn into_connect_options(self) -> (String, u16, String, PathBuf) {
+        (self.host, self.port, self.database, self.ssl_root_cert_path)
     }
 }
 
@@ -1752,7 +1715,6 @@ trustedKinds = ["user", "device", "admin", "superAdmin"]
 host = "postgres.example.test"
 port = 5432
 database = "rss"
-sslMode = "verifyFull"
 sslRootCertPath = "/run/rss/postgres-ca.pem"
 readinessSeconds = 5
 
@@ -2455,7 +2417,14 @@ totalSeconds = 60
                 "tenantId = \"00000000-0000-4000-8000-000000000147\"",
                 "tenantId = \"00000000-0000-0000-0000-000000000000\"",
             ),
-            VALID_CONFIG.replace("sslMode = \"verifyFull\"", "sslMode = \"disable\""),
+            VALID_CONFIG.replace(
+                "database = \"rss\"",
+                "database = \"rss\"\nsslMode = \"disable\"",
+            ),
+            VALID_CONFIG.replace(
+                "sslRootCertPath = \"/run/rss/postgres-ca.pem\"",
+                "sslRootCertPath = \"\"",
+            ),
             VALID_CONFIG.replace("endpoint = \"https://s3.example.test\"", "endpoint = \"http://s3.example.test\""),
             VALID_CONFIG.replacen(
                 "[[vault.tenantStoreAllowlist]]",
@@ -2494,9 +2463,11 @@ totalSeconds = 60
             assert!(!schema_validator().is_valid(&json_value(&document)));
         }
 
-        for mode in ["disable", "prefer", "require", "verifyCa"] {
-            let document =
-                VALID_CONFIG.replace("sslMode = \"verifyFull\"", &format!("sslMode = \"{mode}\""));
+        for mode in ["disable", "prefer", "require", "verifyCa", "verifyFull"] {
+            let document = VALID_CONFIG.replace(
+                "database = \"rss\"",
+                &format!("database = \"rss\"\nsslMode = \"{mode}\""),
+            );
             assert!(matches!(
                 parse_error(&document),
                 ConfigError::InvalidDocument { .. }

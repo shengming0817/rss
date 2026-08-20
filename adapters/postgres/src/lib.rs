@@ -297,8 +297,8 @@ mod test_pg;
 pub use inbox::{PgInboxBacklogSource, PgInboxStore, PgInboxSweeper};
 pub use pool::{
     PgConfig, PgError, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
-    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSagaOperatorConfig,
-    PgTenantReadConfig, PoolReadiness,
+    PgPrivateCa, PgPrivateCaError, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
+    PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
 };
 #[cfg(feature = "domain-settings")]
 pub use pool::{PgProjectionWorkerConfig, PgProjectionWorkerError};
@@ -309,9 +309,6 @@ pub use readiness::{
     PgDbReadiness, PgReadinessInterval, PgRlsAttestationInterval, PgRlsReadiness, PgRuntimeMonitor,
     PgRuntimeMonitorConfig,
 };
-// re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。
-pub use sqlx::postgres::PgSslMode;
-
 use std::sync::Arc;
 
 use diport::{ManagedResource, ShutdownError};

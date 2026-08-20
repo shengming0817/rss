@@ -60,7 +60,7 @@ pub(super) use crate::reconcile::{
     ReconcileTargetKey,
 };
 
-pub(super) use crate::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore};
+pub(super) use crate::{PgConfig, PgError, PgPassword, PgPrivateCa, PgRuntimeDeps, PgStore};
 
 /// The only owner allowed to mint arbitrary contract identities for synthetic test fixtures.
 ///

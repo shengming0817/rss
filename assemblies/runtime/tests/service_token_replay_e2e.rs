@@ -15,7 +15,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use diport::ManagedResource as _;
 use hmac::{Hmac, Mac as _};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig};
 use sha2::Sha256;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -63,14 +63,13 @@ impl ReplayRoundIds {
 }
 
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_owned(),
         PgPassword::new(password.to_owned()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

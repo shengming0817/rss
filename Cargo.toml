@@ -102,7 +102,7 @@ members = [
 ]
 # 自写 dylint lint workspace（nightly rustc_private，自成独立 workspace）——显式排除，
 # 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
-exclude = ["lints"]
+exclude = ["lints", "vendor/sqlx-core-0.8.6"]
 
 # Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
 [workspace.metadata.release-surface]
@@ -236,9 +236,9 @@ tonic = "0.14"
 tonic-health = "0.14"
 prost = "0.14"
 # 持久化（postgres adapter，#1116）
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
+sqlx = { version = "=0.8.6", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
 # inventory build-time SoT：与 `sqlx::migrate!` 同源 `resolve_blocking`（仅 build-dep，不进 serving runtime）
-sqlx-core = { version = "0.8", default-features = false, features = ["migrate"] }
+sqlx-core = { version = "=0.8.6", default-features = false, features = ["migrate"] }
 # redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
 # re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
 # testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
@@ -361,6 +361,11 @@ insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员�
 # 不拉此树）。docker 为运行期依赖（编译不需）；CI 集成 lane（#1145）提供 docker。ref: testcontainers/testcontainers-rs-modules-community
 testcontainers = "0.27"
 testcontainers-modules = "0.15"
+
+[patch.crates-io]
+# RSS #1954: SQLx 0.8.6 overlays explicit roots onto Mozilla roots. This audited downstream patch
+# makes an explicit bundle exclusive; see docs/architecture/202608191900-030-pg-exclusive-private-ca.md.
+sqlx-core = { path = "vendor/sqlx-core-0.8.6" }
 
 # 工程护栏（成员经 `[lints] workspace = true` 继承）。
 [workspace.lints.rust]

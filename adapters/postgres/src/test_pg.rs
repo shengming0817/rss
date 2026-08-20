@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::pool::PgTenantReadConfig;
-use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
+use crate::{PgConfig, PgPassword, PgStore};
 use testkit::{OwnedPgFixture, PgAppRoleSpec};
 
 const RSS_APP_ROLE: &str = "rss_app";
@@ -25,7 +25,7 @@ pub(crate) async fn connect_pg()
 -> Result<(OwnedPgFixture, PgStore), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::owned_postgres().await?;
     let p = fixture.owner_params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
@@ -33,7 +33,6 @@ pub(crate) async fn connect_pg()
         PgPassword::new(p.password.clone()),
     )
     // 本地无 TLS docker postgres：显式降级（默认 VerifyFull 对未启 TLS 的 docker pg 连不上）。
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
     let store = PgStore::connect(&config).await?;
     Ok((fixture, store))
@@ -55,14 +54,13 @@ pub(crate) async fn connect_pg_nobypass_role(
         .resolve_app_roles([PgAppRoleSpec::new(ROLE, PW)])
         .await?;
     let p = role.params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
     Ok(PgStore::connect(&config).await?)
 }
@@ -89,14 +87,13 @@ pub(crate) async fn connect_pg_rss_app_role_with_limits(
         .resolve_app_roles([PgAppRoleSpec::new(RSS_APP_ROLE, RSS_APP_PASSWORD)])
         .await?;
     let p = role.params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(max_connections)
     .with_acquire_timeout(acquire_timeout);
     Ok(PgStore::connect(&config).await?)
@@ -113,14 +110,13 @@ pub(crate) async fn rss_app_read_config(
         .await?;
     let p = role.params();
     Ok(PgTenantReadConfig::new(
-        PgConfig::new(
+        PgConfig::new_for_test_plaintext(
             p.host.clone(),
             p.port,
             p.database.clone(),
             p.username.clone(),
             PgPassword::new(p.password.clone()),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(Duration::from_secs(5)),
     ))
 }
@@ -149,14 +145,13 @@ pub(crate) async fn connect_pg_audit_admin_role(
         )])
         .await?;
     let p = role.params();
-    let config = PgConfig::new(
+    let config = PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         p.username.clone(),
         PgPassword::new(p.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
     Ok(PgStore::connect(&config).await?)
 }

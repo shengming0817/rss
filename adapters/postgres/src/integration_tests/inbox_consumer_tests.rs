@@ -987,14 +987,13 @@ async fn t_dlx_archiver_pool_gate_requires_exact_role_and_function_only_privileg
     .await?;
     let params = fixture.owner_params();
     let config = |username: &str, password: &str| {
-        PgConfig::new(
+        PgConfig::new_for_test_plaintext(
             params.host.clone(),
             params.port,
             params.database.clone(),
             username,
             PgPassword::new(password),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(std::time::Duration::from_secs(5))
     };
     let archiver = config("rss_dlx_archiver", "rss_dlx_archiver_test_pw");
@@ -1092,14 +1091,13 @@ async fn t_dlx_poison_candidate_is_quarantined_without_starving_retryable_peer()
     .await?;
     let params = fixture.owner_params();
     let config = |username: &str, password: &str| {
-        PgConfig::new(
+        PgConfig::new_for_test_plaintext(
             params.host.clone(),
             params.port,
             params.database.clone(),
             username,
             PgPassword::new(password),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(std::time::Duration::from_secs(5))
     };
     let runtime = crate::PgDlxLifecycleRuntime::setup(

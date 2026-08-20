@@ -51,6 +51,11 @@ settings = { path = "../../crates/settings", optional = true }
 httpserve = { path = "../../crates/httpserve", optional = true }
 # eventexec 持久化基座（#1116）：连接池 / 事务 / Migrator。features migrate+macros 在 workspace.dependencies 声明。
 sqlx = { workspace = true }
+# Hard witness for RSS's audited SQLx explicit-root exclusivity patch. If the patch/feature is
+# removed, production adapter construction no longer compiles.
+sqlx-core = { workspace = true, features = ["rss-exclusive-explicit-roots"] }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 # closed exact-lane transaction façade 的 HRTB operation 闭包返回 BoxFuture。
 futures = { workspace = true }
 # 连接 / 迁移成功的结构化日志。
@@ -90,6 +95,7 @@ auth-audit-sink = []
 # 与其私有 seam 子树 `src/integration_tests/` 不编译，verify 永远绿）。
 # testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。
 integration = [
+    "test-support",
     "domain-settings",
     "domain-identity",
     "domain-audit",
@@ -105,6 +111,7 @@ test-support = ["eventexec/test-support"]
 journey-fault-support = []
 # N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。
 fault-matrix-test-support = [
+    "test-support",
     "domain-audit",
     "domain-identity",
     "domain-settings",
@@ -202,6 +209,7 @@ tracewiretest = { path = "../../crates/tracewiretest" }
 uuid = { workspace = true, features = ["v4"] }
 # Local recorder assertions for retry metrics.
 metrics-exporter-prometheus = { workspace = true }
+rcgen = { workspace = true }
 # 会话生命周期集成测试（co-tx t11-t14 + durable find/revoke t20-t22）构造 `ports::Session` 经 `identity::test_support::session`
 # （funnel `Session::new` 为 pub(crate)；test-support feature 仅 dev/test 生效，生产 seal 不变）。同范式见
 # identity 自身 dev-dep `authn = { features = ["test-support"] }`。

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use bootstrap::compose_bindings;
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig};
 use runtime::CONFIGS_READY_PROBE_NAME;
 use runtime::test_support::{
     build_s3_runtime_deps_from_values, build_settings_wire_fixture,
@@ -121,14 +121,13 @@ async fn connect_pg()
 }
 
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

@@ -38,7 +38,7 @@ use identity::ports::{
     Role, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig, caps};
 use rss_request_context::TenantId;
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
@@ -305,14 +305,13 @@ async fn connect_pg()
 }
 
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         p.host.clone(),
         p.port,
         p.database.clone(),
         username.to_string(),
         PgPassword::new(password.to_string()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

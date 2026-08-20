@@ -16,7 +16,7 @@ use super::projection::{
     service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
 use super::service_token::OperatorServiceToken;
-use crate::infra::pg::{build_pg_saga_operator_config, build_pg_saga_serving_configs};
+use crate::infra::pg::{PgSagaCommandConfigs, build_pg_saga_command_configs};
 use crate::phase::OperatorRuntimeCapability;
 #[cfg(feature = "operator-cli")]
 use crate::phase::OperatorRuntimeInputs;
@@ -554,6 +554,7 @@ struct ProductionSagaCommandRuntime<'a> {
     config: crate::config::SnapshotConfig<'a>,
     operator: OperatorRuntimeCapability<'a>,
     grants: Vec<SagaOperatorGrant>,
+    pg: PgSagaCommandConfigs,
 }
 
 struct ProductionSagaTarget {
@@ -570,18 +571,17 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
     }
 
     async fn connect_control(&self) -> anyhow::Result<Self::ControlSession> {
-        PgSagaOperatorDeps::connect(&build_pg_saga_operator_config(self.config)?)
+        PgSagaOperatorDeps::connect(&self.pg.control)
             .await
             .context("setup Saga operator postgres capability")
     }
 
     async fn prepare_target(&self, parsed: &SagaCliArgs) -> anyhow::Result<Self::ActionTarget> {
-        let (writer, reader, audit_admin) = build_pg_saga_serving_configs(self.config)?;
         let mut plan = crate::plan::RuntimePlan::bundled(self.config)?;
         let serving = PgRuntimeDeps::connect_serving(
-            &writer,
-            &reader,
-            audit_admin.as_ref(),
+            &self.pg.writer,
+            &self.pg.reader,
+            self.pg.audit_admin.as_ref(),
             plan.projection_capture(),
         )
         .await
@@ -1261,14 +1261,18 @@ pub async fn run_saga_command(
         let operator = runtime_inputs.operator_capability();
         // Keep grant-load failures inside command_result so shutdown_runtime still runs.
         match load_saga_operator_grants_from_snapshot(config, operator) {
-            Ok(grants) => {
-                let runtime = ProductionSagaCommandRuntime {
-                    config,
-                    operator,
-                    grants,
-                };
-                execute_prepared_saga_command_with_runtime(command.0, &runtime).await
-            }
+            Ok(grants) => match build_pg_saga_command_configs(config) {
+                Ok(pg) => {
+                    let runtime = ProductionSagaCommandRuntime {
+                        config,
+                        operator,
+                        grants,
+                        pg,
+                    };
+                    execute_prepared_saga_command_with_runtime(command.0, &runtime).await
+                }
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         }
     };

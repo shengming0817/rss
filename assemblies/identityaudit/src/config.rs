@@ -719,13 +719,6 @@ impl OidcConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum PgSslMode {
-    Disable,
-    VerifyFull,
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PostgresConfig {
@@ -764,8 +757,8 @@ pub(crate) struct PgConnectionConfig {
     port: u16,
     #[schemars(length(min = 1), regex(pattern = "^.*\\S.*$"))]
     database: String,
-    ssl_mode: PgSslMode,
-    ssl_root_cert_path: Option<PathBuf>,
+    #[schemars(length(min = 1))]
+    ssl_root_cert_path: PathBuf,
 }
 
 impl PgConnectionConfig {
@@ -775,29 +768,15 @@ impl PgConnectionConfig {
         if self.port == 0 {
             return Err(ConfigError::InvalidValue("postgres.connection.port"));
         }
-        if let Some(path) = &self.ssl_root_cert_path {
-            non_empty_path(path, "postgres.connection.sslRootCertPath")?;
-        }
-        let loopback = self
-            .host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-        if !loopback
-            && (self.ssl_mode != PgSslMode::VerifyFull || self.ssl_root_cert_path.is_none())
-        {
-            return Err(ConfigError::InvalidValue("postgres.connection.tls"));
-        }
+        non_empty_path(
+            &self.ssl_root_cert_path,
+            "postgres.connection.sslRootCertPath",
+        )?;
         Ok(())
     }
 
-    pub(crate) fn into_connect_options(self) -> (String, u16, String, PgSslMode, Option<PathBuf>) {
-        (
-            self.host,
-            self.port,
-            self.database,
-            self.ssl_mode,
-            self.ssl_root_cert_path,
-        )
+    pub(crate) fn into_connect_options(self) -> (String, u16, String, PathBuf) {
+        (self.host, self.port, self.database, self.ssl_root_cert_path)
     }
 }
 
@@ -1123,7 +1102,6 @@ refreshSeconds = 30
 host = "postgres.example.test"
 port = 5432
 database = "rss"
-sslMode = "verifyFull"
 sslRootCertPath = "/run/rss/postgres-ca.pem"
 [postgres.writer]
 username = "rss_identity_writer"
@@ -1579,7 +1557,14 @@ caCertPemPath = "/run/rss/redis-ca.pem"
                 "https://vault.example.test:8200",
                 "http://vault.example.test:8200",
             ),
-            VALID_CONFIG.replace("sslMode = \"verifyFull\"", "sslMode = \"disable\""),
+            VALID_CONFIG.replace(
+                "database = \"rss\"",
+                "database = \"rss\"\nsslMode = \"disable\"",
+            ),
+            VALID_CONFIG.replace(
+                "sslRootCertPath = \"/run/rss/postgres-ca.pem\"",
+                "sslRootCertPath = \"\"",
+            ),
             VALID_CONFIG.replace("authGrantTtlSeconds = 2592000", "authGrantTtlSeconds = 60"),
             VALID_CONFIG.replacen(
                 "issuer = \"https://identity.example.test\"",
@@ -1626,8 +1611,7 @@ caCertPemPath = "/run/rss/redis-ca.pem"
             .replace("https://identity.example.test", "http://127.0.0.1:19000")
             .replace("https://identity.example.test", "http://127.0.0.1:19000")
             .replace("https://vault.example.test:8200", "http://127.0.0.1:18200")
-            .replace("host = \"postgres.example.test\"", "host = \"127.0.0.1\"")
-            .replace("sslMode = \"verifyFull\"", "sslMode = \"disable\"");
+            .replace("host = \"postgres.example.test\"", "host = \"127.0.0.1\"");
         parse(&document).expect("explicit loopback plaintext config");
 
         let mut source = TestSource::complete(&document);

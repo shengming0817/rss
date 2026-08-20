@@ -10,7 +10,7 @@ use mqtt::{
     BrokerAssertionVerifier, CredentialGeneration, CredentialRevision, DeviceScope, MqttSession,
     MqttSessionConfig, MqttTlsMaterial, MqttTopicPolicy, MqttsEndpoint, SessionExpiry,
 };
-use postgres::{PgConfig, PgPassword, PgSslMode, PgTenantReadConfig, PoolReadiness};
+use postgres::{PgConfig, PgPassword, PgTenantReadConfig, PoolReadiness};
 use testkit::{MqttCredential, MqttMtlsFixture, PgConnParams};
 use tokio_util::sync::CancellationToken;
 
@@ -61,14 +61,13 @@ impl PgAdminPoolBudget {
 }
 
 pub(super) fn pg_config(params: &PgConnParams, role: &str, password: &str) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         params.host.clone(),
         params.port,
         params.database.clone(),
         role,
         PgPassword::new(password),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

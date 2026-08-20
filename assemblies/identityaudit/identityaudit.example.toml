@@ -34,7 +34,6 @@ refreshSeconds = 30
 host = "postgres.example.com"
 port = 5432
 database = "rss"
-sslMode = "verifyFull"
 sslRootCertPath = "/run/rss/postgres-ca.pem"
 
 [postgres.writer]

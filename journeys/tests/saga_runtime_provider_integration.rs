@@ -19,7 +19,7 @@ use diport::{
     SagaStartAuditId, SagaTerminateExpectation, saga_operator_action,
 };
 use eventexec::{SagaOperatorRecoveryOutcome, SagaStartRequest, SagaWorkerConfig};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
+use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig};
 
 mod common;
 
@@ -40,14 +40,13 @@ struct FixtureRepository {
 }
 
 fn pg_config(params: &testkit::PgConnParams) -> PgConfig {
-    PgConfig::new(
+    PgConfig::new_for_test_plaintext(
         params.host.clone(),
         params.port,
         params.database.clone(),
         params.username.clone(),
         PgPassword::new(params.password.clone()),
     )
-    .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
 }
 

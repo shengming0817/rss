@@ -42,21 +42,22 @@ fn assert_no_workflow_readiness_probes(report: &serde_json::Value) -> Result<()>
     Ok(())
 }
 
-fn owner_options(params: &testkit::PgConnParams) -> PgConnectOptions {
+fn owner_options(params: &testkit::PgConnParams, private_ca_pem: &str) -> PgConnectOptions {
     PgConnectOptions::new()
         .host(&params.host)
         .port(params.port)
         .database(&params.database)
         .username(&params.username)
         .password(&params.password)
-        .ssl_mode(PgSslMode::Prefer)
+        .ssl_mode(PgSslMode::VerifyFull)
+        .ssl_root_cert_from_pem(private_ca_pem.as_bytes().to_vec())
 }
 
-async fn owner_pool(params: &testkit::PgConnParams) -> Result<PgPool> {
+async fn owner_pool(params: &testkit::PgConnParams, private_ca_pem: &str) -> Result<PgPool> {
     Ok(PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))
-        .connect_with(owner_options(params))
+        .connect_with(owner_options(params, private_ca_pem))
         .await?)
 }
 
@@ -238,8 +239,12 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
     let network = testkit::bridge_network("rss-identityaudit-tls").await?;
     let rabbit_dns = format!("{}-rabbit", network.name());
     let redis_dns = format!("{}-redis", network.name());
+    let postgres_dns = format!("{}-postgres", network.name());
     let (postgres, rabbit, redis) = tokio::try_join!(
-        testkit::owned_postgres(),
+        testkit::postgres_tls(testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: &postgres_dns,
+        }),
         testkit::rabbitmq_tls(
             generated::event::identity_v1::session_created::TOPIC,
             testkit::NetworkAttachment {
@@ -252,15 +257,14 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
             dns_name: &redis_dns,
         }),
     )?;
-    let owned = &postgres;
     let logins = identityaudit_fixture::postgres_serving_logins();
-    let [writer, reader, audit_admin] = owned
+    let [writer, reader, audit_admin] = postgres
         .resolve_app_roles(
             logins.map(|login| testkit::PgAppRoleSpec::new(login.username(), login.password())),
         )
         .await?;
-    let owner = owned.owner_params();
-    let pool = owner_pool(owner).await?;
+    let owner = postgres.params();
+    let pool = owner_pool(owner, postgres.ca_pem()).await?;
     sqlx::migrate!("../adapters/postgres/migrations")
         .run(&pool)
         .await
@@ -270,6 +274,7 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
         writer.params(),
         reader.params(),
         audit_admin.params(),
+        postgres.ca_pem(),
         rabbit.shared_url(),
         rabbit.ca_pem(),
         redis.url().to_owned(),

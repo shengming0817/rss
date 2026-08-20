@@ -137,7 +137,7 @@ pub(crate) enum Rule {
     ProductionSecuritySpiffeCloseout,
     /// production runtime 不得把 egress TLS 降级旋钮读回 serving catalog，且 wiring 须走 private CA。
     ///
-    /// INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 / egress-tls { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_security_closeout_rejects_egress_tls_downgrade_catalog_regressions", anti_vacuity = "tests::real_runtime_egress_tls_closeout_accepts_workspace" } — #1710 bans `RSS_*_ALLOW_PLAINTEXT` (AMQP/Redis/S3) and `RSS_PG_SSL_MODE` from FIXED_SERVING_KEYS; they must remain in FORBIDDEN_SERVING_KEYS. Ingress `RSS_LISTENER_ALLOW_PLAINTEXT` stays allowed. Private-CA funnels (`connect_with_private_ca` / `PrivateCaS3ClientFactory` / `RedisPrivateCa` / `AmqpPrivateCa` / PG `VerifyFull`+`with_ssl_root_cert`) are required when the corresponding runtime wiring sources exist.
+    /// INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 / egress-tls { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_security_closeout_rejects_egress_tls_downgrade_catalog_regressions", anti_vacuity = "tests::real_runtime_egress_tls_closeout_accepts_workspace" } — #1710 bans `RSS_*_ALLOW_PLAINTEXT` (AMQP/Redis/S3) and `RSS_PG_SSL_MODE` from FIXED_SERVING_KEYS; they must remain in FORBIDDEN_SERVING_KEYS. Ingress `RSS_LISTENER_ALLOW_PLAINTEXT` stays allowed. Private-CA funnels (`connect_with_private_ca` / `PrivateCaS3ClientFactory` / `RedisPrivateCa` / `AmqpPrivateCa` / `PgPrivateCa`) are required when the corresponding runtime wiring sources exist.
     ProductionSecurityEgressTlsCloseout,
     /// production token profiles must each be built and wired on the `run()`-reachable path.
     ///
@@ -2035,7 +2035,7 @@ fn validate_runtime_egress_tls_closeout(a: &GovernedAssembly, findings: &mut Vec
         findings.push(finding(
             Rule::ProductionSecurityEgressTlsCloseout,
             a.manifest_label(),
-            "source=rust-ast-wiring profile=production gate=egress-tls-private-ca runtime Redis/AMQP/S3/PG wiring must reference RedisPrivateCa / AmqpPrivateCa / PrivateCaS3ClientFactory / connect_with_private_ca / VerifyFull+with_ssl_root_cert; comments, strings, and cfg(test) bait are rejected",
+            "source=rust-ast-wiring profile=production gate=egress-tls-private-ca runtime Redis/AMQP/S3/PG wiring must reference RedisPrivateCa / AmqpPrivateCa / PrivateCaS3ClientFactory / connect_with_private_ca / PgPrivateCa; comments, strings, and cfg(test) bait are rejected",
         ));
     }
 }
@@ -2068,7 +2068,7 @@ fn runtime_egress_tls_closeout_evidence(dir: &Path) -> Result<RuntimeEgressTlsCl
             "src/event_transport.rs",
             &["AmqpPrivateCa", "connect_with_private_ca"],
         ),
-        ("src/infra/pg.rs", &["VerifyFull", "with_ssl_root_cert"]),
+        ("src/infra/pg.rs", &["PgPrivateCa", "from_pem"]),
     ];
     let mut private_ca_ok = true;
     for (rel, required) in wiring_checks {
@@ -10278,7 +10278,7 @@ pub async fn wire_amqp() {
             "AMQP wiring without private CA must fail",
         );
 
-        // Redis+S3+AMQP OK but PG lacks VerifyFull/root cert → fail.
+        // Redis+S3+AMQP OK but PG lacks the typed private CA → fail.
         write_runtime_src(
             &root,
             "event_transport.rs",
@@ -10294,7 +10294,7 @@ pub async fn wire_amqp() {
             "infra/pg.rs",
             r#"
 pub fn build_pg() {
-    let _ = PgConfig::new(host, port, database, username, password);
+    let _ = PgConfig::new_for_test_plaintext(host, port, database, username, password);
 }
 "#,
         )?;
@@ -10302,7 +10302,7 @@ pub fn build_pg() {
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
-            "PG wiring without VerifyFull+with_ssl_root_cert must fail",
+            "PG wiring without PgPrivateCa must fail",
         );
 
         // Green catalogs + private-CA wiring (Redis/AMQP/S3/PG) → no egress TLS findings.
@@ -10311,9 +10311,8 @@ pub fn build_pg() {
             "infra/pg.rs",
             r#"
 pub fn build_pg() {
-    let _ = PgConfig::new(host, port, database, username, password)
-        .with_ssl_mode(PgSslMode::VerifyFull)
-        .with_ssl_root_cert(path);
+    let ca = PgPrivateCa::from_pem(pem).unwrap();
+    let _ = PgConfig::new(host, port, database, username, password, ca);
 }
 "#,
         )?;

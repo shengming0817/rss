@@ -4543,11 +4543,14 @@ dependencies = [
  "observ",
  "postgres-migration-inventory",
  "primitives",
+ "rcgen",
  "rss-conformance",
  "rss-diag-context",
  "rss-request-context",
  "rss-trace-context",
  "runctx",
+ "rustls",
+ "rustls-pki-types",
  "secure",
  "serde",
  "serde_json",
@@ -4555,6 +4558,7 @@ dependencies = [
  "settings",
  "sha2 0.10.9",
  "sqlx",
+ "sqlx-core",
  "support",
  "testkit",
  "thiserror",
@@ -4574,13 +4578,18 @@ name = "postgres-migration"
 version = "0.0.0"
 dependencies = [
  "postgres-migration-inventory",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "secure",
  "serde_json",
  "sqlx",
+ "sqlx-core",
  "testkit",
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "zeroize",
 ]
 
@@ -6388,8 +6397,6 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
  "base64",
  "bytes",

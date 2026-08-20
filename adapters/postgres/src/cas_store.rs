@@ -149,7 +149,7 @@ mod smoke {
 mod integration_tests {
     use diport::{CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, ManagedResource};
 
-    use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
+    use crate::{PgConfig, PgPassword, PgStore};
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -183,14 +183,13 @@ mod integration_tests {
             .await?;
 
         let p = fixture.owner_params();
-        let config = PgConfig::new(
+        let config = PgConfig::new_for_test_plaintext(
             p.host.clone(),
             p.port,
             p.database.clone(),
             role,
             PgPassword::new(password.to_string()),
         )
-        .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(std::time::Duration::from_secs(5));
         Ok(PgStore::connect(&config).await?)
     }
