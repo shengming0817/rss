@@ -41,12 +41,12 @@ use crate::pool::{
 use crate::projection_events::ProjectionWriteRegistry;
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 use crate::tx_retry::LocalTxDeadline;
+#[cfg(feature = "domain-identity")]
+use crate::tx_retry::{DEVICE_POLICY_BOUNDARY, OUTBOX_PRODUCER_BOUNDARY, record_settlement};
 use crate::tx_retry::{
     LocalTxAcquireDeadline, LocalTxBeginDeadline, LocalTxCommitDeadline, LocalTxOperationDeadline,
     LocalTxRollbackDeadline, LocalTxSetupDeadline, LocalTxStageResult,
 };
-#[cfg(feature = "domain-identity")]
-use crate::tx_retry::{OUTBOX_PRODUCER_BOUNDARY, record_settlement};
 
 pub(crate) mod eventing;
 pub(crate) mod identity;
@@ -221,6 +221,46 @@ pub(crate) enum ProducerTxOutcome<A, T> {
 #[must_use = "producer settlement must be observed through ProducerTxAttempt::into_result"]
 pub(crate) struct ProducerTxAttempt<T, E> {
     attempt: LocalTxAttempt<T, E>,
+}
+
+/// Closed result of consuming one non-retrying device-policy transaction attempt.
+#[cfg(feature = "domain-identity")]
+pub(crate) enum DevicePolicyAttemptError<E> {
+    Operation(E),
+    SettlementUnknown(E),
+}
+
+/// Purpose-specific settlement carrier that cannot be flattened without recording final status.
+#[cfg(feature = "domain-identity")]
+#[must_use = "device-policy settlement must be observed through DevicePolicyTxAttempt::into_result"]
+pub(crate) struct DevicePolicyTxAttempt<T, E> {
+    attempt: LocalTxAttempt<T, E>,
+}
+
+#[cfg(feature = "domain-identity")]
+impl<T, E> DevicePolicyTxAttempt<T, E> {
+    fn new(attempt: LocalTxAttempt<T, E>) -> Self {
+        Self { attempt }
+    }
+
+    pub(crate) fn into_result(self) -> Result<T, DevicePolicyAttemptError<E>> {
+        let settlement = self.attempt.settlement();
+        record_settlement(DEVICE_POLICY_BOUNDARY, settlement);
+        let unsafe_settlement = matches!(
+            settlement,
+            Some(
+                consistency::LocalTxFinalStatus::CommitUnknown
+                    | consistency::LocalTxFinalStatus::RollbackFailed
+            )
+        );
+        self.attempt.into_result().map_err(|error| {
+            if unsafe_settlement {
+                DevicePolicyAttemptError::SettlementUnknown(error)
+            } else {
+                DevicePolicyAttemptError::Operation(error)
+            }
+        })
+    }
 }
 
 #[cfg(feature = "domain-identity")]
@@ -2400,9 +2440,9 @@ mod retry_settlement_tests {
     #[cfg(feature = "domain-settings")]
     use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 
-    use super::LocalTxAttempt;
     #[cfg(feature = "domain-settings")]
     use super::ProducerTxAttempt;
+    use super::{DevicePolicyAttemptError, DevicePolicyTxAttempt, LocalTxAttempt};
     use crate::tx_retry::run_pg_localtx_retry;
     #[cfg(feature = "domain-settings")]
     use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, SETTINGS_SECRET_BOUNDARY, run_pg_tx_retry};
@@ -2782,6 +2822,55 @@ mod retry_settlement_tests {
                 }),
                 "plain producer has no actionable WARN for {final_status}: {records:?}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(all(feature = "domain-identity", feature = "domain-settings"))]
+    fn device_policy_attempt_observes_unsafe_settlement_before_classification()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let capture = WarnCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
+
+        metrics::with_local_recorder(&recorder, || {
+            for attempt in [
+                DevicePolicyTxAttempt::new(LocalTxAttempt::<(), _>::commit_unknown(
+                    FakeError::Transient,
+                )),
+                DevicePolicyTxAttempt::new(LocalTxAttempt::<(), _>::rollback_failed(
+                    FakeError::Transient,
+                )),
+            ] {
+                assert!(matches!(
+                    attempt.into_result(),
+                    Err(DevicePolicyAttemptError::SettlementUnknown(_))
+                ));
+            }
+        });
+
+        let rendered = handle.render();
+        assert!(rendered.contains("tx_settlement_final_total"), "{rendered}");
+        assert!(
+            rendered.contains("boundary=\"identity.device-policy\""),
+            "{rendered}"
+        );
+        for final_status in ["commit_unknown", "rollback_failed"] {
+            assert!(
+                rendered.contains(&format!("final_status=\"{final_status}\"")),
+                "{rendered}"
+            );
+        }
+        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        for final_status in ["commit_unknown", "rollback_failed"] {
+            assert!(records.iter().any(|fields| {
+                fields.get("boundary").map(String::as_str) == Some("identity.device-policy")
+                    && fields.get("final_status").map(String::as_str) == Some(final_status)
+            }));
         }
         Ok(())
     }

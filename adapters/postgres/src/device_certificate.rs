@@ -28,9 +28,10 @@ use identity::ports::device_certificate::{
     DeviceCertificateActiveCommand, DeviceCertificateActiveCommandState, DeviceCertificateError,
     DeviceCertificateRepository, DeviceCertificateRepositoryError, DeviceCertificateScope,
     DeviceCertificateStateSnapshot, DeviceCertificateStatusEvidence, DeviceCertificateStatusStore,
-    DeviceCertificateStatusStoreError, DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
-    PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId, ReportedStateHash,
-    ReportedStateRestore, ReportedStateSnapshot, RotationOutcome,
+    DeviceCertificateStatusStoreError, DevicePolicyAuthorizationReceiptId, DeviceSequence,
+    ExpectedGeneration, FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash,
+    ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
+    RotationOutcome,
 };
 use sqlx::PgConnection;
 
@@ -72,6 +73,11 @@ pub(crate) struct DevicePolicyTx<'tx> {
 impl<'tx> DevicePolicyTx<'tx> {
     pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
         Self { conn }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn connection_for_lineage_fixture(&mut self) -> &mut PgConnection {
+        self.conn
     }
 }
 
@@ -212,7 +218,12 @@ pub struct PgDeviceCertificateRepository<
     #[cfg(all(test, feature = "integration"))]
     fail_after_desired_write: bool,
     #[cfg(all(test, feature = "integration"))]
+    #[cfg(all(test, feature = "integration"))]
     fail_after_target_wake: bool,
+    #[cfg(all(test, feature = "integration"))]
+    commit_unknown_after_commit: bool,
+    #[cfg(all(test, feature = "integration"))]
+    rollback_failed_after_rollback: bool,
     #[cfg(all(test, feature = "integration"))]
     device_ingress_fault: Option<crate::device_command::DeviceIngressFault>,
 }
@@ -227,7 +238,12 @@ impl<E: ArtifactEligibility> PgDeviceCertificateRepository<E> {
             #[cfg(all(test, feature = "integration"))]
             fail_after_desired_write: false,
             #[cfg(all(test, feature = "integration"))]
+            #[cfg(all(test, feature = "integration"))]
             fail_after_target_wake: false,
+            #[cfg(all(test, feature = "integration"))]
+            commit_unknown_after_commit: false,
+            #[cfg(all(test, feature = "integration"))]
+            rollback_failed_after_rollback: false,
             #[cfg(all(test, feature = "integration"))]
             device_ingress_fault: None,
         }
@@ -241,6 +257,8 @@ impl<E: ArtifactEligibility> PgDeviceCertificateRepository<E> {
             eligibility: std::marker::PhantomData,
             fail_after_desired_write: false,
             fail_after_target_wake: false,
+            commit_unknown_after_commit: false,
+            rollback_failed_after_rollback: false,
             device_ingress_fault: None,
         }
     }
@@ -256,6 +274,8 @@ impl<E: ArtifactEligibility> PgDeviceCertificateRepository<E> {
             eligibility: std::marker::PhantomData,
             fail_after_desired_write: false,
             fail_after_target_wake: false,
+            commit_unknown_after_commit: false,
+            rollback_failed_after_rollback: false,
             device_ingress_fault: None,
         }
     }
@@ -267,8 +287,22 @@ impl<E: ArtifactEligibility> PgDeviceCertificateRepository<E> {
     }
 
     #[cfg(all(test, feature = "integration"))]
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn with_target_wake_fault_for_test(mut self) -> Self {
         self.fail_after_target_wake = true;
+        self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_commit_unknown_fault_for_test(mut self) -> Self {
+        self.commit_unknown_after_commit = true;
+        self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_rollback_failed_fault_for_test(mut self) -> Self {
+        self.fail_after_desired_write = true;
+        self.rollback_failed_after_rollback = true;
         self
     }
 
@@ -474,6 +508,7 @@ fn status_from_repo(error: RepoError) -> StatusError {
     match error {
         RepoError::CorruptState(source) => StatusError::CorruptState(source),
         RepoError::StorageUnavailable { source } => StatusError::StorageUnavailable { source },
+        RepoError::SettlementUnknown { source } => StatusError::StorageUnavailable { source },
         RepoError::InvalidMutation
         | RepoError::ReconcileEnrollmentMissing
         | RepoError::ReconcileTargetQuarantined => status_corrupt(),
@@ -562,6 +597,7 @@ fn policy_columns(policy: &CertificatePolicy) -> (i32, i32, bool, bool, Vec<Stri
 #[derive(sqlx::FromRow)]
 struct DesiredRow {
     generation: i64,
+    authorization_receipt_id: String,
     policy_hash: Vec<u8>,
     validity_seconds: i32,
     renew_before_seconds: i32,
@@ -590,6 +626,11 @@ fn restore_desired(row: DesiredRow) -> Result<DesiredStateRestore, RepoError> {
     .map_err(corrupt)?;
     Ok(DesiredStateRestore::new(
         u64::try_from(row.generation).map_err(|_| invalid_persisted_value())?,
+        DevicePolicyAuthorizationReceiptId::restore(
+            uuid::Uuid::parse_str(&row.authorization_receipt_id)
+                .map_err(|_| invalid_persisted_value())?,
+        )
+        .map_err(corrupt)?,
         PolicyHash::restore(&row.policy_hash).map_err(corrupt)?,
         policy,
         epoch_micros_to_time(row.created_at_micros)?,
@@ -603,7 +644,7 @@ async fn select_desired(
     device: &str,
 ) -> Result<Option<DesiredRow>, RepoError> {
     sqlx::query_as::<_, DesiredRow>(
-        "SELECT generation, policy_hash, validity_seconds, renew_before_seconds, client_auth, \
+        "SELECT generation, authorization_receipt_id::text AS authorization_receipt_id, policy_hash, validity_seconds, renew_before_seconds, client_auth, \
          server_auth, sans, floor(extract(epoch FROM created_at) * 1000000)::bigint \
          AS created_at_micros, floor(extract(epoch FROM updated_at) * 1000000)::bigint \
          AS updated_at_micros FROM device_certificate_desired_states \
@@ -1293,6 +1334,7 @@ use crate::device_certificate_scope::{
 struct PolicyAcceptFunnelRow {
     outcome: String,
     actual_generation: i64,
+    authorization_receipt_id: Option<String>,
     target_id: Option<String>,
     wake_version: Option<i64>,
 }
@@ -1335,6 +1377,9 @@ fn reconcile_from_repo(error: RepoError) -> CertificateReconcileRepositoryError 
             CertificateReconcileRepositoryError::CorruptState(source)
         }
         RepoError::StorageUnavailable { source } => {
+            CertificateReconcileRepositoryError::StorageUnavailable { source }
+        }
+        RepoError::SettlementUnknown { source } => {
             CertificateReconcileRepositoryError::StorageUnavailable { source }
         }
         RepoError::ReconcileEnrollmentMissing | RepoError::ReconcileTargetQuarantined => {
@@ -1488,8 +1533,8 @@ impl DevicePolicyTx<'_> {
         tenant: &str,
         device: &str,
         input: AcceptDesiredPolicy,
-        fail_after_desired_write: bool,
-        fail_after_target_wake: bool,
+        #[cfg(all(test, feature = "integration"))] fail_after_desired_write: bool,
+        #[cfg(all(test, feature = "integration"))] fail_after_target_wake: bool,
     ) -> Result<DevicePolicyAcceptTxOutcome, DevicePolicyTxError> {
         let key = input.idempotency_key().as_uuid().to_string();
         let expected = to_i64(input.expected_generation().get())?;
@@ -1497,9 +1542,28 @@ impl DevicePolicyTx<'_> {
         let next = to_i64(next_generation.get())?;
         let (validity, renew_before, client_auth, server_auth, sans) =
             policy_columns(input.policy());
+        let authorization = input.authorization();
+        let durable_policy = authorization.durable_policy();
+        let principal_kind = authorization.principal_kind().as_actor_metadata_label();
+        let principal_id = authorization.principal_id().to_owned();
+        let contract_id = authorization.contract_id();
+        let permission = authorization.permission().as_str();
+        let obligation_fingerprint = durable_policy.obligation_fingerprint().to_vec();
+        let evaluated_at_micros = time_to_epoch_micros(durable_policy.evaluated_at())?;
+        let policy_ids: Vec<String> = durable_policy
+            .policies()
+            .iter()
+            .map(|policy| policy.policy_id().to_owned())
+            .collect();
+        let policy_versions: Vec<i64> = durable_policy
+            .policies()
+            .iter()
+            .map(|policy| i64::from(policy.version().get()))
+            .collect();
         let row: PolicyAcceptFunnelRow = sqlx::query_as(
             "SELECT * FROM public.rss_accept_device_certificate_desired( \
-             $1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11)",
+             $1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11, \
+             $12,$13,$14,$15,$16,$17,$18,$19)",
         )
         .bind(tenant)
         .bind(device)
@@ -1512,39 +1576,54 @@ impl DevicePolicyTx<'_> {
         .bind(client_auth)
         .bind(server_auth)
         .bind(sans)
+        .bind(principal_kind)
+        .bind(principal_id)
+        .bind(contract_id)
+        .bind(permission)
+        .bind(obligation_fingerprint)
+        .bind(evaluated_at_micros)
+        .bind(policy_ids)
+        .bind(policy_versions)
         .fetch_one(&mut *self.conn)
         .await
         .map_err(storage)?;
 
-        if fail_after_desired_write {
-            return Err(DevicePolicyTxError::Repository(
-                RepoError::storage_unavailable(std::io::Error::other(
-                    "injected post-desired failure",
-                )),
-            ));
-        }
-
-        if fail_after_target_wake {
-            return Err(DevicePolicyTxError::Repository(
-                RepoError::storage_unavailable(std::io::Error::other(
-                    "injected post-target-wake failure",
-                )),
-            ));
+        #[cfg(all(test, feature = "integration"))]
+        if fail_after_desired_write || fail_after_target_wake {
+            return Err(DevicePolicyTxError::Repository(storage(
+                sqlx::Error::Protocol("injected device-policy transaction failure".to_owned()),
+            )));
         }
 
         match row.outcome.as_str() {
             "accepted" => {
+                let receipt_id = DevicePolicyAuthorizationReceiptId::restore(
+                    uuid::Uuid::parse_str(
+                        &row.authorization_receipt_id
+                            .ok_or_else(invalid_persisted_value)?,
+                    )
+                    .map_err(|_| invalid_persisted_value())?,
+                )
+                .map_err(corrupt)?;
                 let target_id = row.target_id.ok_or_else(invalid_persisted_value)?;
                 let wake_version =
                     WakeVersion::restore(row.wake_version.ok_or_else(invalid_persisted_value)?)
                         .map_err(|_| invalid_persisted_value())?;
                 Ok(DevicePolicyAcceptTxOutcome::Accepted {
-                    result: DesiredPolicyAccepted::fresh(next_generation),
+                    result: DesiredPolicyAccepted::fresh(receipt_id, next_generation),
                     target_id,
                     wake_version,
                 })
             }
             "replayed" => {
+                let receipt_id = DevicePolicyAuthorizationReceiptId::restore(
+                    uuid::Uuid::parse_str(
+                        &row.authorization_receipt_id
+                            .ok_or_else(invalid_persisted_value)?,
+                    )
+                    .map_err(|_| invalid_persisted_value())?,
+                )
+                .map_err(corrupt)?;
                 let accepted_generation = DesiredGeneration::try_new(
                     u64::try_from(row.actual_generation).map_err(|_| invalid_persisted_value())?,
                 )
@@ -1552,6 +1631,7 @@ impl DevicePolicyTx<'_> {
                 .map_err(corrupt)?;
                 Ok(DevicePolicyAcceptTxOutcome::Replayed(
                     DesiredPolicyAccepted::restore(
+                        receipt_id,
                         accepted_generation,
                         DesiredPolicyAcceptedCondition::Reconciling,
                     ),
@@ -1624,18 +1704,30 @@ impl<E: ArtifactEligibility> DeviceCertificateRepository for PgDeviceCertificate
         let device = device_param(scope);
         #[cfg(all(test, feature = "integration"))]
         let fail_after_desired_write = self.fail_after_desired_write;
-        #[cfg(not(all(test, feature = "integration")))]
-        let fail_after_desired_write = false;
         #[cfg(all(test, feature = "integration"))]
         let fail_after_target_wake = self.fail_after_target_wake;
-        #[cfg(not(all(test, feature = "integration")))]
-        let fail_after_target_wake = false;
-        let outcome = self
+        #[cfg(all(test, feature = "integration"))]
+        let commit_unknown_after_commit = self.commit_unknown_after_commit;
+        #[cfg(all(test, feature = "integration"))]
+        let rollback_failed_after_rollback = self.rollback_failed_after_rollback;
+        let attempt = self
             .write_pool
-            .identity_write(
+            .identity_device_policy_attempt(
                 scope,
                 move |mut tx| {
                     Box::pin(async move {
+                        #[cfg(all(test, feature = "integration"))]
+                        if commit_unknown_after_commit {
+                            tx.inject_commit_unknown_after_commit()
+                                .await
+                                .map_err(|error| DevicePolicyTxError::Repository(storage(error)))?;
+                        }
+                        #[cfg(all(test, feature = "integration"))]
+                        if rollback_failed_after_rollback {
+                            tx.inject_rollback_failed_after_rollback()
+                                .await
+                                .map_err(|error| DevicePolicyTxError::Repository(storage(error)))?;
+                        }
                         let mut identity = tx.identity();
                         identity
                             .device_policy()
@@ -1643,7 +1735,9 @@ impl<E: ArtifactEligibility> DeviceCertificateRepository for PgDeviceCertificate
                                 &tenant,
                                 &device,
                                 input,
+                                #[cfg(all(test, feature = "integration"))]
                                 fail_after_desired_write,
+                                #[cfg(all(test, feature = "integration"))]
                                 fail_after_target_wake,
                             )
                             .await
@@ -1652,6 +1746,12 @@ impl<E: ArtifactEligibility> DeviceCertificateRepository for PgDeviceCertificate
                 |error| DevicePolicyTxError::Repository(storage(error)),
             )
             .await;
+        let outcome = attempt.into_result().map_err(|error| match error {
+            crate::cotx::DevicePolicyAttemptError::Operation(error) => error,
+            crate::cotx::DevicePolicyAttemptError::SettlementUnknown(error) => {
+                DevicePolicyTxError::Repository(RepoError::settlement_unknown(error))
+            }
+        });
         match outcome {
             Ok(DevicePolicyAcceptTxOutcome::Accepted {
                 result,
@@ -2276,7 +2376,10 @@ mod tests {
 mod integration_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::{
+        num::NonZeroU32,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     use deviceloop::CertificatePolicy;
     use diport::ManagedResource as _;
@@ -2345,6 +2448,44 @@ mod integration_tests {
     ) -> AcceptDesiredPolicy {
         AcceptDesiredPolicy::for_test(
             scope,
+            ExpectedGeneration::try_new(expected).unwrap(),
+            key,
+            policy(san),
+        )
+        .unwrap()
+    }
+
+    fn desired_with_policy_basis(
+        scope: DeviceCertificateScope,
+        expected: u64,
+        key: DevicePolicyIdempotencyKey,
+        san: &str,
+    ) -> AcceptDesiredPolicy {
+        let policies = (0..65_u32)
+            .rev()
+            .map(|index| {
+                httpserve::AuthorizationPolicyReference::new(
+                    format!("device-policy-{index:03}"),
+                    NonZeroU32::new(index + 1).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let subject = httpserve::AuthorizedSubject::for_test_with_durable_policy(
+            generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+            vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+            scope.tenant(),
+            rss_request_context::PrincipalKind::Admin,
+            "policy-admin-roundtrip",
+            httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string()),
+            policies,
+            [0x31; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+            UNIX_EPOCH + Duration::from_micros(73_123_456),
+        )
+        .unwrap();
+        AcceptDesiredPolicy::from_authorized_subject(
+            &subject,
+            scope.device(),
             ExpectedGeneration::try_new(expected).unwrap(),
             key,
             policy(san),
@@ -2564,6 +2705,96 @@ mod integration_tests {
             1
         );
 
+        let replay_scope = scope();
+        precreate_reconcile_target(&store, replay_scope).await?;
+        let replay_key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
+        let replay_left = PgDeviceCertificateRepository::from_unverified_for_test(&store);
+        let replay_right = PgDeviceCertificateRepository::from_unverified_for_test(&store);
+        let (replay_left, replay_right) = tokio::join!(
+            replay_left.accept_desired_policy(desired_with_key(
+                replay_scope,
+                0,
+                replay_key,
+                "same-key.example",
+            )),
+            replay_right.accept_desired_policy(desired_with_key(
+                replay_scope,
+                0,
+                replay_key,
+                "same-key.example",
+            )),
+        );
+        let replay_outcomes = [replay_left?, replay_right?];
+        assert_eq!(
+            replay_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, DesiredPolicyAcceptOutcome::Accepted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            replay_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, DesiredPolicyAcceptOutcome::Replayed { .. }))
+                .count(),
+            1
+        );
+
+        let conflict_scope = scope();
+        precreate_reconcile_target(&store, conflict_scope).await?;
+        let conflict_key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
+        let conflict_left = PgDeviceCertificateRepository::from_unverified_for_test(&store);
+        let conflict_right = PgDeviceCertificateRepository::from_unverified_for_test(&store);
+        let (conflict_left, conflict_right) = tokio::join!(
+            conflict_left.accept_desired_policy(desired_with_key(
+                conflict_scope,
+                0,
+                conflict_key,
+                "same-key-a.example",
+            )),
+            conflict_right.accept_desired_policy(desired_with_key(
+                conflict_scope,
+                0,
+                conflict_key,
+                "same-key-b.example",
+            )),
+        );
+        let conflict_outcomes = [conflict_left?, conflict_right?];
+        assert_eq!(
+            conflict_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, DesiredPolicyAcceptOutcome::Accepted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            conflict_outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    DesiredPolicyAcceptOutcome::IdempotencyConflict
+                ))
+                .count(),
+            1
+        );
+        for exact_scope in [replay_scope, conflict_scope] {
+            let counts: (i64, i64, i64) = sqlx::query_as(
+                "SELECT \
+                    (SELECT count(*) FROM device_certificate_policy_operations \
+                     WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                    (SELECT count(*) FROM device_certificate_desired_generation_lineage \
+                     WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                    (SELECT wake_version FROM reconcile_targets \
+                     WHERE tenant_id=$1::uuid AND resource_id=$2::uuid::text \
+                       AND reconciler_id='identity.device-certificate')",
+            )
+            .bind(exact_scope.tenant().to_string())
+            .bind(exact_scope.device().as_uuid().to_string())
+            .fetch_one(&store.pool)
+            .await?;
+            assert_eq!(counts, (1, 1, 1));
+        }
+
         let rollback_scope = scope();
         precreate_reconcile_target(&store, rollback_scope).await?;
         let faulted = PgDeviceCertificateRepository::from_unverified_for_test(&store)
@@ -2707,12 +2938,12 @@ mod integration_tests {
         precreate_reconcile_target(&owner, target).await?;
         let key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
         let accepted = repo
-            .accept_desired_policy(desired_with_key(target, 0, key, "replay.example"))
+            .accept_desired_policy(desired_with_policy_basis(target, 0, key, "replay.example"))
             .await?;
-        let wake = match accepted {
+        let (accepted_receipt_id, wake) = match accepted {
             DesiredPolicyAcceptOutcome::Accepted { result, wake } => {
                 assert_eq!(result.accepted_generation().get(), 1);
-                wake
+                (result.authorization_receipt_id(), wake)
             }
             other => {
                 return Err(std::io::Error::other(format!(
@@ -2723,10 +2954,65 @@ mod integration_tests {
         };
         assert_eq!(wake.version().get(), 1);
 
-        let before: (String, String, i64, String, String) = sqlx::query_as(
+        let receipt_projection: (String, String, String, String, String, i64, String, String) =
+            sqlx::query_as(
+                "SELECT operation.authorization_receipt_id::text, operation.principal_kind, \
+                        operation.principal_id, operation.contract_id, operation.permission, \
+                        (extract(epoch FROM operation.evaluated_at) * 1000000)::bigint, \
+                        encode(operation.obligation_fingerprint, 'hex'), \
+                        lineage.authorization_receipt_id::text \
+                 FROM device_certificate_policy_operations operation \
+                 JOIN device_certificate_desired_generation_lineage lineage \
+                   ON lineage.tenant_id=operation.tenant_id AND lineage.device_id=operation.device_id \
+                  AND lineage.generation=operation.accepted_generation \
+                 WHERE operation.tenant_id=$1::uuid AND operation.device_id=$2::uuid",
+            )
+            .bind(target.tenant().to_string())
+            .bind(target.device().as_uuid().to_string())
+            .fetch_one(&owner.pool)
+            .await?;
+        assert_eq!(
+            receipt_projection.0,
+            accepted_receipt_id.as_uuid().to_string()
+        );
+        assert_eq!(receipt_projection.1, "admin");
+        assert_eq!(receipt_projection.2, "policy-admin-roundtrip");
+        assert_eq!(
+            receipt_projection.3,
+            generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID
+        );
+        assert_eq!(
+            receipt_projection.4,
+            vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite.as_str()
+        );
+        assert_eq!(receipt_projection.5, 73_123_456);
+        assert_eq!(receipt_projection.6, "31".repeat(32));
+        assert_eq!(receipt_projection.7, receipt_projection.0);
+        let policy_projection: Vec<(i32, String, i64)> = sqlx::query_as(
+            "SELECT policy_ordinal,policy_id,policy_version \
+             FROM device_certificate_policy_authorization_policies \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid \
+             ORDER BY policy_ordinal",
+        )
+        .bind(target.tenant().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(policy_projection.len(), 65);
+        for (index, (ordinal, policy_id, version)) in policy_projection.iter().enumerate() {
+            assert_eq!(*ordinal, i32::try_from(index + 1).unwrap());
+            assert_eq!(policy_id, &format!("device-policy-{index:03}"));
+            assert_eq!(*version, i64::try_from(index + 1).unwrap());
+        }
+
+        let before: (String, String, i64, i64, i64, String, String) = sqlx::query_as(
             "SELECT to_jsonb(desired)::text, desired.xmin::text, \
                     (SELECT count(*) FROM device_certificate_policy_operations op \
                      WHERE op.tenant_id = desired.tenant_id AND op.device_id = desired.device_id), \
+                    (SELECT count(*) FROM device_certificate_policy_authorization_policies policy \
+                     WHERE policy.tenant_id = desired.tenant_id AND policy.device_id = desired.device_id), \
+                    (SELECT count(*) FROM device_certificate_desired_generation_lineage lineage \
+                     WHERE lineage.tenant_id = desired.tenant_id AND lineage.device_id = desired.device_id), \
                     to_jsonb(target)::text, target.xmin::text \
              FROM device_certificate_desired_states desired \
              JOIN reconcile_targets target \
@@ -2746,6 +3032,7 @@ mod integration_tests {
                 .await?,
             DesiredPolicyAcceptOutcome::Replayed { ref result }
                 if result.accepted_generation().get() == 1
+                    && result.authorization_receipt_id() == accepted_receipt_id
         ));
         assert!(matches!(
             repo.accept_desired_policy(desired_with_key(target, 0, key, "different.example",))
@@ -2767,10 +3054,14 @@ mod integration_tests {
                 .await
                 .is_err()
         );
-        let after: (String, String, i64, String, String) = sqlx::query_as(
+        let after: (String, String, i64, i64, i64, String, String) = sqlx::query_as(
             "SELECT to_jsonb(desired)::text, desired.xmin::text, \
                     (SELECT count(*) FROM device_certificate_policy_operations op \
                      WHERE op.tenant_id = desired.tenant_id AND op.device_id = desired.device_id), \
+                    (SELECT count(*) FROM device_certificate_policy_authorization_policies policy \
+                     WHERE policy.tenant_id = desired.tenant_id AND policy.device_id = desired.device_id), \
+                    (SELECT count(*) FROM device_certificate_desired_generation_lineage lineage \
+                     WHERE lineage.tenant_id = desired.tenant_id AND lineage.device_id = desired.device_id), \
                     to_jsonb(target)::text, target.xmin::text \
              FROM device_certificate_desired_states desired \
              JOIN reconcile_targets target \
@@ -2925,6 +3216,123 @@ mod integration_tests {
             "post-wake fault must preserve only the pre-existing target"
         );
 
+        let unknown_scope = scope();
+        precreate_reconcile_target(&owner, unknown_scope).await?;
+        let unknown_key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
+        let unknown_repo =
+            PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer)
+                .with_commit_unknown_fault_for_test();
+        assert!(matches!(
+            unknown_repo
+                .accept_desired_policy(desired_with_key(
+                    unknown_scope,
+                    0,
+                    unknown_key,
+                    "commit-unknown.example",
+                ))
+                .await,
+            Err(DeviceCertificateRepositoryError::SettlementUnknown { .. })
+        ));
+        let durable_unknown_receipt: String = sqlx::query_scalar(
+            "SELECT authorization_receipt_id::text \
+             FROM device_certificate_policy_operations \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND idempotency_key=$3::uuid",
+        )
+        .bind(unknown_scope.tenant().to_string())
+        .bind(unknown_scope.device().as_uuid().to_string())
+        .bind(unknown_key.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        let recovered = repo
+            .accept_desired_policy(desired_with_key(
+                unknown_scope,
+                0,
+                unknown_key,
+                "commit-unknown.example",
+            ))
+            .await?;
+        assert!(matches!(
+            recovered,
+            DesiredPolicyAcceptOutcome::Replayed { result }
+                if result.authorization_receipt_id().as_uuid().to_string()
+                    == durable_unknown_receipt
+                    && result.accepted_generation().get() == 1
+        ));
+        let unknown_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM device_certificate_policy_operations \
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                (SELECT count(*) FROM device_certificate_desired_generation_lineage \
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                (SELECT wake_version FROM reconcile_targets \
+                 WHERE tenant_id=$1::uuid AND resource_id=$2::uuid::text \
+                   AND reconciler_id='identity.device-certificate')",
+        )
+        .bind(unknown_scope.tenant().to_string())
+        .bind(unknown_scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(unknown_counts, (1, 1, 1));
+
+        let rolled_back_scope = scope();
+        precreate_reconcile_target(&owner, rolled_back_scope).await?;
+        let rolled_back_key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
+        let rolled_back_unknown =
+            PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer)
+                .with_rollback_failed_fault_for_test();
+        assert!(matches!(
+            rolled_back_unknown
+                .accept_desired_policy(desired_with_key(
+                    rolled_back_scope,
+                    0,
+                    rolled_back_key,
+                    "rollback-unknown.example",
+                ))
+                .await,
+            Err(DeviceCertificateRepositoryError::SettlementUnknown { .. })
+        ));
+        let rolled_back_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM device_certificate_policy_operations \
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                (SELECT count(*) FROM device_certificate_desired_generation_lineage \
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                (SELECT wake_version FROM reconcile_targets \
+                 WHERE tenant_id=$1::uuid AND resource_id=$2::uuid::text \
+                   AND reconciler_id='identity.device-certificate')",
+        )
+        .bind(rolled_back_scope.tenant().to_string())
+        .bind(rolled_back_scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(rolled_back_counts, (0, 0, 0));
+        assert!(matches!(
+            repo.accept_desired_policy(desired_with_key(
+                rolled_back_scope,
+                0,
+                rolled_back_key,
+                "rollback-unknown.example",
+            ))
+            .await?,
+            DesiredPolicyAcceptOutcome::Accepted { ref result, .. }
+                if result.accepted_generation().get() == 1
+        ));
+        let recovered_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM device_certificate_policy_operations \
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                (SELECT count(*) FROM device_certificate_desired_generation_lineage \
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid), \
+                (SELECT wake_version FROM reconcile_targets \
+                 WHERE tenant_id=$1::uuid AND resource_id=$2::uuid::text \
+                   AND reconciler_id='identity.device-certificate')",
+        )
+        .bind(rolled_back_scope.tenant().to_string())
+        .bind(rolled_back_scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(recovered_counts, (1, 1, 1));
+
         let quarantined = scope();
         let quarantined_target_id = precreate_reconcile_target(&owner, quarantined).await?;
         let quarantined_target: (String, String) = sqlx::query_as(
@@ -2989,6 +3397,88 @@ mod integration_tests {
         reader.shutdown().await?;
         writer.shutdown().await?;
         owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desired_accept_rejects_anonymous_principal_before_any_receipt_write() -> TestResult {
+        let (_pg, store) = crate::test_pg::connect_pg().await?;
+        store.run_migrations().await?;
+        let target = scope();
+        precreate_reconcile_target(&store, target).await?;
+        let before: (i64, String) = sqlx::query_as(
+            "SELECT wake_version,status FROM reconcile_targets \
+             WHERE tenant_id=$1::uuid AND resource_id=$2::uuid::text \
+               AND reconciler_id='identity.device-certificate' \
+               AND resource_kind='device-certificate'",
+        )
+        .bind(target.tenant().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .fetch_one(&store.pool)
+        .await?;
+        let mut transaction = store.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(target.tenant().to_string())
+            .execute(&mut *transaction)
+            .await?;
+        let rejected = sqlx::query(
+            "SELECT * FROM public.rss_accept_device_certificate_desired( \
+             $1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11, \
+             $12,$13,$14,$15,$16,$17,$18,$19)",
+        )
+        .bind(target.tenant().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(vec![0x55_u8; 32])
+        .bind(0_i64)
+        .bind(1_i64)
+        .bind(3_600_i32)
+        .bind(600_i32)
+        .bind(true)
+        .bind(true)
+        .bind(vec!["anonymous-rejected.example"])
+        .bind("anonymous")
+        .bind("unauthenticated")
+        .bind(generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID)
+        .bind(vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite.as_str())
+        .bind(vec![0x66_u8; 32])
+        .bind(0_i64)
+        .bind(vec!["anonymous-policy"])
+        .bind(vec![1_i64])
+        .execute(&mut *transaction)
+        .await;
+        assert!(rejected.is_err());
+        transaction.rollback().await?;
+        let after: (i64, String) = sqlx::query_as(
+            "SELECT wake_version,status FROM reconcile_targets \
+             WHERE tenant_id=$1::uuid AND resource_id=$2::uuid::text \
+               AND reconciler_id='identity.device-certificate' \
+               AND resource_kind='device-certificate'",
+        )
+        .bind(target.tenant().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(after, before);
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT \
+               (SELECT count(*) FROM device_certificate_policy_operations \
+                WHERE tenant_id=$1::uuid AND device_id=$2::uuid) + \
+               (SELECT count(*) FROM device_certificate_policy_authorization_policies \
+                WHERE tenant_id=$1::uuid AND device_id=$2::uuid) + \
+               (SELECT count(*) FROM device_certificate_desired_generation_lineage \
+                WHERE tenant_id=$1::uuid AND device_id=$2::uuid) + \
+               (SELECT count(*) FROM device_certificate_desired_states \
+                WHERE tenant_id=$1::uuid AND device_id=$2::uuid) + \
+               (SELECT count(*) FROM device_certificate_conditions \
+                WHERE tenant_id=$1::uuid AND device_id=$2::uuid)",
+        )
+        .bind(target.tenant().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(rows, 0);
+        store.shutdown().await?;
         Ok(())
     }
 }

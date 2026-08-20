@@ -11,7 +11,8 @@ use std::time::SystemTime;
 use super::LocalTxAttempt;
 #[cfg(feature = "domain-identity")]
 use super::{
-    MapOutboxAppendError, ProducerFactAuthorization, ProducerTxAttempt, ProducerTxOutcome,
+    DevicePolicyTxAttempt, MapOutboxAppendError, ProducerFactAuthorization, ProducerTxAttempt,
+    ProducerTxOutcome,
 };
 use super::{ServingReadLane, ServingWriteLane, TenantDb, TenantScopeHandle, TenantTx};
 #[cfg(feature = "domain-settings")]
@@ -116,6 +117,12 @@ impl<L: super::TenantLane> IdentityTx<'_, '_, L> {
 impl IdentityTx<'_, '_, ServingWriteLane> {
     pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
         self.tx.inject_commit_unknown_after_commit().await
+    }
+
+    pub(crate) async fn inject_rollback_failed_after_rollback(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        self.tx.inject_rollback_failed_after_rollback().await
     }
 
     pub(crate) async fn inject_failure_after_outbox_append_before_commit(
@@ -261,6 +268,28 @@ impl TenantDb<ServingWriteLane> {
     {
         self.write_attempt(scope, move |tx| write(IdentityTx { tx }), map_storage)
             .await
+    }
+
+    /// Execute exactly one device-policy transaction while preserving opaque settlement evidence.
+    pub(crate) async fn identity_device_policy_attempt<S, T, F, E>(
+        &self,
+        scope: S,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> DevicePolicyTxAttempt<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'borrow, 'tx> FnOnce(
+                IdentityTx<'borrow, 'tx, ServingWriteLane>,
+            ) -> BoxFuture<'borrow, Result<T, E>>
+            + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        DevicePolicyTxAttempt::new(
+            self.write_attempt(scope, move |tx| write(IdentityTx { tx }), map_storage)
+                .await,
+        )
     }
 
     /// Execute the authenticated ACK/report mutation and its generated public receipt in one

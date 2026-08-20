@@ -289,7 +289,7 @@ pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
 pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
 
 #[cfg(all(test, feature = "integration"))]
-mod integration_tests;
+pub(crate) mod integration_tests;
 
 #[cfg(all(test, feature = "integration"))]
 mod test_pg;

@@ -26,6 +26,6 @@ mod revocation_tests;
 mod saga_tests;
 mod settings_persistence_tests;
 mod settings_projection_tests;
-mod support;
+pub(crate) mod support;
 mod tenant_rls_tests;
 mod transaction_tests;

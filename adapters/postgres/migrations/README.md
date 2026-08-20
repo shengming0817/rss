@@ -2374,6 +2374,24 @@ hard cut：取得 `ACCESS EXCLUSIVE` 后，用即将安装的 versioned validato
 3. 新 binary 的 reader capability gate 会精确验证有效函数集合、ACL、安全姿态与函数定义指纹；任一漂移
    使 durable 启动 fail-closed。group 拓扑变化必须用新的 forward migration 与 generated catalog 同步推进。
 
+### 0110 Device-policy authorization receipt hard cut
+
+`0110` 将既有 `device_certificate_policy_operations` 原地升级为 authorization receipt/idempotency 单一
+ledger，新增规范化 policy basis 与 desired-generation lineage。policy accept 铸造新 receipt；自动 rotation
+只把当前 receipt 复制到下一 generation。current desired 以 composite FK 绑定 exact generation/receipt。
+
+1. 这是 non-rolling hard cut。停止 serving/reconcile 写，确认无 held device-certificate lease、无相关写会话，
+   且 ledger 精确为 109。旧 desired/operation 必须为空；迁移遇到旧行会在任何 DDL 前失败，不删除旧行、
+   不补造 principal/policy/evaluation lineage，也不提供旧 binary overload。
+2. 迁移后确认 accept funnel 仅剩一个新签名；accept 与 rotation 均由
+   `rss_device_certificate_funnel_owner` 持有、`SECURITY DEFINER`、固定 `pg_catalog, pg_temp` search path。
+   PUBLIC/reader 无 EXECUTE；serving writer 仅能 EXECUTE。
+3. operation 与 normalized policy 表 ENABLE+FORCE RLS，PUBLIC、`rss_app`、`rss_app_read` 均无直接
+   SELECT/DML；generation-lineage 可 tenant-scoped SELECT，但仅 NOLOGIN funnel owner 可写。用 tenant A/B/
+   空 tenant 验证隔离，并验证 identical replay 的 receipt/generation/xmin/wake 均不变。
+4. 这是 forward-only 原子迁移。postflight 失败时停止新 binary，只能用迁移前完整备份与旧 artifact 整体
+   恢复；禁止局部还原、双写、兼容 view、匿名 receipt 或新旧 binary 并行。
+
 ### 0105 Settings projection input-generation hard cut
 
 `0105` 将 Settings v3 worker/operator/reader 的固定函数身份推进到当前 generated projection-input

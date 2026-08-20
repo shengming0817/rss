@@ -16,9 +16,10 @@ pub use domain::{
     AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, DesiredPolicyAccepted,
     DesiredPolicyAcceptedCondition, DesiredStateRestore, DesiredStateSnapshot,
     DeviceCertificateError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-    DevicePolicyAcceptInputError, DevicePolicyAuthorizationReceipt, DevicePolicyIdempotencyKey,
-    DevicePolicyRequestDigest, DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId,
-    ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
+    DevicePolicyAcceptInputError, DevicePolicyAuthorizationReceipt,
+    DevicePolicyAuthorizationReceiptId, DevicePolicyIdempotencyKey, DevicePolicyRequestDigest,
+    DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId, ReportedStateHash,
+    ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
 };
 pub use eventexec::reconcile::{DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError};
 pub use ingress::{
@@ -90,9 +91,17 @@ mod tests {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
 
+    fn authorization_receipt_id() -> DevicePolicyAuthorizationReceiptId {
+        DevicePolicyAuthorizationReceiptId::restore(
+            uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1").unwrap(),
+        )
+        .unwrap()
+    }
+
     fn desired(generation: u64) -> DesiredStateRestore {
         DesiredStateRestore::new(
             generation,
+            authorization_receipt_id(),
             PolicyHash::parse(&digest('a')).unwrap(),
             policy(),
             SystemTime::UNIX_EPOCH,
@@ -310,14 +319,29 @@ mod tests {
 
     #[test]
     fn accepted_policy_result_has_closed_fresh_condition() {
-        let result =
-            DesiredPolicyAccepted::fresh(ExpectedGeneration::try_new(0).unwrap().next().unwrap());
+        let receipt_id = authorization_receipt_id();
+        let result = DesiredPolicyAccepted::fresh(
+            receipt_id,
+            ExpectedGeneration::try_new(0).unwrap().next().unwrap(),
+        );
+        assert_eq!(result.authorization_receipt_id(), receipt_id);
         assert_eq!(result.accepted_generation().get(), 1);
         assert_eq!(
             result.condition(),
             DesiredPolicyAcceptedCondition::Reconciling
         );
         assert_eq!(result.condition().as_label(), "reconciling");
+    }
+
+    #[test]
+    fn durable_authorization_receipt_id_rejects_nil_and_redacts_debug() {
+        assert!(DevicePolicyAuthorizationReceiptId::restore(uuid::Uuid::nil()).is_err());
+        let receipt_id = authorization_receipt_id();
+        assert_eq!(
+            format!("{receipt_id:?}"),
+            "DevicePolicyAuthorizationReceiptId(<uuid>)"
+        );
+        assert_eq!(receipt_id.as_uuid().get_version_num(), 7);
     }
 
     #[test]
@@ -348,6 +372,7 @@ mod tests {
     fn desired_and_reported_snapshots_restore_storage_invariants() {
         let desired = DesiredStateRestore::new(
             1,
+            authorization_receipt_id(),
             PolicyHash::parse(&digest('a')).unwrap(),
             policy(),
             SystemTime::UNIX_EPOCH,
@@ -375,6 +400,7 @@ mod tests {
     fn reported_ahead_of_desired_fails_restore() {
         let desired = DesiredStateRestore::new(
             1,
+            authorization_receipt_id(),
             PolicyHash::parse(&digest('a')).unwrap(),
             policy(),
             SystemTime::UNIX_EPOCH,

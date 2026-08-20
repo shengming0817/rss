@@ -589,22 +589,10 @@ mod tests {
             "credentialGeneration": 7,
         });
 
-        // The desired-row trigger owns canonical policy hashing, which is unrelated to this
-        // adapter seam. Disable only that user trigger while establishing the FK parent fixture;
-        // command/outbox guards remain active for the behavior under test.
-        sqlx::raw_sql(
-            "ALTER TABLE public.device_certificate_desired_states DISABLE TRIGGER USER; \
-             INSERT INTO public.device_certificate_desired_states \
-               (tenant_id,device_id,generation,policy_hash,validity_seconds, \
-                renew_before_seconds,client_auth,server_auth,sans,created_at,updated_at) \
-             VALUES \
-               ('11111111-1111-4111-8111-111111111111', \
-                '22222222-2222-4222-8222-222222222222',7,decode(repeat('11',32),'hex'), \
-                3600,300,true,false,ARRAY[]::text[],clock_timestamp(),clock_timestamp()); \
-             ALTER TABLE public.device_certificate_desired_states ENABLE TRIGGER USER;",
-        )
-        .execute(&owner.pool)
-        .await?;
+        crate::integration_tests::support::DevicePolicyLineageFixture::new(&owner, TENANT, DEVICE)?
+            .with_policy(3_600, 300, true, false, &[])
+            .seed(7)
+            .await?;
         sqlx::raw_sql(
             "INSERT INTO public.reconcile_targets \
                (tenant_id,target_id,reconciler_id,resource_kind,resource_id) \

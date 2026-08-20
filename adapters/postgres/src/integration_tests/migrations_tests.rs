@@ -1952,6 +1952,108 @@ async fn migration_0107_legacy_resource_fact_aborts_atomically() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0110_rejects_legacy_desired_state_without_partial_receipt_schema() -> TestResult
+{
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(109).run(&store.pool).await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO device_certificate_desired_states \
+           (tenant_id,device_id,generation,validity_seconds,renew_before_seconds, \
+            client_auth,server_auth,sans) \
+         VALUES ($1::uuid,$2::uuid,1,3600,600,true,false,ARRAY[]::text[])",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&store.pool)
+    .await?;
+
+    let failure = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("0110 must reject legacy desired state rather than invent authorization");
+    assert!(
+        failure
+            .to_string()
+            .contains("0110 requires empty legacy device-certificate desired and operation state"),
+        "unexpected 0110 cutover failure: {failure}"
+    );
+    let post_failure: (Option<i64>, bool, bool) = sqlx::query_as(
+        "SELECT \
+           (SELECT max(version) FROM public._sqlx_migrations), \
+           EXISTS (SELECT 1 FROM pg_catalog.pg_attribute \
+                   WHERE attrelid='public.device_certificate_desired_states'::regclass \
+                     AND attname='authorization_receipt_id' AND NOT attisdropped), \
+           to_regclass('public.device_certificate_desired_generation_lineage') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(post_failure, (Some(109), false, false));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0110_rejects_held_device_certificate_lease_without_partial_schema() -> TestResult
+{
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(109).run(&store.pool).await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let target_id: String = sqlx::query_scalar(
+        "INSERT INTO reconcile_targets \
+            (tenant_id,reconciler_id,resource_kind,resource_id) \
+         VALUES ($1::uuid,'identity.device-certificate','device-certificate',$2::uuid::text) \
+         RETURNING target_id::text",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO reconcile_leases \
+            (tenant_id,target_id,state,lease_token,holder_id,epoch,acquired_at,expires_at,heartbeat_at) \
+         VALUES ($1::uuid,$2::uuid,'held',gen_random_uuid(),'migration-0110-worker',1, \
+                 now(),now()+interval '1 hour',now())",
+    )
+    .bind(&tenant)
+    .bind(&target_id)
+    .execute(&store.pool)
+    .await?;
+
+    let failure = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("0110 must reject a held device-certificate reconcile lease");
+    assert!(
+        failure
+            .to_string()
+            .contains("0110 requires every device-certificate reconcile lease to be free"),
+        "unexpected 0110 held-lease failure: {failure}"
+    );
+    let post_failure: (Option<i64>, bool, bool, String) = sqlx::query_as(
+        "SELECT \
+           (SELECT max(version) FROM public._sqlx_migrations), \
+           EXISTS (SELECT 1 FROM pg_catalog.pg_attribute \
+                   WHERE attrelid='public.device_certificate_desired_states'::regclass \
+                     AND attname='authorization_receipt_id' AND NOT attisdropped), \
+           to_regclass('public.device_certificate_desired_generation_lineage') IS NOT NULL, \
+           (SELECT state FROM reconcile_leases \
+            WHERE tenant_id=$1::uuid AND target_id=$2::uuid)",
+    )
+    .bind(&tenant)
+    .bind(&target_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(post_failure, (Some(109), false, false, "held".to_owned()));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0107_writer_capability_delta_is_exact() -> TestResult {
     use std::collections::BTreeSet;
 

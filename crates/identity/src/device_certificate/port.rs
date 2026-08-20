@@ -59,6 +59,13 @@ pub enum DeviceCertificateRepositoryError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// PostgreSQL did not confirm whether the transaction committed or rolled back.
+    #[error("device-certificate transaction settlement is unknown")]
+    SettlementUnknown {
+        /// Opaque provider failure; callers must reconcile by explicit same-key replay.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// Persisted rows failed the domain restore funnel.
     #[error("device-certificate storage returned invalid state")]
     CorruptState(#[source] DeviceCertificateError),
@@ -68,6 +75,13 @@ impl DeviceCertificateRepositoryError {
     /// Preserve an infrastructure provider failure without exposing it as domain state.
     pub fn storage_unavailable(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::StorageUnavailable {
+            source: Box::new(source),
+        }
+    }
+
+    /// Preserve an unsafe commit/rollback settlement without claiming rollback or retry safety.
+    pub fn settlement_unknown(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::SettlementUnknown {
             source: Box::new(source),
         }
     }

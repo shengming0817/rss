@@ -1031,13 +1031,12 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
             .is_none(),
         "superseded commands are never current evidence"
     );
-    sqlx::query(
-        "UPDATE device_certificate_desired_states SET generation=2 \
-         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
-    )
-    .bind(tenant.to_string())
-    .bind(restarted_attempt.target().resource_id())
-    .execute(&store.pool)
+    DevicePolicyLineageFixture::new(
+        &store,
+        &tenant.to_string(),
+        restarted_attempt.target().resource_id(),
+    )?
+    .advance(2)
     .await?;
     let generation_two = reviewed_reconcile_command_at_generation(
         &store,
@@ -1094,13 +1093,12 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
             .is_some(),
         "new desired generation has its own current command evidence"
     );
-    sqlx::query(
-        "UPDATE device_certificate_desired_states SET generation=3 \
-         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
-    )
-    .bind(tenant.to_string())
-    .bind(restarted_attempt.target().resource_id())
-    .execute(&store.pool)
+    DevicePolicyLineageFixture::new(
+        &store,
+        &tenant.to_string(),
+        restarted_attempt.target().resource_id(),
+    )?
+    .advance(3)
     .await?;
     assert!(
         evidence_repo
@@ -1408,14 +1406,9 @@ async fn reconcile_concurrent_takeover_commits_only_highest_authority_without_re
     // Mint while the old authority is still valid; the race exercises durable submission fencing.
     let stale = reviewed_reconcile_command(&store, &old_attempt, "stale-retry", 1).await?;
 
-    sqlx::query(
-        "UPDATE device_certificate_desired_states SET generation = 2, updated_at = now() \
-         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
-    )
-    .bind(tenant.to_string())
-    .bind(&device)
-    .execute(&store.pool)
-    .await?;
+    DevicePolicyLineageFixture::new(&store, &tenant.to_string(), &device)?
+        .advance(2)
+        .await?;
     sqlx::query(
         "UPDATE reconcile_leases SET expires_at = acquired_at + interval '1 microsecond' \
          WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
@@ -1651,14 +1644,9 @@ async fn reconcile_scheduler_supersedes_each_nonterminal_state_and_keeps_termina
             .await?;
         }
 
-        sqlx::query(
-            "UPDATE device_certificate_desired_states SET generation = 2, updated_at = now() \
-             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
-        )
-        .bind(tenant.to_string())
-        .bind(&device)
-        .execute(&store.pool)
-        .await?;
+        DevicePolicyLineageFixture::new(&store, &tenant.to_string(), &device)?
+            .advance(2)
+            .await?;
         sqlx::query(
             "UPDATE reconcile_leases SET expires_at = acquired_at + interval '1 microsecond' \
              WHERE tenant_id = $1::uuid AND target_id = $2::uuid",

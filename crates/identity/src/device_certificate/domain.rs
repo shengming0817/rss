@@ -272,6 +272,32 @@ impl std::fmt::Debug for DevicePolicyIdempotencyKey {
     }
 }
 
+/// Durable identity minted by the PostgreSQL acceptance funnel for one authorization decision.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DevicePolicyAuthorizationReceiptId(Uuid);
+
+impl std::fmt::Debug for DevicePolicyAuthorizationReceiptId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DevicePolicyAuthorizationReceiptId(<uuid>)")
+    }
+}
+
+impl DevicePolicyAuthorizationReceiptId {
+    /// Restore a database-minted non-nil receipt identity.
+    pub fn restore(raw: Uuid) -> Result<Self, DeviceCertificateError> {
+        if raw.is_nil() {
+            return Err(DeviceCertificateError::InvalidPersistedValue);
+        }
+        Ok(Self(raw))
+    }
+
+    /// Exact PostgreSQL UUID representation.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
 impl DevicePolicyIdempotencyKey {
     /// Preserve any syntactically valid UUID; uniqueness and replay scope are provider concerns.
     #[must_use]
@@ -370,6 +396,14 @@ impl DevicePolicyAuthorizationReceipt {
 
     pub fn principal_id(&self) -> &str {
         self.provenance.principal_id()
+    }
+
+    pub fn contract_id(&self) -> &'static str {
+        self.provenance.contract_id()
+    }
+
+    pub fn permission(&self) -> vocab::RoutePermissionId {
+        self.provenance.permission()
     }
 
     pub fn durable_policy(&self) -> &httpserve::DurablePolicyAuthorization {
@@ -535,6 +569,7 @@ impl DesiredPolicyAcceptedCondition {
 /// Deterministic accepted response persisted for exact idempotency replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredPolicyAccepted {
+    authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
     accepted_generation: DesiredGeneration,
     condition: DesiredPolicyAcceptedCondition,
 }
@@ -542,8 +577,12 @@ pub struct DesiredPolicyAccepted {
 impl DesiredPolicyAccepted {
     /// Construct the only condition valid for a newly accepted desired policy.
     #[must_use]
-    pub const fn fresh(accepted_generation: DesiredGeneration) -> Self {
+    pub const fn fresh(
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+        accepted_generation: DesiredGeneration,
+    ) -> Self {
         Self {
+            authorization_receipt_id,
             accepted_generation,
             condition: DesiredPolicyAcceptedCondition::Reconciling,
         }
@@ -552,13 +591,21 @@ impl DesiredPolicyAccepted {
     /// Restore the append-once accepted operation result.
     #[must_use]
     pub const fn restore(
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
         accepted_generation: DesiredGeneration,
         condition: DesiredPolicyAcceptedCondition,
     ) -> Self {
         Self {
+            authorization_receipt_id,
             accepted_generation,
             condition,
         }
+    }
+
+    /// Durable authorization decision committed with this accepted generation.
+    #[must_use]
+    pub const fn authorization_receipt_id(&self) -> DevicePolicyAuthorizationReceiptId {
+        self.authorization_receipt_id
     }
 
     /// Desired generation committed by the accepted operation.
@@ -578,6 +625,7 @@ impl DesiredPolicyAccepted {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredStateRestore {
     generation: u64,
+    authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
     policy_hash: PolicyHash,
     policy: CertificatePolicy,
     created_at: SystemTime,
@@ -589,6 +637,7 @@ impl DesiredStateRestore {
     #[must_use]
     pub fn new(
         generation: u64,
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
         policy_hash: PolicyHash,
         policy: CertificatePolicy,
         created_at: SystemTime,
@@ -596,6 +645,7 @@ impl DesiredStateRestore {
     ) -> Self {
         Self {
             generation,
+            authorization_receipt_id,
             policy_hash,
             policy,
             created_at,
@@ -608,6 +658,7 @@ impl DesiredStateRestore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredStateSnapshot {
     generation: DesiredGeneration,
+    authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
     policy_hash: PolicyHash,
     policy: CertificatePolicy,
     created_at: SystemTime,
@@ -622,6 +673,7 @@ impl DesiredStateSnapshot {
         }
         Ok(Self {
             generation: DesiredGeneration::try_new(input.generation)?,
+            authorization_receipt_id: input.authorization_receipt_id,
             policy_hash: input.policy_hash,
             policy: input.policy,
             created_at: input.created_at,
@@ -633,6 +685,12 @@ impl DesiredStateSnapshot {
     #[must_use]
     pub const fn generation(&self) -> DesiredGeneration {
         self.generation
+    }
+
+    /// Authorization receipt whose allow decision owns this desired generation.
+    #[must_use]
+    pub const fn authorization_receipt_id(&self) -> DevicePolicyAuthorizationReceiptId {
+        self.authorization_receipt_id
     }
 
     /// Database-generated policy hash.

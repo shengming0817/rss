@@ -1145,8 +1145,8 @@ struct ReviewedWriterCapability {
 // head. A migration change cannot compile until its writer authority has been reviewed in the same
 // delivery.
 const REVIEWED_WRITER_CAPABILITY: ReviewedWriterCapability = ReviewedWriterCapability {
-    migration_head: "sha256:be54b8abfda8f94562ea6eaa5bf2f68e4571516d0433246b54711f1cbed6b512",
-    capability_fingerprint: "sha256:5e3443424a964aeeb9b7f67a9e25dabbcbec129719a9e712ead74ffb4a3bfec4",
+    migration_head: "sha256:c7f39ba167dd8af7f21e7f91766c56c9046390401dce542f7df0ddf5811c78ae",
+    capability_fingerprint: "sha256:060ec23595c20884111d9b48bbd9e45df8fb9d589a7a6d3c800f1a7fc4760087",
 };
 
 const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -1430,7 +1430,9 @@ WITH reader AS (
                    'settings_projection_active_pointer',
                    'inbox_receipts',
                    'event_l2_dr_admission_epoch',
-                   'event_l2_dr_admission_phase_receipt'
+                   'event_l2_dr_admission_phase_receipt',
+                   'device_certificate_policy_operations',
+                   'device_certificate_policy_authorization_policies'
                ) AS denied_relation,
            n.nspname = 'public'
                AND c.relkind IN ('r', 'p')
@@ -1438,7 +1440,9 @@ WITH reader AS (
                    'settings_projection_active_pointer',
                    'inbox_receipts',
                    'event_l2_dr_admission_epoch',
-                   'event_l2_dr_admission_phase_receipt'
+                   'event_l2_dr_admission_phase_receipt',
+                   'device_certificate_policy_operations',
+                   'device_certificate_policy_authorization_policies'
                )
                AND EXISTS (
                    SELECT 1

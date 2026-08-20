@@ -1226,6 +1226,10 @@ mod tests {
     fn desired() -> DesiredStateSnapshot {
         DesiredStateSnapshot::restore(DesiredStateRestore::new(
             7,
+            crate::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+                uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1").unwrap(),
+            )
+            .unwrap(),
             PolicyHash::parse(&digest('b')).unwrap(),
             CertificatePolicy::new(
                 CertificatePolicyDurations::new(
@@ -1607,6 +1611,10 @@ mod tests {
         .unwrap();
         let desired_restore = crate::device_certificate::DesiredStateRestore::new(
             7,
+            crate::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+                uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1").unwrap(),
+            )
+            .unwrap(),
             PolicyHash::parse(&digest('b')).unwrap(),
             desired.policy().clone(),
             SystemTime::UNIX_EPOCH,
@@ -2084,6 +2092,10 @@ mod tests {
                 scope(),
                 DesiredStateRestore::new(
                     7,
+                    crate::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+                        uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1").unwrap(),
+                    )
+                    .unwrap(),
                     PolicyHash::parse(&digest('b')).unwrap(),
                     desired().policy().clone(),
                     SystemTime::UNIX_EPOCH,

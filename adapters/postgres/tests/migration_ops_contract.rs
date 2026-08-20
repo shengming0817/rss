@@ -41,6 +41,8 @@ const SETTINGS_METADATA_PROJECTION: &str =
     include_str!("../migrations/0091_create_settings_metadata_projection.sql");
 const SETTINGS_PROJECTION_APPLY_FUNNEL: &str =
     include_str!("../migrations/0093_install_settings_projection_apply_funnel.sql");
+const DEVICE_POLICY_AUTHORIZATION_RECEIPTS: &str =
+    include_str!("../migrations/0110_persist_device_policy_authorization_receipts.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
@@ -123,6 +125,51 @@ fn create_table_body<'a>(sql: &'a str, table: &str) -> Result<&'a str, String> {
         }
     }
     Err(format!("table `{table}` has an unterminated column list"))
+}
+
+#[test]
+fn device_policy_receipt_cutover_is_single_path_normalized_and_fail_loud() {
+    for required in [
+        "0110 requires migration ledger head 0109",
+        "0110 requires empty legacy device-certificate desired and operation state",
+        "DROP FUNCTION public.rss_accept_device_certificate_desired(",
+        "CREATE FUNCTION public.rss_accept_device_certificate_desired(",
+        "CREATE TABLE public.device_certificate_policy_authorization_policies",
+        "CREATE TABLE public.device_certificate_desired_generation_lineage",
+        "authorization_receipt_id uuid NOT NULL",
+        "device_certificate_desired_states_lineage_fk",
+        "device_certificate_policy_operations_contract_exact",
+        "device_certificate_policy_operations_permission_exact",
+        "CHECK (principal_kind IN ('user','device','admin','super_admin','service'))",
+        "p_principal_kind = 'anonymous'",
+        "device_policy_authorization_policies_complete",
+        "ALTER TABLE public.device_certificate_policy_authorization_policies FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE public.device_certificate_desired_generation_lineage FORCE ROW LEVEL SECURITY",
+        "new_receipt_id := pg_catalog.gen_random_uuid()",
+        "lineage.authorization_receipt_id=desired.authorization_receipt_id",
+        "0110 requires exactly one device-policy accept funnel",
+    ] {
+        assert!(
+            DEVICE_POLICY_AUTHORIZATION_RECEIPTS.contains(required),
+            "0110 omits receipt/lineage invariant `{required}`"
+        );
+    }
+    for forbidden in [
+        "jsonb",
+        "CREATE OR REPLACE FUNCTION public.rss_accept_device_certificate_desired",
+        "ADD COLUMN authorization_receipt_id uuid DEFAULT",
+        "DELETE FROM public.device_certificate_desired_states",
+        "GRANT SELECT ON TABLE public.device_certificate_policy_operations TO rss_app",
+        "GRANT SELECT ON TABLE public.device_certificate_policy_authorization_policies TO rss_app",
+        "rss.test_device_policy_fault",
+        "cardinality(p_policy_ids) NOT BETWEEN 1 AND 64",
+        "policy_count > 64",
+    ] {
+        assert!(
+            !DEVICE_POLICY_AUTHORIZATION_RECEIPTS.contains(forbidden),
+            "0110 retains forbidden compatibility or sensitive-read shape `{forbidden}`"
+        );
+    }
 }
 
 fn top_level_table_items(body: &str) -> Result<Vec<&str>, String> {

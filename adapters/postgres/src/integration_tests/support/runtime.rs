@@ -573,16 +573,8 @@ pub(in super::super) async fn insert_device_desired(
     tenant: rss_request_context::TenantId,
     device_id: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO device_certificate_desired_states \
-         (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
-          client_auth, server_auth, sans) \
-         VALUES ($1::uuid, $2::uuid, 1, 3600, 600, true, false, ARRAY[]::text[])",
-    )
-    .bind(tenant.to_string())
-    .bind(device_id)
-    .execute(&store.pool)
-    .await?;
+    insert_device_certificate_desired(store, &tenant.to_string(), device_id, true, false, &[])
+        .await?;
     Ok(())
 }
 

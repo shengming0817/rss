@@ -2249,16 +2249,12 @@ mod integration_tests {
         target: Target,
         generation: u64,
     ) -> TestResult {
-        sqlx::query(
-            "INSERT INTO device_certificate_desired_states \
-             (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
-              client_auth, server_auth, sans) \
-             VALUES ($1::uuid, $2::uuid, $3, 3600, 600, true, false, ARRAY[]::text[])",
-        )
-        .bind(target.scope.tenant().to_string())
-        .bind(target.scope.device().as_uuid().to_string())
-        .bind(i64::try_from(generation)?)
-        .execute(&store.pool)
+        crate::integration_tests::support::DevicePolicyLineageFixture::new(
+            store,
+            &target.scope.tenant().to_string(),
+            &target.scope.device().as_uuid().to_string(),
+        )?
+        .seed(i64::try_from(generation)?)
         .await?;
         let target_id: String = sqlx::query_scalar(
             "INSERT INTO reconcile_targets \
@@ -3126,13 +3122,12 @@ mod integration_tests {
             .expect("an ACK with an old fence against an unreceived command is durably rejected");
         assert!(ack_unreceived_old_fence_settled.load(Ordering::SeqCst));
 
-        sqlx::query(
-            "UPDATE device_certificate_desired_states SET generation=2
-             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
-        )
-        .bind(target.scope.tenant().to_string())
-        .bind(target.scope.device().as_uuid().to_string())
-        .execute(&owner.pool)
+        crate::integration_tests::support::DevicePolicyLineageFixture::new(
+            &owner,
+            &target.scope.tenant().to_string(),
+            &target.scope.device().as_uuid().to_string(),
+        )?
+        .advance(2)
         .await?;
         let (delivery, stale_generation_settled) =
             with_credential_generation(report_delivery_at(target, "stale-generation", 1, 8, 5), 2);
@@ -3237,17 +3232,15 @@ mod integration_tests {
         for target in [ack_target, report_target] {
             insert_desired(&owner, target).await?;
         }
-        sqlx::query(
-            "UPDATE device_certificate_desired_states SET generation=2
-             WHERE tenant_id=$1::uuid AND device_id::text=ANY($2::text[])",
-        )
-        .bind(tenant.to_string())
-        .bind(vec![
-            ack_target.scope.device().as_uuid().to_string(),
-            report_target.scope.device().as_uuid().to_string(),
-        ])
-        .execute(&owner.pool)
-        .await?;
+        for target in [ack_target, report_target] {
+            crate::integration_tests::support::DevicePolicyLineageFixture::new(
+                &owner,
+                &tenant.to_string(),
+                &target.scope.device().as_uuid().to_string(),
+            )?
+            .advance(2)
+            .await?;
+        }
         let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         for (target, command_id, digest) in [
             (ack_target, "independent-credential-ack-command", 31),

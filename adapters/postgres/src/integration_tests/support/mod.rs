@@ -119,7 +119,7 @@ mod runtime;
 mod settings_support;
 
 pub(super) use audit_support::*;
-pub(super) use device::*;
+pub(crate) use device::*;
 pub(super) use eventing::*;
 pub(super) use identity_support::*;
 pub(super) use migrations::*;

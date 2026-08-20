@@ -1751,14 +1751,9 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
     .await?;
     assert!(!deletion_requested);
 
-    sqlx::query(
-        "UPDATE device_certificate_desired_states SET generation=2 \
-         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
-    )
-    .bind(tenant.to_string())
-    .bind(&device)
-    .execute(&store.pool)
-    .await?;
+    DevicePolicyLineageFixture::new(&store, &tenant.to_string(), &device)?
+        .advance(2)
+        .await?;
     let (stale_authorization, _) = authorized_artifact(
         scope,
         1,
@@ -1817,6 +1812,14 @@ async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_st
              JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
               AND target.resource_id=desired.device_id::text \
              WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&rotation_device)
+    .fetch_one(&store.pool)
+    .await?;
+    let before_rotation_receipt: String = sqlx::query_scalar(
+        "SELECT authorization_receipt_id::text FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
     )
     .bind(tenant.to_string())
     .bind(&rotation_device)
@@ -1886,6 +1889,27 @@ async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_st
         (&"False".to_owned(), &"AwaitingDevice".to_owned(), Some(2))
     );
     assert_eq!(after_rotation.10, before_rotation.6 + 1);
+    let rotation_lineage: (String, String, i64) = sqlx::query_as(
+        "SELECT desired.authorization_receipt_id::text,lineage.authorization_receipt_id::text, \
+                (SELECT count(*) FROM device_certificate_desired_generation_lineage all_lineage \
+                 WHERE all_lineage.tenant_id=desired.tenant_id \
+                   AND all_lineage.device_id=desired.device_id) \
+         FROM device_certificate_desired_states desired \
+         JOIN device_certificate_desired_generation_lineage lineage \
+           ON lineage.tenant_id=desired.tenant_id AND lineage.device_id=desired.device_id \
+          AND lineage.generation=desired.generation \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&rotation_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(rotation_lineage.0, before_rotation_receipt);
+    assert_eq!(rotation_lineage.1, before_rotation_receipt);
+    assert_eq!(
+        rotation_lineage.2, 2,
+        "rotation must append exactly one lineage row"
+    );
     assert_eq!(
         repository.rotate_generation(&rotation_fence).await?,
         RotationOutcome::StaleFence
@@ -2858,6 +2882,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_reported_states', \
              'device_certificate_conditions', \
              'device_certificate_policy_operations', \
+             'device_certificate_policy_authorization_policies', \
+             'device_certificate_desired_generation_lineage', \
              'device_certificate_authorized_artifacts' \
            ) \
          ORDER BY c.relname",
@@ -2873,7 +2899,17 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
                 true,
             ),
             ("device_certificate_conditions".to_owned(), true, true),
+            (
+                "device_certificate_desired_generation_lineage".to_owned(),
+                true,
+                true,
+            ),
             ("device_certificate_desired_states".to_owned(), true, true),
+            (
+                "device_certificate_policy_authorization_policies".to_owned(),
+                true,
+                true,
+            ),
             (
                 "device_certificate_policy_operations".to_owned(),
                 true,
@@ -2893,6 +2929,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_reported_states', \
              'device_certificate_conditions', \
              'device_certificate_policy_operations', \
+             'device_certificate_policy_authorization_policies', \
+             'device_certificate_desired_generation_lineage', \
              'device_certificate_authorized_artifacts' \
            ) \
            AND policyname = 'tenant_isolation' \
@@ -2902,7 +2940,7 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     .await?;
     assert_eq!(
         policies.len(),
-        5,
+        7,
         "each tenant relation needs one canonical policy"
     );
     for (table, using, with_check) in policies {
@@ -2940,6 +2978,7 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
             "updated_at",
             "deletion_requested_at",
             "finalizer_present",
+            "authorization_receipt_id",
         ],
         "desired state must not persist a fence epoch or open-text key usages"
     );
@@ -2958,13 +2997,15 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_reported_states', \
              'device_certificate_conditions', \
              'device_certificate_policy_operations', \
+             'device_certificate_policy_authorization_policies', \
+             'device_certificate_desired_generation_lineage', \
              'device_certificate_authorized_artifacts' \
          ]) AS table_name \
          ORDER BY table_name",
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(privileges.len(), 5);
+    assert_eq!(privileges.len(), 7);
     for (
         table,
         writer_select,
@@ -2976,13 +3017,21 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
         reader_update,
     ) in privileges
     {
-        assert!(writer_select, "rss_app must read {table}");
+        let sensitive = matches!(
+            table.as_str(),
+            "device_certificate_policy_operations"
+                | "device_certificate_policy_authorization_policies"
+        );
+        assert_eq!(writer_select, !sensitive, "rss_app SELECT ACL on {table}");
         assert!(
             !writer_insert && !writer_update,
             "rss_app must have column-level mutations only on {table}"
         );
         assert!(!writer_delete, "rss_app must not DELETE {table}");
-        assert!(reader_select, "rss_app_read must read {table}");
+        assert_eq!(
+            reader_select, !sensitive,
+            "rss_app_read SELECT ACL on {table}"
+        );
         assert!(
             !reader_insert && !reader_update,
             "rss_app_read must be read-only on {table}"
@@ -3001,6 +3050,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
                              'device_certificate_reported_states', \
                              'device_certificate_conditions', \
                              'device_certificate_policy_operations', \
+                             'device_certificate_policy_authorization_policies', \
+                             'device_certificate_desired_generation_lineage', \
                              'device_certificate_authorized_artifacts') \
            AND a.attnum > 0 AND NOT a.attisdropped \
          ORDER BY c.relname, a.attnum",
@@ -3013,6 +3064,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
             "device_certificate_reported_states" => false,
             "device_certificate_conditions" => false,
             "device_certificate_policy_operations" => false,
+            "device_certificate_policy_authorization_policies" => false,
+            "device_certificate_desired_generation_lineage" => false,
             "device_certificate_authorized_artifacts" => false,
             _ => false,
         };
@@ -3021,6 +3074,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
             "device_certificate_reported_states" => false,
             "device_certificate_conditions" => false,
             "device_certificate_policy_operations" => false,
+            "device_certificate_policy_authorization_policies" => false,
+            "device_certificate_desired_generation_lineage" => false,
             "device_certificate_authorized_artifacts" => false,
             _ => false,
         };
@@ -3042,6 +3097,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_reported_states'::regclass, \
              'device_certificate_conditions'::regclass, \
              'device_certificate_policy_operations'::regclass, \
+             'device_certificate_policy_authorization_policies'::regclass, \
+             'device_certificate_desired_generation_lineage'::regclass, \
              'device_certificate_authorized_artifacts'::regclass \
          )",
     )
@@ -3057,6 +3114,9 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
         "octet_length(artifact_digest) = 32",
         "octet_length(request_digest) = 32",
         "accepted_condition = 'reconciling'",
+        "authorization_receipt_id <> '00000000-0000-0000-0000-000000000000'",
+        "contract_id = 'identity.device-certificate-policy-put'",
+        "permission = 'identity:device-certificate-policy:write'",
         "condition_type",
         "Ready",
         "QuarantinedByOperator",
@@ -3572,16 +3632,10 @@ async fn device_certificate_database_guards_reject_regression_and_open_condition
     }
 
     let changed_sans = vec!["new.example".to_owned()];
-    sqlx::query(
-        "UPDATE device_certificate_desired_states \
-         SET generation = 2, sans = $3 \
-         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
-    )
-    .bind(&tenant)
-    .bind(&device)
-    .bind(&changed_sans)
-    .execute(&store.pool)
-    .await?;
+    DevicePolicyLineageFixture::new(&store, &tenant, &device)?
+        .with_policy(3_600, 600, true, true, &changed_sans)
+        .accept(2)
+        .await?;
     let changed_hash: Vec<u8> = sqlx::query_scalar(
         "SELECT policy_hash FROM device_certificate_desired_states \
          WHERE tenant_id = $1::uuid AND device_id = $2::uuid",

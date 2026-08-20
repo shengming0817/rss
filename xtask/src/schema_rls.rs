@@ -92,10 +92,13 @@ const FORCE_RLS: &str = "force row level security";
 /// `ALTER POLICY` 升级为本形态，否则 schema-rls 判 `PolicyWeak`（只新增旧谓词不 harden 即门红）。
 const POLICY_PREDICATE_NULLIF: &str =
     "tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid";
-/// Tenant relations whose only reader seam is a fixed SECURITY DEFINER function. This exact list
-/// is intentionally code-owned: adding another relation requires a reviewed guard change and
-/// synthetic red coverage rather than a migration comment or caller-controlled annotation.
-const FUNCTION_ONLY_READER_RELATIONS: &[&str] = &["settings_projection_active_pointer"];
+/// Tenant relations for which raw reader SELECT is intentionally forbidden. They are either
+/// exposed only through a fixed SECURITY DEFINER function or are sensitive internal ledgers with
+/// no serving-reader seam. This exact list is code-owned and requires reviewed guard coverage.
+const RAW_READER_SELECT_DENIED_RELATIONS: &[&str] = &[
+    "settings_projection_active_pointer",
+    "device_certificate_policy_authorization_policies",
+];
 pub(crate) struct SchemaRlsGuard;
 
 impl GovernanceCheck for SchemaRlsGuard {
@@ -370,13 +373,13 @@ fn reader_acl_findings(
             continue;
         };
         let event = select_events.get(table);
-        if FUNCTION_ONLY_READER_RELATIONS.contains(&table) {
+        if RAW_READER_SELECT_DENIED_RELATIONS.contains(&table) {
             if event.is_some_and(|event| event.granted) {
                 findings.push(finding(
                     Rule::ReaderSelectForbidden,
                     table,
                     format!(
-                        "{created_in}: function-only tenant relation must not grant raw SELECT to rss_app_read"
+                        "{created_in}: raw-reader-denied tenant relation must not grant SELECT to rss_app_read"
                     ),
                 ));
             }
@@ -385,7 +388,7 @@ fn reader_acl_findings(
                     Rule::ReaderFunctionOnlyPostureAbsent,
                     table,
                     format!(
-                        "{created_in}: function-only tenant relation requires same-migration REVOKE ALL from rss_app_read"
+                        "{created_in}: raw-reader-denied tenant relation requires same-migration REVOKE ALL from rss_app_read"
                     ),
                 ));
             }
@@ -884,18 +887,18 @@ CREATE POLICY tenant_isolation ON tenant_reader_fixture
         )]
     }
 
-    fn function_only_reader_files(posture: &str) -> Vec<(String, String)> {
+    fn raw_reader_denied_files(table: &str, posture: &str) -> Vec<(String, String)> {
         vec![(
             "0098_function_only.sql".to_string(),
             format!(
                 r#"
-CREATE TABLE settings_projection_active_pointer (
+CREATE TABLE {table} (
     tenant_id uuid NOT NULL,
     projection_id text NOT NULL
 );
-ALTER TABLE settings_projection_active_pointer ENABLE ROW LEVEL SECURITY;
-ALTER TABLE settings_projection_active_pointer FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON settings_projection_active_pointer
+ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+ALTER TABLE {table} FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON {table}
     USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 {posture}
@@ -943,7 +946,8 @@ CREATE POLICY tenant_isolation ON sessions
 
     #[test]
     fn green_function_only_relation_requires_exact_raw_privilege_revoke() {
-        let (count, findings) = scan_rls(&function_only_reader_files(
+        let (count, findings) = scan_rls(&raw_reader_denied_files(
+            "settings_projection_active_pointer",
             "REVOKE ALL ON TABLE public.settings_projection_active_pointer FROM PUBLIC, rss_app_read;",
         ));
         assert_eq!(count, 1);
@@ -952,7 +956,10 @@ CREATE POLICY tenant_isolation ON sessions
 
     #[test]
     fn red_function_only_relation_without_same_migration_revoke() {
-        let (_, findings) = scan_rls(&function_only_reader_files(""));
+        let (_, findings) = scan_rls(&raw_reader_denied_files(
+            "settings_projection_active_pointer",
+            "",
+        ));
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::ReaderFunctionOnlyPostureAbsent
                 && finding.subject == "settings_projection_active_pointer"
@@ -961,13 +968,33 @@ CREATE POLICY tenant_isolation ON sessions
 
     #[test]
     fn red_function_only_relation_rejects_reader_select_even_after_revoke() {
-        let (_, findings) = scan_rls(&function_only_reader_files(
+        let (_, findings) = scan_rls(&raw_reader_denied_files(
+            "settings_projection_active_pointer",
             "REVOKE ALL ON TABLE public.settings_projection_active_pointer FROM PUBLIC, rss_app_read;\n\
              GRANT SELECT ON TABLE public.settings_projection_active_pointer TO rss_app_read;",
         ));
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::ReaderSelectForbidden
                 && finding.subject == "settings_projection_active_pointer"
+        }));
+    }
+
+    #[test]
+    fn device_policy_basis_is_a_raw_reader_denied_tenant_ledger() {
+        let table = "device_certificate_policy_authorization_policies";
+        let (_, green) = scan_rls(&raw_reader_denied_files(
+            table,
+            "REVOKE ALL ON TABLE public.device_certificate_policy_authorization_policies FROM PUBLIC, rss_app_read;",
+        ));
+        assert!(green.is_empty(), "{green:?}");
+
+        let (_, red) = scan_rls(&raw_reader_denied_files(
+            table,
+            "REVOKE ALL ON TABLE public.device_certificate_policy_authorization_policies FROM PUBLIC, rss_app_read;\n\
+             GRANT SELECT ON TABLE public.device_certificate_policy_authorization_policies TO rss_app_read;",
+        ));
+        assert!(red.iter().any(|finding| {
+            finding.rule == Rule::ReaderSelectForbidden && finding.subject == table
         }));
     }
 

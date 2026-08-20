@@ -333,8 +333,9 @@ round-trip。writer 另核验 current role 精确为 `rss_app` 且非 owner/supe
 - device policy receipt 只接受 exact policy-put contract、typed write permission、authenticated tenant/
   principal、canonical path `DeviceId`、durable-policy basis 与域内派生 request digest。handler 不能从
   getter、body tenant/device 或裸 scope 重建 receipt。
-- 上述 T1 carrier 只证明进程内可信 mint、绑定和一次消费，不是 durable、cryptographic 或跨重启证明；
-  PostgreSQL 原子持久化、公开 lineage schema 和 production handler 分别由 #2113、#2114、#2115 闭合。
+- 上述 T1 carrier 只证明进程内可信 mint、绑定和一次消费；#2113 已将其闭值投影与 desired、idempotency、
+  generation lineage 和 durable wake 原子持久化。它不是 cryptographic 跨进程凭据；公开 lineage schema
+  和 production handler 仍分别由 #2114、#2115 闭合。
 
 ## Open-source AuthZ parity boundary
 

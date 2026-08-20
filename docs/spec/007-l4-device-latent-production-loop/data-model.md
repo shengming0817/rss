@@ -48,15 +48,32 @@ device, contributing policy ids/versions, canonical obligation fingerprint, and 
 domain consumes that provenance exactly once and adds the canonical request digest, producing a move-only
 `DevicePolicyAuthorizationReceipt`; `AcceptDesiredPolicy` cannot be built from a naked scope.
 
-This is a T1 in-process capability only. It has no durable receipt identifier and does not by itself prove replay,
-commit outcome, restart survival, or cross-process authenticity. #2113 owns atomic persistence with desired state,
-idempotency and wake; #2114 owns public lineage schema; #2115 owns the production HTTP consumer.
+The move-only carrier remains the T1 mint authority and is never serialized. #2113 lowers its closed projection
+into a server-minted, non-nil durable receipt identifier in the existing operation ledger, atomically with desired
+state, idempotency settlement, generation lineage, conditions and durable wake. Identical replay restores the same
+receipt and generation; commit-unknown returns no receipt until an explicit same-key request observes durable state.
+#2114 owns public lineage schema; #2115 owns the production HTTP consumer.
 
 ### DevicePolicyOperation
 
 Identity: `(tenant_id, device_id, idempotency_key)` where `idempotency_key` is a UUID from the PUT request.
 
-The append-once operation stores the canonical request digest (expected generation plus canonical policy), accepted generation, and deterministic accepted response. Reusing the key with the same canonical digest returns that `200` response without another desired write or wake. Different input under the same key and an expected-generation conflict map to `409`; lookup outside authenticated tenant/path-device scope uses the same `404` as absence. Authenticated tenant and path device are part of the lookup scope and never come from the request body.
+The append-once operation is also the authorization receipt ledger. It stores a server-minted receipt id, canonical
+request digest, accepted generation/response, principal, exact contract/permission, obligation fingerprint,
+evaluation time, and a normalized nonempty ordered set of contributing policy id/version references. Reusing the
+key with the same canonical digest returns the same receipt and `200` response without another desired, lineage or
+wake write. Different input under the same key and an expected-generation conflict map to `409`; lookup outside
+authenticated tenant/path-device scope uses the same `404` as absence. Authenticated tenant and path device are
+part of the lookup scope and never come from the request body.
+
+### DeviceCertificateDesiredGenerationLineage
+
+Identity: `(tenant_id, device_id, generation)`. A policy accept maps its new generation to the new authorization
+receipt in the same transaction. Automatic certificate rotation copies the current mapping to the next generation
+without minting another authorization receipt. The current desired row has a composite foreign key to its exact
+generation/receipt mapping, so commands and artifacts can join historical generations to the allow that authorized
+the policy. Resource Security Fact source/revision/freshness is an evaluation-time fail-closed input owned by #2111;
+it is not persisted as authorization receipt lineage by #2113.
 
 ### DeviceCertificateReportedState
 

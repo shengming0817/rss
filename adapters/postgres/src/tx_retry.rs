@@ -341,6 +341,8 @@ fn localtx_execution_budget() -> LocalTxExecutionBudget {
 pub(crate) enum PgTxRetryBoundary {
     #[cfg(feature = "domain-identity")]
     OutboxProducer,
+    #[cfg(feature = "domain-identity")]
+    DevicePolicy,
     #[cfg(feature = "domain-settings")]
     SettingsConfig,
     #[cfg(feature = "domain-settings")]
@@ -358,6 +360,8 @@ impl PgTxRetryBoundary {
         match self {
             #[cfg(feature = "domain-identity")]
             Self::OutboxProducer => "outbox.producer",
+            #[cfg(feature = "domain-identity")]
+            Self::DevicePolicy => "identity.device-policy",
             #[cfg(feature = "domain-settings")]
             Self::SettingsConfig => "settings.config",
             #[cfg(feature = "domain-settings")]
@@ -375,6 +379,9 @@ impl PgTxRetryBoundary {
 /// Non-retrying HTTP producer transaction boundary.
 #[cfg(feature = "domain-identity")]
 pub(crate) const OUTBOX_PRODUCER_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::OutboxProducer;
+/// Non-retrying settlement boundary for device-policy receipt acceptance.
+#[cfg(feature = "domain-identity")]
+pub(crate) const DEVICE_POLICY_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::DevicePolicy;
 /// Retry boundary for settings config UoW writes.
 #[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_CONFIG_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsConfig;

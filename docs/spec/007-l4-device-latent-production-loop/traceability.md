@@ -7,13 +7,19 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 #2110 supplies the T1 authorization-lineage prerequisite for the draft desired-policy path: private opaque
 provenance, explicit authorizer basis, canonical contributing policy/obligation/time metadata, and move-only
 device policy/status receipts. It intentionally makes no PostgreSQL, wire-schema, mounted-handler or T3 claim;
-those remain the #2113, #2114 and #2115 handoffs.
+#2113 now supplies the T2 PostgreSQL handoff: one append-only authorization/idempotency ledger, normalized policy
+basis, atomic desired-generation lineage for policy accept and rotation, deterministic replay, and typed unsafe
+settlement. #2114 and #2115 remain the public-schema and mounted production-handler handoffs respectively.
+The #2113 T1 boundary proves that denied or unavailable authorization cannot construct
+`AcceptDesiredPolicy`; #2115 owns the mounted route proof that Deny, NoMatch, resource-fact
+Missing/Stale/Future/type-mismatch, and PIP/store errors never invoke the repository. Those cases
+must not be represented by forged database inputs in this persistence PBI.
 
 | Requirement | Owner | Primary proof |
 |---|---:|---|
 | FR-001 | #1896 | T2 — real-PostgreSQL desired-generation monotonicity and tenant-scope conformance |
-| FR-002 | #1898 | T2 — PostgreSQL CAS-conflict test proving zero writes across desired, operation, and schedule state |
-| FR-003 | #1898 | T2 — desired-update/durable-target-wake transaction atomicity test |
+| FR-002 | #2113 | T2 — `desired_accept_replays_without_writes_and_conflicts_roll_back_the_bundle` proves CAS and digest conflicts preserve desired, receipt/policy/lineage, and durable wake snapshots |
+| FR-003 | #2113 | T2 — `desired_accept_has_one_winner_and_write_fault_rolls_back` and `desired_accept_replays_without_writes_and_conflicts_roll_back_the_bundle` prove receipt/desired/condition/wake transaction atomicity |
 | FR-004 | #1896 | T2 — reported high-water PostgreSQL conformance |
 | FR-005 | #1896 | T2 — ahead-of-desired rejection/quarantine transaction test |
 | FR-006 | #1901 | T2 — sealed Ready proof plus PostgreSQL round-trip requiring matching generation/report/artifact/current-command, server-time expiry and fail-closed revocation evidence |
@@ -44,7 +50,7 @@ those remain the #2113, #2114 and #2115 handoffs.
 | FR-030 | #1901 | T2 — schema inventory plus deletion transaction proving retained artifact receipts reuse the existing PostgreSQL decision-side revocation projection |
 | FR-031 | #1906 | T2 — programmable simulator journey keeps draft artifacts production-ineligible; #1904 owns compile-only draft pilot assembly |
 | FR-032 | ADR-028 future handoff | T1/T2 required — typed provider construction plus missing-provider seam/component-readiness rejection; no designated-process startup/readiness claim or current carrier |
-| FR-033 | #1898 | T2 — authenticated tenant/device idempotency replay/reuse PostgreSQL conformance |
+| FR-033 | #2113 | T2 — `desired_accept_replays_without_writes_and_conflicts_roll_back_the_bundle` proves same-key deterministic receipt replay, digest reuse conflict, 65-policy projection, and both unsafe-settlement recovery outcomes |
 | FR-034 | #1893 | T1 — bounded duration and sealed cross-field policy-constructor boundary/property test |
 | FR-035 | #1909 | T2 — existing typed registry/codegen six-contract exact-set synthetic-red proof |
 | FR-036 | #1895 | T1 — four command/event identity, link, kind, consistency, and shape golden |
