@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-12
+- **Last updated**：2026-08-20
 - **Scope**：[`project-scope.md`](../rules/project-scope.md) 的项目目标与目标验收边界
 
 ## Context
@@ -11,6 +11,82 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 面向 Rust 企业应用的 AI 友好型企业开发框架后，需要统一公共消费面、官方技术栈闭包和分阶段完成条件。
 
 ## Decision
+
+### 2026-08-20 amendment：Foundation / Eventing 公共面与 core / eventing T3 闭集
+
+本 amendment 接纳 ADR-029 已冻结的 Foundation 公共残差、一个窄的 Eventing L2 公共 package，以及经正式
+GA-hardening acceptance trigger 明列的 core / eventing T3 evidence item。它只改变产品面与 scope，不修改当前代码、
+Cargo graph、Release Surface、artifact、selector 或运行结果；planned carrier 在对应 PBI 真实落地前不得被写成现行 API
+或完成事实。
+
+Foundation Public 继续只有两个 package owner，不增加聚合层：
+
+| 语义 | 唯一 public owner | 当前状态 |
+|---|---|---|
+| tenant value | `rss-request-context::TenantId` | existing / keep |
+| contract identity 与 descriptor | `rss-contract::{ContractId, ContractVersion, SchemaDigest, ContractDescriptor}` | existing / keep |
+| absolute time | planned `rss-contract::Timepoint` | #2150 前不存在 Release API |
+| opaque pagination token | planned `rss-contract::PageCursor` | #2150 前不存在 Release API |
+| stable data classification | planned `rss-contract::DataClass` | #2151 前不存在 Release API |
+| redact-safe error projection | planned `rss-contract::SafeError` | #2151 前不存在 Release API |
+
+每项的 internal carrier、keep/move/drop、authority 与 Axis A / Axis B 边界只由
+[`ADR-029`](202608191635-029-foundation-public-primitives-ownership.md) 细化。consumer 必须从唯一 owner path 直接导入；
+禁止 `rss-foundation`、shared prelude、Platform/generated/vocab/secure convenience re-export、alias、deprecated
+re-export、`From`/`TryFrom`、feature flag、双读写或双路径。公共值可构造不授予可信性：Platform 的
+application build 产生 instance-bound `TrustedContextMinter`，production composition 只把该 admission capability
+接给 OIDC/AuthN/AuthZ funnel；funnel 在验证后构造 move-only `AdmittedRequest`，dispatch 只消费该值。
+Foundation 值与 Platform capability 本身都不 mint identity。
+
+Eventing Public 接纳 planned `rss-eventing` standalone package，且只拥有 provider-neutral L2 authoring/runtime
+waist：envelope 与 tenant/time/audit metadata、LocalTx/commit outcome 与 ambiguity、delivery/settlement outcome、
+idempotency/fencing、bounded retry/lifecycle，以及低基数 observability emit contract。tenant/time 直接复用
+Foundation owner；package 不公开 AMQP/PostgreSQL/provider 类型、`diport`/Provider SPI、broker 管理面、testkit/fixture、
+assembly/RuntimePlan/provider catalog/constructor、generated internals、L3 projection/saga/operator、L4 device
+implementation、dashboard/alert 或 T3 registry。
+
+`rss-eventing` 不是 `eventexec` 或 `composition/eventing` 的 facade。#2155–#2159 必须先切开 L2 public seam 与
+internal implementation，再由 #2162/#2163 复用现有 Release Surface/package-proof 和外部 consumer。internal consumer
+直接迁到 canonical seam；不得保留 re-export、shim、feature alias、同义双实现或 parallel registry。package
+first-green 只证明公开可消费性，不等于 `eventing` official profile、artifact closure、activation 或 T3。
+
+正式 trigger 将 `core` 与 `eventing` 提升为 `hardening-authorized`，但只授权下列闭集；当前 `active` 集合仍为空，
+`device-security` 继续服从 ADR-028 的 candidate/default-deny 边界：
+
+| Evidence ID | Plan → carrier | Official profile | 唯一 T3 owner |
+|---|---|---|---|
+| `CP-T3-CORE-LIFECYCLE` | #2124 → #2127 | `core` | `ProfileLifecycleJoin` |
+| `CORE-T3-SECURED-REQUEST-01` | #2167 → #2168 | `core` | `AcceptedValueStreamJoin` |
+| `CP-T3-EVENTING-VALUE-STREAM` | #2125 → #2128 | `eventing` | `AcceptedValueStreamJoin` |
+| `EVENTING-T3-PROFILE-LIFECYCLE-01` | #2169 → #2170 | `eventing` | `ProfileLifecycleJoin` |
+
+每个 profile 仍只有一个 designated/canonical production artifact 与一个 canonical journey infrastructure；多个
+evidence item 只共享 image、fixture 和 setup，各自必须有独立 Evidence ID、selector 与可定位 assertion。plan 只冻结
+必要性、artifact、receipts、预算和 transition；plan 文档、issue、PR、receipt 或聚合命令都不是第二 owner。
+
+transition 分成三个不可合并的门：
+
+1. **profile/artifact T1/T2 first-green**：#2165 冻结 `core` exact closure，#2166 冻结 `eventing` exact closure；
+   对应 lower-layer receipts 未在同一 revision 真实通过前，不得开始该 profile 的 T3 carrier 实施。
+2. **单项 T3 carrier first-green**：`core` 分别由 #2127、#2168 证明，`eventing` 分别由 #2170、#2128 证明；
+   #2170 lifecycle first-green 是 #2128 value-stream carrier 的实施 gate。单项通过只产生该 Evidence ID 的 candidate
+   receipt，不激活 profile、不切换 artifact，也不替换其它 evidence 的 legacy owner。
+3. **整 profile activation**：同一 profile 的两项已授权 evidence 均在同一 designated artifact closure 上真实通过后，
+   才能原子切换 artifact/profile/selectors，并按各 evidence plan 的 mapping 删除或降级旧 carrier。此前 legacy owner
+   继续 canonical；失败只拒绝激活，不以兼容入口、skip、committed receipt 或长期双路径绕过。
+
+AI-HARD carrier handoff 保持单链：Foundation 类型/依赖与删除由 #2150/#2151 的 rustc/Cargo Hard carrier 承载，
+owner projection、Release API exact-set 与 package proof 由 #2152 承载，registry-only 外部消费由 #2153 承载；
+Eventing 对应由 #2155–#2163 的 layer/type/release/external-consumer proof 承载；T3 实施 DAG 固定为 profile
+first-green → 单项 carrier first-green → 整 profile activation，运行事实只由上表 carrier 的精确 selector 与
+final-HEAD receipt 承载。本文和 tracker 只记录决策，不声明无载体 invariant，也不新增 Markdown scanner、
+registry、runner、receipt schema 或 gate。
+
+四原则复核：**彻底**，owner、公共/内部边界、consumer、driver handoff、四项 T3 与失败 transition 闭合；
+**不向后兼容**，Axis A 与 T3 cutover 均不保留 shim/alias/双 owner，Axis B 仍按版本化 wire 规则演进；
+**优雅简洁**，详细 Foundation owner、产品授权、external consumer 与通用 scope 分别只由 ADR-029、本 ADR、ADR-026
+与 project-scope 持有；**AI-HARD**，永久约束落到既有 Cargo/rustc、typed release proof、外部 consumer 与精确
+selector，Markdown 只做决策和 carrier handoff。
 
 ### 2026-08-11 amendment：Platform vNext 唯一 owner 与原子 cutover
 
@@ -24,7 +100,7 @@ vNext 的唯一 owner 固定如下：
 |------|------------|------|
 | contract/admission identity | Foundation `rss-contract` | 唯一定义 `ContractId`、`ContractVersion`、`SchemaDigest` 与 descriptor identity；零 internal workspace 依赖 |
 | request/security value vocabulary | Foundation `rss-request-context` | 唯一定义 tenant、request、principal reference/kind、deadline、cancellation、obligation 与只读视图；除公开 obligation 签名确需 contract identity 外不依赖 `rss-contract` |
-| JWT/JWS/JWKS authority | Official OIDC integration 与 AuthN/AuthZ funnel | OIDC integration 唯一验证签名、claims 与 JWKS freshness；funnel 通过私有 sealed mint capability 唯一构造 `TrustedRequestContext` |
+| JWT/JWS/JWKS authority | Official OIDC integration 与 AuthN/AuthZ funnel | OIDC integration 唯一验证签名、claims 与 JWKS freshness；Platform application build 产生 instance-bound `TrustedContextMinter`，production composition 只接给 funnel，funnel 在验证后构造 move-only `AdmittedRequest` |
 | application waist | Platform | descriptor admission、typed async `Handler<C>`、closed dispatch outcome/error semantics、module/dispatch 与稳定 host-view ports；消费并传播 Foundation deadline/cancellation，不重新定义其值类型；不接收 raw token/JWKS，不 mint identity |
 | process lifecycle 与 live inventory | RuntimeExec | startup、signal、readiness、admission stop、总 drain budget、shutdown、inventory mint/reader/publisher；Platform 只读取 internal bridge 投影 |
 | composition | assembly/composition root | 唯一接线 owner；RuntimePlan、provider catalog、constructors、inventory publisher 与第三方 SPI 保持 internal |
@@ -75,6 +151,8 @@ framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sea
 | 产品面 | 版本承诺 | Owner |
 |--------|----------|-------|
 | Standalone Component | 独立 SemVer | 低依赖基础能力的公开 crate |
+| Foundation Public | 独立 SemVer | `rss-contract` 拥有 contract vocabulary；`rss-request-context` 拥有 authority-free request values；无聚合 facade |
+| Eventing Public | 独立 SemVer | planned `rss-eventing` 只拥有 provider-neutral L2 authoring/runtime waist；package 不等于 official profile 或 T3 |
 | Platform Public | 协调版本 | descriptor admission、typed async handler、module/dispatch 与稳定 host-view façade；消费 Foundation/security/runtime 投影，不拥有 contract identity、trusted mint 或 process lifecycle |
 | Official Integration | 封闭支持矩阵 | 成熟上游之上的 tenant、安全、一致性、health 与 lifecycle 适配 |
 | Reference Extension | 第一方纵向 consumer | Identity、Settings、Audit 与已接纳的 L3/L4 slice |
@@ -113,8 +191,8 @@ profile identity、dependency closure、provider capability、typed config 与 r
 
 | Official profile | Designated assembly | Binary / image artifact | 当前状态 | Journey 边界 |
 |------------------|---------------------|-------------------------|----------|--------------|
-| `core` | `assemblies/runtime` | `server::server` / Docker `runtime` target | candidate；当前 runtime 尚未形成 core-only closure | 尚无 profile canonical journey；legacy runtime smoke 只作迁移 evidence |
-| `eventing` | `assemblies/runtime` | `server::server` / Docker `runtime` target | candidate | 尚无 profile canonical journey；SettingsOnly 四项 evidence 是迁移来源，不是 eventing owner |
+| `core` | `assemblies/runtime` | `server::server` / Docker `runtime` target | hardening-authorized scope；artifact 仍为 candidate，当前 runtime 尚未形成 core-only closure | 2026-08-20 amendment 明列两项 candidate evidence；first-green 前尚无 profile canonical journey，legacy runtime smoke 只作迁移 evidence |
+| `eventing` | `assemblies/runtime` | `server::server` / Docker `runtime` target | hardening-authorized scope；artifact 仍为 candidate | 2026-08-20 amendment 明列两项 candidate evidence；first-green 前尚无 profile canonical journey，SettingsOnly evidence 是迁移来源而非 eventing owner |
 | `device-security` | `assemblies/deviceidentity`（原地演进） | 预留 candidate identity：`deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime`；当前均不存在 | candidate scope；当前 assembly 仍 compile-only draft pilot | 零 T3；无 hardening trigger，不得登记 Evidence ID/selector/journey |
 
 `core` 与 `eventing` 可以复用同一 release image，但必须各自通过闭值 profile configuration/plan 证明依赖闭包；不能以同一
@@ -127,9 +205,10 @@ artifact 的 config/startup/readiness/drain/restart，`AcceptedValueStreamJoin` 
 value stream 在 production process/provider 组合后独有的 join hazard。assembly、domain、contract、provider、adapter、
 consistency level、binary/image、`profile = "production"` 或 `supported` lifecycle 都不能单独授权 T3，也不得创造第三类 owner。
 
-ADR 已接纳、因而未来可以逐项申请 GA-hardening trigger 的 official candidate 闭集只有 `core`、`eventing` 与
-`device-security`；其中 `core`/`eventing` 属 GA 主线，`device-security` 服从 ADR-028 的独立候选路径。当前三者均为
-`candidate`，当前 `hardening-authorized` 与 `active` 集合均为空。profile 状态依次为：ADR 接纳的 `candidate`；scope freeze 后由正式
+ADR 已接纳、因而可以逐项申请 GA-hardening trigger 的 official candidate 闭集只有 `core`、`eventing` 与
+`device-security`；其中 `core`/`eventing` 属 GA 主线，`device-security` 服从 ADR-028 的独立候选路径。按
+2026-08-20 amendment，`core`/`eventing` 仅对该 amendment 明列的 evidence item 为 `hardening-authorized`，
+`device-security` 仍为 `candidate`，当前 `active` 集合为空。profile 状态依次为：ADR 接纳的 `candidate`；scope freeze 后由正式
 GA-hardening acceptance trigger 逐项放行的 `hardening-authorized`；designated artifact、真实 provider conformance、
 T1/T2 前置和 candidate production join evidence 全部真实通过后原子进入 `active`。candidate evidence 在激活前不是
 canonical owner、不能进入普通 PR required selection，也不能替换 legacy carrier；这消除“active 才能建 T3、但激活又需要
@@ -239,7 +318,10 @@ PR；不将多个 profile 的 T3 收敛成一个无法独立审批、执行和�
 
 - project target 的每个承诺可映射到现有能力矩阵和唯一产品面。
 - Platform Public 与 Official Integration 具有真实外部 consumer、版本边界和升级路径。
+- Foundation 六项语义只有 ADR-029 指定的直接 owner path；planned 类型在 carrier 落地前不冒充 Release API，且不存在聚合 facade 或兼容双路径。
+- `rss-eventing` 只接纳 provider-neutral L2 公共 waist；package、official profile 与 T3 授权保持正交，external first-green 不越权激活 profile。
 - 官方 profile 的 dependency closure、provider posture、runtime inventory 与 release artifact identity 一致。
+- `core`/`eventing` 的 hardening 授权只限 2026-08-20 amendment 明列的四个 Evidence ID；candidate first-green 前无新 canonical owner。
 - 新增或变更 T3 的 issue/PR 与产品实现分离，并对不可下沉至 T1/T2 的 production join hazard 给出可审查的必要性证明。
 - `identityaudit`/`settingsonly` 不再扩展独立产品/T3 身份；只在官方 profile 和外部 consumer 边界闭合后按独立迁移决策退出核心发布面。
 - L3/L4 primitive 先以最低充分 T1/T2 闭合；`device-security` 已接纳 candidate scope，但产品激活与任何 T3 仍须

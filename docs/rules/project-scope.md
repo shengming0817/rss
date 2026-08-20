@@ -16,7 +16,7 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 | AI 友好型企业开发框架 | Domain Governance、Contract / Codegen、Runtime Assembly、Observability | 稳定公开面、deterministic artifact、结构化诊断和 affected verification 形成外部 consumer 可执行闭环 |
 | 类 Spring 一站式体验 | Contract / Codegen、Runtime Assembly、DI Port / Adapter | 官方 profile 提供 typed config、静态 composition、lifecycle、health/readiness、测试切片与升级路径 |
 | 封闭官方技术栈 | Runtime Assembly、DI Port / Adapter | profile/assembly 声明精确依赖闭包；实际交付 provider 具备 capability、failure、health、lifecycle 与 conformance 证据 |
-| L0–L4 一致性 | Consistency L0–L4 | 各等级按最低充分 T1/T2 证明；只有已激活官方 profile 中的 production-ready 纵向能力才闭合 T3 restart、recovery 与 operator evidence |
+| L0–L4 一致性 | Consistency L0–L4 | 各等级按最低充分 T1/T2 证明；只有正式 trigger 明列的 hardening-authorized candidate 或已激活官方 profile 中的 production-ready 纵向能力才可按独立 evidence plan 闭合 T3 join |
 | 多租户与设备零信任 | Security / AuthN / AuthZ / Tenant、Consistency L0–L4 | verified identity、tenant-safe transaction、授权 obligation、credential freshness、replay/fencing 与 audit 坐标贯通同步和异步路径 |
 
 目标承诺的实际完成状态由下方能力矩阵判定。目标措辞不改变 `Evolve`、`Complete`、`Freeze`、`External` 的 owner
@@ -71,6 +71,21 @@ bridge 与 production composition 是现行边界；v0.2 仅为历史，不提�
 - **Platform vNext 边界**：Foundation 位于 Platform 之下且不依赖 internal workspace；Platform 只定义 application
   waist 与 host-view ports，assembly/composition 是唯一接线 owner。具体 package 集合与依赖闭包从 Cargo metadata
   和 Release Surface 派生，本文不复制数量或实施 DAG。
+
+### Foundation / Eventing 公共面
+
+- Foundation consumer 只能从 ADR-029 指定的 `rss-contract` 或 `rss-request-context` 唯一 owner path 直接导入；
+  禁止聚合 Foundation facade/prelude、Platform/generated/internal convenience re-export、同义 alias 或双路径。
+  planned primitive 在 owner-local type、原子 consumer cutover、Release Surface/package proof 与真实外部消费全部落地前，
+  不构成当前 Release API。详细 owner 与 keep/move/drop 只由 ADR-029 持有，本文不复制清单。
+- Eventing 只接纳 provider-neutral L2 public waist；provider client/SPI、broker 管理面、testkit/fixture、composition、
+  RuntimePlan、L3/L4 implementation 与 T3 carrier 保持 internal。公共 package 必须先与 internal implementation 解耦，
+  再经现有 Cargo/layer/Release API/package-proof 和真实外部 consumer 证明；不得把 internal crate 包装成 facade，或保留
+  re-export、shim、feature alias、同义双实现和平行 registry。
+- package、official profile 与 T3 是三个正交状态：package candidate/first-green 不证明 profile closure 或 activation；
+  profile T1/T2 first-green 不自动生成 T3；T3 只来自 ADR-024 明列的 profile/evidence item，并继续服从下文 default-deny、
+  candidate-first-green 与 canonical transition 规则。external consumer 拥有产品 fixture/CI，不拥有 RSS profile、
+  artifact 或 T3。
 
 ### Contract / Codegen
 
@@ -170,6 +185,8 @@ SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
   capability-specific extension contract；仓内 `pub` 与 internal signature baseline 不自动构成外部兼容承诺。
 - domain、generated internals、provider catalog、RuntimePlan 构造细节、`xtask` 与 journey/fault harness 默认保持 internal。
 - 新公开面必须有真实 consumer、owner、版本与退出路径；不得以“未来可能使用”扩大 release surface。
+- Foundation 公共值必须从 canonical package 直接消费；planned 值不因 ADR、internal `pub` 或 baseline 存在自动成为
+  Release API。Eventing external first-green 只证明 L2 package consumption，不能替代 profile closure 或 T3。
 - 第一方 product incubator 是外部 consumer 源码树，不是 RSS workspace、Product Surface 或管理面。RSS 只拥有其
   Release Surface 与 artifact correctness；incubator 自行拥有 workspace、lock、产品构建、CI、发布和安全响应，且只能
   单向消费不可变 Release Surface artifact。具体迁移边界见
@@ -225,6 +242,9 @@ readiness 与干净退出，除非二者存在独立生产失效模式。
 - 只有产品面 ADR 已接纳的官方 product profile 可以申请 T3。候选、参考或内部 profile 默认零 T3；候选 profile 只有在
   GA hardening trigger 明确放行后，才可用独立 issue/PR 建立非 canonical candidate evidence。candidate 真实通过前不得宣称
   profile active、不得进入 canonical selector，也不得替换 legacy owner；真实通过后才按 activation transition 原子激活。
+- scope/ADR 将 profile 标为 `hardening-authorized` 时，只授权其中逐项明列的 Evidence ID、闭值 owner 与 join hazard；
+  package 发布、external consumer、assembly/profile first-green、共享 image/fixture 或聚合 receipt 均不能扩大该闭集。
+  每项 carrier first-green 前 plan/issue/receipt 不是 canonical owner，legacy owner 继续有效。
 - domain、contract、provider、adapter、consistency level、assembly、binary、image、
   `profile = "production"`、`supported` lifecycle 和 security-critical 标签都不能自动生成 T3 授权。
 - 每个已激活官方 profile 只有一个 canonical production artifact 和一个 canonical journey carrier。

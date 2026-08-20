@@ -38,6 +38,7 @@ package 使用品牌 **RSS** 与 `rss-` 前缀；当前 Release Surface 已接�
 | `contract` | `rss-contract` | `github:shengming0817:rss-maintainers` |
 | `request-context` | `rss-request-context` | `github:shengming0817:rss-maintainers` |
 | `platform` | `rss-platform` | `github:shengming0817:rss-maintainers` |
+| `crates/eventing` / `eventing`（candidate，尚未物化） | `rss-eventing` | `github:shengming0817:rss-maintainers` |
 | `crates/devicesecuritycontracts` / `devicesecuritycontracts`（candidate，尚未物化） | `rss-device-security-contracts` | `github:shengming0817:rss-maintainers` |
 
 规范源码仓库是 [`shengming0817/rss`](https://github.com/shengming0817/rss)。2026-08-09 UTC 的 crates.io
@@ -88,6 +89,7 @@ rss/
 │   ├── contract/         # FoundationPublic：canonical contract identity/descriptor；ADR-029 planned 公共原语 owner（std-only）
 │   ├── request-context/  # FoundationPublic：authority-free request values/read-only views
 │   ├── platform/         # PlatformPublic：typed async waist；精确依赖两个 Foundation package
+│   ├── eventing/         # EventingPublic candidate：provider-neutral L2 authoring/runtime waist（尚未物化）
 │   ├── assembly-schema/  # assembly / contract authoring schema；依赖 vocab canonical 类型
 │   ├── ids/              # sealed newtype（私有字段 = 硬封）
 │   ├── securederive/    # proc-macro：#[derive(Redact)] 字段级脱敏（intra-base DAG 低于 secure）
@@ -155,6 +157,14 @@ rss/
   package。它只拥有 typed async application/module/dispatch waist、闭合 dispatch 结果与只读 `HostView`；不拥有
   JWT/JWKS/token verifier、listener/provider、进程 lifecycle、RuntimePlan、inventory publisher 或 drain authority。
   RuntimeExec 经必填只读 bridge 投影 readiness/drain/live inventory，production assembly 是唯一接线点。
+- **EventingPublic** planned `crates/eventing` / dependency key `eventing` / public package `rss-eventing`：位于
+  FoundationPublic 之上，只拥有 ADR-024 接纳的 provider-neutral L2 authoring/runtime waist。其 normal/build workspace
+  出边允许闭包仅为 `rss-contract`、`rss-request-context`、`rss-diag-context` 与 `rss-trace-context`；不得依赖或 re-export
+  `eventexec`、`consistency`、`diport`、generated、provider adapter、composition/assembly/runtime constructor 或 test-support。
+  `rss-conformance` 继续唯一拥有 provider-neutral LocalTx **测试断言**，不定义、镜像或 re-export Eventing runtime 类型；
+  `rss-eventing` 只可在 dev-dependency 测试图消费该断言面，二者之间不存在 shipped edge。该 planned package 在
+  #2155–#2162 的 Cargo/layer/Release API/package-proof 落地前不是 workspace member 或当前 Release API，也不授予 profile、
+  activation 或 T3。
 
 - **基础** `vocab`/`assembly-schema`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`/`authmint`/`sagaauthmint`/`dlqauthmint`/`requestidmint`/`runtimeinventorymint`:依赖更低位 FoundationPublic + std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ runtimeinventorymint ◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；capability crate `diagctx`、`authmint`、`sagaauthmint`、`dlqauthmint` 与 `requestidmint` 为独立根，不依赖其它基础 crate，也不被其它基础 crate 依赖。`dlqauthmint` 的 exact wrapper 仅为 `diport`（proof owner）与 `runtime`（唯一生产 mint owner）；`eventexec`、adapter 与其它 assembly 均不能命名 token（DLQ-OPERATOR-MINT-01 Hard）。`diport::DlqOperatorAuthorization<A>` 以 sealed action marker、私有字段和 move-only proof 将 caller、已验证 operator subject、tenant、durable start audit ID 与五类 DLQ action 绑定；runtime 内部铸造时序另由 `rss_operator_authorization_callsite` 精确 funnel 守（Medium）。`requestidmint` 仅由 deny.toml wrappers `httpserve`（mint）与 `generated`（consume）持有（HTTP-REQUEST-ID-AUTHORITY-01 Hard），因此业务 crate 不能伪造 typed response 的 request ID。`runtimeinventorymint` 无出边，deny.toml wrapper exact-set 仅准 `assembly-schema` 在 receipt 签名中命名 token、`runtimeexec` 实际持有 token；assembly roots 不能依赖它（RUNTIME-INVENTORY-MINT-01 Hard）。`diagctx` 仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）；`authmint` 仅由既有 deny.toml wrappers 持有（AUTH-EVIDENCE-MINT-01 Hard）；assembly 内 exact mint + proof-consuming 另由 `rss_authenticated_callsite` Medium 守。`assembly-schema::runtime_inventory` 拥有 wire-neutral parts、invariant 与私有 observation fields；`runtimeexec::inventory::InventoryReader` 独占 live source 和 mint，generated 只消费 observation，不存在 generated↔runtimeexec 编译边。现有有语义 owner 的前向边包括:`assembly-schema → runtimeinventorymint|vocab`（runtime inventory receipt token 与 contract authoring 的 canonical `StepName` / `DomainName` 类型边界）、`runctx → rss-request-context`（`AppCtx` tenant payload = canonical `rss_request_context::TenantId`，ADR-029）与`secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制。
 - **引擎/原语** `consistency`/`primitives`/`conformance`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`conformance` 是公开的 provider-neutral LocalTx assertion primitive，零 workspace 出边；支持面不含 adapter/provider driver、fixture、scheduler、CI/T3 或产品成熟度。`tracewire`(W3C Trace Context capture/remote-parent restore 生产单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapters `httpd`(HTTP ingress 还原)/`postgres`(emit 捕获)依赖。生产 OTel 桥只在此与 `adapters/otel` 收口；publish=false 的 `tracewiretest` 只提供 dev-dependency 测试装配。

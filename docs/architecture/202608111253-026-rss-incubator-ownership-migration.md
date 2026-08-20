@@ -2,6 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-11
+- **Last updated**：2026-08-20
 - **Tracking**：#2093
 
 ## Context
@@ -16,6 +17,31 @@ Standalone Component 建立真实跨包消费证据，但也把下游产品 work
 assembly、domain 或 contract。
 
 ## Decision
+
+### 2026-08-20 amendment：Foundation / Eventing external-consumer handoff
+
+`rss-incubator` 可在既有单向 artifact 边界内扩展为 Foundation 增量 API 与 planned `rss-eventing` 的真实 workspace
+外 consumer。RSS 继续唯一拥有 Release Surface 选择、公开 API、SemVer、`.crate` 内容/checksum/VCS revision 与
+package proof；incubator 只拥有自己的 workspace、根 lock、consumer source、真实 broker fixture、产品 CI、升级和
+回退。Foundation/Eventing candidate 必须以精确版本、checksum 与 VCS revision 作为不可变输入，禁止 path/git/workspace
+dependency、相邻 checkout、submodule、vendored RSS source 或任何 RSS internal/test/governance crate。
+
+Foundation first-green 直接从唯一 owner package path 使用新增值并覆盖拒绝路径。Eventing first-green 使用
+consumer-owned 真实 broker fixture完成 authoring → publish → consume/reject → restart；它只证明 package API 与真实外部
+T2 consumption，不拥有 RSS profile configuration、designated/canonical artifact、activation 或 T3。两者复用本 ADR
+既有 receipt shape：同一结果绑定 RSS commit、incubator commit、artifact exact-set、每包版本/checksum/archive VCS
+revision、独立根 lock、registry-only resolution、locked/offline check/test/clippy 与 canonical CI URL。receipt 只链接到
+issue/PR，不写入 committed registry、artifact catalog、generated inventory 或 evidence database。
+
+`rss-test-eventing` official driver 继续是 #1992 的条件提升项，不随 `rss-eventing` package 或 external first-green
+默认发布。只有真实 workspace 外 consumer 已在候选 API 上用独立 broker fixture 通过、consumer owner 明确请求 driver，
+并接受 provider/version/MSRV 与 identity/fencing/budget/ambiguity 支持矩阵时，才能由独立交付提供最小 driver；driver
+不得拥有 broker 管理面、通用测试平台、CI scheduler 或 T3 registry，也不是 Eventing release closeout 的默认 blocker。
+
+candidate 或 consumer CI 失败时不放宽 RSS artifact proof，也不加入 source/path fallback。已有 package 的增量升级失败时，
+incubator pin 回上一已知绿色 immutable version 并重跑 canonical CI，RSS 再发布修复版本或按既有 owner 流程 yank；
+新 package 首次 candidate 失败时，直接拒绝 candidate 并保持先前不含该 package 的 consumer lock/dependency exact-set。
+两种路径都不得恢复 RSS-owned fixture、submodule、双 receipt owner 或并行 registry。
 
 ### Repository 与 owner
 
@@ -95,6 +121,8 @@ Evidence ID、selector、fixture、image、closeout carrier、跨仓 required-st
 | 风险 | Canonical carrier | 强度与交付 |
 |---|---|---|
 | RSS artifact correctness 漂移 | Release Surface、Cargo metadata、现有 `package-proof` | Cargo graph Hard + package proof Medium；RSS 已有 |
+| Foundation/Eventing candidate 冒充已发布公共面 | Release Surface selected/planned/executed exact-set、typed owner projection、package proof | Hard + Medium；#2152/#2162 |
+| Foundation/Eventing 外部消费回到 path/source coupling | 独立 lock、registry-only resolution、forbidden-source proof、真实 consumer CI | Medium T2；#2153/#2163 |
 | incubator 重新成为 RSS 子目录或共享 lock | 独立 repository、virtual workspace、唯一根 `Cargo.lock` | 物理/Cargo 边界；#2094 |
 | path/git/workspace 或 RSS internal 依赖 | Cargo resolution、forbidden-source/exact-set proof、真实 candidate CI | Medium T2；#2095 |
 | RSS 继续拥有外仓源码拓扑 | 删除 gitlink、checkout/upgrade 实现和 submodule CI，替换旧 standalone proof/既有 workflow guard | Medium；#2096 |
@@ -104,7 +132,7 @@ Evidence ID、selector、fixture、image、closeout carrier、跨仓 required-st
 ## Four-principle check
 
 - **Thorough**：repository、双方 owner、artifact/version seam、first-green、cutover、失败处置和毕业条件形成完整闭环；
-  standalone proof 迁移与 Reference Extension 源码迁出明确分离。
+  standalone proof 迁移、Foundation/Eventing consumption 与 Reference Extension 源码迁出明确分离。
 - **Breaking**：cutover 后旧 URL、submodule、gitlink、alias、shim、双 owner 和拓扑回退全部退出；没有兼容窗口或双路径。
 - **Simple**：一个迁移 ADR、现有 PBI DAG 和既有 proof/CI 载体完成切换，不增加状态机、registry 或控制面。
 - **AI-HARD**：永久约束落到 Cargo/物理仓边界和确定性 proof；文档只记录决策与 carrier handoff。
@@ -113,4 +141,5 @@ Evidence ID、selector、fixture、image、closeout carrier、跨仓 required-st
 
 RSS 的 Release Surface 与 `.crate` correctness 保持不变；跨包联合 product-consumption correctness 在 first-green 后归
 incubator。ADR-024 中 `identityaudit`/`settingsonly` 的迁出前置仍未满足，其 assembly、domain、contract 和既有 T3
-迁移基线不因本决策改变。
+迁移基线不因本决策改变。Foundation/Eventing external first-green 只完成各自 T2 handoff，不激活 public package、
+official profile、production artifact 或 T3；这些状态继续由 ADR-024 与各自 implementation/carrier PBI 原子切换。
