@@ -104,7 +104,8 @@ PostgreSQL adapter 只有两条显式模式，二者不得 fallback 或双写：
   写业务行并返回 typed outcome。内核校验 authorization、envelope contract 与 entry fact 后 canonical append。
   generic entry 构造不具 generated fact provenance，不得进入 active producer 的 emitted 分支。
 - 不存在旧 producer co-transaction API、provider `.write()` + append、publisher 补发或兼容双写。
-- 载体：`cargo xtask contract validate` R22；producer evidence 为 `generated/l2-assurance.json`。
+- 载体：`cargo xtask contract validate` R22；producer execution/fault evidence 由
+  `cargo xtask l2-assurance` 的私有 typed closure 直接校验。
 
 ### L2 provider conformance catalog
 

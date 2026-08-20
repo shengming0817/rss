@@ -156,7 +156,7 @@ impl GovernanceCheck for EventTransportGuard {
 
 /// Run the complete transport closure against an injected workspace root.
 ///
-/// Assurance inventory generation consumes this API instead of maintaining a second AST parser.
+/// The L2 typed closure validator consumes this API instead of maintaining a second AST parser.
 pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     let path = root.join(TARGET);
     let content = std::fs::read_to_string(&path)

@@ -34,7 +34,7 @@
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
 //! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "dylint_workspace_ui_gate_is_release_owned_once", anti_vacuity = "dylint_workspace_ui_gate_is_release_owned_once" }—— Dylint UI goldens run once as typed `cargo test --locked --workspace` from `lints` in release-check; fast remains no-compile.
-//! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
+//! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_typed_inventory_closes_active_l2" }—— L2 assurance closure validation is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! Fixed PR execution is projected by the closed [`FixedCiJob`] enum below. The committed caller
 //! and reusable workflow are guarded structurally by `CI-FIXED-WORKFLOW-01`; integration uses one
 //! aggregate scope with bounded diagnostics and always-cleanup, while LocalTx/LocalOnly reports
@@ -162,7 +162,7 @@ enum InternalCheck {
     /// ArchRules 派生索引 + 持久化 funnel 语义 closure 门。
     ArchRules,
     CodegenCheck,
-    /// committed L2 assurance inventory raw-byte drift gate.
+    /// active L2 producer/fact typed closure gate.
     L2AssuranceCheck,
     /// provider declaration ↔ live behavior runner ↔ owner/reachability ↔ typed integration shard.
     ProviderCapabilitiesCheck,
@@ -1686,7 +1686,7 @@ fn run_internal(
             let facts = command_facts
                 .get()
                 .context(command_scope_facts_context("l2-assurance"))?;
-            crate::l2_assurance::run(root, facts, true)
+            crate::l2_assurance::validate(root, facts)
         }
         InternalCheck::ProviderCapabilitiesCheck => crate::provider_capabilities::run(true),
         InternalCheck::LocalTxCoverage => {
@@ -4063,7 +4063,7 @@ mod tests {
                 step_for_id(GateId::L2AssuranceCheck).kind,
                 StepKind::Internal(InternalCheck::L2AssuranceCheck)
             ),
-            "L2 assurance catalog executor drift"
+            "L2 assurance typed executor drift"
         );
         let gates = plan
             .iter()

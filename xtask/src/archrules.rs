@@ -3070,9 +3070,9 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         path: "xtask/src/l2_assurance.rs",
         id: "L2-ASSURANCE-TYPE-01",
         facet: None,
-        carrier: "native-hard",
-        evidence: "closed private assurance record and complete-evidence construction types",
-        binding: CarrierExecutionBinding::NativeCompile,
+        carrier: "xtask",
+        evidence: "closed role record constructors with synthetic reds and real-workspace anti-vacuity",
+        binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/l2_assurance.rs",
@@ -3080,14 +3080,6 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "generated handler ID exact-set across registration-plan-handler-executor carriers with non-empty and raw-callsite synthetic reds",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/l2_assurance.rs",
-        id: "L2-ASSURANCE-WIRE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "typed committed JSON golden with byte-drift synthetic red and real inventory anti-vacuity",
         binding: CHECK_UNIT_BINDING,
     },
     InvariantCarrierBinding {
@@ -6971,10 +6963,35 @@ fn unrelated_green_accepted() { assert!(true); }
     }
 
     #[test]
-    fn l2_assurance_binding_rejects_omission_and_wrong_carrier_red() -> Result<()> {
+    fn l2_assurance_binding_is_check_bound_without_fake_consumption() -> Result<()> {
         let root = crate::workspace_root()?;
         let path = root.join("xtask/src/l2_assurance.rs");
         let found = extract_invariants(&root, &path)?;
+
+        let type_rule = found
+            .iter()
+            .flat_map(|invariant| &invariant.rules)
+            .find(|rule| rule.id == "L2-ASSURANCE-TYPE-01")
+            .context("L2 assurance type invariant missing")?;
+        let type_metadata = type_rule
+            .metadata
+            .as_ref()
+            .context("L2 assurance type invariant metadata missing")?;
+        assert_eq!(type_metadata.level, RuleLevel::Medium);
+        assert_eq!(
+            type_metadata.exec,
+            ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check)
+        );
+        let type_binding = L2_ASSURANCE_INVARIANT_BINDINGS
+            .iter()
+            .find(|binding| binding.id == "L2-ASSURANCE-TYPE-01")
+            .context("L2 assurance type binding missing")?;
+        assert_eq!(type_binding.carrier, "xtask");
+        assert_eq!(type_binding.binding, CHECK_UNIT_BINDING);
+
+        let source = fs::read_to_string(&path)?;
+        assert!(!source.contains(".map(Inventory::finish)"));
+        assert!(!source.contains("fn finish(self)"));
 
         let omitted = L2_ASSURANCE_INVARIANT_BINDINGS
             .iter()
@@ -6992,7 +7009,7 @@ fn unrelated_green_accepted() { assert!(true); }
             .iter_mut()
             .find(|binding| binding.id == "L2-ASSURANCE-TYPE-01")
             .context("L2 assurance type binding missing")?
-            .carrier = "xtask";
+            .carrier = "dylint";
         let mut invalid = Index::default();
         for binding in wrong {
             scan_extracted_invariant_rules_filtered(

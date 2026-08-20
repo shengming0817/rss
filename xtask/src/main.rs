@@ -218,13 +218,13 @@ fn dispatch(command: Command) -> Result<()> {
                 .context("localtx-coverage: load command-scoped workspace facts")?;
             diagnostic::run_check(&localtx_coverage::LocalTxCoverage::new(&root, facts))
         }
-        Command::L2Assurance { check } => {
+        Command::L2Assurance => {
             let root = workspace_root()?;
             let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
             let facts = command_facts
                 .get()
                 .context("l2-assurance: load command-scoped workspace facts")?;
-            l2_assurance::run(&root, facts, check)
+            l2_assurance::validate(&root, facts)
         }
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {

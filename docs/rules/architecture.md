@@ -68,7 +68,8 @@ active HTTP L2 producer 的 route 绑定必须走 move-only typed 链：`HttpPro
 `ProducerMarker` / `ProducerAssuranceReceipt` / `ProducerAuthorization<M>`。provider 侧只允许受控
 producer transaction 入口消费同一个 crate-private capability，并由 typed outcome 闭合
 emitted / no-mutation。跨文件 residual 由 Medium fail-closed execution graph 加 production-composition
-join 证明，committed assurance artifact 唯一；不保留旧 co-tx API、旧版 reader、alias、shim 或双写。
+join 与 in-process L2 typed closure 证明；不存在 committed assurance artifact、旧 co-tx API、reader、
+alias、shim 或双写。
 
 一句话:cargo 的 **crate ≈ 域 / 服务 / adapter / contract 派生体**,**workspace ≈ assembly**;
 Rust 的**类型系统 + crate 依赖图原生强制了大部分静态架构约束**(见 §Rust 原生强制)。

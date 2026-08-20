@@ -124,8 +124,7 @@ cargo xtask verify --only runtime-assembly-residual         # runtime 跨文件 
 cargo xtask runtime-root guard                         # runtime root 纯声明 façade 守卫
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门
-./hack/cargo.sh xtask l2-assurance                     # 从 active contract 生成 L2 assurance inventory
-./hack/cargo.sh xtask l2-assurance --check             # 只读检查 committed inventory 的逐字节漂移
+./hack/cargo.sh xtask l2-assurance                     # 校验 active L2 typed assurance closure
 ./hack/cargo.sh xtask provider-capabilities            # 按需生成 target 下的 provider conformance 诊断报告
 ./hack/cargo.sh xtask provider-capabilities --check    # 声明、runner、owner、可达性与 shard 语义门
 cargo build --workspace                                # 编译全 workspace（分层有环即失败）
@@ -159,42 +158,19 @@ factory symbol 的 wire、Display 与 JSON Schema ID 统一使用显式 `consume
 root 的 compile-link 守卫同时拒绝 crate-level `cfg` 及可递归展开为 `cfg` 的 `cfg_attr`，避免 catalog
 引用与 non-empty 断言被条件编译整体移除。
 
-`generated/l2-assurance.json` 是下游读取 L2 assurance inventory 的唯一 committed artifact；其中
-producer 与 fact 记录由 active contract、compiled registry、精确 mounted handler、receipt
-execution graph、production composition、Postgres producer transaction closure、subscription
-external-effect policy 和 ready fault evidence 共同派生。该文件只允许由 `l2-assurance` 更新，不手工
-编辑；`--check` 不写文件，并拒绝缺失、篡改、CRLF 或输入漂移。
+L2 assurance 由 `xtask/src/l2_assurance.rs` 的私有 typed inventory 直接校验。active contract、compiled
+HTTP/event registry、generated producer binding、精确 mounted handler、receipt execution graph、production
+composition、PostgreSQL producer transaction closure、subscription external-effect policy 与 ready fault
+evidence 必须双向闭合；producer execution/fault terminal 的 fact 集必须与 manifest `emits` 完全一致。
 
-JSON v3 的紧凑 wire 约定如下；v2 不再读取或双写：
-
-- 根字段固定为 `schemaVersion: 3`、`producerCount`、`factCount`、`contracts`。
-- 每条 contract 共有 `contractId`、`domain`、`version`、`role`、`status`、`evidence`；producer
-  另带 `emittedFacts`，fact 另带 `topic` 和
-  `subscriptions: [{consumer, group, externalEffectPolicy}]`。
-- producer `evidence` 只含 `contract`、`generated`、`execution`、`fault`；不再携带 v2 的
-  `runtime/effect` 泛化 bag。`execution` 固定记录 generated route、精确 mounted handler 及按 fact
-  排序的 terminals；每个 terminal 记录 domain call path、`Trait::method` port、`Type::method`
-  provider、production `wire` 注入、`TenantDb::producer_tx`、exact-lane `TenantTx`、canonical append 与
-  settlement。
-  terminal fact 集必须与该 producer 的 `emittedFacts` 精确相等。producer `fault` 同样按 fact terminal
-  记录 provider/transaction、rollback、commit-unknown、rollback-failed 与生产 no-replay carrier，
-  不复用 consumer/relay fixture 冒充 producer settlement 证据。
-- fact 继续携带其适用的 `contract/generated/runtime/effect/fault` evidence。普通 facet 是
-  `{status, carriers}`，carrier 固定为 `{kind, path, symbol}`。
-- 枚举是闭集：`role` 只有 `producer|fact`，record `status` 只有 `closed`，facet `status`
-  只有 `complete`，`kind` 只有 `manifest|rust-symbol|fault-fixture`，`externalEffectPolicy`
-  只有 `transactional-only|idempotency-key|reconcile|compensated`。
-- 输出顺序是协议的一部分：contracts 按 `(contractId, role)`，`emittedFacts` 按 contract ID，
-  subscriptions 按 `(consumer, group)`，carriers 按 `(path, symbol, kind)` 升序；pretty JSON 仅一个尾随 LF。
-- consumer 必须按 `schemaVersion` 精确分派并拒绝未知字段或枚举值。任何字段、枚举或语义变更
-  都必须升级 `schemaVersion`；不为旧版增加 alias、shim 或双写路径。
-
-受控入口只接受以下两种形态；重复 flag、输出路径、兼容别名和其他参数均拒绝：
+该校验不存在 committed JSON、schema 或 reader，也不生成诊断报告。唯一直接入口是：
 
 ```bash
 ./hack/cargo.sh xtask l2-assurance
-./hack/cargo.sh xtask l2-assurance --check
 ```
+
+`l2-assurance-check` verify/CI gate 调用同一个 in-process validator；`--check`、输出路径及兼容别名均拒绝。
+未来若出现真实外部 consumer，必须另立 versioned artifact contract，不恢复未版本化 presentation baseline。
 
 provider owner 中的 `provider_conformance_catalog!` 是声明单源：sealed tuple 在编译期固定每个
 provider 的适用能力全集与顺序；宏为每项生成 live wrapper，wrapper 只能 await 唯一 canonical

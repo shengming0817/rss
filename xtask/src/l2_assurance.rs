@@ -1,22 +1,19 @@
-//! Deterministic active-L2 producer/fact assurance inventory.
+//! Active-L2 producer/fact typed assurance closure validator.
 //!
-//! INVARIANT: L2-ASSURANCE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private role-specific evidence construction plus closed Role, CarrierKind, ClosedStatus, and EvidenceStatus types make incomplete or caller-authored status records unrepresentable" }——
+//! INVARIANT: L2-ASSURANCE-TYPE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::closed_producer_record_rejects_incomplete_fact_sets_at_construction", anti_vacuity = "tests::workspace_typed_inventory_closes_active_l2" }——
 //! producer and fact records have distinct closed evidence types. A producer can only be authored
 //! with contract/generated/execution/fault；fact effect evidence 则由 active subscription 动态发现
 //! registration/plan/handler/executor 四阶段真实 carrier，generated SPEC 不得冒充执行证据。
 //! INVARIANT: L2-ASSURANCE-CONSUMER-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::policy_carrier_rejects_dead_helper_bait + tests::policy_carrier_rejects_nested_dead_helper_bait + tests::policy_carrier_rejects_if_false_bait + tests::policy_executor_rejects_symbol_without_worker_edge", anti_vacuity = "tests::workspace_fact_effect_evidence_closes_all_policy_stages" }——
 //! active ConsumerTx handler 集合从 generated subscriptions 计算；每条 subscription identity
 //! 必须映射到 registration/plan/handler/executor 的精确 Rust symbol 与闭合调用链，任意死 helper 不得冒充。
-//! INVARIANT: L2-ASSURANCE-WIRE-01 { level = "Medium", exec = "check", source = "codegen", golden = "generated/l2-assurance.json", synthetic_red = "tests::check_rejects_missing_tampered_and_crlf_without_writing", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
-//! the typed JSON v3 projection and committed golden are byte-for-byte deterministic and reject
-//! missing, tampered, or non-LF output without writing in check mode.
-//! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
+//! INVARIANT: L2-ASSURANCE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::exact_set_rejects_equal_size_wrong_identity + tests::generated_producer_registry_rejects_wrong_duplicate_missing_extra_and_emits_drift + tests::required_session_created_inbox_closure_rejects_each_missing_case_or_runner", anti_vacuity = "tests::workspace_typed_inventory_closes_active_l2" }——
 //! active OutboxFact manifests, generated registries, producer execution terminals and named fault
 //! cases are joined bidirectionally; each producer terminal fact set equals manifest `emits`, while
-//! producer/fact non-empty anti-vacuity is enforced by the same typed inventory used to render the
-//! committed assurance artifact; rustdoc does not duplicate live catalog counts.
-//! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_inventory_is_exact_and_deterministic" }——
-//! every carrier and the fixed output are real repository-local paths without symlink traversal.
+//! producer/fact non-empty anti-vacuity is enforced by the same private typed inventory consumed
+//! by the gate; rustdoc does not duplicate live catalog counts.
+//! INVARIANT: L2-ASSURANCE-PATH-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::carrier_paths_reject_escapes_backslashes_and_symlinks", anti_vacuity = "tests::workspace_typed_inventory_closes_active_l2" }——
+//! every evidence carrier is a real repository-local path without symlink traversal.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -35,7 +32,6 @@ use generated::event::{
     SubscriptionEffect as GeneratedSubscriptionEffect,
     SubscriptionExecution as GeneratedSubscriptionExecution,
 };
-use serde::Serialize;
 use syn::visit::Visit;
 use vocab::{
     ExternalEffectPolicy as GeneratedExternalEffectPolicy, HttpConsistencyLevel, HttpEffectKind,
@@ -45,63 +41,31 @@ use crate::{
     consistency_fixtures, contract, event_transport_guard, generated_file, producer_assurance,
 };
 
-const OUTPUT: &str = "generated/l2-assurance.json";
-const LF_DECLARATION: &str = "generated/l2-assurance.json text eol=lf";
 const MAX_RUST_CARRIER_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Generate or raw-byte check the only committed L2 assurance artifact.
-pub(crate) fn run(
+/// Validate the active L2 producer/fact closure directly from governed typed sources.
+pub(crate) fn validate(
     root: &Path,
     workspace_facts: &workspacefacts::WorkspaceFacts,
-    check: bool,
 ) -> Result<()> {
-    let output = root.join(OUTPUT);
-    validate_output_path(root, &output)?;
-    generated_file::verify_lf_checkout(root, LF_DECLARATION, std::slice::from_ref(&output))
-        .map_err(lf_checkout_error)?;
-    let bytes = render(&build_inventory(root, workspace_facts)?)?;
-    if check {
-        return check_rendered_file(&output, &bytes);
-    }
-    generated_file::atomic_replace(&output, &bytes)
+    build_validation_receipt(root, workspace_facts)?;
+    Ok(())
 }
 
-fn lf_checkout_error(stage: generated_file::LfCheckoutFailure) -> anyhow::Error {
-    let detail = match stage {
-        generated_file::LfCheckoutFailure::AttributesRead => {
-            "cannot read repository .gitattributes"
-        }
-        generated_file::LfCheckoutFailure::DeclarationMismatch => {
-            "expected exactly one `generated/l2-assurance.json text eol=lf` declaration"
-        }
-        generated_file::LfCheckoutFailure::Input => {
-            "the fixed generated/l2-assurance.json target is not repository-local"
-        }
-        generated_file::LfCheckoutFailure::GitInvocation => {
-            "`/usr/bin/git check-attr` failed or returned an invalid response"
-        }
-        generated_file::LfCheckoutFailure::EffectivePolicyMismatch => {
-            "effective Git attributes for generated/l2-assurance.json are not `text eol=lf`"
-        }
-    };
-    anyhow::anyhow!(
-        "L2 assurance LF checkout policy failed: {detail}; restore `.gitattributes`, then run `./hack/cargo.sh xtask l2-assurance`"
-    )
-}
-
-fn build_inventory(
+fn build_validation_receipt(
     root: &Path,
     workspace_facts: &workspacefacts::WorkspaceFacts,
-) -> Result<Inventory> {
+) -> Result<ValidationReceipt> {
     let governance = contract::governance::ContractGovernanceIr::load_consumer_workspace(root)?;
-    governance.read(|contracts| build_inventory_from_contracts(root, workspace_facts, contracts))
+    governance
+        .read(|contracts| build_validation_receipt_from_contracts(root, workspace_facts, contracts))
 }
 
-fn build_inventory_from_contracts(
+fn build_validation_receipt_from_contracts(
     root: &Path,
     workspace_facts: &workspacefacts::WorkspaceFacts,
     contracts: &[GovernedContract],
-) -> Result<Inventory> {
+) -> Result<ValidationReceipt> {
     let (_, transport_findings) = event_transport_guard::check_root(root)?;
     ensure_findings_empty("event transport closure", &transport_findings)?;
 
@@ -139,6 +103,13 @@ fn build_inventory_from_contracts(
         universe.producers.keys(),
         http_specs.keys(),
     )?;
+    let expected_producers = universe
+        .producers
+        .values()
+        .map(|contract| GeneratedProducerProjection::from_contract(contract))
+        .collect::<Result<Vec<_>>>()?;
+    let generated_producers = generated_producer_registry()?;
+    ensure_generated_producer_registry(&expected_producers, &generated_producers)?;
     let event_specs = generated_event_specs()?;
     ensure_exact_ids(
         "active L2 fact manifest/generated",
@@ -171,9 +142,9 @@ fn build_inventory_from_contracts(
         let evidence = complete_producer_evidence(root, contract, closure)?;
         records.push(AssuranceRecord::producer(
             Identity::from_contract(contract),
-            ProducerDetails { emitted_facts },
+            emitted_facts,
             evidence,
-        ));
+        )?);
     }
     for (id, contract) in &universe.facts {
         let spec = event_specs
@@ -191,25 +162,20 @@ fn build_inventory_from_contracts(
         )?;
         records.push(AssuranceRecord::fact(
             Identity::from_contract(contract),
-            FactDetails {
-                topic: contract
-                    .manifest()
-                    .topic
-                    .clone()
-                    .context("validated fact missing topic")?,
-                subscriptions,
-            },
+            contract
+                .manifest()
+                .topic
+                .clone()
+                .context("validated fact missing topic")?,
+            subscriptions,
             evidence,
-        ));
+        )?);
     }
-    records.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+    records.sort_by(|left, right| left.contract_id().cmp(right.contract_id()));
 
-    Ok(Inventory {
-        schema_version: 3,
-        producer_count: universe.producers.len(),
-        fact_count: universe.facts.len(),
-        contracts: records,
-    })
+    let receipt = ValidationReceipt { contracts: records };
+    receipt.ensure_closed_set()?;
+    Ok(receipt)
 }
 
 fn ensure_findings_empty<R: std::fmt::Debug>(
@@ -305,6 +271,97 @@ fn generated_http_specs() -> Result<BTreeMap<String, &'static generated::http::H
         }
     }
     Ok(specs)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedProducerProjection {
+    contract_id: String,
+    domain: String,
+    version: String,
+    schema_hash: String,
+    emitted_facts: Vec<String>,
+}
+
+impl GeneratedProducerProjection {
+    fn from_contract(contract: &GovernedContract) -> Result<Self> {
+        let manifest = contract.manifest();
+        let emitted_facts = sorted_unique(
+            &manifest
+                .capabilities
+                .outbox
+                .as_ref()
+                .context("validated producer missing outbox capability")?
+                .emits,
+            &format!("producer {} emitted facts", manifest.id),
+        )?;
+        Ok(Self {
+            contract_id: manifest.id.clone(),
+            domain: manifest.domain.clone(),
+            version: manifest.version.clone(),
+            schema_hash: contract.schema_hash().to_owned(),
+            emitted_facts,
+        })
+    }
+}
+
+fn generated_producer_registry() -> Result<Vec<GeneratedProducerProjection>> {
+    generated::http::OUTBOX_PRODUCERS
+        .iter()
+        .map(|producer| {
+            let binding = producer.route().contract();
+            let emitted_facts = producer
+                .emitted_facts()
+                .iter()
+                .map(|fact| fact.contract_id().to_owned())
+                .collect::<Vec<_>>();
+            Ok(GeneratedProducerProjection {
+                contract_id: binding.contract_id().to_owned(),
+                domain: binding.domain().to_owned(),
+                version: binding.version().to_owned(),
+                schema_hash: binding.schema_hash().to_owned(),
+                emitted_facts: sorted_unique(
+                    &emitted_facts,
+                    &format!("generated producer {} emitted facts", binding.contract_id()),
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn ensure_generated_producer_registry(
+    expected: &[GeneratedProducerProjection],
+    actual: &[GeneratedProducerProjection],
+) -> Result<()> {
+    let collect = |side: &str, values: &[GeneratedProducerProjection]| {
+        let mut by_id = BTreeMap::new();
+        for value in values {
+            ensure!(
+                by_id
+                    .insert(value.contract_id.clone(), value.clone())
+                    .is_none(),
+                "generated producer registry {side} contains duplicate identity {}",
+                value.contract_id
+            );
+        }
+        Ok(by_id)
+    };
+    let expected = collect("expected", expected)?;
+    let actual = collect("actual", actual)?;
+    ensure_exact_ids(
+        "active L2 producer/generated binding",
+        expected.keys(),
+        actual.keys(),
+    )?;
+    for (id, expected) in expected {
+        let actual = actual
+            .get(&id)
+            .with_context(|| format!("generated producer binding disappeared: {id}"))?;
+        ensure!(
+            expected == *actual,
+            "generated producer binding drift for {id}: expected={expected:?} actual={actual:?}"
+        );
+    }
+    Ok(())
 }
 
 fn generated_event_specs() -> Result<BTreeMap<String, &'static generated::event::EventSpec>> {
@@ -596,9 +653,78 @@ fn fault_evidence_by_fact<'a>(
     for evidence in by_fact.values_mut() {
         evidence.sort_by(|left, right| left.case_id.cmp(&right.case_id));
     }
+    if expected.contains("identity.session-created") {
+        let session_created = by_fact
+            .get("identity.session-created")
+            .context("identity.session-created lacks ready L2 fault evidence")?;
+        ensure_required_session_created_inbox_closure(session_created)?;
+    }
     Ok(by_fact)
 }
 
+const REQUIRED_SESSION_CREATED_INBOX_CASES: [(&str, &str); 3] = [
+    (
+        "inbox-claim-crash-before-commit",
+        "run_inbox_claim_crash_before_commit",
+    ),
+    (
+        "inbox-commit-before-ack-crash",
+        "run_inbox_commit_before_ack_crash",
+    ),
+    (
+        "inbox-lease-lost-before-commit",
+        "run_inbox_lease_lost_before_commit",
+    ),
+];
+
+fn ensure_required_session_created_inbox_closure(
+    evidence: &[consistency_fixtures::ReadyL2FaultEvidence],
+) -> Result<()> {
+    let mut by_case = BTreeMap::new();
+    for item in evidence {
+        ensure!(
+            by_case.insert(item.case_id.as_str(), item).is_none(),
+            "identity.session-created duplicates ready fault case {}",
+            item.case_id
+        );
+    }
+    for (case_id, runner_symbol) in REQUIRED_SESSION_CREATED_INBOX_CASES {
+        let item = by_case
+            .get(case_id)
+            .with_context(|| format!("identity.session-created lacks required case {case_id}"))?;
+        let expected_fixture = format!("fixtures/consistency/inbox/fixture-{case_id}.toml");
+        ensure_carrier_field_eq(
+            case_id,
+            "contract_id",
+            "identity.session-created",
+            &item.contract_id,
+        )?;
+        ensure_carrier_field_eq(
+            case_id,
+            "fixture_carrier",
+            &expected_fixture,
+            &item.fixture_carrier,
+        )?;
+        ensure_carrier_field_eq(
+            case_id,
+            "runner_carrier",
+            "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs",
+            &item.runner_carrier,
+        )?;
+        ensure_carrier_field_eq(case_id, "runner_symbol", runner_symbol, &item.runner_symbol)?;
+    }
+    Ok(())
+}
+
+fn ensure_carrier_field_eq(case_id: &str, field: &str, expected: &str, actual: &str) -> Result<()> {
+    ensure!(
+        actual == expected,
+        "identity.session-created required case {case_id} carrier drift: field={field} expected={expected:?} actual={actual:?}"
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
 struct FactEvidence;
 
 fn complete_producer_evidence(
@@ -780,7 +906,6 @@ fn complete_producer_evidence(
             )?,
         ])?,
         ProducerExecutionEvidence {
-            status: EvidenceStatus::Complete,
             route,
             mounted_handler,
             terminals,
@@ -1621,145 +1746,61 @@ fn validate_repo_relative_path(root: &Path, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_output_path(root: &Path, output: &Path) -> Result<()> {
-    ensure!(
-        output == root.join(OUTPUT),
-        "L2 assurance output path is fixed"
-    );
-    let parent = output
-        .parent()
-        .context("L2 assurance output lacks parent")?;
-    let relative = parent
-        .strip_prefix(root)
-        .context("L2 assurance output parent escapes workspace")?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(part) = component else {
-            bail!("L2 assurance output parent is not canonical")
-        };
-        current.push(part);
-        let metadata = match fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("inspect output parent: {}", current.display()));
-            }
-        };
-        ensure!(metadata.is_dir(), "output parent is not a real directory");
-        ensure!(
-            !metadata.file_type().is_symlink(),
-            "output parent traverses symlink"
-        );
-    }
-    if let Ok(metadata) = fs::symlink_metadata(output) {
-        ensure!(
-            metadata.is_file(),
-            "L2 assurance output is not a regular file"
-        );
-        ensure!(
-            !metadata.file_type().is_symlink(),
-            "L2 assurance output is a symlink"
-        );
-    }
-    Ok(())
-}
-
-fn render(inventory: &Inventory) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(inventory)?;
-    ensure!(!bytes.contains(&b'\r'), "rendered assurance contains CR");
-    while bytes.last() == Some(&b'\n') {
-        bytes.pop();
-    }
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
-fn check_rendered_file(path: &Path, expected: &[u8]) -> Result<()> {
-    check_rendered_file_with_hook(path, expected, || {})
-}
-
-fn check_rendered_file_with_hook(
-    path: &Path,
-    expected: &[u8],
-    after_open: impl FnOnce(),
-) -> Result<()> {
-    let max_bytes = u64::try_from(expected.len()).context("expected assurance bytes exceed u64")?;
-    let actual = generated_file::read_stable_utf8_file_with_hook(
-        path,
-        max_bytes,
-        "L2 assurance committed artifact",
-        after_open,
-    )
-    .with_context(|| {
-        format!(
-            "cannot read {}; run `./hack/cargo.sh xtask l2-assurance`",
-            path.display()
-        )
-    })?
-    .into_bytes();
-    ensure!(
-        actual == expected,
-        "{} drifted; run `./hack/cargo.sh xtask l2-assurance`",
-        path.display()
-    );
-    Ok(())
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Inventory {
-    schema_version: u8,
-    producer_count: usize,
-    fact_count: usize,
+#[derive(Debug)]
+struct ValidationReceipt {
     contracts: Vec<AssuranceRecord>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
+impl ValidationReceipt {
+    fn ensure_closed_set(&self) -> Result<()> {
+        ensure!(!self.contracts.is_empty(), "L2 inventory must not be empty");
+        ensure!(
+            self.contracts
+                .windows(2)
+                .all(|pair| pair[0].contract_id() < pair[1].contract_id()),
+            "L2 inventory contracts must be sorted and unique"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 enum AssuranceRecord {
-    Producer(ProducerRecord),
-    Fact(FactRecord),
+    Producer(closed_record::ProducerRecord),
+    Fact(closed_record::FactRecord),
 }
 
 impl AssuranceRecord {
     fn producer(
         identity: Identity,
-        details: ProducerDetails,
+        emitted_facts: Vec<String>,
         evidence: CompleteProducerEvidence,
-    ) -> Self {
-        Self::Producer(ProducerRecord {
-            contract_id: identity.contract_id,
-            domain: identity.domain,
-            version: identity.version,
-            role: Role::Producer,
-            status: ClosedStatus::Closed,
-            emitted_facts: details.emitted_facts,
-            evidence: evidence.into_wire(),
-        })
+    ) -> Result<Self> {
+        Ok(Self::Producer(closed_record::ProducerRecord::new(
+            identity,
+            emitted_facts,
+            evidence,
+        )?))
     }
 
     fn fact(
         identity: Identity,
-        details: FactDetails,
+        topic: String,
+        subscriptions: Vec<SubscriptionIdentity>,
         evidence: CompleteEvidence<FactEvidence>,
-    ) -> Self {
-        Self::Fact(FactRecord {
-            contract_id: identity.contract_id,
-            domain: identity.domain,
-            version: identity.version,
-            role: Role::Fact,
-            status: ClosedStatus::Closed,
-            topic: details.topic,
-            subscriptions: details.subscriptions,
-            evidence: evidence.into_wire(),
-        })
+    ) -> Result<Self> {
+        Ok(Self::Fact(closed_record::FactRecord::new(
+            identity,
+            topic,
+            subscriptions,
+            evidence,
+        )?))
     }
 
-    fn sort_key(&self) -> (&str, Role) {
+    fn contract_id(&self) -> &str {
         match self {
-            Self::Producer(record) => (&record.contract_id, record.role),
-            Self::Fact(record) => (&record.contract_id, record.role),
+            Self::Producer(record) => record.contract_id(),
+            Self::Fact(record) => record.contract_id(),
         }
     }
 }
@@ -1781,44 +1822,172 @@ impl Identity {
     }
 }
 
-#[derive(Debug)]
-struct ProducerDetails {
-    emitted_facts: Vec<String>,
+mod closed_record {
+    use super::*;
+
+    #[derive(Debug)]
+    pub(super) struct ProducerRecord {
+        contract_id: String,
+        #[cfg(test)]
+        emitted_facts: Vec<String>,
+        #[cfg(test)]
+        evidence: CompleteProducerEvidence,
+    }
+
+    impl ProducerRecord {
+        pub(super) fn new(
+            identity: Identity,
+            emitted_facts: Vec<String>,
+            evidence: CompleteProducerEvidence,
+        ) -> Result<Self> {
+            ensure_identity_fields(&identity.contract_id, &identity.domain, &identity.version)?;
+            validate_producer_fact_closure(&identity.contract_id, &emitted_facts, &evidence)?;
+            Ok(Self {
+                contract_id: identity.contract_id,
+                #[cfg(test)]
+                emitted_facts,
+                #[cfg(test)]
+                evidence,
+            })
+        }
+
+        pub(super) fn contract_id(&self) -> &str {
+            &self.contract_id
+        }
+
+        #[cfg(test)]
+        pub(super) fn emitted_facts(&self) -> &[String] {
+            &self.emitted_facts
+        }
+
+        #[cfg(test)]
+        pub(super) fn evidence(&self) -> &CompleteProducerEvidence {
+            &self.evidence
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct FactRecord {
+        contract_id: String,
+        #[cfg(test)]
+        subscriptions: Vec<SubscriptionIdentity>,
+        #[cfg(test)]
+        evidence: CompleteEvidence<FactEvidence>,
+    }
+
+    impl FactRecord {
+        pub(super) fn new(
+            identity: Identity,
+            topic: String,
+            subscriptions: Vec<SubscriptionIdentity>,
+            evidence: CompleteEvidence<FactEvidence>,
+        ) -> Result<Self> {
+            ensure_identity_fields(&identity.contract_id, &identity.domain, &identity.version)?;
+            ensure!(
+                !topic.is_empty(),
+                "fact {} topic is empty",
+                identity.contract_id
+            );
+            ensure!(
+                !subscriptions.is_empty(),
+                "fact {} must have at least one subscription",
+                identity.contract_id
+            );
+            ensure!(
+                subscriptions.windows(2).all(|pair| pair[0] < pair[1]),
+                "fact {} subscriptions must be sorted and unique",
+                identity.contract_id
+            );
+            for subscription in &subscriptions {
+                ensure!(
+                    !subscription.consumer.is_empty() && !subscription.group.is_empty(),
+                    "fact {} contains an incomplete subscription identity",
+                    identity.contract_id
+                );
+                match subscription.external_effect_policy {
+                    AssuranceExternalEffectPolicy::TransactionalOnly
+                    | AssuranceExternalEffectPolicy::IdempotencyKey
+                    | AssuranceExternalEffectPolicy::Reconcile
+                    | AssuranceExternalEffectPolicy::Compensated => {}
+                }
+            }
+            evidence.ensure_semantically_closed()?;
+            Ok(Self {
+                contract_id: identity.contract_id,
+                #[cfg(test)]
+                subscriptions,
+                #[cfg(test)]
+                evidence,
+            })
+        }
+
+        pub(super) fn contract_id(&self) -> &str {
+            &self.contract_id
+        }
+
+        #[cfg(test)]
+        pub(super) fn subscriptions(&self) -> &[SubscriptionIdentity] {
+            &self.subscriptions
+        }
+
+        #[cfg(test)]
+        pub(super) fn evidence(&self) -> &CompleteEvidence<FactEvidence> {
+            &self.evidence
+        }
+    }
+
+    fn validate_producer_fact_closure(
+        contract_id: &str,
+        emitted_facts: &[String],
+        evidence: &CompleteProducerEvidence,
+    ) -> Result<()> {
+        ensure!(
+            !emitted_facts.is_empty(),
+            "producer {contract_id} must emit at least one fact"
+        );
+        ensure!(
+            emitted_facts.windows(2).all(|pair| pair[0] < pair[1]),
+            "producer {contract_id} emitted facts must be sorted and unique"
+        );
+        evidence.ensure_semantically_closed(emitted_facts)
+    }
+
+    pub(super) fn validate_fact_ids(
+        emitted_facts: &[String],
+        execution_facts: &[String],
+        fault_facts: &[String],
+    ) -> Result<()> {
+        ensure!(!emitted_facts.is_empty(), "emitted facts are empty");
+        ensure!(
+            emitted_facts.windows(2).all(|pair| pair[0] < pair[1]),
+            "emitted facts are not sorted and unique"
+        );
+        ensure!(
+            execution_facts == emitted_facts,
+            "execution facts differ from emitted facts"
+        );
+        ensure!(
+            fault_facts == emitted_facts,
+            "fault facts differ from emitted facts"
+        );
+        Ok(())
+    }
 }
 
-#[derive(Debug)]
-struct FactDetails {
-    topic: String,
-    subscriptions: Vec<SubscriptionIdentity>,
+fn ensure_identity_fields(contract_id: &str, domain: &str, version: &str) -> Result<()> {
+    ensure!(!contract_id.is_empty(), "L2 contract id is empty");
+    ensure!(
+        !domain.is_empty(),
+        "L2 contract {contract_id} domain is empty"
+    );
+    ensure!(
+        !version.is_empty(),
+        "L2 contract {contract_id} version is empty"
+    );
+    Ok(())
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProducerRecord {
-    contract_id: String,
-    domain: String,
-    version: String,
-    role: Role,
-    status: ClosedStatus,
-    emitted_facts: Vec<String>,
-    evidence: ProducerEvidenceWire,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FactRecord {
-    contract_id: String,
-    domain: String,
-    version: String,
-    role: Role,
-    status: ClosedStatus,
-    topic: String,
-    subscriptions: Vec<SubscriptionIdentity>,
-    evidence: EvidenceWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SubscriptionIdentity {
     consumer: String,
     group: String,
@@ -1834,8 +2003,7 @@ struct SubscriptionValidation {
     external_effect_policy: AssuranceExternalEffectPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AssuranceExternalEffectPolicy {
     TransactionalOnly,
     IdempotencyKey,
@@ -1843,19 +2011,7 @@ enum AssuranceExternalEffectPolicy {
     Compensated,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Role {
-    Producer,
-    Fact,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum ClosedStatus {
-    Closed,
-}
-
+#[derive(Debug)]
 struct CompleteEvidence<R> {
     contract: EvidenceFacet,
     generated: EvidenceFacet,
@@ -1865,6 +2021,7 @@ struct CompleteEvidence<R> {
     role: PhantomData<fn() -> R>,
 }
 
+#[derive(Debug)]
 struct CompleteProducerEvidence {
     contract: EvidenceFacet,
     generated: EvidenceFacet,
@@ -1887,13 +2044,41 @@ impl CompleteProducerEvidence {
         }
     }
 
-    fn into_wire(self) -> ProducerEvidenceWire {
-        ProducerEvidenceWire {
-            contract: self.contract,
-            generated: self.generated,
-            execution: self.execution,
-            fault: self.fault,
+    fn ensure_semantically_closed(&self, emitted_facts: &[String]) -> Result<()> {
+        self.contract.ensure_complete()?;
+        self.generated.ensure_complete()?;
+        self.execution.route.ensure_present()?;
+        self.execution.mounted_handler.ensure_present()?;
+        let execution_facts = self
+            .execution
+            .terminals
+            .iter()
+            .map(|terminal| terminal.fact_id.clone())
+            .collect::<Vec<_>>();
+        let fault_facts = self
+            .fault
+            .terminals
+            .iter()
+            .map(|terminal| terminal.fact_id.clone())
+            .collect::<Vec<_>>();
+        closed_record::validate_fact_ids(emitted_facts, &execution_facts, &fault_facts)?;
+        for terminal in &self.execution.terminals {
+            terminal.ensure_semantically_closed()?;
         }
+        for (execution, fault) in self.execution.terminals.iter().zip(&self.fault.terminals) {
+            ensure!(
+                execution.provider_method == fault.provider_method,
+                "producer execution/fault provider mismatch for {}",
+                execution.fact_id
+            );
+            ensure!(
+                execution.transaction == fault.transaction,
+                "producer execution/fault transaction mismatch for {}",
+                execution.fact_id
+            );
+            fault.ensure_semantically_closed()?;
+        }
+        Ok(())
     }
 }
 
@@ -1915,37 +2100,17 @@ impl<R> CompleteEvidence<R> {
         })
     }
 
-    fn into_wire(self) -> EvidenceWire {
-        EvidenceWire {
-            contract: self.contract,
-            generated: self.generated,
-            runtime: self.runtime,
-            effect: self.effect,
-            fault: self.fault,
-        }
+    fn ensure_semantically_closed(&self) -> Result<()> {
+        self.contract.ensure_complete()?;
+        self.generated.ensure_complete()?;
+        self.runtime.ensure_complete()?;
+        self.effect.ensure_complete()?;
+        self.fault.ensure_complete()
     }
 }
 
-#[derive(Debug, Serialize)]
-struct EvidenceWire {
-    contract: EvidenceFacet,
-    generated: EvidenceFacet,
-    runtime: EvidenceFacet,
-    effect: EvidenceFacet,
-    fault: EvidenceFacet,
-}
-
-#[derive(Debug, Serialize)]
-struct ProducerEvidenceWire {
-    contract: EvidenceFacet,
-    generated: EvidenceFacet,
-    execution: ProducerExecutionEvidence,
-    fault: ProducerFaultEvidence,
-}
-
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct ProducerFaultEvidence {
-    status: EvidenceStatus,
     terminals: Vec<ProducerFaultTerminalEvidence>,
 }
 
@@ -1961,15 +2126,11 @@ impl ProducerFaultEvidence {
                 .all(|pair| pair[0].fact_id < pair[1].fact_id),
             "producer fault terminals must be sorted and unique"
         );
-        Ok(Self {
-            status: EvidenceStatus::Complete,
-            terminals,
-        })
+        Ok(Self { terminals })
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 struct ProducerFaultTerminalEvidence {
     fact_id: String,
     provider_method: Carrier,
@@ -1980,17 +2141,30 @@ struct ProducerFaultTerminalEvidence {
     no_replay: Carrier,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+impl ProducerFaultTerminalEvidence {
+    fn ensure_semantically_closed(&self) -> Result<()> {
+        for carrier in [
+            &self.provider_method,
+            &self.transaction,
+            &self.rollback,
+            &self.commit_unknown,
+            &self.rollback_failed,
+            &self.no_replay,
+        ] {
+            carrier.ensure_present()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 struct ProducerExecutionEvidence {
-    status: EvidenceStatus,
     route: Carrier,
     mounted_handler: Carrier,
     terminals: Vec<ProducerTerminalEvidence>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 struct ProducerTerminalEvidence {
     fact_id: String,
     domain_path: Vec<Carrier>,
@@ -2003,8 +2177,31 @@ struct ProducerTerminalEvidence {
     settlement: Carrier,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+impl ProducerTerminalEvidence {
+    fn ensure_semantically_closed(&self) -> Result<()> {
+        ensure!(
+            !self.domain_path.is_empty(),
+            "producer terminal {} domain path is empty",
+            self.fact_id
+        );
+        for carrier in &self.domain_path {
+            carrier.ensure_present()?;
+        }
+        for carrier in [
+            &self.port_method,
+            &self.provider_method,
+            &self.transaction,
+            &self.capability,
+            &self.append,
+            &self.settlement,
+        ] {
+            carrier.ensure_present()?;
+        }
+        self.production_composition.ensure_semantically_closed()
+    }
+}
+
+#[derive(Debug)]
 struct ProductionCompositionEvidence {
     runtime_entry: Carrier,
     runtime_assembly: Carrier,
@@ -2014,9 +2211,30 @@ struct ProductionCompositionEvidence {
     provider_factory: String,
 }
 
-#[derive(Debug, Serialize)]
+impl ProductionCompositionEvidence {
+    fn ensure_semantically_closed(&self) -> Result<()> {
+        for carrier in [
+            &self.runtime_entry,
+            &self.runtime_assembly,
+            &self.runtime_module,
+            &self.wire,
+        ] {
+            carrier.ensure_present()?;
+        }
+        ensure!(
+            !self.service_constructor.is_empty(),
+            "producer service constructor is empty"
+        );
+        ensure!(
+            !self.provider_factory.is_empty(),
+            "producer provider factory is empty"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 struct EvidenceFacet {
-    status: EvidenceStatus,
     carriers: Vec<Carrier>,
 }
 
@@ -2030,20 +2248,22 @@ impl EvidenceFacet {
                 "evidence facet contains duplicate carrier"
             );
         }
-        Ok(Self {
-            status: EvidenceStatus::Complete,
-            carriers,
-        })
+        Ok(Self { carriers })
+    }
+
+    fn ensure_complete(&self) -> Result<()> {
+        ensure!(
+            !self.carriers.is_empty(),
+            "evidence facet must not be empty"
+        );
+        for carrier in &self.carriers {
+            carrier.ensure_present()?;
+        }
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum EvidenceStatus {
-    Complete,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Carrier {
     kind: CarrierKind,
     path: RepoRelativePath,
@@ -2068,6 +2288,18 @@ impl Carrier {
             path,
             symbol: symbol.to_string(),
         })
+    }
+
+    fn ensure_present(&self) -> Result<()> {
+        ensure!(!self.path.0.is_empty(), "carrier path is empty");
+        ensure!(!self.symbol.is_empty(), "carrier symbol is empty");
+        match self.kind {
+            CarrierKind::Manifest
+            | CarrierKind::RustSymbol
+            | CarrierKind::RustType
+            | CarrierKind::FaultFixture => {}
+        }
+        Ok(())
     }
 
     fn sort_key(&self) -> (&str, &str, CarrierKind) {
@@ -2338,8 +2570,7 @@ fn item_is_conditionally_compiled(item: &syn::Item) -> bool {
         .any(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum CarrierKind {
     Manifest,
     RustSymbol,
@@ -2347,8 +2578,7 @@ enum CarrierKind {
     FaultFixture,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RepoRelativePath(String);
 
 impl RepoRelativePath {
@@ -2788,74 +3018,6 @@ impl DemoProvider {
         Ok(())
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn output_publish_rejects_parent_replaced_by_symlink_after_precheck() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
-
-        let root = crate::testutil::unique_tmp("l2-assurance-parent-swap");
-        let outside = crate::testutil::unique_tmp("l2-assurance-parent-outside");
-        fs::create_dir_all(root.join("generated"))?;
-        fs::create_dir_all(&outside)?;
-        let output = root.join(OUTPUT);
-        fs::write(&output, b"old\n")?;
-        validate_output_path(&root, &output)?;
-
-        fs::rename(root.join("generated"), root.join("generated-real"))?;
-        symlink(&outside, root.join("generated"))?;
-        assert!(generated_file::atomic_replace(&output, b"new\n").is_err());
-        assert!(!outside.join("l2-assurance.json").exists());
-
-        fs::remove_dir_all(root)?;
-        fs::remove_dir_all(outside)?;
-        Ok(())
-    }
-
-    #[test]
-    fn generation_accepts_missing_canonical_parent_for_safe_atomic_creation() -> anyhow::Result<()>
-    {
-        let root = crate::testutil::unique_tmp("l2-assurance-missing-parent");
-        fs::create_dir_all(&root)?;
-        let output = root.join(OUTPUT);
-
-        validate_output_path(&root, &output)?;
-        generated_file::atomic_replace(&output, b"generated\n")?;
-        assert_eq!(fs::read(&output)?, b"generated\n");
-
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn output_publish_rejects_ancestor_replaced_by_symlink_after_precheck() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
-
-        let root = crate::testutil::unique_tmp("l2-assurance-ancestor-swap");
-        let outside = crate::testutil::unique_tmp("l2-assurance-ancestor-outside");
-        let moved = root.with_file_name(format!(
-            "{}-real",
-            root.file_name()
-                .and_then(|name| name.to_str())
-                .context("temporary root is not UTF-8")?
-        ));
-        fs::create_dir_all(root.join("generated"))?;
-        fs::create_dir_all(outside.join("generated"))?;
-        let output = root.join(OUTPUT);
-        fs::write(&output, b"old\n")?;
-        validate_output_path(&root, &output)?;
-
-        fs::rename(&root, &moved)?;
-        symlink(&outside, &root)?;
-        assert!(generated_file::atomic_replace(&output, b"new\n").is_err());
-        assert!(!outside.join(OUTPUT).exists());
-
-        fs::remove_file(&root)?;
-        fs::remove_dir_all(moved)?;
-        fs::remove_dir_all(outside)?;
-        Ok(())
-    }
-
     #[test]
     fn exact_set_rejects_equal_size_wrong_identity() {
         let expected = ["identity.one".to_string(), "identity.two".to_string()];
@@ -2884,44 +3046,157 @@ impl DemoProvider {
     }
 
     #[test]
-    fn check_rejects_missing_tampered_and_crlf_without_writing() -> anyhow::Result<()> {
-        let root = crate::testutil::unique_tmp("l2-assurance-check");
-        fs::create_dir_all(&root)?;
-        let output = root.join("inventory.json");
-        let expected = b"{\n  \"schemaVersion\": 1\n}\n";
-        assert!(check_rendered_file(&output, expected).is_err());
-        fs::write(&output, b"tampered\n")?;
-        assert!(check_rendered_file(&output, expected).is_err());
-        assert_eq!(fs::read(&output)?, b"tampered\n");
-        fs::write(&output, b"{\r\n  \"schemaVersion\": 1\r\n}\r\n")?;
-        assert!(check_rendered_file(&output, expected).is_err());
-        assert_eq!(fs::read(&output)?, b"{\r\n  \"schemaVersion\": 1\r\n}\r\n");
-        fs::write(&output, expected)?;
-        check_rendered_file(&output, expected)?;
-        fs::remove_dir_all(root)?;
-        Ok(())
+    fn closed_producer_record_rejects_incomplete_fact_sets_at_construction() {
+        let one = vec!["identity.one".to_owned()];
+        let two = vec!["identity.two".to_owned()];
+        let duplicate = vec!["identity.one".to_owned(), "identity.one".to_owned()];
+
+        assert!(closed_record::validate_fact_ids(&[], &[], &[]).is_err());
+        assert!(closed_record::validate_fact_ids(&duplicate, &duplicate, &duplicate).is_err());
+        assert!(closed_record::validate_fact_ids(&one, &two, &one).is_err());
+        assert!(closed_record::validate_fact_ids(&one, &one, &two).is_err());
+        assert!(closed_record::validate_fact_ids(&one, &one, &one).is_ok());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn check_rejects_artifact_replaced_after_open() -> anyhow::Result<()> {
-        let root = crate::testutil::unique_tmp("l2-assurance-check-replacement");
-        fs::create_dir_all(&root)?;
-        let output = root.join("inventory.json");
-        let replacement = root.join("replacement.json");
-        let expected = b"{\n  \"schemaVersion\": 1\n}\n";
-        fs::write(&output, expected)?;
-        fs::write(&replacement, expected)?;
+    fn generated_producer_registry_rejects_wrong_duplicate_missing_extra_and_emits_drift() {
+        let producer = |id: &str, emitted_facts: &[&str]| GeneratedProducerProjection {
+            contract_id: id.to_owned(),
+            domain: "identity".to_owned(),
+            version: "v1".to_owned(),
+            schema_hash: format!("sha256:{id}"),
+            emitted_facts: emitted_facts
+                .iter()
+                .map(|fact| (*fact).to_owned())
+                .collect(),
+        };
+        let expected = vec![
+            producer("identity.login", &["identity.session-created"]),
+            producer("identity.logout", &["identity.security-event"]),
+        ];
+        assert!(ensure_generated_producer_registry(&expected, &expected).is_ok());
 
-        let result = check_rendered_file_with_hook(&output, expected, || {
-            let opened = root.join("opened.json");
-            assert!(fs::rename(&output, opened).is_ok());
-            assert!(fs::rename(&replacement, &output).is_ok());
-        });
-        assert!(result.is_err(), "pathname replacement must fail closed");
+        for (label, actual) in [
+            (
+                "wrong",
+                vec![
+                    producer("identity.login", &["identity.session-created"]),
+                    producer("identity.wrong", &["identity.security-event"]),
+                ],
+            ),
+            (
+                "duplicate",
+                vec![
+                    producer("identity.login", &["identity.session-created"]),
+                    producer("identity.login", &["identity.session-created"]),
+                ],
+            ),
+            (
+                "missing",
+                vec![producer("identity.login", &["identity.session-created"])],
+            ),
+            (
+                "extra",
+                vec![
+                    producer("identity.login", &["identity.session-created"]),
+                    producer("identity.logout", &["identity.security-event"]),
+                    producer("identity.refresh", &["identity.security-event"]),
+                ],
+            ),
+            (
+                "emits-drift",
+                vec![
+                    producer("identity.login", &["identity.security-event"]),
+                    producer("identity.logout", &["identity.security-event"]),
+                ],
+            ),
+        ] {
+            assert!(
+                ensure_generated_producer_registry(&expected, &actual).is_err(),
+                "{label} producer registry was accepted"
+            );
+        }
+    }
 
-        fs::remove_dir_all(root)?;
-        Ok(())
+    #[test]
+    fn required_session_created_inbox_closure_identifies_each_drifted_field() {
+        let evidence =
+            |case_id: &str, runner_symbol: &str| consistency_fixtures::ReadyL2FaultEvidence {
+                case_id: case_id.to_owned(),
+                contract_id: "identity.session-created".to_owned(),
+                fixture_carrier: format!("fixtures/consistency/inbox/fixture-{case_id}.toml"),
+                runner_carrier: "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs"
+                    .to_owned(),
+                runner_symbol: runner_symbol.to_owned(),
+            };
+        let complete = vec![
+            evidence(
+                "inbox-claim-crash-before-commit",
+                "run_inbox_claim_crash_before_commit",
+            ),
+            evidence(
+                "inbox-commit-before-ack-crash",
+                "run_inbox_commit_before_ack_crash",
+            ),
+            evidence(
+                "inbox-lease-lost-before-commit",
+                "run_inbox_lease_lost_before_commit",
+            ),
+        ];
+        assert!(ensure_required_session_created_inbox_closure(&complete).is_ok());
+
+        for required in &complete {
+            let missing = complete
+                .iter()
+                .filter(|candidate| candidate.case_id != required.case_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                ensure_required_session_created_inbox_closure(&missing).is_err(),
+                "missing {} was accepted",
+                required.case_id
+            );
+        }
+
+        for index in 0..complete.len() {
+            type MutateEvidence = fn(&mut consistency_fixtures::ReadyL2FaultEvidence);
+            let mutations: [(&str, MutateEvidence); 4] = [
+                (
+                    "contract_id",
+                    |item: &mut consistency_fixtures::ReadyL2FaultEvidence| {
+                        item.contract_id = "identity.wrong".to_owned();
+                    },
+                ),
+                (
+                    "fixture_carrier",
+                    |item: &mut consistency_fixtures::ReadyL2FaultEvidence| {
+                        item.fixture_carrier = "fixtures/consistency/inbox/wrong.toml".to_owned();
+                    },
+                ),
+                (
+                    "runner_carrier",
+                    |item: &mut consistency_fixtures::ReadyL2FaultEvidence| {
+                        item.runner_carrier = "journeys-fault-matrix/tests/wrong.rs".to_owned();
+                    },
+                ),
+                (
+                    "runner_symbol",
+                    |item: &mut consistency_fixtures::ReadyL2FaultEvidence| {
+                        item.runner_symbol = "run_wrong".to_owned();
+                    },
+                ),
+            ];
+            for (field, mutate) in mutations {
+                let mut drifted = complete.clone();
+                mutate(&mut drifted[index]);
+                let error = ensure_required_session_created_inbox_closure(&drifted)
+                    .expect_err("drifted carrier field was accepted")
+                    .to_string();
+                assert!(error.contains(&format!("field={field}")), "{error}");
+                assert!(error.contains("expected="), "{error}");
+                assert!(error.contains("actual="), "{error}");
+            }
+        }
     }
 
     #[test]
@@ -2943,12 +3218,12 @@ impl DemoProvider {
         assert!(error.contains("[Second] two: second detail"), "{error}");
     }
 
-    fn assert_inventory_identity_projection(inventory: &Inventory) {
+    fn assert_inventory_identity_projection(inventory: &ValidationReceipt) {
         let producer_ids = inventory
             .contracts
             .iter()
             .filter_map(|record| match record {
-                AssuranceRecord::Producer(record) => Some(record.contract_id.as_str()),
+                AssuranceRecord::Producer(record) => Some(record.contract_id()),
                 AssuranceRecord::Fact(_) => None,
             })
             .collect::<BTreeSet<_>>();
@@ -2956,60 +3231,125 @@ impl DemoProvider {
             .contracts
             .iter()
             .filter_map(|record| match record {
-                AssuranceRecord::Fact(record) => Some(record.contract_id.as_str()),
+                AssuranceRecord::Fact(record) => Some(record.contract_id()),
                 AssuranceRecord::Producer(_) => None,
             })
             .collect::<BTreeSet<_>>();
         assert!(!producer_ids.is_empty(), "producer projection is empty");
         assert!(!fact_ids.is_empty(), "fact projection is empty");
-        assert_eq!(inventory.producer_count, producer_ids.len());
-        assert_eq!(inventory.fact_count, fact_ids.len());
         assert!(producer_ids.is_disjoint(&fact_ids));
         assert_eq!(
             producer_ids.union(&fact_ids).count(),
             inventory.contracts.len(),
             "record identities must be unique across roles"
         );
+        assert!(
+            inventory
+                .contracts
+                .windows(2)
+                .all(|pair| pair[0].contract_id() < pair[1].contract_id()),
+            "typed inventory must be deterministically sorted by contract identity"
+        );
     }
 
     #[test]
-    fn workspace_inventory_is_exact_and_deterministic() -> anyhow::Result<()> {
+    fn workspace_typed_inventory_closes_active_l2() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
         let workspace_facts = command_facts.get()?;
-        let first = build_inventory(&root, workspace_facts)?;
-        let first_bytes = render(&first)?;
-        let second_bytes = render(&build_inventory(&root, workspace_facts)?)?;
-        assert_inventory_identity_projection(&first);
-        let login = first
+        let inventory = build_validation_receipt(&root, workspace_facts)?;
+        assert_inventory_identity_projection(&inventory);
+        for producer in inventory
+            .contracts
+            .iter()
+            .filter_map(|record| match record {
+                AssuranceRecord::Producer(record) => Some(record),
+                AssuranceRecord::Fact(_) => None,
+            })
+        {
+            let execution_facts = producer
+                .evidence()
+                .execution
+                .terminals
+                .iter()
+                .map(|terminal| terminal.fact_id.as_str())
+                .collect::<Vec<_>>();
+            let fault_facts = producer
+                .evidence()
+                .fault
+                .terminals
+                .iter()
+                .map(|terminal| terminal.fact_id.as_str())
+                .collect::<Vec<_>>();
+            let emitted_facts = producer
+                .emitted_facts()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(execution_facts, emitted_facts, "{}", producer.contract_id());
+            assert_eq!(fault_facts, emitted_facts, "{}", producer.contract_id());
+            for execution in &producer.evidence().execution.terminals {
+                let fault = producer
+                    .evidence()
+                    .fault
+                    .terminals
+                    .iter()
+                    .find(|fault| fault.fact_id == execution.fact_id)
+                    .context("producer execution terminal lacks fault terminal")?;
+                assert_eq!(fault.provider_method, execution.provider_method);
+                assert_eq!(fault.transaction, execution.transaction);
+                assert_eq!(execution.append.symbol, "append_outbox_with_projection");
+                assert_eq!(execution.settlement.symbol, "finish_local_tx");
+                assert_eq!(execution.capability.kind, CarrierKind::RustType);
+                assert!(matches!(
+                    (
+                        execution.transaction.symbol.as_str(),
+                        execution.capability.symbol.as_str(),
+                    ),
+                    ("TenantDb::identity_producer_tx", "IdentityTx")
+                        | ("TenantDb::retry_config_producer_tx", "ConfigWriteTx")
+                        | (
+                            "TenantDb::producer_tx" | "TenantDb::retry_producer_tx",
+                            "TenantTx"
+                        )
+                ));
+                assert_eq!(fault.rollback.symbol, "rollback_local_tx");
+                assert_eq!(fault.commit_unknown.symbol, "finish_local_tx_commit_result");
+                assert_eq!(
+                    fault.rollback_failed.symbol,
+                    "finish_local_tx_rollback_result"
+                );
+            }
+        }
+        let login = inventory
             .contracts
             .iter()
             .find_map(|record| match record {
-                AssuranceRecord::Producer(record) if record.contract_id == "identity.login" => {
+                AssuranceRecord::Producer(record) if record.contract_id() == "identity.login" => {
                     Some(record)
                 }
                 _ => None,
             })
             .context("identity.login producer disappeared")?;
         assert_eq!(
-            login.evidence.execution.mounted_handler.symbol,
+            login.evidence().execution.mounted_handler.symbol,
             "login_handler"
         );
         assert!(
             login
-                .evidence
+                .evidence()
                 .fault
                 .terminals
                 .iter()
                 .all(|terminal| terminal.no_replay.symbol == "ProducerTxAttempt::into_result"),
             "plain producer terminals must record their actual non-retry settlement consumer"
         );
-        let config_publish = first
+        let config_publish = inventory
             .contracts
             .iter()
             .find_map(|record| match record {
                 AssuranceRecord::Producer(record)
-                    if record.contract_id == "settings.config-publish" =>
+                    if record.contract_id() == "settings.config-publish" =>
                 {
                     Some(record)
                 }
@@ -3018,7 +3358,7 @@ impl DemoProvider {
             .context("settings.config-publish producer disappeared")?;
         assert!(
             config_publish
-                .evidence
+                .evidence()
                 .fault
                 .terminals
                 .iter()
@@ -3027,13 +3367,13 @@ impl DemoProvider {
                 }),
             "retry producer terminals must record the retry runner's actual settlement consumer"
         );
-        assert_eq!(first_bytes, second_bytes);
-        assert_eq!(first_bytes.last(), Some(&b'\n'));
-        assert!(!first_bytes.contains(&b'\r'));
-        let text = String::from_utf8(first_bytes)?;
-        assert!(!text.contains("_seed"));
-        assert!(!text.contains("/Users/"));
-        assert!(!text.contains("schemaHash\": \"HEAD"));
+        assert!(
+            inventory
+                .contracts
+                .iter()
+                .all(|record| !record.contract_id().contains("_seed")),
+            "draft seed entered the typed inventory"
+        );
         Ok(())
     }
 
@@ -3042,18 +3382,18 @@ impl DemoProvider {
     {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
-        let inventory = build_inventory(&root, command_facts.get()?)?;
+        let inventory = build_validation_receipt(&root, command_facts.get()?)?;
         let security_event_producers = inventory
             .contracts
             .iter()
             .filter_map(|record| match record {
                 AssuranceRecord::Producer(record)
                     if record
-                        .emitted_facts
+                        .emitted_facts()
                         .iter()
                         .any(|fact| fact == "identity.security-event") =>
                 {
-                    Some(record.contract_id.as_str())
+                    Some(record.contract_id())
                 }
                 _ => None,
             })
@@ -3063,7 +3403,7 @@ impl DemoProvider {
             .contracts
             .iter()
             .find_map(|record| match record {
-                AssuranceRecord::Producer(record) if record.contract_id == "identity.refresh" => {
+                AssuranceRecord::Producer(record) if record.contract_id() == "identity.refresh" => {
                     Some(record)
                 }
                 _ => None,
@@ -3072,7 +3412,7 @@ impl DemoProvider {
                 "identity.refresh must reject LocalTx and enter the closed OutboxFact producer inventory",
             )?;
         assert_eq!(
-            refresh.emitted_facts,
+            refresh.emitted_facts(),
             ["identity.security-event"],
             "refresh reuse containment must emit only the canonical security fact"
         );
@@ -3094,13 +3434,13 @@ impl DemoProvider {
     fn workspace_fault_evidence_uses_exact_runner_symbols() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
-        let inventory = build_inventory(&root, command_facts.get()?)?;
+        let inventory = build_validation_receipt(&root, command_facts.get()?)?;
         let session_created = inventory
             .contracts
             .iter()
             .find_map(|record| match record {
                 AssuranceRecord::Fact(record)
-                    if record.contract_id == "identity.session-created" =>
+                    if record.contract_id() == "identity.session-created" =>
                 {
                     Some(record)
                 }
@@ -3108,7 +3448,7 @@ impl DemoProvider {
             })
             .context("identity.session-created fact disappeared")?;
         let runner_symbols = session_created
-            .evidence
+            .evidence()
             .fault
             .carriers
             .iter()
@@ -3137,7 +3477,7 @@ impl DemoProvider {
     fn workspace_fact_effect_evidence_closes_all_policy_stages() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
-        let inventory = build_inventory(&root, command_facts.get()?)?;
+        let inventory = build_validation_receipt(&root, command_facts.get()?)?;
         let facts = inventory
             .contracts
             .iter()
@@ -3150,21 +3490,21 @@ impl DemoProvider {
         let mut subscription_ids = BTreeSet::new();
         for fact in facts {
             let carriers = fact
-                .evidence
+                .evidence()
                 .effect
                 .carriers
                 .iter()
                 .map(|carrier| (carrier.path.0.as_str(), carrier.symbol.as_str()))
                 .collect::<BTreeSet<_>>();
-            for subscription in &fact.subscriptions {
+            for subscription in fact.subscriptions() {
                 assert!(
                     subscription_ids.insert((
-                        fact.contract_id.as_str(),
+                        fact.contract_id(),
                         subscription.consumer.as_str(),
                         subscription.group.as_str(),
                     )),
                     "duplicate active subscription identity: {}/{}/{}",
-                    fact.contract_id,
+                    fact.contract_id(),
                     subscription.consumer,
                     subscription.group
                 );
@@ -3177,7 +3517,7 @@ impl DemoProvider {
                         .count(),
                     1,
                     "{} effect evidence must have one exact registration capability for {}: {carriers:?}",
-                    fact.contract_id,
+                    fact.contract_id(),
                     subscription.consumer
                 );
                 let handler = match subscription.external_effect_policy {
@@ -3204,7 +3544,7 @@ impl DemoProvider {
                     assert!(
                         carriers.contains(&expected),
                         "{} effect evidence lacks exact policy carrier {expected:?}: {carriers:?}",
-                        fact.contract_id
+                        fact.contract_id()
                     );
                 }
             }
@@ -3213,7 +3553,7 @@ impl DemoProvider {
                     .iter()
                     .all(|(path, _)| !path.starts_with("generated/src/event/")),
                 "{} generated SPEC must not masquerade as effect execution evidence",
-                fact.contract_id
+                fact.contract_id()
             );
         }
         assert!(

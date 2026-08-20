@@ -93,11 +93,8 @@ pub(crate) enum Command {
     Localtx(LocaltxCommand),
     /// active LocalTx manifest/generated/route/test closure 门。
     LocaltxCoverage,
-    /// deterministic active L2 producer/fact assurance inventory。
-    L2Assurance {
-        #[arg(long)]
-        check: bool,
-    },
+    /// 校验 active L2 producer/fact typed assurance closure。
+    L2Assurance,
     /// L2 provider conformance 语义校验；裸命令按需生成 target 诊断报告。
     ProviderCapabilities {
         #[arg(long)]
@@ -897,10 +894,8 @@ mod tests {
 
     #[test]
     fn try_parse_l2_and_provider_flags() -> Result<()> {
-        assert_eq!(
-            parse(&["l2-assurance"])?,
-            Command::L2Assurance { check: false }
-        );
+        assert_eq!(parse(&["l2-assurance"])?, Command::L2Assurance);
+        assert!(parse(&["l2-assurance", "--check"]).is_err());
         assert_eq!(
             parse(&["provider-capabilities", "--check"])?,
             Command::ProviderCapabilities { check: true }
