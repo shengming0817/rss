@@ -43,6 +43,8 @@ const SETTINGS_PROJECTION_APPLY_FUNNEL: &str =
     include_str!("../migrations/0093_install_settings_projection_apply_funnel.sql");
 const DEVICE_POLICY_AUTHORIZATION_RECEIPTS: &str =
     include_str!("../migrations/0110_persist_device_policy_authorization_receipts.sql");
+const DEVICE_ARTIFACT_RECEIPT_BINDING: &str =
+    include_str!("../migrations/0111_bind_certificate_artifacts_to_authorization_receipts.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
@@ -170,6 +172,28 @@ fn device_policy_receipt_cutover_is_single_path_normalized_and_fail_loud() {
             "0110 retains forbidden compatibility or sensitive-read shape `{forbidden}`"
         );
     }
+}
+
+#[test]
+fn certificate_artifact_append_is_bound_to_current_authorization_lineage() {
+    for required in [
+        "0111 requires migration ledger head 0110",
+        "ADD COLUMN authorization_receipt_id uuid",
+        "device_certificate_authorized_artifacts_lineage_fk",
+        "p_authorization_receipt_id uuid",
+        "desired.authorization_receipt_id=p_authorization_receipt_id",
+        "lineage.authorization_receipt_id=p_authorization_receipt_id",
+        "existing.authorization_receipt_id",
+        "rss_append_device_certificate_artifact_production",
+    ] {
+        assert!(
+            DEVICE_ARTIFACT_RECEIPT_BINDING.contains(required),
+            "0111 omits artifact receipt binding `{required}`"
+        );
+    }
+    assert!(!DEVICE_ARTIFACT_RECEIPT_BINDING.contains(
+        "GRANT EXECUTE ON FUNCTION public.rss_append_device_certificate_artifact_production"
+    ));
 }
 
 fn top_level_table_items(body: &str) -> Result<Vec<&str>, String> {

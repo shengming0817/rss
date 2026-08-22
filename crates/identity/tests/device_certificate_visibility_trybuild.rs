@@ -13,6 +13,8 @@ fn device_certificate_is_exposed_only_through_the_ports_facade() {
     tests.compile_fail("tests/ui/device_certificate_draft_production_slot_fail.rs");
     tests.compile_fail("tests/ui/device_certificate_raw_signer_production_slot_fail.rs");
     tests.compile_fail("tests/ui/device_certificate_legacy_production_source_removed_fail.rs");
+    tests.compile_fail("tests/ui/device_certificate_production_mint_without_capability_fail.rs");
+    tests.compile_fail("tests/ui/device_certificate_closure_as_artifact_fail.rs");
     tests.compile_fail("tests/ui/device_certificate_unfenced_condition_writer_fail.rs");
     tests.compile_fail("tests/ui/device_policy_authorization_receipt_private_fields_fail.rs");
     tests.compile_fail("tests/ui/device_policy_authorization_receipt_non_clone_fail.rs");

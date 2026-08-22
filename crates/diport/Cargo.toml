@@ -24,6 +24,7 @@ rss-request-context.workspace = true
 authmint = { path = "../authmint" }
 sagaauthmint = { path = "../sagaauthmint" }
 dlqauthmint = { path = "../dlqauthmint" }
+pkiauthmint = { path = "../pkiauthmint" }
 # DI port 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 dynosaur = { workspace = true }
 # Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur bridge(dyn) 据此生成

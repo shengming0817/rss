@@ -43,16 +43,16 @@ The six identities and proposal shapes are owned by [contract-set.md](./contract
 ## Decision: provider closure and command authorization are distinct
 
 External PKI owns CA policy, EST/CSR processing, SAN and key-usage authorization, signing, CRL/OCSP, and certificate
-lifecycle. A future candidate assembly requires a sealed assembly-level provider closure proving the selected provider,
+lifecycle. #2116 provides a sealed candidate-level provider closure proving the selected provider,
 production configuration and conformance evidence. It grants no tenant/device authorization. Each command separately requires
-a sealed `AuthorizedCertificateArtifact` bound to tenant, device, desired generation, policy, public key, certificate chain and
+a sealed `AuthorizedCertificateArtifact` bound to tenant, device, desired generation, policy, authorization receipt, public key, certificate chain and
 expiry. Its internal receipt exposes non-forgeable `CertScope`, `CertSerial`, and `CertNotAfter` capabilities for readiness and
 the existing revocation lookup. Commands still carry only its opaque artifact identity and digest; private keys, raw CSRs,
-serial authorization, and unapproved certificate material are excluded. The assembly-level type and formal production mint
-are not implemented at the current head.
+serial authorization, and unapproved certificate material are excluded. The type and formal production mint are implemented;
+#2117 still owns making the closure a required candidate assembly dependency.
 
 The simulator delivered by #1904 proves orchestration only and stays draft. ADR-028 supersedes #1910's direct activation
-route: future candidate implementation must first materialize the separate closure and real consumer at T1/T2; hardening/T3
+route: the separate closure and official Vault provider bridge/conformance path now have T1/T2 carriers; a real external consumer receipt, candidate assembly wiring, hardening/T3
 and atomic activation remain independent. Possessing any one authorized artifact cannot unlock the assembly, and possessing
 provider closure cannot authorize an individual command.
 

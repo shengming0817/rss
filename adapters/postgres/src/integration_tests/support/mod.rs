@@ -35,12 +35,12 @@ pub(super) use identity::ports::AccountReactivationLifecycle as _;
 
 pub(super) use identity::ports::device_certificate::{
     AcceptDesiredPolicy, ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
-    AuthorizedDeviceCertificateStatusRead, CertificateArtifactId, CertificateArtifactRequest,
-    CertificateAttemptFence, CertificatePublicKeyDigest, CertificateReadyProof,
-    CertificateReconcileRepository as _, CertificateRevocationObservation, ConditionStateBatch,
-    DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _, DeviceCertificateScope,
-    DeviceCertificateStatusStore as _, DevicePolicyIdempotencyKey, ExpectedGeneration,
-    PersistedCertificateArtifactSnapshot, PolicyHash, ProductionEligibility,
+    AuthorizedDeviceCertificateStatusRead, CertificateArtifactId, CertificateArtifactMaterial,
+    CertificateArtifactRequest, CertificateAttemptFence, CertificatePublicKeyDigest,
+    CertificateReadyProof, CertificateReconcileRepository as _, CertificateRevocationObservation,
+    ConditionStateBatch, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
+    DeviceCertificateScope, DeviceCertificateStatusStore as _, DevicePolicyIdempotencyKey,
+    ExpectedGeneration, PersistedCertificateArtifactSnapshot, PolicyHash, ProductionEligibility,
     ProviderCertificateCandidate, ReportedStateHash,
 };
 

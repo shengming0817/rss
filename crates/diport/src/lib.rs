@@ -212,9 +212,11 @@ pub use pdp::{
     VerifiedFederatedPermissions,
 };
 pub use pki_artifact::{
-    MAX_PKI_CERT_BYTES, MAX_PKI_CSR_BYTES, MAX_PKI_ISSUER_CERTS, PkiArtifactError,
-    PkiArtifactErrorKind, PkiArtifactRequest, PkiArtifactValueError, PkiChainDigest, PkiCommonName,
-    PkiExtendedKeyUsage, PkiPolicyDigest, PkiRequestGeneration, PkiSan, PkiSanRef, PkiSpkiDigest,
+    ExternalPkiProviderClosure, MAX_PKI_CERT_BYTES, MAX_PKI_CSR_BYTES, MAX_PKI_ISSUER_CERTS,
+    PkiArtifactError, PkiArtifactErrorKind, PkiArtifactRequest, PkiArtifactValueError,
+    PkiAuthorizationReceipt, PkiChainDigest, PkiCommonName, PkiExtendedKeyUsage, PkiPolicyDigest,
+    PkiProviderConfigDigest, PkiRequestGeneration, PkiSan, PkiSanRef, PkiSpkiDigest,
+    VerifiedExternalPkiArtifactEvidence, canonical_pki_chain_artifact,
 };
 pub use publisher::{
     DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,

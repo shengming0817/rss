@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for entry in fs::read_dir(migrations)? {
         let path = entry?.path();
         if path.extension().is_some_and(|ext| ext == "sql") {
+            println!("cargo:rerun-if-changed={}", path.display());
             on_disk_sql.insert(path.canonicalize()?);
         }
     }

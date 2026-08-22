@@ -14,4 +14,4 @@ error: cannot construct `AuthorizedCertificateArtifact<_>` with struct literal s
 6 |         eligibility: ProductionEligibility,
   |         ---------------------------------- private field
   |
-  = note: ...and other private fields that were not provided
+  = note: ...and other private field `binding` that was not provided

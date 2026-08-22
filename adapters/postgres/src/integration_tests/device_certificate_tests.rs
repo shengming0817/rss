@@ -18,9 +18,9 @@ use eventexec::reconcile::{
 use identity::ports::device_certificate::{
     ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
     AuthorizedCertificateArtifact, CertificateArtifactAcquisition, CertificateArtifactError,
-    CertificateArtifactId, CertificateArtifactRequest, CertificateArtifactSource,
-    CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
-    CertificatePublicKeyDigest, CertificateReconcileRepository,
+    CertificateArtifactId, CertificateArtifactMaterial, CertificateArtifactRequest,
+    CertificateArtifactSource, CertificateAttemptAuthority, CertificateAttemptFence,
+    CertificateConditionMutation, CertificatePublicKeyDigest, CertificateReconcileRepository,
     CertificateReconcileRepositoryError, CertificateReconcileView, CurrentCommandExpiryOutcome,
     DeletionRequestOutcome, DeviceCertificateReconciler, DeviceIngressContract,
     DeviceIngressDelivery, DeviceIngressPreparation, DeviceIngressRepository,
@@ -226,19 +226,23 @@ async fn device_certificate_receipt_concurrent_transactions_close_same_and_confl
     let (same_scope, same_fence, same_policy_hash, _same_attempt) =
         artifact_append_fixture(&store, "receipt-concurrent-same").await?;
     let (same_left_authorization, _same_snapshot) = authorized_artifact(
+        &store,
         same_scope,
         1,
         &same_policy_hash,
         "artifact-concurrent-same",
         vec![0x19, 0x21],
-    )?;
+    )
+    .await?;
     let (same_right_authorization, _) = authorized_artifact(
+        &store,
         same_scope,
         1,
         &same_policy_hash,
         "artifact-concurrent-same",
         vec![0x19, 0x21],
-    )?;
+    )
+    .await?;
     let same_left =
         crate::device_certificate::PgDeviceCertificateRepository::<ProductionEligibility>::from_unverified_for_test(&store);
     let same_right = crate::device_certificate::PgDeviceCertificateRepository::<
@@ -290,19 +294,23 @@ async fn device_certificate_receipt_concurrent_transactions_close_same_and_confl
     let (conflict_scope, conflict_fence, conflict_policy_hash, _conflict_attempt) =
         artifact_append_fixture(&store, "receipt-concurrent-conflict").await?;
     let (conflict_a, _) = authorized_artifact(
+        &store,
         conflict_scope,
         1,
         &conflict_policy_hash,
         "artifact-concurrent-value-a",
         vec![0x19, 0x31],
-    )?;
+    )
+    .await?;
     let (conflict_b, _) = authorized_artifact(
+        &store,
         conflict_scope,
         1,
         &conflict_policy_hash,
         "artifact-concurrent-value-b",
         vec![0x19, 0x32],
-    )?;
+    )
+    .await?;
     let conflict_left = crate::device_certificate::PgDeviceCertificateRepository::<
         ProductionEligibility,
     >::from_unverified_for_test(&store);
@@ -388,12 +396,14 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
     );
 
     let (authorization, persisted) = authorized_artifact(
+        &store,
         scope,
         1,
         &policy_hash,
         "artifact-command-authorized",
         vec![0x19, 0x41],
-    )?;
+    )
+    .await?;
     let repository = crate::device_certificate::PgDeviceCertificateRepository::<
         ProductionEligibility,
     >::from_unverified_for_test(&store);
@@ -505,12 +515,14 @@ async fn current_command_expiry_is_durable_closed_and_fenced_for_every_active_st
                 &store,
             );
         let (authorization, receipt) = authorized_artifact(
+            &store,
             scope,
             1,
             &policy_hash,
             &format!("expiry-artifact-{state}"),
             vec![0x17, u8::try_from(state.len())?],
-        )?;
+        )
+        .await?;
         assert_eq!(
             repository
                 .append_artifact_receipt(&fence, authorization)
@@ -1042,12 +1054,14 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
         ProductionEligibility,
     >::from_unverified_for_test(&store);
     let (append_authorization, receipt) = authorized_artifact(
+        &store,
         scope,
         1,
         &policy_hash,
         "artifact-append-once",
         vec![0x19, 0x11],
-    )?;
+    )
+    .await?;
     assert_eq!(
         repository
             .append_artifact_receipt(&fence, append_authorization)
@@ -1055,17 +1069,45 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
         ArtifactAppendOutcome::Appended
     );
     let (replay_authorization, _) = authorized_artifact(
+        &store,
         scope,
         1,
         &policy_hash,
         "artifact-append-once",
         vec![0x19, 0x11],
-    )?;
+    )
+    .await?;
     assert_eq!(
         repository
             .append_artifact_receipt(&fence, replay_authorization)
             .await?,
         ArtifactAppendOutcome::Replayed
+    );
+    let (swapped_receipt_authorization, _) = authorized_artifact_with_receipt(
+        scope,
+        1,
+        &policy_hash,
+        "artifact-swapped-receipt",
+        vec![0x19, 0x13],
+        uuid::Uuid::from_bytes([0x44; 16]),
+    )?;
+    assert_eq!(
+        repository
+            .append_artifact_receipt(&fence, swapped_receipt_authorization)
+            .await?,
+        ArtifactAppendOutcome::StaleFence
+    );
+    let artifact_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        artifact_count, 1,
+        "swapped receipt must not mutate evidence"
     );
     let original: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT policy_hash,public_key_digest,expected_state_hash,artifact_digest, \
@@ -1078,12 +1120,14 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
     .fetch_one(&store.pool)
     .await?;
     let (conflict, _) = authorized_artifact(
+        &store,
         scope,
         1,
         &policy_hash,
         "artifact-conflicting-value",
         vec![0x19, 0x12],
-    )?;
+    )
+    .await?;
     assert_eq!(
         repository.append_artifact_receipt(&fence, conflict).await?,
         ArtifactAppendOutcome::Conflict
@@ -1755,12 +1799,14 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
         .advance(2)
         .await?;
     let (stale_authorization, _) = authorized_artifact(
+        &store,
         scope,
         1,
         &policy_hash,
         "artifact-append-once",
         vec![0x19, 0x11],
-    )?;
+    )
+    .await?;
     assert_eq!(
         repository
             .append_artifact_receipt(&fence, stale_authorization)
@@ -2415,12 +2461,14 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
     .fetch_one(&store.pool)
     .await?;
     let (append_authorization, receipt) = authorized_artifact(
+        &store,
         scope,
         2,
         &policy_hash,
         "artifact-reactivated-ready",
         vec![0x19, 0x22],
-    )?;
+    )
+    .await?;
     assert_eq!(
         reconcile_repository
             .append_artifact_receipt(&ready_fence, append_authorization)
@@ -3222,7 +3270,7 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     let production_mint = sqlx::query_scalar::<_, String>(
         "SELECT public.rss_append_device_certificate_artifact_production( \
          NULL::uuid,NULL::uuid,NULL::uuid,NULL::uuid, \
-         NULL::bigint,NULL::bigint,NULL::bigint,NULL::bytea, \
+         NULL::bigint,NULL::bigint,NULL::bigint,NULL::uuid,NULL::bytea, \
          NULL::bytea,NULL::bytea,NULL::bytea,NULL::text,NULL::bytea,NULL::bigint)",
     )
     .fetch_one(&app.pool)
@@ -4090,27 +4138,18 @@ fn mint_authorized(
         request.scope(),
         request.generation(),
         request.policy_hash().clone(),
-        public_key.clone(),
-        artifact_digest,
-        state_hash.clone(),
-        artifact_id.clone(),
-        cert_scope,
-        serial.clone(),
-        not_after,
+        CertificateArtifactMaterial::new(
+            public_key,
+            artifact_digest,
+            state_hash,
+            artifact_id,
+            cert_scope,
+            serial,
+            not_after,
+        ),
     )?;
-    ProviderCertificateCandidate::new(
-        material,
-        request.scope(),
-        request.generation(),
-        request.policy_hash().clone(),
-        public_key,
-        state_hash,
-        artifact_id,
-        cert_scope,
-        serial,
-        not_after,
-    )
-    .authorize_production_for_test(&expected)
+    ProviderCertificateCandidate::new(material, expected.binding().clone())
+        .authorize_production_for_test(&expected)
 }
 
 struct ImmediateArtifactSource {

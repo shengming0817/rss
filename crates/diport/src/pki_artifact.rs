@@ -6,7 +6,100 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use crate::redacted_bytes::RedactedFixedBytes;
-use crate::{CertScope, RedactedBytes, RedactedSource};
+use crate::{CertNotAfter, CertScope, CertSerial, RedactedBytes, RedactedSource};
+
+/// Durable authorization-receipt correlation copied from the identity-owned desired lineage.
+///
+/// This value is not authority by itself. The identity production mint compares it with the
+/// sealed current desired acquisition before it can create a production artifact.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PkiAuthorizationReceipt([u8; 16]);
+
+impl PkiAuthorizationReceipt {
+    /// Preserve the exact non-nil UUID octets used by the durable authorization ledger.
+    pub fn try_new(bytes: [u8; 16]) -> Result<Self, PkiArtifactValueError> {
+        if bytes == [0; 16] {
+            return Err(PkiArtifactValueError::InvalidAuthorizationReceipt);
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Borrow the exact correlation bytes.
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PkiAuthorizationReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PkiAuthorizationReceipt(<uuid>)")
+    }
+}
+
+/// Canonical digest of the selected external provider's non-secret production configuration.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PkiProviderConfigDigest([u8; 32]);
+
+impl PkiProviderConfigDigest {
+    /// Capture an already canonical SHA-256 digest.
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the canonical digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PkiProviderConfigDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PkiProviderConfigDigest(<sha256>)")
+    }
+}
+
+/// Assembly-wide proof that the selected Vault CSR-sign provider, validated configuration, and
+/// closed conformance implementation were constructed together.
+///
+/// It deliberately contains no tenant, device, generation, policy, or authorization receipt and
+/// cannot substitute for a per-command artifact.
+pub struct ExternalPkiProviderClosure {
+    config_digest: PkiProviderConfigDigest,
+    _sealed: (),
+}
+
+impl ExternalPkiProviderClosure {
+    /// Seal the provider/configuration pair at the only approved adapter construction boundary.
+    pub fn seal_vault_csr_sign(
+        _mint: pkiauthmint::ExternalPkiProviderMint,
+        config_digest: PkiProviderConfigDigest,
+    ) -> Self {
+        Self {
+            config_digest,
+            _sealed: (),
+        }
+    }
+
+    /// Borrow the non-secret configuration identity for drift diagnostics.
+    pub const fn config_digest(&self) -> &PkiProviderConfigDigest {
+        &self.config_digest
+    }
+
+    #[cfg(feature = "test-support")]
+    /// Test-only closure preserving the production mint signature.
+    pub fn for_test(config_digest: PkiProviderConfigDigest) -> Self {
+        Self {
+            config_digest,
+            _sealed: (),
+        }
+    }
+}
+
+impl std::fmt::Debug for ExternalPkiProviderClosure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ExternalPkiProviderClosure(<sealed>)")
+    }
+}
 
 /// Maximum accepted PEM CSR size.
 pub const MAX_PKI_CSR_BYTES: usize = 64 * 1024;
@@ -14,6 +107,20 @@ pub const MAX_PKI_CSR_BYTES: usize = 64 * 1024;
 pub const MAX_PKI_CERT_BYTES: usize = 128 * 1024;
 /// Maximum issuer certificates accepted in one verified chain.
 pub const MAX_PKI_ISSUER_CERTS: usize = 16;
+
+/// Canonical length-framed public certificate-chain artifact used by both verification digests
+/// and identity artifact persistence.
+pub fn canonical_pki_chain_artifact<'a>(
+    leaf: &'a [u8],
+    issuers: impl IntoIterator<Item = &'a [u8]>,
+) -> Vec<u8> {
+    let mut artifact = Vec::new();
+    for certificate in std::iter::once(leaf).chain(issuers) {
+        artifact.extend_from_slice(&(certificate.len() as u64).to_be_bytes());
+        artifact.extend_from_slice(certificate);
+    }
+    artifact
+}
 
 /// Positive desired certificate generation carried as request correlation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -290,6 +397,9 @@ pub enum PkiExtendedKeyUsage {
 /// Request construction failed before provider I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PkiArtifactValueError {
+    /// Durable authorization receipt correlation must be a non-nil UUID.
+    #[error("PKI authorization receipt is invalid")]
+    InvalidAuthorizationReceipt,
     /// Generation zero has no valid desired-state meaning.
     #[error("PKI request generation must be positive")]
     ZeroGeneration,
@@ -321,6 +431,7 @@ pub struct PkiArtifactRequest {
     scope: CertScope,
     generation: PkiRequestGeneration,
     policy_digest: PkiPolicyDigest,
+    authorization_receipt: PkiAuthorizationReceipt,
     csr_pem: RedactedBytes,
     spki_digest: PkiSpkiDigest,
     common_name: PkiCommonName,
@@ -337,6 +448,7 @@ impl PkiArtifactRequest {
         scope: CertScope,
         generation: PkiRequestGeneration,
         policy_digest: PkiPolicyDigest,
+        authorization_receipt: PkiAuthorizationReceipt,
         csr_pem: RedactedBytes,
         spki_digest: PkiSpkiDigest,
         common_name: PkiCommonName,
@@ -367,6 +479,7 @@ impl PkiArtifactRequest {
             scope,
             generation,
             policy_digest,
+            authorization_receipt,
             csr_pem,
             spki_digest,
             common_name,
@@ -388,6 +501,10 @@ impl PkiArtifactRequest {
     /// Returns the canonical policy digest.
     pub const fn policy_digest(&self) -> &PkiPolicyDigest {
         &self.policy_digest
+    }
+    /// Returns the durable authorization-receipt correlation.
+    pub const fn authorization_receipt(&self) -> PkiAuthorizationReceipt {
+        self.authorization_receipt
     }
     /// Borrows the redacted PEM CSR wrapper.
     pub const fn csr_pem(&self) -> &RedactedBytes {
@@ -422,6 +539,97 @@ impl PkiArtifactRequest {
 impl std::fmt::Debug for PkiArtifactRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PkiArtifactRequest(<redacted>)")
+    }
+}
+
+/// Move-only public certificate material minted only after an official external-PKI adapter has
+/// verified the request, leaf, issuer chain, serial, and expiry together.
+///
+/// This is transport evidence, not desired-state authorization. The identity production funnel
+/// must still compare its embedded request with the current receipt-bound acquisition and consume
+/// a separately sealed provider closure.
+pub struct VerifiedExternalPkiArtifactEvidence {
+    provider_config_digest: PkiProviderConfigDigest,
+    request: PkiArtifactRequest,
+    leaf_der: RedactedBytes,
+    issuer_chain_der: Vec<RedactedBytes>,
+    chain_digest: PkiChainDigest,
+    serial: CertSerial,
+    not_after: CertNotAfter,
+    _sealed: (),
+}
+
+impl VerifiedExternalPkiArtifactEvidence {
+    /// Seal locally verified Vault CSR-sign material at the approved adapter boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_vault_csr_sign(
+        _mint: pkiauthmint::ExternalPkiProviderMint,
+        provider_config_digest: PkiProviderConfigDigest,
+        request: PkiArtifactRequest,
+        leaf_der: RedactedBytes,
+        issuer_chain_der: Vec<RedactedBytes>,
+        chain_digest: PkiChainDigest,
+        serial: CertSerial,
+        not_after: CertNotAfter,
+    ) -> Result<Self, PkiArtifactValueError> {
+        if leaf_der.is_empty() || leaf_der.len() > MAX_PKI_CERT_BYTES {
+            return Err(PkiArtifactValueError::InvalidCertificateMaterial);
+        }
+        if issuer_chain_der.is_empty() || issuer_chain_der.len() > MAX_PKI_ISSUER_CERTS {
+            return Err(PkiArtifactValueError::InvalidIssuerChain);
+        }
+        if issuer_chain_der
+            .iter()
+            .any(|cert| cert.is_empty() || cert.len() > MAX_PKI_CERT_BYTES)
+        {
+            return Err(PkiArtifactValueError::InvalidCertificateMaterial);
+        }
+        Ok(Self {
+            provider_config_digest,
+            request,
+            leaf_der,
+            issuer_chain_der,
+            chain_digest,
+            serial,
+            not_after,
+            _sealed: (),
+        })
+    }
+
+    /// Returns the exact non-secret provider configuration identity that produced this evidence.
+    pub const fn provider_config_digest(&self) -> &PkiProviderConfigDigest {
+        &self.provider_config_digest
+    }
+
+    /// Returns the exact request consumed by the verified attempt.
+    pub const fn request(&self) -> &PkiArtifactRequest {
+        &self.request
+    }
+    /// Returns the verified leaf certificate DER.
+    pub const fn leaf_der(&self) -> &RedactedBytes {
+        &self.leaf_der
+    }
+    /// Returns the verified issuer chain ordered toward the trust root.
+    pub fn issuer_chain_der(&self) -> &[RedactedBytes] {
+        &self.issuer_chain_der
+    }
+    /// Returns the canonical verified-chain digest.
+    pub const fn chain_digest(&self) -> &PkiChainDigest {
+        &self.chain_digest
+    }
+    /// Returns the verified leaf serial.
+    pub const fn serial(&self) -> &CertSerial {
+        &self.serial
+    }
+    /// Returns the verified leaf expiry.
+    pub const fn not_after(&self) -> CertNotAfter {
+        self.not_after
+    }
+}
+
+impl std::fmt::Debug for VerifiedExternalPkiArtifactEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedExternalPkiArtifactEvidence(<redacted>)")
     }
 }
 
@@ -495,6 +703,7 @@ mod tests {
             scope(),
             generation(),
             PkiPolicyDigest::new([1; 32]),
+            PkiAuthorizationReceipt::try_new([1; 16])?,
             RedactedBytes::new(b"sensitive-csr-marker".to_vec()),
             PkiSpkiDigest::new([2; 32]),
             PkiCommonName::try_new("device.example").expect("common name"),
@@ -584,6 +793,7 @@ mod tests {
                 scope(),
                 generation(),
                 PkiPolicyDigest::new([1; 32]),
+                PkiAuthorizationReceipt::try_new([1; 16]).expect("receipt"),
                 RedactedBytes::new(csr),
                 PkiSpkiDigest::new([2; 32]),
                 PkiCommonName::try_new("device.example").expect("common name"),

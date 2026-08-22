@@ -411,12 +411,14 @@ pub(in super::super) async fn reviewed_reconcile_command_at_generation(
         ExpectedGeneration::try_new(generation)?,
     )?;
     let (authorization, snapshot) = authorized_artifact(
+        store,
         scope,
         generation,
         &[0x11; 32],
         &artifact_id,
         vec![0x19, u8::try_from(amount).unwrap_or(0)],
-    )?;
+    )
+    .await?;
     let repository = crate::device_certificate::PgDeviceCertificateRepository::<
         ProductionEligibility,
     >::from_unverified_for_test(store);
@@ -1613,7 +1615,8 @@ pub(in super::super) async fn claim_device_certificate_attempt(
     }
 }
 
-pub(in super::super) fn authorized_artifact(
+pub(in super::super) async fn authorized_artifact(
+    store: &PgStore,
     scope: DeviceCertificateScope,
     generation: u64,
     policy_hash: &[u8],
@@ -1626,6 +1629,44 @@ pub(in super::super) fn authorized_artifact(
     ),
     TestError,
 > {
+    let receipt_id: String = sqlx::query_scalar(
+        "SELECT authorization_receipt_id::text \
+         FROM device_certificate_desired_generation_lineage \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=$3",
+    )
+    .bind(scope.tenant().to_string())
+    .bind(scope.device().as_uuid().to_string())
+    .bind(i64::try_from(generation)?)
+    .fetch_one(&store.pool)
+    .await?;
+    authorized_artifact_with_receipt(
+        scope,
+        generation,
+        policy_hash,
+        artifact_id,
+        serial,
+        uuid::Uuid::parse_str(&receipt_id)?,
+    )
+}
+
+pub(in super::super) fn authorized_artifact_with_receipt(
+    scope: DeviceCertificateScope,
+    generation: u64,
+    policy_hash: &[u8],
+    artifact_id: &str,
+    serial: Vec<u8>,
+    authorization_receipt_id: uuid::Uuid,
+) -> Result<
+    (
+        ArtifactAppendAuthorization<ProductionEligibility>,
+        PersistedCertificateArtifactSnapshot<ProductionEligibility>,
+    ),
+    TestError,
+> {
+    let receipt_id =
+        identity::ports::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+            authorization_receipt_id,
+        )?;
     let generation = ExpectedGeneration::try_new(generation)?;
     let policy_hash = PolicyHash::restore(policy_hash)?;
     let public_key_digest = CertificatePublicKeyDigest::restore(&[0x21_u8; 32])?;
@@ -1638,44 +1679,25 @@ pub(in super::super) fn authorized_artifact(
     let not_after = CertNotAfter::try_from_system_time(
         std::time::UNIX_EPOCH + Duration::from_secs(4_000_000_000),
     )?;
-    let expected = CertificateArtifactRequest::for_test(
-        scope,
-        generation,
-        policy_hash.clone(),
-        public_key_digest.clone(),
-        artifact_digest.clone(),
-        state_hash.clone(),
-        artifact_id.clone(),
-        cert_scope,
-        serial.clone(),
-        not_after,
-    )?;
-    let authorization = ProviderCertificateCandidate::new(
-        artifact,
+    let expected = CertificateArtifactRequest::for_test_with_receipt(
         scope,
         generation,
         policy_hash,
-        public_key_digest,
-        state_hash,
-        artifact_id,
-        cert_scope,
-        serial,
-        not_after,
-    )
-    .authorize_production_for_test(&expected)?
-    .into_append_authorization();
-    let snapshot = PersistedCertificateArtifactSnapshot::restore(
-        expected.scope(),
-        expected.generation(),
-        expected.policy_hash().clone(),
-        expected.public_key_digest().clone(),
-        expected.artifact_digest().clone(),
-        expected.expected_reported_state_hash().clone(),
-        expected.artifact_id().clone(),
-        expected.cert_scope(),
-        expected.serial().clone(),
-        expected.not_after(),
+        receipt_id,
+        CertificateArtifactMaterial::new(
+            public_key_digest,
+            artifact_digest,
+            state_hash,
+            artifact_id,
+            cert_scope,
+            serial,
+            not_after,
+        ),
     )?;
+    let authorization = ProviderCertificateCandidate::new(artifact, expected.binding().clone())
+        .authorize_production_for_test(&expected)?
+        .into_append_authorization();
+    let snapshot = PersistedCertificateArtifactSnapshot::restore(expected.binding().clone());
     Ok((authorization, snapshot))
 }
 

@@ -20,12 +20,12 @@ The target API and fact set remains draft until ADR-028's candidate implementati
 conditions are independently satisfied. #1894 directly replaces the empty draft `identity.reconcile-loop`; no alias,
 shim, dual reader or dual write is retained.
 
-External PKI owns CA, EST/CSR, SAN and key-usage authorization, signing, CRL/OCSP and certificate lifecycle. A future RSS
-candidate assembly must require an assembly-level provider closure sealed over provider identity, production configuration
+External PKI owns CA, EST/CSR, SAN and key-usage authorization, signing, CRL/OCSP and certificate lifecycle. RSS now has a
+candidate-level provider closure sealed over provider identity, production configuration
 and conformance evidence. Each command separately requires an `AuthorizedCertificateArtifact` sealed over tenant, device,
-generation, policy, public key, chain and expiry. Neither capability may substitute for the other. The current repository has
-the per-command eligibility boundary but no `ExternalPkiProviderClosure` type or formal production mint, so this paragraph is
-a candidate implementation requirement rather than a claim of an existing Hard carrier. The simulator is not a production
+generation, policy, authorization receipt, public key, chain and expiry. Neither capability may substitute for the other.
+The #2116 T1/T2 carrier implements this closure and formal mint, while assembly-required wiring and activation remain future.
+The simulator is not a production
 credential provider, and a future candidate assembly may have no SoftCA, plaintext, in-memory or missing-provider fallback.
 
 The current persistent revocation store remains RSS's sole decision-side revocation projection/cache/lookup. It is not the PKI lifecycle or publication authority, which remains External. Scheduling is purpose-specific and durable; public commands and ingress receipts are emitted through transaction-bound outbox outcomes. MQTT production transport is a direct replacement: the production client is always compiled and exposes one `MqttSession` with one driver, mandatory MQTTS/mTLS material, a certificate-CN-bound stable client ID, `clean_start=false`, bounded session expiry, manual ACK, closed readiness/reload state and one non-empty exact per-device topic policy. Plaintext, random identity, separate publisher/subscriber clients, fallback implementations and environment-selected external MQTT test brokers do not remain.
@@ -69,17 +69,15 @@ Closure extends existing typed registry/code generation, validation, CI-impact a
 
 These carriers are implementation obligations, not Markdown checks. Every invariant has one canonical primary proof whose minimum sufficient carrier is Hard or Medium. Hard is sufficient when a type, generated seam, schema, or database constraint prevents the invalid construction. A separate behavioral Medium carrier is required only for independent runtime hazards that Hard enforcement cannot establish, including transaction joins, real network/broker behavior, restart or takeover, concurrency, and drain. An owner that cannot supply its assigned sufficient carrier must narrow the claim or defer it.
 
-The assembly-level provider closure versus per-command authorization distinction is deliberately absent from the current
-carrier table: it has no implemented assembly closure carrier. ADR-028 hands it to a future candidate implementation PBI,
-which must add two non-interchangeable sealed capabilities, a required assembly dependency, substitution reds and real
-provider T2 conformance before claiming closure. The existing `ProductionEligibility` marker and tests cannot stand in for
-that missing assembly-wide authority.
+The assembly-level provider closure and per-command authorization are now separate #2116 candidate carriers, with substitution
+compile-fail tests and real Vault T2 conformance. They are deliberately not wired as a required assembly dependency here;
+#2117 owns that construction boundary. The `ProductionEligibility` marker alone still cannot stand in for either authority.
 
 ## Consequences
 
 - Policy acceptance can succeed while status remains progressing or degraded; clients must read local status for observed convergence.
 - Durable facts and fencing add storage and transaction work, but remove process-local authority and ambiguous recovery.
-- Candidate implementation waits for external PKI closure and a real consumer even after the simulator journey passes;
+- Candidate assembly wiring waits for #2117 even though the external PKI closure/mint carrier exists;
   activation additionally waits for ADR-028's independent hardening/T3 first-green and atomic transition.
 - Rollout and rollback operations, including the rule that active contract lifecycle never regresses to draft, are owned by [plan.md](../spec/007-l4-device-latent-production-loop/plan.md#rollback).
 

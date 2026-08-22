@@ -7,7 +7,8 @@
 //!   `rewrap`，见 `transit` 模块）。
 //! - `backend` feature 开时增补 concrete Vault PKI transport。它固定调用 Vault PKI
 //!   `/sign/{role}`，并在返回 transport evidence 前本地验证 CSR、leaf、chain 与有效期。
-//!   Evidence 不是 production authorization receipt；该层不接触 `/issue` 或私钥。
+//!   Evidence 不是 production authorization receipt；`VaultExternalPkiProviderClosure` 还须将它与
+//!   current desired acquisition/receipt 精确 join 后才能 mint production artifact。该层不接触 `/issue` 或私钥。
 //!
 //! **TLS-agnostic**（对标 s3 注入 aws `Client`）：adapter 只持有组合根注入的 `reqwest::Client`；TLS provider
 //! （rustls+ring，对齐 sqlx，避开 deny.toml openssl/aws-lc-sys/ring-license ban）与 roots 由组合根在 Join
@@ -74,8 +75,8 @@ mod bundle;
 pub use bundle::{VaultDomain, VaultDomainDeps, VaultRuntimeDeps, caps};
 #[cfg(feature = "backend")]
 pub use pki::{
-    VaultPkiArtifactEvidence, VaultPkiHttpClient, VaultPkiMount, VaultPkiRole, VaultPkiTransport,
-    VaultPkiTransportConfig,
+    VaultExternalPkiProviderClosure, VaultPkiArtifactEvidence, VaultPkiHttpClient, VaultPkiMount,
+    VaultPkiRole, VaultPkiTransport, VaultPkiTransportConfig,
 };
 #[cfg(feature = "backend")]
 pub use secret_resolver::{

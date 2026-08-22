@@ -60,7 +60,8 @@ for readiness and revocation checks; the device command remains limited to opaqu
 can substitute for the other. External PKI owns CA hierarchy, EST/CSR authorization, SAN/key-usage authorization, signing,
 CRL/OCSP, and certificate lifecycle. RSS consumes the authorized public artifact reference and receipt only.
 
-The repository does not yet implement that assembly-wide closure or a formal production mint. Even after the candidate T1/T2
-closure exists, activation still requires ADR-028's independent hardening/T3 first-green and atomic six-contract transition.
+The repository implements that closure and formal receipt-bound production mint as a candidate T1/T2 carrier. It is not yet a
+required dependency of a candidate assembly; #2117 owns that wiring. Activation still requires ADR-028's independent
+hardening/T3 first-green and atomic six-contract transition.
 
 The current PostgreSQL revocation store keyed by `(tenant_id, device_id, serial)` with `not_after` remains the only RSS revocation model. None of these shapes creates a second revocation identity.

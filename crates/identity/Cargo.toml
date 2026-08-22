@@ -59,6 +59,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+diport = { path = "../diport", features = ["test-support"] }
 eventexec = { path = "../eventexec", features = ["test-support"] }
 # 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate，
 # rust-standards.md §命名）。

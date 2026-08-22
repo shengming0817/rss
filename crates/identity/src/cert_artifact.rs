@@ -2,8 +2,9 @@
 //!
 //! Provider material enters as [`ProviderCertificateCandidate`]. Only the binding funnel in this
 //! module can turn it into an [`AuthorizedCertificateArtifact`]; production eligibility remains an
-//! unforgeable capability. ADR-028 supersedes #1910: a future candidate integration must bind any
-//! private production mint to its separately authorized, assembly-wide verified provider closure.
+//! unforgeable capability. The formal production mint additionally consumes separately sealed
+//! assembly-wide provider closure and per-command verified evidence values whose provider/config
+//! identities match.
 //!
 //! ref: instant-labs/instant-acme src/order.rs@8e4441f
 
@@ -13,7 +14,8 @@ use diport::{CertNotAfter, CertScope, CertSerial};
 use sha2::{Digest, Sha256};
 
 use crate::device_certificate::{
-    ArtifactDigest, DeviceCertificateScope, ExpectedGeneration, PolicyHash, ReportedStateHash,
+    ArtifactDigest, DeviceCertificateScope, DevicePolicyAuthorizationReceiptId, ExpectedGeneration,
+    PolicyHash, ReportedStateHash,
 };
 use deviceloop::CertificatePolicy;
 
@@ -32,6 +34,15 @@ pub enum CertificateArtifactError {
     /// The production artifact authority was temporarily unavailable.
     #[error("certificate artifact authority is unavailable")]
     Unavailable,
+    /// The provider may have completed signing, so retrying could mint an untracked certificate.
+    #[error("certificate artifact outcome is unknown")]
+    OutcomeUnknown,
+    /// The provider permanently rejected the caller or requested certificate policy.
+    #[error("certificate artifact authority rejected the request")]
+    Rejected,
+    /// The selected production provider configuration is invalid.
+    #[error("certificate artifact authority is misconfigured")]
+    Misconfigured,
 }
 
 /// Stable provider artifact identity. The value is metadata, but Debug stays redacted so provider
@@ -141,13 +152,13 @@ impl ArtifactEligibility for ProductionEligibility {
     const PERSISTENCE_LABEL: &'static str = "production";
 }
 
-/// Complete expected binding derived from authorized desired state and canonical request state.
-/// Fields are private so a provider cannot choose its own authorization coordinates.
+/// Public certificate coordinates selected by one provider attempt.
+///
+/// Keeping these coordinates in one named value prevents positional projection drift without
+/// granting authorization: the receipt-bound [`CertificateArtifactBinding`] is minted separately
+/// from a sealed desired-state acquisition or restored persistence lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertificateArtifactRequest {
-    scope: DeviceCertificateScope,
-    generation: ExpectedGeneration,
-    policy_hash: PolicyHash,
+pub struct CertificateArtifactMaterial {
     public_key_digest: CertificatePublicKeyDigest,
     artifact_digest: ArtifactDigest,
     expected_reported_state_hash: ReportedStateHash,
@@ -157,56 +168,10 @@ pub struct CertificateArtifactRequest {
     not_after: CertNotAfter,
 }
 
-/// Sealed desired-state request supplied to the production artifact source.
-///
-/// The source may choose provider coordinates, but can return only an artifact carrying the
-/// production eligibility marker introduced by the verified closure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertificateArtifactAcquisition {
-    scope: DeviceCertificateScope,
-    generation: ExpectedGeneration,
-    policy_hash: PolicyHash,
-    policy: CertificatePolicy,
-}
-
-impl CertificateArtifactAcquisition {
-    pub(crate) fn from_desired(
-        scope: DeviceCertificateScope,
-        desired: &crate::device_certificate::DesiredStateSnapshot,
-    ) -> Result<Self, CertificateArtifactError> {
-        Ok(Self {
-            scope,
-            generation: ExpectedGeneration::try_new(desired.generation().get())
-                .map_err(|_| CertificateArtifactError::BindingMismatch)?,
-            policy_hash: desired.policy_hash().clone(),
-            policy: desired.policy().clone(),
-        })
-    }
-
-    /// Authorized tenant/device scope.
-    pub const fn scope(&self) -> DeviceCertificateScope {
-        self.scope
-    }
-    /// Current desired generation.
-    pub const fn generation(&self) -> ExpectedGeneration {
-        self.generation
-    }
-    /// Canonical policy digest.
-    pub const fn policy_hash(&self) -> &PolicyHash {
-        &self.policy_hash
-    }
-    /// Canonical desired certificate policy.
-    pub const fn policy(&self) -> &CertificatePolicy {
-        &self.policy
-    }
-}
-
-impl CertificateArtifactRequest {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_authorized(
-        scope: DeviceCertificateScope,
-        generation: ExpectedGeneration,
-        policy_hash: PolicyHash,
+impl CertificateArtifactMaterial {
+    /// Group one provider attempt's public certificate coordinates.
+    #[must_use]
+    pub fn new(
         public_key_digest: CertificatePublicKeyDigest,
         artifact_digest: ArtifactDigest,
         expected_reported_state_hash: ReportedStateHash,
@@ -214,81 +179,80 @@ impl CertificateArtifactRequest {
         cert_scope: CertScope,
         serial: CertSerial,
         not_after: CertNotAfter,
+    ) -> Self {
+        Self {
+            public_key_digest,
+            artifact_digest,
+            expected_reported_state_hash,
+            artifact_id,
+            cert_scope,
+            serial,
+            not_after,
+        }
+    }
+}
+
+/// Exact receipt-bound coordinates shared by request, candidate, authorization, and persistence.
+///
+/// Fields remain private so callers cannot partially project or mutate one coordinate. This value
+/// is evidence data rather than append authority; only the consuming artifact funnel can mint an
+/// [`ArtifactAppendAuthorization`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateArtifactBinding {
+    scope: DeviceCertificateScope,
+    generation: ExpectedGeneration,
+    policy_hash: PolicyHash,
+    authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+    public_key_digest: CertificatePublicKeyDigest,
+    artifact_digest: ArtifactDigest,
+    expected_reported_state_hash: ReportedStateHash,
+    artifact_id: CertificateArtifactId,
+    cert_scope: CertScope,
+    serial: CertSerial,
+    not_after: CertNotAfter,
+}
+
+impl CertificateArtifactBinding {
+    /// Bind provider material to the exact authorized desired-state acquisition.
+    pub fn from_acquisition(
+        acquisition: &CertificateArtifactAcquisition,
+        material: CertificateArtifactMaterial,
     ) -> Result<Self, CertificateArtifactError> {
-        if cert_scope.tenant() != scope.tenant() || cert_scope.device() != scope.device() {
+        Self::restore(
+            acquisition.scope(),
+            acquisition.generation(),
+            acquisition.policy_hash().clone(),
+            acquisition.authorization_receipt_id(),
+            material,
+        )
+    }
+
+    /// Restore one complete binding while rechecking the redundant revocation scope.
+    pub fn restore(
+        scope: DeviceCertificateScope,
+        generation: ExpectedGeneration,
+        policy_hash: PolicyHash,
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+        material: CertificateArtifactMaterial,
+    ) -> Result<Self, CertificateArtifactError> {
+        if material.cert_scope.tenant() != scope.tenant()
+            || material.cert_scope.device() != scope.device()
+        {
             return Err(CertificateArtifactError::BindingMismatch);
         }
         Ok(Self {
             scope,
             generation,
             policy_hash,
-            public_key_digest,
-            artifact_digest,
-            expected_reported_state_hash,
-            artifact_id,
-            cert_scope,
-            serial,
-            not_after,
+            authorization_receipt_id,
+            public_key_digest: material.public_key_digest,
+            artifact_digest: material.artifact_digest,
+            expected_reported_state_hash: material.expected_reported_state_hash,
+            artifact_id: material.artifact_id,
+            cert_scope: material.cert_scope,
+            serial: material.serial,
+            not_after: material.not_after,
         })
-    }
-
-    /// Bind deterministic draft-provider coordinates to one authorized desired-state acquisition.
-    ///
-    /// This is the sole non-test draft authoring funnel. The provider may choose its public
-    /// artifact coordinates, but tenant, device, generation, and policy digest come only from the
-    /// sealed acquisition supplied by the reconciler.
-    #[allow(clippy::too_many_arguments)]
-    pub fn for_draft_provider(
-        acquisition: &CertificateArtifactAcquisition,
-        public_key_digest: CertificatePublicKeyDigest,
-        artifact_digest: ArtifactDigest,
-        expected_reported_state_hash: ReportedStateHash,
-        artifact_id: CertificateArtifactId,
-        cert_scope: CertScope,
-        serial: CertSerial,
-        not_after: CertNotAfter,
-    ) -> Result<Self, CertificateArtifactError> {
-        Self::from_authorized(
-            acquisition.scope(),
-            acquisition.generation(),
-            acquisition.policy_hash().clone(),
-            public_key_digest,
-            artifact_digest,
-            expected_reported_state_hash,
-            artifact_id,
-            cert_scope,
-            serial,
-            not_after,
-        )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    /// Test-only constructor preserving the production validation funnel.
-    #[allow(clippy::too_many_arguments)]
-    pub fn for_test(
-        scope: DeviceCertificateScope,
-        generation: ExpectedGeneration,
-        policy_hash: PolicyHash,
-        public_key_digest: CertificatePublicKeyDigest,
-        artifact_digest: ArtifactDigest,
-        expected_reported_state_hash: ReportedStateHash,
-        artifact_id: CertificateArtifactId,
-        cert_scope: CertScope,
-        serial: CertSerial,
-        not_after: CertNotAfter,
-    ) -> Result<Self, CertificateArtifactError> {
-        Self::from_authorized(
-            scope,
-            generation,
-            policy_hash,
-            public_key_digest,
-            artifact_digest,
-            expected_reported_state_hash,
-            artifact_id,
-            cert_scope,
-            serial,
-            not_after,
-        )
     }
 
     /// Authorized tenant/device coordinate.
@@ -296,24 +260,27 @@ impl CertificateArtifactRequest {
     pub const fn scope(&self) -> DeviceCertificateScope {
         self.scope
     }
-
     /// Authorized desired generation.
     #[must_use]
     pub const fn generation(&self) -> ExpectedGeneration {
         self.generation
     }
-
     /// Canonical desired-policy digest.
     #[must_use]
     pub const fn policy_hash(&self) -> &PolicyHash {
         &self.policy_hash
     }
-    /// Public key that the certificate must bind.
+    /// Durable allow decision bound to this artifact.
+    #[must_use]
+    pub const fn authorization_receipt_id(&self) -> DevicePolicyAuthorizationReceiptId {
+        self.authorization_receipt_id
+    }
+    /// Public key that the certificate binds.
     #[must_use]
     pub const fn public_key_digest(&self) -> &CertificatePublicKeyDigest {
         &self.public_key_digest
     }
-    /// Expected public artifact digest.
+    /// Canonical public artifact digest.
     #[must_use]
     pub const fn artifact_digest(&self) -> &ArtifactDigest {
         &self.artifact_digest
@@ -333,15 +300,220 @@ impl CertificateArtifactRequest {
     pub const fn cert_scope(&self) -> CertScope {
         self.cert_scope
     }
-    /// Expected RFC 5280 serial.
+    /// RFC 5280 serial.
     #[must_use]
     pub const fn serial(&self) -> &CertSerial {
         &self.serial
     }
-    /// Expected terminal expiry coordinate.
+    /// Authoritative terminal expiry coordinate.
     #[must_use]
     pub const fn not_after(&self) -> CertNotAfter {
         self.not_after
+    }
+}
+
+/// Complete expected binding derived from authorized desired state and canonical request state.
+/// Fields are private so a provider cannot choose its own authorization coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateArtifactRequest {
+    binding: CertificateArtifactBinding,
+}
+
+/// Sealed desired-state request supplied to the production artifact source.
+///
+/// The source may choose provider coordinates, but can return only an artifact carrying the
+/// production eligibility marker introduced by the verified closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateArtifactAcquisition {
+    scope: DeviceCertificateScope,
+    generation: ExpectedGeneration,
+    policy_hash: PolicyHash,
+    authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+    policy: CertificatePolicy,
+}
+
+impl CertificateArtifactAcquisition {
+    pub(crate) fn from_desired(
+        scope: DeviceCertificateScope,
+        desired: &crate::device_certificate::DesiredStateSnapshot,
+    ) -> Result<Self, CertificateArtifactError> {
+        Ok(Self {
+            scope,
+            generation: ExpectedGeneration::try_new(desired.generation().get())
+                .map_err(|_| CertificateArtifactError::BindingMismatch)?,
+            policy_hash: desired.policy_hash().clone(),
+            authorization_receipt_id: desired.authorization_receipt_id(),
+            policy: desired.policy().clone(),
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only construction of the sealed desired-state projection.
+    pub fn for_test(
+        scope: DeviceCertificateScope,
+        generation: ExpectedGeneration,
+        policy_hash: PolicyHash,
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+        policy: CertificatePolicy,
+    ) -> Self {
+        Self {
+            scope,
+            generation,
+            policy_hash,
+            authorization_receipt_id,
+            policy,
+        }
+    }
+
+    /// Authorized tenant/device scope.
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+    /// Current desired generation.
+    pub const fn generation(&self) -> ExpectedGeneration {
+        self.generation
+    }
+    /// Canonical policy digest.
+    pub const fn policy_hash(&self) -> &PolicyHash {
+        &self.policy_hash
+    }
+    /// Durable allow decision owning this desired generation.
+    pub const fn authorization_receipt_id(&self) -> DevicePolicyAuthorizationReceiptId {
+        self.authorization_receipt_id
+    }
+    /// Canonical desired certificate policy.
+    pub const fn policy(&self) -> &CertificatePolicy {
+        &self.policy
+    }
+}
+
+impl CertificateArtifactRequest {
+    /// Bind deterministic draft-provider coordinates to one authorized desired-state acquisition.
+    ///
+    /// This is the sole non-test draft authoring funnel. The provider may choose its public
+    /// artifact coordinates, but tenant, device, generation, and policy digest come only from the
+    /// sealed acquisition supplied by the reconciler.
+    pub fn for_draft_provider(
+        acquisition: &CertificateArtifactAcquisition,
+        material: CertificateArtifactMaterial,
+    ) -> Result<Self, CertificateArtifactError> {
+        Ok(Self {
+            binding: CertificateArtifactBinding::from_acquisition(acquisition, material)?,
+        })
+    }
+
+    /// Bind provider-verified public certificate coordinates to one sealed desired-state
+    /// acquisition. Production eligibility is still minted separately and requires the
+    /// assembly-wide external-PKI closure.
+    pub fn for_external_pki_provider(
+        acquisition: &CertificateArtifactAcquisition,
+        material: CertificateArtifactMaterial,
+    ) -> Result<Self, CertificateArtifactError> {
+        Ok(Self {
+            binding: CertificateArtifactBinding::from_acquisition(acquisition, material)?,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only constructor preserving the production validation funnel.
+    pub fn for_test(
+        scope: DeviceCertificateScope,
+        generation: ExpectedGeneration,
+        policy_hash: PolicyHash,
+        material: CertificateArtifactMaterial,
+    ) -> Result<Self, CertificateArtifactError> {
+        Self::for_test_with_receipt(
+            scope,
+            generation,
+            policy_hash,
+            DevicePolicyAuthorizationReceiptId::restore(uuid::Uuid::from_bytes([1; 16]))
+                .map_err(|_| CertificateArtifactError::BindingMismatch)?,
+            material,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only constructor that preserves an explicit durable receipt correlation.
+    pub fn for_test_with_receipt(
+        scope: DeviceCertificateScope,
+        generation: ExpectedGeneration,
+        policy_hash: PolicyHash,
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+        material: CertificateArtifactMaterial,
+    ) -> Result<Self, CertificateArtifactError> {
+        Ok(Self {
+            binding: CertificateArtifactBinding::restore(
+                scope,
+                generation,
+                policy_hash,
+                authorization_receipt_id,
+                material,
+            )?,
+        })
+    }
+
+    /// Borrow the complete receipt-bound coordinates consumed by later artifact states.
+    #[must_use]
+    pub const fn binding(&self) -> &CertificateArtifactBinding {
+        &self.binding
+    }
+
+    /// Authorized tenant/device coordinate.
+    #[must_use]
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.binding.scope()
+    }
+
+    /// Authorized desired generation.
+    #[must_use]
+    pub const fn generation(&self) -> ExpectedGeneration {
+        self.binding.generation()
+    }
+
+    /// Canonical desired-policy digest.
+    #[must_use]
+    pub const fn policy_hash(&self) -> &PolicyHash {
+        self.binding.policy_hash()
+    }
+    /// Durable allow decision bound to this expected artifact.
+    #[must_use]
+    pub const fn authorization_receipt_id(&self) -> DevicePolicyAuthorizationReceiptId {
+        self.binding.authorization_receipt_id()
+    }
+    /// Public key that the certificate must bind.
+    #[must_use]
+    pub const fn public_key_digest(&self) -> &CertificatePublicKeyDigest {
+        self.binding.public_key_digest()
+    }
+    /// Expected public artifact digest.
+    #[must_use]
+    pub const fn artifact_digest(&self) -> &ArtifactDigest {
+        self.binding.artifact_digest()
+    }
+    /// Expected device-reported public-state digest.
+    #[must_use]
+    pub const fn expected_reported_state_hash(&self) -> &ReportedStateHash {
+        self.binding.expected_reported_state_hash()
+    }
+    /// Stable provider artifact identity.
+    #[must_use]
+    pub const fn artifact_id(&self) -> &CertificateArtifactId {
+        self.binding.artifact_id()
+    }
+    /// Revocation scope bound to the same tenant/device.
+    #[must_use]
+    pub const fn cert_scope(&self) -> CertScope {
+        self.binding.cert_scope()
+    }
+    /// Expected RFC 5280 serial.
+    #[must_use]
+    pub const fn serial(&self) -> &CertSerial {
+        self.binding.serial()
+    }
+    /// Expected terminal expiry coordinate.
+    #[must_use]
+    pub const fn not_after(&self) -> CertNotAfter {
+        self.binding.not_after()
     }
 }
 
@@ -349,15 +521,7 @@ impl CertificateArtifactRequest {
 /// production dependency slot or persistence port until every binding has been checked.
 pub struct ProviderCertificateCandidate {
     artifact: Vec<u8>,
-    scope: DeviceCertificateScope,
-    generation: ExpectedGeneration,
-    policy_hash: PolicyHash,
-    public_key_digest: CertificatePublicKeyDigest,
-    expected_reported_state_hash: ReportedStateHash,
-    artifact_id: CertificateArtifactId,
-    cert_scope: CertScope,
-    serial: CertSerial,
-    not_after: CertNotAfter,
+    binding: CertificateArtifactBinding,
 }
 
 impl fmt::Debug for ProviderCertificateCandidate {
@@ -368,32 +532,9 @@ impl fmt::Debug for ProviderCertificateCandidate {
 
 impl ProviderCertificateCandidate {
     /// Capture untrusted provider output. Authorization is a separate, consuming operation.
-    #[allow(clippy::too_many_arguments)]
     #[must_use]
-    pub fn new(
-        artifact: Vec<u8>,
-        scope: DeviceCertificateScope,
-        generation: ExpectedGeneration,
-        policy_hash: PolicyHash,
-        public_key_digest: CertificatePublicKeyDigest,
-        expected_reported_state_hash: ReportedStateHash,
-        artifact_id: CertificateArtifactId,
-        cert_scope: CertScope,
-        serial: CertSerial,
-        not_after: CertNotAfter,
-    ) -> Self {
-        Self {
-            artifact,
-            scope,
-            generation,
-            policy_hash,
-            public_key_digest,
-            expected_reported_state_hash,
-            artifact_id,
-            cert_scope,
-            serial,
-            not_after,
-        }
+    pub fn new(artifact: Vec<u8>, binding: CertificateArtifactBinding) -> Self {
+        Self { artifact, binding }
     }
 
     fn authorize<E: ArtifactEligibility>(
@@ -402,31 +543,12 @@ impl ProviderCertificateCandidate {
     ) -> Result<AuthorizedCertificateArtifact<E>, CertificateArtifactError> {
         let digest = ArtifactDigest::restore(&Sha256::digest(&self.artifact))
             .map_err(|_| CertificateArtifactError::BindingMismatch)?;
-        if self.scope != expected.scope
-            || self.generation != expected.generation
-            || self.policy_hash != expected.policy_hash
-            || self.public_key_digest != expected.public_key_digest
-            || digest != expected.artifact_digest
-            || self.expected_reported_state_hash != expected.expected_reported_state_hash
-            || self.artifact_id != expected.artifact_id
-            || self.cert_scope != expected.cert_scope
-            || self.serial != expected.serial
-            || self.not_after != expected.not_after
-        {
+        if digest != *self.binding.artifact_digest() || self.binding != expected.binding {
             return Err(CertificateArtifactError::BindingMismatch);
         }
         Ok(AuthorizedCertificateArtifact {
             artifact: self.artifact,
-            scope: self.scope,
-            generation: self.generation,
-            policy_hash: self.policy_hash,
-            public_key_digest: self.public_key_digest,
-            artifact_digest: digest,
-            expected_reported_state_hash: self.expected_reported_state_hash,
-            artifact_id: self.artifact_id,
-            cert_scope: self.cert_scope,
-            serial: self.serial,
-            not_after: self.not_after,
+            binding: self.binding,
             eligibility: std::marker::PhantomData,
         })
     }
@@ -437,6 +559,37 @@ impl ProviderCertificateCandidate {
         self,
         expected: &CertificateArtifactRequest,
     ) -> Result<AuthorizedCertificateArtifact<DraftEligibility>, CertificateArtifactError> {
+        self.authorize(expected)
+    }
+
+    /// Mint one per-command production artifact under an already sealed assembly-wide provider
+    /// closure. The move-only verified evidence must carry the same provider configuration and
+    /// exact command/material coordinates; the closure contains no command authority by itself.
+    pub fn authorize_production(
+        self,
+        closure: &diport::ExternalPkiProviderClosure,
+        evidence: diport::VerifiedExternalPkiArtifactEvidence,
+        expected: &CertificateArtifactRequest,
+    ) -> Result<AuthorizedCertificateArtifact<ProductionEligibility>, CertificateArtifactError>
+    {
+        let evidence_request = evidence.request();
+        let candidate_receipt = self.binding.authorization_receipt_id().as_uuid();
+        if closure.config_digest() != evidence.provider_config_digest()
+            || evidence_request.scope().tenant() != self.binding.scope().tenant()
+            || evidence_request.scope().device() != self.binding.scope().device()
+            || evidence_request.generation().get() != self.binding.generation().get()
+            || evidence_request.policy_digest().as_bytes() != self.binding.policy_hash().as_bytes()
+            || evidence_request.authorization_receipt().as_bytes() != candidate_receipt.as_bytes()
+            || evidence_request.spki_digest().as_bytes()
+                != self.binding.public_key_digest().as_bytes()
+            || evidence.chain_digest().as_bytes()
+                != self.binding.expected_reported_state_hash().as_bytes()
+            || evidence_request.scope() != self.binding.cert_scope()
+            || evidence.serial() != self.binding.serial()
+            || evidence.not_after() != self.binding.not_after()
+        {
+            return Err(CertificateArtifactError::BindingMismatch);
+        }
         self.authorize(expected)
     }
 
@@ -455,16 +608,7 @@ impl ProviderCertificateCandidate {
 /// authoring must consume the one authorized value rather than silently duplicating key material.
 pub struct AuthorizedCertificateArtifact<E: ArtifactEligibility> {
     artifact: Vec<u8>,
-    scope: DeviceCertificateScope,
-    generation: ExpectedGeneration,
-    policy_hash: PolicyHash,
-    public_key_digest: CertificatePublicKeyDigest,
-    artifact_digest: ArtifactDigest,
-    expected_reported_state_hash: ReportedStateHash,
-    artifact_id: CertificateArtifactId,
-    cert_scope: CertScope,
-    serial: CertSerial,
-    not_after: CertNotAfter,
+    binding: CertificateArtifactBinding,
     eligibility: std::marker::PhantomData<E>,
 }
 
@@ -491,16 +635,7 @@ impl<E: ArtifactEligibility> AuthorizedCertificateArtifact<E> {
     pub fn into_append_authorization(self) -> ArtifactAppendAuthorization<E> {
         ArtifactAppendAuthorization {
             snapshot: PersistedCertificateArtifactSnapshot {
-                scope: self.scope,
-                generation: self.generation,
-                policy_hash: self.policy_hash,
-                public_key_digest: self.public_key_digest,
-                artifact_digest: self.artifact_digest,
-                expected_reported_state_hash: self.expected_reported_state_hash,
-                artifact_id: self.artifact_id,
-                cert_scope: self.cert_scope,
-                serial: self.serial,
-                not_after: self.not_after,
+                binding: self.binding,
                 eligibility: std::marker::PhantomData,
             },
         }
@@ -538,102 +673,81 @@ impl<E: ArtifactEligibility> ArtifactAppendAuthorization<E> {
 /// Immutable durable evidence restored from or derived for persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedCertificateArtifactSnapshot<E: ArtifactEligibility> {
-    scope: DeviceCertificateScope,
-    generation: ExpectedGeneration,
-    policy_hash: PolicyHash,
-    public_key_digest: CertificatePublicKeyDigest,
-    artifact_digest: ArtifactDigest,
-    expected_reported_state_hash: ReportedStateHash,
-    artifact_id: CertificateArtifactId,
-    cert_scope: CertScope,
-    serial: CertSerial,
-    not_after: CertNotAfter,
+    binding: CertificateArtifactBinding,
     eligibility: std::marker::PhantomData<E>,
 }
 
 impl<E: ArtifactEligibility> PersistedCertificateArtifactSnapshot<E> {
-    /// Restore one immutable receipt from persistence while rechecking the redundant revocation
-    /// scope binding. Raw artifact bytes are never restored through this path.
-    #[allow(clippy::too_many_arguments)]
-    pub fn restore(
-        scope: DeviceCertificateScope,
-        generation: ExpectedGeneration,
-        policy_hash: PolicyHash,
-        public_key_digest: CertificatePublicKeyDigest,
-        artifact_digest: ArtifactDigest,
-        expected_reported_state_hash: ReportedStateHash,
-        artifact_id: CertificateArtifactId,
-        cert_scope: CertScope,
-        serial: CertSerial,
-        not_after: CertNotAfter,
-    ) -> Result<Self, CertificateArtifactError> {
-        if cert_scope.tenant() != scope.tenant() || cert_scope.device() != scope.device() {
-            return Err(CertificateArtifactError::BindingMismatch);
-        }
-        Ok(Self {
-            scope,
-            generation,
-            policy_hash,
-            public_key_digest,
-            artifact_digest,
-            expected_reported_state_hash,
-            artifact_id,
-            cert_scope,
-            serial,
-            not_after,
+    /// Restore one immutable receipt from an already validated complete binding. Raw artifact
+    /// bytes are never restored through this path.
+    #[must_use]
+    pub fn restore(binding: CertificateArtifactBinding) -> Self {
+        Self {
+            binding,
             eligibility: std::marker::PhantomData,
-        })
+        }
+    }
+
+    /// Borrow the complete receipt-bound coordinates restored from persistence.
+    #[must_use]
+    pub const fn binding(&self) -> &CertificateArtifactBinding {
+        &self.binding
     }
 
     /// Authorized tenant/device coordinate.
     #[must_use]
     pub const fn scope(&self) -> DeviceCertificateScope {
-        self.scope
+        self.binding.scope()
     }
     /// Authorized desired generation.
     #[must_use]
     pub const fn generation(&self) -> ExpectedGeneration {
-        self.generation
+        self.binding.generation()
     }
     /// Canonical desired-policy digest.
     #[must_use]
     pub const fn policy_hash(&self) -> &PolicyHash {
-        &self.policy_hash
+        self.binding.policy_hash()
+    }
+    /// Durable allow decision that owns this generation's artifact.
+    #[must_use]
+    pub const fn authorization_receipt_id(&self) -> DevicePolicyAuthorizationReceiptId {
+        self.binding.authorization_receipt_id()
     }
     /// Certified public-key digest.
     #[must_use]
     pub const fn public_key_digest(&self) -> &CertificatePublicKeyDigest {
-        &self.public_key_digest
+        self.binding.public_key_digest()
     }
     /// Authorized public artifact digest.
     #[must_use]
     pub const fn artifact_digest(&self) -> &ArtifactDigest {
-        &self.artifact_digest
+        self.binding.artifact_digest()
     }
     /// Expected reported public-state digest.
     #[must_use]
     pub const fn expected_reported_state_hash(&self) -> &ReportedStateHash {
-        &self.expected_reported_state_hash
+        self.binding.expected_reported_state_hash()
     }
     /// Stable provider artifact identity.
     #[must_use]
     pub const fn artifact_id(&self) -> &CertificateArtifactId {
-        &self.artifact_id
+        self.binding.artifact_id()
     }
     /// Revocation scope, bound to the same tenant/device.
     #[must_use]
     pub const fn cert_scope(&self) -> CertScope {
-        self.cert_scope
+        self.binding.cert_scope()
     }
     /// RFC 5280 serial used by the single revocation truth source.
     #[must_use]
     pub const fn serial(&self) -> &CertSerial {
-        &self.serial
+        self.binding.serial()
     }
     /// Authoritative terminal expiry coordinate.
     #[must_use]
     pub const fn not_after(&self) -> CertNotAfter {
-        self.not_after
+        self.binding.not_after()
     }
 }
 
@@ -659,6 +773,7 @@ mod tests {
     use super::*;
     use ids::DeviceId;
     use rss_request_context::TenantId;
+    use uuid::Uuid;
 
     fn digest(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
@@ -671,6 +786,80 @@ mod tests {
         )
     }
 
+    fn authorization_receipt_id() -> crate::device_certificate::DevicePolicyAuthorizationReceiptId {
+        crate::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+            Uuid::parse_str("018f7f3e-7b7a-7c4c-8d2a-8ebad5dbe001").unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn receipt_bound_binding_is_shared_across_request_candidate_and_snapshot() {
+        let scope = scope();
+        let artifact = b"shared-binding-certificate-chain".to_vec();
+        let material = CertificateArtifactMaterial::new(
+            CertificatePublicKeyDigest::digest(b"shared-public-key"),
+            ArtifactDigest::restore(&Sha256::digest(&artifact)).unwrap(),
+            ReportedStateHash::parse(&digest('b')).unwrap(),
+            CertificateArtifactId::parse("vault-pki-sha256:shared-binding").unwrap(),
+            CertScope::new(scope.tenant(), scope.device()),
+            CertSerial::try_new([7]).unwrap(),
+            CertNotAfter::try_from_system_time(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(7_200),
+            )
+            .unwrap(),
+        );
+        let expected = CertificateArtifactRequest::for_test_with_receipt(
+            scope,
+            ExpectedGeneration::try_new(7).unwrap(),
+            PolicyHash::parse(&digest('a')).unwrap(),
+            authorization_receipt_id(),
+            material,
+        )
+        .unwrap();
+        let binding = expected.binding().clone();
+        let candidate = ProviderCertificateCandidate::new(artifact, binding.clone());
+        let snapshot = candidate
+            .authorize_production_for_test(&expected)
+            .unwrap()
+            .into_append_authorization()
+            .into_snapshot();
+
+        assert_eq!(snapshot.binding(), &binding);
+    }
+
+    #[test]
+    fn production_mint_requires_provider_closure_and_authorization_receipt() {
+        let scope = scope();
+        let receipt_id = authorization_receipt_id();
+        let artifact = b"receipt-bound-production-certificate-chain".to_vec();
+        let artifact_digest = ArtifactDigest::restore(&Sha256::digest(&artifact)).unwrap();
+        let expected = CertificateArtifactRequest::for_test_with_receipt(
+            scope,
+            ExpectedGeneration::try_new(7).unwrap(),
+            PolicyHash::parse(&digest('a')).unwrap(),
+            receipt_id,
+            CertificateArtifactMaterial::new(
+                CertificatePublicKeyDigest::digest(b"public-key"),
+                artifact_digest,
+                ReportedStateHash::parse(&digest('b')).unwrap(),
+                CertificateArtifactId::parse("vault-pki-sha256:artifact-0007").unwrap(),
+                CertScope::new(scope.tenant(), scope.device()),
+                CertSerial::try_new([7]).unwrap(),
+                CertNotAfter::try_from_system_time(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(7_200),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let candidate = ProviderCertificateCandidate::new(artifact, expected.binding().clone());
+        let authorized = candidate.authorize_production_for_test(&expected).unwrap();
+        let snapshot = authorized.into_append_authorization().into_snapshot();
+
+        assert_eq!(snapshot.authorization_receipt_id(), receipt_id);
+    }
+
     #[test]
     fn complete_binding_authorizes_and_debug_is_redacted() {
         let scope = scope();
@@ -680,30 +869,21 @@ mod tests {
             scope,
             ExpectedGeneration::try_new(1).unwrap(),
             PolicyHash::parse(&digest('a')).unwrap(),
-            CertificatePublicKeyDigest::digest(b"public-key"),
-            artifact_digest.clone(),
-            ReportedStateHash::parse(&digest('b')).unwrap(),
-            CertificateArtifactId::parse("provider/artifact/1").unwrap(),
-            CertScope::new(scope.tenant(), scope.device()),
-            CertSerial::try_new([1]).unwrap(),
-            CertNotAfter::try_from_system_time(
-                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600),
-            )
-            .unwrap(),
+            CertificateArtifactMaterial::new(
+                CertificatePublicKeyDigest::digest(b"public-key"),
+                artifact_digest.clone(),
+                ReportedStateHash::parse(&digest('b')).unwrap(),
+                CertificateArtifactId::parse("provider/artifact/1").unwrap(),
+                CertScope::new(scope.tenant(), scope.device()),
+                CertSerial::try_new([1]).unwrap(),
+                CertNotAfter::try_from_system_time(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
-        let candidate = ProviderCertificateCandidate::new(
-            artifact,
-            scope,
-            expected.generation,
-            expected.policy_hash.clone(),
-            expected.public_key_digest.clone(),
-            expected.expected_reported_state_hash.clone(),
-            expected.artifact_id.clone(),
-            expected.cert_scope,
-            expected.serial.clone(),
-            expected.not_after,
-        );
+        let candidate = ProviderCertificateCandidate::new(artifact, expected.binding().clone());
         let authorized = candidate.authorize_draft(&expected).unwrap();
         assert_eq!(
             format!("{authorized:?}"),
@@ -722,63 +902,57 @@ mod tests {
             scope,
             ExpectedGeneration::try_new(1).unwrap(),
             PolicyHash::parse(&digest('a')).unwrap(),
-            CertificatePublicKeyDigest::digest(b"key-a"),
-            ArtifactDigest::restore(&Sha256::digest(b"artifact")).unwrap(),
-            ReportedStateHash::parse(&digest('b')).unwrap(),
-            CertificateArtifactId::parse("artifact-id-0001").unwrap(),
-            CertScope::new(scope.tenant(), scope.device()),
-            CertSerial::try_new([1]).unwrap(),
-            CertNotAfter::try_from_system_time(
-                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600),
-            )
-            .unwrap(),
+            CertificateArtifactMaterial::new(
+                CertificatePublicKeyDigest::digest(b"key-a"),
+                ArtifactDigest::restore(&Sha256::digest(b"artifact")).unwrap(),
+                ReportedStateHash::parse(&digest('b')).unwrap(),
+                CertificateArtifactId::parse("artifact-id-0001").unwrap(),
+                CertScope::new(scope.tenant(), scope.device()),
+                CertSerial::try_new([1]).unwrap(),
+                CertNotAfter::try_from_system_time(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
-        let valid = || {
-            ProviderCertificateCandidate::new(
-                b"artifact".to_vec(),
-                scope,
-                expected.generation,
-                expected.policy_hash.clone(),
-                expected.public_key_digest.clone(),
-                expected.expected_reported_state_hash.clone(),
-                expected.artifact_id.clone(),
-                expected.cert_scope,
-                expected.serial.clone(),
-                expected.not_after,
-            )
-        };
+        let valid =
+            || ProviderCertificateCandidate::new(b"artifact".to_vec(), expected.binding().clone());
         let other_device = DeviceId::parse("650e8400-e29b-41d4-a716-446655440000").unwrap();
         let mut candidates = Vec::new();
         let mut value = valid();
-        value.scope = DeviceCertificateScope::for_test(scope.tenant(), other_device);
+        value.binding.scope = DeviceCertificateScope::for_test(scope.tenant(), other_device);
         candidates.push(value);
         let mut value = valid();
-        value.generation = ExpectedGeneration::try_new(2).unwrap();
+        value.binding.generation = ExpectedGeneration::try_new(2).unwrap();
         candidates.push(value);
         let mut value = valid();
-        value.policy_hash = PolicyHash::parse(&digest('d')).unwrap();
+        value.binding.policy_hash = PolicyHash::parse(&digest('d')).unwrap();
         candidates.push(value);
         let mut value = valid();
-        value.public_key_digest = CertificatePublicKeyDigest::digest(b"key-b");
+        value.binding.authorization_receipt_id = authorization_receipt_id();
+        candidates.push(value);
+        let mut value = valid();
+        value.binding.public_key_digest = CertificatePublicKeyDigest::digest(b"key-b");
         candidates.push(value);
         let mut value = valid();
         value.artifact = b"other-artifact".to_vec();
         candidates.push(value);
         let mut value = valid();
-        value.expected_reported_state_hash = ReportedStateHash::parse(&digest('e')).unwrap();
+        value.binding.expected_reported_state_hash =
+            ReportedStateHash::parse(&digest('e')).unwrap();
         candidates.push(value);
         let mut value = valid();
-        value.artifact_id = CertificateArtifactId::parse("artifact-id-0002").unwrap();
+        value.binding.artifact_id = CertificateArtifactId::parse("artifact-id-0002").unwrap();
         candidates.push(value);
         let mut value = valid();
-        value.cert_scope = CertScope::new(scope.tenant(), other_device);
+        value.binding.cert_scope = CertScope::new(scope.tenant(), other_device);
         candidates.push(value);
         let mut value = valid();
-        value.serial = CertSerial::try_new([2]).unwrap();
+        value.binding.serial = CertSerial::try_new([2]).unwrap();
         candidates.push(value);
         let mut value = valid();
-        value.not_after = CertNotAfter::try_from_system_time(
+        value.binding.not_after = CertNotAfter::try_from_system_time(
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3601),
         )
         .unwrap();

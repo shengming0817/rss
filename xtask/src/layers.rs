@@ -20,7 +20,7 @@
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
-/// `diagctx`、`authmint`、`sagaauthmint`、`dlqauthmint` 与 `requestidmint` capability crates 是**独立根**
+/// `diagctx`、`authmint`、`sagaauthmint`、`dlqauthmint`、`requestidmint` 与 `pkiauthmint` capability crates 是**独立根**
 /// （[`ISOLATED_BASIS_CRATES`]）：任何涉及这些 crate 的 base 内边
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
@@ -31,6 +31,7 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
     "sagaauthmint",
     "dlqauthmint",
     "requestidmint",
+    "pkiauthmint",
     "runtimeinventorymint",
     "vocab",
     "assembly-schema",
@@ -50,6 +51,7 @@ pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &[
     "sagaauthmint",
     "dlqauthmint",
     "requestidmint",
+    "pkiauthmint",
 ];
 /// 引擎 / 原语层（依赖基础）。
 ///
@@ -332,6 +334,7 @@ mod tests {
     #[case("rss-diag-context", "crates/diagctx", Some(Layer::Basis))]
     #[case("authmint", "crates/authmint", Some(Layer::Basis))]
     #[case("requestidmint", "crates/requestidmint", Some(Layer::Basis))]
+    #[case("pkiauthmint", "crates/pkiauthmint", Some(Layer::Basis))]
     #[case("rss-contract", "crates/contract", Some(Layer::FoundationPublic))]
     #[case(
         "rss-request-context",
@@ -471,6 +474,11 @@ mod tests {
     #[case("vocab", "requestidmint", false)]
     #[case("requestidmint", "vocab", false)]
     #[case("requestidmint", "runctx", false)]
+    // pkiauthmint 独立根：只能被 exact wrapper 集合命名。
+    #[case("runctx", "pkiauthmint", false)]
+    #[case("vocab", "pkiauthmint", false)]
+    #[case("pkiauthmint", "vocab", false)]
+    #[case("pkiauthmint", "runctx", false)]
     // runtimeinventorymint is a low-rank capability root consumed only by assembly-schema and
     // runtimeexec; the exact consumer set is additionally closed by deny.toml wrappers.
     #[case("assembly-schema", "runtimeinventorymint", true)]

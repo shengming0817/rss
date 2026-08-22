@@ -110,6 +110,8 @@ pub(crate) enum Rule {
     RuntimeExecDependencyScope,
     /// WORKSPACEFACTS-CONFINEMENT-01：workspacefacts/guppy 只能沿精确 tooling funnel 消费。
     WorkspaceFactsConfinement,
+    /// EXTERNAL-PKI-PROVIDER-MINT-01：production capability 只能在 Vault 两个私有漏斗调用。
+    PkiMintCallsite,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -188,6 +190,7 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
         findings.extend(scan_bootstrap_generated_sources(&root)?);
+        findings.extend(scan_pkiauthmint_callsites(&root, &members)?);
         findings.extend(check_wrappers(
             &members,
             &bans,
@@ -275,6 +278,238 @@ fn scan_bootstrap_generated_surface(path: &Path, source: &str) -> Vec<Finding> {
             )
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PkiMintCallsite {
+    path: String,
+    symbol: String,
+}
+
+/// The capability crate necessarily exposes a public constructor to its approved wrappers, so the
+/// source graph must additionally prove the two production invocations are the private Vault
+/// closure/evidence seals and nothing else. Downstream identity/composition crates only consume
+/// the resulting move-only carriers and cannot name the mint token.
+///
+/// INVARIANT: EXTERNAL-PKI-PROVIDER-MINT-01 { level = "Medium", exec = "check", source = "code", facet = "production-callsite-exact-set", synthetic_red = "tests::pkiauthmint_callsite_extra_red", anti_vacuity = "tests::pkiauthmint_callsite_exact_green|tests::real_workspace_green" }
+fn scan_pkiauthmint_callsites(root: &Path, members: &[Member]) -> Result<Vec<Finding>> {
+    let mut actual = Vec::new();
+    for member in members {
+        let source_root = root.join(&member.path).join("src");
+        for path in rs_files(&source_root)? {
+            let source = std::fs::read_to_string(&path)
+                .with_context(|| format!("读 PKI mint source 失败: {}", path.display()))?;
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            actual.extend(pkiauthmint_callsites_in_source(relative, &source)?);
+        }
+    }
+    actual.sort();
+    let expected = vec![
+        PkiMintCallsite {
+            path: "adapters/vault/src/pki.rs".to_owned(),
+            symbol: "VaultExternalPkiProviderClosure::from_transport".to_owned(),
+        },
+        PkiMintCallsite {
+            path: "adapters/vault/src/pki.rs".to_owned(),
+            symbol: "VaultPkiArtifactEvidence::from_verified_transport_material".to_owned(),
+        },
+    ];
+    if actual == expected {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::PkiMintCallsite,
+        PKIAUTHMINT_CRATE,
+        format!(
+            "ExternalPkiProviderMint production callsite exact-set drift: expected={expected:?} actual={actual:?}"
+        ),
+    )])
+}
+
+fn pkiauthmint_callsites_in_source(path: &Path, source: &str) -> Result<Vec<PkiMintCallsite>> {
+    let file = syn::parse_file(source)
+        .with_context(|| format!("解析 PKI mint source 失败: {}", path.display()))?;
+    let mut sites = Vec::new();
+    collect_pkiauthmint_item_calls(path, &file.items, &mut sites);
+    Ok(sites)
+}
+
+fn collect_pkiauthmint_item_calls(
+    path: &Path,
+    items: &[syn::Item],
+    sites: &mut Vec<PkiMintCallsite>,
+) {
+    for item in items {
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Fn(value) => value.attrs.as_slice(),
+            syn::Item::Impl(value) => value.attrs.as_slice(),
+            syn::Item::Mod(value) => value.attrs.as_slice(),
+            syn::Item::Use(value) => value.attrs.as_slice(),
+            syn::Item::Type(value) => value.attrs.as_slice(),
+            syn::Item::Macro(value) => value.attrs.as_slice(),
+            _ => &[],
+        };
+        if attrs_are_test_only(attrs) {
+            continue;
+        }
+        match item {
+            syn::Item::Fn(function) => collect_pkiauthmint_block_calls(
+                path,
+                function.sig.ident.to_string(),
+                &function.block,
+                sites,
+            ),
+            syn::Item::Impl(implementation) => {
+                let owner = implementation.self_ty.to_token_stream().to_string();
+                for member in &implementation.items {
+                    let syn::ImplItem::Fn(method) = member else {
+                        continue;
+                    };
+                    if attrs_are_test_only(&method.attrs) {
+                        continue;
+                    }
+                    collect_pkiauthmint_block_calls(
+                        path,
+                        format!("{owner}::{}", method.sig.ident),
+                        &method.block,
+                        sites,
+                    );
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    collect_pkiauthmint_item_calls(path, nested, sites);
+                }
+            }
+            syn::Item::Use(import)
+                if import
+                    .to_token_stream()
+                    .to_string()
+                    .contains("ExternalPkiProviderMint") =>
+            {
+                sites.push(PkiMintCallsite {
+                    path: path.display().to_string(),
+                    symbol: "unauthorized-use-alias".to_owned(),
+                });
+            }
+            syn::Item::Type(alias)
+                if alias
+                    .to_token_stream()
+                    .to_string()
+                    .contains("ExternalPkiProviderMint") =>
+            {
+                sites.push(PkiMintCallsite {
+                    path: path.display().to_string(),
+                    symbol: "unauthorized-type-alias".to_owned(),
+                });
+            }
+            syn::Item::Macro(macro_item)
+                if macro_item
+                    .mac
+                    .tokens
+                    .to_string()
+                    .replace(' ', "")
+                    .contains("ExternalPkiProviderMint::capability") =>
+            {
+                sites.push(PkiMintCallsite {
+                    path: path.display().to_string(),
+                    symbol: "unauthorized-top-level-macro".to_owned(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn attrs_are_test_only(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        if !attribute.path().is_ident("cfg") {
+            return false;
+        }
+        let syn::Meta::List(cfg) = &attribute.meta else {
+            return false;
+        };
+        let Ok(predicate) = syn::parse2::<syn::Meta>(cfg.tokens.clone()) else {
+            return false;
+        };
+        cfg_predicate_is_test_only(&predicate)
+    })
+}
+
+fn cfg_predicate_is_test_only(predicate: &syn::Meta) -> bool {
+    match predicate {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::NameValue(value) if value.path.is_ident("feature") => {
+            matches!(
+                &value.value,
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(feature),
+                    ..
+                }) if feature.value() == "test-support"
+            )
+        }
+        syn::Meta::List(list) if list.path.is_ident("any") || list.path.is_ident("all") => {
+            use syn::parse::Parser as _;
+            let parser = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+            let Ok(items) = parser.parse2(list.tokens.clone()) else {
+                return false;
+            };
+            if list.path.is_ident("any") {
+                !items.is_empty() && items.iter().all(cfg_predicate_is_test_only)
+            } else {
+                items.iter().any(cfg_predicate_is_test_only)
+            }
+        }
+        _ => false,
+    }
+}
+
+fn collect_pkiauthmint_block_calls(
+    path: &Path,
+    symbol: String,
+    block: &syn::Block,
+    sites: &mut Vec<PkiMintCallsite>,
+) {
+    #[derive(Default)]
+    struct Visitor {
+        uses: usize,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Visitor {
+        fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+            let segments = expression
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            if segments.ends_with(&[
+                "ExternalPkiProviderMint".to_owned(),
+                "capability".to_owned(),
+            ]) {
+                self.uses += 1;
+            }
+            syn::visit::visit_expr_path(self, expression);
+        }
+
+        fn visit_macro(&mut self, value: &'ast syn::Macro) {
+            if value
+                .tokens
+                .to_string()
+                .contains("ExternalPkiProviderMint :: capability")
+            {
+                self.uses += 1;
+            }
+            syn::visit::visit_macro(self, value);
+        }
+    }
+    let mut visitor = Visitor::default();
+    visitor.visit_block(block);
+    for _ in 0..visitor.uses {
+        sites.push(PkiMintCallsite {
+            path: path.display().to_string(),
+            symbol: symbol.clone(),
+        });
+    }
 }
 
 #[derive(Default)]
@@ -537,6 +772,8 @@ const DLQAUTHMINT_CRATE: &str = "dlqauthmint";
 const DLQAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
 const REQUESTIDMINT_CRATE: &str = "requestidmint";
 const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
+const PKIAUTHMINT_CRATE: &str = "pkiauthmint";
+const PKIAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "vault"];
 const RUNTIMEINVENTORYMINT_CRATE: &str = "runtimeinventorymint";
 const RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS: &[&str] =
     &["assembly-schema", "runtimeexec", "runtime"];
@@ -621,6 +858,7 @@ pub(crate) fn check_wrappers(
     findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
     findings.extend(check_dlqauthmint_wrapper_coverage(members, bans));
     findings.extend(check_requestidmint_wrapper_coverage(members, bans));
+    findings.extend(check_pkiauthmint_wrapper_coverage(members, bans));
     findings.extend(check_runtimeinventorymint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
         members,
@@ -660,6 +898,7 @@ pub(crate) fn check_wrappers(
             || b.crate_name == SAGAAUTHMINT_CRATE
             || b.crate_name == DLQAUTHMINT_CRATE
             || b.crate_name == REQUESTIDMINT_CRATE
+            || b.crate_name == PKIAUTHMINT_CRATE
             || b.crate_name == RUNTIMEINVENTORYMINT_CRATE
             || b.crate_name == WORKSPACEFACTS_CRATE
             || b.crate_name == GUPPY_CRATE
@@ -1166,6 +1405,75 @@ pub(crate) fn check_requestidmint_wrapper_coverage(
                     REQUESTIDMINT_CRATE,
                     format!(
                         "requestidmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// The external-PKI mint capability is an isolated Basis root. Only the provider-neutral seal
+/// signatures and the official Vault adapter may name it; identity/composition only consume the
+/// opaque closure/evidence values.
+///
+/// INVARIANT: EXTERNAL-PKI-PROVIDER-MINT-01 { level = "Medium", exec = "check", source = "code", facet = "wrapper-exact-set", synthetic_red = "tests::pkiauthmint_wrapper_widened_red", anti_vacuity = "tests::pkiauthmint_wrapper_exact_green" }
+pub(crate) fn check_pkiauthmint_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members
+        .iter()
+        .find(|member| member.name == PKIAUTHMINT_CRATE);
+    let ban = bans
+        .iter()
+        .find(|entry| entry.crate_name == PKIAUTHMINT_CRATE);
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|member| member.layer), Some(Some(Layer::Basis)))
+        || target.is_some_and(|member| member.path != "crates/pkiauthmint")
+    {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            PKIAUTHMINT_CRATE,
+            "pkiauthmint 必须是 `crates/pkiauthmint` 的 isolated Basis workspace member",
+        ));
+        return findings;
+    }
+    for (name, path, layer) in [
+        ("diport", "crates/diport", Layer::DiPort),
+        ("vault", "adapters/vault", Layer::Adapter),
+    ] {
+        if !members
+            .iter()
+            .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
+        {
+            findings.push(finding(
+                Rule::WrapperCoverage,
+                PKIAUTHMINT_CRATE,
+                format!("pkiauthmint 批准消费者 `{name}` 的 path/layer 不精确"),
+            ));
+        }
+    }
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            PKIAUTHMINT_CRATE,
+            "deny.toml 缺 pkiauthmint target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = PKIAUTHMINT_ALLOWED_WRAPPERS.iter().copied().collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    PKIAUTHMINT_CRATE,
+                    format!(
+                        "pkiauthmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
                     ),
                 ));
             }
@@ -3776,6 +4084,122 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             check_requestidmint_wrapper_coverage(&requestidmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].subject, "requestidmint");
+    }
+
+    fn pkiauthmint_fixture_members() -> Vec<Member> {
+        vec![
+            m("pkiauthmint", "crates/pkiauthmint", Some(Layer::Basis)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
+            m("identity", "crates/identity", Some(Layer::Domain)),
+            m(
+                "identity-composition",
+                "composition/identity",
+                Some(Layer::Root),
+            ),
+            m("vault", "adapters/vault", Some(Layer::Adapter)),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+        ]
+    }
+
+    #[test]
+    fn pkiauthmint_wrapper_exact_green() {
+        let bans = vec![ban("pkiauthmint", &["diport", "vault"])];
+        assert!(
+            check_pkiauthmint_wrapper_coverage(&pkiauthmint_fixture_members(), &bans).is_empty()
+        );
+    }
+
+    #[test]
+    fn pkiauthmint_wrapper_widened_red() {
+        let bans = vec![ban("pkiauthmint", &["diport", "vault", "runtime"])];
+        let findings = check_pkiauthmint_wrapper_coverage(&pkiauthmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "pkiauthmint");
+    }
+
+    #[test]
+    fn pkiauthmint_callsite_exact_green() -> anyhow::Result<()> {
+        let vault_source = r#"
+            impl VaultExternalPkiProviderClosure {
+                fn from_transport() {
+                    pkiauthmint::ExternalPkiProviderMint::capability();
+                }
+            }
+            impl VaultPkiArtifactEvidence {
+                fn from_verified_transport_material() {
+                    pkiauthmint::ExternalPkiProviderMint::capability();
+                }
+            }
+            #[cfg(test)]
+            mod tests {
+                fn allowed_test_only() {
+                    pkiauthmint::ExternalPkiProviderMint::capability();
+                }
+            }
+        "#;
+        let mut actual =
+            pkiauthmint_callsites_in_source(Path::new("adapters/vault/src/pki.rs"), vault_source)?;
+        actual.sort();
+        assert_eq!(
+            actual,
+            vec![
+                PkiMintCallsite {
+                    path: "adapters/vault/src/pki.rs".to_owned(),
+                    symbol: "VaultExternalPkiProviderClosure::from_transport".to_owned(),
+                },
+                PkiMintCallsite {
+                    path: "adapters/vault/src/pki.rs".to_owned(),
+                    symbol: "VaultPkiArtifactEvidence::from_verified_transport_material".to_owned(),
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pkiauthmint_callsite_extra_red() -> anyhow::Result<()> {
+        let actual = pkiauthmint_callsites_in_source(
+            Path::new("crates/identity/src/bypass.rs"),
+            r#"
+                use pkiauthmint::ExternalPkiProviderMint as Mint;
+                fn forge() { Mint::capability(); }
+            "#,
+        )?;
+        assert_eq!(
+            actual,
+            vec![PkiMintCallsite {
+                path: "crates/identity/src/bypass.rs".to_owned(),
+                symbol: "unauthorized-use-alias".to_owned(),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pkiauthmint_top_level_macro_is_not_an_unscanned_escape_hatch() -> anyhow::Result<()> {
+        let actual = pkiauthmint_callsites_in_source(
+            Path::new("adapters/vault/src/bypass.rs"),
+            r#"
+                mint_provider!(pkiauthmint::ExternalPkiProviderMint::capability());
+            "#,
+        )?;
+        assert_eq!(actual.len(), 1, "actual={actual:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn pkiauthmint_mixed_test_and_production_cfg_is_still_scanned() -> anyhow::Result<()> {
+        let actual = pkiauthmint_callsites_in_source(
+            Path::new("adapters/vault/src/bypass.rs"),
+            r#"
+                #[cfg(any(test, feature = "backend"))]
+                fn forge() {
+                    pkiauthmint::ExternalPkiProviderMint::capability();
+                }
+            "#,
+        )?;
+        assert_eq!(actual.len(), 1, "actual={actual:?}");
+        Ok(())
     }
 
     fn runtimeinventorymint_fixture_members() -> Vec<Member> {

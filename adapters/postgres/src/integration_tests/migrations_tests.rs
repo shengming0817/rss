@@ -2053,6 +2053,149 @@ async fn migration_0110_rejects_held_device_certificate_lease_without_partial_sc
     Ok(())
 }
 
+async fn seed_migration_0111_artifact(
+    store: &PgStore,
+    artifact_generation: i64,
+) -> Result<(String, String, String), TestError> {
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let receipt = uuid::Uuid::new_v4().to_string();
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "WITH operation AS ( \
+           INSERT INTO device_certificate_policy_operations \
+             (tenant_id,device_id,idempotency_key,request_digest,accepted_generation, \
+              accepted_condition,authorization_receipt_id,principal_kind,principal_id, \
+              contract_id,permission,obligation_fingerprint,evaluated_at) \
+           VALUES ($1::uuid,$2::uuid,gen_random_uuid(),decode(repeat('11',32),'hex'),1, \
+              'reconciling',$3::uuid,'service','migration-0111', \
+              'identity.device-certificate-policy-put', \
+              'identity:device-certificate-policy:write',decode(repeat('22',32),'hex'),now()) \
+           RETURNING authorization_receipt_id \
+         ), policy_basis AS ( \
+           INSERT INTO device_certificate_policy_authorization_policies \
+             (tenant_id,device_id,authorization_receipt_id,policy_ordinal,policy_id,policy_version) \
+           SELECT $1::uuid,$2::uuid,authorization_receipt_id,1,'migration-0111-policy',1 \
+           FROM operation \
+         ), lineage AS ( \
+           INSERT INTO device_certificate_desired_generation_lineage \
+             (tenant_id,device_id,generation,authorization_receipt_id) \
+           SELECT $1::uuid,$2::uuid,1,authorization_receipt_id FROM operation \
+           RETURNING authorization_receipt_id \
+         ) \
+         INSERT INTO device_certificate_desired_states \
+           (tenant_id,device_id,generation,authorization_receipt_id,validity_seconds, \
+            renew_before_seconds,client_auth,server_auth,sans) \
+         SELECT $1::uuid,$2::uuid,1,authorization_receipt_id,3600,600,true,false,ARRAY[]::text[] \
+         FROM lineage",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(&receipt)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO device_certificate_authorized_artifacts \
+           (tenant_id,device_id,generation,artifact_eligibility,policy_hash, \
+            public_key_digest,expected_state_hash,artifact_digest,artifact_id,serial,not_after) \
+         SELECT tenant_id,device_id,$3,'draft',policy_hash, \
+            decode(repeat('33',32),'hex'),decode(repeat('44',32),'hex'), \
+            decode(repeat('55',32),'hex'),'migration-0111-artifact',decode('66','hex'), \
+            now()+interval '1 day' \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(artifact_generation)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((tenant, device, receipt))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0111_upgrades_populated_0110_artifact_and_rebuilds_exact_funnels() -> TestResult
+{
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(110).run(&store.pool).await?;
+    let (tenant, device, receipt) = seed_migration_0111_artifact(&store, 1).await?;
+
+    migrations_through(111).run(&store.pool).await?;
+
+    let restored_receipt: String = sqlx::query_scalar(
+        "SELECT authorization_receipt_id::text \
+         FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(restored_receipt, receipt);
+    let funnel_state: (bool, bool, bool, bool, String) = sqlx::query_as(
+        "SELECT \
+           to_regprocedure('public.rss_append_device_certificate_artifact_draft(uuid,uuid,uuid,uuid,bigint,bigint,bigint,bytea,bytea,bytea,bytea,text,bytea,bigint)') IS NULL, \
+           to_regprocedure('public.rss_append_device_certificate_artifact_draft(uuid,uuid,uuid,uuid,bigint,bigint,bigint,uuid,bytea,bytea,bytea,bytea,text,bytea,bigint)') IS NOT NULL, \
+           has_function_privilege('rss_app','public.rss_append_device_certificate_artifact_draft(uuid,uuid,uuid,uuid,bigint,bigint,bigint,uuid,bytea,bytea,bytea,bytea,text,bytea,bigint)','EXECUTE'), \
+           has_function_privilege('rss_app','public.rss_append_device_certificate_artifact_production(uuid,uuid,uuid,uuid,bigint,bigint,bigint,uuid,bytea,bytea,bytea,bytea,text,bytea,bigint)','EXECUTE'), \
+           pg_get_userbyid(proowner) \
+         FROM pg_proc WHERE oid=to_regprocedure( \
+           'public.rss_append_device_certificate_artifact_production(uuid,uuid,uuid,uuid,bigint,bigint,bigint,uuid,bytea,bytea,bytea,bytea,text,bytea,bigint)')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        funnel_state,
+        (
+            true,
+            true,
+            true,
+            false,
+            "rss_device_certificate_funnel_owner".to_owned()
+        )
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0111_missing_generation_lineage_rolls_back_atomically() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(110).run(&store.pool).await?;
+    seed_migration_0111_artifact(&store, 2).await?;
+
+    let failure = migrations_through(111)
+        .run(&store.pool)
+        .await
+        .expect_err("0111 must reject an artifact without exact generation lineage");
+    assert!(
+        failure
+            .to_string()
+            .contains("0111 cannot bind an artifact without desired-generation receipt lineage"),
+        "unexpected 0111 failure: {failure}"
+    );
+    let rollback: (Option<i64>, bool, bool) = sqlx::query_as(
+        "SELECT \
+           (SELECT max(version) FROM _sqlx_migrations), \
+           EXISTS (SELECT 1 FROM pg_attribute \
+                   WHERE attrelid='device_certificate_authorized_artifacts'::regclass \
+                     AND attname='authorization_receipt_id' AND NOT attisdropped), \
+           to_regprocedure('public.rss_append_device_certificate_artifact_draft(uuid,uuid,uuid,uuid,bigint,bigint,bigint,bytea,bytea,bytea,bytea,text,bytea,bigint)') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(rollback, (Some(110), false, true));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_0107_writer_capability_delta_is_exact() -> TestResult {
     use std::collections::BTreeSet;

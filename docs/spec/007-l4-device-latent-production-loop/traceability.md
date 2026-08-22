@@ -55,7 +55,7 @@ must not be represented by forged database inputs in this persistence PBI.
 | FR-035 | #1909 | T2 — existing typed registry/codegen six-contract exact-set synthetic-red proof |
 | FR-036 | #1895 | T1 — four command/event identity, link, kind, consistency, and shape golden |
 | FR-037 | #1901 | T2 — append-once per-generation artifact binding, stale-fence PostgreSQL tests and incompatible-provider compile proof |
-| FR-038 | ADR-028 future handoff | T1/T2 required — private production mint bound to a distinct assembly-wide external-PKI provider/config/conformance closure; no current carrier |
+| FR-038 | #2116 | T1/T2 — isolated mint capability + non-interchangeable provider closure/artifact compile reds; real Vault `/sign` evidence joins the current desired-generation receipt into a durable production artifact snapshot |
 | FR-039 | #1903 | T2 — public receipt non-oracle equivalence plus authorized internal-audit detail test |
 | FR-040 | #1893 | T1 — reported-state constructor/transition synthetic red rejecting generation zero |
 | FR-041 | #1895 | T1 — report schema/validator synthetic red rejecting `observedGeneration: 0` |

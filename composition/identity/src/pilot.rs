@@ -4,7 +4,6 @@
 //! providers selected by the `deviceidentity` assembly. It has no signer, SoftCA, in-memory, or
 //! optional-provider path.
 
-use std::fmt::Write as _;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -23,14 +22,14 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use identity::ports::device_certificate::{
     ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
     AuthorizedCertificateArtifact, CertificateArtifactAcquisition, CertificateArtifactError,
-    CertificateArtifactId, CertificateArtifactRequest, CertificateArtifactSource,
-    CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
-    CertificatePublicKeyDigest, CertificateReconcileRepository,
-    CertificateReconcileRepositoryError, CertificateReconcileView, CurrentCommandExpiryOutcome,
-    DeletionRequestOutcome, DeviceCertificateCommandTtl, DeviceCertificateReconciler,
-    DeviceIngressRepository, DeviceIngressWrite, DraftEligibility, FencedMutationOutcome,
-    PersistedCertificateArtifactSnapshot, ProviderCertificateCandidate, ReportedStateHash,
-    RotationOutcome,
+    CertificateArtifactId, CertificateArtifactMaterial as ArtifactBindingMaterial,
+    CertificateArtifactRequest, CertificateArtifactSource, CertificateAttemptAuthority,
+    CertificateAttemptFence, CertificateConditionMutation, CertificatePublicKeyDigest,
+    CertificateReconcileRepository, CertificateReconcileRepositoryError, CertificateReconcileView,
+    CurrentCommandExpiryOutcome, DeletionRequestOutcome, DeviceCertificateCommandTtl,
+    DeviceCertificateReconciler, DeviceIngressRepository, DeviceIngressWrite, DraftEligibility,
+    FencedMutationOutcome, PersistedCertificateArtifactSnapshot, ProviderCertificateCandidate,
+    ReportedStateHash, RotationOutcome,
 };
 use mqtt::{MqttReadiness, MqttSession};
 use postgres::{
@@ -44,6 +43,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::device_mqtt::DeviceMqttPublisher;
+use crate::encoding::lowercase_hex;
 
 const DEVICE_CERTIFICATE_RECONCILER_ID: &str = "identity.device-certificate";
 
@@ -73,13 +73,7 @@ impl DraftArtifactSimulator {
 
 struct DraftArtifactMaterial {
     artifact: Vec<u8>,
-    public_key_digest: CertificatePublicKeyDigest,
-    artifact_digest: ArtifactDigest,
-    expected_reported_state_hash: ReportedStateHash,
-    artifact_id: CertificateArtifactId,
-    cert_scope: CertScope,
-    serial: CertSerial,
-    not_after: CertNotAfter,
+    binding: ArtifactBindingMaterial,
 }
 
 impl DraftArtifactMaterial {
@@ -136,13 +130,15 @@ impl DraftArtifactMaterial {
             CertSerial::try_new(serial).map_err(|_| CertificateArtifactError::BindingMismatch)?;
         Ok(Self {
             artifact,
-            public_key_digest: CertificatePublicKeyDigest::digest(&public_key),
-            artifact_digest,
-            expected_reported_state_hash,
-            artifact_id,
-            cert_scope: CertScope::new(scope.tenant(), scope.device()),
-            serial,
-            not_after: simulator.not_after,
+            binding: ArtifactBindingMaterial::new(
+                CertificatePublicKeyDigest::digest(&public_key),
+                artifact_digest,
+                expected_reported_state_hash,
+                artifact_id,
+                CertScope::new(scope.tenant(), scope.device()),
+                serial,
+                simulator.not_after,
+            ),
         })
     }
 }
@@ -169,14 +165,6 @@ fn draft_digest(
     digest.finalize().into()
 }
 
-fn lowercase_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
-}
-
 impl CertificateArtifactSource for DraftArtifactSimulator {
     type Eligibility = DraftEligibility;
 
@@ -190,29 +178,10 @@ impl CertificateArtifactSource for DraftArtifactSimulator {
             acquisition.generation(),
             acquisition.policy_hash(),
         )?;
-        let expected = CertificateArtifactRequest::for_draft_provider(
-            &acquisition,
-            material.public_key_digest.clone(),
-            material.artifact_digest,
-            material.expected_reported_state_hash.clone(),
-            material.artifact_id.clone(),
-            material.cert_scope,
-            material.serial.clone(),
-            material.not_after,
-        )?;
-        ProviderCertificateCandidate::new(
-            material.artifact,
-            acquisition.scope(),
-            acquisition.generation(),
-            acquisition.policy_hash().clone(),
-            material.public_key_digest,
-            material.expected_reported_state_hash,
-            material.artifact_id,
-            material.cert_scope,
-            material.serial,
-            material.not_after,
-        )
-        .authorize_draft(&expected)
+        let expected =
+            CertificateArtifactRequest::for_draft_provider(&acquisition, material.binding)?;
+        ProviderCertificateCandidate::new(material.artifact, expected.binding().clone())
+            .authorize_draft(&expected)
     }
 }
 
@@ -1902,29 +1871,13 @@ mod tests {
             scope,
             generation,
             policy.clone(),
-            material.public_key_digest.clone(),
-            material.artifact_digest.clone(),
-            material.expected_reported_state_hash.clone(),
-            material.artifact_id.clone(),
-            material.cert_scope,
-            material.serial.clone(),
-            material.not_after,
+            material.binding,
         )
         .expect("complete request");
-        let authorized = ProviderCertificateCandidate::new(
-            material.artifact,
-            scope,
-            generation,
-            policy,
-            material.public_key_digest,
-            material.expected_reported_state_hash,
-            material.artifact_id,
-            material.cert_scope,
-            material.serial,
-            material.not_after,
-        )
-        .authorize_draft(&expected)
-        .expect("draft authorization");
+        let authorized =
+            ProviderCertificateCandidate::new(material.artifact, expected.binding().clone())
+                .authorize_draft(&expected)
+                .expect("draft authorization");
         let snapshot = authorized.into_append_authorization().into_snapshot();
         assert_eq!(snapshot.scope(), scope);
         assert_eq!(snapshot.generation(), generation);

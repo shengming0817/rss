@@ -25,6 +25,7 @@ members = [
   "crates/sagaauthmint",
   "crates/dlqauthmint",
   "crates/requestidmint",
+  "crates/pkiauthmint",
   # Runtime inventory live-evidence mint capability; only assembly-schema declares the receipt
   # signature and runtimeexec holds the mint token.
   "crates/runtimeinventorymint",

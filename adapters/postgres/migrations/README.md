@@ -2392,6 +2392,21 @@ ledger，新增规范化 policy basis 与 desired-generation lineage。policy ac
 4. 这是 forward-only 原子迁移。postflight 失败时停止新 binary，只能用迁移前完整备份与旧 artifact 整体
    恢复；禁止局部还原、双写、兼容 view、匿名 receipt 或新旧 binary 并行。
 
+### 0111 Certificate artifact receipt lineage binding
+
+`0111` 为每个 durable authorized artifact 增加 exact `authorization_receipt_id`，并用
+`(tenant_id, device_id, generation, authorization_receipt_id)` composite FK 绑定 `0110` 的 desired-generation
+lineage。artifact append funnel 同时核验 held lease、current desired generation 与 current receipt；旧 receipt、
+跨 generation receipt 和 swapped receipt 均返回 stale fence，不能写入或 replay 成 production artifact。
+
+1. 停止 device-certificate reconcile writer，确认 ledger 精确为 110，再由唯一 migration Job 执行。已有 artifact
+   仅可从同 generation 的 durable lineage 回填；任何无法关联的行使迁移原子失败，禁止补造 receipt。
+2. postflight 确认 artifact receipt 列 `NOT NULL`/non-nil、composite FK validated；三个 append function owner 均为
+   `rss_device_certificate_funnel_owner` 且 search path 固定。`rss_app` 只能执行 draft wrapper；production 与 shared
+   core 对 PUBLIC/writer/reader 均不可执行。
+3. 用 current receipt 验证 append/replay，再分别交换 receipt 与 generation 验证 stale fence 且无 artifact row。
+   这是 candidate persistence carrier，不激活 assembly、binary、image 或六个 draft contracts。
+
 ### 0105 Settings projection input-generation hard cut
 
 `0105` 将 Settings v3 worker/operator/reader 的固定函数身份推进到当前 generated projection-input

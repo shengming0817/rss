@@ -18,20 +18,20 @@ use eventexec::reconcile::{
 };
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
-    ArtifactEligibility, AuthorizedDeviceCertificateStatusRead, CertificateArtifactId,
-    CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
-    CertificatePublicKeyDigest, CertificateReadyProof, CertificateReconcileRepository,
-    CertificateReconcileRepositoryError, CertificateReconcileView,
-    CertificateRevocationObservation, CertificateTransportObservation, CurrentCommandExpiryOutcome,
-    DeletionRequestOutcome, DesiredPolicyAcceptOutcome, DesiredPolicyAccepted,
-    DesiredPolicyAcceptedCondition, DesiredStateRestore, DesiredStateSnapshot,
-    DeviceCertificateActiveCommand, DeviceCertificateActiveCommandState, DeviceCertificateError,
-    DeviceCertificateRepository, DeviceCertificateRepositoryError, DeviceCertificateScope,
-    DeviceCertificateStateSnapshot, DeviceCertificateStatusEvidence, DeviceCertificateStatusStore,
-    DeviceCertificateStatusStoreError, DevicePolicyAuthorizationReceiptId, DeviceSequence,
-    ExpectedGeneration, FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash,
-    ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-    RotationOutcome,
+    ArtifactEligibility, AuthorizedDeviceCertificateStatusRead, CertificateArtifactBinding,
+    CertificateArtifactId, CertificateArtifactMaterial, CertificateAttemptAuthority,
+    CertificateAttemptFence, CertificateConditionMutation, CertificatePublicKeyDigest,
+    CertificateReadyProof, CertificateReconcileRepository, CertificateReconcileRepositoryError,
+    CertificateReconcileView, CertificateRevocationObservation, CertificateTransportObservation,
+    CurrentCommandExpiryOutcome, DeletionRequestOutcome, DesiredPolicyAcceptOutcome,
+    DesiredPolicyAccepted, DesiredPolicyAcceptedCondition, DesiredStateRestore,
+    DesiredStateSnapshot, DeviceCertificateActiveCommand, DeviceCertificateActiveCommandState,
+    DeviceCertificateError, DeviceCertificateRepository, DeviceCertificateRepositoryError,
+    DeviceCertificateScope, DeviceCertificateStateSnapshot, DeviceCertificateStatusEvidence,
+    DeviceCertificateStatusStore, DeviceCertificateStatusStoreError,
+    DevicePolicyAuthorizationReceiptId, DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
+    PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId, ReportedStateHash,
+    ReportedStateRestore, ReportedStateSnapshot, RotationOutcome,
 };
 use sqlx::PgConnection;
 
@@ -97,6 +97,7 @@ enum RepositoryOperation {
 struct ArtifactReceiptRow {
     artifact_eligibility: String,
     generation: i64,
+    authorization_receipt_id: String,
     policy_hash: Vec<u8>,
     public_key_digest: Vec<u8>,
     expected_state_hash: Vec<u8>,
@@ -785,7 +786,7 @@ async fn select_artifact_row(
     generation: i64,
 ) -> Result<Option<ArtifactReceiptRow>, RepoError> {
     sqlx::query_as(
-        "SELECT artifact_eligibility, generation, policy_hash, public_key_digest, expected_state_hash, \
+        "SELECT artifact_eligibility, generation, authorization_receipt_id::text, policy_hash, public_key_digest, expected_state_hash, \
          artifact_digest, artifact_id, serial, \
          floor(extract(epoch FROM not_after))::bigint AS not_after_seconds \
          FROM device_certificate_authorized_artifacts \
@@ -1215,7 +1216,7 @@ impl DeviceCertificateWriteTx<'_> {
         device: &str,
     ) -> Result<Vec<ArtifactReceiptRow>, RepoError> {
         sqlx::query_as(
-            "SELECT artifact_eligibility, generation, policy_hash, public_key_digest, expected_state_hash, \
+            "SELECT artifact_eligibility, generation, authorization_receipt_id::text, policy_hash, public_key_digest, expected_state_hash, \
              artifact_digest, artifact_id, serial, \
              floor(extract(epoch FROM not_after))::bigint AS not_after_seconds \
              FROM device_certificate_authorized_artifacts \
@@ -1420,6 +1421,18 @@ fn restore_artifact_receipt<E: ArtifactEligibility>(
     }
     let generation = ExpectedGeneration::restore(row.generation)
         .map_err(CertificateReconcileRepositoryError::CorruptState)?;
+    let authorization_receipt_id = row
+        .authorization_receipt_id
+        .parse()
+        .map_err(|_| {
+            CertificateReconcileRepositoryError::CorruptState(
+                DeviceCertificateError::InvalidPersistedValue,
+            )
+        })
+        .and_then(|raw| {
+            DevicePolicyAuthorizationReceiptId::restore(raw)
+                .map_err(CertificateReconcileRepositoryError::CorruptState)
+        })?;
     let policy_hash = PolicyHash::restore(&row.policy_hash)
         .map_err(CertificateReconcileRepositoryError::CorruptState)?;
     let public_key_digest =
@@ -1455,23 +1468,27 @@ fn restore_artifact_receipt<E: ArtifactEligibility>(
                 )
             })
         })?;
-    PersistedCertificateArtifactSnapshot::restore(
+    let binding = CertificateArtifactBinding::restore(
         scope,
         generation,
         policy_hash,
-        public_key_digest,
-        artifact_digest,
-        state_hash,
-        artifact_id,
-        CertScope::new(scope.tenant(), scope.device()),
-        serial,
-        not_after,
+        authorization_receipt_id,
+        CertificateArtifactMaterial::new(
+            public_key_digest,
+            artifact_digest,
+            state_hash,
+            artifact_id,
+            CertScope::new(scope.tenant(), scope.device()),
+            serial,
+            not_after,
+        ),
     )
     .map_err(|_| {
         CertificateReconcileRepositoryError::CorruptState(
             DeviceCertificateError::InvalidPersistedValue,
         )
-    })
+    })?;
+    Ok(PersistedCertificateArtifactSnapshot::restore(binding))
 }
 
 fn restore_current_command_evidence(
@@ -1959,12 +1976,12 @@ where
                             "draft" => {
                                 "SELECT public.rss_append_device_certificate_artifact_draft( \
                                 $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7, \
-                                $8,$9,$10,$11,$12,$13,$14)"
+                                $8::uuid,$9,$10,$11,$12,$13,$14,$15)"
                             }
                             "production" => {
                                 "SELECT public.rss_append_device_certificate_artifact_production( \
                                 $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7, \
-                                $8,$9,$10,$11,$12,$13,$14)"
+                                $8::uuid,$9,$10,$11,$12,$13,$14,$15)"
                             }
                             _ => return Err(CertificateReconcileRepositoryError::InvalidMutation),
                         };
@@ -1976,6 +1993,13 @@ where
                             .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
                             .bind(to_i64(fence.wake_version().get()).map_err(reconcile_from_repo)?)
                             .bind(to_i64(receipt.generation().get()).map_err(reconcile_from_repo)?)
+                            .bind(
+                                receipt
+                                    .authorization_receipt_id()
+                                    .as_uuid()
+                                    .hyphenated()
+                                    .to_string(),
+                            )
                             .bind(receipt.policy_hash().as_bytes().as_slice())
                             .bind(receipt.public_key_digest().as_bytes().as_slice())
                             .bind(receipt.expected_reported_state_hash().as_bytes().as_slice())

@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `ExternalPkiProviderClosure: CertificateArtifactSource` is not satisfied
+ --> tests/ui/device_certificate_closure_as_artifact_fail.rs:7:43
+  |
+7 |     requires_production_artifact_source::<ExternalPkiProviderClosure>();
+  |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `CertificateArtifactSource` is not implemented for `ExternalPkiProviderClosure`
+  |
+note: required by a bound in `requires_production_artifact_source`
+ --> tests/ui/device_certificate_closure_as_artifact_fail.rs:4:43
+  |
+4 | fn requires_production_artifact_source<T: CertificateArtifactSource<Eligibility = ProductionEligibility>>() {}
+  |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_production_artifact_source`

@@ -118,6 +118,8 @@ deny = [
   { crate = "dlqauthmint", wrappers = ["diport", "runtime"] },
   # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint；generated 仅消费 opaque carrier。
   { crate = "requestidmint", wrappers = ["httpserve", "generated"] },
+  # EXTERNAL-PKI-PROVIDER-MINT-01：仅 Vault production 构造面调用 mint；diport 只在 opaque seal 签名中消费 token。
+  { crate = "pkiauthmint", wrappers = ["diport", "vault"] },
   # RUNTIME-INVENTORY-MINT-01：assembly-schema only names the token in the private-field receipt
   # constructor; runtimeexec mints full-plan receipts and live observations, while runtime alone
   # mints placement-projected completed-provider receipts. Other assembly roots cannot name it.

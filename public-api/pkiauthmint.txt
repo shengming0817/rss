@@ -1,0 +1,13 @@
+pub mod pkiauthmint
+pub struct pkiauthmint::ExternalPkiProviderMint(_)
+impl pkiauthmint::ExternalPkiProviderMint
+pub const fn pkiauthmint::ExternalPkiProviderMint::capability() -> Self
+impl core::fmt::Debug for pkiauthmint::ExternalPkiProviderMint
+pub fn pkiauthmint::ExternalPkiProviderMint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for pkiauthmint::ExternalPkiProviderMint
+impl core::marker::Send for pkiauthmint::ExternalPkiProviderMint
+impl core::marker::Sync for pkiauthmint::ExternalPkiProviderMint
+impl core::marker::Unpin for pkiauthmint::ExternalPkiProviderMint
+impl core::marker::UnsafeUnpin for pkiauthmint::ExternalPkiProviderMint
+impl core::panic::unwind_safe::RefUnwindSafe for pkiauthmint::ExternalPkiProviderMint
+impl core::panic::unwind_safe::UnwindSafe for pkiauthmint::ExternalPkiProviderMint

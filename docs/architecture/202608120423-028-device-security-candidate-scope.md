@@ -119,9 +119,11 @@ profile，也不能成为 RSS production acceptance owner。
 - #1893–#1909 已落地的 provider-neutral semantics 与最低充分 T1/T2 carrier 保留；不重建、不改写为 T3。
 - #1910 的“External PKI receipt 后直接 activation/T3”路线被本 ADR supersede。其 closed 状态不代表 production closure、
   binary/image、contract activation 或 T3 已交付。
-- #1910 中 assembly-level provider closure 与 per-command authorized artifact 不可互换的安全要求保留，但当前只作为 future
-  carrier handoff；仓库尚无 `ExternalPkiProviderClosure` 类型或正式 `ProductionEligibility` mint，不能声称已有 Hard closure。
-- #1982 的 Vault live target 只是独立 Official Integration T2，不能充当 external PKI closure 或 profile activation receipt。
+- #1910 中 assembly-level provider closure 与 per-command authorized artifact 不可互换的安全要求由 #2116 落为 candidate
+  T1/T2 carrier：`ExternalPkiProviderClosure` 与 receipt-bound `ProductionEligibility` artifact 是两个 sealed、不可互换的能力。
+  这仍不是 assembly/profile activation；#2117 才拥有 required dependency wiring。
+- #1982 的 Vault live target 现同时证明真实 `/sign` response 可经过 #2116 closure mint，但测试结果本身仍不能充当
+  profile activation receipt。
 - #1983 只收敛 `core`/`eventing` 与 legacy carrier，不拥有或 supersede `device-security`。
 - #2102 已关闭并解除 scope blocker；#2107 激活前，Platform vNext planned carrier 不能被当作 current-head public waist。
 
@@ -132,7 +134,7 @@ profile，也不能成为 RSS production acceptance owner。
 | 风险 | 当前 canonical carrier | 结论 |
 |---|---|---|
 | 六个 Draft contract identity/kind/consistency 漂移 | typed contract catalog、schema/codegen exact-set、contract validation | 已有 Hard/Medium；不加第七清单或新 gate |
-| simulator artifact 进入 production slot | sealed `DraftEligibility`/`ProductionEligibility`、private construction、compile-fail tests | 已有 Hard/T1；正式 production mint 仍缺失 |
+| simulator artifact 进入 production slot | sealed `DraftEligibility`/`ProductionEligibility`、closure + move-only evidence 的消费式 production authorize、compile-fail tests；`pkiauthmint` wrapper/callsite exact-set 仅作 Medium 纵深门 | 已有 Hard/T1；正式 mint 仅由 provider config identity 一致的 Vault verified evidence + current receipt-bound acquisition 进入 |
 | draft pilot 被误报为 deployable artifact | assembly manifest/lock/RuntimePlan、`assemblies/artifacts.toml` 与 artifact validation | 已有 Hard/Medium；当前结论为 compile-only |
 | incubator 反向依赖 RSS internals | ADR-026 的独立 repository/Cargo source policy/candidate proof | 已有物理/Cargo/T2 owner |
 | future public/package/assembly/activation partial cutover | contract lifecycle/codegen、Release Surface/package proof、assembly artifact chain | future implementation handoff；未落地前不得声明 invariant 已闭合 |

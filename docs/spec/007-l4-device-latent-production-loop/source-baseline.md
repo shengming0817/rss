@@ -30,7 +30,9 @@ Consequently, #1898 is limited to durable wake-version and failure-streak extens
 - Decision baseline: `origin/develop@7fabf4e36c526c4187c0d7a2bb8f8f96873456b4`.
 - Received `rss-main-user-device-abac-speckit-20260811.zip`: SHA-256 `a714c58a4846ee9e38d5e955fa7e8a19933c8dee2e5718bbb99919d03564a6b8`.
 - Received `rss-incubator-secure-device-rotation-speckit-20260811.zip`: SHA-256 `47a603d91c1117d2b341a02e29ff40132dcfad554cdb26d2620d2c3baa5b8051`.
-- ADR-028 accepts `device-security` only as candidate scope. The current `deviceidentity` target remains a draft, compile-only library pilot with no binary, image, mounted contracts, production provider closure, or formal non-test production mint.
+- ADR-028 accepts `device-security` only as candidate scope. #2116 supplies a non-activated Vault provider closure and formal
+  receipt-bound production mint carrier; the current `deviceidentity` target remains a draft, compile-only library pilot with
+  no binary, image, mounted contracts, or required production-provider wiring.
 - #1910 closed without implementing activation; ADR-028 supersedes its direct activation/T3 route. Future candidate integration and any later hardening/T3 activation require independent owners.
 - The exact RSS public waist remains the existing six draft contracts. Resource Security Fact is an External/incubator bootstrap or product fact, not a seventh RSS ingress or a compatibility path.
 

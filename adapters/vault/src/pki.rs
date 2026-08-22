@@ -9,9 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use diport::{
-    CertNotAfter, CertSerial, Clock, MAX_PKI_CERT_BYTES, MAX_PKI_ISSUER_CERTS, PkiArtifactError,
-    PkiArtifactErrorKind, PkiArtifactRequest, PkiArtifactValueError, PkiChainDigest,
-    PkiExtendedKeyUsage, PkiSan, PkiSanRef, RedactedBytes,
+    CertNotAfter, CertSerial, Clock, ExternalPkiProviderClosure, MAX_PKI_CERT_BYTES,
+    MAX_PKI_ISSUER_CERTS, PkiArtifactError, PkiArtifactErrorKind, PkiArtifactRequest,
+    PkiArtifactValueError, PkiChainDigest, PkiExtendedKeyUsage, PkiProviderConfigDigest, PkiSan,
+    PkiSanRef, RedactedBytes, VerifiedExternalPkiArtifactEvidence, canonical_pki_chain_artifact,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -28,6 +29,7 @@ const CLOCK_SKEW: Duration = Duration::from_secs(300);
 /// Vault PKI CSR-sign transport.
 pub struct VaultPkiTransport {
     client: reqwest::Client,
+    tls_roots_digest: [u8; 32],
     base: reqwest::Url,
     token: VaultToken,
     mount_segments: Vec<String>,
@@ -35,6 +37,23 @@ pub struct VaultPkiTransport {
     trust_roots_der: Vec<Vec<u8>>,
     timeout: Duration,
     clock: Arc<dyn Clock>,
+}
+
+/// Assembly-wide Vault PKI closure plus the exact transport whose validated production
+/// configuration it seals.
+///
+/// The closure is reusable across commands, but each [`Self::sign_csr`] consumes a separately
+/// receipt-bound request and returns move-only locally verified transport evidence. Identity-owned
+/// desired authorization remains a separate consuming funnel.
+pub struct VaultExternalPkiProviderClosure {
+    transport: VaultPkiTransport,
+    provider_closure: ExternalPkiProviderClosure,
+}
+
+impl std::fmt::Debug for VaultExternalPkiProviderClosure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VaultExternalPkiProviderClosure(<sealed>)")
+    }
 }
 
 /// Validated Vault PKI mount path.
@@ -92,16 +111,12 @@ impl VaultPkiTransportConfig {
 
 /// Material minted only after the Vault adapter has verified CSR, chain, policy, and expiry.
 pub struct VaultPkiArtifactEvidence {
-    request: PkiArtifactRequest,
-    leaf_der: RedactedBytes,
-    issuer_chain_der: Vec<RedactedBytes>,
-    chain_digest: PkiChainDigest,
-    serial: CertSerial,
-    not_after: CertNotAfter,
+    verified: VerifiedExternalPkiArtifactEvidence,
 }
 
 impl VaultPkiArtifactEvidence {
     fn from_verified_transport_material(
+        provider_config_digest: PkiProviderConfigDigest,
         request: PkiArtifactRequest,
         leaf_der: RedactedBytes,
         issuer_chain_der: Vec<RedactedBytes>,
@@ -109,51 +124,49 @@ impl VaultPkiArtifactEvidence {
         serial: CertSerial,
         not_after: CertNotAfter,
     ) -> Result<Self, PkiArtifactValueError> {
-        if leaf_der.is_empty() || leaf_der.len() > MAX_PKI_CERT_BYTES {
-            return Err(PkiArtifactValueError::InvalidCertificateMaterial);
-        }
-        if issuer_chain_der.is_empty() || issuer_chain_der.len() > MAX_PKI_ISSUER_CERTS {
-            return Err(PkiArtifactValueError::InvalidIssuerChain);
-        }
-        if issuer_chain_der
-            .iter()
-            .any(|cert| cert.is_empty() || cert.len() > MAX_PKI_CERT_BYTES)
-        {
-            return Err(PkiArtifactValueError::InvalidCertificateMaterial);
-        }
         Ok(Self {
-            request,
-            leaf_der,
-            issuer_chain_der,
-            chain_digest,
-            serial,
-            not_after,
+            verified: VerifiedExternalPkiArtifactEvidence::seal_vault_csr_sign(
+                pkiauthmint::ExternalPkiProviderMint::capability(),
+                provider_config_digest,
+                request,
+                leaf_der,
+                issuer_chain_der,
+                chain_digest,
+                serial,
+                not_after,
+            )?,
         })
     }
 
     /// Returns the exact request consumed by the verified attempt.
     pub const fn request(&self) -> &PkiArtifactRequest {
-        &self.request
+        self.verified.request()
     }
     /// Returns the verified leaf certificate DER.
     pub const fn leaf_der(&self) -> &RedactedBytes {
-        &self.leaf_der
+        self.verified.leaf_der()
     }
     /// Returns the verified issuer chain ordered toward the trust root.
     pub fn issuer_chain_der(&self) -> &[RedactedBytes] {
-        &self.issuer_chain_der
+        self.verified.issuer_chain_der()
     }
     /// Returns the canonical verified-chain digest.
     pub const fn chain_digest(&self) -> &PkiChainDigest {
-        &self.chain_digest
+        self.verified.chain_digest()
     }
     /// Returns the verified leaf serial.
     pub const fn serial(&self) -> &CertSerial {
-        &self.serial
+        self.verified.serial()
     }
     /// Returns the verified leaf expiry.
     pub const fn not_after(&self) -> CertNotAfter {
-        self.not_after
+        self.verified.not_after()
+    }
+
+    /// Consume the Vault-specific wrapper into provider-neutral verified material for the identity
+    /// production mint. This remains transport evidence and carries no desired-state authority.
+    pub fn into_verified(self) -> VerifiedExternalPkiArtifactEvidence {
+        self.verified
     }
 }
 
@@ -168,36 +181,60 @@ impl std::fmt::Debug for VaultPkiArtifactEvidence {
 /// Construction is intentionally narrow: callers may add explicit trust roots, but cannot
 /// enable redirects, plaintext HTTP, or invalid-certificate acceptance.
 #[derive(Clone)]
-pub struct VaultPkiHttpClient(reqwest::Client);
+pub struct VaultPkiHttpClient {
+    client: reqwest::Client,
+    tls_roots_digest: [u8; 32],
+}
 
 impl VaultPkiHttpClient {
     /// Builds a hardened client that trusts only the supplied Vault server roots.
     pub fn with_root_certificates(
-        roots: impl IntoIterator<Item = reqwest::Certificate>,
+        roots_pem: impl IntoIterator<Item = impl AsRef<[u8]>>,
     ) -> Result<Self, VaultConfigError> {
         let mut builder = reqwest::Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .tls_built_in_root_certs(false)
             .pool_max_idle_per_host(0);
-        for root in roots {
+        let mut canonical_roots = Vec::new();
+        for root_pem in roots_pem {
+            let root_pem = root_pem.as_ref();
+            let root_der = parse_one_pem(root_pem, "CERTIFICATE")
+                .map_err(|_| VaultConfigError::InvalidPkiTrustRoot)?;
+            let root = reqwest::Certificate::from_pem(root_pem)
+                .map_err(|_| VaultConfigError::InvalidPkiTrustRoot)?;
+            canonical_roots.push(root_der);
             builder = builder.add_root_certificate(root);
         }
-        builder
+        if canonical_roots.is_empty() {
+            return Err(VaultConfigError::InvalidPkiTrustRoot);
+        }
+        canonical_roots.sort_unstable();
+        let mut hasher = Sha256::new();
+        hash_frame(&mut hasher, b"rss.vault.pki-http-tls-roots.v1");
+        for root in canonical_roots {
+            hash_frame(&mut hasher, &root);
+        }
+        let client = builder
             .build()
-            .map(Self)
-            .map_err(|_| VaultConfigError::InvalidPkiTrustRoot)
+            .map_err(|_| VaultConfigError::InvalidPkiTrustRoot)?;
+        Ok(Self {
+            client,
+            tls_roots_digest: hasher.finalize().into(),
+        })
     }
 
     #[cfg(test)]
     #[allow(clippy::expect_used)]
     fn allow_http_for_test() -> Self {
-        Self(
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("test client"),
-        )
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("test client");
+        Self {
+            client,
+            tls_roots_digest: Sha256::digest(b"rss.vault.pki-http-test-only.v1").into(),
+        }
     }
 }
 
@@ -266,7 +303,8 @@ impl VaultPkiTransport {
             }
         }
         Ok(Self {
-            client: client.0,
+            client: client.client,
+            tls_roots_digest: client.tls_roots_digest,
             base,
             token,
             mount_segments,
@@ -293,6 +331,67 @@ impl VaultPkiTransport {
     }
 }
 
+impl VaultExternalPkiProviderClosure {
+    /// Construct the HTTPS-only transport and seal its non-secret production configuration in one
+    /// consuming boundary.
+    pub fn new(
+        clock: Arc<dyn Clock>,
+        client: VaultPkiHttpClient,
+        config: VaultPkiTransportConfig,
+    ) -> Result<Self, VaultConfigError> {
+        let transport = VaultPkiTransport::new(clock, client, config)?;
+        Ok(Self::from_transport(transport))
+    }
+
+    fn from_transport(transport: VaultPkiTransport) -> Self {
+        let digest = production_config_digest(&transport);
+        let provider_closure = ExternalPkiProviderClosure::seal_vault_csr_sign(
+            pkiauthmint::ExternalPkiProviderMint::capability(),
+            digest,
+        );
+        Self {
+            transport,
+            provider_closure,
+        }
+    }
+
+    /// Sign and locally verify one caller-owned CSR through the exact transport sealed by this
+    /// provider closure.
+    pub async fn sign_csr(
+        &self,
+        request: PkiArtifactRequest,
+    ) -> Result<VaultPkiArtifactEvidence, PkiArtifactError> {
+        self.transport.sign_csr(request).await
+    }
+
+    /// Borrow the provider-neutral assembly closure for construction/drift inspection.
+    pub const fn provider_closure(&self) -> &ExternalPkiProviderClosure {
+        &self.provider_closure
+    }
+}
+
+fn production_config_digest(transport: &VaultPkiTransport) -> PkiProviderConfigDigest {
+    let mut hasher = Sha256::new();
+    hash_frame(&mut hasher, b"rss.vault.external-pki-provider.v1");
+    hash_frame(&mut hasher, transport.base.as_str().as_bytes());
+    for segment in &transport.mount_segments {
+        hash_frame(&mut hasher, segment.as_bytes());
+    }
+    hash_frame(&mut hasher, transport.role.as_bytes());
+    hash_frame(&mut hasher, &transport.tls_roots_digest);
+    for root in &transport.trust_roots_der {
+        hash_frame(&mut hasher, root);
+    }
+    hash_frame(&mut hasher, &transport.timeout.as_secs().to_be_bytes());
+    hash_frame(&mut hasher, &transport.timeout.subsec_nanos().to_be_bytes());
+    PkiProviderConfigDigest::new(hasher.finalize().into())
+}
+
+fn hash_frame(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
 fn validate_role(role: String) -> Result<String, VaultConfigError> {
     let trimmed = role.trim();
     if trimmed.is_empty() {
@@ -317,24 +416,7 @@ impl VaultPkiTransport {
         request: PkiArtifactRequest,
     ) -> Result<VaultPkiArtifactEvidence, PkiArtifactError> {
         let result = self.sign_csr_attempt(request).await;
-        match &result {
-            Ok(_) => tracing::info!(
-                phase = "response-verification",
-                reason = "verified",
-                outcome = "verified",
-                category = "verified",
-                status = "success",
-                "Vault PKI attempt settled"
-            ),
-            Err(failure) => tracing::warn!(
-                phase = failure.phase,
-                reason = failure.reason,
-                outcome = failure.outcome,
-                category = failure.category,
-                status = "failure",
-                "Vault PKI attempt settled"
-            ),
-        }
+        trace_pki_attempt(result.as_ref().err());
         result.map_err(|failure| failure.error)
     }
 
@@ -396,8 +478,35 @@ impl VaultPkiTransport {
         let raw = read_bounded(response)
             .await
             .map_err(|error| PkiAttemptFailure::from_response(error, "response-body"))?;
-        verify_and_normalize(request, &raw, self.clock.now(), &self.trust_roots_der)
-            .map_err(|error| PkiAttemptFailure::from_response(error, "response-verification"))
+        verify_and_normalize(
+            request,
+            &raw,
+            self.clock.now(),
+            &self.trust_roots_der,
+            production_config_digest(self),
+        )
+        .map_err(|error| PkiAttemptFailure::from_response(error, "response-verification"))
+    }
+}
+
+fn trace_pki_attempt(failure: Option<&PkiAttemptFailure>) {
+    match failure {
+        None => tracing::debug!(
+            phase = "response-verification",
+            reason = "verified",
+            outcome = "verified",
+            category = "verified",
+            status = "success",
+            "Vault PKI attempt settled"
+        ),
+        Some(failure) => tracing::warn!(
+            phase = failure.phase,
+            reason = failure.reason,
+            outcome = failure.outcome,
+            category = failure.category,
+            status = "failure",
+            "Vault PKI attempt settled"
+        ),
     }
 }
 
@@ -527,6 +636,7 @@ fn verify_and_normalize(
     raw: &[u8],
     now: SystemTime,
     trust_roots: &[Vec<u8>],
+    provider_config_digest: PkiProviderConfigDigest,
 ) -> Result<VaultPkiArtifactEvidence, PkiArtifactError> {
     let wire: Value = serde_json::from_slice(raw).map_err(|_| invalid_response("invalid JSON"))?;
     let data = wire
@@ -584,6 +694,7 @@ fn verify_and_normalize(
     .map_err(|_| invalid_response("invalid expiration"))?;
     let chain_digest = chain_digest(&leaf_der, &issuer_chain);
     VaultPkiArtifactEvidence::from_verified_transport_material(
+        provider_config_digest,
         request,
         RedactedBytes::new(leaf_der),
         issuer_chain.into_iter().map(RedactedBytes::new).collect(),
@@ -1060,12 +1171,11 @@ fn parse_expiration(value: Option<&Value>) -> Result<i64, PkiArtifactError> {
 }
 
 fn chain_digest(leaf: &[u8], issuers: &[Vec<u8>]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    for cert in std::iter::once(leaf).chain(issuers.iter().map(Vec::as_slice)) {
-        hasher.update((cert.len() as u64).to_be_bytes());
-        hasher.update(cert);
-    }
-    hasher.finalize().into()
+    Sha256::digest(canonical_pki_chain_artifact(
+        leaf,
+        issuers.iter().map(Vec::as_slice),
+    ))
+    .into()
 }
 
 fn dedup_exact(certs: &mut Vec<Vec<u8>>) {
@@ -1117,7 +1227,20 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use diport::{CertScope, PkiCommonName, PkiPolicyDigest, PkiRequestGeneration, PkiSpkiDigest};
+    use deviceloop::{
+        CertificateKeyUsage, CertificatePolicy, CertificatePolicyDurations,
+        CertificateRenewBeforeSeconds, CertificateSan, CertificateValiditySeconds,
+    };
+    use diport::{
+        CertScope, PkiAuthorizationReceipt, PkiCommonName, PkiPolicyDigest, PkiRequestGeneration,
+        PkiSpkiDigest,
+    };
+    use identity_composition::{
+        CertificateArtifactAcquisition, CertificateArtifactError, DeviceCertificateScope,
+        DevicePolicyAuthorizationReceiptId, ExpectedGeneration, PolicyHash,
+        classify_external_pki_artifact_error, mint_external_pki_production_artifact,
+        validate_external_pki_artifact_request,
+    };
     use ids::DeviceId;
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
@@ -1132,11 +1255,26 @@ mod tests {
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    const DEVICE_COMMON_NAME: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
     struct FixedClock;
     impl Clock for FixedClock {
         fn now(&self) -> SystemTime {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1_699_920_000)
         }
+    }
+
+    fn lowercase_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = write!(encoded, "{byte:02x}");
+        }
+        encoded
+    }
+
+    fn provider_config_digest() -> PkiProviderConfigDigest {
+        PkiProviderConfigDigest::new([0x42; 32])
     }
 
     #[derive(Clone, Default)]
@@ -1152,11 +1290,29 @@ mod tests {
         fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
             let mut visitor = EventFieldRecorder::default();
             event.record(&mut visitor);
+            visitor
+                .fields
+                .push(format!("level={}", event.metadata().level()));
             self.0
                 .lock()
                 .expect("event recorder lock")
                 .push(visitor.fields.join(" "));
         }
+    }
+
+    #[test]
+    fn successful_attempt_is_debug_not_terminal_info() {
+        let recorder = EventRecorder::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(recorder.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        trace_pki_attempt(None);
+
+        let records = recorder.records().join("\n");
+        assert!(records.contains("level=DEBUG"), "records={records}");
+        assert!(records.contains("status=\"success\""), "records={records}");
     }
 
     #[derive(Default)]
@@ -1173,18 +1329,46 @@ mod tests {
     #[test]
     fn status_mapping_is_closed_and_error_is_redacted() {
         let cases = [
-            (401, PkiArtifactErrorKind::Forbidden),
-            (403, PkiArtifactErrorKind::Forbidden),
-            (404, PkiArtifactErrorKind::Misconfigured),
-            (400, PkiArtifactErrorKind::Rejected),
-            (429, PkiArtifactErrorKind::Unavailable),
-            (500, PkiArtifactErrorKind::OutcomeUnknown),
+            (
+                401,
+                PkiArtifactErrorKind::Forbidden,
+                CertificateArtifactError::Rejected,
+            ),
+            (
+                403,
+                PkiArtifactErrorKind::Forbidden,
+                CertificateArtifactError::Rejected,
+            ),
+            (
+                404,
+                PkiArtifactErrorKind::Misconfigured,
+                CertificateArtifactError::Misconfigured,
+            ),
+            (
+                400,
+                PkiArtifactErrorKind::Rejected,
+                CertificateArtifactError::Rejected,
+            ),
+            (
+                429,
+                PkiArtifactErrorKind::Unavailable,
+                CertificateArtifactError::Unavailable,
+            ),
+            (
+                500,
+                PkiArtifactErrorKind::OutcomeUnknown,
+                CertificateArtifactError::OutcomeUnknown,
+            ),
         ];
-        for (status, expected) in cases {
+        for (status, expected, domain_expected) in cases {
             let error = status_error(reqwest::StatusCode::from_u16(status).expect("status"));
             assert_eq!(error.kind(), expected);
             assert_eq!(error.to_string(), "PKI artifact transport failed");
             assert!(format!("{error:?}").contains("<redacted>"));
+            assert_eq!(
+                classify_external_pki_artifact_error(&error),
+                domain_expected
+            );
         }
     }
 
@@ -1221,11 +1405,41 @@ mod tests {
         params.self_signed(&key).expect("root certificate").pem()
     }
 
+    #[test]
+    fn provider_closure_digest_binds_the_actual_https_trust_roots() {
+        let pki_root = root_pem();
+        let tls_root_a = root_pem();
+        let tls_root_b = root_pem();
+        let closure = |tls_root: &str| {
+            VaultExternalPkiProviderClosure::new(
+                Arc::new(FixedClock),
+                VaultPkiHttpClient::with_root_certificates([tls_root.as_bytes()])
+                    .expect("TLS client"),
+                VaultPkiTransportConfig::new(
+                    "https://vault.example",
+                    "token",
+                    VaultPkiMount::try_new("pki").expect("mount"),
+                    VaultPkiRole::try_new("role").expect("role"),
+                    vec![RedactedBytes::new(pki_root.as_bytes().to_vec())],
+                    Duration::from_secs(1),
+                ),
+            )
+            .expect("provider closure")
+        };
+
+        let first = closure(&tls_root_a);
+        let second = closure(&tls_root_b);
+        assert_ne!(
+            first.provider_closure().config_digest(),
+            second.provider_closure().config_digest()
+        );
+    }
+
     fn request() -> PkiArtifactRequest {
         let key = KeyPair::generate().expect("request key");
         let mut params = CertificateParams::new(vec!["device.example".to_owned()]).expect("params");
         let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, "device.example");
+        name.push(DnType::CommonName, DEVICE_COMMON_NAME);
         params.distinguished_name = name;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -1237,9 +1451,10 @@ mod tests {
             ),
             PkiRequestGeneration::try_new(1).expect("generation"),
             PkiPolicyDigest::new([1; 32]),
+            PkiAuthorizationReceipt::try_new([1; 16]).expect("receipt"),
             RedactedBytes::new(csr.pem().expect("PEM").into_bytes()),
             PkiSpkiDigest::new(Sha256::digest(key.subject_public_key_info()).into()),
-            PkiCommonName::try_new("device.example").expect("common name"),
+            PkiCommonName::try_new(DEVICE_COMMON_NAME).expect("common name"),
             vec![PkiSan::dns("device.example").expect("DNS")],
             vec![PkiExtendedKeyUsage::ClientAuth],
             Duration::from_secs(3600),
@@ -1280,7 +1495,7 @@ mod tests {
         let mut csr_params =
             CertificateParams::new(vec!["device.example".to_owned()]).expect("CSR parameters");
         let mut subject = DistinguishedName::new();
-        subject.push(DnType::CommonName, "device.example");
+        subject.push(DnType::CommonName, DEVICE_COMMON_NAME);
         csr_params.distinguished_name = subject;
         csr_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         csr_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -1291,7 +1506,7 @@ mod tests {
         let mut leaf_params =
             CertificateParams::new(vec!["device.example".to_owned()]).expect("leaf parameters");
         let mut leaf_subject = DistinguishedName::new();
-        leaf_subject.push(DnType::CommonName, "device.example");
+        leaf_subject.push(DnType::CommonName, DEVICE_COMMON_NAME);
         leaf_params.distinguished_name = leaf_subject;
         leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
@@ -1312,9 +1527,10 @@ mod tests {
             ),
             PkiRequestGeneration::try_new(7).expect("generation"),
             PkiPolicyDigest::new([7; 32]),
+            PkiAuthorizationReceipt::try_new([7; 16]).expect("receipt"),
             RedactedBytes::new(csr.pem().expect("CSR PEM").into_bytes()),
             PkiSpkiDigest::new(Sha256::digest(request_key.subject_public_key_info()).into()),
-            PkiCommonName::try_new("device.example").expect("common name"),
+            PkiCommonName::try_new(DEVICE_COMMON_NAME).expect("common name"),
             vec![PkiSan::dns("device.example").expect("DNS")],
             vec![PkiExtendedKeyUsage::ClientAuth],
             Duration::from_secs(86_400),
@@ -1333,6 +1549,180 @@ mod tests {
         (request, response, vec![root.der().to_vec()])
     }
 
+    fn unrelated_chain_pems() -> (String, String) {
+        let mut root_params = CertificateParams::default();
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let mut root_subject = DistinguishedName::new();
+        root_subject.push(DnType::CommonName, "Unrelated Root");
+        root_params.distinguished_name = root_subject;
+        root_params.not_before = date_time_ymd(2020, 1, 1);
+        root_params.not_after = date_time_ymd(2030, 1, 1);
+        let root = CertifiedIssuer::self_signed(
+            root_params,
+            KeyPair::generate().expect("unrelated root key"),
+        )
+        .expect("unrelated root");
+
+        let mut issuer_params = CertificateParams::default();
+        issuer_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        issuer_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let mut issuer_subject = DistinguishedName::new();
+        issuer_subject.push(DnType::CommonName, "Test Issuer");
+        issuer_params.distinguished_name = issuer_subject;
+        issuer_params.not_before = date_time_ymd(2020, 1, 1);
+        issuer_params.not_after = date_time_ymd(2029, 1, 1);
+        let issuer = CertifiedIssuer::signed_by(
+            issuer_params,
+            KeyPair::generate().expect("unrelated issuer key"),
+            &root,
+        )
+        .expect("unrelated issuer");
+        (issuer.pem(), root.pem())
+    }
+
+    fn acquisition(receipt: [u8; 16]) -> CertificateArtifactAcquisition {
+        acquisition_with_usages(receipt, vec![CertificateKeyUsage::ClientAuth])
+    }
+
+    fn acquisition_with_usages(
+        receipt: [u8; 16],
+        key_usages: Vec<CertificateKeyUsage>,
+    ) -> CertificateArtifactAcquisition {
+        let scope = DeviceCertificateScope::for_test(
+            TenantId::parse("11111111-2222-4333-8444-555555555555").expect("tenant"),
+            DeviceId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("device"),
+        );
+        let policy = CertificatePolicy::new(
+            CertificatePolicyDurations::new(
+                CertificateValiditySeconds::try_new(86_400).expect("validity"),
+                CertificateRenewBeforeSeconds::try_new(300).expect("renew-before"),
+            )
+            .expect("durations"),
+            key_usages,
+            vec![CertificateSan::parse("device.example").expect("SAN")],
+        )
+        .expect("policy");
+        CertificateArtifactAcquisition::for_test(
+            scope,
+            ExpectedGeneration::try_new(7).expect("generation"),
+            PolicyHash::restore(&[7; 32]).expect("policy hash"),
+            DevicePolicyAuthorizationReceiptId::restore(uuid::Uuid::from_bytes(receipt))
+                .expect("receipt"),
+            policy,
+        )
+    }
+
+    #[test]
+    fn verified_vault_evidence_mints_only_the_receipt_bound_production_artifact() {
+        let (request, response, roots) = verified_fixture();
+        let evidence = verify_and_normalize(
+            request,
+            &serde_json::to_vec(&response).expect("response"),
+            FixedClock.now(),
+            &roots,
+            provider_config_digest(),
+        )
+        .expect("verified evidence");
+        let acquisition = acquisition([7; 16]);
+        let closure = ExternalPkiProviderClosure::seal_vault_csr_sign(
+            pkiauthmint::ExternalPkiProviderMint::capability(),
+            provider_config_digest(),
+        );
+
+        let authorization_receipt_id = acquisition.authorization_receipt_id();
+        let authorized =
+            mint_external_pki_production_artifact(&closure, acquisition, evidence.into_verified())
+                .expect("receipt-bound artifact");
+        let snapshot = authorized.into_append_authorization().into_snapshot();
+
+        assert_eq!(
+            snapshot.authorization_receipt_id(),
+            authorization_receipt_id
+        );
+        assert_eq!(
+            snapshot.artifact_id().as_str(),
+            format!(
+                "vault-pki-sha256:{}",
+                lowercase_hex(snapshot.artifact_digest().as_bytes())
+            )
+        );
+        assert_eq!(
+            format!("{closure:?}"),
+            "ExternalPkiProviderClosure(<sealed>)"
+        );
+    }
+
+    #[test]
+    fn provider_closure_cannot_authorize_evidence_from_a_different_config() {
+        let (request, response, roots) = verified_fixture();
+        let evidence = verify_and_normalize(
+            request,
+            &serde_json::to_vec(&response).expect("response"),
+            FixedClock.now(),
+            &roots,
+            provider_config_digest(),
+        )
+        .expect("verified evidence");
+        let different_closure = ExternalPkiProviderClosure::seal_vault_csr_sign(
+            pkiauthmint::ExternalPkiProviderMint::capability(),
+            PkiProviderConfigDigest::new([0x43; 32]),
+        );
+
+        assert!(matches!(
+            mint_external_pki_production_artifact(
+                &different_closure,
+                acquisition([7; 16]),
+                evidence.into_verified(),
+            ),
+            Err(CertificateArtifactError::BindingMismatch)
+        ));
+    }
+
+    #[test]
+    fn swapped_authorization_receipt_is_rejected_before_provider_io() {
+        let (request, _, _) = verified_fixture();
+        assert_eq!(
+            validate_external_pki_artifact_request(&acquisition([8; 16]), &request),
+            Err(CertificateArtifactError::BindingMismatch)
+        );
+    }
+
+    #[test]
+    fn common_name_must_be_authorized_by_the_current_device_scope() {
+        let (request, _, _) = verified_fixture();
+        let request = rebuild_with_matching_csr_common_name(&request, "other.example");
+        assert_eq!(
+            validate_external_pki_artifact_request(&acquisition([7; 16]), &request),
+            Err(CertificateArtifactError::BindingMismatch)
+        );
+    }
+
+    #[test]
+    fn equivalent_eku_set_order_preserves_receipt_binding() {
+        let (request, _, _) = verified_fixture();
+        let request = rebuild_request(
+            &request,
+            *request.spki_digest(),
+            request.sans().to_vec(),
+            vec![
+                PkiExtendedKeyUsage::ServerAuth,
+                PkiExtendedKeyUsage::ClientAuth,
+            ],
+        );
+        let acquisition = acquisition_with_usages(
+            [7; 16],
+            vec![
+                CertificateKeyUsage::ClientAuth,
+                CertificateKeyUsage::ServerAuth,
+            ],
+        );
+        assert_eq!(
+            validate_external_pki_artifact_request(&acquisition, &request),
+            Ok(())
+        );
+    }
+
     fn rebuild_request(
         request: &PkiArtifactRequest,
         spki_digest: PkiSpkiDigest,
@@ -1343,6 +1733,7 @@ mod tests {
             request.scope(),
             request.generation(),
             *request.policy_digest(),
+            request.authorization_receipt(),
             RedactedBytes::new(request.csr_pem().as_bytes().to_vec()),
             spki_digest,
             request.common_name().clone(),
@@ -1359,8 +1750,37 @@ mod tests {
             request.scope(),
             request.generation(),
             *request.policy_digest(),
+            request.authorization_receipt(),
             RedactedBytes::new(request.csr_pem().as_bytes().to_vec()),
             *request.spki_digest(),
+            PkiCommonName::try_new(value).expect("common name"),
+            request.sans().to_vec(),
+            request.extended_key_usages().to_vec(),
+            request.requested_validity(),
+            request.renew_before(),
+        )
+        .expect("rebuilt request")
+    }
+
+    fn rebuild_with_matching_csr_common_name(
+        request: &PkiArtifactRequest,
+        value: &str,
+    ) -> PkiArtifactRequest {
+        let key = KeyPair::generate().expect("request key");
+        let mut params = CertificateParams::new(vec!["device.example".to_owned()]).expect("params");
+        let mut name = DistinguishedName::new();
+        name.push(DnType::CommonName, value);
+        params.distinguished_name = name;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let csr = params.serialize_request(&key).expect("CSR");
+        PkiArtifactRequest::try_new(
+            request.scope(),
+            request.generation(),
+            *request.policy_digest(),
+            request.authorization_receipt(),
+            RedactedBytes::new(csr.pem().expect("PEM").into_bytes()),
+            PkiSpkiDigest::new(Sha256::digest(key.subject_public_key_info()).into()),
             PkiCommonName::try_new(value).expect("common name"),
             request.sans().to_vec(),
             request.extended_key_usages().to_vec(),
@@ -1380,6 +1800,7 @@ mod tests {
         for leaf_size in [0, MAX_PKI_CERT_BYTES + 1] {
             assert!(matches!(
                 VaultPkiArtifactEvidence::from_verified_transport_material(
+                    provider_config_digest(),
                     request(),
                     RedactedBytes::new(vec![1; leaf_size]),
                     vec![RedactedBytes::new([2])],
@@ -1392,6 +1813,7 @@ mod tests {
         }
         assert!(
             VaultPkiArtifactEvidence::from_verified_transport_material(
+                provider_config_digest(),
                 request(),
                 RedactedBytes::new(vec![1; MAX_PKI_CERT_BYTES]),
                 vec![RedactedBytes::new([2]); MAX_PKI_ISSUER_CERTS],
@@ -1404,6 +1826,7 @@ mod tests {
         for issuer_count in [0, MAX_PKI_ISSUER_CERTS + 1] {
             assert!(matches!(
                 VaultPkiArtifactEvidence::from_verified_transport_material(
+                    provider_config_digest(),
                     request(),
                     RedactedBytes::new([1]),
                     vec![RedactedBytes::new([2]); issuer_count],
@@ -1417,6 +1840,7 @@ mod tests {
         for issuer in [Vec::new(), vec![2; MAX_PKI_CERT_BYTES + 1]] {
             assert!(matches!(
                 VaultPkiArtifactEvidence::from_verified_transport_material(
+                    provider_config_digest(),
                     request(),
                     RedactedBytes::new([1]),
                     vec![RedactedBytes::new(issuer)],
@@ -1446,6 +1870,7 @@ mod tests {
             &serde_json::to_vec(&response).expect("JSON"),
             FixedClock.now(),
             &roots,
+            provider_config_digest(),
         )
         .expect("verified evidence");
         assert_eq!(evidence.request().generation().get(), 7);
@@ -1487,7 +1912,11 @@ mod tests {
                     let expiration = response["data"]["expiration"].as_i64().expect("expiration");
                     response["data"]["expiration"] = Value::from(expiration + 1);
                 }
-                "chain" => response["data"]["ca_chain"] = serde_json::json!([]),
+                "chain" => {
+                    let (issuer, root) = unrelated_chain_pems();
+                    response["data"]["issuing_ca"] = Value::String(issuer.clone());
+                    response["data"]["ca_chain"] = serde_json::json!([issuer, root]);
+                }
                 _ => {}
             }
             let error = verify_and_normalize(
@@ -1495,6 +1924,7 @@ mod tests {
                 &serde_json::to_vec(&response).expect("JSON"),
                 FixedClock.now(),
                 &roots,
+                provider_config_digest(),
             )
             .expect_err("binding mismatch must fail closed");
             assert_eq!(
@@ -1542,6 +1972,7 @@ mod tests {
         );
         let records = recorder.records().join("\n");
         for field in [
+            "level=WARN",
             "phase=\"request-validation\"",
             "reason=\"invalid-request\"",
             "outcome=\"not-applied\"",
@@ -1565,7 +1996,7 @@ mod tests {
             .and(path("/v1/team/pki/sign/device-role"))
             .and(header(VAULT_TOKEN_HEADER, "sensitive-token-marker"))
             .and(body_json(serde_json::json!({
-                "csr": csr, "common_name": "device.example", "alt_names": "device.example",
+                "csr": csr, "common_name": DEVICE_COMMON_NAME, "alt_names": "device.example",
                 "ip_sans": "", "uri_sans": "", "other_sans": "", "ttl": "3600s",
                 "format": "pem", "exclude_cn_from_sans": true
             })))
@@ -1633,6 +2064,7 @@ mod tests {
             &serde_json::to_vec(&response).expect("JSON"),
             FixedClock.now() + Duration::from_secs(3600),
             &roots,
+            provider_config_digest(),
         )
         .expect_err("stale leaf must not be rebound");
         assert_eq!(error.kind(), PkiArtifactErrorKind::InvalidResponse);

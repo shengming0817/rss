@@ -32,9 +32,9 @@ use super::{
     ArtifactAppendOutcome, ArtifactDigest, CertificateAttemptAuthority,
     CertificateConditionMutation, CertificateReconcileRepository,
     CertificateReconcileRepositoryError, CertificateTransportObservation, ConditionStateBatch,
-    CurrentCommandExpiryOutcome, DesiredStateSnapshot, DeviceCertificateScope, DeviceSequence,
-    ExpectedGeneration, FencedMutationOutcome, ReportEnvelopeId, ReportedStateHash,
-    ReportedStateSnapshot, RotationOutcome,
+    CurrentCommandExpiryOutcome, DesiredStateSnapshot, DeviceCertificateScope,
+    DeviceCertificateStateSnapshot, DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
+    ReportEnvelopeId, ReportedStateHash, ReportedStateSnapshot, RotationOutcome,
 };
 
 const DEGRADED_RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -238,6 +238,7 @@ impl CertificateReadyProof {
     ) -> Result<Self, CertificateReadyProofError> {
         if receipt.scope() != scope
             || receipt.generation().get() != desired.generation().get()
+            || receipt.authorization_receipt_id() != desired.authorization_receipt_id()
             || report.observed_generation().get() != desired.generation().get()
             || command.tenant() != scope.tenant()
             || command.device_id() != scope.device().as_uuid()
@@ -636,6 +637,9 @@ where
         if view.deletion_requested() {
             return self.reconcile_deletion(attempt, &receipts, now).await;
         }
+        if current_generation_is_quarantined(view.state()) {
+            return Ok(DurableReconcileOutcome::settled());
+        }
         match self
             .repository
             .expire_due_current_command(fence)
@@ -685,6 +689,18 @@ where
                     );
                     self.write_degraded(fence, observation.reason).await?;
                     return Ok(observation.into_outcome());
+                }
+                Err(
+                    crate::cert_artifact::CertificateArtifactError::OutcomeUnknown
+                    | crate::cert_artifact::CertificateArtifactError::Rejected
+                    | crate::cert_artifact::CertificateArtifactError::Misconfigured,
+                ) => {
+                    // An unknown signing result must never be retried blindly: Vault may already
+                    // have issued a live certificate. Permanent provider/configuration failures
+                    // share the same fail-closed recovery boundary. A newly authorized desired
+                    // generation clears the generation-scoped quarantine explicitly.
+                    self.write_quarantined(fence).await?;
+                    return Ok(DurableReconcileOutcome::settled());
                 }
                 Err(
                     crate::cert_artifact::CertificateArtifactError::InvalidArtifactId
@@ -939,6 +955,18 @@ where
     }
 }
 
+fn current_generation_is_quarantined(state: &DeviceCertificateStateSnapshot) -> bool {
+    let generation = state.desired().generation().get();
+    state.conditions().iter().any(|condition| {
+        matches!(
+            condition,
+            deviceloop::DeviceConditionSnapshot::Quarantined(value)
+                if value.status() == deviceloop::ConditionStatus::True
+                    && value.observed_generation().is_some_and(|value| value.get() == generation)
+        )
+    })
+}
+
 impl<Store, Source, Repository, E> DurableReconciler<Store>
     for DeviceCertificateReconciler<Source, Repository, E>
 where
@@ -1109,7 +1137,10 @@ mod tests {
     use ids::DeviceId;
     use rss_request_context::TenantId;
 
-    use crate::cert_artifact::{CertificateArtifactId, CertificatePublicKeyDigest};
+    use crate::cert_artifact::{
+        CertificateArtifactBinding, CertificateArtifactId, CertificateArtifactMaterial,
+        CertificatePublicKeyDigest,
+    };
     use crate::device_certificate::{DesiredStateRestore, PolicyHash};
 
     use super::*;
@@ -1257,23 +1288,40 @@ mod tests {
         serial: u8,
         not_after_seconds: u64,
     ) -> PersistedCertificateArtifactSnapshot<crate::cert_artifact::ProductionEligibility> {
+        receipt_with_authorization(
+            serial,
+            not_after_seconds,
+            desired().authorization_receipt_id(),
+        )
+    }
+
+    fn receipt_with_authorization(
+        serial: u8,
+        not_after_seconds: u64,
+        authorization_receipt_id: crate::device_certificate::DevicePolicyAuthorizationReceiptId,
+    ) -> PersistedCertificateArtifactSnapshot<crate::cert_artifact::ProductionEligibility> {
         let scope = scope();
         PersistedCertificateArtifactSnapshot::restore(
-            scope,
-            ExpectedGeneration::try_new(7).unwrap(),
-            PolicyHash::parse(&digest('b')).unwrap(),
-            CertificatePublicKeyDigest::digest(b"key"),
-            ArtifactDigest::parse(&digest('a')).unwrap(),
-            ReportedStateHash::parse(&digest('b')).unwrap(),
-            CertificateArtifactId::parse("artifact-device-certificate-v1").unwrap(),
-            CertScope::new(scope.tenant(), scope.device()),
-            CertSerial::try_new([serial]).unwrap(),
-            CertNotAfter::try_from_system_time(
-                SystemTime::UNIX_EPOCH + Duration::from_secs(not_after_seconds),
+            CertificateArtifactBinding::restore(
+                scope,
+                ExpectedGeneration::try_new(7).unwrap(),
+                PolicyHash::parse(&digest('b')).unwrap(),
+                authorization_receipt_id,
+                CertificateArtifactMaterial::new(
+                    CertificatePublicKeyDigest::digest(b"key"),
+                    ArtifactDigest::parse(&digest('a')).unwrap(),
+                    ReportedStateHash::parse(&digest('b')).unwrap(),
+                    CertificateArtifactId::parse("artifact-device-certificate-v1").unwrap(),
+                    CertScope::new(scope.tenant(), scope.device()),
+                    CertSerial::try_new([serial]).unwrap(),
+                    CertNotAfter::try_from_system_time(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(not_after_seconds),
+                    )
+                    .unwrap(),
+                ),
             )
             .unwrap(),
         )
-        .unwrap()
     }
 
     struct FakeRevocations {
@@ -1642,6 +1690,45 @@ mod tests {
         assert_eq!(state.conditions()[0].status_label(), "True");
     }
 
+    #[test]
+    fn restored_ready_proof_rejects_a_swapped_authorization_receipt() {
+        let desired = desired();
+        let swapped_receipt = receipt_with_authorization(
+            1,
+            NOW_SECONDS + 301,
+            crate::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+                uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a2").unwrap(),
+            )
+            .unwrap(),
+        );
+        let report =
+            ReportedStateSnapshot::restore(crate::device_certificate::ReportedStateRestore::new(
+                7,
+                9,
+                ReportedStateHash::parse(&digest('b')).unwrap(),
+                ArtifactDigest::parse(&digest('a')).unwrap(),
+                ReportEnvelopeId::parse("swapped-receipt-report-7").unwrap(),
+                DeviceSequence::try_new(7).unwrap(),
+                None,
+                None,
+                now(),
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            CertificateReadyProof::restore_current(
+                scope(),
+                &desired,
+                &swapped_receipt,
+                &report,
+                &command_evidence(9),
+                now(),
+                CertificateRevocationObservation::Unrevoked,
+            ),
+            Err(CertificateReadyProofError::BindingMismatch)
+        ));
+    }
+
     #[tokio::test]
     async fn deletion_revokes_first_and_multiple_history_before_complete() {
         let receipts = vec![
@@ -1709,14 +1796,15 @@ mod tests {
         use sha2::{Digest as _, Sha256};
 
         use crate::cert_artifact::{
-            ArtifactAppendAuthorization, CertificateArtifactRequest, CertificateArtifactSource,
-            ProductionEligibility, ProviderCertificateCandidate,
+            ArtifactAppendAuthorization, CertificateArtifactMaterial, CertificateArtifactRequest,
+            CertificateArtifactSource, ProductionEligibility, ProviderCertificateCandidate,
         };
         use crate::device_certificate::{
             CertificateAttemptFence, CertificateReconcileView, CertificateTransportObservation,
             CurrentCommandExpiryOutcome, DeletionRequestOutcome, DeviceCertificateStateSnapshot,
             ReportedStateRestore,
         };
+        use deviceloop::DeviceConditionRestore;
 
         use super::*;
 
@@ -1724,6 +1812,9 @@ mod tests {
         enum SourceMode {
             Healthy,
             Unavailable,
+            OutcomeUnknown,
+            Rejected,
+            Misconfigured,
             BindingMismatch,
         }
 
@@ -1758,6 +1849,15 @@ mod tests {
                     SourceMode::Unavailable => {
                         return Err(crate::cert_artifact::CertificateArtifactError::Unavailable);
                     }
+                    SourceMode::OutcomeUnknown => {
+                        return Err(crate::cert_artifact::CertificateArtifactError::OutcomeUnknown);
+                    }
+                    SourceMode::Rejected => {
+                        return Err(crate::cert_artifact::CertificateArtifactError::Rejected);
+                    }
+                    SourceMode::Misconfigured => {
+                        return Err(crate::cert_artifact::CertificateArtifactError::Misconfigured);
+                    }
                     SourceMode::BindingMismatch => {
                         return Err(
                             crate::cert_artifact::CertificateArtifactError::BindingMismatch,
@@ -1778,28 +1878,19 @@ mod tests {
                     request.scope(),
                     request.generation(),
                     request.policy_hash().clone(),
-                    public_key.clone(),
-                    artifact_digest,
-                    state_hash.clone(),
-                    artifact_id.clone(),
-                    cert_scope,
-                    serial.clone(),
-                    not_after,
+                    CertificateArtifactMaterial::new(
+                        public_key,
+                        artifact_digest,
+                        state_hash,
+                        artifact_id,
+                        cert_scope,
+                        serial,
+                        not_after,
+                    ),
                 )
                 .unwrap();
-                ProviderCertificateCandidate::new(
-                    artifact,
-                    request.scope(),
-                    request.generation(),
-                    request.policy_hash().clone(),
-                    public_key,
-                    state_hash,
-                    artifact_id,
-                    cert_scope,
-                    serial,
-                    not_after,
-                )
-                .authorize_production_for_test(&expected)
+                ProviderCertificateCandidate::new(artifact, expected.binding().clone())
+                    .authorize_production_for_test(&expected)
             }
         }
 
@@ -2088,6 +2179,13 @@ mod tests {
         }
 
         fn state(report: Option<ReportedStateRestore>) -> DeviceCertificateStateSnapshot {
+            state_with_conditions(report, Vec::new())
+        }
+
+        fn state_with_conditions(
+            report: Option<ReportedStateRestore>,
+            conditions: Vec<DeviceConditionRestore>,
+        ) -> DeviceCertificateStateSnapshot {
             DeviceCertificateStateSnapshot::restore(
                 scope(),
                 DesiredStateRestore::new(
@@ -2102,7 +2200,7 @@ mod tests {
                     SystemTime::UNIX_EPOCH,
                 ),
                 report,
-                Vec::new(),
+                conditions,
             )
             .unwrap()
         }
@@ -2397,6 +2495,80 @@ mod tests {
                 "CommandTimedOut"
             ));
             assert!(schedule_state.actions.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn outcome_unknown_quarantines_generation_and_never_blindly_resigns() {
+            let (first, repo, schedule, source) = run_case(
+                SourceMode::OutcomeUnknown,
+                None,
+                vec![],
+                CertificateTransportObservation::Available,
+                false,
+                false,
+            )
+            .await;
+            assert!(first.is_ok());
+            assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+            assert!(condition_is(
+                &repo,
+                "Quarantined",
+                "True",
+                "ProtocolViolation"
+            ));
+
+            let attempt = ReconcileAttempt::new("attempt-component", target());
+            let authority = CertificateAttemptAuthority::for_test(scope(), &attempt).unwrap();
+            *repo.view.lock().unwrap() = Some(
+                CertificateReconcileView::restore_current(
+                    &authority,
+                    state_with_conditions(
+                        None,
+                        vec![DeviceConditionRestore::quarantined(
+                            ConditionStatus::True,
+                            QuarantinedReason::ProtocolViolation,
+                            Some(ObservedGeneration::try_new(7).unwrap()),
+                            now(),
+                        )],
+                    ),
+                    false,
+                    CertificateTransportObservation::Available,
+                )
+                .unwrap(),
+            );
+            let second = run_existing(
+                Arc::clone(&repo),
+                Arc::clone(&schedule),
+                Arc::clone(&source),
+            )
+            .await;
+            assert!(second.is_ok());
+            assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+            assert!(schedule.actions.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn permanent_artifact_authority_failures_are_quarantined() {
+            for mode in [SourceMode::Rejected, SourceMode::Misconfigured] {
+                let (result, repo, schedule, source) = run_case(
+                    mode,
+                    None,
+                    vec![],
+                    CertificateTransportObservation::Available,
+                    false,
+                    false,
+                )
+                .await;
+                assert!(result.is_ok());
+                assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+                assert!(condition_is(
+                    &repo,
+                    "Quarantined",
+                    "True",
+                    "ProtocolViolation"
+                ));
+                assert!(schedule.actions.lock().unwrap().is_empty());
+            }
         }
 
         #[tokio::test]

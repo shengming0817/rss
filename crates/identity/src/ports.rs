@@ -34,10 +34,10 @@ use eventexec::event::ReviewedEvent;
 pub mod device_certificate {
     pub use crate::cert_artifact::{
         ArtifactAppendAuthorization, ArtifactEligibility, AuthorizedCertificateArtifact,
-        CertificateArtifactAcquisition, CertificateArtifactError, CertificateArtifactId,
-        CertificateArtifactRequest, CertificateArtifactSource, CertificatePublicKeyDigest,
-        DraftEligibility, PersistedCertificateArtifactSnapshot, ProductionEligibility,
-        ProviderCertificateCandidate,
+        CertificateArtifactAcquisition, CertificateArtifactBinding, CertificateArtifactError,
+        CertificateArtifactId, CertificateArtifactMaterial, CertificateArtifactRequest,
+        CertificateArtifactSource, CertificatePublicKeyDigest, DraftEligibility,
+        PersistedCertificateArtifactSnapshot, ProductionEligibility, ProviderCertificateCandidate,
     };
     pub use crate::device_certificate::{
         AcceptDesiredPolicy, ArtifactAppendOutcome, ArtifactDigest,

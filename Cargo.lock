@@ -1903,6 +1903,7 @@ dependencies = [
  "futures",
  "ids",
  "mockall",
+ "pkiauthmint",
  "primitives",
  "rss-request-context",
  "sagaauthmint",
@@ -4507,6 +4508,10 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "pkiauthmint"
+version = "0.0.0"
 
 [[package]]
 name = "plain"
@@ -7522,8 +7527,11 @@ name = "vault"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "deviceloop",
  "diport",
+ "identity-composition",
  "ids",
+ "pkiauthmint",
  "rcgen",
  "reqwest",
  "rss-request-context",
@@ -7536,6 +7544,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "vocab",
  "wiremock",
  "x509-parser",

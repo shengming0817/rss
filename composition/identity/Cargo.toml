@@ -39,7 +39,7 @@ vocab = { path = "../../crates/vocab" }
 
 [features]
 device-mqtt = ["dep:ids", "dep:mqtt"]
-test-support = ["postgres/test-support"]
+test-support = ["identity/test-support", "postgres/test-support"]
 
 [dev-dependencies]
 identity = { path = "../../crates/identity", features = ["test-support"] }

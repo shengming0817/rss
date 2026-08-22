@@ -193,10 +193,16 @@ No second revocation entity, digest-keyed table, or independent reason model is 
 
 ### ExternalPkiProviderClosure
 
-This is the target shape for a future sealed assembly-level capability proving that one selected external provider, its
-production configuration digest, and its provider-conformance evidence form an eligible candidate dependency. It contains no
-tenant/device/generation authorization and cannot authorize an individual command. The current repository has no such type or
-formal production mint; ADR-028 assigns both to future candidate T1/T2 implementation and keeps activation separate.
+`diport::ExternalPkiProviderClosure` is the sealed candidate-level capability proving that one selected Vault CSR-sign
+provider and its canonical non-secret production configuration digest were constructed together. It contains no
+tenant/device/generation authorization and cannot authorize an individual command. `pkiauthmint` is an isolated Basis
+capability whose exact wrappers are only `diport` (opaque seal signatures) and `vault` (the sole invoker); identity and
+composition can only consume a closure plus move-only evidence carrying the same provider config identity. Assembly
+wiring and activation remain separate.
+
+The external-PKI request common name is not caller policy authority. The production join derives the only accepted CN
+from the current authenticated `device_id` UUID and compares it before provider I/O; SANs remain the separately
+authorized canonical policy set.
 
 ### AuthorizedCertificateArtifact
 
@@ -207,6 +213,7 @@ This is a sealed capability/reference returned by an external PKI provider, not 
 | `artifact_id` | opaque ID | resolved only under authenticated tenant/device scope |
 | `cert_scope` | sealed `CertScope` | authenticated tenant/device binding; cannot be supplied as payload authority |
 | `desired_generation` | positive generation | exact desired match |
+| `authorization_receipt_id` | opaque non-nil UUID | exact current desired-generation lineage from the accepted policy decision |
 | `cert_serial` | sealed `CertSerial` | exact serial coordinate for the existing revocation store |
 | `public_key_digest` | SHA-256 digest | binds the enrolled device key |
 | `certificate_chain_digest` | SHA-256 digest | identifies the public artifact |
@@ -219,7 +226,8 @@ The sealed internal receipt makes `CertScope`, `CertSerial`, and `CertNotAfter` 
 
 The first verified provider result for `(tenant_id, device_id, desired_generation)` is appended once
 under the exact attempt lease, epoch, wake version, and desired-generation fence. The receipt stores
-all authorization bindings plus the terminal `cert_serial`/`cert_not_after` coordinates. An identical
+all authorization bindings, including `authorization_receipt_id`, plus the terminal `cert_serial`/`cert_not_after`
+coordinates. An identical
 retry is a no-op; different evidence for the same generation is an invariant violation and can never
 overwrite the row. Later attempts use this durable receipt rather than re-resolving mutable provider
 output.

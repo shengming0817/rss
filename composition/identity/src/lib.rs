@@ -4,6 +4,8 @@
 mod device_ingress;
 #[cfg(feature = "device-mqtt")]
 mod device_mqtt;
+mod encoding;
+mod external_pki;
 #[cfg(feature = "device-mqtt")]
 mod pilot;
 
@@ -30,8 +32,14 @@ const DOMAIN_NAME: &str = "identity";
 pub use device_ingress::{
     PostgresDeviceIngressSettlementError, acknowledge_postgres_device_ingress,
 };
+pub use external_pki::{
+    classify_external_pki_artifact_error, mint_external_pki_production_artifact,
+    validate_external_pki_artifact_request,
+};
 pub use identity::ports::device_certificate::{
-    DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError,
+    CertificateArtifactAcquisition, CertificateArtifactError, DeviceCertificateCommandTtl,
+    DeviceCertificateCommandTtlError, DeviceCertificateScope, DevicePolicyAuthorizationReceiptId,
+    ExpectedGeneration, PolicyHash,
 };
 #[cfg(all(feature = "device-mqtt", feature = "test-support"))]
 pub use pilot::PilotLoopPauseGuard;
