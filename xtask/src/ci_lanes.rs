@@ -107,7 +107,7 @@ pub(crate) enum GateGroup {
     Security,
     Coverage,
     LocalOnly,
-    Nightly,
+    Audit,
 }
 
 impl GateGroup {
@@ -118,7 +118,7 @@ impl GateGroup {
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
             Self::LocalOnly => "ci-local-only",
-            Self::Nightly => "audit",
+            Self::Audit => "audit",
         }
     }
 }
@@ -204,7 +204,7 @@ pub(crate) enum GateExecutor {
 pub(crate) enum GatePolicy {
     OnChange,
     ReleaseOnChange,
-    ReleaseScheduled,
+    AdvisoryRefresh,
     RequiredEvidence,
     Subsumed(SubsumptionProof),
 }
@@ -888,7 +888,7 @@ macro_rules! gate_catalog {
                             install_hint: DENY_HINT,
                         },
                         EvidenceKind::SupplyChain,
-                        GatePolicy::ReleaseScheduled,
+                        GatePolicy::AdvisoryRefresh,
                     )
             ),
         }
@@ -1035,11 +1035,11 @@ impl GateSpec {
             }
             (GateExecutor::RequiredEvidence, _) => [Some(GateGroup::LocalOnly), None],
             (GateExecutor::Coverage, _) => [Some(GateGroup::Coverage), None],
-            (GateExecutor::SupplyChain, GatePolicy::ReleaseScheduled) => {
-                [Some(GateGroup::Nightly), None]
+            (GateExecutor::SupplyChain, GatePolicy::AdvisoryRefresh) => {
+                [Some(GateGroup::Audit), None]
             }
             (GateExecutor::SupplyChain, GatePolicy::ReleaseOnChange) => {
-                [Some(GateGroup::Security), Some(GateGroup::Nightly)]
+                [Some(GateGroup::Security), Some(GateGroup::Audit)]
             }
             (GateExecutor::SupplyChain, _) => [Some(GateGroup::Security), None],
         }
@@ -1088,9 +1088,7 @@ const fn gate(
     policy: GatePolicy,
 ) -> GateSpec {
     let primary_owner = match policy {
-        GatePolicy::ReleaseOnChange | GatePolicy::ReleaseScheduled => {
-            ExecutionProfile::ReleaseCheck
-        }
+        GatePolicy::ReleaseOnChange | GatePolicy::AdvisoryRefresh => ExecutionProfile::ReleaseCheck,
         GatePolicy::OnChange | GatePolicy::RequiredEvidence | GatePolicy::Subsumed(_) => {
             match evidence {
                 EvidenceKind::Test => ExecutionProfile::Test,
@@ -1625,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_advisory_projection_is_typed_and_closed() {
+    fn advisory_refresh_projection_is_typed_and_closed() {
         let shared: Vec<_> = REGISTRY
             .iter()
             .filter(|spec| spec.lanes()[1].is_some())
@@ -1634,7 +1632,7 @@ mod tests {
         assert_eq!(shared[0].id(), GateId::CargoAudit);
         assert_eq!(
             shared[0].lanes(),
-            [Some(GateGroup::Security), Some(GateGroup::Nightly)]
+            [Some(GateGroup::Security), Some(GateGroup::Audit)]
         );
     }
 

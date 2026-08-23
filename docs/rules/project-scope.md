@@ -204,8 +204,8 @@ SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
 | 层 | V 模型对应关系 | 主证明 | 范围所有者 | 默认执行边界 |
 |----|---------------|--------|------------|--------------|
 | **T1 设计与组件证明** | 详细设计 / 实现 ↔ 单元与组件验证 | rustc/Cargo Hard、schema/codegen/golden、表驱动/属性/状态机测试、进程内 component/oneshot | 一个 invariant、crate 或 contract ID | affected PR 默认执行；不得要求真实 production provider 或 binary |
-| **T2 能力与接缝证明** | 架构 / 接口设计 ↔ 集成验证 | consumer contract、port/provider conformance、真实 adapter、migration/RLS、事务原子性/幂等及接缝故障 | 一个 contract seam、port 或实际交付 provider | 受影响能力选择有界 critical target；完整矩阵进入 develop/nightly |
-| **T3 生产组合与验收证明** | 系统需求 / 官方 profile 设计 ↔ 系统与验收验证 | production binary、真实 provider 组合、配置/CA/secret、readiness、关键纵向 journey、restart/drain 与 image smoke | 一个经 GA hardening trigger 授权的 candidate 或已激活官方 product profile、其唯一 designated/canonical production artifact 及显式接纳的闭集 T3 owner | 相关高风险变更定向执行；完整集合进入 production-runtime/nightly/release |
+| **T2 能力与接缝证明** | 架构 / 接口设计 ↔ 集成验证 | consumer contract、port/provider conformance、真实 adapter、migration/RLS、事务原子性/幂等及接缝故障 | 一个 contract seam、port 或实际交付 provider | 受影响能力选择有界 critical target；完整矩阵进入 develop/release 或显式 full |
+| **T3 生产组合与验收证明** | 系统需求 / 官方 profile 设计 ↔ 系统与验收验证 | production binary、真实 provider 组合、配置/CA/secret、readiness、关键纵向 journey、restart/drain 与 image smoke | 一个经 GA hardening trigger 授权的 candidate 或已激活官方 product profile、其唯一 designated/canonical production artifact 及显式接纳的闭集 T3 owner | 相关高风险变更定向执行；完整集合进入 develop/release 或显式 full 的 production-runtime |
 
 范围基数按 owner 和独立失效模式确定，不按当前数量做 golden：
 
@@ -263,7 +263,7 @@ readiness 与干净退出，除非二者存在独立生产失效模式。
 |--------------|----|--------------------------------------|------------------------|-------------------|
 | `candidate`（无 hardening trigger） | 禁止 | 禁止 | 禁止 | 仅既有 affected T1/T2 与已激活 canonical T3 |
 | `hardening-authorized` | 仅正式 trigger 明列且经独立 T3 issue/PR 批准的 candidate item | 仅正式 trigger 逐项明列的最低充分项 | 禁止；除非同时满足下述有界例外并逐项明列 | candidate 直接命令验证，不注册 required selector |
-| `active` | 运行已激活 canonical T3；扩展仍需独立批准 | 维持已接纳最小项；新增仍逐项触发 | 禁止；除非满足下述有界例外并逐项明列 | affected canonical T3 可进入普通 PR；全集仅 nightly/release |
+| `active` | 运行已激活 canonical T3；扩展仍需独立批准 | 维持已接纳最小项；新增仍逐项触发 | 禁止；除非满足下述有界例外并逐项明列 | affected canonical T3 可进入普通 PR；全集仅 develop/release 或显式 full |
 | GA 后 | 维持 canonical T3；不因 GA 自动扩展 | 仅基于真实流量调优 RSS 自有项 | 仍需 RSS owner 边界内的独立接纳；托管监控保持 External | 不改变既有 selection 分层 |
 
 - GA maturity 默认禁止。GA hardening trigger 明确接纳前（包括 scope freeze 前及 freeze 后尚未启动 hardening 的区间），
@@ -274,12 +274,12 @@ readiness 与干净退出，除非二者存在独立生产失效模式。
   通用 evidence 平台。
 - 普通能力 PR 只运行既有 affected T1/T2 与已激活 canonical T3 的有界选择，不因 hardening 自动拉起 candidate T3。
   独立 T3 PR 以 evidence plan 中的精确命令直接运行 candidate；candidate 在真实通过并完成 activation 前不注册到普通
-  PR required selector。完整 active T3、fault/recovery、performance/soak 仍只进入 develop/nightly/release 或显式 full。
+  PR required selector。完整 active T3、fault/recovery、performance/soak 仍只进入 develop/release 或显式 full。
 - GA 后才可基于真实流量调优 error budget、paging threshold、容量和长期运行参数；该阶段不改变 `External` 边界：
   autoscaling controller、多区域 delivery、商业 tenant 等级和托管监控仍由外部系统拥有，不能因 GA 完成进入 RSS。
 - GA 前例外只限：已接纳官方产品面的 correctness/safety blocker；不测量就无法决定不可逆架构选择；明确的安全、合规或
   数据完整性要求；或已进入 GA hardening 且具有正式 acceptance trigger。每个例外必须同时记录正式 trigger、official
-  product/profile、canonical proof owner、最低充分 T1/T2/T3、固定时间与 CI 预算、PR/nightly/release 执行位置、禁止扩张
+  product/profile、canonical proof owner、最低充分 T1/T2/T3、固定时间与 CI 预算、PR/develop/release/显式 full 执行位置、禁止扩张
   的矩阵维度，以及完成后替换或删除的既有证明。只有最低充分层包含 T3 时才填写闭值 T3 owner
   （`ProfileLifecycleJoin | AcceptedValueStreamJoin`）；T1/T2-only 项必须写 `T3 owner=N/A（未申请 T3）`。
   “更完整”“企业级”“多一道保险”不是例外理由。
@@ -356,7 +356,7 @@ generated inventory 或任何 committed static registry，也不得由静态 gat
 - **执行频率**：普通 PR 只在固定 `check`、`test-affected`、`integration-critical` Job 中运行 affected T1 和
   capability map 选出的有界 T2/T3。分析失败、高影响根或保守 rename 升级为 `PrComplete`，仍不得触发
   coverage、audit、全部 integration shard 或其它 `ReleaseCheck` 成员。完整回归、跨 provider conformance、
-  fault/recovery、performance/soak 和供应链时效检查只进入 develop/nightly/release 或显式 `ci full`。本地
+  fault/recovery、performance/soak 和供应链时效检查只进入 develop/release 或显式 `ci full`。本地
   `make ci` 保持 10 分钟有界：unknown 忽略并留痕，影响分析失败直接报错，二者均不自动升级 full。
 - **测试标签不是层级**：regression 是选择方式，smoke 是深度，fault/concurrency/security/performance 是场景维度；
   它们嵌入最低充分层，不各自复制一套 suite。performance 必须绑定明确的生产 SLO；soak 必须绑定生产 SLO，

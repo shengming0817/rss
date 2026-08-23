@@ -254,7 +254,7 @@ runs:
 
     - name: Save sealed tools from trusted runs
       id: tools-save
-      if: ${{ steps.tools-cache-verify.outcome != 'success' && steps.tools-verify.outcome == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'schedule') }}
+      if: ${{ steps.tools-cache-verify.outcome != 'success' && steps.tools-verify.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/develop' }}
       continue-on-error: true
       uses: actions/cache/save@v4
       with:

@@ -5,8 +5,6 @@ on:
     branches: [develop]
   push:
     branches: [develop]
-  schedule:
-    - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -168,48 +166,6 @@ jobs:
             case "$dependency" in *=success) ;; *) failed=true ;; esac
           done
           [ "$failed" = false ]
-
-  scheduled-audit-fallback:
-    name: scheduled-audit-fallback
-    if: ${{ always() && github.event_name == 'schedule' && needs.preflight.result != 'success' }}
-    needs: preflight
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Checkout scheduled audit revision
-        id: audit-checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-          ref: ${{ github.sha }}
-      - name: Setup scheduled audit tools
-        id: audit-setup
-        uses: ./.github/actions/setup-rss-ci
-        with:
-          lane: audit
-          compiler-partition: audit
-          toolchain: 1.96.0
-          nightly: ""
-          download-cache-epoch: v7
-          tool-cache-epoch: v4
-          compiler-cache-epoch: v4
-      - name: Scan prose for stale governance claims
-        id: audit-prose-scan
-        continue-on-error: true
-        run: bash hack/automation/prose-advisory-scan.sh scan
-      - name: Run scheduled audit fallback
-        id: audit-run
-        run: cargo run --locked -p xtask -- ci audit
-      - name: Finalize scheduled audit caches
-        id: audit-finalize
-        if: ${{ always() && !cancelled() && steps.audit-setup.outcome == 'success' }}
-        continue-on-error: true
-        uses: ./.github/actions/finalize-rss-ci
-        with:
-          cache-context: ${{ steps.audit-setup.outputs.cache-context }}
-          execution-outcome: ${{ steps.audit-run.outcome }}
-          save-eligible: ${{ steps.audit-run.outcome == 'success' || steps.audit-run.outcome == 'failure' }}
 
   ci-gate:
     name: ci-gate

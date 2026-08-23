@@ -125,7 +125,7 @@
 
 ## pm:ci 评论（`<!-- pm:ci -->`）
 
-> 外部 CI-capable producer 的检查结果记录；ship/fix 默认执行 10 分钟有界本地 canonical `make ci CI_BASE=<remote>/develop`，重型门交 nightly/develop，不追加 `make ci-full`，也不生产或等待 pm:ci。`ci-green` 是终态（`next.agent=null`），`ci-failed` 路由至 `next.agent=human`，本评论只记录外部检查结果。
+> 外部 CI-capable producer 的检查结果记录；ship/fix 默认执行 10 分钟有界本地 canonical `make ci CI_BASE=<remote>/develop`，重型门交 develop/release 或显式 full，不追加 `make ci-full`，也不生产或等待 pm:ci。`ci-green` 是终态（`next.agent=null`），`ci-failed` 路由至 `next.agent=human`，本评论只记录外部检查结果。
 
 ```markdown
 <!-- pm:ci -->

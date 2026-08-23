@@ -1,0 +1,51 @@
+name: Security audit
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rss-security-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: rustsec advisory refresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout default branch revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+
+      - name: Setup audit tools
+        id: audit-setup
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          lane: audit
+          compiler-partition: audit
+          toolchain: 1.96.0
+          nightly: ""
+          download-cache-epoch: v7
+          tool-cache-epoch: v4
+          compiler-cache-epoch: v4
+
+      - name: Run typed advisory audit
+        id: audit-run
+        run: cargo run --locked -p xtask -- ci audit
+
+      - name: Finalize audit caches
+        if: ${{ always() && !cancelled() && steps.audit-setup.outcome == 'success' }}
+        continue-on-error: true
+        uses: ./.github/actions/finalize-rss-ci
+        with:
+          cache-context: ${{ steps.audit-setup.outputs.cache-context }}
+          execution-outcome: ${{ steps.audit-run.outcome }}
+          save-eligible: ${{ steps.audit-run.outcome == 'success' || steps.audit-run.outcome == 'failure' }}

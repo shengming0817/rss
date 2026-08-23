@@ -90,7 +90,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 1. 完整展示聚类后的 findings，并保留可定位证据。
 2. IN_SCOPE Cx1/Cx2 直接派 `developer` 修复，不逐条询问。只要存在任一 IN_SCOPE Cx3/Cx4，就必须严格按 `.github/project-template/PROJECT.md` §5 发起一次批量处置，由用户对整批建议作出决策；只有不存在此类 finding 时才不沟通。这是顶部自主推进规则的显式决策门，不以“方案无歧义”为由跳过。
 3. 推送修复并完成冲突预检；按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、评论 artifact、机器块、label 流转与延迟监控，内容格式分别引用 `backlog.md` 和 `pr-comment.md`。
-4. **本地验证（label 后执行）**：运行 `make -C <worktree> ci CI_BASE=<remote>/develop`，其中 `<worktree>` 是阶段 3 记录的绝对路径，展开后的命令形如 `make -C /absolute/worktrees/<type>/<name> ci CI_BASE=<remote>/develop`。这是 10 分钟有界 affected preflight；失败则回到相应实施批次，修复、推送并重新完成收尾流转。重型门交 nightly/develop。
+4. **本地验证（label 后执行）**：运行 `make -C <worktree> ci CI_BASE=<remote>/develop`，其中 `<worktree>` 是阶段 3 记录的绝对路径，展开后的命令形如 `make -C /absolute/worktrees/<type>/<name> ci CI_BASE=<remote>/develop`。这是 10 分钟有界 affected preflight；失败则回到相应实施批次，修复、推送并重新完成收尾流转。重型门交 develop/release 或显式 full；每日 security-audit 只刷新 advisory，不运行测试。
 
 artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/project-template/PROJECT.md` §5。
 

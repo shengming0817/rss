@@ -76,7 +76,7 @@ bundle 生成，不要求或暗示 crates.io 预发布。
   条件条目额外使用 `flag-cond`。
 - **FR-012**：所有 PBI 使用真实 `Blocked-by: #N` 留下依赖；不写 W0–W8 或看板 Wave 字段。
 - **FR-013**：每个实现 PR 的最终本地门是 `make ci CI_BASE=origin/develop`；重型 provider/full matrix 留给
-  nightly/develop 或 PBI 明确的定向诊断。
+  develop/release、显式 full 或 PBI 明确的定向诊断；每日 security-audit 只刷新 advisory，不运行测试。
 
 ## 非目标
 

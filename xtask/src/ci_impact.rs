@@ -256,7 +256,6 @@ pub(crate) enum SelectionMode {
 pub(crate) enum DecisionReason {
     PullRequestImpact,
     DevelopPush,
-    Schedule,
     WorkflowDispatch,
     FullOverride,
     GlobalImpact,
@@ -818,7 +817,6 @@ fn legal_selection(mode: SelectionMode, reason: DecisionReason) -> bool {
         DecisionReason::PullRequestImpact => mode == SelectionMode::Adaptive,
         DecisionReason::GlobalImpact => mode == SelectionMode::PrComplete,
         DecisionReason::DevelopPush
-        | DecisionReason::Schedule
         | DecisionReason::WorkflowDispatch
         | DecisionReason::FullOverride => mode == SelectionMode::ReleaseCheck,
         DecisionReason::PolicyInvalid
@@ -1738,9 +1736,6 @@ fn plan_event_with_facts(
             DecisionReason::DevelopPush,
             execution_revision,
         ),
-        "schedule" => {
-            release_selection(policy_version, DecisionReason::Schedule, execution_revision)
-        }
         "workflow_dispatch" => release_selection(
             policy_version,
             DecisionReason::WorkflowDispatch,
@@ -4405,7 +4400,6 @@ const fn decision_reason_name(reason: DecisionReason) -> &'static str {
     match reason {
         DecisionReason::PullRequestImpact => "pull-request-impact",
         DecisionReason::DevelopPush => "develop-push",
-        DecisionReason::Schedule => "schedule",
         DecisionReason::WorkflowDispatch => "workflow-dispatch",
         DecisionReason::FullOverride => "full-override",
         DecisionReason::GlobalImpact => "global-impact",
@@ -4911,6 +4905,48 @@ mod tests {
             full_override(Some(OsStr::new("TRUE"))),
             FullOverride::Invalid
         );
+    }
+
+    #[test]
+    fn fixed_events_exclude_scheduled_nightly() -> Result<()> {
+        let root = Path::new(".");
+        let facts = CommandWorkspaceFacts::new(root);
+        let policy = policy_version(b"schemaVersion=3\nmode='adaptive'\n");
+        let revision = "a".repeat(40);
+
+        for (event, reason) in [
+            ("push", DecisionReason::DevelopPush),
+            ("workflow_dispatch", DecisionReason::WorkflowDispatch),
+        ] {
+            let plan = plan_event_with_facts(
+                root,
+                &facts,
+                event,
+                "{}",
+                policy.clone(),
+                PolicyMode::Adaptive,
+                revision.clone(),
+            )?;
+            assert_eq!(plan.mode(), SelectionMode::ReleaseCheck);
+            assert_eq!(plan.decision_reason, reason);
+        }
+
+        let plan = plan_event_with_facts(
+            root,
+            &facts,
+            "schedule",
+            "{}",
+            policy,
+            PolicyMode::Adaptive,
+            revision,
+        )?;
+        assert_eq!(plan.mode(), SelectionMode::ReleaseCheck);
+        assert_eq!(plan.decision_reason, DecisionReason::EventInvalid);
+        assert_eq!(
+            plan.fallback_context.map(|context| context.code),
+            Some(FallbackCode::EventInvalid)
+        );
+        Ok(())
     }
 
     #[test]
@@ -5932,7 +5968,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             labels.iter().all(|label| !label.contains("integration")),
-            "integration compile belongs to nightly/develop, not local preflight: {labels:?}"
+            "integration compile belongs to develop/release, not local preflight: {labels:?}"
         );
         Ok(())
     }

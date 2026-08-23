@@ -38,7 +38,7 @@ GitHub pull request 的执行拓扑固定（preflight 只构建一次 xtask，�
 执行 Job 的最终结果，不解析额外回执）。integration 使用四个显式、非 matrix 的闭合 group 并行 carrier，随后聚合为稳定的
 `integration-critical` context；具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，不在此手抄闭集。
 分析失败、高影响根或保守 rename 会把 PR 选择升级为 `PrComplete`，但不会触发 `ReleaseCheck`。后者只属于
-develop、nightly、release 或显式 `ci full`。
+develop、release 或显式 `ci full`。
 cargo-nextest profile 只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
 当前承载状态与迁移边界见 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)。
 

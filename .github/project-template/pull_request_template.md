@@ -43,4 +43,4 @@ journey 时保留本节；其余 PR 删除整节。逐项对应 issue 中的 evi
 
 ## Test plan
 
-- [ ] `make ci CI_BASE=<remote>/develop` 10 分钟有界本地通过（只分析已提交差异；重型门 `DEFERRED` 到 nightly/develop，不追加 `make ci-full`）
+- [ ] `make ci CI_BASE=<remote>/develop` 10 分钟有界本地通过（只分析已提交差异；重型门 `DEFERRED` 到 develop/release 或显式 full，不追加 `make ci-full`）

@@ -13,7 +13,7 @@ cache key 只由 `.github/scripts/ci-cache-maintain.sh derive-keys` 派生：
   避免并发 Job 或不同 affected 集合用不完整快照永久抢占相同 key。只缓存 runner 临时 Cargo home 内的
   registry cache/index 与 git db，不缓存 credentials。
 - sealed 工具 `v4`：OS、架构、toolchain、nightly、lane 与工具策略 hash 组成 exact key。工具 cache 不包含
-  Cargo/source 输入；restore 后必须验 seal，失效即安全重建。只有 develop push 或 schedule 能持久化工具 cache。
+  Cargo/source 输入；restore 后必须验 seal，失效即安全重建。只有 develop push 能持久化工具 cache。
 - sccache `v3`：OS、架构、toolchain、nightly、sccache 版本、lane、输入 hash、run id 与 attempt 组成唯一
   primary。恢复顺序为相同输入前缀，再到去掉输入 hash 的相同 invariant 前缀。输入变化只令不匹配的 sccache
   对象 miss，不再切断同 toolchain/lane 的历史对象；sccache 自身仍按 compiler、有效 rustc 参数/features、源码、
@@ -24,7 +24,7 @@ cache key 只由 `.github/scripts/ci-cache-maintain.sh derive-keys` 派生：
 
 ## 失败保存与容量边界
 
-`setup-rss-ci` 负责全部 restore，并仅在可信 develop push/schedule 保存已校验的 sealed tools；`finalize-rss-ci` 是
+`setup-rss-ci` 负责全部 restore，并仅在可信 develop push 保存已校验的 sealed tools；`finalize-rss-ci` 是
 Cargo 下载与 compiler snapshot 的唯一 save owner。普通 success/failure
 执行结束后先采集 JSON stats、停止 sccache server，再验证 cache root 是 runner temp 的安全、非空、最多 2 GiB
 的 descendant，最后使用本次 run/attempt primary key 尝试保存。取消、timeout、setup 未完成、server 未停止、

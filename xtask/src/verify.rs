@@ -19,10 +19,10 @@
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
 //! CI 门。两者与固定 GitHub jobs 均经 [`plan_for`] 与 [`FixedCiJob`] 的 Hard 闭集派生，杜绝门集漂移。
 //!
-//! **`cargo xtask ci audit`（[`run_audit`]）= 供应链漏洞定时刷新入口**（issue #1133，GitHub Actions
-//! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
+//! **`cargo xtask ci audit`（[`run_audit`]）= 供应链漏洞显式诊断入口**（issue #1133）：
+//! advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
 //! （皆 no-compile、快）。PR-triggered adaptive plan 按影响选择 `deny check`
-//! （advisories+licenses+bans+sources）+ cargo-audit；scheduled audit 专攻**时间维度**，捕获未改依赖的新披露
+//! （advisories+licenses+bans+sources）+ cargo-audit；显式 audit 专攻**时间维度**，捕获未改依赖的新披露
 //! CVE。两者在各自 run 内 fail-closed；`ci-gate` 激活为 required check 或建立 forge bridge 前均不阻断 Azure 合入。
 //!
 //! **`cargo-udeps` 仍不入三者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
@@ -595,8 +595,8 @@ fn step_deny() -> Step {
         env: &[],
     }
 }
-/// audit 定时 lane 专用：advisory-scoped `cargo deny check advisories`（只查 RustSec 漏洞库，
-/// licenses/bans 留给 PR-triggered adaptive plan 的 [`step_deny`]）。issue #1133 每日 cron 只刷新漏洞维度。
+/// audit 显式诊断专用：advisory-scoped `cargo deny check advisories`（只查 RustSec 漏洞库，
+/// licenses/bans 留给 PR-triggered adaptive plan 的 [`step_deny`]）。
 fn step_deny_advisories() -> Step {
     Step {
         id: GateId::DenyAdvisories,
@@ -898,7 +898,7 @@ pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
             | GateGroup::Security
             | GateGroup::Coverage
             | GateGroup::LocalOnly
-            | GateGroup::Nightly,
+            | GateGroup::Audit,
         ) => &[ExecutionProfile::ReleaseCheck],
         PlanProjection::Verify => &[ExecutionProfile::Check, ExecutionProfile::Test],
         PlanProjection::Lane(GateGroup::Core) => {
@@ -922,7 +922,7 @@ pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
         })
         .map(step_for_id)
         .collect::<Vec<_>>();
-    if target == PlanProjection::Lane(GateGroup::Nightly) {
+    if target == PlanProjection::Lane(GateGroup::Audit) {
         plan.sort_by_key(|step| usize::from(step.id == GateId::CargoAudit));
     }
     plan
@@ -939,15 +939,15 @@ macro_rules! define_step_dispatch {
 }
 crate::ci_lanes::gate_catalog!(define_step_dispatch);
 
-/// audit 精简供应链门步计划（issue #1133；统一 GitHub CI typed Audit job）。
-/// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
-/// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；
+/// audit 精简供应链门步计划（issue #1133；显式人工诊断入口）。
+/// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快，用于检查「未变依赖」后来披露的新
+/// CVE。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），重复检查无增益；
 /// `release-check` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
 /// [`step_cargo_audit`] 构造。
 ///
 /// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
 fn audit_plan() -> Vec<Step> {
-    plan_for(PlanProjection::Lane(GateGroup::Nightly))
+    plan_for(PlanProjection::Lane(GateGroup::Audit))
 }
 
 const CRATES_IO_REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -2414,8 +2414,7 @@ pub(crate) fn run_fixed_job(
     }
 }
 
-/// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
-/// GitHub Actions schedule 由 `ci audit` 调用。
+/// audit 入口（issue #1133 供应链显式诊断）：按 [`audit_plan`] 顺序跑每步，fail-fast。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
 pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -3136,7 +3135,7 @@ mod tests {
             GateGroup::Security,
             GateGroup::Coverage,
             GateGroup::LocalOnly,
-            GateGroup::Nightly,
+            GateGroup::Audit,
         ]
         .into_iter()
         .map(|lane| {
@@ -5080,10 +5079,10 @@ mod tests {
         }
     }
 
-    // ---- audit 精简供应链 lane（issue #1133；每日 cron advisory 刷新）----
+    // ---- audit 精简供应链 lane（issue #1133；显式 advisory 诊断）----
 
-    /// audit_plan 顺序与门集（单一事实源；scheduled lane 实跑顺序）：advisory-scoped deny + cargo-audit。
-    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；release-check 已全查。
+    /// audit_plan 顺序与门集（单一事实源）：advisory-scoped deny + cargo-audit。
+    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），重复跑无增益；release-check 已全查。
     #[test]
     fn audit_plan_keeps_local_supply_chain_order() {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
@@ -5197,7 +5196,7 @@ mod tests {
     }
 
     /// audit lane 的 deny 步是 **advisory-scoped**（`deny check advisories`），非裸 `deny check`——
-    /// 定时刷新只查漏洞库，licenses/bans 留给 PR-triggered adaptive plan 的 `deny check`。
+    /// 显式诊断只查漏洞库，licenses/bans 留给 PR-triggered adaptive plan 的 `deny check`。
     #[test]
     fn audit_plan_deny_is_advisories_scoped() -> anyhow::Result<()> {
         let plan = audit_plan();
@@ -5895,69 +5894,6 @@ mod tests {
             .is_some()
     }
 
-    fn scheduled_audit_is_exact(
-        root: &serde_yaml_ng::Mapping,
-        jobs: &serde_yaml_ng::Mapping,
-    ) -> bool {
-        let schedule_is_utc = yaml_field(root, "on")
-            .and_then(yaml_map)
-            .and_then(|on| yaml_field(on, "schedule"))
-            .and_then(serde_yaml_ng::Value::as_sequence)
-            .is_some_and(|entries| {
-                entries.len() == 1
-                    && entries[0].as_mapping().is_some_and(|entry| {
-                        yaml_keys_exact(entry, &["cron"])
-                            && yaml_scalar(entry, "cron") == Some("0 6 * * *")
-                    })
-            });
-        let Some(job) = yaml_field(jobs, "scheduled-audit-fallback").and_then(yaml_map) else {
-            return false;
-        };
-        let checkout = step_by_id(job, "audit-checkout");
-        let setup = step_by_id(job, "audit-setup");
-        let prose = step_by_id(job, "audit-prose-scan");
-        let audit = step_by_id(job, "audit-run");
-        schedule_is_utc
-            && yaml_scalar(job, "if")
-                == Some(
-                    "${{ always() && github.event_name == 'schedule' && needs.preflight.result != 'success' }}",
-                )
-            && yaml_scalar(job, "needs") == Some("preflight")
-            && checkout.is_some_and(|step| {
-                yaml_scalar(step, "uses") == Some("actions/checkout@v4")
-                    && yaml_field(step, "with")
-                        .and_then(yaml_map)
-                        .is_some_and(|with| {
-                            yaml_field(with, "persist-credentials")
-                                .and_then(serde_yaml_ng::Value::as_bool)
-                                == Some(false)
-                                && yaml_scalar(with, "ref") == Some("${{ github.sha }}")
-                        })
-            })
-            && setup.is_some_and(|step| {
-                yaml_scalar(step, "uses") == Some("./.github/actions/setup-rss-ci")
-                    && yaml_field(step, "with")
-                        .and_then(yaml_map)
-                        .is_some_and(|with| {
-                            yaml_scalar(with, "lane") == Some("audit")
-                                && yaml_scalar(with, "compiler-partition") == Some("audit")
-                                && yaml_scalar(with, "download-cache-epoch") == Some("v7")
-                                && yaml_scalar(with, "tool-cache-epoch") == Some("v4")
-                                && yaml_scalar(with, "compiler-cache-epoch") == Some("v4")
-                        })
-            })
-            && step_ids_are_ordered(job, &["audit-setup", "audit-prose-scan", "audit-run"])
-            && prose.is_some_and(|step| {
-                yaml_keys_exact(step, &["continue-on-error", "id", "name", "run"])
-                    && yaml_field(step, "continue-on-error").and_then(serde_yaml_ng::Value::as_bool)
-                        == Some(true)
-                    && yaml_scalar(step, "run")
-                        == Some("bash hack/automation/prose-advisory-scan.sh scan")
-            })
-            && audit.and_then(|step| yaml_scalar(step, "run"))
-                == Some("cargo run --locked -p xtask -- ci audit")
-    }
-
     fn artifact_step_is_exact(
         job: &serde_yaml_ng::Mapping,
         id: &str,
@@ -6092,11 +6028,7 @@ mod tests {
             "test-affected".to_owned(),
         ];
         expected_jobs.extend(integration_jobs.iter().cloned());
-        expected_jobs.extend([
-            "integration-critical".to_owned(),
-            "scheduled-audit-fallback".to_owned(),
-            "ci-gate".to_owned(),
-        ]);
+        expected_jobs.extend(["integration-critical".to_owned(), "ci-gate".to_owned()]);
         let Some(reusable_jobs) = yaml_field(reusable_root, "jobs").and_then(yaml_map) else {
             return false;
         };
@@ -6141,12 +6073,17 @@ mod tests {
             .map(|group| format!("integration-critical:{group}"))
             .collect::<Vec<_>>()
             .join("|");
-        let push_is_develop_only = yaml_field(caller_root, "on")
+        let fixed_events_are_exact = yaml_field(caller_root, "on")
             .and_then(yaml_map)
-            .and_then(|on| yaml_field(on, "push"))
-            .and_then(yaml_map)
-            .and_then(|push| yaml_field(push, "branches"))
-            .is_some_and(|branches| yaml_sequence_exact(branches, &["develop"]));
+            .is_some_and(|events| {
+                yaml_keys_exact(events, &["pull_request", "push", "workflow_dispatch"])
+                    && ["pull_request", "push"].into_iter().all(|event| {
+                        yaml_field(events, event)
+                            .and_then(yaml_map)
+                            .and_then(|event| yaml_field(event, "branches"))
+                            .is_some_and(|branches| yaml_sequence_exact(branches, &["develop"]))
+                    })
+            });
         let integration_gate = yaml_field(jobs, "integration-critical").and_then(yaml_map);
         let exact_integration_gate = integration_gate.is_some_and(|gate| {
             yaml_scalar(gate, "if") == Some("${{ always() }}")
@@ -6273,22 +6210,18 @@ mod tests {
                 yaml_scalar(step, "if")
                     == Some("${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}")
             });
-        let cache_lifecycle = preflight.is_some_and(|job| {
-            cache_caller_is_exact(
-                job,
-                "preflight-setup",
-                "preflight-run",
-                "preflight-finalize",
-            )
-        }) && yaml_field(jobs, "scheduled-audit-fallback")
-            .and_then(yaml_map)
-            .is_some_and(|job| {
-                cache_caller_is_exact(job, "audit-setup", "audit-run", "audit-finalize")
-            })
-            && cache_caller_is_exact(execute, "rss-setup", "xtask", "rss-finalize")
-            && workflow_has_no_direct_cache(caller_root)
-            && workflow_has_no_direct_cache(reusable_root)
-            && fixed_cache_actions_are_closed(setup, finalize, cache_policy);
+        let cache_lifecycle =
+            preflight.is_some_and(|job| {
+                cache_caller_is_exact(
+                    job,
+                    "preflight-setup",
+                    "preflight-run",
+                    "preflight-finalize",
+                )
+            }) && cache_caller_is_exact(execute, "rss-setup", "xtask", "rss-finalize")
+                && workflow_has_no_direct_cache(caller_root)
+                && workflow_has_no_direct_cache(reusable_root)
+                && fixed_cache_actions_are_closed(setup, finalize, cache_policy);
         let lifecycle = step_ids_are_ordered(
             execute,
             &[
@@ -6361,8 +6294,7 @@ mod tests {
             && exact_permissions
             && exact_inputs
             && fixed_calls
-            && push_is_develop_only
-            && scheduled_audit_is_exact(caller_root, jobs)
+            && fixed_events_are_exact
             && exact_preflight
             && exact_integration_gate
             && exact_gate
@@ -6389,6 +6321,76 @@ mod tests {
     }
 
     #[test]
+    fn committed_ci_workflow_has_no_scheduled_nightly() {
+        let workflow = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(include_str!(
+            "../../.github/workflows/ci.yml"
+        ))
+        .expect("committed CI workflow must parse as YAML");
+        let root = yaml_map(&workflow).expect("committed CI workflow must be a mapping");
+        let triggers = yaml_field(root, "on")
+            .and_then(yaml_map)
+            .expect("committed CI workflow must declare triggers");
+        let jobs = yaml_field(root, "jobs")
+            .and_then(yaml_map)
+            .expect("committed CI workflow must declare jobs");
+
+        assert!(
+            yaml_field(triggers, "schedule").is_none(),
+            "fixed CI must not repeat ReleaseCheck on a nightly schedule"
+        );
+        assert!(
+            yaml_field(jobs, "scheduled-audit-fallback").is_none(),
+            "fixed CI must not retain the scheduled-only fallback job"
+        );
+    }
+
+    #[test]
+    fn committed_scheduled_security_audit_is_narrow() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/security-audit.yml");
+        let workflow = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let value = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&workflow)
+            .expect("scheduled security audit must parse as YAML");
+        let root = yaml_map(&value).expect("scheduled security audit must be a mapping");
+        let triggers = yaml_field(root, "on")
+            .and_then(yaml_map)
+            .expect("scheduled security audit must declare triggers");
+        let schedule = yaml_field(triggers, "schedule")
+            .and_then(serde_yaml_ng::Value::as_sequence)
+            .expect("scheduled security audit must declare a UTC cron");
+        let jobs = yaml_field(root, "jobs")
+            .and_then(yaml_map)
+            .expect("scheduled security audit must declare jobs");
+
+        assert!(yaml_keys_exact(
+            triggers,
+            &["schedule", "workflow_dispatch"]
+        ));
+        assert_eq!(schedule.len(), 1);
+        assert_eq!(
+            schedule[0]
+                .as_mapping()
+                .and_then(|entry| yaml_scalar(entry, "cron")),
+            Some("0 6 * * *")
+        );
+        assert!(exact_read_permissions(root));
+        assert!(yaml_keys_exact(jobs, &["audit"]));
+        assert_eq!(
+            workflow
+                .matches("cargo run --locked -p xtask -- ci audit")
+                .count(),
+            1
+        );
+        for forbidden in ["ci full", "ci run --job", "nextest", "cargo test"] {
+            assert!(
+                !workflow.contains(forbidden),
+                "scheduled security audit must not execute `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
     fn fixed_ci_workflow_guard_rejects_structural_weakening() {
         let caller = include_str!("../../.github/workflows/ci.yml");
         let reusable = include_str!("../../.github/workflows/rss-rust-job.yml");
@@ -6410,6 +6412,8 @@ mod tests {
             (caller.replace("*=success) ;;", "*=failure) ;;"), reusable.to_owned()),
             (caller.replacen("            \"artifact=$ARTIFACT_RESULT\"; do\n", "            ; do\n", 1), reusable.to_owned()),
             (caller.replace("    branches: [develop]\n", "    branches: [develop, feature/**]\n"), reusable.to_owned()),
+            (caller.replacen("  workflow_dispatch:\n", "  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\n", 1), reusable.to_owned()),
+            (caller.replacen("  ci-gate:\n", "  scheduled-audit-fallback:\n    runs-on: ubuntu-latest\n  ci-gate:\n", 1), reusable.to_owned()),
             (caller.to_owned(), reusable.replacen("      source-revision:\n", "      legacy-lane:\n        required: false\n        type: string\n      source-revision:\n", 1)),
             (caller.to_owned(), reusable.replacen("steps.validate-localtx.outcome == 'success'", "always()", 1)),
             (caller.to_owned(), reusable.replacen("steps.validate-localonly.outcome == 'success'", "always()", 1)),
@@ -6431,63 +6435,6 @@ mod tests {
                     cache_policy,
                 ),
                 "fixed workflow synthetic red {index} was accepted"
-            );
-        }
-        for (label, red_caller) in [
-            (
-                "blocking prose advisory",
-                caller.replacen("        continue-on-error: true\n        run: bash hack/automation/prose-advisory-scan.sh scan", "        continue-on-error: false\n        run: bash hack/automation/prose-advisory-scan.sh scan", 1),
-            ),
-            (
-                "wrong prose advisory entrypoint",
-                caller.replacen(
-                    "run: bash hack/automation/prose-advisory-scan.sh scan",
-                    "run: bash hack/automation/prose-advisory-scan.sh selftest",
-                    1,
-                ),
-            ),
-            (
-                "wrong execution outcome binding",
-                caller.replacen(
-                    "execution-outcome: ${{ steps.audit-run.outcome }}",
-                    "execution-outcome: ${{ steps.audit-prose-scan.outcome }}",
-                    1,
-                ),
-            ),
-            (
-                "constant save eligibility",
-                caller.replacen(
-                    "save-eligible: ${{ steps.audit-run.outcome == 'success' || steps.audit-run.outcome == 'failure' }}",
-                    "save-eligible: true",
-                    1,
-                ),
-            ),
-            (
-                "direct caller cache bypass",
-                caller.replacen(
-                    "      - name: Finalize scheduled audit caches\n",
-                    "      - name: Direct cache bypass\n        uses: actions/cache/save@v4\n        with:\n          path: .cache/direct\n          key: direct\n\n      - name: Finalize scheduled audit caches\n",
-                    1,
-                ),
-            ),
-            (
-                "duplicate setup action",
-                caller.replacen(
-                    "      - name: Finalize scheduled audit caches\n",
-                    "      - name: Duplicate setup\n        id: duplicate-setup\n        uses: ./.github/actions/setup-rss-ci\n\n      - name: Finalize scheduled audit caches\n",
-                    1,
-                ),
-            ),
-        ] {
-            assert!(
-                !fixed_ci_workflow_is_closed(
-                    &red_caller,
-                    reusable,
-                    setup,
-                    finalize,
-                    cache_policy,
-                ),
-                "fixed workflow cache synthetic red `{label}` was accepted"
             );
         }
         for (label, red_setup, red_finalize) in [
@@ -6640,7 +6587,7 @@ mod tests {
                 run.contains(".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\"")
             })
             && save.is_some_and(|step| {
-                yaml_scalar(step, "if") == Some("${{ steps.tools-cache-verify.outcome != 'success' && steps.tools-verify.outcome == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'schedule') }}")
+                yaml_scalar(step, "if") == Some("${{ steps.tools-cache-verify.outcome != 'success' && steps.tools-verify.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/develop' }}")
                     && yaml_scalar(step, "uses") == Some("actions/cache/save@v4")
                     && yaml_field(step, "with").and_then(yaml_map).is_some_and(|with| {
                         yaml_scalar(with, "path") == Some(".cache/ci-tools/${{ inputs.lane }}")

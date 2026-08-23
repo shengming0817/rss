@@ -15,7 +15,7 @@ exact-set 和真实后端断言在该执行单元内 fail-closed。PR 的 result
 或核对额外报告；诊断 artifact 不能把失败执行改写为通过。
 
 `PrComplete` 只会选择 PR 固定图内的 critical units，不等于 `ReleaseCheck`。全部 Postgres/integration catalog
-只属于 develop、nightly、release 或显式 `cargo xtask ci full`。
+只属于 develop、release 或显式 `cargo xtask ci full`。
 
 ## Post-merge operator checklist
 

@@ -13,7 +13,7 @@
 #   make ci-full      仅人工诊断时显式执行默认 keep-going 的 release-check；workspace coverage 吸收 component
 #                     nextest，不维护独立成员表；不得作为 PR 默认收尾。
 #   make cargo-selftest 本地 Cargo 入口的 target 隔离与 override 机器验收。
-#   make audit        供应链漏洞刷新 lane（与 GitHub Actions schedule 使用同一 typed audit plan）：
+#   make audit        供应链漏洞刷新 lane（与 security-audit.yml 的每日 UTC schedule 使用同一 typed audit plan）：
 #                     inner plan 只有 advisory-scoped `deny check advisories` + cargo-audit，
 #                     不包含 workspace 编译 gate；外层 Cargo 启动器边界同上。
 #   make docker-build server 多阶段镜像构建（#1134）：cargo-chef + distroless/cc:nonroot → rss-server:dev。

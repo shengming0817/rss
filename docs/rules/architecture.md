@@ -299,7 +299,7 @@ result-only gate 只聚合执行结果）：具体 Job 名与闭集以 `.github/
 [`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)；本文不手抄 Job 名单。
 `test-affected` 除 affected 组件测试外始终持有并生产 LocalOnly required evidence；其唯一公开直接入口是
 `cargo xtask ci localonly-evidence --output <path>`。高影响根、影响分析失败和保守 rename 可升级为
-`PrComplete`，但不得把 PR 扩成 `ReleaseCheck`。完整验证只属于 develop、nightly、release 与显式
+`PrComplete`，但不得把 PR 扩成 `ReleaseCheck`。完整验证只属于 develop、release 与显式
 `cargo xtask ci full`。
 `CI-FIXED-WORKFLOW-01` 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定固定拓扑、
 只读权限和唯一 reusable 委托，不允许 workflow 重列路径/job 策略；`CI-RESULT-GATE-01` 锁定 result-only
@@ -309,11 +309,11 @@ active PR 的 Medium enforcement；运行时激活状态、required-check 状态
 避免规则文档复制易漂移的运维事实。
 本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`：10 分钟有界、unknown 默认本地忽略并留痕，
 只跑受影响 package 与定向治理测试；显式全量 `cargo xtask ci full` 仅供人工诊断，不是 PR 完成条件。
-nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
+develop/release 重型门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
 （引擎-基础 ≥90%，无 ratchet 例外）、唯一 `public-api` gate（internal/release exact-set、逐包 SemVer、
 公共依赖与结构化类型泄漏）与供应链门。
 **供应链门**必须同时覆盖依赖内容与时间维度：`cargo deny check`（advisories/licenses/bans/sources）
-守当前依赖集，advisory-scoped 定时刷新覆盖「未变依赖」后来披露 CVE。
+守当前依赖集，独立的 advisory-only UTC schedule 与显式诊断覆盖「未变依赖」后来披露 CVE，且不得恢复完整 scheduled ReleaseCheck。
 实际 schedule、forge 与 required-check 状态以
 [CI 运维状态](../ops/202607130824-1765-diff-adaptive-ci.md) 为准，设计见
 [`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)。

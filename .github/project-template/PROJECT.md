@@ -181,7 +181,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
   → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）→ 内置修复 Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
-  → 切 pr-status/needs-review-again（首审唯一使用点）→ 10 分钟有界 `make ci CI_BASE=<remote>/develop`（重型门交 nightly/develop）；外部 app 可先行 review
+  → 切 pr-status/needs-review-again（首审唯一使用点）→ 10 分钟有界 `make ci CI_BASE=<remote>/develop`（重型门交 develop/release 或显式 full）；外部 app 可先行 review
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
@@ -205,7 +205,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
-> 本地 canonical `make ci` 只承担 10 分钟有界 affected preflight；unknown 本地忽略并留痕，workspace/feature/integration/coverage/public-api/dylint/audit/container 等重型全量门由 nightly/develop 承接。`make ci-full` 仅人工诊断，任何 skill/template 不得把它追加为 PR 默认完成条件。
+> 本地 canonical `make ci` 只承担 10 分钟有界 affected preflight；unknown 本地忽略并留痕，workspace/feature/integration/coverage/public-api/dylint/audit/container 等重型全量门由 develop/release 或显式 full 承接。`make ci-full` 仅人工诊断，任何 skill/template 不得把它追加为 PR 默认完成条件。
 > **Production acceptance evidence review gate**：相关 PR 从 `in-progress` 切到 `needs-review-again` 前，必须在 PR body 按
 > [`project-scope.md`](../../docs/rules/project-scope.md#production-acceptance-evidence-plan-与-carrier-replacement)
 > 完整留下 final-HEAD lower-layer receipts、每个 T3 assertion 的唯一 production join hazard 和独立复现入口、

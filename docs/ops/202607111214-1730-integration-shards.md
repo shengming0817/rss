@@ -56,7 +56,7 @@ OutboxFact 的 `identity_logout_grant_journey` 由 Parallel batch 调度。各 b
 `l2-dr-recovery-journey` 只在 `ReleaseCheck` 中拥有 `journeys-fault-matrix:l2_dr_recovery_journey`
 这一枚 Serial、RemoteOnly execution unit；它使用 Postgres 与 AMQP 构造应用级等价 divergent state，
 不执行外部 PITR 或 broker restore。该 unit 不带 impact marker，不能进入 `IntegrationCritical`、普通 PR
-required selector 或 T3。完整 fault/recovery 仍只由 develop、nightly、release 或显式 `ci full` 选择；
+required selector 或 T3。完整 fault/recovery 仍只由 develop、release 或显式 `ci full` 选择；
 需要在候选 revision 上定位时直接运行该 test target，不修改 canonical PR selection。
 
 ## 资源解析
@@ -101,7 +101,7 @@ versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不�
 `journeys:settingsonly_production_artifact` 对应 typed execution unit
 `SettingsOnlyProductionArtifact`，只在 `ProductionRuntime` 的 Serial batch 运行；四条 exact case 及其 artifact
 selector 的闭合映射由代码 gate 证明，本文不承担 enforcement。该 shard 继续使用既有
-`production-runtime` 的 900 秒 runner timeout 和 develop/nightly 路由；本次 carrier 替换不新增 workflow、
+`production-runtime` 的 900 秒 runner timeout 和 develop/release 或显式 full 路由；本次 carrier 替换不新增 workflow、
 scheduler 或 CI 路径。
 
 MQTT production code 默认编译；`broker-tests` 只打开 Docker-backed T2，不控制 runtime 实现。typed shard
