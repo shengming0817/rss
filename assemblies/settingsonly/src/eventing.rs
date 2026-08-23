@@ -615,7 +615,7 @@ fn retain_admission_authority(
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::starting());
-    let probe_name = primitives::ProbeName::parse("settingsonly_dr_admission")
+    let probe_name = primitives::ProbeName::parse(crate::readiness::DR_ADMISSION)
         .context("build settingsonly DR admission probe name")?;
     output.push_probe((
         probe_name.clone(),

@@ -2094,7 +2094,8 @@ pub(in super::super) fn conf_lease_cfg() -> LeaseConfig {
 }
 
 pub(in super::super) fn conf_consumer_admission() -> primitives::ConsumerAdmission {
-    let (_, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+    let (control, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+    assert!(control.start_running().is_ok());
     consumer
 }
 

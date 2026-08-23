@@ -443,6 +443,18 @@ pub(in super::super) fn policy_rejection(err: &IdentityError) -> bool {
     matches!(err, IdentityError::InvalidPolicy)
 }
 
+fn map_raw_policy_insert_error(error: sqlx::Error) -> IdentityError {
+    let invalid_policy = error.as_database_error().is_some_and(|database_error| {
+        database_error.code().as_deref() == Some("23514")
+            && database_error.constraint() == Some("abac_policies_operator_values_v2")
+    });
+    if invalid_policy {
+        IdentityError::InvalidPolicy
+    } else {
+        IdentityError::Storage(Box::new(error))
+    }
+}
+
 pub(in super::super) fn principal_kind_rule_json(operator_json: &str) -> String {
     format!(
         r#"{{"rules":[{{"condition":{{"attribute":"{POLICY_ATTR_PRINCIPAL_KIND}","operator":{operator_json}}},"effect":"allow"}}]}}"#
@@ -681,7 +693,7 @@ pub(in super::super) async fn insert_raw_policy_and_load(
     .bind(rules_json)
     .execute(&store.pool)
     .await
-    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+    .map_err(map_raw_policy_insert_error)?;
 
     repo.list_effective(identity_scope(tenant), policy_scope()?, policy_time(20))
         .await

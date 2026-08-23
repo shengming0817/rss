@@ -91,7 +91,7 @@ jsonschema = { workspace = true }
 serde_json = { workspace = true }
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
 testkit = { path = "../../crates/testkit" }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 tokio-rustls = { workspace = true }
 vocab = { path = "../../crates/vocab" }
 wiremock = { workspace = true }

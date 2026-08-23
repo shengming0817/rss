@@ -1,4 +1,5 @@
-use audit::ports::{AuditAdminRepo, AuditPage, TenantId};
+use audit::ports::{AuditAdminRepo, AuditPage};
+use rss_request_context::TenantId;
 
 async fn bad<R: AuditAdminRepo>(repo: &R, tenant: TenantId) {
     let page = AuditPage {

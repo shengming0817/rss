@@ -1,7 +1,7 @@
 error[E0624]: associated function `from_authenticated_tenant` is private
- --> tests/ui/audit_scope_private_ctor_fail.rs:5:35
+ --> tests/ui/audit_scope_private_ctor_fail.rs:6:35
   |
-5 |     let _scope = TenantRepoScope::from_authenticated_tenant(tenant);
+6 |     let _scope = TenantRepoScope::from_authenticated_tenant(tenant);
   |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
   |
  ::: src/ports.rs

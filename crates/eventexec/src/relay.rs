@@ -24,7 +24,7 @@ use consistency::{
     OutboxMetricSubject, OutboxRelay, RetentionSweeper,
 };
 use primitives::healthz::HealthStatus;
-use primitives::{AdmissionError, RelayAdmission, WriteAdmission};
+use primitives::{AdmissionError, AdmissionPermit, RelayAdmission, WriteAdmission, WriteLane};
 use vocab::DomainName;
 
 use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
@@ -284,6 +284,51 @@ pub async fn relay_loop<A>(
     health.mark_stopped();
 }
 
+async fn wait_for_write_admission(
+    admission: &WriteAdmission,
+    token: &CancellationToken,
+) -> Result<Option<WriteAdmissionEntry>, AdmissionError> {
+    match admission.try_enter() {
+        Ok(permit) => {
+            return Ok(Some(WriteAdmissionEntry {
+                permit,
+                resumed: false,
+            }));
+        }
+        Err(AdmissionError::Paused) => {}
+        Err(AdmissionError::Stopped) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    loop {
+        let opened = tokio::select! {
+            biased;
+            () = token.cancelled() => return Ok(None),
+            result = admission.wait_open() => result,
+        };
+        match opened {
+            Ok(()) => {}
+            Err(AdmissionError::Stopped) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        match admission.try_enter() {
+            Ok(permit) => {
+                return Ok(Some(WriteAdmissionEntry {
+                    permit,
+                    resumed: true,
+                }));
+            }
+            Err(AdmissionError::Paused) => {}
+            Err(AdmissionError::Stopped) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+struct WriteAdmissionEntry {
+    permit: AdmissionPermit<WriteLane>,
+    resumed: bool,
+}
+
 /// 单轮 relay 健康结果——驱动 worker health（F4 把业务处置通道并入映射）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TickOutcome {
@@ -470,21 +515,22 @@ pub async fn sweeper_loop<S>(
     S: RetentionSweeper,
 {
     let mut ticker = tokio::time::interval(config.sweep_interval());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
-                let _permit = match admission.try_enter() {
-                    Ok(permit) => permit,
-                    Err(AdmissionError::Paused) => continue,
-                    Err(AdmissionError::Stopped) => break,
+                let admission_entry = match wait_for_write_admission(&admission, &token).await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
                     Err(error) => {
                         tracing::error!(error = %error, "sweeper: admission invariant failed");
                         health.mark_invariant();
                         break;
                     }
                 };
+                let WriteAdmissionEntry { permit: _permit, resumed } = admission_entry;
                 sweeper_tick(
                     &store,
                     config.retain_seconds(),
@@ -492,6 +538,11 @@ pub async fn sweeper_loop<S>(
                     &health,
                     target,
                 ).await;
+                if resumed {
+                    // Admission may stay closed across many periods. Start a fresh period after
+                    // the resumed sweep instead of replaying missed maintenance ticks in a burst.
+                    ticker.reset();
+                }
             },
         }
     }
@@ -1406,6 +1457,7 @@ mod tests {
     struct FakeSweeper {
         sweep_count: AtomicUsize,
         sweep_err: Option<consistency::error::EngineErrorKind>,
+        sweep_delay: Duration,
     }
 
     impl FakeSweeper {
@@ -1413,6 +1465,7 @@ mod tests {
             Arc::new(Self {
                 sweep_count: AtomicUsize::new(0),
                 sweep_err: None,
+                sweep_delay: Duration::ZERO,
             })
         }
 
@@ -1420,6 +1473,15 @@ mod tests {
             Arc::new(Self {
                 sweep_count: AtomicUsize::new(0),
                 sweep_err: Some(kind),
+                sweep_delay: Duration::ZERO,
+            })
+        }
+
+        fn with_delay(delay: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                sweep_count: AtomicUsize::new(0),
+                sweep_err: None,
+                sweep_delay: delay,
             })
         }
 
@@ -1439,8 +1501,98 @@ mod tests {
                 return Err(consistency::error::EngineError::new(kind));
             }
             self.sweep_count.fetch_add(1, AtomOrd::Release);
+            if !self.sweep_delay.is_zero() {
+                tokio::time::sleep(self.sweep_delay).await;
+            }
             Ok(0)
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweeper_open_admission_keeps_fixed_rate_cadence() {
+        let sweeper = FakeSweeper::with_delay(Duration::from_secs(3));
+        let health = Arc::new(WorkerHealth::starting());
+        let token = CancellationToken::new();
+        let (control, _, _, admission) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        let handle = tokio::spawn(sweeper_loop(
+            Arc::clone(&sweeper),
+            sweeper_config(86_400, Duration::from_secs(10)),
+            fixed_clock(),
+            token.clone(),
+            health,
+            RetentionTarget::OutboxPublished,
+            admission,
+        ));
+
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sweeper.sweep_count(), 1);
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(7)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sweeper.sweep_count(),
+            2,
+            "an always-open gate must keep the original fixed-rate cadence"
+        );
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        token.cancel();
+        assert!(handle.await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweeper_admission_resume_does_not_replay_missed_intervals() {
+        let sweeper = FakeSweeper::new();
+        let health = Arc::new(WorkerHealth::starting());
+        let token = CancellationToken::new();
+        let (control, _, _, admission) = primitives::prepare_dr_admission_controls().into_parts();
+        let handle = tokio::spawn(sweeper_loop(
+            Arc::clone(&sweeper),
+            sweeper_config(86_400, Duration::from_secs(10)),
+            fixed_clock(),
+            token.clone(),
+            Arc::clone(&health),
+            RetentionTarget::OutboxPublished,
+            admission,
+        ));
+
+        tokio::task::yield_now().await;
+        assert_eq!(sweeper.sweep_count(), 0);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(control.start_running().is_ok());
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sweeper.sweep_count(),
+            1,
+            "opening admission must resume the current tick without replaying missed intervals"
+        );
+        assert_eq!(health.status(), HealthStatus::Healthy);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sweeper.sweep_count(), 1);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sweeper.sweep_count(), 2);
+
+        token.cancel();
+        assert!(handle.await.is_ok());
     }
 
     // ── T8：两阶段逆序 shutdown，在途写不丢 ──────────────────────────────────

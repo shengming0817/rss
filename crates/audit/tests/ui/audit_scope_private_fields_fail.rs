@@ -1,4 +1,5 @@
-use audit::ports::{TenantId, TenantRepoScope};
+use audit::ports::TenantRepoScope;
+use rss_request_context::TenantId;
 
 fn main() {
     let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();

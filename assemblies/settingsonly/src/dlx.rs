@@ -20,6 +20,8 @@ const DLX_LIFECYCLE_WORKER_NAME: &str = "settingsonly-dlx-lifecycle";
 const DLX_ARCHIVE_READINESS_WORKER_NAME: &str = "settingsonly-dlx-archive-readiness";
 const DLX_ARCHIVE_KEY_READINESS_WORKER_NAME: &str = "settingsonly-dlx-archive-key-readiness";
 const DLX_HOT_KEY_READINESS_WORKER_NAME: &str = "settingsonly-dlx-hot-key-readiness";
+const DLX_ARCHIVE_KEY_READINESS_WORKER_IDENTITY: &str = "assemblies.settingsonly.src.dlx.02";
+const DLX_HOT_KEY_READINESS_WORKER_IDENTITY: &str = "assemblies.settingsonly.src.dlx.04";
 const DLX_LIFECYCLE_PROBE: &str = crate::readiness::DLX_LIFECYCLE;
 const DLX_ARCHIVE_READINESS_PROBE: &str = crate::readiness::DLX_ARCHIVE;
 const DLX_ARCHIVE_KEY_READINESS_PROBE: &str = crate::readiness::DLX_ARCHIVE_KEY;
@@ -210,15 +212,29 @@ async fn lifecycle_loop(
     health: Arc<WorkerHealth>,
     write_admission: primitives::WriteAdmission,
 ) {
-    let mut ticker = tokio::time::interval(DLX_LIFECYCLE_INTERVAL);
+    let mut ticker = lifecycle_ticker(DLX_LIFECYCLE_INTERVAL);
     loop {
         tokio::select! {
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
-                let Ok(_permit) = write_admission.try_enter() else {
-                    continue;
+                let admission_entry = match wait_for_write_admission(&write_admission, &token).await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::error!(error = %error, "settingsonly DLX admission invariant failed");
+                        record_health_transition(
+                            &health,
+                            DlxLifecycleHealth::Unhealthy,
+                            "dlx-lifecycle",
+                            "admission",
+                            "invariant",
+                            "admission_invariant",
+                        );
+                        break;
+                    }
                 };
+                let WriteAdmissionEntry { permit: _permit, resumed } = admission_entry;
                 let now = epoch_seconds(crate::SystemClock.now());
                 match tokio::time::timeout(DLX_LIFECYCLE_TICK_TIMEOUT, lifecycle.tick(now)).await {
                     Ok(report) => record_health_transition(
@@ -240,9 +256,69 @@ async fn lifecycle_loop(
                         );
                     }
                 }
+                schedule_next_lifecycle_tick(&mut ticker, resumed);
             }
         }
     }
+}
+
+fn lifecycle_ticker(period: Duration) -> tokio::time::Interval {
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker
+}
+
+fn schedule_next_lifecycle_tick(ticker: &mut tokio::time::Interval, resumed: bool) {
+    if resumed {
+        // A DR pause may span many lifecycle periods. The resumed tick is current work;
+        // schedule the next period from its completion instead of replaying a backlog.
+        ticker.reset();
+    }
+}
+
+async fn wait_for_write_admission(
+    admission: &primitives::WriteAdmission,
+    token: &tokio_util::sync::CancellationToken,
+) -> Result<Option<WriteAdmissionEntry>, primitives::AdmissionError> {
+    match admission.try_enter() {
+        Ok(permit) => {
+            return Ok(Some(WriteAdmissionEntry {
+                permit,
+                resumed: false,
+            }));
+        }
+        Err(primitives::AdmissionError::Paused) => {}
+        Err(primitives::AdmissionError::Stopped) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    loop {
+        let opened = tokio::select! {
+            biased;
+            () = token.cancelled() => return Ok(None),
+            result = admission.wait_open() => result,
+        };
+        match opened {
+            Ok(()) => {}
+            Err(primitives::AdmissionError::Stopped) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        match admission.try_enter() {
+            Ok(permit) => {
+                return Ok(Some(WriteAdmissionEntry {
+                    permit,
+                    resumed: true,
+                }));
+            }
+            Err(primitives::AdmissionError::Paused) => {}
+            Err(primitives::AdmissionError::Stopped) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+struct WriteAdmissionEntry {
+    permit: primitives::AdmissionPermit<primitives::WriteLane>,
+    resumed: bool,
 }
 
 struct SharedKeyProvider(Arc<vault::VaultKeyProvider>);
@@ -295,6 +371,7 @@ fn archive_key_readiness_worker(
 
 #[derive(Clone, Copy)]
 struct KeyReadinessSpec {
+    worker_identity: &'static str,
     worker_name: &'static str,
     aad_scope: &'static str,
 }
@@ -302,6 +379,7 @@ struct KeyReadinessSpec {
 impl KeyReadinessSpec {
     const fn archive() -> Self {
         Self {
+            worker_identity: DLX_ARCHIVE_KEY_READINESS_WORKER_IDENTITY,
             worker_name: DLX_ARCHIVE_KEY_READINESS_WORKER_NAME,
             aad_scope: "settingsonly/dlx/archive",
         }
@@ -309,6 +387,7 @@ impl KeyReadinessSpec {
 
     const fn hot() -> Self {
         Self {
+            worker_identity: DLX_HOT_KEY_READINESS_WORKER_IDENTITY,
             worker_name: DLX_HOT_KEY_READINESS_WORKER_NAME,
             aad_scope: "settingsonly/dlx/hot",
         }
@@ -323,7 +402,7 @@ fn key_readiness_worker(
 ) -> anyhow::Result<WorkerSpec> {
     let aad = key_canary_aad(spec.aad_scope)?;
     Ok(WorkerSpec::observational_phase_one(
-        "assemblies.settingsonly.src.dlx.02",
+        spec.worker_identity,
         move |token| {
             DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
                 spec.worker_name,
@@ -667,5 +746,75 @@ mod tests {
         let aad = key_canary_aad("settingsonly/dlx/archive")?;
         assert!(!aad.as_canonical_bytes().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn archive_and_hot_key_readiness_workers_have_distinct_identities() {
+        let archive = KeyReadinessSpec::archive();
+        let hot = KeyReadinessSpec::hot();
+        assert_eq!(
+            archive.worker_identity,
+            DLX_ARCHIVE_KEY_READINESS_WORKER_IDENTITY
+        );
+        assert_eq!(hot.worker_identity, DLX_HOT_KEY_READINESS_WORKER_IDENTITY);
+        assert_ne!(archive.worker_identity, hot.worker_identity);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_admission_resume_does_not_replay_missed_lifecycle_intervals() {
+        let (control, _, _, admission) = primitives::prepare_dr_admission_controls().into_parts();
+        let token = tokio_util::sync::CancellationToken::new();
+        let period = Duration::from_secs(10);
+        let mut ticker = lifecycle_ticker(period);
+        ticker.tick().await;
+        let wait = wait_for_write_admission(&admission, &token);
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut wait)
+                .await
+                .is_err(),
+            "closed admission must keep the current lifecycle tick waiting"
+        );
+        tokio::time::advance(period * 3).await;
+        assert!(control.start_running().is_ok());
+        assert!(
+            wait.await
+                .is_ok_and(|entry| entry.is_some_and(|entry| entry.resumed)),
+            "opening admission must resume the current lifecycle tick"
+        );
+
+        schedule_next_lifecycle_tick(&mut ticker, true);
+        let resumed_at = tokio::time::Instant::now();
+        ticker.tick().await;
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(resumed_at),
+            period,
+            "the next lifecycle run must wait a full interval after admission resumes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn open_write_admission_preserves_lifecycle_fixed_rate_cadence() {
+        let (control, _, _, admission) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        let token = tokio_util::sync::CancellationToken::new();
+        let period = Duration::from_secs(10);
+        let mut ticker = lifecycle_ticker(period);
+        ticker.tick().await;
+        let started = tokio::time::Instant::now();
+        let entry = wait_for_write_admission(&admission, &token).await;
+        assert!(
+            entry.is_ok_and(|entry| entry.is_some_and(|entry| !entry.resumed)),
+            "an already-open gate must not be classified as a resumed tick"
+        );
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        schedule_next_lifecycle_tick(&mut ticker, false);
+        ticker.tick().await;
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            period,
+            "normal lifecycle work must remain part of the fixed-rate period"
+        );
     }
 }

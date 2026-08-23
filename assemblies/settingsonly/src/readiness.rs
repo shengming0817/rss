@@ -15,6 +15,7 @@ pub(crate) const EVENT_CONSUMER: &str =
 pub(crate) const INBOX_SWEEPER: &str = "settingsonly_inbox_sweeper";
 pub(crate) const OUTBOX_SAMPLER: &str = "settingsonly_outbox_sampler";
 pub(crate) const OUTBOX_SWEEPER: &str = "settingsonly_outbox_sweeper";
+pub(crate) const DR_ADMISSION: &str = "settingsonly_dr_admission";
 pub(crate) const SETTINGS_PROJECTION_WORKER: &str = "projection_worker:settings.config-projection";
 
 /// Exact required-probe closure of the production SettingsOnly assembly.
@@ -38,6 +39,7 @@ pub(crate) const PRODUCTION_REQUIRED_PROBES: &[&str] = &[
     INBOX_SWEEPER,
     OUTBOX_SWEEPER,
     OUTBOX_SAMPLER,
+    DR_ADMISSION,
     SETTINGS_PROJECTION_WORKER,
 ];
 

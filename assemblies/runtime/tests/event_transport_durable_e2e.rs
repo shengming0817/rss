@@ -46,7 +46,7 @@ use generated::http::identity_v1::{
 };
 use generated::http::settings_v1::{SPEC as SETTINGS_CONFIG_SPEC, SettingsConfigPublishRequest};
 use httpserve::ProducerMarker;
-use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteResource};
+use httpserve::{RouteAuthorizationRequest, RouteResource};
 use identity::ports::{
     AttributeKey, DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle,
     DynRoleBindingReadRepo, DynRoleReadRepo, EqualityPredicate, MembershipPredicate, Operator,
@@ -1101,11 +1101,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .iter()
         .map(|event| event.subscriptions().len())
         .sum::<usize>();
-    let expected_worker_count = generated_subscription_count + 6;
+    let expected_worker_count = generated_subscription_count + 7;
     assert_eq!(
         event_module.worker_count(),
         expected_worker_count,
-        "identity/settings relays + generated consumers + sampler + outbox sweeper + inbox sweeper"
+        "identity/settings relays + generated consumers + outbox/inbox samplers + outbox/inbox sweepers + DR admission owner"
     );
     let probe_names: Vec<&str> = event_module
         .probes()
@@ -1118,6 +1118,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "outbox_relay_settings",
             "outbox_sampler",
             "outbox_sweeper",
+            "inbox_sampler",
             "event_consumer:settings_config-version-changed__settings__settings_config-version-changed",
             "event_consumer:identity_session-created__audit__audit_session-created",
             "event_consumer:identity_role-assigned__audit__audit_role-assigned",
@@ -1164,6 +1165,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "outbox-relay-settings",
             "outbox-sampler",
             "outbox-sweeper",
+            "inbox-backlog-sampler",
             "event-consumer:settings:settings.config-version-changed",
             "event-consumer:audit:identity.session-created",
             "event-consumer:audit:identity.role-assigned",
@@ -1354,20 +1356,33 @@ async fn event_transport_durable_e2e() -> Result<()> {
             .await?,
         )
         .await?;
-    assert_eq!(
-        route_authorizer
-            .authorize(RouteAuthorizationRequest {
-                contract_id: "identity.account-status-get",
-                permission: vocab::RoutePermissionId::IdentityAccountSecurityRead,
-                tenant_id: Some(tenant),
-                principal_kind: rss_request_context::PrincipalKind::User,
-                principal_id: CANON_USER.to_string(),
-                resource: Some(RouteResource::new(CANON_USER).context("canonical resource")?),
-                federated_permissions: None,
-            })
-            .await,
-        RouteAuthorizationDecision::authorizer_local(),
+    let typed_decision = route_authorizer
+        .authorize(RouteAuthorizationRequest {
+            contract_id: "identity.account-status-get",
+            permission: vocab::RoutePermissionId::IdentityAccountSecurityRead,
+            tenant_id: Some(tenant),
+            principal_kind: rss_request_context::PrincipalKind::User,
+            principal_id: CANON_USER.to_string(),
+            resource: Some(RouteResource::new(CANON_USER).context("canonical resource")?),
+            federated_permissions: None,
+        })
+        .await;
+    assert!(
+        typed_decision.is_allow(),
         "typed principal attributes must drive the production route authorizer"
+    );
+    let typed_authorization = typed_decision
+        .durable_policy()
+        .context("production route authorizer must retain durable policy lineage")?;
+    assert_eq!(typed_authorization.policies().len(), 1);
+    assert_eq!(
+        typed_authorization.policies()[0].policy_id(),
+        "policy-typed-resource-runtime-e2e"
+    );
+    assert_eq!(typed_authorization.policies()[0].version().get(), 1);
+    assert_eq!(
+        typed_authorization.evaluated_at(),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS)
     );
 
     let policy_id = "policy-runtime-e2e";

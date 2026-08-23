@@ -55,6 +55,7 @@ const SECRET_DIRECTORY: &str = "/var/run/rss/secrets";
 const WORKLOAD_DIRECTORY: &str = "/run/rss-spiffe";
 const WORKLOAD_SOCKET: &str = "/run/rss-spiffe/workload.sock";
 const WORKLOAD_ENDPOINT: &str = "unix:///run/rss-spiffe/workload.sock";
+const RUNTIME_INSTANCE_ID: &str = "00000000-0000-4000-8000-000000001875";
 const TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -2578,6 +2579,7 @@ impl ProductionImage {
             .args(["--volume", &format!("{}:/fixtures:ro", files.public_path.display())])
             .args(["--mount", secret_bundle.mount()])
             .args(["--mount", workload_mount])
+            .args(["--env", &format!("RSS_RUNTIME_INSTANCE_ID={RUNTIME_INSTANCE_ID}")])
             .args(["--env", "RSS_DEPLOYMENT_POD_IP=0.0.0.0"])
             .args(["--env", &format!("RSS_DEPLOYMENT_PRIMARY_PORT={}", ports.frontend_primary)])
             .args(["--env", &format!("RSS_DEPLOYMENT_ADMIN_PORT={}", ports.frontend_admin)])

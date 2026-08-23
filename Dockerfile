@@ -23,6 +23,9 @@ FROM rust:1.96.0-bookworm AS chef
 # 须 ≥0.1.71（edition 2024 支持；workspace = edition 2024 / 工具链 1.96）。
 RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /app
+# `cargo chef cook` receives only the generated recipe in builder stages. The SQLx patch is an
+# excluded path dependency, so cargo-chef cannot synthesize it as a workspace-member skeleton.
+COPY vendor/sqlx-core-0.8.6 vendor/sqlx-core-0.8.6
 # 仓库级 Cargo 配置把本地构建放入 `.cache/`；镜像构建固定回 cargo-chef 预期的共享层路径。
 ENV CARGO_TARGET_DIR=/app/target
 
