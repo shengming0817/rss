@@ -809,6 +809,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     consumer_group: impl Into<String>,
     tenant_authority: Arc<TenantAuthority>,
     admission: primitives::ConsumerAdmission,
+    token: tokio_util::sync::CancellationToken,
     handler: H,
     lease_cfg: LeaseConfig,
 ) where
@@ -851,6 +852,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
         },
         lease_cfg,
         admission,
+        token,
     )
     .await;
 }
@@ -1362,6 +1364,7 @@ mod tests {
             "seed.do-thing.consumer",
             tenant_authority(),
             consumer_admission(),
+            tokio_util::sync::CancellationToken::new(),
             move |req: DoThing| {
                 let seen2 = seen2.clone();
                 async move {
@@ -1405,6 +1408,7 @@ mod tests {
             "seed.do-thing.consumer",
             tenant_authority(),
             consumer_admission(),
+            tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {
@@ -1442,6 +1446,7 @@ mod tests {
             "seed.do-thing.consumer",
             tenant_authority(),
             consumer_admission(),
+            tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {
@@ -1475,6 +1480,7 @@ mod tests {
             "seed.do-thing.consumer",
             tenant_authority(),
             consumer_admission(),
+            tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| async move { HandleResult::ack() },
             lease_cfg(),
         )
@@ -1501,6 +1507,7 @@ mod tests {
             "seed.do-thing.consumer",
             tenant_authority(),
             consumer_admission(),
+            tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {

@@ -7,4 +7,4 @@ error[E0308]: mismatched types
    |                           expected due to this
    |
    = note: expected fn pointer `fn((), fn(()) -> std::future::Ready<Result<(), anyhow::Error>>, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches, TotalDrainBudget) -> LaunchPlan<(), (), fn(()) -> std::future::Ready<Result<(), anyhow::Error>>>`
-                 found fn item `fn(_, _, _, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches, TotalDrainBudget) -> LaunchPlan<_, _, _> {LaunchPlan::<_, _, _>::new}`
+                 found fn item `fn(_, LaunchProbeReceipt<_>, _, Option<Box<DynManagedResource<'static>>>, LaunchLifecycleBatches, TotalDrainBudget) -> LaunchPlan<_, _, _> {LaunchPlan::<_, _, _>::new}`

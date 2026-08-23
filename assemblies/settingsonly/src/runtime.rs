@@ -38,7 +38,7 @@ impl ProductionStartup {
 
 impl runtimeexec::StartupAdapter for ProductionStartup {
     type Adapter = listeners::LaunchAdapter;
-    type ProbeReceipt = listeners::FinalizedProbeReceipt;
+    type ProbeReceipt = Arc<bootstrap::HealthReporter>;
     type ReadyHook = crate::runtime::ReadyHook;
     type Ready = crate::runtime::ReadyFuture;
 
@@ -296,7 +296,7 @@ pub(crate) async fn prepare_assembly<S>(
 ) -> anyhow::Result<
     runtimeexec::PreparedLaunch<
         listeners::LaunchAdapter,
-        listeners::FinalizedProbeReceipt,
+        Arc<bootstrap::HealthReporter>,
         ReadyHook,
     >,
 >
@@ -342,7 +342,8 @@ where
     let (provider_output, domain_output) = transaction.outputs_mut();
     register_probes(&mut registry, provider_output)?;
     register_probes(&mut registry, domain_output)?;
-    let reporter = Arc::new(registry.take_health_reporter());
+    let listener_probe = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)?;
+    let reporter = Arc::clone(listener_probe.assembly_receipt());
     let (inventory_publisher, inventory_reader) =
         runtimeexec::inventory::inventory_channel(inventory_seed, Arc::clone(&reporter));
     let framework_routes = crate::inventory::InventoryFrameworkRoutes::new(inventory_reader);
@@ -383,7 +384,10 @@ where
         )
     });
     Ok(runtimeexec::PreparedLaunch::new(
-        adapter, receipt, ready, None,
+        adapter,
+        listener_probe,
+        ready,
+        None,
     ))
 }
 

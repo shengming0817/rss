@@ -80,15 +80,11 @@ const DOMAIN_FORBIDDEN: &[&str] = &[
     "PgInboxStore",
     "RedisInboxStore",
     "ManagedBlockingWorker",
-    "spawn_consumer(",
-    "spawn_consumer_ackable(",
     "spawn_consumer_ackable_subscriber(",
     "pg.infra().inbox(",
     "pg.infra().dead_letter(",
 ];
 const BYPASS_FORBIDDEN: &[&str] = &[
-    "spawn_consumer(",
-    "spawn_consumer_ackable(",
     "spawn_consumer_ackable_subscriber(",
     "spawn_consumer_ackable_tx_subscriber(",
     "pg.infra().inbox(",
@@ -2494,8 +2490,6 @@ fn call_path_bypass_fragment(
 
 fn forbidden_spawn_fragment(ident: &str) -> Option<&'static str> {
     match ident {
-        "spawn_consumer" => Some("spawn_consumer("),
-        "spawn_consumer_ackable" => Some("spawn_consumer_ackable("),
         "spawn_consumer_ackable_subscriber" => Some("spawn_consumer_ackable_subscriber("),
         "spawn_consumer_ackable_tx_subscriber" => Some("spawn_consumer_ackable_tx_subscriber("),
         _ => None,
@@ -8171,9 +8165,9 @@ pub mod fault_matrix;
     fn scan_bypass_content_rejects_production_spawn_outside_bridge() {
         let findings = scan_bypass_content(
             Path::new("assemblies/runtime/src/other.rs"),
-            "spawn_consumer(); spawn_consumer_ackable_subscriber();",
+            "spawn_consumer_ackable_subscriber();",
         );
-        assert_eq!(findings.len(), 2);
+        assert_eq!(findings.len(), 1);
         assert!(
             findings
                 .iter()
@@ -8221,7 +8215,7 @@ pub mod fault_matrix;
         let findings = scan_bypass_content(
             Path::new("assemblies/runtime/src/other.rs"),
             r#"
-            // spawn_consumer();
+            // spawn_consumer_ackable_subscriber();
             const NOTE: &str = "pg.infra().inbox()";
             "#,
         );

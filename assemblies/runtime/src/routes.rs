@@ -153,6 +153,7 @@ pub(crate) struct FinalizedListenerSet {
 /// The private field prevents construction outside this module. Deliberately omitting `Clone` and
 /// `Copy` keeps the proof coupled to the finalized listener set until the launch executor consumes
 /// it.
+#[cfg(any(test, feature = "integration"))]
 pub(crate) struct FinalizedProbeReceipt {
     _private: (),
 }
@@ -160,7 +161,7 @@ pub(crate) struct FinalizedProbeReceipt {
 /// Route finalization output kept indivisible until the `Finalized` phase state is constructed.
 pub(crate) struct FinalizedListenerPlan {
     listeners: FinalizedListenerSet,
-    probe_receipt: FinalizedProbeReceipt,
+    probe_receipt: runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
     health_reporter: Arc<bootstrap::HealthReporter>,
 }
 
@@ -251,7 +252,10 @@ impl FinalizedListenerSet {
     #[cfg(feature = "integration")]
     pub(crate) fn for_inventory_journey(
         admin: httpserve::AuthenticatedRoutes,
-    ) -> anyhow::Result<(Self, FinalizedProbeReceipt)> {
+    ) -> anyhow::Result<(
+        Self,
+        runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
+    )> {
         let mut admin = Some(admin);
         struct JourneyMetrics;
         impl diport::MetricsExporter for JourneyMetrics {
@@ -259,7 +263,9 @@ impl FinalizedListenerSet {
                 "# inventory-journey\n".to_owned()
             }
         }
-        let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
+        let mut registry = bootstrap::Registry::new();
+        let receipt = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)?;
+        let reporter = Arc::clone(receipt.assembly_receipt());
         let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(JourneyMetrics);
         let mut listeners = Vec::new();
         for kind in [
@@ -287,7 +293,7 @@ impl FinalizedListenerSet {
                 transport: ListenerTransport::InventoryJourneyPlaintext,
             });
         }
-        Ok((Self { listeners }, FinalizedProbeReceipt { _private: () }))
+        Ok((Self { listeners }, receipt))
     }
 }
 
@@ -307,13 +313,14 @@ impl FinalizedListenerPlan {
         self,
     ) -> (
         FinalizedListenerSet,
-        FinalizedProbeReceipt,
+        runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
         Arc<bootstrap::HealthReporter>,
     ) {
         (self.listeners, self.probe_receipt, self.health_reporter)
     }
 }
 
+#[cfg(any(test, feature = "integration"))]
 impl FinalizedProbeReceipt {
     #[cfg(test)]
     pub(crate) const fn for_test() -> Self {
@@ -587,8 +594,8 @@ where
 
     let (health_index, health_spec) =
         health.context("RuntimePlan does not declare the required Health listener")?;
-    let health_reporter = Arc::new(registry.take_health_reporter());
-    let probe_receipt = FinalizedProbeReceipt { _private: () };
+    let probe_receipt = runtimeexec::ListenerLifecycleRegistration::install(registry)?;
+    let health_reporter = Arc::clone(probe_receipt.assembly_receipt());
     let health = finalize_health_spec(health_spec, Arc::clone(&health_reporter), metrics)?;
     finalized.push((health_index, health));
     finalized.sort_by_key(|(plan_index, _)| *plan_index);

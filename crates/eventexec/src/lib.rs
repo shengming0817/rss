@@ -9,7 +9,12 @@
 //!      serverlesstechnology/cqrs（背景 relay 解耦 + 取消安全两阶段关闭）
 
 pub mod consumer;
-pub use consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use consumer::run_managed_delivery_stream_harness;
+pub use consumer::{
+    ConsumerMeta, LeaseConfig, ManagedDeliveryStream, run_consumer, run_consumer_ackable,
+};
 pub mod consumer_tx;
 pub mod tenant_authority;
 pub use tenant_authority::{
@@ -19,8 +24,8 @@ pub use tenant_authority::{
 
 pub mod consumer_worker;
 pub use consumer_worker::{
-    EVENT_CONSUMER_PROBE, run_ackable_subscription_loop, spawn_consumer, spawn_consumer_ackable,
-    spawn_consumer_ackable_subscriber, spawn_relay,
+    EVENT_CONSUMER_PROBE, run_ackable_subscription_loop, spawn_consumer_ackable_subscriber,
+    spawn_relay,
 };
 
 pub mod managed_blocking_worker;

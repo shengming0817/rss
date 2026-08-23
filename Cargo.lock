@@ -99,11 +99,13 @@ dependencies = [
  "anyhow",
  "consistency",
  "diport",
+ "eventexec",
  "futures",
  "generated",
  "ids",
  "lapin",
  "primitives",
+ "rss-request-context",
  "runctx",
  "rustls-pki-types",
  "secure",
@@ -2901,6 +2903,7 @@ dependencies = [
  "http-body 1.0.1",
  "http-body-util",
  "httpserve",
+ "listenerlifecycle",
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
@@ -3689,6 +3692,15 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "listenerlifecycle"
+version = "0.0.0"
+dependencies = [
+ "diport",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "litemap"
@@ -5477,6 +5489,7 @@ dependencies = [
  "bootstrap",
  "diport",
  "eventexec",
+ "listenerlifecycle",
  "primitives",
  "rss-platform",
  "runtimeinventorymint",

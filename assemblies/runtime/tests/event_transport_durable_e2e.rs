@@ -1147,12 +1147,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         stack.register_detached(resource);
     }
     for worker in workers {
-        match worker {
-            bootstrap::WorkerSpec::PhaseOne(make) => stack.register_with_token(make.into_factory()),
-            bootstrap::WorkerSpec::Deferred(make) => {
-                stack.register_deferred_with_token(make.into_factory())
-            }
-        }
+        worker.register_into(&mut stack);
     }
     assert_eq!(
         stack.registered_names().collect::<Vec<_>>(),

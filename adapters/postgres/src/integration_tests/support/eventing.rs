@@ -21,8 +21,7 @@ pub(in super::super) use diport::{
 };
 
 pub(in super::super) use eventexec::{
-    ConsumerMeta, LeaseConfig, MAX_REDELIVERY, RelayBudget, TenantAuthority,
-    TenantAuthorityBinding, run_consumer_ackable,
+    ConsumerMeta, LeaseConfig, MAX_REDELIVERY, RelayBudget, TenantAuthority, TenantAuthorityBinding,
 };
 
 pub(in super::super) use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
@@ -40,6 +39,37 @@ pub(in super::super) use crate::outbox_cdc::append_outbox_log;
 
 pub(in super::super) static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
+
+pub(in super::super) async fn run_consumer_ackable<S, H>(
+    stream: DeliveryStream,
+    idempotency: Arc<S>,
+    dlx: &DynDeadLetterStore<'static>,
+    meta: &ConsumerMeta,
+    handler: &H,
+    lease_cfg: LeaseConfig,
+    admission: primitives::ConsumerAdmission,
+) where
+    S: consistency::InboxStore + Send + Sync + 'static,
+    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+{
+    eventexec::run_managed_delivery_stream_harness(
+        stream,
+        tokio_util::sync::CancellationToken::new(),
+        async |stream| {
+            eventexec::run_consumer_ackable(
+                stream,
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                lease_cfg,
+                admission,
+            )
+            .await;
+        },
+    )
+    .await;
+}
 
 pub(in super::super) fn test_append_error(_: OutboxAppendError) -> sqlx::Error {
     sqlx::Error::Protocol("outbox append test failed".to_string())

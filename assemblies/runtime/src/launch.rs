@@ -4,6 +4,7 @@ use crate::{config::SnapshotConfig, listeners, routes};
 
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -113,7 +114,7 @@ pub(crate) struct RuntimeListenerInventory {
     admin: Option<SocketAddr>,
 }
 
-impl<R, P> runtimeexec::LaunchAdapter<routes::FinalizedProbeReceipt> for RuntimeLaunchAdapter<R, P>
+impl<R, P> runtimeexec::LaunchAdapter<Arc<bootstrap::HealthReporter>> for RuntimeLaunchAdapter<R, P>
 where
     R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr> + Send + Sync,
     P: InventoryPublication,
@@ -123,7 +124,7 @@ where
 
     async fn prepare(
         self,
-        probe_receipt: routes::FinalizedProbeReceipt,
+        probe_receipt: Arc<bootstrap::HealthReporter>,
         transaction: &mut runtimeexec::LaunchTransaction<'_>,
     ) -> anyhow::Result<Self::Prepared> {
         let Self {
@@ -327,7 +328,7 @@ pub(crate) async fn serve_inventory_journey(
 trait ListenerRegistrar {
     fn register_with_token<F>(&mut self, make: F)
     where
-        F: FnOnce(tokio_util::sync::CancellationToken) -> Box<DynManagedResource<'static>>;
+        F: FnOnce(tokio_util::sync::CancellationToken) -> httpd::ListenerTaskRegistration;
 }
 
 trait PreparationRegistrar {
@@ -343,7 +344,7 @@ impl PreparationRegistrar for runtimeexec::LaunchTransaction<'_> {
 impl ListenerRegistrar for runtimeexec::LaunchRegistrar<'_> {
     fn register_with_token<F>(&mut self, make: F)
     where
-        F: FnOnce(tokio_util::sync::CancellationToken) -> Box<DynManagedResource<'static>>,
+        F: FnOnce(tokio_util::sync::CancellationToken) -> httpd::ListenerTaskRegistration,
     {
         runtimeexec::LaunchRegistrar::register_listener_with_token(self, make);
     }
@@ -417,9 +418,7 @@ impl BoundListener {
         } = self;
         match transport {
             PreparedListenerTransport::Mtls { config, health: _ } => {
-                registrar.register_with_token(move |token| {
-                    DynManagedResource::new_box(bound.serve_mtls(svc, config, token))
-                });
+                registrar.register_with_token(move |token| bound.serve_mtls(svc, config, token));
             }
             PreparedListenerTransport::Plaintext => {
                 if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
@@ -428,9 +427,7 @@ impl BoundListener {
                         "binding local-test Internal service-token listener; mTLS is the production default"
                     );
                 }
-                registrar.register_with_token(move |token| {
-                    DynManagedResource::new_box(bound.serve(svc, token))
-                });
+                registrar.register_with_token(move |token| bound.serve(svc, token));
             }
         }
     }
@@ -543,6 +540,13 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
+    fn listener_receipt<T>(
+        _receipt: T,
+    ) -> anyhow::Result<runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>> {
+        let mut registry = bootstrap::Registry::new();
+        runtimeexec::ListenerLifecycleRegistration::install(&mut registry)
+    }
+
     struct NoopProbe;
 
     impl bootstrap::HealthProbe for NoopProbe {
@@ -634,9 +638,11 @@ mod tests {
     impl ListenerRegistrar for TestRegistrar {
         fn register_with_token<F>(&mut self, make: F)
         where
-            F: FnOnce(tokio_util::sync::CancellationToken) -> Box<DynManagedResource<'static>>,
+            F: FnOnce(tokio_util::sync::CancellationToken) -> httpd::ListenerTaskRegistration,
         {
-            self.stack.register_with_token(make);
+            let _status = self
+                .stack
+                .register_managed_task_with_token(|token| make(token).into_managed());
         }
     }
 
@@ -1047,7 +1053,8 @@ mod tests {
         );
         let launch_plan = runtimeexec::LaunchPlan::new(
             adapter,
-            routes::FinalizedProbeReceipt::for_test(),
+            listener_receipt(routes::FinalizedProbeReceipt::for_test())
+                .expect("listener probe install"),
             move |inventory: RuntimeListenerInventory| async move {
                 assert_eq!(inventory.listener_count, 1);
                 ready_calls_for_hook.fetch_add(1, Ordering::SeqCst);
@@ -1124,7 +1131,8 @@ mod tests {
         );
         let launch_plan = runtimeexec::LaunchPlan::new(
             adapter,
-            routes::FinalizedProbeReceipt::for_test(),
+            listener_receipt(routes::FinalizedProbeReceipt::for_test())
+                .expect("listener probe install"),
             move |_: RuntimeListenerInventory| async move {
                 ready_calls_for_hook.fetch_add(1, Ordering::SeqCst);
                 Ok(())

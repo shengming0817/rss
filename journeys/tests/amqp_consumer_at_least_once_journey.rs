@@ -163,15 +163,22 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
     let admission = consumer_admission()?;
     let (_, driven) = tokio::join!(
-        run_consumer_ackable(
+        eventexec::run_managed_delivery_stream_harness(
             stream,
-            claimer,
-            dlx.as_ref(),
-            &meta,
-            &handler,
-            // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
-            LeaseConfig::from_ttl(std::time::Duration::from_secs(60)),
-            admission,
+            token.child_token(),
+            async |stream| {
+                run_consumer_ackable(
+                    stream,
+                    claimer,
+                    dlx.as_ref(),
+                    &meta,
+                    &handler,
+                    // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
+                    LeaseConfig::from_ttl(std::time::Duration::from_secs(60)),
+                    admission,
+                )
+                .await;
+            },
         ),
         drive,
     );
@@ -267,14 +274,21 @@ async fn run_consumer_ackable_quarantines_untrusted_envelope_in_broker_dlq()
     let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
     let admission = consumer_admission()?;
     let (_, driven) = tokio::join!(
-        run_consumer_ackable(
+        eventexec::run_managed_delivery_stream_harness(
             stream,
-            claimer,
-            dlx.as_ref(),
-            &meta,
-            &handler,
-            LeaseConfig::from_ttl(Duration::from_secs(60)),
-            admission,
+            token.child_token(),
+            async |stream| {
+                run_consumer_ackable(
+                    stream,
+                    claimer,
+                    dlx.as_ref(),
+                    &meta,
+                    &handler,
+                    LeaseConfig::from_ttl(Duration::from_secs(60)),
+                    admission,
+                )
+                .await;
+            },
         ),
         drive,
     );

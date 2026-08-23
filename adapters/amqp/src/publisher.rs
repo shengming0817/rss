@@ -19,7 +19,6 @@ use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::conn::{self, REPLY_SUCCESS};
@@ -503,9 +502,7 @@ struct PublisherTransportLifecycle {
 }
 
 struct OwnedTransportRecovery {
-    cancellation: CancellationToken,
-    deadline: tokio::time::Instant,
-    task: JoinHandle<()>,
+    task: diport::ManagedTask,
 }
 
 impl PublisherTransportLifecycle {
@@ -551,8 +548,6 @@ enum PublisherTransportError {
     RecoveryTaskCancelled,
     #[error("amqp publisher recovery task terminated unexpectedly")]
     RecoveryTaskUnknown,
-    #[error("amqp publisher recovery join deadline elapsed")]
-    RecoveryJoinDeadline,
 }
 
 /// `Publisher::publish` 的唯一内部失败载体。Display 只含固定安全摘要；endpoint、routing key、event id、
@@ -949,29 +944,36 @@ impl AmqpPublisher {
         recovery: TransportRecovery<LapinPublisherTransport>,
     ) {
         if let Some(previous) = lifecycle.recovery.take()
-            && !previous.task.is_finished()
+            && previous.task.status().is_running()
         {
             // 只能命中「上一 task 已把状态落为 Unavailable、尚未 return」的窄窗口。合作取消避免
             // detached task 在新 generation 已开始恢复后继续发起 authenticated reconnect。
-            previous.cancellation.cancel();
+            drop(previous);
         }
         let started = tokio::time::Instant::now();
         let deadline = started + self.publish_timeout;
         let cancellation = CancellationToken::new();
-        let task = tokio::spawn(run_transport_recovery(
-            self.connection_config.clone(),
-            Arc::clone(&self.transports),
-            self.name.clone(),
-            started,
-            deadline,
-            cancellation.clone(),
-            recovery,
-        ));
-        lifecycle.recovery = Some(OwnedTransportRecovery {
-            cancellation,
-            deadline,
-            task,
+        let connection_config = self.connection_config.clone();
+        let transports = Arc::clone(&self.transports);
+        let name = self.name.clone();
+        let (start, _) = diport::ManagedTask::prepare(
+            "amqp-publisher-transport-recovery",
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        );
+        let task = start.spawn(cancellation, |cancellation| async move {
+            run_transport_recovery(
+                connection_config,
+                transports,
+                name,
+                started,
+                deadline,
+                cancellation,
+                recovery,
+            )
+            .await;
+            Ok(())
         });
+        lifecycle.recovery = Some(OwnedTransportRecovery { task });
     }
 
     /// 将 [`PublishFailureDecision`] 落到 generation retirement 与三态 [`PublisherError`]。
@@ -1144,34 +1146,19 @@ async fn wait_for_shutdown_admission(
 }
 
 async fn join_cancelled_recovery(
-    mut recovery: OwnedTransportRecovery,
+    recovery: OwnedTransportRecovery,
 ) -> Result<(), PublisherTransportError> {
-    recovery.cancellation.cancel();
-    tokio::select! {
-        biased;
-        joined = &mut recovery.task => classify_recovery_join(joined),
-        _ = tokio::time::sleep_until(recovery.deadline) => {
-            // Cooperative stages are deadline-bound; abort is only a hard backstop for code between
-            // awaits once the shared budget is already exhausted.
-            recovery.task.abort();
-            let _ = recovery.task.await;
-            Err(PublisherTransportError::RecoveryJoinDeadline)
-        }
-    }
-}
-
-fn classify_recovery_join(
-    joined: Result<(), tokio::task::JoinError>,
-) -> Result<(), PublisherTransportError> {
-    joined.map_err(|error| {
-        if error.is_panic() {
-            PublisherTransportError::RecoveryTaskPanicked
-        } else if error.is_cancelled() {
-            PublisherTransportError::RecoveryTaskCancelled
-        } else {
-            PublisherTransportError::RecoveryTaskUnknown
-        }
-    })
+    diport::ManagedResource::shutdown(&recovery.task)
+        .await
+        .map_err(|error| {
+            if error.kind() == diport::ShutdownErrorKind::TaskPanicked {
+                PublisherTransportError::RecoveryTaskPanicked
+            } else if error.kind() == diport::ShutdownErrorKind::TaskCancelled {
+                PublisherTransportError::RecoveryTaskCancelled
+            } else {
+                PublisherTransportError::RecoveryTaskUnknown
+            }
+        })
 }
 
 /// ambiguous/client failure 后的资源恢复在 owned task 中执行，避免 Postgres 外层 publisher watchdog drop
@@ -1696,10 +1683,7 @@ fn publisher_transport_shutdown_error(error: PublisherTransportError) -> Shutdow
         PublisherTransportError::RecoveryTaskPanicked => ShutdownError::task_panicked(error),
         PublisherTransportError::RecoveryTaskCancelled => ShutdownError::task_cancelled(error),
         PublisherTransportError::RecoveryTaskUnknown => ShutdownError::task_unknown(error),
-        PublisherTransportError::RecoveryJoinDeadline
-        | PublisherTransportError::AdmissionDrainDeadline => {
-            ShutdownError::deadline_exceeded(error)
-        }
+        PublisherTransportError::AdmissionDrainDeadline => ShutdownError::deadline_exceeded(error),
         _ => ShutdownError::new(error),
     }
 }
@@ -2736,8 +2720,7 @@ mod publisher_channel_recovery_deadline_tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        OwnedTransportRecovery, PublisherTransportError, RecoveryStageError, TransportAdmission,
-        TransportSlot, join_cancelled_recovery, publisher_transport_shutdown_error,
+        PublisherTransportError, RecoveryStageError, TransportAdmission, TransportSlot,
         run_publisher_transport_recovery_pipeline, wait_for_shutdown_admission,
     };
 
@@ -2757,68 +2740,6 @@ mod publisher_channel_recovery_deadline_tests {
         ));
         assert_eq!(started.elapsed(), Duration::from_secs(9));
         drop(permit);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_join_cancels_and_waits_for_owned_recovery() {
-        let started = tokio::time::Instant::now();
-        let cancellation = CancellationToken::new();
-        let observed = Arc::new(AtomicBool::new(false));
-        let task_token = cancellation.clone();
-        let task_observed = Arc::clone(&observed);
-        let task = tokio::spawn(async move {
-            task_token.cancelled().await;
-            task_observed.store(true, Ordering::SeqCst);
-        });
-
-        join_cancelled_recovery(OwnedTransportRecovery {
-            cancellation,
-            deadline: started + Duration::from_secs(9),
-            task,
-        })
-        .await
-        .expect("cooperative recovery stops cleanly");
-
-        assert!(observed.load(Ordering::SeqCst));
-        assert_eq!(started.elapsed(), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    #[allow(clippy::panic)]
-    async fn shutdown_join_reports_panic_and_deadline_as_closed_reasons() {
-        let panic_result = join_cancelled_recovery(OwnedTransportRecovery {
-            cancellation: CancellationToken::new(),
-            deadline: tokio::time::Instant::now() + Duration::from_secs(9),
-            task: tokio::spawn(async { panic!("amqp-recovery-plain-panic-secret") }),
-        })
-        .await;
-        assert!(matches!(
-            panic_result,
-            Err(PublisherTransportError::RecoveryTaskPanicked)
-        ));
-        assert_eq!(
-            publisher_transport_shutdown_error(PublisherTransportError::RecoveryTaskPanicked)
-                .kind(),
-            diport::ShutdownErrorKind::TaskPanicked
-        );
-
-        let started = tokio::time::Instant::now();
-        let deadline_result = join_cancelled_recovery(OwnedTransportRecovery {
-            cancellation: CancellationToken::new(),
-            deadline: started + Duration::from_secs(9),
-            task: tokio::spawn(std::future::pending::<()>()),
-        })
-        .await;
-        assert!(matches!(
-            deadline_result,
-            Err(PublisherTransportError::RecoveryJoinDeadline)
-        ));
-        assert_eq!(started.elapsed(), Duration::from_secs(9));
-        assert_eq!(
-            publisher_transport_shutdown_error(PublisherTransportError::RecoveryJoinDeadline)
-                .kind(),
-            diport::ShutdownErrorKind::DeadlineExceeded
-        );
     }
 
     #[tokio::test(start_paused = true)]

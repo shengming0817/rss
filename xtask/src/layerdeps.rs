@@ -61,7 +61,8 @@
 //!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 铸造完整计划 receipt，以及 runtime
 //!   的 placement-projected provider transaction 持有；其它 assembly roots 不得依赖。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
-//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/primitives/secure 与外部
+//!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/
+//!   listenerlifecycle/primitives/rss-platform/runtimeinventorymint/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
 //!   `[dev-dependencies]` 不入该 shipped allowlist 扫描。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
@@ -786,6 +787,7 @@ const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "bootstrap",
     "diport",
     "eventexec",
+    "listenerlifecycle",
     "primitives",
     "rss-platform",
     "runtimeinventorymint",
@@ -4272,6 +4274,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             e("runtimeexec", "bootstrap"),
             e("runtimeexec", "diport"),
             e("runtimeexec", "eventexec"),
+            e("runtimeexec", "listenerlifecycle"),
             e("runtimeexec", "primitives"),
             e("runtimeexec", "rss-platform"),
             e("runtimeexec", "runtimeinventorymint"),
@@ -4283,6 +4286,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             runtime_dep("bootstrap", true),
             runtime_dep("diport", true),
             runtime_dep("eventexec", true),
+            runtime_dep("listenerlifecycle", true),
             runtime_dep("primitives", true),
             runtime_dep("runtimeinventorymint", true),
             runtime_dep("secure", true),

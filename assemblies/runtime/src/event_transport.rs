@@ -2297,8 +2297,7 @@ fn wire_inbox_sweeper(
         &admission,
         move |token, worker_admission| {
             let loop_health = Arc::clone(&worker_health);
-            let loop_token = token.clone();
-            let handle = tokio::spawn(async move {
+            let make = move |loop_token| async move {
                 let _stopped = loop_health.stopped_on_exit();
                 sweeper_loop(
                     Arc::new(sweeper),
@@ -2310,10 +2309,10 @@ fn wire_inbox_sweeper(
                     worker_admission,
                 )
                 .await;
-            });
-            DynManagedResource::new_box(SweeperWorker::adopt(
+            };
+            DynManagedResource::new_box(SweeperWorker::spawn(
                 INBOX_SWEEPER_WORKER_NAME,
-                handle,
+                make,
                 worker_health,
                 token,
             ))
@@ -4045,14 +4044,13 @@ mod tests {
             open_write_admission(),
         );
 
-        let resource = match worker {
-            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => make.into_factory()(token),
-        };
+        let mut stack = bootstrap::shutdown::ShutdownStack::new(token);
+        worker.register_into(&mut stack);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), tick_observed.recv()).await,
             Ok(Some(()))
         );
-        assert!(resource.shutdown().await.is_ok());
+        assert!(stack.shutdown().await.is_empty());
         assert_eq!(
             epochs
                 .lock()

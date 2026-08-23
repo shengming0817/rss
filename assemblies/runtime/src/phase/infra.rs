@@ -15,7 +15,9 @@ use super::maintenance::wire_service_token_replay_sweeper;
 use crate::SharedRuntimeDeps;
 use crate::config::RuntimeServingConfigParts;
 use crate::infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
-use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
+use crate::infra::redis::{
+    REDIS_READY_PROBE_NAME, RedisReadyProbe, prepare_redis_readiness_sampler,
+};
 use crate::infra::redis::{RedisRuntimeConfig, build_redis_runtime_deps};
 use crate::infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts, build_s3_runtime_deps};
 use crate::infra::vault::{IdentityVaultRuntimeConfig, SettingsVaultRuntimeConfig};
@@ -621,23 +623,22 @@ impl<'a> ProvidersBuilt<'a> {
         let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let redis_probe_name = primitives::ProbeName::parse(REDIS_READY_PROBE_NAME)
             .context("parse redis_ready probe name")?;
-        let redis_for_sampler = redis.clone();
-        let redis_worker_ready = Arc::clone(&redis_ready);
-        let redis_readiness_worker = bootstrap::WorkerSpec::observational_phase_one(
+        let (redis_task_status, redis_task_factory) = prepare_redis_readiness_sampler(
+            redis.clone(),
+            redis_readiness_period,
+            Arc::clone(&redis_ready),
+        );
+        let redis_readiness_worker = bootstrap::WorkerSpec::managed_observational_phase_one(
             "assemblies.runtime.src.phase.infra.01",
-            move |token| {
-                diport::DynManagedResource::new_box(spawn_redis_readiness_sampler(
-                    redis_for_sampler.clone(),
-                    redis_readiness_period,
-                    token,
-                    Arc::clone(&redis_worker_ready),
-                ))
-            },
+            redis_task_factory,
         );
         let mut redis_output = DomainModuleResult::default();
         redis_output.push_probe((
             redis_probe_name,
-            Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
+            Box::new(RedisReadyProbe::new(
+                Arc::clone(&redis_ready),
+                redis_task_status,
+            )),
         ));
         redis_output.extend_resources(redis.runtime_resources());
         redis_output.push_worker(redis_readiness_worker);

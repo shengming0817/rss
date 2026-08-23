@@ -12,15 +12,14 @@ use anyhow::Context as _;
 use bootstrap::{DomainBinding, DomainModuleResult, WorkerSpec};
 use diport::key_provider::KeyProviderErrorKind;
 use diport::{
-    Clock, DynKeyProvider, DynManagedResource, DynSecretResolver, KeyName, KeyProvider as _,
-    ManagedResource, SecretResolver as _, SecretResolverError, ShutdownError,
+    Clock, DynKeyProvider, DynSecretResolver, KeyName, KeyProvider as _, SecretResolver as _,
+    SecretResolverError,
 };
 use postgres::{ConfigValueProtections, PgDbReadiness, PgDomainDeps, PoolReadiness, caps};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use secure::{Plaintext, ProtectionContext};
 use settings::ports::{DynSecretRepo, DynSecretUnitOfWork};
 use settings::{SettingsDomain, SettingsService};
-use tokio_util::sync::CancellationToken;
 use vault::{SecretResolverReadinessTarget, VaultDomainDeps, caps as vault_caps};
 
 const DOMAIN_NAME: &str = "settings";
@@ -161,26 +160,35 @@ impl SettingsProviderReadiness {
             .context("verify settings config value key provider")?;
         let key_provider = Arc::new(AtomicBool::new(true));
         let secret_resolver = Arc::new(AtomicBool::new(false));
-        let key_worker = keyprovider_readiness_worker(
+        let (key_worker, key_task) = keyprovider_readiness_worker(
             vault.key_provider(),
             key_name,
             interval.get(),
             Arc::clone(&key_provider),
         );
-        let resolver_worker = secret_resolver_readiness_worker(
+        let (resolver_worker, resolver_task) = secret_resolver_readiness_worker(
             vault.secret_resolver(),
             vault.secret_resolver_readiness_targets(),
             interval.get(),
             Arc::clone(&secret_resolver),
         );
-        Self::from_workers(key_provider, secret_resolver, key_worker, resolver_worker)
+        Self::from_workers(
+            key_provider,
+            secret_resolver,
+            key_worker,
+            key_task,
+            resolver_worker,
+            resolver_task,
+        )
     }
 
     fn from_workers(
         key_provider: Arc<AtomicBool>,
         secret_resolver: Arc<AtomicBool>,
         key_worker: WorkerSpec,
+        key_task: diport::TaskStatus,
         resolver_worker: WorkerSpec,
+        resolver_task: diport::TaskStatus,
     ) -> anyhow::Result<Self> {
         let key_name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME)
             .context("keyprovider_ready probe name is invalid")?;
@@ -194,7 +202,7 @@ impl SettingsProviderReadiness {
             key_provider: SettingsKeyProviderReadinessOutput(DomainModuleResult::from_parts(
                 vec![(
                     key_name,
-                    Box::new(KeyProviderReadyProbe::new(key_provider)) as _,
+                    Box::new(KeyProviderReadyProbe::new(key_provider, key_task)) as _,
                 )],
                 [],
                 vec![key_worker],
@@ -202,7 +210,10 @@ impl SettingsProviderReadiness {
             secret_resolver: SettingsSecretResolverReadinessOutput(DomainModuleResult::from_parts(
                 vec![(
                     resolver_name,
-                    Box::new(SecretResolverReadyProbe::new(secret_resolver)) as _,
+                    Box::new(SecretResolverReadyProbe::new(
+                        secret_resolver,
+                        resolver_task,
+                    )) as _,
                 )],
                 [],
                 vec![resolver_worker],
@@ -422,12 +433,31 @@ fn keyprovider_readiness_worker(
     key_name: KeyName,
     period: Duration,
     ready: Arc<AtomicBool>,
-) -> WorkerSpec {
-    WorkerSpec::observational_phase_one("composition.settings.src.lib.01", move |token| {
-        DynManagedResource::new_box(spawn_keyprovider_readiness_sampler(
-            provider, key_name, period, token, ready,
-        ))
-    })
+) -> (WorkerSpec, diport::TaskStatus) {
+    let (start, status) = diport::ManagedTask::prepare(
+        "keyprovider-readiness-sampler",
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+    );
+    let worker = WorkerSpec::managed_observational_phase_one(
+        "composition.settings.src.lib.01",
+        move |token| {
+            start
+                .spawn(token, |worker_token| async move {
+                    loop {
+                        tokio::select! {
+                            () = worker_token.cancelled() => break,
+                            () = tokio::time::sleep(period) => {
+                                let is_ready = verify_keyprovider_ready(&provider, key_name.clone()).await.is_ok();
+                                ready.store(is_ready, Ordering::Release);
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+                .into_registration()
+        },
+    );
+    (worker, status)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -468,12 +498,31 @@ fn secret_resolver_readiness_worker(
     targets: Vec<SecretResolverReadinessTarget>,
     period: Duration,
     ready: Arc<AtomicBool>,
-) -> WorkerSpec {
-    WorkerSpec::observational_phase_one("composition.settings.src.lib.02", move |token| {
-        DynManagedResource::new_box(spawn_secret_resolver_readiness_sampler(
-            resolver, targets, period, token, ready,
-        ))
-    })
+) -> (WorkerSpec, diport::TaskStatus) {
+    let (start, status) = diport::ManagedTask::prepare(
+        "vault-secret-resolver-readiness-sampler",
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+    );
+    let worker = WorkerSpec::managed_observational_phase_one(
+        "composition.settings.src.lib.02",
+        move |token| {
+            start
+                .spawn(token, |worker_token| async move {
+                    loop {
+                        tokio::select! {
+                            () = worker_token.cancelled() => break,
+                            () = tokio::time::sleep(period) => {
+                                let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
+                                apply_secret_resolver_readiness_sample(&ready, sample);
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+                .into_registration()
+        },
+    );
+    (worker, status)
 }
 
 /// DB readiness probe backed by the shared, non-blocking postgres snapshot.
@@ -502,28 +551,30 @@ impl bootstrap::HealthProbe for ConfigsReadyProbe {
 /// Key-provider probe backed by the sampler's shared readiness snapshot.
 pub struct KeyProviderReadyProbe {
     ready: Arc<AtomicBool>,
+    task: diport::TaskStatus,
     name: ProbeName,
 }
 
 /// Vault KV capability probe backed by the resolver canary sampler.
 pub struct SecretResolverReadyProbe {
     ready: Arc<AtomicBool>,
+    task: diport::TaskStatus,
     name: ProbeName,
 }
 
 impl SecretResolverReadyProbe {
     #[allow(clippy::expect_used)]
     #[must_use]
-    pub fn new(ready: Arc<AtomicBool>) -> Self {
+    pub fn new(ready: Arc<AtomicBool>, task: diport::TaskStatus) -> Self {
         let name =
             ProbeName::parse(SECRET_RESOLVER_READY_PROBE_NAME).expect("valid probe name const");
-        Self { ready, name }
+        Self { ready, task, name }
     }
 }
 
 impl bootstrap::HealthProbe for SecretResolverReadyProbe {
     fn check(&self) -> HealthCheck {
-        let (status, detail) = if self.ready.load(Ordering::Acquire) {
+        let (status, detail) = if self.task.is_running() && self.ready.load(Ordering::Acquire) {
             (HealthStatus::Healthy, "ready")
         } else {
             (HealthStatus::Unhealthy, "down")
@@ -536,15 +587,15 @@ impl KeyProviderReadyProbe {
     /// Construct the key-provider readiness probe.
     #[allow(clippy::expect_used)]
     #[must_use]
-    pub fn new(ready: Arc<AtomicBool>) -> Self {
+    pub fn new(ready: Arc<AtomicBool>, task: diport::TaskStatus) -> Self {
         let name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME).expect("valid probe name const");
-        Self { ready, name }
+        Self { ready, task, name }
     }
 }
 
 impl bootstrap::HealthProbe for KeyProviderReadyProbe {
     fn check(&self) -> HealthCheck {
-        let (status, detail) = if self.ready.load(Ordering::Acquire) {
+        let (status, detail) = if self.task.is_running() && self.ready.load(Ordering::Acquire) {
             (HealthStatus::Healthy, "ready")
         } else {
             (HealthStatus::Unhealthy, "down")
@@ -614,104 +665,6 @@ async fn verify_keyprovider_ready(
         Ok(_) => anyhow::bail!("key provider accepted mismatched readiness aad"),
         Err(error) if error.kind() == KeyProviderErrorKind::Rejected => Ok(()),
         Err(error) => Err(error).context("key provider readiness mismatched aad decrypt"),
-    }
-}
-
-struct KeyProviderReadinessSampler {
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: CancellationToken,
-}
-
-impl ManagedResource for KeyProviderReadinessSampler {
-    fn name(&self) -> &str {
-        "keyprovider-readiness-sampler"
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
-    }
-}
-
-fn spawn_keyprovider_readiness_sampler(
-    provider: Box<DynKeyProvider<'static>>,
-    key_name: KeyName,
-    period: Duration,
-    token: CancellationToken,
-    ready: Arc<AtomicBool>,
-) -> KeyProviderReadinessSampler {
-    let child = token.child_token();
-    let worker_token = child.clone();
-    let handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = worker_token.cancelled() => break,
-                () = tokio::time::sleep(period) => {
-                    let is_ready = verify_keyprovider_ready(&provider, key_name.clone()).await.is_ok();
-                    ready.store(is_ready, Ordering::Release);
-                }
-            }
-        }
-    });
-    KeyProviderReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-        token: child,
-    }
-}
-
-struct SecretResolverReadinessSampler {
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: CancellationToken,
-}
-
-impl ManagedResource for SecretResolverReadinessSampler {
-    fn name(&self) -> &str {
-        "vault-secret-resolver-readiness-sampler"
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
-    }
-}
-
-fn spawn_secret_resolver_readiness_sampler(
-    resolver: Box<DynSecretResolver<'static>>,
-    targets: Vec<SecretResolverReadinessTarget>,
-    period: Duration,
-    token: CancellationToken,
-    ready: Arc<AtomicBool>,
-) -> SecretResolverReadinessSampler {
-    let child = token.child_token();
-    let worker_token = child.clone();
-    let handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = worker_token.cancelled() => break,
-                () = tokio::time::sleep(period) => {
-                    let sample = sample_secret_resolver_readiness(&resolver, &targets).await;
-                    apply_secret_resolver_readiness_sample(&ready, sample);
-                }
-            }
-        }
-    });
-    SecretResolverReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-        token: child,
     }
 }
 
@@ -835,59 +788,32 @@ mod tests {
 
     use bootstrap::{HealthProbe as _, compose_bindings};
     use diport::{
-        EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes,
-        SecretCoordinate, SecretMaterial, SecretResolver,
+        EncryptOutput, KeyProvider, KeyProviderError, KeyRef, KeyVersion, ManagedResource,
+        RedactedBytes, SecretCoordinate, SecretMaterial, SecretResolver,
     };
     use secure::DerivedAad;
+    use tokio_util::sync::CancellationToken;
     use vault::{
         StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
     };
 
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn readiness_samplers_propagate_closed_join_failure_kinds() {
-        let key_provider = KeyProviderReadinessSampler {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("settings-readiness-plain-panic-secret");
-            })))),
-            token: CancellationToken::new(),
-        };
-        let error = key_provider
-            .shutdown()
-            .await
-            .expect_err("panic must propagate");
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(!format!("{error:?}").contains("plain-panic-secret"));
-
-        let handle = tokio::spawn(std::future::pending::<()>());
-        handle.abort();
-        let secret_resolver = SecretResolverReadinessSampler {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            token: CancellationToken::new(),
-        };
-        let error = secret_resolver
-            .shutdown()
-            .await
-            .expect_err("cancellation must propagate");
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskCancelled);
-    }
-
-    struct ReadinessTestWorker;
-
-    impl ManagedResource for ReadinessTestWorker {
-        fn name(&self) -> &str {
-            "settings-readiness-test-worker"
-        }
-
-        async fn shutdown(&self) -> Result<(), ShutdownError> {
-            Ok(())
-        }
-    }
-
-    fn readiness_test_worker() -> WorkerSpec {
-        WorkerSpec::observational_phase_one("composition.settings.src.lib.03", |_| {
-            DynManagedResource::new_box(ReadinessTestWorker)
-        })
+    fn readiness_test_worker() -> (WorkerSpec, diport::TaskStatus) {
+        let (start, status) = diport::ManagedTask::prepare(
+            "settings-readiness-test-worker",
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        );
+        let worker = WorkerSpec::managed_observational_phase_one(
+            "composition.settings.src.lib.03",
+            move |token| {
+                start
+                    .spawn(token, |worker_token| async move {
+                        worker_token.cancelled().await;
+                        Ok(())
+                    })
+                    .into_registration()
+            },
+        );
+        (worker, status)
     }
 
     struct FailingKeyProvider;
@@ -1096,14 +1022,24 @@ mod tests {
         assert!(KeyProviderReadinessInterval::try_new(Duration::from_secs(31)).is_err());
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::expect_used)]
-    fn keyprovider_probe_observes_shared_snapshot() {
+    async fn keyprovider_probe_observes_shared_snapshot() {
         let ready = Arc::new(AtomicBool::new(true));
-        let probe = KeyProviderReadyProbe::new(Arc::clone(&ready));
+        let token = CancellationToken::new();
+        let (start, status) = diport::ManagedTask::prepare(
+            "keyprovider-probe-test",
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        );
+        let task = start.spawn(token, |task_token| async move {
+            task_token.cancelled().await;
+            Ok(())
+        });
+        let probe = KeyProviderReadyProbe::new(Arc::clone(&ready), status);
         assert_eq!(probe.check().status(), HealthStatus::Healthy);
         ready.store(false, Ordering::Release);
         assert_eq!(probe.check().status(), HealthStatus::Unhealthy);
+        task.shutdown().await.expect("test task drains");
     }
 
     #[tokio::test]
@@ -1186,11 +1122,15 @@ mod tests {
     #[tokio::test]
     async fn typed_provider_readiness_outputs_are_non_interchangeable_and_exact()
     -> anyhow::Result<()> {
+        let (key_worker, key_status) = readiness_test_worker();
+        let (resolver_worker, resolver_status) = readiness_test_worker();
         let readiness = SettingsProviderReadiness::from_workers(
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(true)),
-            readiness_test_worker(),
-            readiness_test_worker(),
+            key_worker,
+            key_status,
+            resolver_worker,
+            resolver_status,
         )?;
         let (pending, key, resolver) = readiness.into_vault_parts();
         let pg = postgres::PgRuntimeHandle::for_ready_module_test();
@@ -1251,17 +1191,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn readiness_worker_updates_snapshot_and_drains() {
         let ready = Arc::new(AtomicBool::new(true));
-        let worker = keyprovider_readiness_worker(
+        let (worker, _) = keyprovider_readiness_worker(
             DynKeyProvider::new_box(FailingKeyProvider),
             KeyName::try_new("settings-config").expect("valid key"),
             Duration::from_millis(1),
             Arc::clone(&ready),
         );
-        let resource = match worker {
-            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                make.into_factory()(CancellationToken::new())
-            }
-        };
+        let mut stack = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
+        worker.register_into(&mut stack);
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while ready.load(Ordering::Acquire) {
@@ -1270,24 +1207,21 @@ mod tests {
         })
         .await
         .expect("sampler updates readiness within timeout");
-        resource.shutdown().await.expect("sampler drains cleanly");
+        assert!(stack.shutdown().await.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
     #[allow(clippy::expect_used)]
     async fn readiness_worker_waits_for_the_exact_injected_interval() {
         let ready = Arc::new(AtomicBool::new(true));
-        let worker = keyprovider_readiness_worker(
+        let (worker, _) = keyprovider_readiness_worker(
             DynKeyProvider::new_box(FailingKeyProvider),
             KeyName::try_new("settings-config").expect("valid key"),
             Duration::from_secs(7),
             Arc::clone(&ready),
         );
-        let resource = match worker {
-            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                make.into_factory()(CancellationToken::new())
-            }
-        };
+        let mut stack = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
+        worker.register_into(&mut stack);
         tokio::task::yield_now().await;
 
         tokio::time::advance(Duration::from_secs(6)).await;
@@ -1302,6 +1236,6 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(!ready.load(Ordering::Acquire));
-        resource.shutdown().await.expect("sampler drains cleanly");
+        assert!(stack.shutdown().await.is_empty());
     }
 }

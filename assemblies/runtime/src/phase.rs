@@ -477,7 +477,7 @@ pub(crate) struct Finalized<'a> {
     domain_transport: DomainTransportRuntime,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     listeners: crate::routes::FinalizedListenerSet,
-    probe_receipt: crate::routes::FinalizedProbeReceipt,
+    probe_receipt: runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
     platform_host: runtimeexec::RuntimeHostView,
 }

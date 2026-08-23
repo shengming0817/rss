@@ -17,6 +17,68 @@ use static_assertions::assert_not_impl_any;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+fn test_listener_receipt<T>(assembly_receipt: T) -> LaunchProbeReceipt<T> {
+    let mut registry = bootstrap::Registry::default();
+    ListenerLifecycleRegistration::install(&mut registry)
+        .map(|receipt| receipt.map_for_test(assembly_receipt))
+        .expect("listener probe installation must succeed")
+}
+
+fn listener_probe_status(reporter: &bootstrap::HealthReporter) -> HealthStatus {
+    reporter
+        .report()
+        .checks()
+        .iter()
+        .find(|check| check.name().as_str() == "runtime-listeners")
+        .expect("runtime listener probe must be installed")
+        .status()
+}
+
+fn listener_probe_detail(reporter: &bootstrap::HealthReporter) -> &'static str {
+    reporter
+        .report()
+        .checks()
+        .iter()
+        .find(|check| check.name().as_str() == "runtime-listeners")
+        .expect("runtime listener probe must be installed")
+        .detail()
+}
+
+#[tokio::test]
+async fn listener_probe_is_installed_sealed_and_terminal_sticky() {
+    let mut registry = bootstrap::Registry::default();
+    let receipt =
+        ListenerLifecycleRegistration::install(&mut registry).expect("listener probe install");
+    let reporter = Arc::clone(receipt.assembly_receipt());
+    assert_eq!(listener_probe_status(&reporter), HealthStatus::Unhealthy);
+
+    let (_assembly, listener_receipt) = receipt.into_parts();
+    let root = CancellationToken::new();
+    let mut stack = ShutdownStack::new(root.clone());
+    let transaction = LaunchTransaction { stack: &mut stack };
+    let mut registrar = transaction.commit(listener_receipt);
+    registrar.register_listener_with_token(|token| {
+        bound_listener("listener-probe-test").spawn(
+            token,
+            Duration::from_secs(1),
+            |_listener, worker_token| async move {
+                worker_token.cancelled().await;
+                Ok(())
+            },
+        )
+    });
+    assert_eq!(listener_probe_status(&reporter), HealthStatus::Unhealthy);
+    let _activated = registrar
+        .complete(())
+        .expect("non-empty listener group seals");
+    assert_eq!(listener_probe_status(&reporter), HealthStatus::Healthy);
+
+    root.cancel();
+    assert!(stack.shutdown().await.is_empty());
+    assert_eq!(listener_probe_status(&reporter), HealthStatus::Unhealthy);
+    assert_eq!(listener_probe_detail(&reporter), "listener cancelled");
+}
+
 #[test]
 #[allow(clippy::panic)]
 fn production_panic_hook_redacts_payload() {
@@ -210,6 +272,32 @@ fn resource(name: &'static str, transcript: &Transcript) -> Box<DynManagedResour
     })
 }
 
+fn listener_registration(
+    name: &'static str,
+    transcript: &Transcript,
+    token: CancellationToken,
+) -> listenerlifecycle::ListenerTaskRegistration {
+    let transcript = transcript.clone();
+    bound_listener(name).spawn(
+        token,
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        move |_listener, task_token| async move {
+            task_token.cancelled().await;
+            transcript.record(name);
+            Ok(())
+        },
+    )
+}
+
+fn bound_listener(name: &'static str) -> listenerlifecycle::BoundTcpListener {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set test listener nonblocking");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("adopt test listener");
+    listenerlifecycle::BoundTcpListener::new(name, listener).expect("read test listener address")
+}
+
 fn failing_resource(
     name: &'static str,
     transcript: &Transcript,
@@ -253,6 +341,54 @@ struct ReadyInventory {
     listener_count: usize,
 }
 
+#[derive(Clone, Copy)]
+enum EarlyListenerExit {
+    Completed,
+    Failed,
+    Panicked,
+}
+
+struct EarlyExitAdapter {
+    exit: EarlyListenerExit,
+}
+
+impl LaunchAdapter<ProbeReceipt> for EarlyExitAdapter {
+    type Prepared = Self;
+    type Inventory = ();
+
+    fn prepare(
+        self,
+        _receipt: ProbeReceipt,
+        _transaction: &mut LaunchTransaction<'_>,
+    ) -> impl Future<Output = anyhow::Result<Self::Prepared>> + Send {
+        ready(Ok(self))
+    }
+
+    fn activate(
+        prepared: Self::Prepared,
+        mut registrar: LaunchRegistrar<'_>,
+    ) -> anyhow::Result<Activated<Self::Inventory>> {
+        registrar.register_listener_with_token(move |token| {
+            bound_listener("early-exit-listener").spawn(
+                token,
+                diport::DEFAULT_SHUTDOWN_TIMEOUT,
+                move |_listener, _managed_token| async move {
+                    match prepared.exit {
+                        EarlyListenerExit::Completed => Ok(()),
+                        EarlyListenerExit::Failed => Err(ShutdownError::new(
+                            std::io::Error::other("listener-plaintext-secret"),
+                        )),
+                        EarlyListenerExit::Panicked => {
+                            panic!("listener-plaintext-panic-secret")
+                        }
+                    }
+                },
+            )
+        });
+        registrar.complete(())
+    }
+}
+
 impl LaunchAdapter<ProbeReceipt> for FakeAdapter {
     type Prepared = PreparedFake;
     type Inventory = ReadyInventory;
@@ -278,7 +414,9 @@ impl LaunchAdapter<ProbeReceipt> for FakeAdapter {
         let listener_count = prepared.listener_names.len();
         for name in prepared.listener_names {
             let transcript = prepared.transcript.clone();
-            registrar.register_listener_with_token(move |_token| resource(name, &transcript));
+            registrar.register_listener_with_token(move |token| {
+                listener_registration(name, &transcript, token)
+            });
         }
         registrar.complete(ReadyInventory { listener_count })
     }
@@ -444,12 +582,17 @@ impl LaunchAdapter<ProbeReceipt> for CancellationAdapter {
         } = prepared.0;
         registrar.register_listener_with_token(move |token| {
             activated.notify_one();
-            DynManagedResource::new_box(CancellationObservedResource {
+            bound_listener("cancellation-observed").spawn(
                 token,
-                shutdowns,
-                cancelled_at_shutdown,
-                shutdown_done,
-            })
+                diport::DEFAULT_SHUTDOWN_TIMEOUT,
+                move |_listener, task_token| async move {
+                    task_token.cancelled().await;
+                    cancelled_at_shutdown.store(true, Ordering::SeqCst);
+                    shutdowns.fetch_add(1, Ordering::SeqCst);
+                    shutdown_done.notify_one();
+                    Ok(())
+                },
+            )
         });
         registrar.complete(())
     }
@@ -546,7 +689,7 @@ where
             transcript: transcript.clone(),
             fail_prepare,
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         move |inventory| ready(on_ready(inventory)),
         Some(resource("trace", transcript)),
         lifecycle_batches(provider_module, domain_module),
@@ -830,7 +973,7 @@ async fn executor_rejects_adapter_that_claims_listener_without_activating_one() 
             transcript: transcript.clone(),
             fail_prepare: false,
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         move |_| {
             ready({
                 ready_transcript.record("ready");
@@ -858,7 +1001,7 @@ async fn staged_prepare_resource_does_not_count_as_an_activated_listener() {
         StagedOnlyAdapter {
             transcript: transcript.clone(),
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
@@ -881,7 +1024,7 @@ async fn staged_shutdown_failure_preserves_prepare_primary_error() {
         FailingPrepareAdapter {
             transcript: transcript.clone(),
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
@@ -1077,6 +1220,58 @@ async fn controlled_launch_preserves_the_original_request_error() {
 }
 
 #[tokio::test]
+async fn listener_early_completion_failure_and_panic_fail_closed_and_drain() {
+    for (exit, expected) in [
+        (EarlyListenerExit::Completed, "completed"),
+        (EarlyListenerExit::Failed, "task-failed"),
+        (EarlyListenerExit::Panicked, "task-panicked"),
+    ] {
+        let transcript = Transcript::new();
+        let launch = LaunchPlan::new(
+            EarlyExitAdapter { exit },
+            test_listener_receipt(ProbeReceipt),
+            |()| std::future::pending::<anyhow::Result<()>>(),
+            Some(resource("trace", &transcript)),
+            lifecycle_batches(
+                module(vec![resource("provider", &transcript)], Vec::new()),
+                DomainModuleResult::default(),
+            ),
+            test_drain_budget(),
+        );
+
+        let error = launch_until(launch, || Ok(std::future::pending::<anyhow::Result<()>>()))
+            .await
+            .err()
+            .expect("listener completion before shutdown must fail launch");
+        let message = error.to_string();
+        assert!(message.contains(expected), "{message}");
+        assert!(message.contains("early-exit-listener"), "{message}");
+        assert!(!message.contains("plaintext"), "{message}");
+        assert_eq!(transcript.snapshot(), vec!["provider", "trace"]);
+    }
+}
+
+#[tokio::test]
+async fn shutdown_signal_wins_a_simultaneous_listener_completion_race() {
+    let transcript = Transcript::new();
+    let launch = LaunchPlan::new(
+        EarlyExitAdapter {
+            exit: EarlyListenerExit::Completed,
+        },
+        test_listener_receipt(ProbeReceipt),
+        |()| ready(Ok(())),
+        Some(resource("trace", &transcript)),
+        lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
+        test_drain_budget(),
+    );
+
+    let _outputs = launch_until(launch, || Ok(ready(Ok(()))))
+        .await
+        .expect("signal must be the planned-stop authority when both futures are ready");
+    assert_eq!(transcript.snapshot(), vec!["trace"]);
+}
+
+#[tokio::test]
 async fn shutdown_signal_interrupts_pending_readiness_then_drains() {
     let transcript = Transcript::new();
     let readiness_started = Arc::new(Notify::new());
@@ -1087,7 +1282,7 @@ async fn shutdown_signal_interrupts_pending_readiness_then_drains() {
             transcript: transcript.clone(),
             fail_prepare: false,
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         move |_| async move {
             readiness_started.notify_one();
             std::future::pending::<anyhow::Result<()>>().await
@@ -1212,7 +1407,7 @@ async fn total_drain_budget_bounds_multiple_hanging_resources() {
             transcript,
             fail_prepare: false,
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         |_| ready(Ok(())),
         None,
         lifecycle_batches(
@@ -1258,7 +1453,7 @@ async fn abort_during_execute_transfers_stack_and_drains_exactly_once() {
             cancelled_at_shutdown: Arc::clone(&cancelled_at_shutdown),
             shutdown_done: Arc::clone(&shutdown_done),
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
@@ -1300,7 +1495,7 @@ async fn abort_during_prepare_awaits_resources_created_by_prepare() {
             shutdowns: Arc::clone(&shutdowns),
             shutdown_done: Arc::clone(&shutdown_done),
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         |()| ready(Ok(())),
         None,
         lifecycle_batches(DomainModuleResult::default(), DomainModuleResult::default()),
@@ -1361,7 +1556,7 @@ async fn abort_while_finish_waits_does_not_interrupt_remaining_lifo_drain() {
             transcript: transcript.clone(),
             fail_prepare: false,
         },
-        ProbeReceipt,
+        test_listener_receipt(ProbeReceipt),
         |_| ready(Ok(())),
         None,
         lifecycle_batches(provider_module, DomainModuleResult::default()),

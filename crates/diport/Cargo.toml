@@ -52,7 +52,7 @@ futures = { workspace = true }
 # Service-token replay deadlines are typed, absolute Tokio deadlines so every adapter operation
 # shares one cancellation boundary instead of minting per-stage relative timeouts. `rt` exposes
 # JoinError for the payload-free ShutdownError task-failure classifier.
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # DLX archive provider observations carry a fixed SHA-256 integrity checksum.
 sha2 = { workspace = true }
 # Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 bootstrap shutdown 同源）。

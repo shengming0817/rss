@@ -5,10 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
-use diport::{
-    AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownError,
-    Topic,
-};
+use diport::{AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, Topic};
 #[cfg(test)]
 use eventexec::EVENT_CONSUMER_PROBE;
 use eventexec::{
@@ -194,23 +191,29 @@ fn wire_amqp_readiness(
     ));
     let publisher_name = primitives::ProbeName::parse(crate::readiness::AMQP_PUBLISHER)
         .context("build settingsonly AMQP publisher readiness probe name")?;
+    let (publisher_start, publisher_task) = diport::ManagedTask::prepare(
+        "settingsonly-amqp-publisher-readiness",
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+    );
     publisher.push_probe((
         publisher_name.clone(),
         Box::new(TransportProbe::new(
             publisher_name,
             Arc::clone(&publisher_ready),
+            publisher_task,
         )),
     ));
     let publisher_amqp = amqp.clone();
-    publisher.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+    publisher.push_worker(bootstrap::WorkerSpec::managed_observational_phase_one(
         "assemblies.settingsonly.src.eventing.01",
         move |token| {
-            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+            spawn_amqp_readiness(
+                publisher_start,
                 publisher_amqp,
                 AmqpReadinessRole::Publisher,
                 publisher_ready,
                 token,
-            ))
+            )
         },
     ));
 
@@ -219,23 +222,29 @@ fn wire_amqp_readiness(
     ));
     let subscriber_name = primitives::ProbeName::parse(crate::readiness::AMQP_SUBSCRIBER)
         .context("build settingsonly AMQP subscriber readiness probe name")?;
+    let (subscriber_start, subscriber_task) = diport::ManagedTask::prepare(
+        "settingsonly-amqp-subscriber-readiness",
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+    );
     subscriber.push_probe((
         subscriber_name.clone(),
         Box::new(TransportProbe::new(
             subscriber_name,
             Arc::clone(&subscriber_ready),
+            subscriber_task,
         )),
     ));
     let subscriber_amqp = amqp.clone();
-    subscriber.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+    subscriber.push_worker(bootstrap::WorkerSpec::managed_observational_phase_one(
         "assemblies.settingsonly.src.eventing.02",
         move |token| {
-            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+            spawn_amqp_readiness(
+                subscriber_start,
                 subscriber_amqp,
                 AmqpReadinessRole::Subscriber,
                 subscriber_ready,
                 token,
-            ))
+            )
         },
     ));
     Ok(())
@@ -250,18 +259,23 @@ enum AmqpReadinessRole {
 struct TransportProbe {
     name: primitives::ProbeName,
     ready: Arc<std::sync::atomic::AtomicBool>,
+    task: diport::TaskStatus,
 }
 
 impl TransportProbe {
-    fn new(name: primitives::ProbeName, ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
-        Self { name, ready }
+    fn new(
+        name: primitives::ProbeName,
+        ready: Arc<std::sync::atomic::AtomicBool>,
+        task: diport::TaskStatus,
+    ) -> Self {
+        Self { name, ready, task }
     }
 }
 
 impl bootstrap::HealthProbe for TransportProbe {
     fn check(&self) -> primitives::HealthCheck {
         use std::sync::atomic::Ordering;
-        let (status, detail) = if self.ready.load(Ordering::Acquire) {
+        let (status, detail) = if self.task.is_running() && self.ready.load(Ordering::Acquire) {
             (primitives::HealthStatus::Healthy, "ready")
         } else {
             (primitives::HealthStatus::Unhealthy, "down")
@@ -270,64 +284,33 @@ impl bootstrap::HealthProbe for TransportProbe {
     }
 }
 
-struct AmqpReadinessWorker {
-    name: &'static str,
+fn spawn_amqp_readiness(
+    start: diport::TaskStart,
+    amqp: amqp::AmqpRuntimeDeps,
+    role: AmqpReadinessRole,
+    ready: Arc<std::sync::atomic::AtomicBool>,
     token: tokio_util::sync::CancellationToken,
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-}
-
-impl AmqpReadinessWorker {
-    fn spawn(
-        amqp: amqp::AmqpRuntimeDeps,
-        role: AmqpReadinessRole,
-        ready: Arc<std::sync::atomic::AtomicBool>,
-        token: tokio_util::sync::CancellationToken,
-    ) -> Self {
-        use std::sync::atomic::Ordering;
-        let name = match role {
-            AmqpReadinessRole::Publisher => "settingsonly-amqp-publisher-readiness",
-            AmqpReadinessRole::Subscriber => "settingsonly-amqp-subscriber-readiness",
-        };
-        let worker_token = token.clone();
-        let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(AMQP_READINESS_INTERVAL);
-            loop {
-                tokio::select! {
-                    biased;
-                    () = worker_token.cancelled() => break,
-                    _ = ticker.tick() => {
-                        let healthy = match role {
-                            AmqpReadinessRole::Publisher => amqp.publisher_readiness().is_ready(),
-                            AmqpReadinessRole::Subscriber => amqp.subscriber_readiness().is_ready(),
-                        };
-                        ready.store(healthy, Ordering::Release);
-                    }
+) -> diport::ManagedTaskRegistration {
+    use std::sync::atomic::Ordering;
+    let task = start.spawn(token, |worker_token| async move {
+        let mut ticker = tokio::time::interval(AMQP_READINESS_INTERVAL);
+        loop {
+            tokio::select! {
+                biased;
+                () = worker_token.cancelled() => break,
+                _ = ticker.tick() => {
+                    let healthy = match role {
+                        AmqpReadinessRole::Publisher => amqp.publisher_readiness().is_ready(),
+                        AmqpReadinessRole::Subscriber => amqp.subscriber_readiness().is_ready(),
+                    };
+                    ready.store(healthy, Ordering::Release);
                 }
             }
-        });
-        Self {
-            name,
-            token,
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
         }
-    }
-}
-
-impl ManagedResource for AmqpReadinessWorker {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        if let Some(handle) = self.handle.lock().await.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
+        ready.store(false, Ordering::Release);
         Ok(())
-    }
+    });
+    task.into_registration()
 }
 
 fn assemble_role_outputs(
@@ -484,8 +467,7 @@ fn wire_inbox_sweeper(
         &admission,
         move |token, worker_admission| {
             let loop_health = Arc::clone(&worker_health);
-            let loop_token = token.clone();
-            let handle = tokio::spawn(async move {
+            let make = move |loop_token| async move {
                 let _stopped = loop_health.stopped_on_exit();
                 sweeper_loop(
                     Arc::new(sweeper),
@@ -497,10 +479,10 @@ fn wire_inbox_sweeper(
                     worker_admission,
                 )
                 .await;
-            });
-            DynManagedResource::new_box(SweeperWorker::adopt(
+            };
+            DynManagedResource::new_box(SweeperWorker::spawn(
                 "settingsonly-inbox-dedup-sweeper",
-                handle,
+                make,
                 worker_health,
                 token,
             ))

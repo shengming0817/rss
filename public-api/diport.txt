@@ -2084,6 +2084,46 @@ impl core::marker::Unpin for diport::managed_resource::ShutdownErrorKind
 impl core::marker::UnsafeUnpin for diport::managed_resource::ShutdownErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ShutdownErrorKind
 impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ShutdownErrorKind
+pub enum diport::managed_resource::TaskExit
+pub diport::managed_resource::TaskExit::Cancelled
+pub diport::managed_resource::TaskExit::Completed
+pub diport::managed_resource::TaskExit::Failed(diport::managed_resource::ShutdownErrorKind)
+impl core::clone::Clone for diport::managed_resource::TaskExit
+pub fn diport::managed_resource::TaskExit::clone(&self) -> diport::managed_resource::TaskExit
+impl core::cmp::Eq for diport::managed_resource::TaskExit
+impl core::cmp::PartialEq for diport::managed_resource::TaskExit
+pub fn diport::managed_resource::TaskExit::eq(&self, &diport::managed_resource::TaskExit) -> bool
+impl core::fmt::Debug for diport::managed_resource::TaskExit
+pub fn diport::managed_resource::TaskExit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::managed_resource::TaskExit
+impl core::marker::StructuralPartialEq for diport::managed_resource::TaskExit
+impl core::marker::Freeze for diport::managed_resource::TaskExit
+impl core::marker::Send for diport::managed_resource::TaskExit
+impl core::marker::Sync for diport::managed_resource::TaskExit
+impl core::marker::Unpin for diport::managed_resource::TaskExit
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskExit
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskExit
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskExit
+pub enum diport::managed_resource::TaskState
+pub diport::managed_resource::TaskState::Pending
+pub diport::managed_resource::TaskState::Running
+pub diport::managed_resource::TaskState::Stopped(diport::managed_resource::TaskExit)
+impl core::clone::Clone for diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskState::clone(&self) -> diport::managed_resource::TaskState
+impl core::cmp::Eq for diport::managed_resource::TaskState
+impl core::cmp::PartialEq for diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskState::eq(&self, &diport::managed_resource::TaskState) -> bool
+impl core::fmt::Debug for diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::managed_resource::TaskState
+impl core::marker::StructuralPartialEq for diport::managed_resource::TaskState
+impl core::marker::Freeze for diport::managed_resource::TaskState
+impl core::marker::Send for diport::managed_resource::TaskState
+impl core::marker::Sync for diport::managed_resource::TaskState
+impl core::marker::Unpin for diport::managed_resource::TaskState
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskState
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskState
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskState
 #[repr(transparent)] pub struct diport::managed_resource::DynManagedResource<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynManagedResource<'dynosaur_struct>
 pub const fn diport::DynManagedResource<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::managed_resource::ManagedResource + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynManagedResource<'dynosaur_struct>>
@@ -2121,22 +2161,38 @@ impl<'dynosaur_struct> !core::marker::Unpin for diport::DynManagedResource<'dyno
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynManagedResource<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynManagedResource<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynManagedResource<'dynosaur_struct>
-pub struct diport::managed_resource::OwnedTask<T>
-impl<T> diport::managed_resource::OwnedTask<T>
-pub fn diport::managed_resource::OwnedTask<T>::abort(&self)
-pub async fn diport::managed_resource::OwnedTask<T>::join(self) -> core::result::Result<T, tokio::runtime::task::error::JoinError>
-pub const fn diport::managed_resource::OwnedTask<T>::new(tokio::runtime::task::join::JoinHandle<T>) -> Self
-impl<T: core::fmt::Debug> core::fmt::Debug for diport::managed_resource::OwnedTask<T>
-pub fn diport::managed_resource::OwnedTask<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<T> core::ops::drop::Drop for diport::managed_resource::OwnedTask<T>
-pub fn diport::managed_resource::OwnedTask<T>::drop(&mut self)
-impl<T> core::marker::Freeze for diport::managed_resource::OwnedTask<T>
-impl<T> core::marker::Send for diport::managed_resource::OwnedTask<T> where T: core::marker::Send
-impl<T> core::marker::Sync for diport::managed_resource::OwnedTask<T> where T: core::marker::Send
-impl<T> core::marker::Unpin for diport::managed_resource::OwnedTask<T>
-impl<T> core::marker::UnsafeUnpin for diport::managed_resource::OwnedTask<T>
-impl<T> core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::OwnedTask<T>
-impl<T> core::panic::unwind_safe::UnwindSafe for diport::managed_resource::OwnedTask<T>
+pub struct diport::managed_resource::ManagedTask
+impl diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::into_registration(self) -> diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTask::prepare(impl core::convert::Into<alloc::string::String>, core::time::Duration) -> (diport::managed_resource::TaskStart, diport::managed_resource::TaskStatus)
+pub fn diport::managed_resource::ManagedTask::status(&self) -> diport::managed_resource::TaskStatus
+impl core::ops::drop::Drop for diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::drop(&mut self)
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTask::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTask::shutdown_timeout(&self) -> core::time::Duration
+impl !core::marker::Freeze for diport::managed_resource::ManagedTask
+impl core::marker::Send for diport::managed_resource::ManagedTask
+impl core::marker::Sync for diport::managed_resource::ManagedTask
+impl core::marker::Unpin for diport::managed_resource::ManagedTask
+impl core::marker::UnsafeUnpin for diport::managed_resource::ManagedTask
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ManagedTask
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ManagedTask
+pub struct diport::managed_resource::ManagedTaskRegistration
+impl diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTaskRegistration::status(&self) -> diport::managed_resource::TaskStatus
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTaskRegistration::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTaskRegistration::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTaskRegistration::shutdown_timeout(&self) -> core::time::Duration
+impl !core::marker::Freeze for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::Send for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::Sync for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::Unpin for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::UnsafeUnpin for diport::managed_resource::ManagedTaskRegistration
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ManagedTaskRegistration
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ManagedTaskRegistration
 pub struct diport::managed_resource::ShutdownError
 impl diport::managed_resource::ShutdownError
 pub fn diport::managed_resource::ShutdownError::deadline_exceeded<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -2159,11 +2215,48 @@ impl core::marker::Unpin for diport::managed_resource::ShutdownError
 impl core::marker::UnsafeUnpin for diport::managed_resource::ShutdownError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ShutdownError
 impl !core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ShutdownError
+pub struct diport::managed_resource::TaskStart
+impl diport::managed_resource::TaskStart
+pub fn diport::managed_resource::TaskStart::spawn<F, Make>(self, tokio_util::sync::cancellation_token::CancellationToken, Make) -> diport::managed_resource::ManagedTask where F: core::future::future::Future<Output = core::result::Result<(), diport::managed_resource::ShutdownError>> + core::marker::Send + 'static, Make: core::ops::function::FnOnce(tokio_util::sync::cancellation_token::CancellationToken) -> F
+impl core::ops::drop::Drop for diport::managed_resource::TaskStart
+pub fn diport::managed_resource::TaskStart::drop(&mut self)
+impl core::marker::Freeze for diport::managed_resource::TaskStart
+impl core::marker::Send for diport::managed_resource::TaskStart
+impl core::marker::Sync for diport::managed_resource::TaskStart
+impl core::marker::Unpin for diport::managed_resource::TaskStart
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskStart
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskStart
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskStart
+pub struct diport::managed_resource::TaskStatus
+impl diport::managed_resource::TaskStatus
+pub fn diport::managed_resource::TaskStatus::current(&self) -> diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskStatus::is_running(&self) -> bool
+pub fn diport::managed_resource::TaskStatus::name(&self) -> &str
+pub async fn diport::managed_resource::TaskStatus::wait_stopped(&self) -> diport::managed_resource::TaskExit
+impl core::clone::Clone for diport::managed_resource::TaskStatus
+pub fn diport::managed_resource::TaskStatus::clone(&self) -> diport::managed_resource::TaskStatus
+impl core::fmt::Debug for diport::managed_resource::TaskStatus
+pub fn diport::managed_resource::TaskStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::managed_resource::TaskStatus
+impl core::marker::Send for diport::managed_resource::TaskStatus
+impl core::marker::Sync for diport::managed_resource::TaskStatus
+impl core::marker::Unpin for diport::managed_resource::TaskStatus
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskStatus
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskStatus
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskStatus
 pub const diport::managed_resource::DEFAULT_SHUTDOWN_TIMEOUT: core::time::Duration
 pub trait diport::managed_resource::ManagedResource: core::marker::Send
 pub fn diport::managed_resource::ManagedResource::name(&self) -> &str
 pub fn diport::managed_resource::ManagedResource::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::managed_resource::ShutdownError>> + core::marker::Send
 pub fn diport::managed_resource::ManagedResource::shutdown_timeout(&self) -> core::time::Duration
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTask::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTask::shutdown_timeout(&self) -> core::time::Duration
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTaskRegistration::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTaskRegistration::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTaskRegistration::shutdown_timeout(&self) -> core::time::Duration
 impl<'dynosaur_struct> diport::managed_resource::ManagedResource for &diport::DynManagedResource<'dynosaur_struct> where Self: core::marker::Send
 pub fn &diport::DynManagedResource<'dynosaur_struct>::name(&self) -> &str
 pub fn &diport::DynManagedResource<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::managed_resource::ShutdownError>> + core::marker::Send
@@ -2188,6 +2281,7 @@ impl<TraitVariantBlanketType: diport::managed_resource::ManagedResource> diport:
 pub fn TraitVariantBlanketType::name(&self) -> &str
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
 pub fn TraitVariantBlanketType::shutdown_timeout(&self) -> core::time::Duration
+pub async fn diport::managed_resource::join_owned_task<F, T>(F) -> core::result::Result<T, tokio::runtime::task::error::JoinError> where F: core::ops::function::FnOnce() -> T + core::marker::Send + 'static, T: core::marker::Send + 'static
 pub mod diport::metrics_exporter
 pub trait diport::metrics_exporter::MetricsExporter: core::marker::Send + core::marker::Sync
 pub fn diport::metrics_exporter::MetricsExporter::render(&self) -> alloc::string::String
@@ -7301,6 +7395,46 @@ impl core::marker::Unpin for diport::managed_resource::ShutdownErrorKind
 impl core::marker::UnsafeUnpin for diport::managed_resource::ShutdownErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ShutdownErrorKind
 impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ShutdownErrorKind
+pub enum diport::TaskExit
+pub diport::TaskExit::Cancelled
+pub diport::TaskExit::Completed
+pub diport::TaskExit::Failed(diport::managed_resource::ShutdownErrorKind)
+impl core::clone::Clone for diport::managed_resource::TaskExit
+pub fn diport::managed_resource::TaskExit::clone(&self) -> diport::managed_resource::TaskExit
+impl core::cmp::Eq for diport::managed_resource::TaskExit
+impl core::cmp::PartialEq for diport::managed_resource::TaskExit
+pub fn diport::managed_resource::TaskExit::eq(&self, &diport::managed_resource::TaskExit) -> bool
+impl core::fmt::Debug for diport::managed_resource::TaskExit
+pub fn diport::managed_resource::TaskExit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::managed_resource::TaskExit
+impl core::marker::StructuralPartialEq for diport::managed_resource::TaskExit
+impl core::marker::Freeze for diport::managed_resource::TaskExit
+impl core::marker::Send for diport::managed_resource::TaskExit
+impl core::marker::Sync for diport::managed_resource::TaskExit
+impl core::marker::Unpin for diport::managed_resource::TaskExit
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskExit
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskExit
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskExit
+pub enum diport::TaskState
+pub diport::TaskState::Pending
+pub diport::TaskState::Running
+pub diport::TaskState::Stopped(diport::managed_resource::TaskExit)
+impl core::clone::Clone for diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskState::clone(&self) -> diport::managed_resource::TaskState
+impl core::cmp::Eq for diport::managed_resource::TaskState
+impl core::cmp::PartialEq for diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskState::eq(&self, &diport::managed_resource::TaskState) -> bool
+impl core::fmt::Debug for diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::managed_resource::TaskState
+impl core::marker::StructuralPartialEq for diport::managed_resource::TaskState
+impl core::marker::Freeze for diport::managed_resource::TaskState
+impl core::marker::Send for diport::managed_resource::TaskState
+impl core::marker::Sync for diport::managed_resource::TaskState
+impl core::marker::Unpin for diport::managed_resource::TaskState
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskState
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskState
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskState
 pub enum diport::TokenAlgorithm
 pub diport::TokenAlgorithm::Es256
 pub diport::TokenAlgorithm::Hs256
@@ -9289,6 +9423,38 @@ impl core::marker::Unpin for diport::lock_store::LockStoreKey
 impl core::marker::UnsafeUnpin for diport::lock_store::LockStoreKey
 impl core::panic::unwind_safe::RefUnwindSafe for diport::lock_store::LockStoreKey
 impl core::panic::unwind_safe::UnwindSafe for diport::lock_store::LockStoreKey
+pub struct diport::ManagedTask
+impl diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::into_registration(self) -> diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTask::prepare(impl core::convert::Into<alloc::string::String>, core::time::Duration) -> (diport::managed_resource::TaskStart, diport::managed_resource::TaskStatus)
+pub fn diport::managed_resource::ManagedTask::status(&self) -> diport::managed_resource::TaskStatus
+impl core::ops::drop::Drop for diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::drop(&mut self)
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTask::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTask::shutdown_timeout(&self) -> core::time::Duration
+impl !core::marker::Freeze for diport::managed_resource::ManagedTask
+impl core::marker::Send for diport::managed_resource::ManagedTask
+impl core::marker::Sync for diport::managed_resource::ManagedTask
+impl core::marker::Unpin for diport::managed_resource::ManagedTask
+impl core::marker::UnsafeUnpin for diport::managed_resource::ManagedTask
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ManagedTask
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ManagedTask
+pub struct diport::ManagedTaskRegistration
+impl diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTaskRegistration::status(&self) -> diport::managed_resource::TaskStatus
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTaskRegistration::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTaskRegistration::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTaskRegistration::shutdown_timeout(&self) -> core::time::Duration
+impl !core::marker::Freeze for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::Send for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::Sync for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::Unpin for diport::managed_resource::ManagedTaskRegistration
+impl core::marker::UnsafeUnpin for diport::managed_resource::ManagedTaskRegistration
+impl !core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::ManagedTaskRegistration
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::ManagedTaskRegistration
 pub struct diport::Message
 impl diport::subscriber::Message
 pub fn diport::subscriber::Message::id(&self) -> &diport::subscriber::MessageId
@@ -9481,22 +9647,6 @@ impl core::marker::Unpin for diport::outbox_emitter::OutboxEnvelopeParts
 impl core::marker::UnsafeUnpin for diport::outbox_emitter::OutboxEnvelopeParts
 impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OutboxEnvelopeParts
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxEnvelopeParts
-pub struct diport::OwnedTask<T>
-impl<T> diport::managed_resource::OwnedTask<T>
-pub fn diport::managed_resource::OwnedTask<T>::abort(&self)
-pub async fn diport::managed_resource::OwnedTask<T>::join(self) -> core::result::Result<T, tokio::runtime::task::error::JoinError>
-pub const fn diport::managed_resource::OwnedTask<T>::new(tokio::runtime::task::join::JoinHandle<T>) -> Self
-impl<T: core::fmt::Debug> core::fmt::Debug for diport::managed_resource::OwnedTask<T>
-pub fn diport::managed_resource::OwnedTask<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<T> core::ops::drop::Drop for diport::managed_resource::OwnedTask<T>
-pub fn diport::managed_resource::OwnedTask<T>::drop(&mut self)
-impl<T> core::marker::Freeze for diport::managed_resource::OwnedTask<T>
-impl<T> core::marker::Send for diport::managed_resource::OwnedTask<T> where T: core::marker::Send
-impl<T> core::marker::Sync for diport::managed_resource::OwnedTask<T> where T: core::marker::Send
-impl<T> core::marker::Unpin for diport::managed_resource::OwnedTask<T>
-impl<T> core::marker::UnsafeUnpin for diport::managed_resource::OwnedTask<T>
-impl<T> core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::OwnedTask<T>
-impl<T> core::panic::unwind_safe::UnwindSafe for diport::managed_resource::OwnedTask<T>
 pub struct diport::PkiArtifactError
 impl diport::pki_artifact::PkiArtifactError
 pub const fn diport::pki_artifact::PkiArtifactError::kind(&self) -> diport::pki_artifact::PkiArtifactErrorKind
@@ -10837,6 +10987,35 @@ impl core::marker::Unpin for diport::SyncObj
 impl core::marker::UnsafeUnpin for diport::SyncObj
 impl core::panic::unwind_safe::RefUnwindSafe for diport::SyncObj
 impl core::panic::unwind_safe::UnwindSafe for diport::SyncObj
+pub struct diport::TaskStart
+impl diport::managed_resource::TaskStart
+pub fn diport::managed_resource::TaskStart::spawn<F, Make>(self, tokio_util::sync::cancellation_token::CancellationToken, Make) -> diport::managed_resource::ManagedTask where F: core::future::future::Future<Output = core::result::Result<(), diport::managed_resource::ShutdownError>> + core::marker::Send + 'static, Make: core::ops::function::FnOnce(tokio_util::sync::cancellation_token::CancellationToken) -> F
+impl core::ops::drop::Drop for diport::managed_resource::TaskStart
+pub fn diport::managed_resource::TaskStart::drop(&mut self)
+impl core::marker::Freeze for diport::managed_resource::TaskStart
+impl core::marker::Send for diport::managed_resource::TaskStart
+impl core::marker::Sync for diport::managed_resource::TaskStart
+impl core::marker::Unpin for diport::managed_resource::TaskStart
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskStart
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskStart
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskStart
+pub struct diport::TaskStatus
+impl diport::managed_resource::TaskStatus
+pub fn diport::managed_resource::TaskStatus::current(&self) -> diport::managed_resource::TaskState
+pub fn diport::managed_resource::TaskStatus::is_running(&self) -> bool
+pub fn diport::managed_resource::TaskStatus::name(&self) -> &str
+pub async fn diport::managed_resource::TaskStatus::wait_stopped(&self) -> diport::managed_resource::TaskExit
+impl core::clone::Clone for diport::managed_resource::TaskStatus
+pub fn diport::managed_resource::TaskStatus::clone(&self) -> diport::managed_resource::TaskStatus
+impl core::fmt::Debug for diport::managed_resource::TaskStatus
+pub fn diport::managed_resource::TaskStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::managed_resource::TaskStatus
+impl core::marker::Send for diport::managed_resource::TaskStatus
+impl core::marker::Sync for diport::managed_resource::TaskStatus
+impl core::marker::Unpin for diport::managed_resource::TaskStatus
+impl core::marker::UnsafeUnpin for diport::managed_resource::TaskStatus
+impl core::panic::unwind_safe::RefUnwindSafe for diport::managed_resource::TaskStatus
+impl core::panic::unwind_safe::UnwindSafe for diport::managed_resource::TaskStatus
 pub struct diport::TokenPolicy
 impl diport::pdp::TokenPolicy
 pub const fn diport::pdp::TokenPolicy::algorithm(self) -> diport::pdp::TokenAlgorithm
@@ -11336,6 +11515,14 @@ pub trait diport::ManagedResource: core::marker::Send
 pub fn diport::ManagedResource::name(&self) -> &str
 pub fn diport::ManagedResource::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::managed_resource::ShutdownError>> + core::marker::Send
 pub fn diport::ManagedResource::shutdown_timeout(&self) -> core::time::Duration
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTask
+pub fn diport::managed_resource::ManagedTask::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTask::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTask::shutdown_timeout(&self) -> core::time::Duration
+impl diport::managed_resource::ManagedResource for diport::managed_resource::ManagedTaskRegistration
+pub fn diport::managed_resource::ManagedTaskRegistration::name(&self) -> &str
+pub async fn diport::managed_resource::ManagedTaskRegistration::shutdown(&self) -> core::result::Result<(), diport::managed_resource::ShutdownError>
+pub fn diport::managed_resource::ManagedTaskRegistration::shutdown_timeout(&self) -> core::time::Duration
 impl<'dynosaur_struct> diport::managed_resource::ManagedResource for &diport::DynManagedResource<'dynosaur_struct> where Self: core::marker::Send
 pub fn &diport::DynManagedResource<'dynosaur_struct>::name(&self) -> &str
 pub fn &diport::DynManagedResource<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::managed_resource::ShutdownError>> + core::marker::Send
@@ -11637,6 +11824,7 @@ impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
 pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
 pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
 pub fn diport::canonical_pki_chain_artifact<'a>(&'a [u8], impl core::iter::traits::collect::IntoIterator<Item = &'a [u8]>) -> alloc::vec::Vec<u8>
+pub async fn diport::join_owned_task<F, T>(F) -> core::result::Result<T, tokio::runtime::task::error::JoinError> where F: core::ops::function::FnOnce() -> T + core::marker::Send + 'static, T: core::marker::Send + 'static
 pub type diport::DeliveryStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::acker::Delivery> + core::marker::Send)>>
 pub type diport::MessageStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::subscriber::Message> + core::marker::Send)>>
 pub type diport::ObjectByteStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = core::result::Result<alloc::vec::Vec<u8>, diport::object_store::ObjectStoreError>> + core::marker::Send)>>

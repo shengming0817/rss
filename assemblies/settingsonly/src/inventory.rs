@@ -321,7 +321,8 @@ pub mod test_support {
             }
         }
         lifecycle = retained;
-        let reporter = Arc::new(registry.take_health_reporter());
+        let listener_probe = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)?;
+        let reporter = Arc::clone(listener_probe.assembly_receipt());
         let (publisher, reader) = model::inventory_channel(seed, Arc::clone(&reporter));
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(
@@ -356,7 +357,7 @@ pub mod test_support {
         let routes = crate::auth_bridge::apply(routes, verifier);
         let response = crate::listeners::serve_inventory_journey(
             routes,
-            Arc::clone(&reporter),
+            listener_probe,
             publisher,
             crate::test_support::valid_federated_token().to_owned(),
             lifecycle,

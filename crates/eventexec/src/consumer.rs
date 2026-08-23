@@ -9,8 +9,13 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use futures::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use consistency::idempotency::{ConsumerGroup, IdemKey, LeaseOutcome, LeaseToken, SeenState};
 use consistency::{HandleResult, InboxReceiptContext, InboxReceiptContextError};
@@ -34,6 +39,56 @@ use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAut
 /// The normal delay is the provider-derived lease renewal interval (`ttl / 3`); the cap prevents
 /// unusually large provider TTLs from monopolizing a consumer lane indefinitely.
 const MAX_CLAIM_IN_PROGRESS_DELAY: Duration = Duration::from_secs(30);
+
+/// Same-source durable delivery stream and lifecycle token.
+///
+/// INVARIANT: EVENT-SUBSCRIPTION-LIFECYCLE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and crate-private mint used only by run_ackable_subscription_loop" }
+pub struct ManagedDeliveryStream {
+    stream: diport::DeliveryStream,
+    token: CancellationToken,
+    cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl ManagedDeliveryStream {
+    pub(crate) fn mint(stream: diport::DeliveryStream, token: CancellationToken) -> Self {
+        let cancelled = Box::pin(token.clone().cancelled_owned());
+        Self {
+            stream,
+            token,
+            cancelled,
+        }
+    }
+
+    /// Derive the lifecycle token for one in-flight delivery.
+    pub fn delivery_token(&self) -> CancellationToken {
+        self.token.child_token()
+    }
+}
+
+/// Test harness that lends a managed delivery stream to one closed async scope without exposing
+/// a constructor or allowing the lifecycle-bound value to escape that scope.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub async fn run_managed_delivery_stream_harness<D>(
+    stream: diport::DeliveryStream,
+    token: CancellationToken,
+    run: D,
+) where
+    D: AsyncFnOnce(ManagedDeliveryStream),
+{
+    run(ManagedDeliveryStream::mint(stream, token)).await;
+}
+
+impl futures::Stream for ManagedDeliveryStream {
+    type Item = diport::Delivery;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.cancelled.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        self.stream.as_mut().poll_next(cx)
+    }
+}
 
 // ── LeaseConfig（消费侧租约续租配置，#1213）────────────────────────────────────
 
@@ -227,13 +282,15 @@ pub enum ReceiptContextBuildError {
 /// - `dlx: Box<DynDeadLetterStore>`：每条消息至多调用一次 write_dead_letter，
 ///   one-shot 写入语义不需要共享，owned 注入更自然（类型层明确消费权）。
 ///
-/// **worker 生命周期豁免**：本驱动是 plain async fn（对齐 `run_dispatch` 范式），
-/// `ManagedResource` / probe / `ShutdownStack` 两阶段关闭接入随组合根 spawn 落地，
-/// 属 consumer worker 生命周期 follow-up（#1142 派生，组合根 spawn + ManagedResource/ShutdownStack + probe）；
-/// 与 relay.rs 的 `RelayWorker` 不同，本任务只交付驱动函数本体。
+/// **worker 生命周期**：本驱动只由 managed consumer worker 的私有 stream mint funnel 调用；
+/// 同源 cancellation token 贯穿 subscription、delivery handler 与 lease renewal。组合根通过
+/// `ManagedBlockingWorker` + `ShutdownStack` 独占专用线程、取消和 join，不存在裸 spawn owner。
 ///
 /// ref: watermill message/router/middleware/poison.go（DLX ack 收口）
 ///      watermill message/router/middleware/retry.go（MaxRetries+1 次尝试首投）
+#[allow(clippy::too_many_arguments)]
+// reason: lifecycle cancellation is a required same-source dependency alongside the existing
+// consumer contract inputs; grouping these unrelated capabilities would weaken the call-site proof.
 pub async fn run_consumer<S, H>(
     mut stream: MessageStream,
     idempotency: Arc<S>,
@@ -242,12 +299,35 @@ pub async fn run_consumer<S, H>(
     handler: H,
     lease_cfg: LeaseConfig,
     admission: ConsumerAdmission,
+    token: CancellationToken,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
-    while let Some((msg, _permit)) = next_admitted(&mut stream, &admission).await {
-        consume_one(&idempotency, &dlx, &meta, &handler, msg, None, lease_cfg).await;
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = token.cancelled() => None,
+            next = next_admitted(&mut stream, &admission) => next,
+        };
+        let Some((msg, _permit)) = next else {
+            break;
+        };
+        let delivery_token = token.child_token();
+        if consume_one(
+            &idempotency,
+            &dlx,
+            &meta,
+            &handler,
+            msg,
+            None,
+            lease_cfg,
+            delivery_token,
+        )
+        .await
+        {
+            break;
+        }
     }
 }
 
@@ -274,7 +354,7 @@ pub async fn run_consumer<S, H>(
 /// ref: lapin message::Delivery.acker（AMQP 手工 ack 范式）
 ///      watermill-amqp pkg/amqp/subscriber.go@master（Ack/Nack 驱动模型）
 pub async fn run_consumer_ackable<S, H>(
-    mut stream: diport::DeliveryStream,
+    mut stream: ManagedDeliveryStream,
     idempotency: Arc<S>,
     dlx: &DynDeadLetterStore<'static>,
     meta: &ConsumerMeta,
@@ -287,7 +367,8 @@ pub async fn run_consumer_ackable<S, H>(
 {
     while let Some((d, _permit)) = next_admitted(&mut stream, &admission).await {
         let diport::Delivery { message, acker } = d;
-        consume_one(
+        let delivery_token = stream.delivery_token();
+        if consume_one(
             &idempotency,
             dlx,
             meta,
@@ -295,8 +376,12 @@ pub async fn run_consumer_ackable<S, H>(
             message,
             Some(acker.as_ref()),
             lease_cfg,
+            delivery_token,
         )
-        .await;
+        .await
+        {
+            break;
+        }
     }
 }
 
@@ -332,6 +417,9 @@ async fn next_admitted<T>(
 
 /// 处理单条消息：parse key → envelope header gate → try_claim → handle_fresh 或幂等短路。
 /// 从 `run_consumer` 抽出，控制各自认知复杂度 ≤15（rust-standards §工程护栏）。
+#[allow(clippy::too_many_arguments)]
+// reason: this private boundary carries the complete delivery state, including the mandatory
+// lifecycle token, so cancellation can drop every preflight and settlement future atomically.
 async fn consume_one<S, H>(
     idempotency: &Arc<S>,
     dlx: &DynDeadLetterStore<'static>,
@@ -340,7 +428,44 @@ async fn consume_one<S, H>(
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
-) where
+    token: CancellationToken,
+) -> bool
+where
+    S: consistency::InboxStore + Send + Sync + 'static,
+    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+{
+    let inner_token = token.clone();
+    tokio::select! {
+        // A delivery whose processing future already reached a terminal result keeps that result.
+        // Otherwise lifecycle cancellation drops every pending preflight/claim/handler/settlement
+        // future and leaves the broker delivery unsettled for session-close redelivery.
+        biased;
+        cancelled = consume_one_inner(
+            idempotency,
+            dlx,
+            meta,
+            handler,
+            msg,
+            acker,
+            lease_cfg,
+            inner_token,
+        ) => cancelled,
+        () = token.cancelled() => true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_one_inner<S, H>(
+    idempotency: &Arc<S>,
+    dlx: &DynDeadLetterStore<'static>,
+    meta: &ConsumerMeta,
+    handler: &H,
+    msg: Message,
+    acker: Option<&diport::DynAcker<'static>>,
+    lease_cfg: LeaseConfig,
+    token: CancellationToken,
+) -> bool
+where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
@@ -357,7 +482,7 @@ async fn consume_one<S, H>(
                 msg.id().as_str(),
             )
             .await;
-            return;
+            return false;
         }
     };
     let parent_causation = match EnvelopeCausationId::from_opaque(msg.id().as_str()) {
@@ -371,7 +496,7 @@ async fn consume_one<S, H>(
                 msg.id().as_str(),
             )
             .await;
-            return;
+            return false;
         }
     };
 
@@ -379,7 +504,7 @@ async fn consume_one<S, H>(
         Ok(header) => header,
         Err(error) => {
             reject_invalid_envelope_header(meta, &msg, acker, &error).await;
-            return;
+            return false;
         }
     };
 
@@ -387,7 +512,7 @@ async fn consume_one<S, H>(
         Ok(tenant) => tenant,
         Err(error) => {
             reject_invalid_tenant_authority(meta, &msg, acker, error).await;
-            return;
+            return false;
         }
     };
 
@@ -395,7 +520,7 @@ async fn consume_one<S, H>(
         Ok(ctx) => ctx,
         Err(error) => {
             reject_invalid_receipt_context(meta, &msg, acker, error).await;
-            return;
+            return false;
         }
     };
 
@@ -414,11 +539,13 @@ async fn consume_one<S, H>(
                 msg.id().as_str(),
             )
             .await;
+            false
         }
         // Expected contention is not a backend error: keep it out of warn/health signals and hold
         // the delivery for a provider-derived bounded interval before requeueing.
         Ok(SeenState::InProgress) => {
             settle_claim_in_progress(acker, meta, &msg, lease_cfg).await;
+            false
         }
         // 幂等短路：不调 handler、不 commit；broker Ack（已处理过，无需再投）。
         Ok(SeenState::Duplicate) => {
@@ -430,6 +557,7 @@ async fn consume_one<S, H>(
                 msg.id().as_str(),
             )
             .await;
+            false
         }
         Ok(SeenState::Fresh) => {
             crate::event::scope_verified_event_origin(
@@ -445,9 +573,10 @@ async fn consume_one<S, H>(
                     &lease,
                     acker,
                     lease_cfg,
+                    token,
                 ),
             )
-            .await;
+            .await
         }
     }
 }
@@ -514,7 +643,9 @@ async fn handle_fresh<S, H>(
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
-) where
+    token: CancellationToken,
+) -> bool
+where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
@@ -531,12 +662,16 @@ async fn handle_fresh<S, H>(
         // handler 先完成：终态已在 loop 内结算；renewal future 被 drop（停止续租）。
         // `.instrument(consume_span)`：handler 全程在消费 span 内，其内部 span 挂回 producer trace（#1224）。
         () = run_handler_loop(idempotency, dlx, meta, handler, msg, ctx, key, lease, acker)
-            .instrument(consume_span) => {}
+            .instrument(consume_span) => false,
+        // Lifecycle cancellation deliberately leaves the delivery unsettled. Dropping both
+        // futures prevents Ack/commit/DLX and channel close delegates redelivery to the broker.
+        () = token.cancelled() => true,
         // 续租侧判租约丢失：handler future 被 drop（cancel 执行上下文），hard-fence 结算 Requeue、不 commit。
         () = renewal_loop(idempotency, meta, ctx, key, lease, lease_cfg, &message_id) => {
             log_lease_lost(meta, &message_id);
             emit_lease_lost(meta.domain());
             settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
+            false
         }
     }
 }
@@ -1255,14 +1390,41 @@ mod tests {
         EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
         Message,
     };
+    use futures::StreamExt;
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        ConsumerMeta, LeaseConfig, ReceiptContextBuildError, claim_in_progress_delay,
-        receipt_context_error_reason, record_dead_letter_skip, run_consumer, run_consumer_ackable,
+        ConsumerMeta, LeaseConfig, ReceiptContextBuildError, claim_in_progress_delay, consume_one,
+        receipt_context_error_reason, record_dead_letter_skip, run_consumer,
     };
     use crate::MAX_REDELIVERY;
     use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding};
+
+    async fn run_test_consumer_ackable<S, H>(
+        stream: diport::DeliveryStream,
+        idempotency: Arc<S>,
+        dlx: &diport::DynDeadLetterStore<'static>,
+        meta: &ConsumerMeta,
+        handler: &H,
+        lease_cfg: LeaseConfig,
+        admission: primitives::ConsumerAdmission,
+        token: CancellationToken,
+    ) where
+        S: consistency::InboxStore + Send + Sync + 'static,
+        H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    {
+        super::run_consumer_ackable(
+            super::ManagedDeliveryStream::mint(stream, token),
+            idempotency,
+            dlx,
+            meta,
+            handler,
+            lease_cfg,
+            admission,
+        )
+        .await;
+    }
 
     /// 测试用 lease 配置：续租间隔大（60s/3=20s），普通快测中续租永不触发（不干扰原终态断言）。
     fn lease_cfg_test() -> LeaseConfig {
@@ -1424,6 +1586,63 @@ mod tests {
     }
 
     // ── FakeInboxStore ─────────────────────────────────────────────────
+
+    struct BlockingClaimStore {
+        started: tokio::sync::Notify,
+        commits: AtomicU32,
+        releases: AtomicU32,
+    }
+
+    impl BlockingClaimStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                started: tokio::sync::Notify::new(),
+                commits: AtomicU32::new(0),
+                releases: AtomicU32::new(0),
+            })
+        }
+    }
+
+    impl InboxStore for BlockingClaimStore {
+        async fn try_claim(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<SeenState, consistency::error::EngineError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn extend(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            Ok(LeaseOutcome::Held)
+        }
+
+        async fn commit(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, consistency::error::EngineError> {
+            self.commits.fetch_add(1, Ordering::AcqRel);
+            Ok(LeaseOutcome::Held)
+        }
+
+        async fn release(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<(), consistency::error::EngineError> {
+            self.releases.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
 
     /// 三态 fake store（Arc<Mutex> + Atomic，Send 友好，不跨 await 持锁——relay.rs FakeStore 范式）。
     /// 可配 try_claim 返 Fresh / InProgress / Duplicate / Err；commit 可配 Err / Lost；extend 可配 N 次后 Lost；
@@ -1946,6 +2165,7 @@ mod tests {
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -1991,6 +2211,7 @@ mod tests {
             handler_requeue(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2048,6 +2269,7 @@ mod tests {
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2085,6 +2307,7 @@ mod tests {
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2115,7 +2338,7 @@ mod tests {
             boxed,
         )]));
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2123,6 +2346,7 @@ mod tests {
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2205,7 +2429,7 @@ mod tests {
                 )]));
 
             metrics::with_local_recorder(&recorder, || {
-                rt.block_on(run_consumer_ackable(
+                rt.block_on(run_test_consumer_ackable(
                     stream,
                     idem.clone(),
                     (dlx).as_ref(),
@@ -2213,6 +2437,7 @@ mod tests {
                     &(handler_ack(handler_count.clone())),
                     lease_cfg_test(),
                     consumer_admission(),
+                    CancellationToken::new(),
                 ));
             });
 
@@ -2356,7 +2581,7 @@ mod tests {
                 )]));
 
             metrics::with_local_recorder(&recorder, || {
-                rt.block_on(run_consumer_ackable(
+                rt.block_on(run_test_consumer_ackable(
                     stream,
                     idem.clone(),
                     (dlx).as_ref(),
@@ -2364,6 +2589,7 @@ mod tests {
                     &(handler_reject(handler_count.clone())),
                     lease_cfg_test(),
                     consumer_admission(),
+                    CancellationToken::new(),
                 ));
             });
 
@@ -2424,6 +2650,7 @@ mod tests {
             handler_reject_invariant(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2456,6 +2683,7 @@ mod tests {
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2482,6 +2710,7 @@ mod tests {
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2513,6 +2742,7 @@ mod tests {
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2544,6 +2774,7 @@ mod tests {
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2696,6 +2927,7 @@ mod tests {
                     handler_reject(handler_count),
                     lease_cfg_test(),
                     consumer_admission(),
+                    CancellationToken::new(),
                 )
                 .await;
             });
@@ -2751,7 +2983,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack1", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2759,6 +2991,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2785,7 +3018,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack2", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2793,6 +3026,7 @@ mod tests {
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2819,7 +3053,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack3", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2827,6 +3061,7 @@ mod tests {
             &(handler_requeue(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2853,7 +3088,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack4", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2861,6 +3096,7 @@ mod tests {
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2896,7 +3132,7 @@ mod tests {
         let (stream, ackers) = delivery_stream_of(&[("msg-ack-4b", b"payload")]);
 
         metrics::with_local_recorder(&recorder, || {
-            rt.block_on(run_consumer_ackable(
+            rt.block_on(run_test_consumer_ackable(
                 stream,
                 idem.clone(),
                 (dlx).as_ref(),
@@ -2904,6 +3140,7 @@ mod tests {
                 &(handler_reject(handler_count)),
                 lease_cfg_test(),
                 consumer_admission(),
+                CancellationToken::new(),
             ));
         });
 
@@ -2935,7 +3172,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack5", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2943,6 +3180,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -2966,7 +3204,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack5b", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -2974,6 +3212,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3008,7 +3247,7 @@ mod tests {
             rt.block_on(async {
                 let consumer_meta = meta();
                 let handler = handler_ack(handler_count.clone());
-                let mut run = Box::pin(run_consumer_ackable(
+                let mut run = Box::pin(run_test_consumer_ackable(
                     stream,
                     idem.clone(),
                     dlx.as_ref(),
@@ -3016,6 +3255,7 @@ mod tests {
                     &handler,
                     lease_cfg_fast(),
                     consumer_admission(),
+                    CancellationToken::new(),
                 ));
                 let delayed = tokio::time::timeout(Duration::from_millis(1), &mut run)
                     .await
@@ -3050,7 +3290,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack6", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3058,6 +3298,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3080,7 +3321,7 @@ mod tests {
         // 空 id → IdemKey::parse 失败
         let (stream, ackers) = delivery_stream_of(&[("", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3088,6 +3329,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3111,7 +3353,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("m-cf", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3119,6 +3361,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3145,7 +3388,7 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("m-cf-dlx", b"payload")]);
 
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3153,6 +3396,7 @@ mod tests {
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3185,7 +3429,7 @@ mod tests {
                 let dlx = fake_dlx(FakeDeadLetterStore::new());
                 let handler_count = Arc::new(AtomicU32::new(0));
                 let (stream, _ackers) = delivery_stream_of(&[("m-metric", b"payload")]);
-                run_consumer_ackable(
+                run_test_consumer_ackable(
                     stream,
                     idem,
                     (dlx).as_ref(),
@@ -3193,6 +3437,7 @@ mod tests {
                     &(handler_ack(handler_count)),
                     lease_cfg_test(),
                     consumer_admission(),
+                    CancellationToken::new(),
                 )
                 .await;
             });
@@ -3270,7 +3515,7 @@ mod tests {
         let (stream, ackers) = delivery_stream_of(&[("evt-lease1", b"payload")]);
 
         // handler 睡 50ms，续租间隔 5ms（lease_cfg_fast）→ 执行期间 extend 触发多次。
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3278,6 +3523,7 @@ mod tests {
             &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_millis(50))),
             lease_cfg_fast(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3296,6 +3542,121 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lifecycle_cancel_drops_handler_and_renewal_without_settlement() {
+        let idem = FakeInboxStore::fresh();
+        let dlx = fake_dlx(FakeDeadLetterStore::new());
+        let started = Arc::new(AtomicU32::new(0));
+        let finished = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-forced-cancel", b"payload")]);
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let observed = Arc::clone(&started);
+        let canceller = tokio::spawn(async move {
+            while observed.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            cancel.cancel();
+        });
+
+        run_test_consumer_ackable(
+            stream,
+            idem.clone(),
+            dlx.as_ref(),
+            &meta(),
+            &handler_slow_ack(
+                Arc::clone(&started),
+                Arc::clone(&finished),
+                Duration::from_secs(60),
+            ),
+            lease_cfg_fast(),
+            consumer_admission(),
+            token,
+        )
+        .await;
+        let _ = canceller.await;
+
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
+        assert_eq!(idem.commit_count(), 0);
+        assert!(
+            ackers[0].settled_actions().is_empty(),
+            "forced lifecycle cancellation must leave the delivery unsettled"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cancel_during_claim_leaves_delivery_completely_unsettled() {
+        let store = BlockingClaimStore::new();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let handler_calls = Arc::new(AtomicU32::new(0));
+        let handler_calls_run = Arc::clone(&handler_calls);
+        let (stream, ackers) = delivery_stream_of(&[("evt-cancel-claim", b"payload")]);
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let started_store = Arc::clone(&store);
+        let canceller = tokio::spawn(async move {
+            started_store.started.notified().await;
+            cancel.cancel();
+        });
+
+        run_test_consumer_ackable(
+            stream,
+            Arc::clone(&store),
+            dlx.as_ref(),
+            &meta(),
+            &move |_message| {
+                handler_calls_run.fetch_add(1, Ordering::AcqRel);
+                Box::pin(async { HandleResult::ack() })
+            },
+            lease_cfg_fast(),
+            consumer_admission(),
+            token,
+        )
+        .await;
+        canceller.await.expect("claim canceller must join");
+
+        assert!(ackers[0].settled_actions().is_empty());
+        assert_eq!(store.commits.load(Ordering::Acquire), 0);
+        assert_eq!(store.releases.load(Ordering::Acquire), 0);
+        assert_eq!(dlx_store.write_count(), 0);
+        assert_eq!(handler_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_delivery_wins_simultaneous_lifecycle_cancellation_once() {
+        let store = FakeInboxStore::fresh();
+        let dlx = fake_dlx(FakeDeadLetterStore::new());
+        let (mut stream, ackers) = delivery_stream_of(&[("evt-cancel-complete-race", b"payload")]);
+        let delivery = stream.next().await.expect("one delivery");
+        let token = CancellationToken::new();
+        token.cancel();
+        let handler = |_message| {
+            Box::pin(async { HandleResult::ack() })
+                as futures::future::BoxFuture<'static, HandleResult>
+        };
+
+        let cancelled = consume_one(
+            &store,
+            dlx.as_ref(),
+            &meta(),
+            &handler,
+            delivery.message,
+            Some(delivery.acker.as_ref()),
+            lease_cfg_fast(),
+            token,
+        )
+        .await;
+
+        assert!(
+            !cancelled,
+            "already-completed terminal work must win the biased race"
+        );
+        assert_eq!(store.commit_count(), 1);
+        assert_eq!(ackers[0].settled_actions(), vec![AckAction::Ack]);
+    }
+
     /// LEASE-2：handler 执行中租约被重捞（extend→Lost）→ handler 被取消（未跑完）、settle [Requeue]、commit 0
     /// 次（续租侧 leaseLost hard-fence）。
     #[tokio::test]
@@ -3308,7 +3669,7 @@ mod tests {
         let (stream, ackers) = delivery_stream_of(&[("evt-lease2", b"payload")]);
 
         // handler 睡 5s（远超续租间隔 5ms）：续租侧在 ~5ms 判 Lost → 取消 handler、hard-fence Requeue。
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3316,6 +3677,7 @@ mod tests {
             &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_secs(5))),
             lease_cfg_fast(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3348,7 +3710,7 @@ mod tests {
         let (stream, ackers) = delivery_stream_of(&[("evt-lease3", b"payload")]);
 
         // handler 即时 Ack；lease_cfg_test 续租间隔大（不触发续租）→ 仅 commit 侧 CAS 判 Lost。
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3356,6 +3718,7 @@ mod tests {
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3380,7 +3743,7 @@ mod tests {
         let (stream, ackers) = delivery_stream_of(&[("evt-lease4", b"payload")]);
 
         // handler 睡 100ms / 续租 5ms：前 2 次 extend Err（续命），后续 Held；handler 跑完 → 正常 commit Ack。
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3392,6 +3755,7 @@ mod tests {
             )),
             lease_cfg_fast(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3423,7 +3787,7 @@ mod tests {
         let (stream, ackers) = delivery_stream_of(&[("evt-lease5", b"payload")]);
 
         // handler Reject → dead_letter 写 DLX 成功 → commit_key 返 Lost → settle Requeue（不 Ack）。
-        run_consumer_ackable(
+        run_test_consumer_ackable(
             stream,
             idem.clone(),
             (dlx).as_ref(),
@@ -3431,6 +3795,7 @@ mod tests {
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         )
         .await;
 
@@ -3623,6 +3988,7 @@ mod tests {
                 handler,
                 lease_cfg_test(),
                 consumer_admission(),
+                CancellationToken::new(),
             ));
             trace_id_of(producer_tp.as_str())
         });
@@ -3689,6 +4055,7 @@ mod tests {
             handler,
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         ));
 
         assert_eq!(seen.lock().unwrap().as_deref(), Some(message_id));
@@ -3721,6 +4088,7 @@ mod tests {
             handler,
             lease_cfg_test(),
             consumer_admission(),
+            CancellationToken::new(),
         ));
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);

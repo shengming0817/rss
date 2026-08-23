@@ -14,7 +14,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use diport::ManagedResource as _;
+use diport::{DynManagedResource, ManagedResource as _};
 use httpd::HttpServer;
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 
@@ -23,6 +23,32 @@ use common::{FixedMetrics, noop_metrics};
 
 fn test_budget() -> httpserve::ServerRequestBudget {
     httpserve::ServerRequestBudget::for_test()
+}
+
+struct E2eServer {
+    addr: SocketAddr,
+    resource: Box<DynManagedResource<'static>>,
+}
+
+impl E2eServer {
+    fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    async fn shutdown(self) -> Result<(), diport::ShutdownError> {
+        self.resource.shutdown().await
+    }
+}
+
+#[allow(clippy::expect_used)]
+async fn bind_and_serve(name: &'static str, svc: httpserve::ServerService) -> E2eServer {
+    let bound = HttpServer::bind(name, "127.0.0.1:0".parse().expect("addr"))
+        .await
+        .expect("bind real socket");
+    let addr = bound.local_addr();
+    let resource =
+        DynManagedResource::new_box(bound.serve(svc, tokio_util::sync::CancellationToken::new()));
+    E2eServer { addr, resource }
 }
 
 /// 健康探针替身（Healthy）。
@@ -40,7 +66,7 @@ impl bootstrap::HealthProbe for HealthyProbe {
 
 /// 用给定探针集构造 reporter → health_listener → httpd bind 真实 socket，返回 server（已 serve）。
 #[allow(clippy::expect_used)]
-async fn serve_health(with_healthy_probe: bool) -> HttpServer {
+async fn serve_health(with_healthy_probe: bool) -> E2eServer {
     let mut reg = bootstrap::compose(&[]).expect("compose");
     if with_healthy_probe {
         reg.probe(
@@ -52,14 +78,7 @@ async fn serve_health(with_healthy_probe: bool) -> HttpServer {
     let reporter = Arc::new(reg.take_health_reporter());
     let authed = runtime::test_support::finalize_health_listener(reporter, noop_metrics())
         .expect("health listener");
-    let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    HttpServer::serve(
-        "http-health",
-        addr,
-        authed.into_server_service(test_budget()),
-    )
-    .await
-    .expect("bind + serve real socket")
+    bind_and_serve("http-health", authed.into_server_service(test_budget())).await
 }
 
 /// 绑真实 socket → 真 HTTP readyz 200 + 带 x-request-id → liveness 200 → 优雅关停 → 后续连接被拒。
@@ -112,14 +131,7 @@ async fn metrics_endpoint_renders_exposition_over_real_socket() {
     let exporter: Arc<dyn diport::MetricsExporter> = Arc::new(FixedMetrics("rss_e2e_total 7\n"));
     let authed = runtime::test_support::finalize_health_listener(reporter, exporter)
         .expect("health listener");
-    let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    let server = HttpServer::serve(
-        "http-health",
-        addr,
-        authed.into_server_service(test_budget()),
-    )
-    .await
-    .expect("bind + serve real socket");
+    let server = bind_and_serve("http-health", authed.into_server_service(test_budget())).await;
     let local = server.local_addr();
 
     let resp = reqwest::Client::new()
@@ -172,7 +184,6 @@ async fn readyz_fail_closed_503_over_real_socket() {
 #[allow(clippy::expect_used)]
 async fn serve_via_shutdownstack_funnel_path() {
     use bootstrap::shutdown::ShutdownStack;
-    use diport::DynManagedResource;
     use tokio_util::sync::CancellationToken;
 
     let mut reg = bootstrap::compose(&[]).expect("compose");
@@ -194,7 +205,7 @@ async fn serve_via_shutdownstack_funnel_path() {
 
     // 生产 funnel：register_with_token 注入 child token，同步闭包内 bound.serve spawn serve task。
     let mut stack = ShutdownStack::new(CancellationToken::new());
-    stack.register_with_token(move |token| DynManagedResource::new_box(bound.serve(svc, token)));
+    stack.register_managed_task_with_token(move |token| bound.serve(svc, token));
 
     let resp = reqwest::Client::new()
         .get(format!("http://{local}/health/v1/readyz"))

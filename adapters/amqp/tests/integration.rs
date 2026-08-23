@@ -6,6 +6,8 @@
 //! 设 `RSS_AMQP_TEST_URL` 则对接长存外部 broker（其 vhost 须预建）。需 docker（容器路径）。
 //! 连不上即失败（fail-loud）。测试名 `integration_` 前缀 → nextest 串行 group（`test(/integration/)`）。
 //! 本地：`cargo nextest run -p amqp --features integration`（docker 在场自起容器）。
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use amqp::{
@@ -15,13 +17,143 @@ use amqp::{
 use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
-    KEY_SUBJECT_ID, ManagedResource, MessageId, PublishErrorKind, PublishRequest, Publisher, Topic,
+    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, ManagedResource, MessageId,
+    PublishErrorKind, PublishRequest, Publisher, Topic,
 };
 use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
+
+struct ForcedCancelInbox {
+    claims: AtomicU32,
+    commits: AtomicU32,
+    releases: AtomicU32,
+}
+
+impl consistency::InboxStore for ForcedCancelInbox {
+    async fn try_claim(
+        &self,
+        _ctx: &consistency::InboxReceiptContext,
+        _key: &consistency::IdemKey,
+        _lease: &consistency::LeaseToken,
+    ) -> Result<consistency::SeenState, consistency::EngineError> {
+        self.claims.fetch_add(1, Ordering::AcqRel);
+        Ok(consistency::SeenState::Fresh)
+    }
+
+    async fn extend(
+        &self,
+        _ctx: &consistency::InboxReceiptContext,
+        _key: &consistency::IdemKey,
+        _lease: &consistency::LeaseToken,
+    ) -> Result<consistency::LeaseOutcome, consistency::EngineError> {
+        Ok(consistency::LeaseOutcome::Held)
+    }
+
+    async fn commit(
+        &self,
+        _ctx: &consistency::InboxReceiptContext,
+        _key: &consistency::IdemKey,
+        _lease: &consistency::LeaseToken,
+    ) -> Result<consistency::LeaseOutcome, consistency::EngineError> {
+        self.commits.fetch_add(1, Ordering::AcqRel);
+        Ok(consistency::LeaseOutcome::Held)
+    }
+
+    async fn release(
+        &self,
+        _ctx: &consistency::InboxReceiptContext,
+        _key: &consistency::IdemKey,
+        _lease: &consistency::LeaseToken,
+    ) -> Result<(), consistency::EngineError> {
+        self.releases.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+struct NoopDeadLetter;
+
+impl diport::DeadLetterStore for NoopDeadLetter {
+    async fn write_dead_letter(
+        &self,
+        _record: diport::DeadLetterRecord,
+    ) -> Result<(), diport::DeadLetterStoreError> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::DeadLetterStoreError> {
+        Ok(())
+    }
+}
+
+struct TestMac;
+
+impl primitives::MacVerifier for TestMac {
+    fn sign(
+        &self,
+        _key: &primitives::MacKey,
+        _algorithm: primitives::MacAlgorithm,
+        _message: &[u8],
+    ) -> primitives::Mac {
+        primitives::Mac::from_bytes(vec![0x5a; 32])
+    }
+
+    fn verify(
+        &self,
+        key: &primitives::MacKey,
+        algorithm: primitives::MacAlgorithm,
+        message: &[u8],
+        tag: &primitives::Mac,
+    ) -> bool {
+        primitives::constant_time_eq(
+            self.sign(key, algorithm, message).as_bytes(),
+            tag.as_bytes(),
+        )
+    }
+}
+
+fn forced_cancel_consumer_contract(
+    topic: &Topic,
+    message_id: &str,
+) -> anyhow::Result<(eventexec::ConsumerMeta, EnvelopeMetadata)> {
+    let authority = Arc::new(eventexec::TenantAuthority::new(
+        Arc::new(TestMac),
+        primitives::MacKey::from_bytes(vec![0x42; 32]),
+        3_600,
+        60,
+        Arc::new(|| 1_000),
+    )?);
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let tenant = rss_request_context::TenantId::parse(TENANT)?;
+    let token = authority.sign(eventexec::TenantAuthorityBinding::new(
+        tenant,
+        "amqp",
+        "amqp-forced-cancel",
+        topic.as_str(),
+        message_id,
+    ))?;
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, TENANT);
+    metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+    metadata.insert_wire_pair(
+        KEY_SCHEMA_HASH,
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    );
+    Ok((
+        eventexec::ConsumerMeta::new(
+            "amqp",
+            "amqp",
+            "amqp-forced-cancel",
+            topic.as_str(),
+            "amqp-forced-cancel-group",
+            authority,
+        ),
+        metadata,
+    ))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wrong_ca()
@@ -1205,6 +1337,101 @@ async fn integration_ackable_token_cancel_drains_inflight_before_shutdown()
         .settle(AckAction::Ack)
         .await
         .map_err(|e| anyhow!("settle ack failed: {e}"))?;
+
+    token2.cancel();
+    AckableSubscriber::shutdown(&sub2).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// Forced lifecycle cancellation leaves the current delivery unsettled. Closing the old session
+/// must therefore return that exact delivery to the broker for a replacement consumer.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
+-> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_forced_cancel").await?;
+    let topic = Topic::new("rss.it.ack-forced-cancel");
+    let sub1 = connect_subscriber(&url, "amqp-it-forced-cancel-sub1").await?;
+    let token1 = CancellationToken::new();
+    let publisher = connect_publisher(&url, "amqp-it-forced-cancel-pub").await?;
+    let message_id = "evt-forced-cancel";
+    let (meta, metadata) = forced_cancel_consumer_contract(&topic, message_id)?;
+
+    let store = Arc::new(ForcedCancelInbox {
+        claims: AtomicU32::new(0),
+        commits: AtomicU32::new(0),
+        releases: AtomicU32::new(0),
+    });
+    let dlx = diport::DynDeadLetterStore::new_box(NoopDeadLetter);
+    let handler_started = Arc::new(tokio::sync::Notify::new());
+    let handler_started_run = Arc::clone(&handler_started);
+    let handler = move |_message| {
+        let handler_started_run = Arc::clone(&handler_started_run);
+        Box::pin(async move {
+            handler_started_run.notify_one();
+            std::future::pending::<consistency::HandleResult>().await
+        }) as futures::future::BoxFuture<'static, consistency::HandleResult>
+    };
+    let (admission_control, _, admission, _) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
+    let health = Arc::new(eventexec::WorkerHealth::starting());
+    let subscription_health = Arc::clone(&health);
+    let worker = eventexec::spawn_consumer_ackable_subscriber(
+        "amqp-it-forced-cancel-worker".to_owned(),
+        diport::DynAckableSubscriber::new_box(sub1),
+        topic.clone(),
+        Arc::clone(&store),
+        dlx,
+        meta,
+        handler,
+        eventexec::LeaseConfig::from_ttl(Duration::from_secs(60)),
+        token1,
+        health,
+        eventexec::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))?,
+        admission,
+    );
+    while subscription_health.status() != primitives::healthz::HealthStatus::Healthy {
+        tokio::task::yield_now().await;
+    }
+    let handler_notified = handler_started.notified();
+    publisher
+        .publish(
+            PublishRequest::new(
+                topic.clone(),
+                MessageId::new(message_id),
+                b"forced-cancel-payload".to_vec(),
+            )
+            .with_metadata(metadata),
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(5), handler_notified)
+        .await
+        .map_err(|_| anyhow!("timeout waiting for managed handler"))?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        diport::ManagedResource::shutdown(&worker),
+    )
+    .await
+    .map_err(|_| anyhow!("managed consumer did not stop after owner shutdown"))??;
+    assert_eq!(store.claims.load(Ordering::Acquire), 1);
+    assert_eq!(store.commits.load(Ordering::Acquire), 0);
+    assert_eq!(store.releases.load(Ordering::Acquire), 0);
+
+    let sub2 = connect_subscriber(&url, "amqp-it-forced-cancel-sub2").await?;
+    let token2 = CancellationToken::new();
+    let mut stream2 = sub2.subscribe_ackable(topic, token2.clone()).await?;
+    let redelivery = tokio::time::timeout(Duration::from_secs(5), stream2.next())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for forced-cancel redelivery"))?
+        .ok_or_else(|| anyhow!("replacement stream closed"))?;
+    assert_eq!(redelivery.message.id().as_str(), message_id);
+    redelivery
+        .acker
+        .settle(AckAction::Ack)
+        .await
+        .map_err(|error| anyhow!("settle redelivery failed: {error}"))?;
 
     token2.cancel();
     AckableSubscriber::shutdown(&sub2).await?;

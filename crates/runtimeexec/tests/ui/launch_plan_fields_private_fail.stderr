@@ -1,3 +1,12 @@
+error[E0308]: mismatched types
+ --> tests/ui/launch_plan_fields_private_fail.rs:9:28
+  |
+9 |             probe_receipt: (),
+  |                            ^^ expected `LaunchProbeReceipt<()>`, found `()`
+  |
+  = note: expected struct `LaunchProbeReceipt<()>`
+          found unit type `()`
+
 error: cannot construct `LaunchPlan<_, _, _>` with struct literal syntax due to private fields
   --> tests/ui/launch_plan_fields_private_fail.rs:7:9
    |

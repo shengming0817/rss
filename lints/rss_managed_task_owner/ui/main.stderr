@@ -1,0 +1,69 @@
+warning: ManagedResource owns a raw Tokio JoinHandle
+  --> $DIR/main.rs:12:1
+   |
+LL | / impl ManagedResource for Direct {
+LL | |     fn name(&self) -> &str { "direct" }
+LL | |     async fn shutdown(&self) -> Result<(), ShutdownError> { Ok(()) }
+LL | | }
+   | |_^
+   |
+   = help: replace the stored handle/token/join state with diport::ManagedTask and expose only TaskStatus
+   = note: `#[warn(rss_managed_task_owner)]` on by default
+
+warning: ManagedResource owns a raw Tokio JoinHandle
+  --> $DIR/main.rs:23:1
+   |
+LL | / impl ManagedResource for ThroughNewtype {
+LL | |     fn name(&self) -> &str { "wrapped" }
+LL | |     async fn shutdown(&self) -> Result<(), ShutdownError> { Ok(()) }
+LL | | }
+   | |_^
+   |
+   = help: replace the stored handle/token/join state with diport::ManagedTask and expose only TaskStatus
+
+warning: ManagedResource owns a raw Tokio JoinHandle
+  --> $DIR/main.rs:32:1
+   |
+LL | / impl ManagedResource for NestedOwner {
+LL | |     fn name(&self) -> &str { "nested" }
+LL | |     async fn shutdown(&self) -> Result<(), ShutdownError> { Ok(()) }
+LL | | }
+   | |_^
+   |
+   = help: replace the stored handle/token/join state with diport::ManagedTask and expose only TaskStatus
+
+warning: ManagedResource owns a raw Tokio JoinHandle
+  --> $DIR/main.rs:53:1
+   |
+LL | / impl ManagedResource for SameNameOwner {
+LL | |     fn name(&self) -> &str { "same-name" }
+LL | |     async fn shutdown(&self) -> Result<(), ShutdownError> { Ok(()) }
+LL | | }
+   | |_^
+   |
+   = help: replace the stored handle/token/join state with diport::ManagedTask and expose only TaskStatus
+
+warning: ManagedResource owns a raw Tokio JoinHandle
+  --> $DIR/main.rs:58:1
+   |
+LL | / impl ManagedResource for RepeatedGenericOwner {
+LL | |     fn name(&self) -> &str { "repeated-generic" }
+LL | |     async fn shutdown(&self) -> Result<(), ShutdownError> { Ok(()) }
+LL | | }
+   | |_^
+   |
+   = help: replace the stored handle/token/join state with diport::ManagedTask and expose only TaskStatus
+
+warning: ManagedResource owns a raw Tokio JoinHandle
+  --> $DIR/main.rs:67:1
+   |
+LL | / impl ManagedResource for ThroughCrossCrateNewtype {
+LL | |     fn name(&self) -> &str { "cross-crate-newtype" }
+LL | |     async fn shutdown(&self) -> Result<(), ShutdownError> { Ok(()) }
+LL | | }
+   | |_^
+   |
+   = help: replace the stored handle/token/join state with diport::ManagedTask and expose only TaskStatus
+
+warning: 6 warnings emitted
+

@@ -12,4 +12,6 @@ fn launch_ownership_capabilities_cannot_be_forged_or_reused() {
     tests.compile_fail("tests/ui/launch_plan_clone_fail.rs");
     tests.compile_fail("tests/ui/launch_plan_missing_probe_receipt_fail.rs");
     tests.compile_fail("tests/ui/launch_lifecycle_batches_swapped_fail.rs");
+    tests.compile_fail("tests/ui/launch_registrar_raw_resource_fail.rs");
+    tests.compile_fail("tests/ui/launch_registrar_managed_task_fail.rs");
 }

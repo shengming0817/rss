@@ -1,0 +1,10 @@
+error[E0308]: mismatched types
+  --> tests/ui/launch_registrar_managed_task_fail.rs:5:9
+   |
+ 5 | /         start
+ 6 | |             .spawn(token, |managed_token| async move {
+ 7 | |                 managed_token.cancelled().await;
+ 8 | |                 Ok(())
+ 9 | |             })
+10 | |             .into_registration()
+   | |________________________________^ expected `ListenerTaskRegistration`, found `ManagedTaskRegistration`

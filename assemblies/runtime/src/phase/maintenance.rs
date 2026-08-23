@@ -132,8 +132,22 @@ impl bootstrap::HealthProbe for AuthGrantSweeperProbe {
 
 struct SweeperWorker {
     name: &'static str,
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: CancellationToken,
+    task: diport::ManagedTask,
+}
+
+impl SweeperWorker {
+    fn spawn<F, Make>(name: &'static str, token: CancellationToken, make: Make) -> Self
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+        Make: FnOnce(CancellationToken) -> F + Send + 'static,
+    {
+        let (start, _status) = diport::ManagedTask::prepare(name, diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let task = start.spawn(token, |managed_token| async move {
+            make(managed_token).await;
+            Ok(())
+        });
+        Self { name, task }
+    }
 }
 
 impl ManagedResource for SweeperWorker {
@@ -142,15 +156,7 @@ impl ManagedResource for SweeperWorker {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
+        diport::ManagedResource::shutdown(&self.task).await
     }
 }
 
@@ -608,20 +614,21 @@ fn spawn_auth_grant_sweeper(
     admission: primitives::WriteAdmission,
 ) -> SweeperWorker {
     let child = token.child_token();
-    let worker_token = child.clone();
-    let handle = tokio::spawn(run_auth_grant_sweeper_loop(
-        sweeper,
-        period,
-        AUTH_GRANT_SWEEP_TIMEOUT,
-        worker_token,
-        health,
-        admission,
-    ));
-    SweeperWorker {
-        name: AUTH_GRANT_SWEEPER_WORKER_NAME,
-        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-        token: child,
-    }
+    SweeperWorker::spawn(
+        AUTH_GRANT_SWEEPER_WORKER_NAME,
+        child,
+        move |worker_token| async move {
+            run_auth_grant_sweeper_loop(
+                sweeper,
+                period,
+                AUTH_GRANT_SWEEP_TIMEOUT,
+                worker_token,
+                health,
+                admission,
+            )
+            .await;
+        },
+    )
 }
 
 pub(crate) fn sweeper_module_result(
@@ -684,21 +691,21 @@ pub(crate) fn wire_service_token_replay_sweeper(
         write_admission,
         move |token, _write_admission| {
             let child = token.child_token();
-            let worker_token = child.clone();
             let health = worker_health;
-            let handle = tokio::spawn(run_sweeper_loop(
-                ServiceTokenReplaySweepTask { sweeper },
-                SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL,
-                SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
-                worker_token,
-                health,
-                worker_admission,
-            ));
-            DynManagedResource::new_box(SweeperWorker {
-                name: SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
-                handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-                token: child,
-            })
+            DynManagedResource::new_box(SweeperWorker::spawn(
+                SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
+                child,
+                move |worker_token| {
+                    run_sweeper_loop(
+                        ServiceTokenReplaySweepTask { sweeper },
+                        SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL,
+                        SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
+                        worker_token,
+                        health,
+                        worker_admission,
+                    )
+                },
+            ))
         },
     );
     sweeper_module_result(worker, health, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME)
@@ -719,20 +726,20 @@ pub(crate) fn wire_revocation_sweeper(
         write_admission,
         move |token, _write_admission| {
             let child = token.child_token();
-            let worker_token = child.clone();
-            let handle = tokio::spawn(run_revocation_sweeper_loop(
-                sweeper,
-                REVOCATION_SWEEP_INTERVAL,
-                REVOCATION_SWEEP_TIMEOUT,
-                worker_token,
-                worker_health,
-                worker_admission,
-            ));
-            DynManagedResource::new_box(SweeperWorker {
-                name: REVOCATION_SWEEPER_WORKER_NAME,
-                handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-                token: child,
-            })
+            DynManagedResource::new_box(SweeperWorker::spawn(
+                REVOCATION_SWEEPER_WORKER_NAME,
+                child,
+                move |worker_token| {
+                    run_revocation_sweeper_loop(
+                        sweeper,
+                        REVOCATION_SWEEP_INTERVAL,
+                        REVOCATION_SWEEP_TIMEOUT,
+                        worker_token,
+                        worker_health,
+                        worker_admission,
+                    )
+                },
+            ))
         },
     );
     sweeper_module_result(worker, health, REVOCATION_SWEEPER_PROBE_NAME)
@@ -757,20 +764,20 @@ pub(crate) fn wire_saga_terminal_sweeper(
         write_admission,
         move |token, _write_admission| {
             let child = token.child_token();
-            let worker_token = child.clone();
-            let handle = tokio::spawn(run_sweeper_loop(
-                SagaTerminalSweepTask { runner: sweeper },
-                SAGA_TERMINAL_SWEEP_INTERVAL,
-                SAGA_TERMINAL_SWEEP_TIMEOUT,
-                worker_token,
-                worker_health,
-                worker_admission,
-            ));
-            DynManagedResource::new_box(SweeperWorker {
-                name: SAGA_TERMINAL_SWEEPER_WORKER_NAME,
-                handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-                token: child,
-            })
+            DynManagedResource::new_box(SweeperWorker::spawn(
+                SAGA_TERMINAL_SWEEPER_WORKER_NAME,
+                child,
+                move |worker_token| {
+                    run_sweeper_loop(
+                        SagaTerminalSweepTask { runner: sweeper },
+                        SAGA_TERMINAL_SWEEP_INTERVAL,
+                        SAGA_TERMINAL_SWEEP_TIMEOUT,
+                        worker_token,
+                        worker_health,
+                        worker_admission,
+                    )
+                },
+            ))
         },
     );
     sweeper_module_result(worker, health, SAGA_TERMINAL_SWEEPER_PROBE_NAME)
@@ -781,61 +788,8 @@ mod saga_terminal_tests {
     use super::{
         MaintenanceSweepFailureStage, MaintenanceSweepResult, MaintenanceSweepTask,
         RetentionBacklog, RetentionOutcome, SAGA_TERMINAL_SWEEPER_PROBE_NAME,
-        SAGA_TERMINAL_SWEEPER_WORKER_NAME, SagaTerminalSweepTask, SweeperWorker,
-        wire_saga_terminal_sweeper,
+        SAGA_TERMINAL_SWEEPER_WORKER_NAME, SagaTerminalSweepTask, wire_saga_terminal_sweeper,
     };
-    use diport::{ManagedResource, ShutdownError};
-    use tokio_util::sync::CancellationToken;
-
-    #[allow(clippy::expect_used)]
-    fn assert_shutdown_error_redacts(error: &ShutdownError, marker: &str) {
-        assert!(!error.to_string().contains(marker));
-        assert!(!format!("{error:?}").contains(marker));
-        let source = std::error::Error::source(error).expect("redacted source remains visible");
-        assert!(!source.to_string().contains(marker));
-        assert!(
-            source.source().is_none(),
-            "source chain stops at redaction boundary"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn sweeper_worker_propagates_redacted_join_failure() {
-        const MARKER: &str = "maintenance-sweeper-plain-panic-secret";
-        let worker = SweeperWorker {
-            name: "test-sweeper",
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("{MARKER}");
-            })))),
-            token: CancellationToken::new(),
-        };
-
-        let error = ManagedResource::shutdown(&worker)
-            .await
-            .expect_err("join failure must propagate");
-        assert_shutdown_error_redacts(&error, MARKER);
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(
-            ManagedResource::shutdown(&worker).await.is_ok(),
-            "shutdown is idempotent"
-        );
-
-        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
-        cancelled_handle.abort();
-        let cancelled = SweeperWorker {
-            name: "test-cancelled-sweeper",
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
-            token: CancellationToken::new(),
-        };
-        let cancelled_error = ManagedResource::shutdown(&cancelled)
-            .await
-            .expect_err("cancelled join must propagate");
-        assert_eq!(
-            cancelled_error.kind(),
-            diport::ShutdownErrorKind::TaskCancelled
-        );
-    }
 
     struct UnusedRunner;
 

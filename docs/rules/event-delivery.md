@@ -10,12 +10,19 @@
 - 唯一规范 outcome 是 `eventexec::consumer_tx::ConsumerTxOutcome<C>`；Postgres 用私有
   `PgConsumerTxCommitProof` 绑定成功分支。禁止镜像枚举、转换桥、crate-root re-export 或 `()` proof。
 - commit outcome unknown 不得 success-ack；由同 ID redelivery 与 Inbox state 收敛。
+- subscriber 只能由生产订阅入口铸造字段私有的 `ManagedDeliveryStream`；stream 与派生 lifecycle token
+  是同一个 move-only receipt，不存在 raw `stream + token` compose-first API。每条 delivery 使用同源 child
+  token；强制取消同时 drop handler 与 renewal，且不 Ack、commit、写 DLX、伪造 Requeue 或释放无法证明
+  rollback-safe 的 claim，未结算 delivery 由 channel/session 关闭后交 broker redelivery。
 
 ## Claim 与 lease
 
 - claim token/epoch/expiry 私有铸造；extend/commit/release 必须 CAS 匹配完整 lease identity。
 - lease lost 是 hard fence：停止后续 effect/settlement，取消在途可取消工作，并让 broker redeliver。
 - 运行期可能在 TTL race 中重复执行，因此所有外部 side effect 必须幂等、可重入或由 fencing 保护。
+- subscriber 只能铸造字段私有、move-only 的 managed delivery stream；stream 与 lifecycle token 必须同源，
+  raw stream/token compose API 禁止。强制取消必须同时终止 handler 与 renewal，且不得 ACK、commit、写 DLQ、
+  伪造 requeue 或释放无法证明 rollback-safe 的 claim；未结算 delivery 交由 broker redelivery。
 
 ## Disposition 与 settlement
 
@@ -46,5 +53,6 @@ fenced、rejected。自由字符串或 adapter-specific fallback 禁止。
 
 ## Carrier
 
-- Hard：private lease/authorization types、closed Disposition、typed `ConsumerTx` 与 no-raw-acker boundary。
+- Hard：private lease/authorization types、managed delivery stream、closed Disposition、typed `ConsumerTx` 与
+  no-raw-acker boundary。
 - Medium：provider conformance、transaction fault tests、DLQ lifecycle/tenant gates 与真实 broker/database integration。

@@ -190,8 +190,9 @@ pub use lock_store::{
     DynLockStore, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey,
 };
 pub use managed_resource::{
-    DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, OwnedTask, ShutdownError,
-    ShutdownErrorKind,
+    DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ManagedTask,
+    ManagedTaskRegistration, ShutdownError, ShutdownErrorKind, TaskExit, TaskStart, TaskState,
+    TaskStatus, join_owned_task,
 };
 pub use metrics_exporter::MetricsExporter;
 pub use object_store::{

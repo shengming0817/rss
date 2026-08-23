@@ -569,6 +569,7 @@ dependencies = [
  "dynosaur",
  "futures",
  "ids",
+ "pkiauthmint",
  "primitives",
  "rss-request-context",
  "sagaauthmint",
@@ -1527,6 +1528,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "managed-task-owner-fixture"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1781,6 +1789,10 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "pkiauthmint"
+version = "0.0.0"
 
 [[package]]
 name = "portable-atomic"
@@ -2186,6 +2198,18 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "tracing",
+]
+
+[[package]]
+name = "rss_managed_task_owner"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "diport",
+ "dylint_linting",
+ "dylint_testing",
+ "managed-task-owner-fixture",
+ "tokio",
 ]
 
 [[package]]

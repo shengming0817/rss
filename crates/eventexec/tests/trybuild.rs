@@ -160,3 +160,9 @@ fn consumer_tx_policy_capabilities_are_sealed() {
     t.compile_fail("tests/ui/consumer_tx_external_key_public_name_fail.rs");
     t.compile_fail("tests/ui/consumer_tx_external_key_raw_construct_fail.rs");
 }
+
+#[test]
+fn managed_delivery_stream_constructor_is_private() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/managed_delivery_stream_constructor_private_fail.rs");
+}

@@ -194,7 +194,10 @@ pub mod test_support {
 
     fn journey_probe_chain(
         case: JourneyCase,
-    ) -> anyhow::Result<(primitives::ProbeName, Arc<bootstrap::HealthReporter>)> {
+    ) -> anyhow::Result<(
+        primitives::ProbeName,
+        runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
+    )> {
         let name = primitives::ProbeName::parse("inventory_journey_provider")?;
         let status = match case {
             JourneyCase::ProbeDegraded => primitives::HealthStatus::Degraded,
@@ -211,7 +214,8 @@ pub mod test_support {
                 status,
             }),
         )?;
-        Ok((name, Arc::new(registry.take_health_reporter())))
+        let receipt = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)?;
+        Ok((name, receipt))
     }
 
     pub struct JourneyResult {
@@ -223,7 +227,8 @@ pub mod test_support {
 
     pub async fn run_journey(case: JourneyCase) -> anyhow::Result<JourneyResult> {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
-        let (probe_name, reporter) = journey_probe_chain(case)?;
+        let (probe_name, listener_probe) = journey_probe_chain(case)?;
+        let reporter = Arc::clone(listener_probe.assembly_receipt());
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
             .map(|provider| {
@@ -281,7 +286,7 @@ pub mod test_support {
         let routes = crate::auth_bridge::apply(routes, verifier);
         let response = crate::listeners::serve_inventory_journey(
             routes,
-            reporter,
+            listener_probe,
             publisher,
             "e30.eyJzdWIiOiJpZGVudGl0eWF1ZGl0LWZpeHR1cmUifQ.c2ln".to_owned(),
         )

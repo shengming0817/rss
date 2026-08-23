@@ -95,7 +95,7 @@ impl ConsumerTxHandler<policy::Reconcile> for postgres::PgSettingsConsumerTx {
 
 /// Ackable durable consumer runner using ConsumerTx for Fresh messages.
 pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
-    mut stream: diport::DeliveryStream,
+    mut stream: eventexec::ManagedDeliveryStream,
     idempotency: Arc<S>,
     dlx: &diport::DynDeadLetterStore<'static>,
     meta: &ConsumerMeta,
@@ -109,7 +109,8 @@ pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
 {
     while let Some((d, _permit)) = next_admitted_delivery(&mut stream, &admission).await {
         let diport::Delivery { message, acker } = d;
-        consume_one_tx(
+        let delivery_token = stream.delivery_token();
+        if consume_one_tx(
             &idempotency,
             dlx,
             meta,
@@ -117,13 +118,17 @@ pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
             message,
             Some(acker.as_ref()),
             lease_cfg,
+            delivery_token,
         )
-        .await;
+        .await
+        {
+            break;
+        }
     }
 }
 
 async fn next_admitted_delivery(
-    stream: &mut diport::DeliveryStream,
+    stream: &mut eventexec::ManagedDeliveryStream,
     admission: &primitives::ConsumerAdmission,
 ) -> Option<(
     diport::Delivery,
@@ -176,7 +181,42 @@ async fn consume_one_tx<S, P, H>(
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
-) where
+    token: tokio_util::sync::CancellationToken,
+) -> bool
+where
+    S: consistency::InboxStore + Send + Sync + 'static,
+    P: policy::Policy,
+    H: ConsumerTxHandler<P>,
+{
+    let inner_token = token.clone();
+    tokio::select! {
+        biased;
+        cancelled = consume_one_tx_inner(
+            idempotency,
+            dlx,
+            meta,
+            handler,
+            msg,
+            acker,
+            lease_cfg,
+            inner_token,
+        ) => cancelled,
+        () = token.cancelled() => true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_one_tx_inner<S, P, H>(
+    idempotency: &Arc<S>,
+    dlx: &diport::DynDeadLetterStore<'static>,
+    meta: &ConsumerMeta,
+    handler: &Arc<H>,
+    msg: Message,
+    acker: Option<&diport::DynAcker<'static>>,
+    lease_cfg: LeaseConfig,
+    token: tokio_util::sync::CancellationToken,
+) -> bool
+where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
@@ -185,7 +225,7 @@ async fn consume_one_tx<S, P, H>(
         Ok(preflight) => preflight,
         Err(error) => {
             reject_tx_preflight(meta, &msg, acker, error).await;
-            return;
+            return false;
         }
     };
 
@@ -193,12 +233,15 @@ async fn consume_one_tx<S, P, H>(
     match idempotency.try_claim(&ctx, &key, &lease).await {
         Err(error) => {
             settle_tx_try_claim_error(meta, &msg, acker, &error).await;
+            false
         }
         Ok(SeenState::InProgress) => {
             settle_claim_in_progress(acker, meta, &msg, lease_cfg).await;
+            false
         }
         Ok(SeenState::Duplicate) => {
             ack_tx_duplicate(meta, &msg, acker).await;
+            false
         }
         Ok(SeenState::Fresh) => {
             handle_fresh_tx(
@@ -212,8 +255,9 @@ async fn consume_one_tx<S, P, H>(
                 lease,
                 acker,
                 lease_cfg,
+                token,
             )
-            .await;
+            .await
         }
     }
 }
@@ -387,7 +431,9 @@ async fn handle_fresh_tx<S, P, H>(
     lease: LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
-) where
+    lifecycle: tokio_util::sync::CancellationToken,
+) -> bool
+where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
@@ -409,7 +455,8 @@ async fn handle_fresh_tx<S, P, H>(
             acker,
             terminal.clone(),
         )
-            .instrument(consume_span) => {}
+            .instrument(consume_span) => false,
+        () = lifecycle.cancelled() => true,
         () = renewal_before_terminal(
             idempotency,
             meta,
@@ -423,6 +470,7 @@ async fn handle_fresh_tx<S, P, H>(
             log_lease_lost(meta, &message_id);
             emit_lease_lost(meta.domain());
             settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
+            false
         }
     }
 }
@@ -736,6 +784,62 @@ mod tests {
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+
+    async fn run_test_consumer_ackable_tx<S, P, H>(
+        stream: diport::DeliveryStream,
+        idempotency: Arc<S>,
+        dlx: &diport::DynDeadLetterStore<'static>,
+        meta: &ConsumerMeta,
+        handler: Arc<H>,
+        lease_cfg: LeaseConfig,
+        admission: primitives::ConsumerAdmission,
+    ) where
+        S: consistency::InboxStore + Send + Sync + 'static,
+        P: policy::Policy,
+        H: ConsumerTxHandler<P>,
+    {
+        run_test_consumer_ackable_tx_with_token(
+            stream,
+            idempotency,
+            dlx,
+            meta,
+            handler,
+            lease_cfg,
+            admission,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_test_consumer_ackable_tx_with_token<S, P, H>(
+        stream: diport::DeliveryStream,
+        idempotency: Arc<S>,
+        dlx: &diport::DynDeadLetterStore<'static>,
+        meta: &ConsumerMeta,
+        handler: Arc<H>,
+        lease_cfg: LeaseConfig,
+        admission: primitives::ConsumerAdmission,
+        token: tokio_util::sync::CancellationToken,
+    ) where
+        S: consistency::InboxStore + Send + Sync + 'static,
+        P: policy::Policy,
+        H: ConsumerTxHandler<P>,
+    {
+        eventexec::run_managed_delivery_stream_harness(stream, token, async |stream| {
+            super::run_consumer_ackable_tx(
+                stream,
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                lease_cfg,
+                admission,
+            )
+            .await;
+        })
+        .await;
+    }
 
     type TestCommitProof = postgres::PgConsumerTxCommitProof;
 
@@ -1179,6 +1283,63 @@ mod tests {
         extends: AtomicU32,
     }
 
+    struct BlockingTxClaimStore {
+        started: tokio::sync::Notify,
+        commits: AtomicU32,
+        releases: AtomicU32,
+    }
+
+    impl BlockingTxClaimStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                started: tokio::sync::Notify::new(),
+                commits: AtomicU32::new(0),
+                releases: AtomicU32::new(0),
+            })
+        }
+    }
+
+    impl InboxStore for BlockingTxClaimStore {
+        async fn try_claim(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<SeenState, EngineError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+
+        async fn extend(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, EngineError> {
+            Ok(LeaseOutcome::Held)
+        }
+
+        async fn commit(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<LeaseOutcome, EngineError> {
+            self.commits.fetch_add(1, Ordering::AcqRel);
+            Ok(LeaseOutcome::Held)
+        }
+
+        async fn release(
+            &self,
+            _ctx: &InboxReceiptContext,
+            _key: &IdemKey,
+            _lease: &LeaseToken,
+        ) -> Result<(), EngineError> {
+            self.releases.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
     impl TxStore {
         fn fresh() -> Arc<Self> {
             Arc::new(Self {
@@ -1328,7 +1489,7 @@ mod tests {
             })
         });
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("evt-tx-ack", Arc::clone(&actions))?,
             Arc::clone(&store),
             (noop_dlx()).as_ref(),
@@ -1353,6 +1514,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_cancel_drops_tx_handler_without_settlement_or_pseudo_rollback() -> TestResult
+    {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let store = TxStore::fresh();
+        let handler_started = Arc::new(tokio::sync::Notify::new());
+        let handler_started_run = Arc::clone(&handler_started);
+        let token = tokio_util::sync::CancellationToken::new();
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            let handler_started_run = Arc::clone(&handler_started_run);
+            Box::pin(async move {
+                handler_started_run.notify_one();
+                futures::future::pending::<ConsumerTxOutcome<TestCommitProof>>().await
+            })
+        });
+        let dlx = noop_dlx();
+        let meta = meta()?;
+        let run = run_test_consumer_ackable_tx_with_token(
+            delivery_stream("evt-tx-lifecycle-cancel", Arc::clone(&actions))?,
+            Arc::clone(&store),
+            dlx.as_ref(),
+            &meta,
+            Arc::new(handler),
+            LeaseConfig::from_ttl(Duration::from_millis(15)),
+            consumer_admission(),
+            token.clone(),
+        );
+        tokio::pin!(run);
+
+        tokio::select! {
+            () = handler_started.notified() => {}
+            () = &mut run => return Err(std::io::Error::other("run ended before handler started").into()),
+        }
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), &mut run).await?;
+
+        assert!(
+            actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+        assert_eq!(store.commits.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cancel_during_tx_claim_has_no_external_effects() -> TestResult {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let dlx_writes = Arc::new(AtomicU32::new(0));
+        let store = BlockingTxClaimStore::new();
+        let handler_calls = Arc::new(AtomicU32::new(0));
+        let handler_calls_run = Arc::clone(&handler_calls);
+        let token = tokio_util::sync::CancellationToken::new();
+        let cancel = token.clone();
+        let started_store = Arc::clone(&store);
+        let canceller = tokio::spawn(async move {
+            started_store.started.notified().await;
+            cancel.cancel();
+        });
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            handler_calls_run.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { ConsumerTxOutcome::Committed(test_commit_proof()) })
+        });
+
+        run_test_consumer_ackable_tx_with_token(
+            delivery_stream("evt-tx-cancel-claim", Arc::clone(&actions))?,
+            Arc::clone(&store),
+            (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+            &meta()?,
+            Arc::new(handler),
+            lease_cfg(),
+            consumer_admission(),
+            token,
+        )
+        .await;
+        canceller.await?;
+
+        assert!(actions.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert_eq!(store.commits.load(Ordering::Acquire), 0);
+        assert_eq!(store.releases.load(Ordering::Acquire), 0);
+        assert_eq!(dlx_writes.load(Ordering::Acquire), 0);
+        assert_eq!(handler_calls.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn committed_proof_fences_terminal_lease_loss_until_ack_finishes() -> TestResult {
         let actions = Arc::new(Mutex::new(Vec::new()));
         let ack_started = Arc::new(tokio::sync::Notify::new());
@@ -1369,7 +1616,7 @@ mod tests {
         });
         let dlx = noop_dlx();
         let meta = meta()?;
-        let run = run_consumer_ackable_tx(
+        let run = run_test_consumer_ackable_tx(
             blocking_ack_delivery_stream(
                 "evt-tx-terminal-ack-race",
                 Arc::clone(&actions),
@@ -1425,7 +1672,7 @@ mod tests {
         });
         let dlx = recording_dlx(Arc::clone(&writes));
         let meta = meta()?;
-        let run = run_consumer_ackable_tx(
+        let run = run_test_consumer_ackable_tx(
             blocking_ack_delivery_stream(
                 "evt-tx-terminal-dlx-race",
                 Arc::clone(&actions),
@@ -1478,7 +1725,7 @@ mod tests {
             })
         });
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("evt-tx-duplicate", Arc::clone(&actions))?,
             store,
             (noop_dlx()).as_ref(),
@@ -1514,7 +1761,7 @@ mod tests {
         });
         let started = std::time::Instant::now();
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("evt-tx-in-progress", Arc::clone(&actions))?,
             store,
             (noop_dlx()).as_ref(),
@@ -1550,7 +1797,7 @@ mod tests {
             })
         });
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("evt-tx-requeue", Arc::clone(&actions))?,
             Arc::clone(&store),
             (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
@@ -1586,7 +1833,7 @@ mod tests {
             })
         });
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("evt-tx-commit-unknown", Arc::clone(&actions))?,
             Arc::clone(&store),
             (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
@@ -1634,7 +1881,7 @@ mod tests {
                 })
             });
 
-            run_consumer_ackable_tx(
+            run_test_consumer_ackable_tx(
                 delivery_stream(event_id, Arc::clone(&actions))?,
                 Arc::clone(&store),
                 (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
@@ -1681,7 +1928,7 @@ mod tests {
                 })
             });
 
-            run_consumer_ackable_tx(
+            run_test_consumer_ackable_tx(
                 delivery_stream(message_id, Arc::clone(&actions))?,
                 Arc::clone(&store),
                 (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
@@ -1718,7 +1965,7 @@ mod tests {
             })
         });
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("evt-tx-lease-lost", Arc::clone(&actions))?,
             Arc::clone(&store),
             (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
@@ -1753,7 +2000,7 @@ mod tests {
             })
         });
 
-        run_consumer_ackable_tx(
+        run_test_consumer_ackable_tx(
             delivery_stream("", Arc::clone(&actions))?,
             store,
             (noop_dlx()).as_ref(),
@@ -1791,7 +2038,7 @@ mod tests {
                 })
             });
 
-            run_consumer_ackable_tx(
+            run_test_consumer_ackable_tx(
                 delivery_stream("evt-tx-claim-error", Arc::clone(&actions))?,
                 TxStore::claim_error(kind),
                 (noop_dlx()).as_ref(),

@@ -489,19 +489,29 @@ impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchLifecycleBa
 impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchLifecycleBatches
 pub struct runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
 impl<Adapter, ProbeReceipt, ReadyHook> runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
-pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>, runtimeexec::LaunchLifecycleBatches, runtimeexec::TotalDrainBudget) -> Self
+pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, runtimeexec::LaunchProbeReceipt<ProbeReceipt>, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>, runtimeexec::LaunchLifecycleBatches, runtimeexec::TotalDrainBudget) -> Self
 pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::with_platform_host(self, runtimeexec::RuntimeHostView) -> Self
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ProbeReceipt: core::marker::Freeze, ReadyHook: core::marker::Freeze
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ProbeReceipt: core::marker::Send, ReadyHook: core::marker::Send
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ReadyHook: core::marker::Freeze, ProbeReceipt: core::marker::Freeze
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ReadyHook: core::marker::Send, ProbeReceipt: core::marker::Send
 impl<Adapter, ProbeReceipt, ReadyHook> !core::marker::Sync for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Unpin for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Unpin, ProbeReceipt: core::marker::Unpin, ReadyHook: core::marker::Unpin
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::UnsafeUnpin for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::UnsafeUnpin, ProbeReceipt: core::marker::UnsafeUnpin, ReadyHook: core::marker::UnsafeUnpin
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Unpin for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Unpin, ReadyHook: core::marker::Unpin, ProbeReceipt: core::marker::Unpin
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::UnsafeUnpin for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::UnsafeUnpin, ReadyHook: core::marker::UnsafeUnpin, ProbeReceipt: core::marker::UnsafeUnpin
 impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
 impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
+pub struct runtimeexec::LaunchProbeReceipt<AssemblyReceipt>
+impl<AssemblyReceipt> runtimeexec::LaunchProbeReceipt<AssemblyReceipt>
+pub fn runtimeexec::LaunchProbeReceipt<AssemblyReceipt>::assembly_receipt(&self) -> &AssemblyReceipt
+impl<AssemblyReceipt> core::marker::Freeze for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::marker::Freeze
+impl<AssemblyReceipt> core::marker::Send for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::marker::Send
+impl<AssemblyReceipt> core::marker::Sync for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::marker::Sync
+impl<AssemblyReceipt> core::marker::Unpin for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::marker::Unpin
+impl<AssemblyReceipt> core::marker::UnsafeUnpin for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::marker::UnsafeUnpin
+impl<AssemblyReceipt> core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::panic::unwind_safe::RefUnwindSafe
+impl<AssemblyReceipt> core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchProbeReceipt<AssemblyReceipt> where AssemblyReceipt: core::panic::unwind_safe::UnwindSafe
 pub struct runtimeexec::LaunchRegistrar<'stack>
 impl runtimeexec::LaunchRegistrar<'_>
 pub fn runtimeexec::LaunchRegistrar<'_>::complete<Inventory>(self, Inventory) -> anyhow::Result<runtimeexec::Activated<Inventory>>
-pub fn runtimeexec::LaunchRegistrar<'_>::register_listener_with_token<F>(&mut self, F) where F: core::ops::function::FnOnce(tokio_util::sync::cancellation_token::CancellationToken) -> alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>
+pub fn runtimeexec::LaunchRegistrar<'_>::register_listener_with_token<F>(&mut self, F) where F: core::ops::function::FnOnce(tokio_util::sync::cancellation_token::CancellationToken) -> listenerlifecycle::ListenerTaskRegistration
 impl<'stack> core::marker::Freeze for runtimeexec::LaunchRegistrar<'stack>
 impl<'stack> core::marker::Send for runtimeexec::LaunchRegistrar<'stack>
 impl<'stack> !core::marker::Sync for runtimeexec::LaunchRegistrar<'stack>
@@ -519,14 +529,24 @@ impl<'stack> core::marker::Unpin for runtimeexec::LaunchTransaction<'stack>
 impl<'stack> core::marker::UnsafeUnpin for runtimeexec::LaunchTransaction<'stack>
 impl<'stack> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::LaunchTransaction<'stack>
 impl<'stack> !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchTransaction<'stack>
+pub struct runtimeexec::ListenerLifecycleRegistration
+impl runtimeexec::ListenerLifecycleRegistration
+pub fn runtimeexec::ListenerLifecycleRegistration::install(&mut bootstrap::registry::Registry) -> anyhow::Result<runtimeexec::LaunchProbeReceipt<alloc::sync::Arc<bootstrap::registry::HealthReporter>>>
+impl core::marker::Freeze for runtimeexec::ListenerLifecycleRegistration
+impl core::marker::Send for runtimeexec::ListenerLifecycleRegistration
+impl core::marker::Sync for runtimeexec::ListenerLifecycleRegistration
+impl core::marker::Unpin for runtimeexec::ListenerLifecycleRegistration
+impl core::marker::UnsafeUnpin for runtimeexec::ListenerLifecycleRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::ListenerLifecycleRegistration
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::ListenerLifecycleRegistration
 pub struct runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
 impl<Adapter, ProbeReceipt, ReadyHook> runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
-pub fn runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>) -> Self
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ProbeReceipt: core::marker::Freeze, ReadyHook: core::marker::Freeze
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ProbeReceipt: core::marker::Send, ReadyHook: core::marker::Send
+pub fn runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, runtimeexec::LaunchProbeReceipt<ProbeReceipt>, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>) -> Self
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ReadyHook: core::marker::Freeze, ProbeReceipt: core::marker::Freeze
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ReadyHook: core::marker::Send, ProbeReceipt: core::marker::Send
 impl<Adapter, ProbeReceipt, ReadyHook> !core::marker::Sync for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Unpin for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Unpin, ProbeReceipt: core::marker::Unpin, ReadyHook: core::marker::Unpin
-impl<Adapter, ProbeReceipt, ReadyHook> core::marker::UnsafeUnpin for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::UnsafeUnpin, ProbeReceipt: core::marker::UnsafeUnpin, ReadyHook: core::marker::UnsafeUnpin
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Unpin for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Unpin, ReadyHook: core::marker::Unpin, ProbeReceipt: core::marker::Unpin
+impl<Adapter, ProbeReceipt, ReadyHook> core::marker::UnsafeUnpin for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::UnsafeUnpin, ReadyHook: core::marker::UnsafeUnpin, ProbeReceipt: core::marker::UnsafeUnpin
 impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
 impl<Adapter, ProbeReceipt, ReadyHook> !core::panic::unwind_safe::UnwindSafe for runtimeexec::PreparedLaunch<Adapter, ProbeReceipt, ReadyHook>
 pub struct runtimeexec::ProviderLifecycleBatch(_)

@@ -14,7 +14,6 @@ use rumqttc::v5::mqttbytes::v5::{
 use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions, Request};
 use rumqttc::{Outgoing, TlsConfiguration, Transport};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{PreparedSessionConfig, prepare_tls};
@@ -561,12 +560,20 @@ struct Shared {
     commands: mpsc::Sender<DriverCommand>,
     deliveries: Arc<DeliveryQueue>,
     readiness: watch::Receiver<MqttReadiness>,
-    cancel: CancellationToken,
-    join: Mutex<Option<JoinHandle<()>>>,
+    task_status: diport::TaskStatus,
+    task: diport::ManagedTask,
     client_id: String,
     credential_revision: AtomicU64,
     reload_lock: Mutex<()>,
     epoch_fence: Arc<TransportEpochFence>,
+}
+
+struct DriverStoppedGuard(watch::Sender<MqttReadiness>);
+
+impl Drop for DriverStoppedGuard {
+    fn drop(&mut self) {
+        self.0.send_replace(MqttReadiness::Stopped);
+    }
 }
 
 impl MqttSession {
@@ -579,23 +586,32 @@ impl MqttSession {
         let (readiness_tx, readiness_rx) = watch::channel(MqttReadiness::Starting);
         let (initial_tx, initial_rx) = oneshot::channel();
         let cancel = CancellationToken::new();
-        let driver_cancel = cancel.clone();
         let epoch_fence = Arc::new(TransportEpochFence::new(0));
-        let join = tokio::spawn(run_driver(
-            prepared,
-            Arc::clone(&epoch_fence),
-            command_rx,
-            Arc::clone(&deliveries),
-            readiness_tx,
-            driver_cancel,
-            initial_tx,
-        ));
+        let (start, task_status) =
+            diport::ManagedTask::prepare("mqtt-session", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let driver_deliveries = Arc::clone(&deliveries);
+        let driver_epoch_fence = Arc::clone(&epoch_fence);
+        let terminal_readiness = readiness_tx.clone();
+        let task = start.spawn(cancel, |driver_cancel| async move {
+            let _terminal = DriverStoppedGuard(terminal_readiness);
+            run_driver(
+                prepared,
+                driver_epoch_fence,
+                command_rx,
+                driver_deliveries,
+                readiness_tx,
+                driver_cancel,
+                initial_tx,
+            )
+            .await;
+            Ok(())
+        });
         let shared = Arc::new(Shared {
             commands: command_tx,
             deliveries,
             readiness: readiness_rx,
-            cancel,
-            join: Mutex::new(Some(join)),
+            task_status,
+            task,
             client_id,
             credential_revision: AtomicU64::new(revision),
             reload_lock: Mutex::new(()),
@@ -608,7 +624,11 @@ impl MqttSession {
     }
 
     pub fn readiness(&self) -> MqttReadiness {
-        *self.shared.readiness.borrow()
+        if self.shared.task_status.is_running() {
+            *self.shared.readiness.borrow()
+        } else {
+            MqttReadiness::Stopped
+        }
     }
 
     pub fn readiness_changes(&self) -> watch::Receiver<MqttReadiness> {
@@ -763,37 +783,7 @@ impl MqttSession {
     }
 
     async fn shutdown_inner(&self) -> Result<(), ShutdownError> {
-        self.shared.cancel.cancel();
-        join_owned_driver(&self.shared.join).await
-    }
-
-    /// Force-stop the owned driver after an enclosing lifecycle deadline expires.
-    ///
-    /// The normal shutdown future keeps the handle in its owner until join completes, so cancelling
-    /// that future cannot detach the task. This method is the sole deadline backstop.
-    pub async fn abort_driver_for_shutdown(&self) {
-        self.shared.cancel.cancel();
-        let Some(handle) = self.shared.join.lock().await.take() else {
-            return;
-        };
-        handle.abort();
-        let _ = handle.await;
-    }
-}
-
-async fn join_owned_driver(join: &Mutex<Option<JoinHandle<()>>>) -> Result<(), ShutdownError> {
-    let mut join = join.lock().await;
-    if let Some(handle) = join.as_mut() {
-        let result = handle.await.map_err(ShutdownError::from_join_error);
-        join.take();
-        result?;
-    }
-    Ok(())
-}
-
-impl Drop for MqttSession {
-    fn drop(&mut self) {
-        self.shared.cancel.cancel();
+        diport::ManagedResource::shutdown(&self.shared.task).await
     }
 }
 
@@ -1825,30 +1815,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn owned_driver_join_preserves_failure_kind_and_handle_on_cancellation() {
-        let panicked = Mutex::new(Some(tokio::spawn(async {
-            panic!("mqtt-driver-plain-panic-secret");
-        })));
-        let error = join_owned_driver(&panicked)
-            .await
-            .expect_err("panic must propagate");
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(!format!("{error:?}").contains("plain-panic-secret"));
-
-        let pending = Mutex::new(Some(tokio::spawn(std::future::pending::<()>())));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), join_owned_driver(&pending))
-                .await
-                .is_err()
-        );
-        let retained = pending.lock().await.take().expect("handle remains owned");
-        retained.abort();
-        let cancelled = retained.await.expect_err("abort must cancel task");
-        assert!(cancelled.is_cancelled());
-    }
-
     fn settle(capability: AckCapability) -> Result<(), MqttSessionError> {
         let fence = Arc::clone(&capability.fence);
         fence.settle(capability)
@@ -1967,6 +1933,18 @@ mod tests {
         );
         assert_eq!(*receiver.borrow(), MqttReadiness::Stopped);
         assert_eq!(fence.current().get(), 2);
+    }
+
+    #[test]
+    fn driver_exit_guard_publishes_terminal_readiness() {
+        let (sender, receiver) = watch::channel(MqttReadiness::Ready {
+            session_present: false,
+            credential_revision: 7,
+        });
+
+        drop(DriverStoppedGuard(sender));
+
+        assert_eq!(*receiver.borrow(), MqttReadiness::Stopped);
     }
 
     #[test]

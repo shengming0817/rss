@@ -336,8 +336,7 @@ fn wire_inbox_sweeper(
         &admission,
         move |token, write_admission| {
             let loop_health = Arc::clone(&worker_health);
-            let loop_token = token.clone();
-            let handle = tokio::spawn(async move {
+            let make = move |loop_token| async move {
                 let _stopped = loop_health.stopped_on_exit();
                 sweeper_loop(
                     Arc::new(sweeper),
@@ -349,10 +348,10 @@ fn wire_inbox_sweeper(
                     write_admission,
                 )
                 .await;
-            });
-            DynManagedResource::new_box(SweeperWorker::adopt(
+            };
+            DynManagedResource::new_box(SweeperWorker::spawn(
                 INBOX_SWEEPER_NAME,
-                handle,
+                make,
                 worker_health,
                 token,
             ))

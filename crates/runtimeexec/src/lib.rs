@@ -20,8 +20,8 @@ pub mod test_support;
 
 use std::future::Future;
 use std::io::Write as _;
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -94,6 +94,132 @@ pub trait LaunchAdapter<ProbeReceipt>: Sized {
     ) -> anyhow::Result<Activated<Self::Inventory>>;
 }
 
+/// RuntimeExec-owned installer for the mandatory listener lifecycle receipt.
+pub struct ListenerLifecycleRegistration {
+    _private: (),
+}
+
+impl ListenerLifecycleRegistration {
+    /// Install the listener-group probe before the assembly finalizes its health reporter.
+    ///
+    /// The reporter is drained from this exact registry only after the listener probe is installed;
+    /// no caller-supplied finalizer can substitute a receipt from another registry.
+    pub fn install(
+        registry: &mut bootstrap::Registry,
+    ) -> anyhow::Result<LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>> {
+        let group = Arc::new(Mutex::new(ListenerGroupState::default()));
+        let name = primitives::ProbeName::parse("runtime-listeners")
+            .map_err(|error| anyhow::anyhow!("invalid runtime listener probe name: {error}"))?;
+        registry.probe(
+            name.clone(),
+            Box::new(ListenerGroupProbe {
+                name,
+                group: Arc::clone(&group),
+            }),
+        )?;
+        let assembly_receipt = Arc::new(registry.take_health_reporter());
+        Ok(LaunchProbeReceipt {
+            assembly_receipt,
+            listener_receipt: ListenerProbeReceipt { group },
+        })
+    }
+}
+
+/// Move-only proof that RuntimeExec installed listener lifecycle supervision around the assembly
+/// probe receipt.
+#[must_use = "the installed listener lifecycle receipt must be consumed by LaunchPlan"]
+pub struct LaunchProbeReceipt<AssemblyReceipt> {
+    assembly_receipt: AssemblyReceipt,
+    listener_receipt: ListenerProbeReceipt,
+}
+
+struct ListenerProbeReceipt {
+    group: ListenerGroup,
+}
+
+type ListenerGroup = Arc<Mutex<ListenerGroupState>>;
+
+#[derive(Default)]
+struct ListenerGroupState {
+    sealed: bool,
+    listeners: Vec<diport::TaskStatus>,
+}
+
+impl ListenerGroupState {
+    fn health(&self) -> (primitives::HealthStatus, &'static str) {
+        if !self.sealed {
+            return (
+                primitives::HealthStatus::Unhealthy,
+                "listener group not sealed",
+            );
+        }
+        if self.listeners.is_empty() {
+            return (
+                primitives::HealthStatus::Unhealthy,
+                "listener group is empty",
+            );
+        }
+        if self.listeners.iter().all(diport::TaskStatus::is_running) {
+            return (primitives::HealthStatus::Healthy, "all listeners running");
+        }
+        let detail = self
+            .listeners
+            .iter()
+            .find_map(|status| match status.current() {
+                diport::TaskState::Stopped(diport::TaskExit::Cancelled) => {
+                    Some("listener cancelled")
+                }
+                diport::TaskState::Stopped(diport::TaskExit::Completed) => {
+                    Some("listener completed")
+                }
+                diport::TaskState::Stopped(diport::TaskExit::Failed(kind)) => Some(match kind {
+                    diport::ShutdownErrorKind::TaskCancelled => "listener task-cancelled",
+                    diport::ShutdownErrorKind::TaskPanicked => "listener task-panicked",
+                    diport::ShutdownErrorKind::TaskUnknown => "listener task-unknown",
+                    _ => "listener task-failed",
+                }),
+                diport::TaskState::Pending | diport::TaskState::Running => None,
+            })
+            .unwrap_or("listener task stopped");
+        (primitives::HealthStatus::Unhealthy, detail)
+    }
+}
+
+struct ListenerGroupProbe {
+    name: primitives::ProbeName,
+    group: ListenerGroup,
+}
+
+impl bootstrap::HealthProbe for ListenerGroupProbe {
+    fn check(&self) -> primitives::HealthCheck {
+        let state = self
+            .group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (status, detail) = state.health();
+        primitives::HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+impl<AssemblyReceipt> LaunchProbeReceipt<AssemblyReceipt> {
+    /// Borrow the assembly receipt without separating it from the installed listener supervisor.
+    pub fn assembly_receipt(&self) -> &AssemblyReceipt {
+        &self.assembly_receipt
+    }
+
+    #[cfg(test)]
+    fn map_for_test<Mapped>(self, value: Mapped) -> LaunchProbeReceipt<Mapped> {
+        LaunchProbeReceipt {
+            assembly_receipt: value,
+            listener_receipt: self.listener_receipt,
+        }
+    }
+
+    fn into_parts(self) -> (AssemblyReceipt, ListenerProbeReceipt) {
+        (self.assembly_receipt, self.listener_receipt)
+    }
+}
+
 /// Prepare-stage lifecycle transaction owned by the launch kernel.
 ///
 /// Staged resources enter the kernel's shutdown stack immediately. A prepare error or cancellation
@@ -109,10 +235,10 @@ impl<'stack> LaunchTransaction<'stack> {
         self.stack.register_detached(resource);
     }
 
-    fn commit(self) -> LaunchRegistrar<'stack> {
+    fn commit(self, receipt: ListenerProbeReceipt) -> LaunchRegistrar<'stack> {
         LaunchRegistrar {
             stack: self.stack,
-            listener_count: 0,
+            group: receipt.group,
         }
     }
 }
@@ -233,37 +359,58 @@ fn merge_module_output(target: &mut DomainModuleResult, output: DomainModuleResu
 /// ```
 pub struct LaunchRegistrar<'stack> {
     stack: &'stack mut ShutdownStack,
-    listener_count: usize,
+    group: ListenerGroup,
 }
 
 impl LaunchRegistrar<'_> {
     /// Register a background resource with a token derived from the executor's root token.
     pub fn register_listener_with_token<F>(&mut self, make: F)
     where
-        F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>>,
+        F: FnOnce(CancellationToken) -> listenerlifecycle::ListenerTaskRegistration,
     {
-        self.stack.register_with_token(make);
-        self.listener_count += 1;
+        let status = self
+            .stack
+            .register_managed_task_with_token(|token| make(token).into_managed());
+        self.group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .listeners
+            .push(status);
     }
 
     /// Seal the activation inventory after proving that at least one listener entered the funnel.
     pub fn complete<Inventory>(self, inventory: Inventory) -> anyhow::Result<Activated<Inventory>> {
+        let mut group = self
+            .group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         anyhow::ensure!(
-            self.listener_count > 0,
+            !group.listeners.is_empty(),
             "no listener was activated (refusing to start with zero bound sockets)"
         );
-        Ok(Activated { inventory })
+        group.sealed = true;
+        anyhow::ensure!(
+            group.listeners.iter().all(diport::TaskStatus::is_running),
+            "listener exited during activation"
+        );
+        let listeners = group.listeners.clone();
+        drop(group);
+        Ok(Activated {
+            inventory,
+            listeners,
+        })
     }
 }
 
 /// Capability proving that listener activation registered a non-empty set.
 pub struct Activated<Inventory> {
     inventory: Inventory,
+    listeners: Vec<diport::TaskStatus>,
 }
 
 impl<Inventory> Activated<Inventory> {
-    fn into_inventory(self) -> Inventory {
-        self.inventory
+    fn into_parts(self) -> (Inventory, Vec<diport::TaskStatus>) {
+        (self.inventory, self.listeners)
     }
 }
 
@@ -348,32 +495,10 @@ impl LaunchLifecycleBatches {
 ///     lifecycle_batches: todo!(),
 /// };
 /// ```
-///
-/// ```compile_fail
-/// use runtimeexec::LaunchPlan;
-/// let plan = LaunchPlan::new(
-///     (),
-///     (),
-///     |_: ()| std::future::ready(Ok(())),
-///     None,
-///     runtimeexec::LaunchLifecycleBatches::new(
-///         runtimeexec::ProviderLifecycleBatch::from_provider_output(
-///             bootstrap::DomainModuleResult::default(),
-///         ),
-///         runtimeexec::DomainLifecycleBatch::from_domain_output(
-///             bootstrap::DomainModuleResult::default(),
-///         ),
-///         Some(bootstrap::ExpectedWorkerInventory::closed([])?),
-///     ),
-///     runtimeexec::TotalDrainBudget::new(std::time::Duration::from_secs(20))?,
-/// );
-/// let _second_owner = plan.clone();
-/// # Ok::<(), anyhow::Error>(())
-/// ```
 #[must_use = "a launch plan owns lifecycle resources and must be executed"]
 pub struct LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {
     adapter: Adapter,
-    probe_receipt: ProbeReceipt,
+    probe_receipt: LaunchProbeReceipt<ProbeReceipt>,
     on_ready: ReadyHook,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycle,
@@ -384,7 +509,7 @@ impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHo
     /// Seal the exact provider/domain lifecycle batches and mandatory assembly hooks.
     pub fn new(
         adapter: Adapter,
-        probe_receipt: ProbeReceipt,
+        probe_receipt: LaunchProbeReceipt<ProbeReceipt>,
         on_ready: ReadyHook,
         trace_exporter: Option<Box<DynManagedResource<'static>>>,
         lifecycle_batches: LaunchLifecycleBatches,
@@ -413,7 +538,7 @@ impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHo
 /// Launch material produced only after every startup phase completes successfully.
 pub struct PreparedLaunch<Adapter, ProbeReceipt, ReadyHook> {
     adapter: Adapter,
-    probe_receipt: ProbeReceipt,
+    probe_receipt: LaunchProbeReceipt<ProbeReceipt>,
     on_ready: ReadyHook,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
 }
@@ -422,7 +547,7 @@ impl<Adapter, ProbeReceipt, ReadyHook> PreparedLaunch<Adapter, ProbeReceipt, Rea
     /// Seal the successful startup output before listener preparation begins.
     pub fn new(
         adapter: Adapter,
-        probe_receipt: ProbeReceipt,
+        probe_receipt: LaunchProbeReceipt<ProbeReceipt>,
         on_ready: ReadyHook,
         trace_exporter: Option<Box<DynManagedResource<'static>>>,
     ) -> Self {
@@ -576,10 +701,12 @@ where
                 on_ready,
                 trace_exporter,
             } = prepared;
+            let (probe_receipt, listener_receipt) = probe_receipt.into_parts();
             execute_launch(
                 owner.stack_mut(),
                 adapter,
                 probe_receipt,
+                listener_receipt,
                 on_ready,
                 trace_exporter,
                 batches,
@@ -641,10 +768,12 @@ where
         total_drain_budget,
     } = lifecycle_batches;
     let mut owner = ShutdownOwner::new(total_drain_budget, platform_host.clone());
+    let (probe_receipt, listener_receipt) = probe_receipt.into_parts();
     let launch_result = execute_launch(
         owner.stack_mut(),
         adapter,
         probe_receipt,
+        listener_receipt,
         on_ready,
         trace_exporter,
         lifecycle_batches,
@@ -773,6 +902,7 @@ async fn execute_launch<Adapter, ProbeReceipt, ReadyHook, Ready, InstallShutdown
     stack: &mut ShutdownStack,
     adapter: Adapter,
     probe_receipt: ProbeReceipt,
+    listener_receipt: ListenerProbeReceipt,
     on_ready: ReadyHook,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycleBatches,
@@ -793,24 +923,82 @@ where
     let shutdown = install_shutdown()?;
     let mut transaction = LaunchTransaction { stack };
     let prepared = adapter.prepare(probe_receipt, &mut transaction).await?;
-    let activated = Adapter::activate(prepared, transaction.commit())?;
+    let activated = Adapter::activate(prepared, transaction.commit(listener_receipt))?;
     if let Some(host) = platform_host {
         // Listener activation has finished registering resources. Push admission last so LIFO
         // closes it first and waits for admitted handlers before any listener/provider drain.
         register_platform_admission(stack, host);
     }
-    let readiness = on_ready(activated.into_inventory());
+    let (inventory, listeners) = activated.into_parts();
+    let readiness = on_ready(inventory);
+    let listener_exit = wait_for_listener_exit(listeners);
     tokio::pin!(readiness);
     tokio::pin!(shutdown);
+    tokio::pin!(listener_exit);
     tokio::select! {
         biased;
         result = &mut shutdown => return result,
+        exit = &mut listener_exit => return Err(unexpected_listener_exit(exit)),
         result = &mut readiness => {
             result?;
             if let Some(host) = platform_host { host.mark_ready(); }
         },
     }
-    shutdown.await
+    tokio::select! {
+        biased;
+        result = &mut shutdown => result,
+        exit = &mut listener_exit => Err(unexpected_listener_exit(exit)),
+    }
+}
+
+struct ListenerExit {
+    name: String,
+    exit: diport::TaskExit,
+}
+
+async fn wait_for_listener_exit(statuses: Vec<diport::TaskStatus>) -> ListenerExit {
+    let mut waits = tokio::task::JoinSet::new();
+    for status in statuses {
+        waits.spawn(async move {
+            let name = status.name().to_owned();
+            let exit = status.wait_stopped().await;
+            ListenerExit { name, exit }
+        });
+    }
+    match waits.join_next().await {
+        Some(Ok(exit)) => exit,
+        Some(Err(error)) => ListenerExit {
+            name: "listener-supervisor".to_owned(),
+            exit: diport::TaskExit::Failed(if error.is_cancelled() {
+                diport::ShutdownErrorKind::TaskCancelled
+            } else if error.is_panic() {
+                diport::ShutdownErrorKind::TaskPanicked
+            } else {
+                diport::ShutdownErrorKind::TaskUnknown
+            }),
+        },
+        None => ListenerExit {
+            name: "listener-supervisor".to_owned(),
+            exit: diport::TaskExit::Failed(diport::ShutdownErrorKind::TaskUnknown),
+        },
+    }
+}
+
+fn unexpected_listener_exit(listener: ListenerExit) -> anyhow::Error {
+    let kind = match listener.exit {
+        diport::TaskExit::Cancelled => "cancelled",
+        diport::TaskExit::Completed => "completed",
+        diport::TaskExit::Failed(kind) => match kind {
+            diport::ShutdownErrorKind::TaskCancelled => "task-cancelled",
+            diport::ShutdownErrorKind::TaskPanicked => "task-panicked",
+            diport::ShutdownErrorKind::TaskUnknown => "task-unknown",
+            _ => "task-failed",
+        },
+    };
+    anyhow::anyhow!(
+        "managed listener `{}` exited unexpectedly ({kind})",
+        listener.name
+    )
 }
 
 fn register_platform_admission(stack: &mut ShutdownStack, host: &RuntimeHostView) {
@@ -949,12 +1137,7 @@ fn register_partitioned_resources(
 fn register_partitioned_module(stack: &mut ShutdownStack, output: PartitionedModuleOutput) {
     register_partitioned_resources(stack, output.resources);
     for worker in output.workers {
-        match worker {
-            WorkerSpec::PhaseOne(worker) => stack.register_with_token(worker.into_factory()),
-            WorkerSpec::Deferred(worker) => {
-                stack.register_deferred_with_token(worker.into_factory());
-            }
-        }
+        worker.register_into(stack);
     }
 }
 

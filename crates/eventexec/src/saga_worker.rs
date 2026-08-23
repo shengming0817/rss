@@ -3,6 +3,7 @@
 //! The worker is intentionally a thin poll/orchestrate layer. Work discovery is advisory and all
 //! correctness remains in [`crate::SagaExecutor`] plus the single fenced durable store.
 
+use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,6 @@ use diport::{
     SagaTenantCursor, SagaTenantSource, SagaWorkerIdentity,
 };
 use primitives::ProbeName;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::relay::WorkerHealth;
@@ -79,24 +79,28 @@ impl Default for SagaWorkerConfig {
 /// Worker handle adopted by bootstrap shutdown.
 pub struct SagaWorker {
     name: String,
-    inner: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
+    task: diport::ManagedTask,
     health: Arc<WorkerHealth>,
-    token: CancellationToken,
 }
 
 impl SagaWorker {
-    fn adopt(
+    fn spawn<F, Make>(
         name: String,
-        handle: JoinHandle<()>,
+        make: Make,
         health: Arc<WorkerHealth>,
         token: CancellationToken,
-    ) -> Self {
-        Self {
-            name,
-            inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            health,
-            token,
-        }
+    ) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+        Make: FnOnce(CancellationToken) -> F + Send + 'static,
+    {
+        let (start, _status) =
+            diport::ManagedTask::prepare(name.clone(), SAGA_WORKER_SHUTDOWN_TIMEOUT);
+        let task = start.spawn(token, |managed_token| async move {
+            make(managed_token).await;
+            Ok(())
+        });
+        Self { name, task, health }
     }
 
     /// Worker health shared with readyz probes.
@@ -111,14 +115,7 @@ impl ManagedResource for SagaWorker {
     }
 
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        self.token.cancel();
-        if let Some(handle) = self.inner.lock().await.take() {
-            handle
-                .join()
-                .await
-                .map_err(diport::ShutdownError::from_join_error)?;
-        }
-        Ok(())
+        diport::ManagedResource::shutdown(&self.task).await
     }
 
     fn shutdown_timeout(&self) -> Duration {
@@ -176,9 +173,8 @@ where
             admission,
         } = self;
         let worker_name = saga_worker_name(&identity);
-        let task_token = token.clone();
         let task_health = health.clone();
-        let handle = tokio::spawn(async move {
+        let make = move |task_token| async move {
             saga_worker_loop(
                 SagaWorkerRuntime::new(
                     identity,
@@ -193,8 +189,8 @@ where
                 task_health,
             )
             .await;
-        });
-        SagaWorker::adopt(worker_name, handle, health, token)
+        };
+        SagaWorker::spawn(worker_name, make, health, token)
     }
 }
 

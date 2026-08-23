@@ -472,35 +472,39 @@ impl PgRuntimeMonitorFactory {
         self.rls_readiness.mark(self.rls_readiness.is_ready());
         let writer_for_readiness = Arc::clone(&self.writer_store);
         let reader_for_readiness = Arc::clone(&self.reader_store);
-        let monitor_token = token.child_token();
-        let readiness_token = monitor_token.clone();
-        let rls_token = monitor_token.clone();
         let readiness = Arc::clone(&self.readiness);
         let rls_readiness = Arc::clone(&self.rls_readiness);
-        let readiness_task = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
-            writer_for_readiness,
-            reader_for_readiness,
-            self.projection_capture,
-            self.config.readiness().get(),
-            readiness_token,
-            Arc::clone(&readiness),
-        ));
-        let rls_task = tokio::spawn(crate::readiness::pg_rls_attestation_loop(
-            self.writer_store,
-            self.reader_store,
-            self.config.rls_attestation().get(),
-            rls_token,
-            Arc::clone(&rls_readiness),
-        ));
-        let supervisor_token = monitor_token.clone();
-        let handle = tokio::spawn(crate::readiness::supervise_runtime_monitor(
-            readiness_task,
-            rls_task,
-            supervisor_token,
-            readiness,
-            rls_readiness,
-        ));
-        PgRuntimeMonitor::adopt(handle, self.readiness, self.rls_readiness, monitor_token)
+        PgRuntimeMonitor::spawn(
+            move |monitor_token| {
+                let readiness_token = monitor_token.child_token();
+                let rls_token = monitor_token.child_token();
+                let readiness_task = crate::readiness::pg_readiness_sampling_loop(
+                    writer_for_readiness,
+                    reader_for_readiness,
+                    self.projection_capture,
+                    self.config.readiness().get(),
+                    readiness_token,
+                    Arc::clone(&readiness),
+                );
+                let rls_task = crate::readiness::pg_rls_attestation_loop(
+                    self.writer_store,
+                    self.reader_store,
+                    self.config.rls_attestation().get(),
+                    rls_token,
+                    Arc::clone(&rls_readiness),
+                );
+                crate::readiness::supervise_runtime_monitor(
+                    readiness_task,
+                    rls_task,
+                    monitor_token,
+                    readiness,
+                    rls_readiness,
+                )
+            },
+            self.readiness,
+            self.rls_readiness,
+            token,
+        )
     }
 }
 

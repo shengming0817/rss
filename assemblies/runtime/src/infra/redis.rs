@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use diport::{ManagedResource, ShutdownError};
+use diport::{ManagedTask, ManagedTaskRegistration, TaskStatus};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
@@ -130,74 +130,55 @@ pub const REDIS_READY_PROBE_NAME: &str = "redis_ready";
 /// visible to `/readyz` and lets later Redis outages fail readiness.
 pub struct RedisReadyProbe {
     ready: Arc<std::sync::atomic::AtomicBool>,
+    task: TaskStatus,
     name: ProbeName,
 }
 
 impl RedisReadyProbe {
     #[allow(clippy::expect_used)]
-    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>, task: TaskStatus) -> Self {
         let name = ProbeName::parse(REDIS_READY_PROBE_NAME).expect("valid probe name const");
-        Self { ready, name }
+        Self { ready, task, name }
     }
 }
 
 impl bootstrap::HealthProbe for RedisReadyProbe {
     fn check(&self) -> HealthCheck {
-        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
-            (HealthStatus::Healthy, "ready")
-        } else {
-            (HealthStatus::Unhealthy, "down")
-        };
+        let (status, detail) =
+            if self.task.is_running() && self.ready.load(std::sync::atomic::Ordering::Acquire) {
+                (HealthStatus::Healthy, "ready")
+            } else {
+                (HealthStatus::Unhealthy, "down")
+            };
         HealthCheck::new(self.name.clone(), status, detail)
     }
 }
 
-pub(crate) struct RedisReadinessSampler {
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: CancellationToken,
-}
-
-impl ManagedResource for RedisReadinessSampler {
-    fn name(&self) -> &str {
-        "redis-readiness-sampler"
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
-    }
-}
-
-pub(crate) fn spawn_redis_readiness_sampler(
+pub(crate) fn prepare_redis_readiness_sampler(
     redis: redis::RedisRuntimeDeps,
     period: Duration,
-    token: CancellationToken,
     ready: Arc<std::sync::atomic::AtomicBool>,
-) -> RedisReadinessSampler {
-    let child = token.child_token();
-    let worker_token = child.clone();
-    let handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = worker_token.cancelled() => break,
-                () = tokio::time::sleep(period) => {
-                    let is_ready = redis.ping().await.is_ok();
-                    ready.store(is_ready, std::sync::atomic::Ordering::Release);
+) -> (
+    TaskStatus,
+    impl FnOnce(CancellationToken) -> ManagedTaskRegistration + Send + 'static,
+) {
+    let (start, status) = ManagedTask::prepare("redis-readiness-sampler", Duration::from_secs(30));
+    (status, move |token| {
+        start
+            .spawn(token, |worker_token| async move {
+                loop {
+                    tokio::select! {
+                        () = worker_token.cancelled() => break,
+                        () = tokio::time::sleep(period) => {
+                            let is_ready = redis.ping().await.is_ok();
+                            ready.store(is_ready, std::sync::atomic::Ordering::Release);
+                        }
+                    }
                 }
-            }
-        }
-    });
-    RedisReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-        token: child,
-    }
+                Ok(())
+            })
+            .into_registration()
+    })
 }
 
 #[cfg(test)]
@@ -209,54 +190,6 @@ mod tests {
 
     /// Stable self-signed CA PEM for unit tests that do not need a live matching server.
     use crate::infra::TEST_PRIVATE_CA_PEM as TEST_CA_PEM;
-
-    #[allow(clippy::expect_used)]
-    fn assert_shutdown_error_redacts(error: &ShutdownError, marker: &str) {
-        assert!(!error.to_string().contains(marker));
-        assert!(!format!("{error:?}").contains(marker));
-        let source = std::error::Error::source(error).expect("redacted source remains visible");
-        assert!(!source.to_string().contains(marker));
-        assert!(
-            source.source().is_none(),
-            "source chain stops at redaction boundary"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn readiness_sampler_propagates_redacted_join_failure() {
-        const MARKER: &str = "redis-readiness-plain-panic-secret";
-        let sampler = RedisReadinessSampler {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("{MARKER}");
-            })))),
-            token: CancellationToken::new(),
-        };
-
-        let error = ManagedResource::shutdown(&sampler)
-            .await
-            .expect_err("join failure must propagate");
-        assert_shutdown_error_redacts(&error, MARKER);
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(
-            ManagedResource::shutdown(&sampler).await.is_ok(),
-            "shutdown is idempotent"
-        );
-
-        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
-        cancelled_handle.abort();
-        let cancelled = RedisReadinessSampler {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
-            token: CancellationToken::new(),
-        };
-        let cancelled_error = ManagedResource::shutdown(&cancelled)
-            .await
-            .expect_err("cancelled join must propagate");
-        assert_eq!(
-            cancelled_error.kind(),
-            diport::ShutdownErrorKind::TaskCancelled
-        );
-    }
 
     #[allow(clippy::expect_used)]
     fn test_ca_pem_path() -> &'static str {
@@ -390,13 +323,19 @@ mod tests {
     }
 
     /// RedisReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("down")`（fail-closed）。
-    #[test]
-    fn redis_ready_probe_maps_flag_to_health() {
+    #[tokio::test]
+    async fn redis_ready_probe_maps_flag_and_task_status_to_health() {
         use bootstrap::HealthProbe;
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let flag = Arc::new(AtomicBool::new(true));
-        let probe = RedisReadyProbe::new(Arc::clone(&flag));
+        let token = CancellationToken::new();
+        let (start, status) = ManagedTask::prepare("probe-test", Duration::from_secs(1));
+        let task = start.spawn(token, |worker_token| async move {
+            worker_token.cancelled().await;
+            Ok(())
+        });
+        let probe = RedisReadyProbe::new(Arc::clone(&flag), status);
         let ready = probe.check();
         assert_eq!(ready.status(), HealthStatus::Healthy);
         assert_eq!(ready.detail(), "ready");
@@ -406,6 +345,12 @@ mod tests {
         let down = probe.check();
         assert_eq!(down.status(), HealthStatus::Unhealthy);
         assert_eq!(down.detail(), "down");
+
+        diport::ManagedResource::shutdown(&task)
+            .await
+            .expect("task shutdown");
+        flag.store(true, Ordering::Release);
+        assert_eq!(probe.check().status(), HealthStatus::Unhealthy);
     }
 
     #[tokio::test]

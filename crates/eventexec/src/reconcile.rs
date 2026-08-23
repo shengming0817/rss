@@ -3594,8 +3594,8 @@ enum NextAction {
 /// （**无内部 spawn**：组合根 `tokio::spawn(loop.run(token))`，与 relay 同范式——泛型 future 在具体
 /// reconciler + leader 处单态化为 Send）。
 ///
-/// 与 relay 的 `RelayWorker` 不同，reconcile 不分离 Worker——`run`/`run_with_leader` 消费 `self`，
-/// 组合根 `tokio::spawn` 直接持 JoinHandle。
+/// reconcile 不分离 Worker——`run`/`run_with_leader` 消费 `self`；生产组合根若把该 future 作为长期
+/// Tokio task 启动，必须交给 `diport::ManagedTask`，不得保存可 detach 的裸 `JoinHandle`。
 pub struct ReconcileLoop<R: Reconciler> {
     reconciler: R,
     tenancy: Tenancy,

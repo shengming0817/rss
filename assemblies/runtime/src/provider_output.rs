@@ -143,8 +143,7 @@ impl bootstrap::HealthProbe for IdentitySignerProbe {
 }
 
 struct IdentitySignerReadinessWorker {
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: CancellationToken,
+    task: diport::ManagedTask,
 }
 
 impl IdentitySignerReadinessWorker {
@@ -156,8 +155,11 @@ impl IdentitySignerReadinessWorker {
         health: Arc<IdentitySignerHealth>,
     ) -> Self {
         let token = parent.child_token();
-        let worker_token = token.clone();
-        let handle = tokio::spawn(async move {
+        let (start, _status) = diport::ManagedTask::prepare(
+            IDENTITY_SIGNER_READINESS_WORKER,
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        );
+        let task = start.spawn(token, |worker_token| async move {
             let mut interval = tokio::time::interval(IDENTITY_SIGNER_READINESS_PERIOD);
             loop {
                 tokio::select! {
@@ -168,11 +170,9 @@ impl IdentitySignerReadinessWorker {
                 }
             }
             health.stopped();
+            Ok(())
         });
-        Self {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            token,
-        }
+        Self { task }
     }
 }
 
@@ -182,14 +182,7 @@ impl ManagedResource for IdentitySignerReadinessWorker {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        if let Some(handle) = self.handle.lock().await.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
+        diport::ManagedResource::shutdown(&self.task).await
     }
 }
 
@@ -1330,11 +1323,10 @@ pub(crate) enum ProviderBuildError {
 mod tests {
     use super::{
         BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_PROBES_WORKERS, CHANNELS_RESOURCES,
-        DeviceRevocationStorePermit, DistributedLockStorePermit, IdentitySignerReadinessWorker,
-        ListenerPdpConstructor, LocalDomainProviderPermits, ProviderBuild, ProviderBuildError,
-        ProviderFactoryDispatch, ProviderFactoryPermit, ProviderOutput, ProviderReceipt,
-        RuntimeObjectStorePermit, build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle,
-        identity_signer_resource,
+        DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpConstructor,
+        LocalDomainProviderPermits, ProviderBuild, ProviderBuildError, ProviderFactoryDispatch,
+        ProviderFactoryPermit, ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit,
+        build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle, identity_signer_resource,
     };
     use crate::providers_gen::ListenerPdpJwksLifecycle;
 
@@ -1378,37 +1370,6 @@ mod tests {
         assert_eq!(resource.name(), "vault-signer");
         drop(resource);
         assert_eq!(Arc::strong_count(&signer), 1);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn identity_signer_readiness_worker_propagates_join_failures() {
-        const MARKER: &str = "identity-signer-readiness-plain-panic-secret";
-        let panicked = IdentitySignerReadinessWorker {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("{MARKER}");
-            })))),
-            token: tokio_util::sync::CancellationToken::new(),
-        };
-        let panic_error = ManagedResource::shutdown(&panicked)
-            .await
-            .expect_err("panic join must propagate");
-        assert_eq!(panic_error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(!format!("{panic_error:?}").contains(MARKER));
-
-        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
-        cancelled_handle.abort();
-        let cancelled = IdentitySignerReadinessWorker {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
-            token: tokio_util::sync::CancellationToken::new(),
-        };
-        let cancelled_error = ManagedResource::shutdown(&cancelled)
-            .await
-            .expect_err("cancelled join must propagate");
-        assert_eq!(
-            cancelled_error.kind(),
-            diport::ShutdownErrorKind::TaskCancelled
-        );
     }
 
     #[tokio::test]
@@ -2142,7 +2103,6 @@ mod tests {
     }
 
     fn worker_names(module: DomainModuleResult) -> Vec<String> {
-        let token = tokio_util::sync::CancellationToken::new();
         module
             .into_outputs()
             .filter_map(|output| match output {
@@ -2150,11 +2110,7 @@ mod tests {
                 | bootstrap::DomainLifecycleOutput::Resource(_) => None,
                 bootstrap::DomainLifecycleOutput::Worker(worker) => Some(worker),
             })
-            .map(|worker| match worker {
-                WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                    make.into_factory()(token.clone()).name().to_owned()
-                }
-            })
+            .map(|worker| worker.descriptor().identity)
             .collect()
     }
 

@@ -1,0 +1,26 @@
+[package]
+name = "rss_managed_task_owner"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Reject raw Tokio JoinHandle ownership in ManagedResource implementations"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "rss_managed_task_owner_ui"
+path = "ui/main.rs"
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+diport = { path = "../../crates/diport" }
+managed-task-owner-fixture = { path = "ui/wrapper" }
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[package.metadata.rust-analyzer]
+rustc_private = true

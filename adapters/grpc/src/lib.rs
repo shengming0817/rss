@@ -47,13 +47,8 @@ pub struct GrpcServer {
     /// 驱动 serve task 退出的 token：组合根经 funnel 注入（或 `serve` 的内部 detached token）。
     /// `shutdown()` `cancel()` 它触发 graceful 退出（幂等：阶段 1 广播已 cancel 则 no-op）。
     #[cfg(feature = "backend")]
-    token: tokio_util::sync::CancellationToken,
-    #[cfg(feature = "backend")]
-    handle: tokio::sync::Mutex<Option<ServeHandle>>,
+    task: diport::ManagedTask,
 }
-
-#[cfg(feature = "backend")]
-type ServeHandle = tokio::task::JoinHandle<Result<(), tonic::transport::Error>>;
 
 /// gRPC server 启动失败（构造期 fail-fast，不静默 noop）。
 ///
@@ -125,8 +120,8 @@ impl GrpcServer {
         reporter
             .set_service_status("", tonic_health::ServingStatus::Serving)
             .await;
-        let serve_token = token.clone();
-        let handle = tokio::spawn(async move {
+        let (start, _) = diport::ManagedTask::prepare("grpc", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let task = start.spawn(token, |serve_token| async move {
             tonic::transport::Server::builder()
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(incoming, async move {
@@ -134,15 +129,12 @@ impl GrpcServer {
                     serve_token.cancelled().await;
                 })
                 .await
+                .map_err(ShutdownError::new)
         });
 
         tracing::info!(addr = %local_addr, "grpc server started");
 
-        Ok(Self {
-            local_addr,
-            token,
-            handle: tokio::sync::Mutex::new(Some(handle)),
-        })
+        Ok(Self { local_addr, task })
     }
 
     fn reject_non_loopback_plaintext(
@@ -198,31 +190,9 @@ impl ManagedResource for GrpcServer {
 #[cfg(feature = "backend")]
 impl GrpcServer {
     async fn shutdown_backend(&self) -> Result<(), ShutdownError> {
-        // 触发 graceful 退出：cancel token（幂等——若 ShutdownStack 阶段 1 已 cancel 则 no-op）。
-        self.token.cancel();
-        if let Some(handle) = self.handle.lock().await.take() {
-            Self::await_serve_task(self.name(), handle).await?;
-        }
+        diport::ManagedResource::shutdown(&self.task).await?;
+        tracing::info!(name = self.name(), "grpc server shutdown complete");
         Ok(())
-    }
-
-    async fn await_serve_task(name: &str, handle: ServeHandle) -> Result<(), ShutdownError> {
-        let transport_result = handle
-            .await
-            .map_err(|error| Self::serve_join_error(name, error))?;
-        transport_result.map_err(|error| Self::serve_transport_error(name, error))?;
-        tracing::info!(name, "grpc server shutdown complete");
-        Ok(())
-    }
-
-    fn serve_transport_error(name: &str, error: tonic::transport::Error) -> ShutdownError {
-        tracing::warn!(name, err = %error, "grpc server transport error on shutdown");
-        ShutdownError::new(error)
-    }
-
-    fn serve_join_error(name: &str, error: tokio::task::JoinError) -> ShutdownError {
-        tracing::error!(name, err = %error, "grpc server task join error on shutdown");
-        ShutdownError::new(error)
     }
 }
 

@@ -33,7 +33,7 @@ struct ProductionStartup {
 
 impl runtimeexec::StartupAdapter for ProductionStartup {
     type Adapter = listeners::LaunchAdapter;
-    type ProbeReceipt = listeners::FinalizedProbeReceipt;
+    type ProbeReceipt = Arc<bootstrap::HealthReporter>;
     type ReadyHook = ReadyHook;
     type Ready = ReadyFuture;
 
@@ -154,7 +154,8 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         let (provider_output, domain_output) = transaction.outputs_mut();
         register_probes(&mut registry, provider_output)?;
         register_probes(&mut registry, domain_output)?;
-        let reporter = Arc::new(registry.take_health_reporter());
+        let listener_probe = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)?;
+        let reporter = Arc::clone(listener_probe.assembly_receipt());
         let (inventory_publisher, inventory_reader) =
             runtimeexec::inventory::inventory_channel(inventory_seed, Arc::clone(&reporter));
         crate::modules_gen::register_framework_routes(
@@ -194,7 +195,10 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             })
         });
         Ok(runtimeexec::PreparedLaunch::new(
-            adapter, receipt, ready, None,
+            adapter,
+            listener_probe,
+            ready,
+            None,
         ))
     }
 }

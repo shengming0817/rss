@@ -7,16 +7,16 @@
 //! 的 future 在 stable Rust 上无法证明 Send（RTN 未稳定）。因此：
 //! - 泛型 `relay_loop` / `sweeper_loop`：纯 loop 体，**不 spawn**——泛型 async fn 不要求 Send，能编过。
 //! - spawn 发生在**具体类型 call site**（生产=组合根 PgOutbox，测试=具体 Fake）——单态化后 future 具体 Send。
-//! - `RelayWorker` / `SweeperWorker`：adopt 式，持已 spawn 的 `JoinHandle<()>`，impl `ManagedResource`。
+//! - `RelayWorker` / `SweeperWorker`：把具体 future 直接交给 `ManagedTask`，impl `ManagedResource`。
 //!
 //! ref: serverlesstechnology/cqrs（背景 relay 解耦 + 取消安全两阶段关闭，偏离 event-sourcing 同步派发）。
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime};
 
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use consistency::{
@@ -45,7 +45,7 @@ pub const OUTBOX_SAMPLER_PROBE: &str = "outbox_sampler";
 // worker 名常量（≥3 处使用抽 const）
 const RELAY_WORKER_NAME: &str = "outbox-relay";
 /// outbox 保留期 sweeper 的 readyz worker 名（per-target sweeper 默认名；组合根 #1208 可对 inbox_receipts /
-/// dead_letter 传各自名，#327 review F2）。`pub`：[`SweeperWorker::adopt`] 的 `name` 参数由组合根/测试传入。
+/// dead_letter 传各自名，#327 review F2）。`pub`：[`SweeperWorker::spawn`] 的 `name` 参数由组合根/测试传入。
 pub const SWEEPER_WORKER_NAME: &str = "outbox-sweeper";
 const SAMPLER_WORKER_NAME: &str = "outbox-sampler";
 
@@ -502,7 +502,7 @@ fn log_claimed(domain: &str, claimed: usize) {
 ///
 /// `target`（低基数 `&'static str`，如 `outbox` / `inbox_receipts`）= 本 loop 驱动的清理目标——
 /// 泛型 store 自身无表身份，故由 spawn 端显式传入并写入每轮成功/失败日志，使多表 sweeper 的日志可归因（#327
-/// review F2）。worker 身份见 [`SweeperWorker::adopt`] 的 `name` 参数（per-target readyz 命名）。
+/// review F2）。worker 身份见 [`SweeperWorker::spawn`] 的 `name` 参数（per-target readyz 命名）。
 pub async fn sweeper_loop<S>(
     store: Arc<S>,
     config: SweeperConfig,
@@ -795,47 +795,35 @@ fn log_sample_failed(domain: &str, e: &impl std::fmt::Display) {
     );
 }
 
-// ── worker 两阶段关闭共享 helper ─────────────────────────────────────────────
+// ── canonical managed worker（共用 ManagedRelayWorker + newtype 委派）───────
 
-/// adopt 式 worker 关闭收敛（[`RelayWorker`] / [`SweeperWorker`] 共用）：防御性 cancel（幂等）→ await
-/// JoinHandle。task panic/abort 的 `JoinError` 包成 typed [`diport::ShutdownError`] 上抛——**不**再
-/// `let _ = h.await` 吞掉，使 panic/abort 误报成关闭成功（F6；接 `ManagedResource::shutdown` typed 语义）。
-async fn shutdown_worker(
-    token: &CancellationToken,
-    inner: &tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-) -> Result<(), diport::ShutdownError> {
-    // 防御性 cancel（幂等；生产中 ShutdownStack 已先 cancel，此处兜底防 test/误用 hang）。
-    token.cancel();
-    // await loop 收敛——保证 worker 在 pool 之前停（LIFO 由组合根注册顺序保证）、在途写不丢。
-    if let Some(h) = inner.lock().await.take() {
-        h.join()
-            .await
-            .map_err(diport::ShutdownError::from_join_error)?;
-    }
-    Ok(())
-}
-
-// ── adopt 式 worker（共用 AdoptedWorker + newtype 委派）────────────────────────
-
-/// adopt 式后台 worker 通用状态（[`RelayWorker`] / [`SweeperWorker`] / [`SamplerWorker`] 共用）。
+/// canonical managed 后台 worker 通用状态。
 ///
-/// 持已 spawn 的 `JoinHandle<()>` + 同一 health + 同一 token；三个 public worker 各 newtype 包裹一个
-/// `AdoptedWorker`、委派 `adopt`/`health`/`shutdown`，消除字段集 + 构造 + 访问器三副本（#1209 review）。
+/// 直接持 `ManagedTask` + health；三个 public worker 各 newtype 委派 spawn/health/shutdown。
 /// public worker 仍是**具体类型**——relay_loop/sweeper_loop/backlog_sampler_loop 是泛型非-Send，spawn 在
 /// 具体 call site 单态化后 future 才 Send（见本文件 §设计摘要），故不能合并成单一 generic worker。
-struct AdoptedWorker {
-    inner: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
+struct ManagedRelayWorker {
+    task: diport::ManagedTask,
     health: Arc<WorkerHealth>,
-    token: CancellationToken,
 }
 
-impl AdoptedWorker {
-    fn adopt(handle: JoinHandle<()>, health: Arc<WorkerHealth>, token: CancellationToken) -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            health,
-            token,
-        }
+impl ManagedRelayWorker {
+    fn spawn<F, Make>(
+        name: &'static str,
+        make: Make,
+        health: Arc<WorkerHealth>,
+        token: CancellationToken,
+    ) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+        Make: FnOnce(CancellationToken) -> F + Send + 'static,
+    {
+        let (start, _status) = diport::ManagedTask::prepare(name, WORKER_SHUTDOWN_TIMEOUT);
+        let task = start.spawn(token, |managed_token| async move {
+            make(managed_token).await;
+            Ok(())
+        });
+        Self { task, health }
     }
 
     fn health(&self) -> Arc<WorkerHealth> {
@@ -843,26 +831,30 @@ impl AdoptedWorker {
     }
 
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        shutdown_worker(&self.token, &self.inner).await
+        diport::ManagedResource::shutdown(&self.task).await
     }
 }
 
-/// 由 newtype 包裹 [`AdoptedWorker`] 生成 public worker + 委派 `ManagedResource`（仅 `name()` 各异）。
+/// 由 newtype 包裹 [`ManagedRelayWorker`] 生成 public worker + 委派 `ManagedResource`。
 macro_rules! adopt_worker {
     ($(#[doc = $doc:literal])+ $worker:ident => $name_const:ident) => {
         $(#[doc = $doc])+
         ///
-        /// adopt 式：先在具体类型处 `tokio::spawn(<loop>::<ConcreteStore>(...))` 再 `adopt`。
-        pub struct $worker(AdoptedWorker);
+        /// 具体 loop future 由 canonical `ManagedTask` 注入的 token factory 构造并直接 spawn。
+        pub struct $worker(ManagedRelayWorker);
 
         impl $worker {
-            /// 组合根/测试：先 spawn 对应 loop(具体类型)，再 adopt JoinHandle + 同一 health + 同一 token。
-            pub fn adopt(
-                handle: JoinHandle<()>,
+            /// 组合根/测试：提交由 managed token 构造对应 loop future 的 factory。
+            pub fn spawn<F, Make>(
+                make: Make,
                 health: Arc<WorkerHealth>,
                 token: CancellationToken,
-            ) -> Self {
-                Self(AdoptedWorker::adopt(handle, health, token))
+            ) -> Self
+            where
+                F: Future<Output = ()> + Send + 'static,
+                Make: FnOnce(CancellationToken) -> F + Send + 'static,
+            {
+                Self(ManagedRelayWorker::spawn($name_const, make, health, token))
             }
 
             /// 读 worker health（readyz 聚合用）。
@@ -899,24 +891,28 @@ adopt_worker!(
 /// 保留期 sweeper 后台 worker（结构与 [`RelayWorker`] 同构，但 **readyz name 运行期携带**）。
 ///
 /// 同一泛化 `sweeper_loop` 可服务 outbox / inbox receipt durable 表，故 worker 身份不再是
-/// 编译期常量——由 [`SweeperWorker::adopt`] 的 `name` 参数（per-target，如 [`SWEEPER_WORKER_NAME`]）决定，使
-/// readyz 聚合能区分各表 sweeper（#327 review F2）。adopt 式：先在具体类型处 `tokio::spawn(sweeper_loop::<S>(..))` 再 `adopt`。
+/// 编译期常量——由 [`SweeperWorker::spawn`] 的 `name` 参数决定，使 readyz 可区分各表 sweeper。
 pub struct SweeperWorker {
-    inner: AdoptedWorker,
+    inner: ManagedRelayWorker,
     name: &'static str,
 }
 
 impl SweeperWorker {
-    /// 组合根/测试：先 spawn `sweeper_loop`(具体类型)，再 adopt JoinHandle + 同一 health/token + per-target `name`
+    /// 组合根/测试：提交由 managed token 构造具体 `sweeper_loop` future 的 factory、health 与
+    /// per-target `name`
     /// （readyz 命名，如 `outbox-sweeper` / `inbox-dedup-sweeper`）。
-    pub fn adopt(
+    pub fn spawn<F, Make>(
         name: &'static str,
-        handle: JoinHandle<()>,
+        make: Make,
         health: Arc<WorkerHealth>,
         token: CancellationToken,
-    ) -> Self {
+    ) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+        Make: FnOnce(CancellationToken) -> F + Send + 'static,
+    {
         Self {
-            inner: AdoptedWorker::adopt(handle, health, token),
+            inner: ManagedRelayWorker::spawn(name, make, health, token),
             name,
         }
     }
@@ -1610,17 +1606,21 @@ mod tests {
         let token = CancellationToken::new();
 
         // spawn relay_loop（具体类型 FakeStore，future 具体 Send，tokio::spawn 编得过）。
-        let handle = tokio::spawn(relay_loop(
-            store.clone(),
-            relay_config(Duration::from_millis(100)),
-            fixed_clock(),
-            token.clone(),
-            health.clone(),
-            noop_metrics(),
-            relay_admission(),
-        ));
+        let loop_store = store.clone();
+        let loop_health = health.clone();
+        let make = move |task_token| {
+            relay_loop(
+                loop_store,
+                relay_config(Duration::from_millis(100)),
+                fixed_clock(),
+                task_token,
+                loop_health,
+                noop_metrics(),
+                relay_admission(),
+            )
+        };
 
-        let worker = RelayWorker::adopt(handle, health.clone(), token.clone());
+        let worker = RelayWorker::spawn(make, health.clone(), token.clone());
 
         // 推进时间触发 interval tick：relay_loop 会执行一轮 poll+relay。
         tokio::time::advance(std::time::Duration::from_millis(200)).await;
@@ -1699,17 +1699,21 @@ mod tests {
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
 
-        let handle = tokio::spawn(relay_loop(
-            store.clone(),
-            relay_config(Duration::from_secs(60)),
-            fixed_clock(),
-            token.clone(),
-            health.clone(),
-            noop_metrics(),
-            relay_admission(),
-        ));
+        let loop_store = store.clone();
+        let loop_health = health.clone();
+        let make = move |task_token| {
+            relay_loop(
+                loop_store,
+                relay_config(Duration::from_secs(60)),
+                fixed_clock(),
+                task_token,
+                loop_health,
+                noop_metrics(),
+                relay_admission(),
+            )
+        };
 
-        let worker = RelayWorker::adopt(handle, health.clone(), token.clone());
+        let worker = RelayWorker::spawn(make, health.clone(), token.clone());
 
         // 验证 shutdown_timeout
         assert_eq!(
@@ -1738,18 +1742,20 @@ mod tests {
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
 
-        let handle = tokio::spawn(sweeper_loop(
-            sweeper.clone(),
-            sweeper_config(86400, Duration::from_secs(60)),
-            fixed_clock(),
-            token.clone(),
-            health.clone(),
-            RetentionTarget::OutboxPublished,
-            write_admission(),
-        ));
+        let loop_health = health.clone();
+        let make = move |task_token| {
+            sweeper_loop(
+                sweeper,
+                sweeper_config(86400, Duration::from_secs(60)),
+                fixed_clock(),
+                task_token,
+                loop_health,
+                RetentionTarget::OutboxPublished,
+                write_admission(),
+            )
+        };
 
-        let worker =
-            SweeperWorker::adopt(SWEEPER_WORKER_NAME, handle, health.clone(), token.clone());
+        let worker = SweeperWorker::spawn(SWEEPER_WORKER_NAME, make, health.clone(), token.clone());
 
         assert_eq!(
             worker.shutdown_timeout(),
@@ -1771,17 +1777,20 @@ mod tests {
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
 
-        let handle = tokio::spawn(relay_loop(
-            store.clone(),
-            relay_config(Duration::from_secs(60)),
-            fixed_clock(),
-            token.clone(),
-            health.clone(),
-            noop_metrics(),
-            relay_admission(),
-        ));
+        let loop_health = health.clone();
+        let make = move |task_token| {
+            relay_loop(
+                store,
+                relay_config(Duration::from_secs(60)),
+                fixed_clock(),
+                task_token,
+                loop_health,
+                noop_metrics(),
+                relay_admission(),
+            )
+        };
 
-        let worker = RelayWorker::adopt(handle, health.clone(), token.clone());
+        let worker = RelayWorker::spawn(make, health.clone(), token.clone());
 
         // 初始 Healthy。
         assert_eq!(worker.health().status(), HealthStatus::Healthy);
@@ -1925,20 +1934,20 @@ mod tests {
         assert_eq!(all_ack.relay_count(), 2, "both entries must be relayed");
     }
 
-    /// F6：worker task 异常终止（abort）→ shutdown 把 JoinError 包成 ShutdownError 返回 Err
-    /// （不再 `let _ = h.await` 吞掉 panic/abort 致 Ack 假成功）。
+    /// F6：worker task panic → canonical ManagedTask returns a redacted typed shutdown error.
     #[tokio::test]
-    async fn worker_shutdown_propagates_join_error_on_abort() {
+    async fn worker_shutdown_propagates_managed_task_panic() {
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
-        // 永不完成的 task，abort 之 → JoinHandle 收敛为 JoinError（cancelled）。
-        let handle = tokio::spawn(std::future::pending::<()>());
-        handle.abort();
-        let worker = RelayWorker::adopt(handle, health, token);
+        let worker = RelayWorker::spawn(
+            |_task_token| async { panic!("synthetic worker panic") },
+            health,
+            token,
+        );
         let result = worker.shutdown().await;
         assert!(
             result.is_err(),
-            "shutdown must propagate JoinError as ShutdownError when worker task aborted"
+            "shutdown must propagate the managed panic as a closed ShutdownError"
         );
     }
 
@@ -2106,16 +2115,19 @@ mod tests {
         let store = FakeStore::new(vec![]);
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
-        let handle = tokio::spawn(relay_loop(
-            store,
-            relay_config(Duration::from_secs(60)),
-            fixed_clock(),
-            token.clone(),
-            health.clone(),
-            noop_metrics(),
-            relay_admission(),
-        ));
-        let worker = RelayWorker::adopt(handle, health, token);
+        let loop_health = health.clone();
+        let make = move |task_token| {
+            relay_loop(
+                store,
+                relay_config(Duration::from_secs(60)),
+                fixed_clock(),
+                task_token,
+                loop_health,
+                noop_metrics(),
+                relay_admission(),
+            )
+        };
+        let worker = RelayWorker::spawn(make, health, token);
         assert_eq!(worker.name(), "outbox-relay");
         let _ = worker.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
     }
@@ -2127,16 +2139,19 @@ mod tests {
         async fn adopt_named(name: &'static str) -> SweeperWorker {
             let health = Arc::new(WorkerHealth::healthy());
             let token = CancellationToken::new();
-            let handle = tokio::spawn(sweeper_loop(
-                FakeSweeper::new(),
-                sweeper_config(86400, Duration::from_secs(60)),
-                fixed_clock(),
-                token.clone(),
-                health.clone(),
-                RetentionTarget::OutboxPublished,
-                write_admission(),
-            ));
-            SweeperWorker::adopt(name, handle, health, token)
+            let loop_health = health.clone();
+            let make = move |task_token| {
+                sweeper_loop(
+                    FakeSweeper::new(),
+                    sweeper_config(86400, Duration::from_secs(60)),
+                    fixed_clock(),
+                    task_token,
+                    loop_health,
+                    RetentionTarget::OutboxPublished,
+                    write_admission(),
+                )
+            };
+            SweeperWorker::spawn(name, make, health, token)
         }
         let outbox = adopt_named(SWEEPER_WORKER_NAME).await;
         assert_eq!(outbox.name(), "outbox-sweeper", "默认常量 = outbox-sweeper");
@@ -2157,14 +2172,17 @@ mod tests {
         let store = FakeBacklog::new(BacklogSample::empty());
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
-        let handle = tokio::spawn(backlog_sampler_loop(
-            store,
-            sampler_config(&["dom"], Duration::from_secs(60)),
-            token.clone(),
-            health.clone(),
-            noop_metrics(),
-        ));
-        let worker = SamplerWorker::adopt(handle, health, token);
+        let loop_health = health.clone();
+        let make = move |task_token| {
+            backlog_sampler_loop(
+                store,
+                sampler_config(&["dom"], Duration::from_secs(60)),
+                task_token,
+                loop_health,
+                noop_metrics(),
+            )
+        };
+        let worker = SamplerWorker::spawn(make, health, token);
         assert_eq!(worker.name(), "outbox-sampler");
         let _ = worker.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
     }

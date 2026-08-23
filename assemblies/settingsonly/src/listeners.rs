@@ -7,7 +7,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthPlan, AuthScheme, ListenerKind};
 #[cfg(any(test, feature = "test-support"))]
@@ -289,13 +288,13 @@ pub(crate) struct ListenerInventory {
     pub(crate) health: SocketAddr,
 }
 
-impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
+impl runtimeexec::LaunchAdapter<Arc<bootstrap::HealthReporter>> for LaunchAdapter {
     type Prepared = PreparedListeners;
     type Inventory = ListenerInventory;
 
     async fn prepare(
         self,
-        _probe_receipt: FinalizedProbeReceipt,
+        _probe_receipt: Arc<bootstrap::HealthReporter>,
         transaction: &mut runtimeexec::LaunchTransaction<'_>,
     ) -> anyhow::Result<Self::Prepared> {
         let Self {
@@ -522,13 +521,14 @@ impl InventoryJourneyRequestPlan {
 #[cfg(feature = "test-support")]
 pub(crate) async fn serve_inventory_journey(
     admin: httpserve::AuthenticatedRoutes,
-    reporter: Arc<bootstrap::HealthReporter>,
+    listener_probe: runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
     bearer: String,
     domain_lifecycle: bootstrap::DomainModuleResult,
     expected_workers: bootstrap::ExpectedWorkerInventory,
     request_plan: InventoryJourneyRequestPlan,
 ) -> anyhow::Result<InventoryJourneyHttpResult> {
+    let reporter = Arc::clone(listener_probe.assembly_receipt());
     struct JourneyMetrics;
     impl diport::MetricsExporter for JourneyMetrics {
         fn render(&self) -> String {
@@ -572,7 +572,7 @@ pub(crate) async fn serve_inventory_journey(
     let (completion, controlled) = runtimeexec::test_support::controlled();
     let launch = runtimeexec::LaunchPlan::new(
         adapter,
-        FinalizedProbeReceipt { reporter },
+        listener_probe,
         move |inventory: ListenerInventory| async move {
             let result = async {
                 let client = reqwest::Client::new();
@@ -623,18 +623,15 @@ pub(crate) async fn serve_inventory_journey(
 }
 
 fn register(listener: PreparedListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
-    registrar.register_listener_with_token(move |token| {
-        DynManagedResource::new_box(listener.bound.serve(listener.service, token))
-    });
+    registrar
+        .register_listener_with_token(move |token| listener.bound.serve(listener.service, token));
 }
 
 fn register_mtls(listener: PreparedMtlsListener, registrar: &mut runtimeexec::LaunchRegistrar<'_>) {
     registrar.register_listener_with_token(move |token| {
-        DynManagedResource::new_box(listener.bound.serve_mtls(
-            listener.service,
-            listener.mtls,
-            token,
-        ))
+        listener
+            .bound
+            .serve_mtls(listener.service, listener.mtls, token)
     });
 }
 
@@ -645,7 +642,15 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use diport::DynManagedResource;
     use httpserve::RouteAuthorizer as _;
+
+    fn listener_receipt<T>(
+        _receipt: T,
+    ) -> anyhow::Result<runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>> {
+        let mut registry = bootstrap::Registry::new();
+        runtimeexec::ListenerLifecycleRegistration::install(&mut registry)
+    }
 
     struct CountedResource {
         name: &'static str,
@@ -807,9 +812,9 @@ mod tests {
         domain_output.push_resource(counted_resource("domain-one", &domain_one, &transcript));
         let plan = runtimeexec::LaunchPlan::new(
             adapter,
-            FinalizedProbeReceipt {
+            listener_receipt(FinalizedProbeReceipt {
                 reporter: Arc::new(bootstrap::Registry::new().take_health_reporter()),
-            },
+            })?,
             move |_| async move {
                 ready_hook.fetch_add(1, Ordering::SeqCst);
                 Ok(())

@@ -3,9 +3,12 @@ fn ready(_: ()) -> std::future::Ready<anyhow::Result<()>> {
 }
 
 fn main() {
+    let mut registry = bootstrap::Registry::default();
+    let probe_receipt = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)
+        .expect("listener probe installation");
     let plan = runtimeexec::LaunchPlan::new(
         (),
-        (),
+        probe_receipt,
         ready as fn(()) -> std::future::Ready<anyhow::Result<()>>,
         None,
         runtimeexec::LaunchLifecycleBatches::new(

@@ -1,4 +1,4 @@
-//! DB liveness 采样组件（后台周期探针 + adopt 式 ManagedResource worker）。
+//! DB liveness 采样组件（后台周期探针 + canonical managed worker）。
 //!
 //! 镜像 `crates/eventexec/src/relay.rs`（`backlog_sampler_loop` + `AdoptedWorker` + `adopt_worker!`
 //! 结构），但 postgres 在 `adapters/` 下不引用 `eventexec` 类型——**结构镜像而非类型复用**。
@@ -7,17 +7,16 @@
 //!
 //! - [`PgDbReadiness`]：`AtomicU8` 状态持有者，初值 Down（fail-closed：首次成功采样前不报 ready）。
 //! - [`pg_readiness_sampling_loop`]：裸 loop，**不 spawn**，spawn 在组合根 call-site。
-//! - [`PgRuntimeMonitor`]：同时托管 liveness 与 RLS attestation 的 adopt 式 worker；
-//!   `shutdown` 两阶段关闭：cancel token → await handle。
+//! - [`PgRuntimeMonitor`]：一个 `ManagedTask` 同时监督 liveness 与 RLS attestation futures。
 //!
 //! `tokio::time::interval` 被允许——clippy 只禁 `Instant::now`/`elapsed`（Clock 注入约束），
 //! 周期定时器不属此约束（relay.rs:371 同款用法）。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::PgStore;
@@ -653,108 +652,106 @@ fn mark_monitor_down(readiness: &PgDbReadiness, rls_readiness: &PgRlsReadiness) 
     rls_readiness.mark(false);
 }
 
-fn monitor_join_error(lane: &'static str, error: tokio::task::JoinError) -> diport::ShutdownError {
-    let error = diport::ShutdownError::from_join_error(error);
-    tracing::error!(
-        target: "postgres",
-        lane,
-        reason = error.kind().as_str(),
-        "postgres runtime monitor lane terminated abnormally"
-    );
-    error
+struct MonitorDownGuard {
+    readiness: Arc<PgDbReadiness>,
+    rls_readiness: Arc<PgRlsReadiness>,
+}
+
+impl Drop for MonitorDownGuard {
+    fn drop(&mut self) {
+        mark_monitor_down(&self.readiness, &self.rls_readiness);
+    }
 }
 
 enum MonitorEvent {
     Cancelled,
-    Readiness(Result<(), tokio::task::JoinError>),
-    Rls(Result<(), tokio::task::JoinError>),
+    Readiness,
+    Rls,
 }
 
-async fn finish_abnormal_monitor_lane(
-    lane: &'static str,
-    lane_result: Result<(), tokio::task::JoinError>,
-    sibling: JoinHandle<()>,
-    token: &CancellationToken,
-) -> Result<(), diport::ShutdownError> {
-    token.cancel();
-    sibling.abort();
-    let _ = sibling.await;
-    if let Err(error) = lane_result {
-        return Err(monitor_join_error(lane, error));
-    }
+fn abnormal_monitor_lane(lane: &'static str) -> diport::ShutdownError {
     tracing::error!(
         target: "postgres",
         lane,
         reason = "task-exited",
         "postgres runtime monitor lane terminated abnormally"
     );
-    Err(diport::ShutdownError::new(MonitorLaneExited))
+    diport::ShutdownError::new(MonitorLaneExited)
 }
 
-pub(crate) async fn supervise_runtime_monitor(
-    mut readiness_task: JoinHandle<()>,
-    mut rls_task: JoinHandle<()>,
+pub(crate) async fn supervise_runtime_monitor<R, L>(
+    readiness_task: R,
+    rls_task: L,
     token: CancellationToken,
     readiness: Arc<PgDbReadiness>,
     rls_readiness: Arc<PgRlsReadiness>,
-) -> Result<(), diport::ShutdownError> {
+) -> Result<(), diport::ShutdownError>
+where
+    R: Future<Output = ()>,
+    L: Future<Output = ()>,
+{
+    let _down = MonitorDownGuard {
+        readiness: Arc::clone(&readiness),
+        rls_readiness: Arc::clone(&rls_readiness),
+    };
+    tokio::pin!(readiness_task, rls_task);
     let event = tokio::select! {
         biased;
         () = token.cancelled() => MonitorEvent::Cancelled,
-        readiness_result = &mut readiness_task => MonitorEvent::Readiness(readiness_result),
-        rls_result = &mut rls_task => MonitorEvent::Rls(rls_result),
+        () = &mut readiness_task => MonitorEvent::Readiness,
+        () = &mut rls_task => MonitorEvent::Rls,
     };
-    mark_monitor_down(&readiness, &rls_readiness);
     match event {
         MonitorEvent::Cancelled => {
-            let (readiness_result, rls_result) = tokio::join!(readiness_task, rls_task);
-            readiness_result.map_err(|error| monitor_join_error("readiness", error))?;
-            rls_result.map_err(|error| monitor_join_error("rls", error))?;
+            tokio::join!(readiness_task, rls_task);
             Ok(())
         }
-        MonitorEvent::Readiness(result) => {
-            finish_abnormal_monitor_lane("readiness", result, rls_task, &token).await
+        MonitorEvent::Readiness => {
+            token.cancel();
+            Err(abnormal_monitor_lane("readiness"))
         }
-        MonitorEvent::Rls(result) => {
-            finish_abnormal_monitor_lane("rls", result, readiness_task, &token).await
+        MonitorEvent::Rls => {
+            token.cancel();
+            Err(abnormal_monitor_lane("rls"))
         }
     }
 }
 
-/// DB liveness 采样 adopt 式 worker（impl `diport::ManagedResource`）。
+/// DB liveness 采样 canonical managed worker（impl `diport::ManagedResource`）。
 ///
-/// 持已 spawn 的 typed supervisor + `Arc<PgDbReadiness>` + `CancellationToken`；
-/// `shutdown` 两阶段关闭：cancel token（幂等）→ await handle 收敛。
-///
-/// adopt 式：先在具体类型处 `tokio::spawn(pg_readiness_sampling_loop(...))` 再调
-/// [`PgRuntimeMonitor::adopt`]，与 `relay.rs` 中 `RelayWorker::adopt` 同范式。
+/// 一个 `ManagedTask` 直接持有双 lane supervisor；没有可 detach 的中间 `JoinHandle` owner。
 ///
 /// `PgStore` 在 `adapters/postgres` 下 impl `ManagedResource` 无需 `#[allow]`——
 /// `PgRuntimeMonitor` 同理：dylint `rss_diport_impl_allowlist` 按 manifest
 /// 父目录 (`adapters/`) 自动放行。
 pub struct PgRuntimeMonitor {
-    inner: tokio::sync::Mutex<Option<diport::OwnedTask<Result<(), diport::ShutdownError>>>>,
+    task: diport::ManagedTask,
     readiness: Arc<PgDbReadiness>,
     rls_readiness: Arc<PgRlsReadiness>,
-    token: CancellationToken,
 }
 
 impl PgRuntimeMonitor {
-    /// 先 `tokio::spawn(pg_readiness_sampling_loop(具体 store, ...))` 再 adopt。
+    /// 把双 lane supervisor future 直接交给 canonical managed owner。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅由
     /// [`crate::PgRuntimeMonitorFactory::spawn`] 收口调用。
-    pub(crate) fn adopt(
-        handle: JoinHandle<Result<(), diport::ShutdownError>>,
+    pub(crate) fn spawn<F, Make>(
+        make: Make,
         readiness: Arc<PgDbReadiness>,
         rls_readiness: Arc<PgRlsReadiness>,
         token: CancellationToken,
-    ) -> Self {
+    ) -> Self
+    where
+        F: Future<Output = Result<(), diport::ShutdownError>> + Send + 'static,
+        Make: FnOnce(CancellationToken) -> F,
+    {
+        let (start, _status) =
+            diport::ManagedTask::prepare(MONITOR_WORKER_NAME, diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let task = start.spawn(token, make);
         Self {
-            inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
+            task,
             readiness,
             rls_readiness,
-            token,
         }
     }
 
@@ -775,15 +772,7 @@ impl diport::ManagedResource for PgRuntimeMonitor {
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
         self.readiness.mark(PoolReadiness::Down);
         self.rls_readiness.mark(false);
-        // 防御性 cancel（幂等；生产中 ShutdownStack 已先 cancel，此处兜底防 test/误用 hang）。
-        self.token.cancel();
-        // await loop 收敛——保证 worker 在 pool 之前停（LIFO 由组合根注册顺序保证）。
-        if let Some(h) = self.inner.lock().await.take() {
-            h.join()
-                .await
-                .map_err(diport::ShutdownError::from_join_error)??;
-        }
-        Ok(())
+        diport::ManagedResource::shutdown(&self.task).await
     }
 }
 
@@ -791,9 +780,7 @@ impl diport::ManagedResource for PgRuntimeMonitor {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::sync::Mutex;
     use std::time::Duration;
 
     use diport::ManagedResource;
@@ -804,66 +791,6 @@ mod tests {
     use crate::pool::PoolReadiness;
 
     use super::{PgDbReadiness, PgRlsReadiness, PgRuntimeMonitor, pg_readiness_sampling_loop};
-
-    #[derive(Default)]
-    struct CapturedFields(BTreeMap<String, String>);
-
-    impl tracing::field::Visit for CapturedFields {
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.insert(field.name().to_owned(), value.to_owned());
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
-            self.0.insert(field.name().to_owned(), format!("{value:?}"));
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct ErrorCapture {
-        records: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
-    }
-
-    impl tracing::Subscriber for ErrorCapture {
-        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            *metadata.level() == tracing::Level::ERROR
-        }
-
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut fields = CapturedFields::default();
-            event.record(&mut fields);
-            self.records
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(fields.0);
-        }
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    fn assert_monitor_error_lane(
-        records: &Arc<Mutex<Vec<BTreeMap<String, String>>>>,
-        expected: &str,
-    ) {
-        let records = records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            records
-                .iter()
-                .any(|fields| fields.get("lane").map(String::as_str) == Some(expected)),
-            "monitor error must identify lane {expected}: {records:?}"
-        );
-    }
 
     // ── 辅助：构造已关闭 lazy pool 的 PgStore（不连 DB）────────────────────────
 
@@ -1072,7 +999,7 @@ mod tests {
         let task_store = Arc::clone(&store);
         let task_health = Arc::clone(&health);
         let task_token = token.clone();
-        let handle = tokio::spawn(async move {
+        let future = async move {
             pg_readiness_sampling_loop(
                 Arc::clone(&task_store),
                 task_store,
@@ -1083,10 +1010,15 @@ mod tests {
             )
             .await;
             Ok(())
-        });
+        };
 
         let rls = Arc::new(PgRlsReadiness::for_test(true));
-        let monitor = PgRuntimeMonitor::adopt(handle, Arc::clone(&health), Arc::clone(&rls), token);
+        let monitor = PgRuntimeMonitor::spawn(
+            move |_| future,
+            Arc::clone(&health),
+            Arc::clone(&rls),
+            token,
+        );
         assert!(
             monitor.shutdown().await.is_ok(),
             "PgRuntimeMonitor::shutdown 应返回 Ok"
@@ -1106,7 +1038,7 @@ mod tests {
         let task_store = Arc::clone(&store);
         let task_health = Arc::clone(&health);
         let task_token = token.clone();
-        let handle = tokio::spawn(async move {
+        let future = async move {
             pg_readiness_sampling_loop(
                 Arc::clone(&task_store),
                 task_store,
@@ -1117,10 +1049,10 @@ mod tests {
             )
             .await;
             Ok(())
-        });
+        };
 
-        let monitor = PgRuntimeMonitor::adopt(
-            handle,
+        let monitor = PgRuntimeMonitor::spawn(
+            move |_| future,
             Arc::clone(&health),
             Arc::new(PgRlsReadiness::for_test(true)),
             token,
@@ -1181,25 +1113,25 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::panic)]
     async fn monitor_supervisor_fails_closed_when_a_lane_panics() {
-        let capture = ErrorCapture::default();
-        let records = Arc::clone(&capture.records);
-        let dispatch = tracing::Dispatch::new(capture);
-        let _guard = tracing::dispatcher::set_default(&dispatch);
         let readiness = Arc::new(PgDbReadiness::new());
         readiness.mark(PoolReadiness::Ready);
         let rls = Arc::new(PgRlsReadiness::for_test(true));
         let token = CancellationToken::new();
-        let readiness_task = tokio::spawn(async { panic!("synthetic monitor lane panic") });
-        let rls_task = tokio::spawn(std::future::pending());
-
-        let result = super::supervise_runtime_monitor(
-            readiness_task,
-            rls_task,
-            token,
+        let supervisor = super::supervise_runtime_monitor(
+            async { panic!("synthetic monitor lane panic") },
+            std::future::pending(),
+            token.clone(),
             Arc::clone(&readiness),
             Arc::clone(&rls),
-        )
-        .await;
+        );
+        let monitor = PgRuntimeMonitor::spawn(
+            move |_| supervisor,
+            Arc::clone(&readiness),
+            Arc::clone(&rls),
+            token,
+        );
+        tokio::task::yield_now().await;
+        let result = monitor.shutdown().await;
 
         assert!(matches!(
             result,
@@ -1207,7 +1139,6 @@ mod tests {
         ));
         assert_eq!(readiness.snapshot(), PoolReadiness::Down);
         assert!(!rls.is_ready());
-        assert_monitor_error_lane(&records, "readiness");
     }
 
     #[tokio::test]
@@ -1218,8 +1149,8 @@ mod tests {
         let token = CancellationToken::new();
         let readiness_token = token.clone();
         let rls_token = token.clone();
-        let readiness_task = tokio::spawn(async move { readiness_token.cancelled().await });
-        let rls_task = tokio::spawn(async move { rls_token.cancelled().await });
+        let readiness_task = async move { readiness_token.cancelled().await };
+        let rls_task = async move { rls_token.cancelled().await };
         token.cancel();
 
         let result = super::supervise_runtime_monitor(
@@ -1243,10 +1174,13 @@ mod tests {
             readiness.mark(PoolReadiness::Ready);
             let rls = Arc::new(PgRlsReadiness::for_test(true));
             let token = CancellationToken::new();
-            let (readiness_task, rls_task) = if readiness_exits {
-                (tokio::spawn(async {}), tokio::spawn(std::future::pending()))
+            let (readiness_task, rls_task): (
+                std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+                std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+            ) = if readiness_exits {
+                (Box::pin(async {}), Box::pin(std::future::pending()))
             } else {
-                (tokio::spawn(std::future::pending()), tokio::spawn(async {}))
+                (Box::pin(std::future::pending()), Box::pin(async {}))
             };
 
             let result = super::supervise_runtime_monitor(
@@ -1271,25 +1205,25 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::panic)]
     async fn monitor_supervisor_preserves_rls_lane_panic_kind() {
-        let capture = ErrorCapture::default();
-        let records = Arc::clone(&capture.records);
-        let dispatch = tracing::Dispatch::new(capture);
-        let _guard = tracing::dispatcher::set_default(&dispatch);
         let readiness = Arc::new(PgDbReadiness::new());
         readiness.mark(PoolReadiness::Ready);
         let rls = Arc::new(PgRlsReadiness::for_test(true));
         let token = CancellationToken::new();
-        let readiness_task = tokio::spawn(std::future::pending());
-        let rls_task = tokio::spawn(async { panic!("synthetic RLS lane panic") });
-
-        let result = super::supervise_runtime_monitor(
-            readiness_task,
-            rls_task,
-            token,
+        let supervisor = super::supervise_runtime_monitor(
+            std::future::pending(),
+            async { panic!("synthetic RLS lane panic") },
+            token.clone(),
             Arc::clone(&readiness),
             Arc::clone(&rls),
-        )
-        .await;
+        );
+        let monitor = PgRuntimeMonitor::spawn(
+            move |_| supervisor,
+            Arc::clone(&readiness),
+            Arc::clone(&rls),
+            token,
+        );
+        tokio::task::yield_now().await;
+        let result = monitor.shutdown().await;
 
         assert!(matches!(
             result,
@@ -1297,7 +1231,6 @@ mod tests {
         ));
         assert_eq!(readiness.snapshot(), PoolReadiness::Down);
         assert!(!rls.is_ready());
-        assert_monitor_error_lane(&records, "rls");
     }
 
     #[test]

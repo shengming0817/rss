@@ -571,31 +571,32 @@ where
 
 pub struct S3ReadyProbe {
     ready: Arc<std::sync::atomic::AtomicBool>,
+    task: diport::TaskStatus,
     name: ProbeName,
 }
 
 impl S3ReadyProbe {
     #[allow(clippy::expect_used)]
-    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>, task: diport::TaskStatus) -> Self {
         let name = ProbeName::parse(S3_READY_PROBE_NAME).expect("valid probe name const");
-        Self { ready, name }
+        Self { ready, task, name }
     }
 }
 
 impl bootstrap::HealthProbe for S3ReadyProbe {
     fn check(&self) -> HealthCheck {
-        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
-            (HealthStatus::Healthy, "ready")
-        } else {
-            (HealthStatus::Unhealthy, "down")
-        };
+        let (status, detail) =
+            if self.task.is_running() && self.ready.load(std::sync::atomic::Ordering::Acquire) {
+                (HealthStatus::Healthy, "ready")
+            } else {
+                (HealthStatus::Unhealthy, "down")
+            };
         HealthCheck::new(self.name.clone(), status, detail)
     }
 }
 
 struct S3CanarySampler {
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: CancellationToken,
+    task: diport::ManagedTask,
 }
 
 impl ManagedResource for S3CanarySampler {
@@ -604,28 +605,20 @@ impl ManagedResource for S3CanarySampler {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
+        diport::ManagedResource::shutdown(&self.task).await
     }
 }
 
 fn spawn_s3_canary_sampler(
+    start: diport::TaskStart,
     s3: S3RuntimeDeps,
     config: S3CanaryConfig,
     token: CancellationToken,
     ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> S3CanarySampler {
     let child = token.child_token();
-    let worker_token = child.clone();
     let store = s3.object_store();
-    let handle = tokio::spawn(async move {
+    let task = start.spawn(child, |worker_token| async move {
         loop {
             let round = tokio::time::timeout(
                 config.timeout,
@@ -649,11 +642,10 @@ fn spawn_s3_canary_sampler(
                 () = tokio::time::sleep(config.interval) => {}
             }
         }
+        ready.store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     });
-    S3CanarySampler {
-        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-        token: child,
-    }
+    S3CanarySampler { task }
 }
 
 pub(crate) fn wire_s3_canary(
@@ -666,10 +658,13 @@ pub(crate) fn wire_s3_canary(
     let probe_ready = Arc::clone(&ready);
     let worker_ready = Arc::clone(&ready);
     let s3 = deps.s3.clone();
+    let (start, task_status) =
+        diport::ManagedTask::prepare("s3-canary-sampler", diport::DEFAULT_SHUTDOWN_TIMEOUT);
     let worker = bootstrap::WorkerSpec::observational_phase_one(
         "assemblies.runtime.src.infra.s3.01",
         move |token| {
             DynManagedResource::new_box(spawn_s3_canary_sampler(
+                start,
                 s3.clone(),
                 config,
                 token,
@@ -678,7 +673,10 @@ pub(crate) fn wire_s3_canary(
         },
     );
     let mut output = DomainModuleResult::default();
-    output.push_probe((probe_name, Box::new(S3ReadyProbe::new(probe_ready))));
+    output.push_probe((
+        probe_name,
+        Box::new(S3ReadyProbe::new(probe_ready, task_status)),
+    ));
     output.push_worker(worker);
     Ok(output)
 }
@@ -686,55 +684,8 @@ pub(crate) fn wire_s3_canary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bootstrap::HealthProbe;
     use std::sync::Arc;
-
-    #[allow(clippy::expect_used)]
-    fn assert_shutdown_error_redacts(error: &ShutdownError, marker: &str) {
-        assert!(!error.to_string().contains(marker));
-        assert!(!format!("{error:?}").contains(marker));
-        let source = std::error::Error::source(error).expect("redacted source remains visible");
-        assert!(!source.to_string().contains(marker));
-        assert!(
-            source.source().is_none(),
-            "source chain stops at redaction boundary"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn canary_sampler_propagates_redacted_join_failure() {
-        const MARKER: &str = "s3-canary-plain-panic-secret";
-        let sampler = S3CanarySampler {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("{MARKER}");
-            })))),
-            token: CancellationToken::new(),
-        };
-
-        let error = ManagedResource::shutdown(&sampler)
-            .await
-            .expect_err("join failure must propagate");
-        assert_shutdown_error_redacts(&error, MARKER);
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(
-            ManagedResource::shutdown(&sampler).await.is_ok(),
-            "shutdown is idempotent"
-        );
-
-        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
-        cancelled_handle.abort();
-        let cancelled = S3CanarySampler {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
-            token: CancellationToken::new(),
-        };
-        let cancelled_error = ManagedResource::shutdown(&cancelled)
-            .await
-            .expect_err("cancelled join must propagate");
-        assert_eq!(
-            cancelled_error.kind(),
-            diport::ShutdownErrorKind::TaskCancelled
-        );
-    }
 
     fn valid_s3_values() -> Vec<(&'static str, String)> {
         vec![
@@ -757,6 +708,25 @@ mod tests {
     }
 
     use crate::infra::TEST_PRIVATE_CA_PEM as TEST_S3_CA_PEM;
+
+    #[tokio::test]
+    async fn s3_probe_requires_business_ready_and_running_task_and_stays_closed() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let token = CancellationToken::new();
+        let (start, status) = diport::ManagedTask::prepare("s3-probe-test", Duration::from_secs(1));
+        let probe = S3ReadyProbe::new(Arc::clone(&ready), status);
+        assert_eq!(probe.check().status(), HealthStatus::Unhealthy);
+        let task = start.spawn(token, |task_token| async move {
+            task_token.cancelled().await;
+            Ok(())
+        });
+        assert_eq!(probe.check().status(), HealthStatus::Healthy);
+        ready.store(false, std::sync::atomic::Ordering::Release);
+        assert_eq!(probe.check().status(), HealthStatus::Unhealthy);
+        ready.store(true, std::sync::atomic::Ordering::Release);
+        task.shutdown().await.expect("probe task drains");
+        assert_eq!(probe.check().status(), HealthStatus::Unhealthy);
+    }
 
     #[allow(clippy::expect_used)]
     fn test_s3_ca_pem_path() -> String {

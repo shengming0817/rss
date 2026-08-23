@@ -32,8 +32,6 @@ use p256::ecdsa::{Signature, VerifyingKey};
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 use tokio::runtime::Handle;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{KeyEntry, KeySet};
@@ -80,7 +78,7 @@ pub enum JwksError {
     /// 刷新间隔为零（`tokio::time::interval` 要求 period > 0；零间隔是误配，构造期拒）。
     #[error("jwks refresh interval must be greater than zero")]
     ZeroInterval,
-    /// 不在 tokio runtime 上下文构造（后台 poll 任务需 `tokio::spawn`）。构造期 fail-fast（typed `Err`），
+    /// 不在 tokio runtime 上下文构造（后台 poll 任务由 `ManagedTask` 启动）。构造期 fail-fast（typed `Err`），
     /// 而非运行期 `tokio::spawn` panic——与 fail-fast 设计对齐（评审：Soft panic → Medium typed error）。
     #[error("jwks source must be constructed within a tokio runtime context")]
     NoRuntime,
@@ -108,6 +106,7 @@ impl JwksError {
 #[derive(Clone)]
 pub struct JwksReadinessHandle {
     ready: Arc<AtomicBool>,
+    task: diport::TaskStatus,
     source_id: Arc<str>,
     snapshot: Arc<JwksSnapshotStore>,
 }
@@ -115,7 +114,7 @@ pub struct JwksReadinessHandle {
 impl JwksReadinessHandle {
     /// 上次刷新是否成功（degraded = false）。
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.task.is_running() && self.ready.load(Ordering::Acquire)
     }
     /// operator 控制的低基数源标识（日志 / probe detail 用）。
     pub fn source_id(&self) -> &str {
@@ -383,11 +382,12 @@ impl<P: TokenProfileMarker> IsolatedJwksKeySource<P> {
 /// 远程 IdP = follow-up）。持当前快照（后台刷新原子换出）+ readiness 标志 + 刷新任务句柄。
 ///
 /// **生命周期约束**（资源管理，调用方/组合根须遵守）：
-/// - 须在 **tokio runtime 上下文**构造（`load_and_watch` 内 `tokio::spawn` 后台 poll 任务；非 runtime →
+/// - 须在 **tokio runtime 上下文**构造（`load_and_watch` 内由 `ManagedTask` 启动 poll；非 runtime →
 ///   `JwksError::NoRuntime` fail-fast，不 panic）。
-/// - 构造成功后**必须经 [`Self::shutdown`] 关闭**——直接 drop 会孤立后台 poll 任务（`JoinHandle` 未 await）。
-///   生产路径经 [`crate::OidcProvider`] `ManagedResource::shutdown` 级联（ShutdownStack 编排）。
-/// - 注入的 `token` 生命周期应 ≥ 本源关闭时刻——外层提前 cancel 会令 poll 任务提前停止（`is_ready()` 不自动转 false）。
+/// - 生产路径经 [`crate::OidcProvider`] `ManagedResource::shutdown` 级联（ShutdownStack 编排）；异常 drop
+///   由 `ManagedTask` 取消并 abort，绝不采用 raw `JoinHandle` detach 语义。
+/// - 注入 token 提前取消或 poll task 任意终止后，readiness 与同源 `TaskStatus::is_running()` 合取并永久
+///   fail-closed。
 pub struct JwksKeySource {
     /// operator 控制的低基数源标识（日志 / readiness 句柄；多源定位用）。
     source_id: Arc<str>,
@@ -399,26 +399,8 @@ pub struct JwksKeySource {
     ready: Arc<AtomicBool>,
     /// Present only when both access profiles are active in the same runtime generation.
     isolation: Option<IsolationLease>,
-    /// 刷新任务取消信号（`shutdown` 触发；幂等——ShutdownStack 阶段 1 可能已 cancel）。
-    token: CancellationToken,
-    /// 后台 poll 任务句柄（`shutdown` 取走 + await 收敛；`tokio::sync::Mutex` 供 `&self` 异步关闭）。
-    handle: Mutex<Option<diport::OwnedTask<()>>>,
-}
-
-impl Drop for JwksKeySource {
-    /// RAII 兜底（资源启动与所有权提交非同一事务的释放协议）：未经 [`Self::shutdown`] 直接 drop 时（如
-    /// `VerifierConfigBuilder::build` 失败、key 源被覆盖），cancel token + abort 后台 poll 任务，防任务泄漏。
-    /// 优雅关闭仍应走 `shutdown`（await 收敛）；本 Drop 是漏调 shutdown 的安全网。
-    fn drop(&mut self) {
-        self.token.cancel();
-        // 独占 drop，try_lock 必成功；shutdown 已取走句柄则 None（幂等）。
-        let Ok(mut guard) = self.handle.try_lock() else {
-            return;
-        };
-        if let Some(handle) = guard.take() {
-            handle.abort();
-        }
-    }
+    task: diport::ManagedTask,
+    task_status: diport::TaskStatus,
 }
 
 impl JwksKeySource {
@@ -426,7 +408,7 @@ impl JwksKeySource {
     ///
     /// **初始加载 fail-fast**（误配在组合根接线期暴露，不静默 noop）：非 tokio runtime → `NoRuntime`；零间隔 →
     /// `ZeroInterval`；路径不可读 / 超 [`MAX_JWKS_BYTES`] → `Unreadable`；畸形 → `Malformed`；无可用 key →
-    /// `NoUsableKeys`。成功后 `tokio::spawn` poll 任务，每 `refresh_interval` 重读、解析成功才原子换出快照，失败保留
+    /// `NoUsableKeys`。成功后启动 managed poll，每 `refresh_interval` 重读、解析成功才原子换出快照，失败保留
     /// last-good + 标 degraded。
     ///
     /// 调用约束：
@@ -472,7 +454,7 @@ impl JwksKeySource {
         token: CancellationToken,
         isolation: Option<IsolationLease>,
     ) -> Result<Self, JwksError> {
-        // 非 tokio runtime → 构造期 typed fail-fast（spawn_poll 内 tokio::spawn 否则运行期 panic）。
+        // 非 tokio runtime → 构造期 typed fail-fast（ManagedTask spawn 否则运行期 panic）。
         if Handle::try_current().is_err() {
             return Err(JwksError::NoRuntime);
         }
@@ -487,23 +469,34 @@ impl JwksKeySource {
             lease.register_initial(&snapshot.snapshot())?;
         }
         let ready = Arc::new(AtomicBool::new(true));
-        let handle = spawn_poll(
-            Arc::clone(&source_id),
-            path.clone(),
-            refresh_interval,
-            Arc::clone(&snapshot),
-            Arc::clone(&ready),
-            token.clone(),
-            isolation.clone(),
-        );
+        let (start, task_status) =
+            diport::ManagedTask::prepare("oidc-jwks-refresh", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let poll_source_id = Arc::clone(&source_id);
+        let poll_path = path.clone();
+        let poll_snapshot = Arc::clone(&snapshot);
+        let poll_ready = Arc::clone(&ready);
+        let poll_isolation = isolation.clone();
+        let task = start.spawn(token, move |managed_token| async move {
+            poll_loop(
+                poll_source_id,
+                poll_path,
+                refresh_interval,
+                poll_snapshot,
+                poll_ready,
+                managed_token,
+                poll_isolation,
+            )
+            .await;
+            Ok(())
+        });
         Ok(Self {
             source_id,
             path,
             snapshot,
             ready,
             isolation,
-            token,
-            handle: Mutex::new(Some(diport::OwnedTask::new(handle))),
+            task,
+            task_status,
         })
     }
 
@@ -512,6 +505,7 @@ impl JwksKeySource {
     pub fn readiness_handle(&self) -> JwksReadinessHandle {
         JwksReadinessHandle {
             ready: Arc::clone(&self.ready),
+            task: self.task_status.clone(),
             source_id: Arc::clone(&self.source_id),
             snapshot: Arc::clone(&self.snapshot),
         }
@@ -546,19 +540,13 @@ impl JwksKeySource {
     /// 关闭：取消刷新任务（幂等）+ await 任务收敛。由 [`crate::config::KeySource::shutdown`] →
     /// [`crate::OidcProvider`] `ManagedResource::shutdown` 级联调用。再次调用 no-op（句柄已取走）。
     pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        // 先取出句柄并释放锁，再 await 任务收敛（不锁跨 await）。再次 shutdown → 句柄已取走 → no-op。
-        let handle = self.handle.lock().await.take();
-        let Some(handle) = handle else {
-            return Ok(());
-        };
-        handle.join().await.map_err(ShutdownError::from_join_error)
+        diport::ManagedResource::shutdown(&self.task).await
     }
 }
 
 /// 后台周期刷新任务：每 `period` 重读源 + 刷新快照，直到 `token` 取消。首个立即 tick 被消费（初始快照已在
 /// 构造期同步加载）。
-fn spawn_poll(
+async fn poll_loop(
     source_id: Arc<str>,
     path: PathBuf,
     period: Duration,
@@ -566,28 +554,26 @@ fn spawn_poll(
     ready: Arc<AtomicBool>,
     token: CancellationToken,
     isolation: Option<IsolationLease>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(period);
-        // 刷新慢于 period 时跳过堆积 tick（不抢跑），避免 burst 重读。
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        ticker.tick().await; // 消费立即触发的首 tick。
-        loop {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => break,
-                _ = ticker.tick() => {
-                    refresh(&source_id, &path, &snapshot, &ready, isolation.as_ref())
-                },
-            }
+) {
+    let mut ticker = tokio::time::interval(period);
+    // 刷新慢于 period 时跳过堆积 tick（不抢跑），避免 burst 重读。
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await; // 消费立即触发的首 tick。
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            _ = ticker.tick() => {
+                refresh(&source_id, &path, &snapshot, &ready, isolation.as_ref())
+            },
         }
-        tracing::debug!(
-            target: LOG_TARGET,
-            resource = LOG_TARGET,
-            source_id = %source_id,
-            "jwks refresh task stopped"
-        );
-    })
+    }
+    tracing::debug!(
+        target: LOG_TARGET,
+        resource = LOG_TARGET,
+        source_id = %source_id,
+        "jwks refresh task stopped"
+    );
 }
 
 /// 刷新原语（poll 任务与 [`JwksKeySource::reload`] 共用单源）：重读 + 解析成功才**原子换出**快照 +
@@ -921,26 +907,53 @@ mod tests {
         }
     }
 
-    fn readiness_for(kid: &str, signing: &SigningKey) -> JwksReadinessHandle {
-        JwksReadinessHandle {
+    fn readiness_for(
+        kid: &str,
+        signing: &SigningKey,
+    ) -> (JwksReadinessHandle, diport::ManagedTask) {
+        let token = CancellationToken::new();
+        let (start, status) =
+            diport::ManagedTask::prepare("jwks-readiness-test", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let task = start.spawn(token, |task_token| async move {
+            task_token.cancelled().await;
+            Ok(())
+        });
+        let readiness = JwksReadinessHandle {
             ready: Arc::new(AtomicBool::new(true)),
+            task: status,
             source_id: Arc::from("test-rss-signing-proof"),
             snapshot: Arc::new(JwksSnapshotStore::new(KeySet::access(vec![KeyEntry {
                 kid: kid.to_owned(),
                 key: *signing.verifying_key(),
             }]))),
-        }
+        };
+        (readiness, task)
+    }
+
+    #[tokio::test]
+    async fn jwks_readiness_fails_closed_after_managed_task_stops() {
+        let signing = sk(&SK1_BYTES);
+        let (readiness, task) = readiness_for("rss-active", &signing);
+        assert!(readiness.is_ready());
+
+        diport::ManagedResource::shutdown(&task)
+            .await
+            .expect("managed JWKS task shutdown");
+
+        assert!(!readiness.is_ready());
+        assert!(!readiness.is_ready(), "terminal state must remain sticky");
     }
 
     #[tokio::test]
     async fn rss_signing_proof_accepts_matching_exact_kid_material() {
         let signing = sk(&SK1_BYTES);
         let binding = diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-active"));
+        let (readiness, _task) = readiness_for("rss-active", &signing);
         assert!(
             super::prove_rss_signer_matches_jwks(
                 &TestSigner(signing.clone()),
                 &binding,
-                &readiness_for("rss-active", &signing),
+                &readiness,
             )
             .await
             .is_ok()
@@ -952,25 +965,27 @@ mod tests {
         let signer_key = sk(&SK1_BYTES);
         let jwks_key = sk(&SK2_BYTES);
         let binding = diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-active"));
+        let (wrong_material, _wrong_material_task) = readiness_for("rss-active", &jwks_key);
         assert!(
             super::prove_rss_signer_matches_jwks(
                 &TestSigner(signer_key.clone()),
                 &binding,
-                &readiness_for("rss-active", &jwks_key),
+                &wrong_material,
             )
             .await
             .is_err()
         );
+        let (wrong_kid, _wrong_kid_task) = readiness_for("different-kid", &signer_key);
         assert!(
             super::prove_rss_signer_matches_jwks(
                 &TestSigner(signer_key.clone()),
                 &binding,
-                &readiness_for("different-kid", &signer_key),
+                &wrong_kid,
             )
             .await
             .is_err()
         );
-        let stale = readiness_for("rss-active", &signer_key);
+        let (stale, _stale_task) = readiness_for("rss-active", &signer_key);
         stale.ready.store(false, Ordering::Release);
         assert!(
             super::prove_rss_signer_matches_jwks(&TestSigner(signer_key), &binding, &stale)
@@ -1590,32 +1605,6 @@ mod tests {
         src.shutdown()
             .await
             .expect("second shutdown ok (idempotent)");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn shutdown_classifies_join_panic_without_exposing_payload() {
-        const MARKER: &str = "jwks-refresh-plain-panic-secret";
-        let tmp = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "k1")]));
-        let src = JwksKeySource::load_and_watch(
-            "test-idp",
-            tmp.path(),
-            Duration::from_secs(3600),
-            CancellationToken::new(),
-        )
-        .expect("initial load");
-        let original = src
-            .handle
-            .lock()
-            .await
-            .replace(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("{MARKER}");
-            })));
-        original.expect("watch task exists").abort();
-
-        let error = src.shutdown().await.expect_err("panic must propagate");
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(!format!("{error:?}").contains(MARKER));
     }
 
     // ── 后台 poll 任务确定性轮转（start_paused + advance 驱动 interval tick，非 wall-clock）──────────

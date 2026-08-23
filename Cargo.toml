@@ -44,6 +44,7 @@ members = [
   "crates/workspacefacts",
   # DI-infra（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费——DI port trait 单源 + dynosaur unsafe 收敛）
   "crates/diport",
+  "crates/listenerlifecycle",
   # 服务（依赖基础 + 引擎 + DI-infra）
   "crates/httpserve",
   "crates/authn",
@@ -148,6 +149,7 @@ libraries = [
   { path = "lints/rss_instrument_err_level" },
   { path = "lints/rss_diagctx_auth_source" },
   { path = "lints/rss_contract_schema_parse_funnel" },
+  { path = "lints/rss_managed_task_owner" },
 ]
 
 [workspace.package]

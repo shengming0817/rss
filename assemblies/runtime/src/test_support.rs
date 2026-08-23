@@ -199,7 +199,8 @@ where
         }
     }
     module = retained;
-    let reporter = Arc::new(registry.take_health_reporter());
+    let listener_probe = runtimeexec::ListenerLifecycleRegistration::install(&mut registry)?;
+    let reporter = Arc::clone(listener_probe.assembly_receipt());
     let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(SagaJourneyMetrics);
     let (listeners, receipt) = crate::routes::FinalizedListenerSet::for_saga_journey(
         activation_listener,
@@ -220,7 +221,7 @@ where
     let (completion, controlled) = runtimeexec::test_support::controlled();
     let launch = runtimeexec::LaunchPlan::new(
         adapter,
-        receipt,
+        listener_probe,
         move |_| async move {
             let result = assertion(reporter, start, operator).await;
             completion.complete(result)

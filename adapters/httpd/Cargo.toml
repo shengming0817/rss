@@ -24,6 +24,7 @@ test-support = ["dep:rcgen"]
 #   thiserror  = 构造期 / shutdown 错误枚举（：&'static str message，无 PII）
 [dependencies]
 diport = { path = "../../crates/diport" }
+listenerlifecycle = { path = "../../crates/listenerlifecycle" }
 authn = { path = "../../crates/authn" }
 httpserve = { path = "../../crates/httpserve" }
 distributed = { path = "../../crates/distributed" }

@@ -106,7 +106,7 @@ struct FixtureStartup {
 
 impl runtimeexec::StartupAdapter for FixtureStartup {
     type Adapter = listeners::LaunchAdapter;
-    type ProbeReceipt = listeners::FinalizedProbeReceipt;
+    type ProbeReceipt = Arc<bootstrap::HealthReporter>;
     type ReadyHook = runtime::ReadyHook;
     type Ready = runtime::ReadyFuture;
 

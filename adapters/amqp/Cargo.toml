@@ -55,6 +55,10 @@ path = "tests/integration.rs"
 required-features = ["integration"]
 
 [dev-dependencies]
+eventexec = { path = "../../crates/eventexec", features = ["test-support"] }
+consistency = { path = "../../crates/consistency" }
+primitives = { path = "../../crates/primitives" }
+rss-request-context.workspace = true
 # 集成测试 #[tokio::test]（仅 feature=integration 下编译执行）；time = 防挂的有界超时。
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
 futures = { workspace = true }

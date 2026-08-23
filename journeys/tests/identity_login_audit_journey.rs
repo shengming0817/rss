@@ -60,7 +60,8 @@ use diport::{
     DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
     OutboxActor, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher, Subscriber, Topic,
 };
-use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth, spawn_consumer};
+use eventexec::consumer_worker::spawn_test_consumer;
+use eventexec::{ConsumerMeta, EVENT_CONSUMER_PROBE, LeaseConfig, WorkerHealth};
 use futures::future::BoxFuture;
 use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
 use httpserve::ProducerMarker;
@@ -162,7 +163,7 @@ where
     let (admission_control, _, consumer_admission, _) =
         primitives::prepare_dr_admission_controls().into_parts();
     admission_control.start_running()?;
-    let worker = spawn_consumer(
+    let worker = spawn_test_consumer(
         name,
         stream,
         claimer,

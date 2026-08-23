@@ -43,7 +43,10 @@ use std::time::Duration;
 // ADR-003 dynosaur 派发统一）；本 crate 仅保留关闭编排（ShutdownStack + 两阶段 LIFO 驱动器，ADR-001）。
 // dynosaur Send 变体 `ManagedResource` + `DynManagedResource`（Send wrapper）：ShutdownStack 以
 // `Box<DynManagedResource<'static>>` 持有并 tokio::spawn 隔离 panic（Box 仅需 Send，免 Arc 的 Sync 要求）。
-use diport::{DynManagedResource, ManagedResource, ShutdownError, ShutdownErrorKind};
+use diport::{
+    DynManagedResource, ManagedResource, ManagedTaskRegistration, ShutdownError, ShutdownErrorKind,
+    TaskStatus,
+};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -170,6 +173,45 @@ impl ShutdownStack {
     {
         let token = self.root_token.child_token();
         self.resources.push(make(token));
+    }
+
+    /// Register the canonical owner for one Tokio background task and return its same-source
+    /// read-only status receipt.
+    ///
+    /// The closure cannot return an arbitrary managed resource: the opaque registration proves
+    /// that the task owner, lifecycle token, shutdown join, and status publisher were minted by
+    /// one [`diport::ManagedTask`].
+    pub fn register_managed_task_with_token<F>(&mut self, make: F) -> TaskStatus
+    where
+        F: FnOnce(CancellationToken) -> ManagedTaskRegistration,
+    {
+        let token = self.root_token.child_token();
+        let registration = make(token);
+        let status = registration.status();
+        self.resources
+            .push(DynManagedResource::new_box(registration));
+        status
+    }
+
+    /// Register a canonical managed task whose cancellation begins only at its own LIFO phase.
+    pub fn register_deferred_managed_task_with_token<F>(&mut self, make: F) -> TaskStatus
+    where
+        F: FnOnce(CancellationToken) -> ManagedTaskRegistration,
+    {
+        let token = CancellationToken::new();
+        let registration = make(token.clone());
+        let status = registration.status();
+        let name = registration.name().to_owned();
+        let shutdown_timeout = registration.shutdown_timeout();
+        let resource = DynManagedResource::new_box(registration);
+        self.resources
+            .push(DynManagedResource::new_box(DeferredCancellationResource {
+                name,
+                shutdown_timeout,
+                token: CancelOnDrop(token),
+                inner: tokio::sync::Mutex::new(Some(resource)),
+            }));
+        status
     }
 
     /// 注册一个必须等到其**自身 LIFO 关闭相位**才取消的后台 task。
@@ -405,7 +447,7 @@ enum ShutdownStep {
 ///
 /// `deadline` 是 `run` 持有的**共享**整体预算 future（跨资源复用同一 deadline，cancel-safe）。
 /// 预算先判（`biased`）：耗尽则 **abort 并 await 在飞 shutdown owner**（cancel-safe；owner 内的
-/// `OwnedTask` drop guard 同步发出内层 abort，不 detach 等进程退出回收，
+/// canonical task owner 的 drop guard 同步发出内层 abort，不 detach 等进程退出回收，
 /// `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）→ 返回 [`ShutdownStep::Exhausted`]。
 async fn shutdown_one<D>(
     resource: Box<DynManagedResource<'static>>,
@@ -842,6 +884,32 @@ mod tests {
 
         assert!(failures.is_empty());
         assert_eq!(entries(&log), vec!["waiter"]);
+    }
+
+    #[tokio::test]
+    async fn managed_task_registration_returns_its_same_source_status() {
+        let (start, status) =
+            diport::ManagedTask::prepare("canonical-task", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        assert_eq!(status.current(), diport::TaskState::Pending);
+
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+        let registered = stack.register_managed_task_with_token(|token| {
+            start
+                .spawn(token, |task_token| async move {
+                    task_token.cancelled().await;
+                    Ok(())
+                })
+                .into_registration()
+        });
+
+        assert_eq!(registered.current(), diport::TaskState::Running);
+        assert_eq!(status.current(), diport::TaskState::Running);
+        assert!(stack.shutdown().await.is_empty());
+        assert_eq!(
+            registered.current(),
+            diport::TaskState::Stopped(diport::TaskExit::Cancelled)
+        );
+        assert_eq!(registered.current(), status.current());
     }
 
     // SHUTDOWN-TOKEN-FUNNEL-01：deferred token 同样只能由 stack 在 closure 内铸造，但不属于

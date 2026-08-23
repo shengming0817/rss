@@ -80,6 +80,7 @@ pub(crate) const SERVICE_CRATES: &[&str] = &[
     "authn",
     "bootstrap",
     "eventexec",
+    "listenerlifecycle",
     "observ",
     "distributed",
     "deviceloop",

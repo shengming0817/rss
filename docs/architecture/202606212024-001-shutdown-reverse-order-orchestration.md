@@ -73,6 +73,12 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
    `register_detached(…)`（无 `pub child_token`，两类 token 的铸造均收口于注册）。
    module worker 不再用统一 closure alias：`WorkerSpec::{PhaseOne, Deferred}` 是闭合 typed policy，
    生产构造点必须显式选择，runtime sink 穷尽 match 后进入对应 funnel。
+   长驻 Tokio task 不允许各资源重复保存 raw `JoinHandle`：`diport::ManagedTask` 是唯一 task/token/join/
+   terminal publisher owner，`TaskStart` move-only、`TaskStatus` 只读、`ManagedTaskRegistration` opaque。
+   `register_managed_task_with_token` / deferred 变体是唯一 typed sink，并返回同源 status。内部不再设置
+   join timeout；per-resource 与 total deadline 仍只由本 stack 裁决。一次性 OTel `spawn_blocking` 只能经
+   非存储型 `join_owned_task` await。dedicated OS thread 仍归 `eventexec::ManagedBlockingWorker`，broker
+   settlement 仍归 consumer，进程 listener 失败策略仍归 RuntimeExec，不把业务状态机塞入通用 primitive。
 3. **两阶段逆序驱动器**——`ShutdownStack::shutdown(self)` / `shutdown_within(self, total_budget)`：
    - **阶段 1 · 广播（并发、无序）**：`root_token.cancel()`，所有经 `register_with_token` 注入的
      后台 task 同时感知关闭、开始自行退出。deferred task 不接此广播。
@@ -113,6 +119,7 @@ Go（GoCell 原实现）靠 `defer` 的 LIFO 语义天然表达：`defer db.Clos
 | `SHUTDOWN-NO-PANIC-ON-ERROR-01` | 关闭路径自身绝不 `panic!`/`unwrap`/`expect`，失败走 `Result` | Medium | clippy `panic`/`unwrap_used`/`expect_used` deny |
 | `SHUTDOWN-TOKEN-FUNNEL-01` | 后台 task 取消 token 只能经 `register_with_token`（root 广播）或 `register_deferred_with_token`（自身 LIFO 相位）由本 stack 铸造注入；module worker 以闭合 `WorkerSpec` policy 显式选择；无 task 资源经 `register_detached` 显式声明 | Medium→ | **无 `pub child_token`**；`WorkerSpec` 无默认/字符串 policy，runtime sink 穷尽 match；deferred wrapper cancel-on-drop 覆盖未到达 shutdown 相位的预算耗尽。资源仍可忽略注入 token（sealed handle 才 Hard，见 §5 follow-up） |
 | `SHUTDOWN-BUDGET-CANCEL-SAFE-01` | 整体预算由驱动器内部 `shutdown_within` 承担（cancel-safe），不交外层 `timeout` | Medium | 驱动器内单一共享 deadline + `BudgetExhausted` 聚合 + 测试断言；rustdoc 危险说明禁外层 timeout（footgun 防护） |
+| `MANAGED-TASK-STATE-01` | 长驻 Tokio task 的 start、token、future、join 与 terminal state 必须同源，terminal 不可恢复 | **Hard** | private publisher + move-only `TaskStart` + token future factory + opaque registration + closed `TaskState`/`TaskExit`; raw `JoinHandle` owner 另由 type-aware Dylint 拒绝 |
 
 > 强度说明（AI-robust）：仅 `SHUTDOWN-SINGLE-SHOT-01` 是 **Hard**——消费 self 让违反在类型层
 > 不可表达。`SHUTDOWN-TOKEN-FUNNEL-01` 的 token 发放经 `pub(crate)` 可见性收口于注册 funnel

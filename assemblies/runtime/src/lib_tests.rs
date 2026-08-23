@@ -464,14 +464,9 @@ fn resource_names<'a>(
 }
 
 fn worker_names(workers: Vec<bootstrap::WorkerSpec>) -> Vec<String> {
-    let token = CancellationToken::new();
     workers
         .into_iter()
-        .map(|worker| match worker {
-            bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
-                make.into_factory()(token.clone()).name().to_owned()
-            }
-        })
+        .map(|worker| worker.descriptor().identity)
         .collect()
 }
 
@@ -1434,15 +1429,12 @@ async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
             bootstrap::DomainLifecycleOutput::Worker(worker) => Some(worker),
         })
         .expect("one revocation worker");
+    assert_eq!(worker.descriptor().identity, REVOCATION_SWEEPER_WORKER_NAME);
     let root = CancellationToken::new();
-    let resource = match worker {
-        bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
-            make.into_factory()(root.clone())
-        }
-    };
-    assert_eq!(resource.name(), REVOCATION_SWEEPER_WORKER_NAME);
+    let mut stack = bootstrap::shutdown::ShutdownStack::new(root.clone());
+    worker.register_into(&mut stack);
     root.cancel();
-    assert!(resource.shutdown().await.is_ok());
+    assert!(stack.shutdown().await.is_empty());
 }
 
 struct ScriptedAuthGrantSweeper {

@@ -1,5 +1,5 @@
 error[E0599]: no method named `clone` found for struct `LaunchPlan<Adapter, ProbeReceipt, ReadyHook>` in the current scope
-  --> tests/ui/launch_plan_clone_fail.rs:23:30
+  --> tests/ui/launch_plan_clone_fail.rs:26:30
    |
-23 |     let _second_owner = plan.clone();
-   |                              ^^^^^ method not found in `LaunchPlan<(), (), fn(()) -> std::future::Ready<Result<(), anyhow::Error>>>`
+26 |     let _second_owner = plan.clone();
+   |                              ^^^^^ method not found in `LaunchPlan<(), Arc<HealthReporter>, fn(()) -> std::future::Ready<Result<(), anyhow::Error>>>`

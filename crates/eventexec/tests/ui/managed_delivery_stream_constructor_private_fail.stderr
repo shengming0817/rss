@@ -1,0 +1,10 @@
+error[E0624]: associated function `mint` is private
+ --> tests/ui/managed_delivery_stream_constructor_private_fail.rs:7:42
+  |
+7 |     let _forged = ManagedDeliveryStream::mint(stream, CancellationToken::new());
+  |                                          ^^^^ private associated function
+  |
+ ::: src/consumer.rs
+  |
+  |     pub(crate) fn mint(stream: diport::DeliveryStream, token: CancellationToken) -> Self {
+  |     ------------------------------------------------------------------------------------ private associated function defined here

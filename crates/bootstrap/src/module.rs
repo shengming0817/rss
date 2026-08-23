@@ -9,7 +9,7 @@
 //! [`DomainModuleResult`] 是域能力的标准装配出口（ADR-010 §2.2）：`module()` / `wire_X` 的可聚合产物，
 //! 组合根经 [`DomainModuleResult::merge`] / [`Extend`] 聚合各域 result 后排空到 sink。
 
-use diport::DynManagedResource;
+use diport::{DynManagedResource, ManagedTaskRegistration};
 use primitives::ProbeName;
 use tokio_util::sync::CancellationToken;
 
@@ -77,7 +77,12 @@ pub enum WorkerSpec {
 
 pub struct WorkerRegistration {
     descriptor: WorkerDescriptor,
-    make: Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>,
+    make: WorkerFactory,
+}
+
+enum WorkerFactory {
+    Resource(Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>),
+    ManagedTask(Box<dyn FnOnce(CancellationToken) -> ManagedTaskRegistration + Send>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -98,10 +103,22 @@ impl WorkerRegistration {
     pub fn descriptor(&self) -> WorkerDescriptor {
         self.descriptor.clone()
     }
-    pub fn into_factory(
-        self,
-    ) -> Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send> {
-        self.make
+    fn register_phase_one(self, stack: &mut crate::shutdown::ShutdownStack) {
+        match self.make {
+            WorkerFactory::Resource(make) => stack.register_with_token(make),
+            WorkerFactory::ManagedTask(make) => {
+                let _status = stack.register_managed_task_with_token(make);
+            }
+        }
+    }
+
+    fn register_deferred(self, stack: &mut crate::shutdown::ShutdownStack) {
+        match self.make {
+            WorkerFactory::Resource(make) => stack.register_deferred_with_token(make),
+            WorkerFactory::ManagedTask(make) => {
+                let _status = stack.register_deferred_managed_task_with_token(make);
+            }
+        }
     }
 }
 
@@ -118,8 +135,48 @@ impl WorkerSpec {
         assert!(!identity.is_empty(), "worker identity must not be empty");
         WorkerRegistration {
             descriptor: WorkerDescriptor { lane, identity },
-            make: Box::new(make),
+            make: WorkerFactory::Resource(Box::new(make)),
         }
+    }
+
+    fn managed_registration<F>(
+        identity: impl Into<String>,
+        lane: WorkerAdmissionLane,
+        make: F,
+    ) -> WorkerRegistration
+    where
+        F: FnOnce(CancellationToken) -> ManagedTaskRegistration + Send + 'static,
+    {
+        let identity = identity.into();
+        assert!(!identity.is_empty(), "worker identity must not be empty");
+        WorkerRegistration {
+            descriptor: WorkerDescriptor { lane, identity },
+            make: WorkerFactory::ManagedTask(Box::new(make)),
+        }
+    }
+
+    #[track_caller]
+    pub fn managed_observational_phase_one<F>(identity: impl Into<String>, make: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> ManagedTaskRegistration + Send + 'static,
+    {
+        Self::PhaseOne(Self::managed_registration(
+            identity,
+            WorkerAdmissionLane::Observational,
+            make,
+        ))
+    }
+
+    #[track_caller]
+    pub fn managed_observational_deferred<F>(identity: impl Into<String>, make: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> ManagedTaskRegistration + Send + 'static,
+    {
+        Self::Deferred(Self::managed_registration(
+            identity,
+            WorkerAdmissionLane::Observational,
+            make,
+        ))
     }
 
     #[track_caller]
@@ -281,6 +338,14 @@ impl WorkerSpec {
     pub fn descriptor(&self) -> WorkerDescriptor {
         match self {
             Self::PhaseOne(r) | Self::Deferred(r) => r.descriptor(),
+        }
+    }
+
+    /// Consume this closed worker policy into the sole shutdown owner.
+    pub fn register_into(self, stack: &mut crate::shutdown::ShutdownStack) {
+        match self {
+            Self::PhaseOne(registration) => registration.register_phase_one(stack),
+            Self::Deferred(registration) => registration.register_deferred(stack),
         }
     }
 }
@@ -798,17 +863,11 @@ mod result_tests {
     }
 
     fn labeled_worker(label: &'static str) -> WorkerSpec {
-        WorkerSpec::observational_phase_one("crates.bootstrap.src.module.04", move |_token| {
-            labeled_resource(label)
-        })
+        WorkerSpec::observational_phase_one(label, move |_token| labeled_resource(label))
     }
 
-    fn invoke_worker(worker: WorkerSpec) -> Box<DynManagedResource<'static>> {
-        match worker {
-            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                make.into_factory()(CancellationToken::new())
-            }
-        }
+    fn worker_identity(worker: WorkerSpec) -> String {
+        worker.descriptor().identity
     }
 
     fn labeled_result(label: &'static str) -> DomainModuleResult {
@@ -931,10 +990,10 @@ mod result_tests {
             Some("still-owned")
         );
         assert_eq!(
-            drain_workers(&mut output).into_iter().next().map(|worker| {
-                let resource = invoke_worker(worker);
-                resource.name().to_owned()
-            }),
+            drain_workers(&mut output)
+                .into_iter()
+                .next()
+                .map(worker_identity),
             Some("still-owned".to_owned())
         );
     }
@@ -963,7 +1022,7 @@ mod result_tests {
             .collect();
         let worker_order: Vec<String> = drain_workers(&mut output)
             .into_iter()
-            .map(|worker| invoke_worker(worker).name().to_owned())
+            .map(worker_identity)
             .collect();
 
         assert_eq!(probe_order, expected.map(str::to_owned));
@@ -999,7 +1058,7 @@ mod result_tests {
         assert_eq!(output.worker_count(), 1);
         let worker_labels: Vec<String> = drain_workers(&mut output)
             .into_iter()
-            .map(|worker| invoke_worker(worker).name().to_owned())
+            .map(worker_identity)
             .collect();
         assert_eq!(worker_labels, ["only"]);
     }
@@ -1020,9 +1079,9 @@ mod result_tests {
         let worker = drain_workers(&mut output)
             .pop()
             .expect("worker must be present");
-        let resource = invoke_worker(worker);
-
-        assert_eq!(resource.name(), "single-use");
+        let root = CancellationToken::new();
+        let mut stack = crate::shutdown::ShutdownStack::new(root);
+        worker.register_into(&mut stack);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(output.worker_count(), 0);
     }

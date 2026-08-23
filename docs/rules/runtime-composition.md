@@ -33,7 +33,15 @@
 - composition root 拥有 prepare/start/readiness/drain/shutdown；域 init 不做外部 I/O 或后台 spawn。
 - startup 是有界事务：任一步失败必须按逆序回滚已启动资源并保留脱敏因果链。
 - readiness 只在全部 required provider 与 worker 达成同一 plan identity 后为真。
+- process runtime 是 listener activation、completion supervision、readiness revocation、root cancellation、signal
+  priority、unexpected-exit reporting 与 total/LIFO drain 的唯一 owner。adapter 只能返回由真实 bound socket
+  铸造的 opaque listener receipt；readiness 前必须消费非空 listener receipt，root cancellation 前的任何
+  terminal listener state 都必须 fail-closed。
 - drain 先停止 admission，再等待有界在途任务，最后关闭 provider；超时返回失败而非伪造 clean shutdown。
+- RuntimeExec 是 listener activation、completion supervision、readiness revocation、root cancellation、signal
+  priority 与 LIFO drain 的唯一 owner。HTTP adapter 只能通过消费真实 bound socket 铸造 opaque
+  `ListenerTaskRegistration`；非空 sealed listener receipt 是 readiness 的必填证明，root cancellation 前任一
+  listener terminal 都永久 fail-closed。
 - config reload 只能原子切换完整 validated snapshot；candidate 失败保留 last-good。
 
 ## 载体

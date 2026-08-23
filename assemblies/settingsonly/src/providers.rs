@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context as _;
-use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
+use diport::{DynKeyProvider, DynManagedResource, ManagedResource};
 
 use crate::config;
 use crate::runtime::SharedManagedResource;
@@ -363,23 +363,29 @@ async fn build_production_infra(
         .context("build settingsonly Redis readiness probe name")?;
     let redis_sampler = redis.clone();
     let sampler_ready = Arc::clone(&redis_ready);
+    let (redis_start, redis_task) = diport::ManagedTask::prepare(
+        "settingsonly-redis-readiness",
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+    );
     let mut redis_output = bootstrap::DomainModuleResult::default();
     redis_output.push_probe((
         redis_probe_name.clone(),
         Box::new(RedisReadyProbe {
             name: redis_probe_name,
             ready: Arc::clone(&redis_ready),
+            task: redis_task,
         }),
     ));
-    redis_output.push_worker(bootstrap::WorkerSpec::observational_phase_one(
+    redis_output.push_worker(bootstrap::WorkerSpec::managed_observational_phase_one(
         "assemblies.settingsonly.src.providers.02",
         move |token| {
-            DynManagedResource::new_box(RedisReadinessWorker::spawn(
+            spawn_redis_readiness(
+                redis_start,
                 redis_sampler,
                 redis_readiness,
                 token,
                 sampler_ready,
-            ))
+            )
         },
     ));
     redis_output.extend_resources(redis.runtime_resources());
@@ -591,6 +597,7 @@ async fn build_redis(
 struct RedisReadyProbe {
     name: primitives::ProbeName,
     ready: Arc<AtomicBool>,
+    task: diport::TaskStatus,
 }
 
 struct RlsReadyProbe {
@@ -614,7 +621,7 @@ impl bootstrap::HealthProbe for RlsReadyProbe {
 
 impl bootstrap::HealthProbe for RedisReadyProbe {
     fn check(&self) -> primitives::HealthCheck {
-        let (status, detail) = if self.ready.load(Ordering::Acquire) {
+        let (status, detail) = if self.task.is_running() && self.ready.load(Ordering::Acquire) {
             (primitives::HealthStatus::Healthy, "ready")
         } else {
             (primitives::HealthStatus::Unhealthy, "down")
@@ -623,20 +630,14 @@ impl bootstrap::HealthProbe for RedisReadyProbe {
     }
 }
 
-struct RedisReadinessWorker {
+fn spawn_redis_readiness(
+    start: diport::TaskStart,
+    redis: redis::RedisRuntimeDeps,
+    period: std::time::Duration,
     token: tokio_util::sync::CancellationToken,
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-}
-
-impl RedisReadinessWorker {
-    fn spawn(
-        redis: redis::RedisRuntimeDeps,
-        period: std::time::Duration,
-        token: tokio_util::sync::CancellationToken,
-        ready: Arc<AtomicBool>,
-    ) -> Self {
-        let worker_token = token.clone();
-        let handle = tokio::spawn(async move {
+    ready: Arc<AtomicBool>,
+) -> diport::ManagedTaskRegistration {
+    let task = start.spawn(token, |worker_token| async move {
             let mut ticker = tokio::time::interval(period);
             loop {
                 tokio::select! {
@@ -663,29 +664,10 @@ impl RedisReadinessWorker {
                     }
                 }
             }
+            ready.store(false, Ordering::Release);
+            Ok(())
         });
-        Self {
-            token,
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-        }
-    }
-}
-
-impl ManagedResource for RedisReadinessWorker {
-    fn name(&self) -> &str {
-        "settingsonly-redis-readiness"
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        if let Some(handle) = self.handle.lock().await.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
-        Ok(())
-    }
+    task.into_registration()
 }
 
 fn build_tenant_authority(
@@ -1218,9 +1200,36 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use crate::providers_gen::ListenerPdpJwksLifecycle;
+    use bootstrap::HealthProbe as _;
     use diport::ManagedResource as _;
+    use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test]
+    async fn redis_probe_conjoins_provider_flag_with_terminal_task_status() -> anyhow::Result<()> {
+        let ready = Arc::new(AtomicBool::new(true));
+        let token = tokio_util::sync::CancellationToken::new();
+        let (start, status) =
+            diport::ManagedTask::prepare("redis-probe-test", Duration::from_secs(1));
+        let probe = RedisReadyProbe {
+            name: primitives::ProbeName::parse("redis-probe-test")?,
+            ready: Arc::clone(&ready),
+            task: status,
+        };
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Unhealthy);
+        let task = start.spawn(token, |task_token| async move {
+            task_token.cancelled().await;
+            Ok(())
+        });
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Healthy);
+        ready.store(false, Ordering::Release);
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Unhealthy);
+        ready.store(true, Ordering::Release);
+        task.shutdown().await?;
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Unhealthy);
+        Ok(())
+    }
 
     fn private_ca() -> rcgen::CertifiedIssuer<'static, rcgen::KeyPair> {
         use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};

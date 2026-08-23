@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
+use diport::{DynKeyProvider, DynManagedResource};
 
 use crate::config;
 use crate::runtime::SharedManagedResource;
@@ -199,23 +199,29 @@ pub(crate) async fn build(
         .context("build identityaudit Redis probe name")?;
     let redis_for_worker = redis.clone();
     let redis_worker_ready = Arc::clone(&redis_ready);
+    let (redis_start, redis_task) = diport::ManagedTask::prepare(
+        "identityaudit-redis-readiness-worker",
+        diport::DEFAULT_SHUTDOWN_TIMEOUT,
+    );
     let lock_output = bootstrap::DomainModuleResult::from_parts(
         [(
             redis_probe_name.clone(),
             Box::new(RedisProbe {
                 name: redis_probe_name,
                 ready: Arc::clone(&redis_ready),
+                task: redis_task,
             }) as Box<dyn bootstrap::HealthProbe>,
         )],
         redis.runtime_resources(),
-        [bootstrap::WorkerSpec::observational_phase_one(
+        [bootstrap::WorkerSpec::managed_observational_phase_one(
             "assemblies.identityaudit.src.providers.02",
             move |token| {
-                DynManagedResource::new_box(RedisReadinessWorker::spawn(
+                spawn_redis_readiness_worker(
+                    redis_start,
                     redis_for_worker.clone(),
                     token,
                     Arc::clone(&redis_worker_ready),
-                ))
+                )
             },
         )],
     );
@@ -429,11 +435,12 @@ async fn build_redis(
 struct RedisProbe {
     name: primitives::ProbeName,
     ready: Arc<AtomicBool>,
+    task: diport::TaskStatus,
 }
 
 impl bootstrap::HealthProbe for RedisProbe {
     fn check(&self) -> primitives::HealthCheck {
-        let (status, detail) = if self.ready.load(Ordering::Acquire) {
+        let (status, detail) = if self.task.is_running() && self.ready.load(Ordering::Acquire) {
             (primitives::HealthStatus::Healthy, "ready")
         } else {
             (primitives::HealthStatus::Unhealthy, "down")
@@ -442,53 +449,27 @@ impl bootstrap::HealthProbe for RedisProbe {
     }
 }
 
-struct RedisReadinessWorker {
-    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    token: tokio_util::sync::CancellationToken,
-}
-
-impl RedisReadinessWorker {
-    fn spawn(
-        redis: redis::RedisRuntimeDeps,
-        parent: tokio_util::sync::CancellationToken,
-        ready: Arc<AtomicBool>,
-    ) -> Self {
-        let token = parent.child_token();
-        let worker_token = token.clone();
-        let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(REDIS_READINESS_PERIOD);
-            loop {
-                tokio::select! {
-                    _ = worker_token.cancelled() => break,
-                    _ = interval.tick() => {
-                        ready.store(redis.ping().await.is_ok(), Ordering::Release);
-                    }
+fn spawn_redis_readiness_worker(
+    start: diport::TaskStart,
+    redis: redis::RedisRuntimeDeps,
+    parent: tokio_util::sync::CancellationToken,
+    ready: Arc<AtomicBool>,
+) -> diport::ManagedTaskRegistration {
+    let token = parent.child_token();
+    let task = start.spawn(token, |worker_token| async move {
+        let mut interval = tokio::time::interval(REDIS_READINESS_PERIOD);
+        loop {
+            tokio::select! {
+                _ = worker_token.cancelled() => break,
+                _ = interval.tick() => {
+                    ready.store(redis.ping().await.is_ok(), Ordering::Release);
                 }
             }
-            ready.store(false, Ordering::Release);
-        });
-        Self {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            token,
         }
-    }
-}
-
-impl ManagedResource for RedisReadinessWorker {
-    fn name(&self) -> &str {
-        "identityaudit-redis-readiness-worker"
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        if let Some(handle) = self.handle.lock().await.take() {
-            handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-        }
+        ready.store(false, Ordering::Release);
         Ok(())
-    }
+    });
+    task.into_registration()
 }
 
 struct StartupResourceCell {
@@ -628,11 +609,20 @@ async fn build_vault(
         .context("build identityaudit Vault signer readiness probe")?;
     let dlx_probe_name = primitives::ProbeName::parse("identityaudit_vault_dlx_key_ready")
         .context("build identityaudit Vault DLX readiness probe")?;
+    let (signer_start, signer_task) = diport::ManagedTask::prepare(
+        "identityaudit-vault-signer-readiness",
+        Duration::from_secs(2),
+    );
+    let (dlx_start, dlx_task) = diport::ManagedTask::prepare(
+        "identityaudit-vault-dlx-key-readiness",
+        Duration::from_secs(2),
+    );
     let signer_readiness_probe = (
         signer_probe_name.clone(),
         Box::new(VaultCapabilityProbe::signer(
             signer_probe_name,
             Arc::clone(&readiness),
+            signer_task,
         )) as Box<dyn bootstrap::HealthProbe>,
     );
     let dlx_readiness_probe = (
@@ -640,6 +630,7 @@ async fn build_vault(
         Box::new(VaultCapabilityProbe::dlx(
             dlx_probe_name,
             Arc::clone(&readiness),
+            dlx_task,
         )) as Box<dyn bootstrap::HealthProbe>,
     );
     let worker_signer = Arc::clone(&signer);
@@ -647,29 +638,31 @@ async fn build_vault(
     let worker_signing_binding = signing_binding;
     let worker_dlx_key = dlx_key_name.clone();
     let signer_readiness = Arc::clone(&readiness);
-    let signer_readiness_worker = bootstrap::WorkerSpec::observational_phase_one(
+    let signer_readiness_worker = bootstrap::WorkerSpec::managed_observational_phase_one(
         "assemblies.identityaudit.src.providers.03",
         move |token| {
-            DynManagedResource::new_box(VaultReadinessWorker::spawn_signer(
+            spawn_vault_signer_readiness(
+                signer_start,
                 token,
                 timeout,
                 worker_signer,
                 worker_signing_binding,
                 jwks,
                 signer_readiness,
-            ))
+            )
         },
     );
-    let dlx_readiness_worker = bootstrap::WorkerSpec::observational_phase_one(
+    let dlx_readiness_worker = bootstrap::WorkerSpec::managed_observational_phase_one(
         "assemblies.identityaudit.src.providers.04",
         move |token| {
-            DynManagedResource::new_box(VaultReadinessWorker::spawn_dlx(
+            spawn_vault_dlx_readiness(
+                dlx_start,
                 token,
                 timeout,
                 worker_key_provider,
                 worker_dlx_key,
                 readiness,
-            ))
+            )
         },
     );
     Ok(VaultProducts {
@@ -757,32 +750,44 @@ struct VaultCapabilityProbe {
     name: primitives::ProbeName,
     readiness: Arc<VaultReadiness>,
     capability: VaultCapability,
+    task: diport::TaskStatus,
 }
 
 impl VaultCapabilityProbe {
-    fn signer(name: primitives::ProbeName, readiness: Arc<VaultReadiness>) -> Self {
+    fn signer(
+        name: primitives::ProbeName,
+        readiness: Arc<VaultReadiness>,
+        task: diport::TaskStatus,
+    ) -> Self {
         Self {
             name,
             readiness,
             capability: VaultCapability::Signer,
+            task,
         }
     }
 
-    fn dlx(name: primitives::ProbeName, readiness: Arc<VaultReadiness>) -> Self {
+    fn dlx(
+        name: primitives::ProbeName,
+        readiness: Arc<VaultReadiness>,
+        task: diport::TaskStatus,
+    ) -> Self {
         Self {
             name,
             readiness,
             capability: VaultCapability::Dlx,
+            task,
         }
     }
 }
 
 impl bootstrap::HealthProbe for VaultCapabilityProbe {
     fn check(&self) -> primitives::HealthCheck {
-        let ready = match self.capability {
-            VaultCapability::Signer => self.readiness.signer.load(Ordering::Acquire),
-            VaultCapability::Dlx => self.readiness.dlx.load(Ordering::Acquire),
-        };
+        let ready = self.task.is_running()
+            && match self.capability {
+                VaultCapability::Signer => self.readiness.signer.load(Ordering::Acquire),
+                VaultCapability::Dlx => self.readiness.dlx.load(Ordering::Acquire),
+            };
         primitives::HealthCheck::new(
             self.name.clone(),
             if ready {
@@ -795,64 +800,16 @@ impl bootstrap::HealthProbe for VaultCapabilityProbe {
     }
 }
 
-struct VaultReadinessWorker {
-    name: &'static str,
+fn spawn_vault_signer_readiness(
+    start: diport::TaskStart,
     token: tokio_util::sync::CancellationToken,
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-struct AbortReadinessTaskOnDrop {
-    handle: tokio::task::JoinHandle<()>,
-    armed: bool,
-}
-
-#[derive(Debug)]
-struct VaultReadinessJoinDeadline;
-
-impl std::fmt::Display for VaultReadinessJoinDeadline {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("identityaudit Vault readiness join deadline exceeded")
-    }
-}
-
-impl std::error::Error for VaultReadinessJoinDeadline {}
-
-impl AbortReadinessTaskOnDrop {
-    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
-        Self {
-            handle,
-            armed: true,
-        }
-    }
-
-    fn handle(&mut self) -> &mut tokio::task::JoinHandle<()> {
-        &mut self.handle
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for AbortReadinessTaskOnDrop {
-    fn drop(&mut self) {
-        if self.armed {
-            self.handle.abort();
-        }
-    }
-}
-
-impl VaultReadinessWorker {
-    fn spawn_signer(
-        token: tokio_util::sync::CancellationToken,
-        period: Duration,
-        signer: Arc<vault::VaultSigner>,
-        signing_binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
-        jwks: oidc::JwksReadinessHandle,
-        readiness: Arc<VaultReadiness>,
-    ) -> Self {
-        let run_token = token.clone();
-        let handle = tokio::spawn(async move {
+    period: Duration,
+    signer: Arc<vault::VaultSigner>,
+    signing_binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
+    jwks: oidc::JwksReadinessHandle,
+    readiness: Arc<VaultReadiness>,
+) -> diport::ManagedTaskRegistration {
+    let task = start.spawn(token, |run_token| async move {
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -871,23 +828,20 @@ impl VaultReadinessWorker {
                 }
             }
             readiness.signer.store(false, Ordering::Release);
-        });
-        Self {
-            name: "identityaudit-vault-signer-readiness",
-            token,
-            handle: tokio::sync::Mutex::new(Some(handle)),
-        }
-    }
+            Ok(())
+    });
+    task.into_registration()
+}
 
-    fn spawn_dlx(
-        token: tokio_util::sync::CancellationToken,
-        period: Duration,
-        key_provider: Arc<vault::VaultKeyProvider>,
-        dlx_key: String,
-        readiness: Arc<VaultReadiness>,
-    ) -> Self {
-        let run_token = token.clone();
-        let handle = tokio::spawn(async move {
+fn spawn_vault_dlx_readiness(
+    start: diport::TaskStart,
+    token: tokio_util::sync::CancellationToken,
+    period: Duration,
+    key_provider: Arc<vault::VaultKeyProvider>,
+    dlx_key: String,
+    readiness: Arc<VaultReadiness>,
+) -> diport::ManagedTaskRegistration {
+    let task = start.spawn(token, |run_token| async move {
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -903,45 +857,9 @@ impl VaultReadinessWorker {
                 }
             }
             readiness.dlx.store(false, Ordering::Release);
-        });
-        Self {
-            name: "identityaudit-vault-dlx-key-readiness",
-            token,
-            handle: tokio::sync::Mutex::new(Some(handle)),
-        }
-    }
-}
-
-impl diport::ManagedResource for VaultReadinessWorker {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn shutdown_timeout(&self) -> Duration {
-        Duration::from_secs(2)
-    }
-
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        self.token.cancel();
-        let Some(handle) = self.handle.lock().await.take() else {
-            return Ok(());
-        };
-        let mut guard = AbortReadinessTaskOnDrop::new(handle);
-        match tokio::time::timeout(Duration::from_secs(1), guard.handle()).await {
-            Ok(joined) => {
-                guard.disarm();
-                joined.map_err(diport::ShutdownError::from_join_error)
-            }
-            Err(_) => {
-                guard.handle().abort();
-                let _ = guard.handle().await;
-                guard.disarm();
-                Err(diport::ShutdownError::deadline_exceeded(
-                    VaultReadinessJoinDeadline,
-                ))
-            }
-        }
-    }
+            Ok(())
+    });
+    task.into_registration()
 }
 
 struct OidcProducts {
@@ -1181,10 +1099,36 @@ mod tests {
     use crate::providers_gen::{ListenerPdpJwksLifecycle, PROVIDER_CATALOG};
     use axum::{Json, Router, routing::post};
     use base64::Engine as _;
-    use diport::KeyProvider as _;
+    use bootstrap::HealthProbe as _;
+    use diport::{KeyProvider as _, ManagedResource as _};
     use p256::ecdsa::signature::Signer as _;
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
     use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn redis_probe_conjoins_provider_flag_with_terminal_task_status() -> anyhow::Result<()> {
+        let ready = Arc::new(AtomicBool::new(true));
+        let token = tokio_util::sync::CancellationToken::new();
+        let (start, status) =
+            diport::ManagedTask::prepare("redis-probe-test", Duration::from_secs(1));
+        let probe = RedisProbe {
+            name: primitives::ProbeName::parse("redis-probe-test")?,
+            ready: Arc::clone(&ready),
+            task: status,
+        };
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Unhealthy);
+        let task = start.spawn(token, |task_token| async move {
+            task_token.cancelled().await;
+            Ok(())
+        });
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Healthy);
+        ready.store(false, Ordering::Release);
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Unhealthy);
+        ready.store(true, Ordering::Release);
+        task.shutdown().await?;
+        assert_eq!(probe.check().status(), primitives::HealthStatus::Unhealthy);
+        Ok(())
+    }
 
     fn assert_provider_bindings_match_catalog(
         bindings: &[runtimeexec::inventory::ProviderProbeBinding],
@@ -1257,52 +1201,6 @@ mod tests {
         }
         std::fs::remove_dir_all(root)?;
         Ok(())
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::panic)]
-    async fn readiness_workers_propagate_closed_join_failure_kinds() {
-        struct DropMarker(Arc<AtomicBool>);
-        impl Drop for DropMarker {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
-            }
-        }
-        let redis = RedisReadinessWorker {
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("identityaudit-readiness-plain-panic-secret");
-            })))),
-            token: tokio_util::sync::CancellationToken::new(),
-        };
-        let error = redis.shutdown().await.expect_err("panic must propagate");
-        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-        assert!(!format!("{error:?}").contains("plain-panic-secret"));
-
-        let vault_stopped = Arc::new(AtomicBool::new(false));
-        let vault = VaultReadinessWorker {
-            name: "test-vault-readiness",
-            token: tokio_util::sync::CancellationToken::new(),
-            handle: tokio::sync::Mutex::new(Some(tokio::spawn({
-                let vault_stopped = Arc::clone(&vault_stopped);
-                async move {
-                    let _marker = DropMarker(vault_stopped);
-                    std::future::pending::<()>().await;
-                }
-            }))),
-        };
-        tokio::task::yield_now().await;
-        let mut stack =
-            bootstrap::shutdown::ShutdownStack::new(tokio_util::sync::CancellationToken::new());
-        stack.register_detached(diport::DynManagedResource::new_box(vault));
-        let failures = stack.shutdown().await;
-        assert!(matches!(
-            failures.as_slice(),
-            [bootstrap::shutdown::ResourceShutdownError {
-                kind: bootstrap::shutdown::ShutdownFailureKind::DeadlineExceeded,
-                ..
-            }]
-        ));
-        assert!(vault_stopped.load(Ordering::Acquire));
     }
 
     struct TestResource {
@@ -1714,13 +1612,30 @@ mod tests {
         assert!(system_epoch_seconds() > 0);
     }
 
-    #[test]
-    fn vault_capability_probes_track_each_capability_independently() {
+    #[tokio::test]
+    async fn vault_capability_probes_track_each_capability_independently() {
         let readiness = Arc::new(VaultReadiness::healthy());
         let signer_name = primitives::ProbeName::parse("vault-signer").expect("probe name");
         let dlx_name = primitives::ProbeName::parse("vault-dlx").expect("probe name");
-        let signer = VaultCapabilityProbe::signer(signer_name, Arc::clone(&readiness));
-        let dlx = VaultCapabilityProbe::dlx(dlx_name, Arc::clone(&readiness));
+        let signer_token = tokio_util::sync::CancellationToken::new();
+        let (signer_start, signer_status) = diport::ManagedTask::prepare(
+            "vault-signer-probe-test",
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        );
+        let signer_task = signer_start.spawn(signer_token, |signer_run| async move {
+            signer_run.cancelled().await;
+            Ok(())
+        });
+        let dlx_token = tokio_util::sync::CancellationToken::new();
+        let (dlx_start, dlx_status) =
+            diport::ManagedTask::prepare("vault-dlx-probe-test", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let dlx_task = dlx_start.spawn(dlx_token, |dlx_run| async move {
+            dlx_run.cancelled().await;
+            Ok(())
+        });
+        let signer =
+            VaultCapabilityProbe::signer(signer_name, Arc::clone(&readiness), signer_status);
+        let dlx = VaultCapabilityProbe::dlx(dlx_name, Arc::clone(&readiness), dlx_status);
         assert_eq!(
             bootstrap::HealthProbe::check(&signer).status(),
             primitives::HealthStatus::Healthy
@@ -1744,6 +1659,8 @@ mod tests {
             bootstrap::HealthProbe::check(&dlx).status(),
             primitives::HealthStatus::Unhealthy
         );
+        signer_task.shutdown().await.expect("signer task drains");
+        dlx_task.shutdown().await.expect("dlx task drains");
     }
 
     #[test]
@@ -1823,17 +1740,12 @@ mod tests {
             .context("test Vault rewrap")?;
         assert!(rewrapped.ciphertext().starts_with(b"vault:v1:"));
 
-        let token = tokio_util::sync::CancellationToken::new();
-        let spawn = |worker: bootstrap::WorkerSpec| match worker {
-            bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
-                make.into_factory()(token.clone())
-            }
-        };
-        let signer_worker = spawn(products.signer_readiness_worker);
-        let dlx_worker = spawn(products.dlx_readiness_worker);
+        let mut stack =
+            bootstrap::shutdown::ShutdownStack::new(tokio_util::sync::CancellationToken::new());
+        products.signer_readiness_worker.register_into(&mut stack);
+        products.dlx_readiness_worker.register_into(&mut stack);
         testkit::await_delay(Duration::from_millis(20)).await;
-        signer_worker.shutdown().await?;
-        dlx_worker.shutdown().await?;
+        assert!(stack.shutdown().await.is_empty());
         assert_eq!(
             products.signer_readiness_probe.1.check().status(),
             primitives::HealthStatus::Unhealthy

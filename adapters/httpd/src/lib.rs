@@ -1,9 +1,9 @@
 //! httpd adapter —— HTTP 传输 adapter（#1320 运行时入口 Join）。
 //!
-//! 单一 `HttpServer`：bind `TcpListener` → `axum::serve` 已认证 router 的
-//! `httpserve::ServerService` →
-//! serve task 监听注入的 [`CancellationToken`] 优雅关停；`impl diport::ManagedResource` 经
-//! `cancel()` + await JoinHandle 收敛。**精确对标 `adapters/grpc` 的 `GrpcServer`**（transport=adapter）。
+//! `HttpServer::bind` fail-fast 产出 [`BoundHttpServer`]；其 `serve*` 消费 listener 与注入的
+//! [`CancellationToken`]，只返回 opaque [`ListenerTaskRegistration`]。该 receipt 只能由真实 bound
+//! socket 消费后铸造；task/token/status/join 配对不能由 caller 拆开，RuntimeExec 经专用 listener
+//! funnel 监督提前完成并统一 drain。
 //!
 //! 私有 make-service 在真实 bind 分支注入 `ConnectInfo<SocketAddr>`，并由同一 adapter-private seam
 //! 铸造可信 HTTP/HTTPS observation。`httpserve::ServerService` 不发射 transport evidence；即使外部
@@ -17,10 +17,9 @@
 //!
 //! # graceful shutdown：经 ShutdownStack token funnel
 //!
-//! 后台 serve task 的关闭信号是组合根经 `bootstrap::ShutdownStack::register_with_token` 注入的 child
+//! 后台 serve task 的关闭信号是组合根经 `bootstrap::ShutdownStack::register_managed_task_with_token` 注入的 child
 //! [`CancellationToken`]（SHUTDOWN-TOKEN-FUNNEL-01）：阶段 1 广播 `cancel()` 即 `axum::serve` 的
-//! `with_graceful_shutdown` 触发 drain，阶段 2 `shutdown()` await task 收敛。`serve(addr, svc)` 是
-//! detached 便捷构造（内部 token，不接外部广播；测试 / 简单 caller 用）。**不**自建 oneshot 绕过 funnel。
+//! `with_graceful_shutdown` 触发 drain，阶段 2由 `ManagedTask` await 收敛；不存在 detached serve owner。
 //!
 //! # 安全：plaintext 或 listener 级 SPIFFE/mTLS
 //!
@@ -30,7 +29,7 @@
 //!
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints）。
 //! ref: tokio-rs/axum axum/src/serve/mod.rs@v0.8.9（`axum::serve(TcpListener, make_service).with_graceful_shutdown`）
-//! ref: 内部对标 adapters/grpc/src/lib.rs（`GrpcServer` = ManagedResource + CancellationToken funnel）
+//! ref: 内部对标 adapters/grpc/src/lib.rs（`GrpcServer` = ManagedTask + CancellationToken funnel）
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -49,10 +48,11 @@ use distributed::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
+
+pub use listenerlifecycle::ListenerTaskRegistration;
 
 mod domain_client;
 mod server_observation;
@@ -60,18 +60,11 @@ mod server_observation;
 mod server_observation_tests;
 use domain_client::{DomainHttpTarget, ObservedHttpClient};
 
-/// HTTP 传输 adapter：持有 bind 成功的 listener 地址、graceful-shutdown 的 [`CancellationToken`]
-/// 与 serve 任务句柄。每 listener（Primary / Health / …）一个实例，经组合根 `ShutdownStack` 托管。
-#[derive(Debug)]
-pub struct HttpServer {
-    /// ManagedResource 关闭日志的稳定名（如 `http-primary` / `http-health`，组合根注入区分多 listener）。
-    name: &'static str,
-    local_addr: SocketAddr,
-    /// 驱动 serve task 退出的 token：组合根经 funnel 注入（或 [`HttpServer::serve`] 的内部 detached token）。
-    /// `shutdown()` `cancel()` 它触发 graceful 退出（幂等：阶段 1 广播已 cancel 则 no-op）。
-    token: CancellationToken,
-    handle: Mutex<Option<diport::OwnedTask<std::io::Result<()>>>>,
-}
+/// Namespace for the fail-fast HTTP bind operation.
+///
+/// This uninhabited type cannot own a listener task. Runtime listener ownership is minted only by
+/// [`BoundHttpServer::serve`] as an opaque [`ListenerTaskRegistration`].
+pub enum HttpServer {}
 
 /// HTTP server 启动失败（构造期 fail-fast，不静默 noop）。
 ///
@@ -1104,7 +1097,7 @@ where
 #[must_use = "BoundHttpServer 须 serve(svc, token) 才真正起服务（否则只 bind 不 serve）"]
 pub struct BoundHttpServer {
     name: &'static str,
-    listener: TcpListener,
+    listener: listenerlifecycle::BoundTcpListener,
     local_addr: SocketAddr,
 }
 
@@ -1114,7 +1107,7 @@ impl BoundHttpServer {
         self.local_addr
     }
 
-    /// 同步 spawn serve task（消费已 bind 的 listener + 注入的 `token`），产出托管 [`HttpServer`]。
+    /// 同步 spawn serve task（消费已 bind 的 listener + 注入的 `token`），产出 opaque registration。
     ///
     /// **同步**：契合 `ShutdownStack::register_with_token` 的同步 `make` 闭包——funnel 注入 child token，
     /// 本 fn 即时 `tokio::spawn`。serve task 经 `with_graceful_shutdown` 监听 `token`：阶段 1 广播 `cancel()`
@@ -1125,33 +1118,36 @@ impl BoundHttpServer {
     /// 须在 **tokio runtime 上下文**调用——内部 `tokio::spawn` 在无 runtime 时 panic。从 async fn
     /// （如 `serve_until_signal`）或 `ShutdownStack::register_with_token` 闭包内调用即满足（组合根均在
     /// `#[tokio::main]` 运行时内）。
-    pub fn serve(self, svc: httpserve::ServerService, token: CancellationToken) -> HttpServer {
+    pub fn serve(
+        self,
+        svc: httpserve::ServerService,
+        token: CancellationToken,
+    ) -> ListenerTaskRegistration {
         tracing::warn!(
             name = self.name,
             transport = "plaintext",
             hsts_policy = "strip",
             "plaintext listener strips Strict-Transport-Security; the TLS terminator must own HSTS"
         );
-        let serve_token = token.clone();
         let listener = self.listener;
-        let handle = tokio::spawn(async move {
-            let svc = TransportMakeService::plaintext(svc);
-            axum::serve(listener, svc)
-                .with_graceful_shutdown(async move {
-                    // 关闭信号 = 注入 token 的 cancel（阶段 1 广播 / 内部 detached cancel）。
-                    serve_token.cancelled().await;
-                })
-                .await
-        });
+        let registration = listener.spawn(
+            token,
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+            move |listener, serve_token| async move {
+                let svc = TransportMakeService::plaintext(svc);
+                axum::serve(listener, svc)
+                    .with_graceful_shutdown(async move {
+                        // 关闭信号 = 注入 token 的 cancel（阶段 1 广播 / 内部 detached cancel）。
+                        serve_token.cancelled().await;
+                    })
+                    .await
+                    .map_err(ShutdownError::new)
+            },
+        );
 
         tracing::info!(name = self.name, addr = %self.local_addr, "http server started");
 
-        HttpServer {
-            name: self.name,
-            local_addr: self.local_addr,
-            token,
-            handle: Mutex::new(Some(diport::OwnedTask::new(handle))),
-        }
+        registration
     }
 
     /// Spawn an mTLS HTTP serve task. Each accepted request receives both
@@ -1161,31 +1157,32 @@ impl BoundHttpServer {
         svc: httpserve::ServerService,
         mtls: MtlsServerConfig,
         token: CancellationToken,
-    ) -> HttpServer {
-        let serve_token = token.clone();
-        let listener = MtlsListener {
-            name: self.name,
-            listener: self.listener,
-            local_addr: self.local_addr,
-            config: mtls,
-        };
-        let handle = tokio::spawn(async move {
-            let svc = TransportMakeService::tls(svc);
-            axum::serve(listener.tap_io(|_io| {}), MtlsMakeService::new(svc))
-                .with_graceful_shutdown(async move {
-                    serve_token.cancelled().await;
-                })
-                .await
-        });
+    ) -> ListenerTaskRegistration {
+        let name = self.name;
+        let local_addr = self.local_addr;
+        let registration = self.listener.spawn(
+            token,
+            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+            move |listener, serve_token| async move {
+                let listener = MtlsListener {
+                    name,
+                    listener,
+                    local_addr,
+                    config: mtls,
+                };
+                let svc = TransportMakeService::tls(svc);
+                axum::serve(listener.tap_io(|_io| {}), MtlsMakeService::new(svc))
+                    .with_graceful_shutdown(async move {
+                        serve_token.cancelled().await;
+                    })
+                    .await
+                    .map_err(ShutdownError::new)
+            },
+        );
 
         tracing::info!(name = self.name, addr = %self.local_addr, "http mtls server started");
 
-        HttpServer {
-            name: self.name,
-            local_addr: self.local_addr,
-            token,
-            handle: Mutex::new(Some(diport::OwnedTask::new(handle))),
-        }
+        registration
     }
 }
 
@@ -1202,70 +1199,14 @@ impl HttpServer {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(HttpServeError::Bind)?;
-        let local_addr = listener.local_addr().map_err(HttpServeError::LocalAddr)?;
+        let listener = listenerlifecycle::BoundTcpListener::new(name, listener)
+            .map_err(HttpServeError::LocalAddr)?;
+        let local_addr = listener.local_addr();
         Ok(BoundHttpServer {
             name,
             listener,
             local_addr,
         })
-    }
-
-    /// 便捷构造：bind + serve 一步（监听注入的 `token`）。生产组合根用拆分的 [`HttpServer::bind`] +
-    /// [`BoundHttpServer::serve`] 走 funnel；本 fn 供测试 / 简单 caller。
-    pub async fn serve_with_token(
-        name: &'static str,
-        addr: SocketAddr,
-        svc: httpserve::ServerService,
-        token: CancellationToken,
-    ) -> Result<Self, HttpServeError> {
-        Ok(Self::bind(name, addr).await?.serve(svc, token))
-    }
-
-    /// Convenience constructor for mTLS listener.
-    pub async fn serve_mtls_with_token(
-        name: &'static str,
-        addr: SocketAddr,
-        svc: httpserve::ServerService,
-        mtls: MtlsServerConfig,
-        token: CancellationToken,
-    ) -> Result<Self, HttpServeError> {
-        Ok(Self::bind(name, addr).await?.serve_mtls(svc, mtls, token))
-    }
-
-    /// detached 便捷构造（内部 token，不接外部 ShutdownStack 广播）：测试 / 简单 caller 用。
-    /// `shutdown()` 经内部 token 触发退出。
-    pub async fn serve(
-        name: &'static str,
-        addr: SocketAddr,
-        svc: httpserve::ServerService,
-    ) -> Result<Self, HttpServeError> {
-        Self::serve_with_token(name, addr, svc, CancellationToken::new()).await
-    }
-
-    /// 返回 server 实际绑定的地址（含内核分配的 ephemeral 端口）。
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-}
-
-impl ManagedResource for HttpServer {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        // 触发 graceful 退出：cancel token（幂等——若 ShutdownStack 阶段 1 已 cancel 则 no-op）。
-        self.token.cancel();
-        // await serve task 收敛；失败只经 typed shutdown funnel 上抛，由 ShutdownStack 统一观察。
-        if let Some(handle) = self.handle.lock().await.take() {
-            let serve_result = handle
-                .join()
-                .await
-                .map_err(ShutdownError::from_join_error)?;
-            serve_result.map_err(ShutdownError::new)?;
-            tracing::info!(name = self.name, "http server shutdown complete");
-        }
-        Ok(())
     }
 }
 
@@ -1292,6 +1233,100 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsConnector;
     use tracing::Instrument as _;
+
+    struct TestHttpServer {
+        name: &'static str,
+        local_addr: SocketAddr,
+        resource: tokio::sync::Mutex<Box<DynManagedResource<'static>>>,
+    }
+
+    impl TestHttpServer {
+        fn from_registration(
+            name: &'static str,
+            local_addr: SocketAddr,
+            registration: diport::ManagedTaskRegistration,
+        ) -> Self {
+            Self {
+                name,
+                local_addr,
+                resource: tokio::sync::Mutex::new(DynManagedResource::new_box(registration)),
+            }
+        }
+
+        fn from_task(name: &'static str, task: diport::ManagedTask) -> Self {
+            Self::from_registration(
+                name,
+                "127.0.0.1:0".parse().expect("test address"),
+                task.into_registration(),
+            )
+        }
+
+        fn local_addr(&self) -> SocketAddr {
+            self.local_addr
+        }
+    }
+
+    impl std::fmt::Debug for TestHttpServer {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("TestHttpServer")
+                .field("name", &self.name)
+                .field("local_addr", &self.local_addr)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ManagedResource for TestHttpServer {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            self.resource.lock().await.shutdown().await
+        }
+    }
+
+    trait TestRegistrationExt {
+        async fn shutdown(self) -> Result<(), ShutdownError>;
+    }
+
+    impl TestRegistrationExt for diport::ManagedTaskRegistration {
+        async fn shutdown(self) -> Result<(), ShutdownError> {
+            ManagedResource::shutdown(&self).await
+        }
+    }
+
+    impl TestRegistrationExt for listenerlifecycle::ListenerTaskRegistration {
+        async fn shutdown(self) -> Result<(), ShutdownError> {
+            let registration = self.into_managed();
+            ManagedResource::shutdown(&registration).await
+        }
+    }
+
+    impl HttpServer {
+        async fn serve_with_token(
+            name: &'static str,
+            addr: SocketAddr,
+            svc: httpserve::ServerService,
+            token: CancellationToken,
+        ) -> Result<TestHttpServer, HttpServeError> {
+            let bound = Self::bind(name, addr).await?;
+            let local_addr = bound.local_addr();
+            Ok(TestHttpServer::from_registration(
+                name,
+                local_addr,
+                bound.serve(svc, token).into_managed(),
+            ))
+        }
+
+        async fn serve(
+            name: &'static str,
+            addr: SocketAddr,
+            svc: httpserve::ServerService,
+        ) -> Result<TestHttpServer, HttpServeError> {
+            Self::serve_with_token(name, addr, svc, CancellationToken::new()).await
+        }
+    }
 
     #[derive(Default)]
     struct EventCapture {
@@ -1441,53 +1476,35 @@ mod tests {
         const IO_MARKER: &str = "redis://shutdown:io-secret@cache.internal/0";
         const PANIC_MARKER: &str = "http-worker-plain-panic-secret";
 
-        let io_server = HttpServer {
-            name: "http-io-failure",
-            local_addr: "127.0.0.1:0".parse().expect("test address"),
-            token: CancellationToken::new(),
-            handle: Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                Err(std::io::Error::other(IO_MARKER))
-            })))),
-        };
+        let (start, _status) =
+            diport::ManagedTask::prepare("http-io-failure", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let io_server = TestHttpServer::from_task(
+            "http-io-failure",
+            start.spawn(CancellationToken::new(), |_| async {
+                Err(ShutdownError::new(std::io::Error::other(IO_MARKER)))
+            }),
+        );
         let io_error = ManagedResource::shutdown(&io_server)
             .await
             .expect_err("serve io failure must propagate");
         assert_shutdown_error_redacts(&io_error, IO_MARKER);
         assert_eq!(io_error.kind(), diport::ShutdownErrorKind::Operation);
-        assert!(
-            ManagedResource::shutdown(&io_server).await.is_ok(),
-            "shutdown is idempotent"
-        );
 
-        let panic_server = HttpServer {
-            name: "http-join-failure",
-            local_addr: "127.0.0.1:0".parse().expect("test address"),
-            token: CancellationToken::new(),
-            handle: Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
-                panic!("{PANIC_MARKER}")
-            })))),
-        };
+        let (start, _status) =
+            diport::ManagedTask::prepare("http-join-failure", diport::DEFAULT_SHUTDOWN_TIMEOUT);
+        let panic_server = TestHttpServer::from_task(
+            "http-join-failure",
+            start.spawn(CancellationToken::new(), |_| async {
+                panic!("{PANIC_MARKER}");
+                #[allow(unreachable_code)]
+                Ok(())
+            }),
+        );
         let join_error = ManagedResource::shutdown(&panic_server)
             .await
             .expect_err("serve task panic must propagate");
         assert_shutdown_error_redacts(&join_error, PANIC_MARKER);
         assert_eq!(join_error.kind(), diport::ShutdownErrorKind::TaskPanicked);
-
-        let cancelled_handle = tokio::spawn(std::future::pending::<std::io::Result<()>>());
-        cancelled_handle.abort();
-        let cancelled_server = HttpServer {
-            name: "http-cancelled",
-            local_addr: "127.0.0.1:0".parse().expect("test address"),
-            token: CancellationToken::new(),
-            handle: Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
-        };
-        let cancelled_error = ManagedResource::shutdown(&cancelled_server)
-            .await
-            .expect_err("serve task cancellation must propagate");
-        assert_eq!(
-            cancelled_error.kind(),
-            diport::ShutdownErrorKind::TaskCancelled
-        );
     }
 
     /// 极简 router → budget-sealed server service，挂一个 GET /healthz 恒 200。
