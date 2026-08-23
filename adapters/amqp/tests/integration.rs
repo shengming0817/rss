@@ -17,14 +17,31 @@ use amqp::{
 use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
-    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, ManagedResource, MessageId,
-    PublishErrorKind, PublishRequest, Publisher, Topic,
+    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, ManagedResource, MessageId,
+    PublishErrorKind, PublishRequest as DiPublishRequest, Publisher, Topic,
 };
 use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
+const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+const TEST_SCHEMA_HASH: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// Test-only constructor that keeps broker-behavior fixtures on a valid typed envelope.
+struct PublishRequest;
+
+impl PublishRequest {
+    fn new(topic: Topic, event_id: MessageId, payload: Vec<u8>) -> DiPublishRequest {
+        let mut metadata = EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(KEY_TENANT_ID, TEST_TENANT);
+        metadata.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        metadata.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
+        DiPublishRequest::new(topic, event_id, payload).with_metadata(metadata)
+    }
+}
 
 struct ForcedCancelInbox {
     claims: AtomicU32,
@@ -1457,7 +1474,10 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
 
     // 构造携 envelope metadata 的 PublishRequest。
     let mut md = EnvelopeMetadata::empty();
+    md.insert_wire_pair(KEY_TENANT_ID, TEST_TENANT);
     md.insert_wire_pair(KEY_OCCURRED_AT, "1700000001");
+    md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+    md.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
     md.insert_wire_pair(KEY_CORRELATION, "corr-42");
     md.insert_wire_pair(KEY_SUBJECT_ID, "user-7");
 
@@ -1478,8 +1498,8 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
 
     // metadata 保真验证。
     assert_eq!(
-        delivery.message.metadata().occurred_at_secs(),
-        Some(1_700_000_001_i64),
+        delivery.message.metadata().get(KEY_OCCURRED_AT),
+        Some("1700000001"),
         "occurred_at 应经 AMQP timestamp 字段透传"
     );
     assert_eq!(

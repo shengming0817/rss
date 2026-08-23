@@ -1054,7 +1054,11 @@ async fn drive_settings(
     ));
     let settings_domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
-            MemEmitter::with_tenant_metadata_signer(MemBus::new(), common::memory_tenant_signer()),
+            MemEmitter::with_tenant_metadata_signer(
+                MemBus::new(),
+                common::memory_tenant_signer(),
+                Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+            ),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         )),
         secret_route_repo,

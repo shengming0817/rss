@@ -1278,9 +1278,11 @@ pub async fn TraitVariantBlanketType::record_verified_receipt(&self, &Self::Arch
 pub async fn TraitVariantBlanketType::settle_archive_failure(&self, Self::ArchiveClaim, diport::dlx_lifecycle::DlxLifecycleError) -> core::result::Result<diport::dlx_lifecycle::ArchiveClaimSettleOutcome, diport::dlx_lifecycle::DlxLifecycleError>
 pub mod diport::envelope
 pub enum diport::envelope::EnvelopeHeaderError
+pub diport::envelope::EnvelopeHeaderError::InvalidOccurredAt
 pub diport::envelope::EnvelopeHeaderError::InvalidSchemaHash
 pub diport::envelope::EnvelopeHeaderError::InvalidSchemaVersion
 pub diport::envelope::EnvelopeHeaderError::InvalidTenantId
+pub diport::envelope::EnvelopeHeaderError::MissingOccurredAt
 pub diport::envelope::EnvelopeHeaderError::MissingSchemaHash
 pub diport::envelope::EnvelopeHeaderError::MissingSchemaVersion
 pub diport::envelope::EnvelopeHeaderError::MissingTenantId
@@ -1326,9 +1328,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::envelope::MetadataError
 impl core::panic::unwind_safe::UnwindSafe for diport::envelope::MetadataError
 pub struct diport::envelope::EnvelopeHeader
 impl diport::envelope::EnvelopeHeader
-pub fn diport::envelope::EnvelopeHeader::correlation(&self) -> core::option::Option<&str>
-pub fn diport::envelope::EnvelopeHeader::new(rss_request_context::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
-pub fn diport::envelope::EnvelopeHeader::occurred_at_secs(&self) -> core::option::Option<i64>
+pub fn diport::envelope::EnvelopeHeader::new(rss_request_context::TenantId, rss_contract::Timepoint, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
+pub const fn diport::envelope::EnvelopeHeader::occurred_at(&self) -> rss_contract::Timepoint
 pub fn diport::envelope::EnvelopeHeader::partition_key(&self) -> core::option::Option<&consistency::outbox::PartitionKey>
 pub fn diport::envelope::EnvelopeHeader::schema_hash(&self) -> &diport::envelope::EnvelopeSchemaHash
 pub fn diport::envelope::EnvelopeHeader::schema_version(&self) -> &diport::envelope::EnvelopeSchemaVersion
@@ -1361,10 +1362,6 @@ pub fn diport::envelope::EnvelopeMetadata::is_transport_header_key(&str) -> bool
 pub fn diport::envelope::EnvelopeMetadata::iter_persisted_metadata(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::iter_transport_headers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
-pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
-pub fn diport::envelope::EnvelopeMetadata::schema_hash(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaHash>
-pub fn diport::envelope::EnvelopeMetadata::schema_version(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaVersion>
-pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<rss_request_context::TenantId>
 pub fn diport::envelope::EnvelopeMetadata::try_insert(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<(), diport::envelope::MetadataError>
 impl core::clone::Clone for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::clone(&self) -> diport::envelope::EnvelopeMetadata
@@ -1434,7 +1431,6 @@ impl diport::envelope::MessageEnvelope
 pub fn diport::envelope::MessageEnvelope::header(&self) -> &diport::envelope::EnvelopeHeader
 pub fn diport::envelope::MessageEnvelope::into_payload(self) -> alloc::vec::Vec<u8>
 pub fn diport::envelope::MessageEnvelope::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::envelope::MessageEnvelope::new(diport::envelope::EnvelopeHeader, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::envelope::MessageEnvelope::payload(&self) -> &[u8]
 pub fn diport::envelope::MessageEnvelope::try_from_metadata(alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::envelope::MessageEnvelope
@@ -6316,9 +6312,11 @@ impl core::marker::UnsafeUnpin for diport::dlx_lifecycle::DlxLifecycleReason
 impl core::panic::unwind_safe::RefUnwindSafe for diport::dlx_lifecycle::DlxLifecycleReason
 impl core::panic::unwind_safe::UnwindSafe for diport::dlx_lifecycle::DlxLifecycleReason
 pub enum diport::EnvelopeHeaderError
+pub diport::EnvelopeHeaderError::InvalidOccurredAt
 pub diport::EnvelopeHeaderError::InvalidSchemaHash
 pub diport::EnvelopeHeaderError::InvalidSchemaVersion
 pub diport::EnvelopeHeaderError::InvalidTenantId
+pub diport::EnvelopeHeaderError::MissingOccurredAt
 pub diport::EnvelopeHeaderError::MissingSchemaHash
 pub diport::EnvelopeHeaderError::MissingSchemaVersion
 pub diport::EnvelopeHeaderError::MissingTenantId
@@ -9045,9 +9043,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::Envelop
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeCausationId
 pub struct diport::EnvelopeHeader
 impl diport::envelope::EnvelopeHeader
-pub fn diport::envelope::EnvelopeHeader::correlation(&self) -> core::option::Option<&str>
-pub fn diport::envelope::EnvelopeHeader::new(rss_request_context::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
-pub fn diport::envelope::EnvelopeHeader::occurred_at_secs(&self) -> core::option::Option<i64>
+pub fn diport::envelope::EnvelopeHeader::new(rss_request_context::TenantId, rss_contract::Timepoint, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
+pub const fn diport::envelope::EnvelopeHeader::occurred_at(&self) -> rss_contract::Timepoint
 pub fn diport::envelope::EnvelopeHeader::partition_key(&self) -> core::option::Option<&consistency::outbox::PartitionKey>
 pub fn diport::envelope::EnvelopeHeader::schema_hash(&self) -> &diport::envelope::EnvelopeSchemaHash
 pub fn diport::envelope::EnvelopeHeader::schema_version(&self) -> &diport::envelope::EnvelopeSchemaVersion
@@ -9080,10 +9077,6 @@ pub fn diport::envelope::EnvelopeMetadata::is_transport_header_key(&str) -> bool
 pub fn diport::envelope::EnvelopeMetadata::iter_persisted_metadata(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::iter_transport_headers(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, &str)>
 pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
-pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
-pub fn diport::envelope::EnvelopeMetadata::schema_hash(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaHash>
-pub fn diport::envelope::EnvelopeMetadata::schema_version(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaVersion>
-pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<rss_request_context::TenantId>
 pub fn diport::envelope::EnvelopeMetadata::try_insert(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<(), diport::envelope::MetadataError>
 impl core::clone::Clone for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::clone(&self) -> diport::envelope::EnvelopeMetadata
@@ -9530,7 +9523,6 @@ impl diport::envelope::MessageEnvelope
 pub fn diport::envelope::MessageEnvelope::header(&self) -> &diport::envelope::EnvelopeHeader
 pub fn diport::envelope::MessageEnvelope::into_payload(self) -> alloc::vec::Vec<u8>
 pub fn diport::envelope::MessageEnvelope::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::envelope::MessageEnvelope::new(diport::envelope::EnvelopeHeader, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::envelope::MessageEnvelope::payload(&self) -> &[u8]
 pub fn diport::envelope::MessageEnvelope::try_from_metadata(alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::envelope::MessageEnvelope

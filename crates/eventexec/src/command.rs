@@ -24,9 +24,7 @@ use consistency::{
     HandleResult, InboxStore,
 };
 use diport::dead_letter_store::DynDeadLetterStore;
-use diport::{
-    EnvelopeSubjectId, Message, MessageStream, OutboxActor, OutboxEnvelopeParts, RedactedSource,
-};
+use diport::{EnvelopeSubjectId, MessageStream, OutboxActor, OutboxEnvelopeParts, RedactedSource};
 use secure::{BlindIndex, BlindIndexKey, FilterBits, IndexScope};
 use sha2::{Digest as _, Sha256};
 
@@ -835,11 +833,12 @@ pub async fn register_command_handler<S, R, H, Fut>(
         idempotency,
         dlx,
         meta,
-        move |msg: Message| {
+        move |event: Arc<crate::consumer::ValidatedEvent>| {
             let handler = Arc::clone(&handler);
             let contract_id_s = Arc::clone(&contract_id_s);
             let topic_s = Arc::clone(&topic_s);
             Box::pin(async move {
+                let msg = event.message();
                 match serde_json::from_slice::<R>(msg.payload().as_bytes()) {
                     Ok(req) => handler(req).await,
                     Err(_) => {
@@ -885,7 +884,7 @@ mod tests {
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{
-        EnvelopeMetadata, EnvelopeSubjectId, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        EnvelopeMetadata, EnvelopeSubjectId, KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
         KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, OpaqueActorId, OutboxActor,
     };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
@@ -1329,6 +1328,7 @@ mod tests {
                     ))
                     .expect("tenant authority test signing cannot fail");
                 md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+                md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
                 md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
                 md.insert_wire_pair(KEY_SCHEMA_VERSION, schema_version);
                 md.insert_wire_pair(KEY_SCHEMA_HASH, schema_hash);

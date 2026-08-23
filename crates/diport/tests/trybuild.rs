@@ -35,6 +35,7 @@ fn ui() {
     t.compile_fail("tests/ui/dead_letter_record_legacy_source_fail.rs");
     t.compile_fail("tests/ui/envelope_header_private_fields_fail.rs");
     t.compile_fail("tests/ui/message_envelope_private_fields_fail.rs");
+    t.compile_fail("tests/ui/message_envelope_constructor_private_fail.rs");
     t.compile_fail("tests/ui/message_private_fields_fail.rs");
     t.compile_fail("tests/ui/pki_artifact_request_clone_fail.rs");
     t.compile_fail("tests/ui/pki_artifact_san_forge_fail.rs");

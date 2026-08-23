@@ -13,6 +13,7 @@ use std::sync::Arc;
 use consistency::idempotency::{IdemKey, LeaseToken, SeenState};
 use consistency::{EngineErrorKind, InboxReceiptContext};
 use diport::{EnvelopeHeaderError, Message};
+use eventexec::consumer::{EventValidationError, ValidatedEvent};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use tracing::Instrument as _;
@@ -57,7 +58,7 @@ pub(crate) trait ConsumerTxHandler<P: policy::Policy>: Send + Sync + 'static {
     /// Execute one claimed delivery while retaining the policy marker and concrete provider proof.
     fn handle(
         self: Arc<Self>,
-        message: Message,
+        event: Arc<ValidatedEvent>,
         context: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
@@ -71,12 +72,12 @@ where
 {
     fn handle(
         self: Arc<Self>,
-        message: Message,
+        event: Arc<ValidatedEvent>,
         context: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>> {
-        postgres::PgAuditConsumerTx::handle(self, message, context, key, lease)
+        postgres::PgAuditConsumerTx::handle(self, event, context, key, lease)
     }
 }
 
@@ -84,12 +85,12 @@ where
 impl ConsumerTxHandler<policy::Reconcile> for postgres::PgSettingsConsumerTx {
     fn handle(
         self: Arc<Self>,
-        message: Message,
+        event: Arc<ValidatedEvent>,
         context: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>> {
-        postgres::PgSettingsConsumerTx::handle(self, message, context, key, lease)
+        postgres::PgSettingsConsumerTx::handle(self, event, context, key, lease)
     }
 }
 
@@ -163,6 +164,7 @@ async fn next_admitted_delivery(
 struct TxPreflight {
     key: IdemKey,
     ctx: InboxReceiptContext,
+    event: Arc<ValidatedEvent>,
 }
 
 enum TxPreflightError {
@@ -221,7 +223,7 @@ where
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
-    let TxPreflight { key, ctx } = match tx_preflight(meta, &msg) {
+    let TxPreflight { key, ctx, event } = match tx_preflight(meta, &msg) {
         Ok(preflight) => preflight,
         Err(error) => {
             reject_tx_preflight(meta, &msg, acker, error).await;
@@ -249,7 +251,7 @@ where
                 dlx,
                 meta,
                 handler,
-                msg,
+                event,
                 ctx,
                 key,
                 lease,
@@ -264,16 +266,18 @@ where
 
 fn tx_preflight(meta: &ConsumerMeta, msg: &Message) -> Result<TxPreflight, TxPreflightError> {
     let key = IdemKey::parse(msg.id().as_str()).map_err(|_| TxPreflightError::MalformedId)?;
-    let header = meta
-        .verify_envelope_header(msg)
-        .map_err(TxPreflightError::InvalidEnvelopeHeader)?;
-    let tenant = meta
-        .verify_tenant_authority(msg)
-        .map_err(TxPreflightError::InvalidTenantAuthority)?;
+    let (header, event) = meta
+        .validate_event(msg.clone())
+        .map_err(|error| match error {
+            EventValidationError::Header(error) => TxPreflightError::InvalidEnvelopeHeader(error),
+            EventValidationError::TenantAuthority(error) => {
+                TxPreflightError::InvalidTenantAuthority(error)
+            }
+        })?;
     let ctx = meta
-        .receipt_context(tenant, &header)
+        .receipt_context(event.metadata(), &header)
         .map_err(TxPreflightError::InvalidReceiptContext)?;
-    Ok(TxPreflight { key, ctx })
+    Ok(TxPreflight { key, ctx, event })
 }
 
 async fn reject_tx_preflight(
@@ -425,7 +429,7 @@ async fn handle_fresh_tx<S, P, H>(
     dlx: &diport::DynDeadLetterStore<'static>,
     meta: &ConsumerMeta,
     handler: &Arc<H>,
-    msg: Message,
+    event: Arc<ValidatedEvent>,
     ctx: InboxReceiptContext,
     key: IdemKey,
     lease: LeaseToken,
@@ -438,6 +442,7 @@ where
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
+    let msg = event.message();
     let message_id = msg.id().as_str().to_owned();
     let consume_span = build_consume_span(meta, &message_id, msg.metadata().get(diport::KEY_TRACE));
     let terminal = tokio_util::sync::CancellationToken::new();
@@ -448,7 +453,7 @@ where
             dlx,
             meta,
             handler,
-            msg,
+            event,
             ctx.clone(),
             key.clone(),
             lease.clone(),
@@ -501,7 +506,7 @@ async fn run_tx_handler_loop<S, P, H>(
     dlx: &diport::DynDeadLetterStore<'static>,
     meta: &ConsumerMeta,
     handler: &Arc<H>,
-    msg: Message,
+    event: Arc<ValidatedEvent>,
     ctx: InboxReceiptContext,
     key: IdemKey,
     lease: LeaseToken,
@@ -513,9 +518,10 @@ async fn run_tx_handler_loop<S, P, H>(
     H: ConsumerTxHandler<P>,
 {
     let mut last_requeue_summary = EngineErrorKind::Transient.message();
+    let msg = event.message();
     for attempt in 1..=MAX_REDELIVERY {
         match Arc::clone(handler)
-            .handle(msg.clone(), ctx.clone(), key.clone(), lease.clone())
+            .handle(Arc::clone(&event), ctx.clone(), key.clone(), lease.clone())
             .await
         {
             outcome @ ConsumerTxOutcome::Committed(_) => {
@@ -771,8 +777,8 @@ mod tests {
     };
     use diport::{
         AckAction, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
-        EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
-        ManagedResource as _, Message, SubscriberError, Topic,
+        EnvelopeMetadata, KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, ManagedResource as _, Message, SubscriberError, Topic,
     };
     use primitives::{HealthStatus, Mac, MacAlgorithm, MacKey, MacVerifier};
 
@@ -958,7 +964,7 @@ mod tests {
     where
         P: policy::Policy,
         F: Fn(
-                Message,
+                Arc<ValidatedEvent>,
                 InboxReceiptContext,
                 IdemKey,
                 LeaseToken,
@@ -969,19 +975,19 @@ mod tests {
     {
         fn handle(
             self: Arc<Self>,
-            message: Message,
+            event: Arc<ValidatedEvent>,
             context: InboxReceiptContext,
             key: IdemKey,
             lease: LeaseToken,
         ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>> {
-            (self.inner)(message, context, key, lease)
+            (self.inner)(event, context, key, lease)
         }
     }
 
     fn transactional_handler<F>(inner: F) -> TestHandler<policy::TransactionalOnly, F>
     where
         F: Fn(
-                Message,
+                Arc<ValidatedEvent>,
                 InboxReceiptContext,
                 IdemKey,
                 LeaseToken,
@@ -1242,6 +1248,7 @@ mod tests {
         ))?;
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, &token);

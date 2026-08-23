@@ -34,6 +34,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 # session-created 订阅 handler 入参：diport::Message（跨域事件信封）。
 diport = { path = "../diport" }
+# Eventing L2 公共 metadata 当前 canonical owner；#2159 原子迁入 rss-eventing 后直接切换。
+eventexec = { path = "../eventexec" }
 # 解码 session-created event payload（generated 派生类型）。
 serde_json = { workspace = true }
 # 跨租户 admin 读 HTTP handler（GET /api/v1/audit/entries）：axum Query/Json + route_group 挂载。
@@ -44,6 +46,7 @@ tracing = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+eventexec = { path = "../eventexec", features = ["test-support"] }
 # 订阅 handler / async repo 单测 runtime。verifier / repo 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
 tokio = { workspace = true }
 # 表驱动域单测（链篡改逐字段参数化）。

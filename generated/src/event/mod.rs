@@ -39,6 +39,7 @@ pub trait EventEmit {
         &self,
         payload: &C::Payload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Self::IdempotencyKey,

@@ -41,8 +41,6 @@ pub enum TenantAuthoritySignError {
 pub enum TenantAuthorityError {
     #[error("tenant authority token is missing")]
     Missing,
-    #[error("tenant metadata is missing or invalid")]
-    TenantMissing,
     #[error("tenant authority token is malformed")]
     Malformed,
     #[error("tenant authority token MAC is invalid")]
@@ -57,7 +55,6 @@ impl TenantAuthorityError {
     pub const fn skip_reason(self) -> &'static str {
         match self {
             Self::Missing => "tenant_authority_missing",
-            Self::TenantMissing => "tenant_authority_missing",
             Self::Malformed | Self::BadMac => "tenant_authority_invalid",
             Self::Expired => "tenant_authority_expired",
             Self::BindingMismatch => "tenant_authority_binding_mismatch",
@@ -143,17 +140,14 @@ impl TenantAuthority {
         &self,
         binding: TenantAuthorityBinding<'_>,
         metadata: &diport::EnvelopeMetadata,
-    ) -> Result<rss_request_context::TenantId, TenantAuthorityError> {
-        let metadata_tenant = metadata
-            .tenant_id()
-            .ok_or(TenantAuthorityError::TenantMissing)?;
+    ) -> Result<(), TenantAuthorityError> {
         let token = metadata
             .get(diport::KEY_TENANT_AUTHORITY)
             .ok_or(TenantAuthorityError::Missing)?;
         let payload = self.verify_token(token)?;
         let signed_tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
             .map_err(|_| TenantAuthorityError::Malformed)?;
-        if signed_tenant != binding.tenant || metadata_tenant != binding.tenant {
+        if signed_tenant != binding.tenant {
             return Err(TenantAuthorityError::BindingMismatch);
         }
         if payload.issuer() != ISSUER
@@ -178,7 +172,7 @@ impl TenantAuthority {
         if payload.iat > now.saturating_add(skew) || now > payload.exp.saturating_add(skew) {
             return Err(TenantAuthorityError::Expired);
         }
-        Ok(signed_tenant)
+        Ok(())
     }
 
     fn verify_token(&self, token: &str) -> Result<TenantAuthorityPayload, TenantAuthorityError> {
@@ -379,8 +373,7 @@ mod tests {
         let auth = authority(1_700_000_000);
         let token = auth.sign(binding("msg-1")).expect("signed");
         let md = metadata(token);
-        let verified = auth.verify(binding("msg-1"), &md).expect("verified");
-        assert_eq!(verified, tenant());
+        auth.verify(binding("msg-1"), &md).expect("verified");
     }
 
     #[test]
@@ -412,8 +405,7 @@ mod tests {
         let signer = authority(1_700_000_000);
         let verifier = authority(1_700_000_064);
         let md = metadata(signer.sign(binding("msg-1")).expect("signed"));
-        let verified = verifier.verify(binding("msg-1"), &md).expect("verified");
-        assert_eq!(verified, tenant());
+        verifier.verify(binding("msg-1"), &md).expect("verified");
     }
 
     #[test]

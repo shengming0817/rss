@@ -10,9 +10,8 @@ fn main() {
             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("hash"),
-        occurred_at_secs: None,
+        occurred_at: rss_contract::Timepoint::try_from(1_i64).expect("time"),
         trace: None,
-        correlation: None,
         tenant_authority: None,
         partition_key: None,
     };

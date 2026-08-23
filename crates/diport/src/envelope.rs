@@ -75,6 +75,12 @@ pub enum EnvelopeHeaderError {
     /// transport metadata 携带的 tenant id 非 canonical UUID。
     #[error("invalid envelope metadata key tenantId")]
     InvalidTenantId,
+    /// transport metadata 缺 canonical event occurrence time。
+    #[error("missing envelope metadata key occurredAt")]
+    MissingOccurredAt,
+    /// transport metadata 携带的 event occurrence time 不是非负 Unix int64 秒。
+    #[error("invalid envelope metadata key occurredAt")]
+    InvalidOccurredAt,
     /// transport metadata 缺 schema version。
     #[error("missing envelope metadata key schemaVersion")]
     MissingSchemaVersion,
@@ -167,16 +173,15 @@ impl std::fmt::Display for EnvelopeSchemaHash {
 
 /// 标准 delivery envelope header。
 ///
-/// `tenantId` / `schemaVersion` / `schemaHash` 缺失或非法时 fail-closed；`trace` / `correlation`
-/// 是观测辅助字段，缺失或非标准值均 fail-open 保留为可观测字符串，不阻断业务消费。
+/// `tenantId` / `occurredAt` / `schemaVersion` / `schemaHash` 缺失或非法时 fail-closed；`trace`
+/// 是内部观测辅助字段，缺失或非标准值均 fail-open 保留，不阻断业务消费。
 #[derive(Clone, PartialEq, Eq)]
 pub struct EnvelopeHeader {
     tenant_id: rss_request_context::TenantId,
+    occurred_at: rss_contract::Timepoint,
     schema_version: EnvelopeSchemaVersion,
     schema_hash: EnvelopeSchemaHash,
-    occurred_at_secs: Option<i64>,
     trace: Option<String>,
-    correlation: Option<String>,
     tenant_authority: Option<String>,
     partition_key: Option<consistency::PartitionKey>,
 }
@@ -185,16 +190,16 @@ impl EnvelopeHeader {
     /// 由必填 header 字段构造；观测字段与分区键默认为空。
     pub fn new(
         tenant_id: rss_request_context::TenantId,
+        occurred_at: rss_contract::Timepoint,
         schema_version: EnvelopeSchemaVersion,
         schema_hash: EnvelopeSchemaHash,
     ) -> Self {
         Self {
             tenant_id,
+            occurred_at,
             schema_version,
             schema_hash,
-            occurred_at_secs: None,
             trace: None,
-            correlation: None,
             tenant_authority: None,
             partition_key: None,
         }
@@ -211,6 +216,15 @@ impl EnvelopeHeader {
         let tenant_id = rss_request_context::TenantId::parse(tenant_raw)
             .map_err(|_| EnvelopeHeaderError::InvalidTenantId)?;
 
+        let occurred_at_raw = metadata
+            .get(KEY_OCCURRED_AT)
+            .ok_or(EnvelopeHeaderError::MissingOccurredAt)?;
+        let occurred_at_secs = occurred_at_raw
+            .parse::<i64>()
+            .map_err(|_| EnvelopeHeaderError::InvalidOccurredAt)?;
+        let occurred_at = rss_contract::Timepoint::try_from(occurred_at_secs)
+            .map_err(|_| EnvelopeHeaderError::InvalidOccurredAt)?;
+
         let version_raw = metadata
             .get(KEY_SCHEMA_VERSION)
             .ok_or(EnvelopeHeaderError::MissingSchemaVersion)?;
@@ -223,11 +237,10 @@ impl EnvelopeHeader {
 
         Ok(Self {
             tenant_id,
+            occurred_at,
             schema_version,
             schema_hash,
-            occurred_at_secs: metadata.occurred_at_secs(),
             trace: metadata.get(KEY_TRACE).map(str::to_string),
-            correlation: metadata.get(KEY_CORRELATION).map(str::to_string),
             tenant_authority: metadata.get(KEY_TENANT_AUTHORITY).map(str::to_string),
             partition_key,
         })
@@ -236,6 +249,11 @@ impl EnvelopeHeader {
     /// tenant id。
     pub fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
+    }
+
+    /// canonical event occurrence time。
+    pub const fn occurred_at(&self) -> rss_contract::Timepoint {
+        self.occurred_at
     }
 
     /// schema version。
@@ -248,19 +266,9 @@ impl EnvelopeHeader {
         &self.schema_hash
     }
 
-    /// occurredAt unix 秒；缺失或非法时为 `None`。
-    pub fn occurred_at_secs(&self) -> Option<i64> {
-        self.occurred_at_secs
-    }
-
     /// trace header（fail-open，可为非 W3C 字符串）。
     pub fn trace(&self) -> Option<&str> {
         self.trace.as_deref()
-    }
-
-    /// correlation header（fail-open，可为任意诊断字符串）。
-    pub fn correlation(&self) -> Option<&str> {
-        self.correlation.as_deref()
     }
 
     /// tenant authority token（值只供验签，不应 Debug 明文输出）。
@@ -277,17 +285,19 @@ impl EnvelopeHeader {
 impl std::fmt::Debug for EnvelopeHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EnvelopeHeader")
-            .field("tenant_id", &self.tenant_id)
+            .field("tenant_id", &"<redacted>")
+            .field("occurred_at", &"<redacted>")
             .field("schema_version", &self.schema_version)
             .field("schema_hash", &self.schema_hash)
-            .field("occurred_at_secs", &self.occurred_at_secs)
-            .field("trace", &self.trace)
-            .field("correlation", &self.correlation)
+            .field("trace", &self.trace.as_ref().map(|_| "<redacted>"))
             .field(
                 "tenant_authority",
                 &self.tenant_authority.as_ref().map(|_| "<redacted>"),
             )
-            .field("partition_key", &self.partition_key)
+            .field(
+                "partition_key",
+                &self.partition_key.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -302,7 +312,7 @@ pub struct MessageEnvelope {
 
 impl MessageEnvelope {
     /// 由已校验 header、原始 metadata 与 payload 构造。
-    pub fn new(header: EnvelopeHeader, payload: Vec<u8>, metadata: EnvelopeMetadata) -> Self {
+    fn new(header: EnvelopeHeader, payload: Vec<u8>, metadata: EnvelopeMetadata) -> Self {
         Self {
             header,
             metadata,
@@ -404,26 +414,6 @@ impl EnvelopeMetadata {
         self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
-    /// 便捷 typed 读：`occurred_at` unix 秒（解析失败 → `None`）。AMQP `timestamp` 映射 + 消费观测用。
-    pub fn occurred_at_secs(&self) -> Option<i64> {
-        self.get(KEY_OCCURRED_AT)?.parse().ok()
-    }
-
-    /// typed 读：canonical tenant id。缺失或非 canonical 值均 fail-closed 为 `None`。
-    pub fn tenant_id(&self) -> Option<rss_request_context::TenantId> {
-        rss_request_context::TenantId::parse(self.get(KEY_TENANT_ID)?).ok()
-    }
-
-    /// typed 读：schema version。缺失或非法均 fail-closed 为 `None`。
-    pub fn schema_version(&self) -> Option<EnvelopeSchemaVersion> {
-        EnvelopeSchemaVersion::parse(self.get(KEY_SCHEMA_VERSION)?.to_string()).ok()
-    }
-
-    /// typed 读：schema hash。缺失或非法均 fail-closed 为 `None`。
-    pub fn schema_hash(&self) -> Option<EnvelopeSchemaHash> {
-        EnvelopeSchemaHash::parse(self.get(KEY_SCHEMA_HASH)?.to_string()).ok()
-    }
-
     /// **业务 free-form 写入口**——命中 [`RESERVED_METADATA_KEYS`] fail-closed 拒（Hard：业务经此伪造
     /// reserved key 类型层不可表达）。
     pub fn try_insert(
@@ -475,25 +465,13 @@ fn is_schema_hash(raw: &str) -> bool {
     })
 }
 
-/// PII / authority 边界（类型层，对标 [`crate::OutboxEnvelopeParts`]）：手写 `Debug` 对 `subjectId` /
-/// `principal` / `tenantAuthority`（opaque 主体或授权材料）值输出 `<redacted>`；`occurred_at` / `trace` /
-/// `correlation` 是路由 / 观测元数据，可观测。INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level =
-/// "Medium", exec = "manual/opt-in", source = "code" }（回归见 `pii_debug` 单测）。
+/// Raw transport metadata is completely opaque in `Debug`. This single boundary protects every
+/// containing DTO from leaking free-form event/provider/DLQ source, payload-like values, tenant,
+/// correlation, or PII. INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec =
+/// "manual/opt-in", source = "code" }（回归见 `pii_debug` 单测）。
 impl std::fmt::Debug for EnvelopeMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut m = f.debug_map();
-        for (k, v) in self.0.iter() {
-            if k == KEY_SUBJECT_ID
-                || k == KEY_PRINCIPAL
-                || k == KEY_ACTOR
-                || k == KEY_TENANT_AUTHORITY
-            {
-                m.entry(&k, &"<redacted>");
-            } else {
-                m.entry(&k, &v);
-            }
-        }
-        m.finish()
+        f.write_str("EnvelopeMetadata(<redacted>)")
     }
 }
 
@@ -512,6 +490,7 @@ mod tests {
     fn complete_metadata() -> EnvelopeMetadata {
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
         md
@@ -554,25 +533,9 @@ mod tests {
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
         assert_eq!(md.get(KEY_CORRELATION), Some("corr-9"));
-        assert_eq!(md.occurred_at_secs(), Some(1_700_000_000));
-        assert_eq!(
-            md.schema_version().map(|v| v.to_string()).as_deref(),
-            Some("v1")
-        );
-        assert_eq!(
-            md.schema_hash().map(|v| v.to_string()).as_deref(),
-            Some(HASH)
-        );
-    }
-
-    #[test]
-    fn occurred_at_secs_parses_or_none() {
-        let mut md = EnvelopeMetadata::empty();
-        assert_eq!(md.occurred_at_secs(), None);
-        md.insert_wire_pair(KEY_OCCURRED_AT, "not-a-number");
-        assert_eq!(md.occurred_at_secs(), None);
-        md.insert_wire_pair(KEY_OCCURRED_AT, "42");
-        assert_eq!(md.occurred_at_secs(), Some(42));
+        assert_eq!(md.get(KEY_OCCURRED_AT), Some("1700000000"));
+        assert_eq!(md.get(KEY_SCHEMA_VERSION), Some("v1"));
+        assert_eq!(md.get(KEY_SCHEMA_HASH), Some(HASH));
     }
 
     #[test]
@@ -659,17 +622,14 @@ mod tests {
     }
 
     #[test]
-    fn tenant_id_parses_canonical_wire_value() {
+    fn raw_tenant_value_is_available_only_as_wire_text() {
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_TENANT_ID, TENANT);
-        assert_eq!(
-            md.tenant_id().map(|t| t.to_string()).as_deref(),
-            Some(TENANT)
-        );
+        assert_eq!(md.get(KEY_TENANT_ID), Some(TENANT));
         md.insert_wire_pair(KEY_TENANT_ID, "F47AC10B-58CC-4372-A567-0E02B2C3D479");
-        assert!(
-            md.tenant_id().is_none(),
-            "non-canonical tenant must fail closed"
+        assert_eq!(
+            md.get(KEY_TENANT_ID),
+            Some("F47AC10B-58CC-4372-A567-0E02B2C3D479")
         );
     }
 
@@ -704,7 +664,6 @@ mod tests {
     #[test]
     fn envelope_header_rehydrates_required_schema_fields() -> Result<(), EnvelopeHeaderError> {
         let mut md = complete_metadata();
-        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_TRACE, "not a w3c traceparent");
         md.insert_wire_pair(KEY_CORRELATION, "corr 1");
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, "SECRET_AUTHORITY");
@@ -714,15 +673,20 @@ mod tests {
         assert_eq!(header.tenant_id(), tenant());
         assert_eq!(header.schema_version().as_str(), "v1");
         assert_eq!(header.schema_hash().as_str(), HASH);
-        assert_eq!(header.occurred_at_secs(), Some(1_700_000_000));
+        assert_eq!(header.occurred_at().unix_seconds(), 1_700_000_000);
         assert_eq!(header.trace(), Some("not a w3c traceparent"));
-        assert_eq!(header.correlation(), Some("corr 1"));
         assert!(header.partition_key().is_some());
 
         let dbg = format!("{header:?}");
         assert!(
             !dbg.contains("SECRET_AUTHORITY"),
             "tenantAuthority leaked in Debug: {dbg}"
+        );
+        assert!(!dbg.contains(TENANT), "tenant leaked in Debug: {dbg}");
+        assert!(!dbg.contains("1700000000"), "time leaked in Debug: {dbg}");
+        assert!(
+            !dbg.contains("not a w3c traceparent"),
+            "trace leaked in Debug: {dbg}"
         );
         assert!(
             dbg.contains("<redacted>"),
@@ -743,6 +707,7 @@ mod tests {
         let missing_version = {
             let mut md = EnvelopeMetadata::empty();
             md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+            md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
             md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
             md
         };
@@ -761,6 +726,7 @@ mod tests {
         let missing_hash = {
             let mut md = EnvelopeMetadata::empty();
             md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+            md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
             md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
             md
         };
@@ -780,12 +746,35 @@ mod tests {
     #[test]
     fn envelope_header_missing_tenant_is_distinct_from_invalid_tenant() {
         let mut md = EnvelopeMetadata::empty();
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
         assert_eq!(
             EnvelopeHeader::try_from_metadata(&md, None),
             Err(EnvelopeHeaderError::MissingTenantId)
         );
+    }
+
+    #[test]
+    fn envelope_header_rejects_missing_malformed_and_negative_occurred_at() {
+        let mut missing = EnvelopeMetadata::empty();
+        missing.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        missing.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        missing.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
+        assert_eq!(
+            EnvelopeHeader::try_from_metadata(&missing, None),
+            Err(EnvelopeHeaderError::MissingOccurredAt)
+        );
+
+        for invalid in ["not-a-number", "-1"] {
+            let mut metadata = complete_metadata();
+            metadata.insert_wire_pair(KEY_OCCURRED_AT, invalid);
+            assert_eq!(
+                EnvelopeHeader::try_from_metadata(&metadata, None),
+                Err(EnvelopeHeaderError::InvalidOccurredAt),
+                "invalid occurredAt should fail closed: {invalid}"
+            );
+        }
     }
 
     #[test]
@@ -810,7 +799,7 @@ mod tests {
 
 #[cfg(test)]
 mod pii_debug {
-    //! `EnvelopeMetadata` 的 `subjectId` / `principal` / `tenantAuthority` 值 Debug 脱敏回归。
+    //! `EnvelopeMetadata` 的全部值 Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
     use super::{
         EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
@@ -818,7 +807,7 @@ mod pii_debug {
     };
 
     #[test]
-    fn debug_redacts_subject_principal_and_tenant_authority_shows_observable() {
+    fn debug_is_fully_opaque_for_reserved_and_free_form_values() {
         let mut md = EnvelopeMetadata::empty();
         // anti-vacuity：subjectId 值若不脱敏会出现在普通 map Debug 中。
         md.insert_wire_pair(KEY_SUBJECT_ID, "SECRET_SUBJECT");
@@ -827,17 +816,27 @@ mod pii_debug {
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, "SECRET_TENANT_AUTHORITY");
         md.insert_wire_pair(KEY_CORRELATION, "corr-observable");
         md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
-        let dbg = format!("{md:?}");
-        assert!(!dbg.contains("SECRET_SUBJECT"), "subjectId 值泄漏: {dbg}");
-        assert!(!dbg.contains("SECRET_PRINCIPAL"), "principal 值泄漏: {dbg}");
         assert!(
-            !dbg.contains("SECRET_TENANT_AUTHORITY"),
-            "tenantAuthority 值泄漏: {dbg}"
+            md.try_insert("providerSource", "SECRET_PROVIDER_SOURCE")
+                .is_ok()
         );
-        assert!(!dbg.contains("SECRET_ACTOR"), "actor 值泄漏: {dbg}");
-        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
-        // 路由 / 观测元数据可见。
-        assert!(dbg.contains("corr-observable"), "correlation 应可见: {dbg}");
-        assert!(dbg.contains("1700000000"), "occurred_at 应可见: {dbg}");
+        assert!(md.try_insert("payload", "SECRET_PAYLOAD").is_ok());
+        let dbg = format!("{md:?}");
+        for marker in [
+            "SECRET_SUBJECT",
+            "SECRET_PRINCIPAL",
+            "SECRET_TENANT_AUTHORITY",
+            "SECRET_ACTOR",
+            "SECRET_PROVIDER_SOURCE",
+            "SECRET_PAYLOAD",
+            "corr-observable",
+            "1700000000",
+        ] {
+            assert!(
+                !dbg.contains(marker),
+                "metadata Debug leaked {marker}: {dbg}"
+            );
+        }
+        assert_eq!(dbg, "EnvelopeMetadata(<redacted>)");
     }
 }

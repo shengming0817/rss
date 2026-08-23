@@ -135,7 +135,7 @@ async fn projection_writer_runtime_setup_mirrors_reviewed_generated_event() -> T
         SESSION_PROJECTION_INPUTS,
     )
     .await?;
-    let emitter = deps.handle().infra().emitter(fixed_clock());
+    let emitter = deps.handle().infra().emitter();
     let event_id = unique_event_id("projection-runtime-session");
     let tenant = test_tenant();
     let event = reviewed_session_event(

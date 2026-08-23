@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use diport::{
-    EnvelopeMetadata, KEY_OCCURRED_AT, ManagedResource, PublishRequest, Publisher, PublisherError,
-    ShutdownError,
+    EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, KEY_OCCURRED_AT, ManagedResource,
+    PublishRequest, Publisher, PublisherError, ShutdownError,
 };
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
@@ -30,19 +30,18 @@ const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;
 /// 独占 AMQP typed `timestamp`（unix 秒 u64），不再重复进 headers；其余 pair 进 `FieldTable` LongString。
 ///
 /// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
-fn build_properties(event_id: &str, md: &EnvelopeMetadata) -> BasicProperties {
+fn build_properties(
+    event_id: &str,
+    header: &EnvelopeHeader,
+    md: &EnvelopeMetadata,
+) -> BasicProperties {
     let props = BasicProperties::default()
         .with_message_id(event_id.into())
         .with_delivery_mode(2);
-    // occurred_at 用 AMQP 原生 timestamp 字段（u64），不重复进 headers（避免双写歧义）。
-    // wire metadata bag 是 public scalar——畸形负值（epoch 前，理论不可达但 bag 可携）经 `u64::try_from`
-    // fail-closed 跳过 timestamp，不 `as u64` wrap 成超大值（不依赖 producer 非负保证；F3 review）。
-    let props = match md
-        .occurred_at_secs()
-        .and_then(|secs| u64::try_from(secs).ok())
-    {
-        Some(ts) => props.with_timestamp(ts),
-        None => props,
+    // occurred_at 来自 validated `Timepoint`；畸形或负 wire 值在任何 broker I/O 前已 fail-closed。
+    let props = match u64::try_from(header.occurred_at().unix_seconds()) {
+        Ok(timestamp) => props.with_timestamp(timestamp),
+        Err(_) => props,
     };
     let mut table = FieldTable::default();
     for (k, v) in md.iter_transport_headers() {
@@ -554,6 +553,8 @@ enum PublisherTransportError {
 /// payload 与 lapin source 都不会越过 `PublisherError` 的 redacted source 边界。
 #[derive(Debug, thiserror::Error)]
 enum PublishAttemptFailure {
+    #[error("amqp publish envelope validation failed")]
+    Envelope(#[source] EnvelopeHeaderError),
     #[error("amqp publish admission failed")]
     Admission(#[source] PublisherTransportError),
     #[error("amqp publish client failed")]
@@ -590,6 +591,9 @@ impl PublishAttemptFailure {
 
     fn decision(&self) -> PublishFailureDecision {
         match self {
+            Self::Envelope(_) => {
+                PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
+            }
             Self::Admission(_) | Self::Rejected(_) => {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient)
             }
@@ -612,7 +616,7 @@ impl PublishAttemptFailure {
 
     fn phase(&self) -> PublishPhase {
         match self {
-            Self::Admission(_) => PublishPhase::PreSend,
+            Self::Envelope(_) | Self::Admission(_) => PublishPhase::PreSend,
             Self::Client { phase, .. } => *phase,
             Self::Deadline { elapsed, .. } => elapsed.phase,
             Self::Rejected(_) => PublishPhase::Confirm,
@@ -1561,6 +1565,12 @@ async fn close_transport_bounded_at(
 
 impl Publisher for AmqpPublisher {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        let header = match request.try_header() {
+            Ok(header) => header,
+            Err(error) => {
+                return Err(self.handle_publish_failure(PublishAttemptFailure::Envelope(error)));
+            }
+        };
         let snapshot = match self.transport_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1586,7 +1596,7 @@ impl Publisher for AmqpPublisher {
         // envelope metadata 透传：occurred_at → AMQP timestamp；其余 → FieldTable LongString headers。
         let event_id = request.event_id().as_str().to_string();
         let topic = request.topic().as_str().to_string();
-        let properties = build_properties(&event_id, request.metadata());
+        let properties = build_properties(&event_id, &header, request.metadata());
         // into_payload()：move payload 出 request（event_id / topic / metadata 已借用完毕）。
         let payload = request.into_payload();
         let inject_post_send_close = self.take_post_send_connection_close_fault();
@@ -1852,47 +1862,55 @@ mod classify_tests {
 #[cfg(test)]
 mod build_properties_tests {
     use diport::{
-        EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
-        KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID,
+        EnvelopeHeader, EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
+        KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID,
     };
     use lapin::types::AMQPValue;
 
     use super::build_properties;
 
+    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[allow(clippy::expect_used)]
+    fn complete_metadata(occurred_at: &str) -> EnvelopeMetadata {
+        let mut metadata = EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        metadata.insert_wire_pair(KEY_OCCURRED_AT, occurred_at);
+        metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+        metadata.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
+        metadata
+    }
+
+    #[allow(clippy::expect_used)]
+    fn header(metadata: &EnvelopeMetadata) -> EnvelopeHeader {
+        EnvelopeHeader::try_from_metadata(metadata, None).expect("complete envelope metadata")
+    }
+
     #[test]
-    fn empty_metadata_sets_message_id_and_persistent_delivery() {
-        let md = EnvelopeMetadata::empty();
-        let props = build_properties("evt-1", &md);
+    fn validated_metadata_sets_message_id_persistence_and_timestamp() {
+        let md = complete_metadata("0");
+        let header = header(&md);
+        let props = build_properties("evt-1", &header, &md);
         assert_eq!(
             props.message_id().as_ref().map(|s| s.as_str()),
             Some("evt-1")
         );
         assert_eq!(props.delivery_mode(), &Some(2));
-        assert!(
-            props.timestamp().is_none(),
-            "no timestamp for empty metadata"
-        );
-        assert!(props.headers().is_none(), "no headers for empty metadata");
+        assert_eq!(props.timestamp(), &Some(0));
     }
 
     #[test]
-    fn negative_occurred_at_skips_timestamp() {
-        // F3 review：wire bag 可携畸形负 occurred_at（epoch 前）；`u64::try_from` fail-closed 跳过
-        // timestamp，不 `as u64` wrap 成超大值。anti-vacuity：正值仍设 timestamp（见上一测试）。
-        let mut md = EnvelopeMetadata::empty();
-        md.insert_wire_pair(KEY_OCCURRED_AT, "-5");
-        let props = build_properties("evt-neg", &md);
-        assert!(
-            props.timestamp().is_none(),
-            "负 occurred_at 不应 cast 成超大 timestamp，应跳过"
-        );
+    fn negative_occurred_at_is_rejected_before_property_construction() {
+        let md = complete_metadata("-5");
+        assert!(EnvelopeHeader::try_from_metadata(&md, None).is_err());
     }
 
     #[test]
     fn occurred_at_goes_to_timestamp_not_headers() {
-        let mut md = EnvelopeMetadata::empty();
-        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
-        let props = build_properties("evt-2", &md);
+        let md = complete_metadata("1700000000");
+        let header = header(&md);
+        let props = build_properties("evt-2", &header, &md);
         assert_eq!(props.timestamp(), &Some(1_700_000_000_u64));
         // occurred_at 不得出现在 headers。
         if let Some(table) = props.headers() {
@@ -1911,7 +1929,7 @@ mod build_properties_tests {
     // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
     #[allow(clippy::expect_used)]
     fn transport_metadata_goes_to_headers_and_sensitive_metadata_is_excluded() {
-        let mut md = EnvelopeMetadata::empty();
+        let mut md = complete_metadata("1700000000");
         md.insert_wire_pair(KEY_CORRELATION, "corr-9");
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(
@@ -1922,8 +1940,9 @@ mod build_properties_tests {
         md.insert_wire_pair(KEY_PRINCIPAL, "principal-42");
         md.insert_wire_pair(KEY_ACTOR, "actor-42");
         let _ = md.try_insert("requestPath", "/login");
-        let props = build_properties("evt-3", &md);
-        assert!(props.timestamp().is_none(), "no occurred_at → no timestamp");
+        let header = header(&md);
+        let props = build_properties("evt-3", &header, &md);
+        assert_eq!(props.timestamp(), &Some(1_700_000_000));
         let table = props.headers().as_ref().expect("headers should be set");
         let get = |key: &str| {
             table.inner().iter().find_map(|(k, v)| {
@@ -1954,10 +1973,10 @@ mod build_properties_tests {
     // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
     #[allow(clippy::expect_used)]
     fn full_roundtrip_occurred_at_and_other_fields() {
-        let mut md = EnvelopeMetadata::empty();
-        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000001");
+        let mut md = complete_metadata("1700000001");
         md.insert_wire_pair(KEY_CORRELATION, "corr-full");
-        let props = build_properties("evt-full", &md);
+        let header = header(&md);
+        let props = build_properties("evt-full", &header, &md);
         // message_id = event_id。
         assert_eq!(
             props.message_id().as_ref().map(|s| s.as_str()),
@@ -2270,6 +2289,12 @@ mod publish_pipeline_red_tests {
     #[test]
     fn publish_attempt_failure_decision_covers_every_closed_variant() {
         let cases = [
+            (
+                super::PublishAttemptFailure::Envelope(
+                    diport::EnvelopeHeaderError::MissingTenantId,
+                ),
+                PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent),
+            ),
             (
                 super::PublishAttemptFailure::Admission(
                     super::PublisherTransportError::Unavailable,
@@ -2905,8 +2930,9 @@ mod publisher_transport_replacement_integration_tests {
 
     use anyhow::{Context as _, anyhow};
     use diport::{
-        AckAction, AckableSubscriber, Acker, ManagedResource, MessageId, PublishErrorKind,
-        PublishRequest, Publisher, Topic,
+        AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_OCCURRED_AT, KEY_SCHEMA_HASH,
+        KEY_SCHEMA_VERSION, KEY_TENANT_ID, ManagedResource, MessageId, PublishErrorKind,
+        PublishRequest as DiPublishRequest, Publisher, Topic,
     };
     use futures::StreamExt;
     use lapin::options::{BasicGetOptions, QueueDeclareOptions};
@@ -2916,6 +2942,23 @@ mod publisher_transport_replacement_integration_tests {
 
     use super::{AmqpPublisher, PublisherTransportError};
     use crate::AmqpSubscriber;
+
+    const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const TEST_SCHEMA_HASH: &str =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    struct PublishRequest;
+
+    impl PublishRequest {
+        fn new(topic: Topic, event_id: MessageId, payload: Vec<u8>) -> DiPublishRequest {
+            let mut metadata = EnvelopeMetadata::empty();
+            metadata.insert_wire_pair(KEY_TENANT_ID, TEST_TENANT);
+            metadata.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+            metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+            metadata.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
+            DiPublishRequest::new(topic, event_id, payload).with_metadata(metadata)
+        }
+    }
 
     pub(super) async fn broker_roundtrip_preserves_message_identity_behavior()
     -> Result<(), FixtureError> {

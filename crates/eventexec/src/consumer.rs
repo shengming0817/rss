@@ -25,7 +25,7 @@ use diport::dead_letter_store::{
 };
 use diport::{
     Acker as _, DeadLetterProvenance, EnvelopeCausationId, EnvelopeHeader, EnvelopeHeaderError,
-    Message, MessageStream,
+    KEY_CORRELATION, Message, MessageStream,
 };
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
@@ -33,7 +33,55 @@ use tracing::Instrument as _;
 use primitives::{AdmissionError, ConsumerAdmission};
 
 use crate::MAX_REDELIVERY;
+use crate::event_metadata::EventMetadata;
 use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
+
+/// One transport message paired with the metadata validated by consumer preflight.
+///
+/// Private fields prevent handlers from substituting a second metadata owner or bypassing the
+/// envelope/tenant-authority gate. Retries share this move-only value through [`Arc`].
+pub struct ValidatedEvent {
+    message: Message,
+    metadata: EventMetadata,
+}
+
+/// Closed failure set for minting a [`ValidatedEvent`] across the composition boundary.
+#[doc(hidden)]
+pub enum EventValidationError {
+    Header(EnvelopeHeaderError),
+    TenantAuthority(TenantAuthorityError),
+}
+
+impl ValidatedEvent {
+    pub(crate) const fn new(message: Message, metadata: EventMetadata) -> Self {
+        Self { message, metadata }
+    }
+
+    /// Validated transport message.
+    pub const fn message(&self) -> &Message {
+        &self.message
+    }
+
+    /// Canonical public event metadata produced by preflight.
+    pub const fn metadata(&self) -> &EventMetadata {
+        &self.metadata
+    }
+
+    /// Test-only mint that runs the same typed-header and correlation parsing as preflight.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn for_test(message: Message) -> Result<Self, EnvelopeHeaderError> {
+        let header = message.try_header()?;
+        let audit_correlation = message
+            .metadata()
+            .get(KEY_CORRELATION)
+            .and_then(|raw| rss_diag_context::CorrelationId::parse(raw).ok());
+        Ok(Self::new(
+            message,
+            EventMetadata::new(header.tenant_id(), header.occurred_at(), audit_correlation),
+        ))
+    }
+}
 
 /// Upper bound for holding an active broker delivery before requeueing a contended claim.
 /// The normal delay is the provider-derived lease renewal interval (`ttl / 3`); the cap prevents
@@ -195,14 +243,11 @@ impl ConsumerMeta {
     pub fn verify_tenant_authority(
         &self,
         msg: &Message,
-    ) -> Result<rss_request_context::TenantId, TenantAuthorityError> {
-        let tenant = msg
-            .metadata()
-            .tenant_id()
-            .ok_or(TenantAuthorityError::TenantMissing)?;
+        event_metadata: &EventMetadata,
+    ) -> Result<(), TenantAuthorityError> {
         self.tenant_authority.verify(
             TenantAuthorityBinding::new(
-                tenant,
+                event_metadata.tenant_id(),
                 self.authority_domain(),
                 self.contract_id(),
                 self.topic(),
@@ -216,7 +261,7 @@ impl ConsumerMeta {
     pub fn verify_envelope_header(
         &self,
         msg: &Message,
-    ) -> Result<EnvelopeHeader, EnvelopeHeaderError> {
+    ) -> Result<(EnvelopeHeader, EventMetadata), EnvelopeHeaderError> {
         let header = msg.try_header()?;
         if self
             .expected_schema_version
@@ -232,19 +277,39 @@ impl ConsumerMeta {
         {
             return Err(EnvelopeHeaderError::SchemaHashMismatch);
         }
-        Ok(header)
+        let audit_correlation = msg
+            .metadata()
+            .get(KEY_CORRELATION)
+            .and_then(|raw| rss_diag_context::CorrelationId::parse(raw).ok());
+        let event_metadata =
+            EventMetadata::new(header.tenant_id(), header.occurred_at(), audit_correlation);
+        Ok((header, event_metadata))
+    }
+
+    /// Validate the typed envelope and bind its canonical metadata to the owned message.
+    #[doc(hidden)]
+    pub fn validate_event(
+        &self,
+        msg: Message,
+    ) -> Result<(EnvelopeHeader, Arc<ValidatedEvent>), EventValidationError> {
+        let (header, metadata) = self
+            .verify_envelope_header(&msg)
+            .map_err(EventValidationError::Header)?;
+        self.verify_tenant_authority(&msg, &metadata)
+            .map_err(EventValidationError::TenantAuthority)?;
+        Ok((header, Arc::new(ValidatedEvent::new(msg, metadata))))
     }
 
     #[doc(hidden)]
     pub fn receipt_context(
         &self,
-        tenant_id: rss_request_context::TenantId,
+        event_metadata: &EventMetadata,
         header: &EnvelopeHeader,
     ) -> Result<InboxReceiptContext, ReceiptContextBuildError> {
         let consumer_group = ConsumerGroup::parse(self.consumer_group())
             .map_err(|_| ReceiptContextBuildError::ConsumerGroup)?;
         InboxReceiptContext::new(
-            tenant_id,
+            event_metadata.tenant_id(),
             consumer_group,
             self.domain(),
             self.topic(),
@@ -252,7 +317,7 @@ impl ConsumerMeta {
             header.schema_version().as_str(),
             header.schema_hash().as_str(),
             header.trace().map(str::to_string),
-            header.correlation().map(str::to_string),
+            None,
         )
         .map_err(ReceiptContextBuildError::Receipt)
     }
@@ -302,7 +367,7 @@ pub async fn run_consumer<S, H>(
     token: CancellationToken,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     loop {
         let next = tokio::select! {
@@ -363,7 +428,7 @@ pub async fn run_consumer_ackable<S, H>(
     admission: ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     while let Some((d, _permit)) = next_admitted(&mut stream, &admission).await {
         let diport::Delivery { message, acker } = d;
@@ -432,7 +497,7 @@ async fn consume_one<S, H>(
 ) -> bool
 where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     let inner_token = token.clone();
     tokio::select! {
@@ -467,7 +532,7 @@ async fn consume_one_inner<S, H>(
 ) -> bool
 where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     // parse 失败 → 结构化 warn + 丢弃（不 panic；key 漂移即等价新消费者，fail-closed）。
     let key = match IdemKey::parse(msg.id().as_str()) {
@@ -500,30 +565,26 @@ where
         }
     };
 
-    let header = match meta.verify_envelope_header(&msg) {
-        Ok(header) => header,
+    let (header, event_metadata) = match meta.verify_envelope_header(&msg) {
+        Ok(validated) => validated,
         Err(error) => {
             reject_invalid_envelope_header(meta, &msg, acker, &error).await;
             return false;
         }
     };
 
-    let tenant = match meta.verify_tenant_authority(&msg) {
-        Ok(tenant) => tenant,
-        Err(error) => {
-            reject_invalid_tenant_authority(meta, &msg, acker, error).await;
-            return false;
-        }
-    };
+    if let Err(error) = meta.verify_tenant_authority(&msg, &event_metadata) {
+        reject_invalid_tenant_authority(meta, &msg, acker, error).await;
+        return false;
+    }
 
-    let receipt_context = match meta.receipt_context(tenant, &header) {
+    let receipt_context = match meta.receipt_context(&event_metadata, &header) {
         Ok(ctx) => ctx,
         Err(error) => {
             reject_invalid_receipt_context(meta, &msg, acker, error).await;
             return false;
         }
     };
-
     // 本次 claim 的租约令牌（消费方铸，uuid v4 内置于 mint）：try_claim 在 claimed 行 stamp，extend/commit/release 凭它 CAS。
     let lease = LeaseToken::mint();
 
@@ -560,6 +621,7 @@ where
             false
         }
         Ok(SeenState::Fresh) => {
+            let event = Arc::new(ValidatedEvent::new(msg, event_metadata));
             crate::event::scope_verified_event_origin(
                 crate::event::VerifiedEventOrigin::new(parent_causation),
                 handle_fresh(
@@ -567,7 +629,7 @@ where
                     dlx,
                     meta,
                     handler,
-                    msg,
+                    event,
                     &receipt_context,
                     &key,
                     &lease,
@@ -637,7 +699,7 @@ async fn handle_fresh<S, H>(
     dlx: &DynDeadLetterStore<'static>,
     meta: &ConsumerMeta,
     handler: &H,
-    msg: Message,
+    event: Arc<ValidatedEvent>,
     ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
@@ -647,8 +709,9 @@ async fn handle_fresh<S, H>(
 ) -> bool
 where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
+    let msg = event.message();
     // owned message_id：run_handler_loop 取 msg 所有权，续租 / hard-fence 日志用 owned 串避免借用冲突。
     let message_id = msg.id().as_str().to_owned();
     // #1224：从 producer 经 outbox metadata → broker header 透传的 W3C traceparent 还原消费 span 的 remote
@@ -661,7 +724,7 @@ where
         biased;
         // handler 先完成：终态已在 loop 内结算；renewal future 被 drop（停止续租）。
         // `.instrument(consume_span)`：handler 全程在消费 span 内，其内部 span 挂回 producer trace（#1224）。
-        () = run_handler_loop(idempotency, dlx, meta, handler, msg, ctx, key, lease, acker)
+        () = run_handler_loop(idempotency, dlx, meta, handler, event, ctx, key, lease, acker)
             .instrument(consume_span) => false,
         // Lifecycle cancellation deliberately leaves the delivery unsettled. Dropping both
         // futures prevents Ack/commit/DLX and channel close delegates redelivery to the broker.
@@ -775,21 +838,22 @@ async fn run_handler_loop<S, H>(
     dlx: &DynDeadLetterStore<'static>,
     meta: &ConsumerMeta,
     handler: &H,
-    msg: Message,
+    event: Arc<ValidatedEvent>,
     ctx: &InboxReceiptContext,
     key: &IdemKey,
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
+    let msg = event.message();
     // requeue 路径记下最近一次 error kind 摘要，耗尽时随 DLX 落日志（#1125/#1285）。
     // Settled 闭合穷尽：仅 `Requeue` 续循环，故耗尽出口恒有摘要（Hard）。
     let mut last_requeue_summary: Option<&'static str> = None;
     // 含首投在内至多 MAX_REDELIVERY 次（bounded，对齐 watermill retry.go MaxRetries+1 次尝试）。
     for attempt in 1..=MAX_REDELIVERY {
-        let result = handler(msg.clone()).await;
+        let result = handler(Arc::clone(&event)).await;
         match result.as_settled() {
             consistency::Settled::Ack => {
                 // 仅 commit（幂等 done 标记，CAS 守租约）成功才 broker Ack；commit 失败 / 租约丢失 → Requeue
@@ -1116,6 +1180,8 @@ pub fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str
     match error {
         EnvelopeHeaderError::MissingTenantId => "envelope_missing_tenant_id",
         EnvelopeHeaderError::InvalidTenantId => "envelope_invalid_tenant_id",
+        EnvelopeHeaderError::MissingOccurredAt => "envelope_missing_occurred_at",
+        EnvelopeHeaderError::InvalidOccurredAt => "envelope_invalid_occurred_at",
         EnvelopeHeaderError::MissingSchemaVersion => "envelope_missing_schema_version",
         EnvelopeHeaderError::InvalidSchemaVersion => "envelope_invalid_schema_version",
         EnvelopeHeaderError::MissingSchemaHash => "envelope_missing_schema_hash",
@@ -1387,8 +1453,8 @@ mod tests {
     };
     use diport::{AckAction, Acker, DeliveryStream, DynAcker};
     use diport::{
-        EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
-        Message,
+        EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message,
     };
     use futures::StreamExt;
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
@@ -1412,7 +1478,9 @@ mod tests {
         token: CancellationToken,
     ) where
         S: consistency::InboxStore + Send + Sync + 'static,
-        H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+        H: Fn(Arc<super::ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult>
+            + Send
+            + Sync,
     {
         super::run_consumer_ackable(
             super::ManagedDeliveryStream::mint(stream, token),
@@ -1501,6 +1569,7 @@ mod tests {
     }
 
     fn insert_schema_header(md: &mut EnvelopeMetadata) {
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
     }
@@ -1524,6 +1593,7 @@ mod tests {
             ))
             .expect("tenant authority test signing cannot fail");
         md.insert_wire_pair(KEY_TENANT_ID, tenant().to_string());
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
         md
     }
@@ -1557,8 +1627,62 @@ mod tests {
         )
     }
 
+    fn without_occurred_at(source: &EnvelopeMetadata) -> EnvelopeMetadata {
+        let mut metadata = EnvelopeMetadata::empty();
+        for (key, value) in source.iter_transport_headers() {
+            if key != KEY_OCCURRED_AT {
+                metadata.insert_wire_pair(key, value);
+            }
+        }
+        metadata
+    }
+
     fn message(id: &str, payload: &[u8]) -> Message {
         Message::new_with_metadata(id, payload.to_vec(), tenant_metadata(id))
+    }
+
+    #[test]
+    fn preflight_parses_valid_correlation_and_drops_missing_or_invalid_values() {
+        let consumer = meta();
+        let cases = [
+            (Some("audit-correlation-1"), Some("audit-correlation-1")),
+            (None, None),
+            (Some("invalid correlation with spaces"), None),
+        ];
+
+        for (wire, expected) in cases {
+            let mut metadata = tenant_metadata("correlation-case");
+            if let Some(wire) = wire {
+                metadata.insert_wire_pair(KEY_CORRELATION, wire);
+            }
+            let message = Message::new_with_metadata("correlation-case", Vec::new(), metadata);
+            let (_, event_metadata) = consumer
+                .verify_envelope_header(&message)
+                .expect("standard envelope must remain valid");
+            assert_eq!(
+                event_metadata
+                    .audit_correlation()
+                    .map(|correlation| correlation.as_str()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn valid_audit_correlation_never_enters_receipt_context() {
+        let consumer = meta();
+        let mut metadata = tenant_metadata("correlation-receipt-case");
+        metadata.insert_wire_pair(KEY_CORRELATION, "audit-correlation-1");
+        let message = Message::new_with_metadata("correlation-receipt-case", Vec::new(), metadata);
+        let (header, event_metadata) = consumer
+            .verify_envelope_header(&message)
+            .expect("standard envelope must remain valid");
+
+        assert!(event_metadata.audit_correlation().is_some());
+        let receipt = consumer
+            .receipt_context(&event_metadata, &header)
+            .expect("validated metadata must build a receipt context");
+        assert_eq!(receipt.correlation_id(), None);
     }
 
     fn meta() -> ConsumerMeta {
@@ -2092,7 +2216,9 @@ mod tests {
     /// 恒 Ack handler（计数调用次数）。
     fn handler_ack(
         counter: Arc<AtomicU32>,
-    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    ) -> impl Fn(Arc<super::ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult>
+    + Send
+    + Sync {
         move |_msg| {
             let counter = counter.clone();
             Box::pin(async move {
@@ -2105,7 +2231,9 @@ mod tests {
     /// 恒 Requeue handler（计数调用次数）。
     fn handler_requeue(
         counter: Arc<AtomicU32>,
-    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    ) -> impl Fn(Arc<super::ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult>
+    + Send
+    + Sync {
         move |_msg| {
             let counter = counter.clone();
             Box::pin(async move {
@@ -2120,7 +2248,9 @@ mod tests {
     /// 恒 Reject handler（计数调用次数）。
     fn handler_reject(
         counter: Arc<AtomicU32>,
-    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    ) -> impl Fn(Arc<super::ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult>
+    + Send
+    + Sync {
         move |_msg| {
             let counter = counter.clone();
             Box::pin(async move {
@@ -2135,7 +2265,9 @@ mod tests {
     /// 恒 Reject handler（`Invariant` kind；用于核 error kind 摘要随 HandleResult 流到 DLX，#1125）。
     fn handler_reject_invariant(
         counter: Arc<AtomicU32>,
-    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    ) -> impl Fn(Arc<super::ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult>
+    + Send
+    + Sync {
         move |_msg| {
             let counter = counter.clone();
             Box::pin(async move {
@@ -2375,7 +2507,22 @@ mod tests {
     fn tc3d_invalid_standard_header_rejects_before_claim() {
         const OTHER_SCHEMA_HASH: &str =
             "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let cases: [(&str, EnvelopeMetadata, &str); 6] = [
+        let cases: [(&str, EnvelopeMetadata, &str); 9] = [
+            (
+                "msg-no-time",
+                without_occurred_at(&tenant_metadata("msg-no-time")),
+                "envelope_missing_occurred_at",
+            ),
+            {
+                let mut md = tenant_metadata("msg-malformed-time");
+                md.insert_wire_pair(KEY_OCCURRED_AT, "not-a-number");
+                ("msg-malformed-time", md, "envelope_invalid_occurred_at")
+            },
+            {
+                let mut md = tenant_metadata("msg-negative-time");
+                md.insert_wire_pair(KEY_OCCURRED_AT, "-1");
+                ("msg-negative-time", md, "envelope_invalid_occurred_at")
+            },
             (
                 "msg-no-schema",
                 tenant_authority_metadata("msg-no-schema"),
@@ -3491,7 +3638,9 @@ mod tests {
         started: Arc<AtomicU32>,
         finished: Arc<AtomicU32>,
         sleep: Duration,
-    ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+    ) -> impl Fn(Arc<super::ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult>
+    + Send
+    + Sync {
         move |_msg| {
             let started = started.clone();
             let finished = finished.clone();
@@ -3966,7 +4115,7 @@ mod tests {
             md.insert_wire_pair(diport::KEY_TRACE, producer_tp.as_str().to_owned());
             let msg = Message::new_with_metadata("msg-e2e-trace", b"payload".to_vec(), md);
 
-            let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
+            let handler = move |_event: Arc<super::ValidatedEvent>| -> futures::future::BoxFuture<'static, HandleResult> {
                 let seen = seen_handler.clone();
                 Box::pin(async move {
                     // handler 经 `.instrument(consume_span)` 在还原后的消费 span 内执行。
@@ -4008,7 +4157,7 @@ mod tests {
         let message_id = "verified-parent-event-1";
         let msg = message(message_id, b"payload");
 
-        let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
+        let handler = move |_event: Arc<super::ValidatedEvent>| -> futures::future::BoxFuture<'static, HandleResult> {
             let seen = seen_handler.clone();
             Box::pin(async move {
                 let tenant = tenant();
@@ -4024,6 +4173,7 @@ mod tests {
                     &crate::event::GeneratedEventEncoder,
                     payload,
                     tenant,
+                    rss_contract::Timepoint::try_from(1_i64).expect("time"),
                     diport::EnvelopeSubjectId::from_opaque("consumer.child").expect("subject"),
                     diport::OutboxActor::scoped(
                         rss_request_context::PrincipalKind::Service,
@@ -4068,7 +4218,7 @@ mod tests {
         let calls_handler = calls.clone();
         let message_id = "x".repeat(257);
         let msg = message(&message_id, b"payload");
-        let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
+        let handler = move |_event: Arc<super::ValidatedEvent>| -> futures::future::BoxFuture<'static, HandleResult> {
             let calls = calls_handler.clone();
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::SeqCst);

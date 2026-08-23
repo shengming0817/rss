@@ -50,7 +50,11 @@ pub(in super::super) async fn run_consumer_ackable<S, H>(
     admission: primitives::ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
+    H: Fn(
+            Arc<eventexec::consumer::ValidatedEvent>,
+        ) -> futures::future::BoxFuture<'static, HandleResult>
+        + Send
+        + Sync,
 {
     eventexec::run_managed_delivery_stream_harness(
         stream,
@@ -539,6 +543,11 @@ where
         return Err("fixture topic or contract does not match its generated event contract".into());
     }
     let payload = serde_json::from_slice::<C::Payload>(entry.payload())?;
+    let occurred_at = serde_json::from_slice::<serde_json::Value>(entry.payload())?
+        .get("occurredAt")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("fixture payload must carry occurredAt")?;
+    let occurred_at = rss_contract::Timepoint::try_from(occurred_at)?;
     let idempotency_key = entry.idem_key().clone();
     let (_contract, tenant, subject_id, actor, partition_key, causation_id) = envelope.into_parts();
     if partition_key.is_some() || causation_id.is_some() {
@@ -548,6 +557,7 @@ where
         &eventexec::event::GeneratedEventEncoder,
         &payload,
         tenant,
+        occurred_at,
         subject_id,
         actor,
         idempotency_key,
@@ -572,6 +582,7 @@ pub(in super::super) async fn reviewed_session_event(
             occurred_at: expected_occurred_at(),
         },
         tenant,
+        rss_contract::Timepoint::try_from(expected_occurred_at())?,
         subject_id(envelope_subject),
         actor,
         IdemKey::parse(event_id)?,
@@ -2129,9 +2140,33 @@ pub(in super::super) fn conf_consumer_admission() -> primitives::ConsumerAdmissi
     consumer
 }
 
+pub(in super::super) fn validated_event_message(
+    message: Message,
+    tenant: rss_request_context::TenantId,
+    occurred_at: i64,
+) -> Arc<eventexec::consumer::ValidatedEvent> {
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
+    metadata.insert_wire_pair(KEY_OCCURRED_AT, occurred_at.to_string());
+    metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
+    metadata.insert_wire_pair(KEY_SCHEMA_HASH, TEST_SCHEMA_HASH);
+    Arc::new(
+        eventexec::consumer::ValidatedEvent::for_test(Message::new_with_metadata(
+            message.id().as_str(),
+            message.payload().as_bytes().to_vec(),
+            metadata,
+        ))
+        .expect("valid integration event"),
+    )
+}
+
 pub(in super::super) fn conf_requeue_handler(
     calls: Arc<AtomicU32>,
-) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+) -> impl Fn(
+    Arc<eventexec::consumer::ValidatedEvent>,
+) -> futures::future::BoxFuture<'static, HandleResult>
++ Send
++ Sync {
     move |_message| {
         let calls = Arc::clone(&calls);
         Box::pin(async move {
@@ -2145,7 +2180,11 @@ pub(in super::super) fn conf_requeue_handler(
 
 pub(in super::super) fn conf_ack_handler(
     calls: Arc<AtomicU32>,
-) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
+) -> impl Fn(
+    Arc<eventexec::consumer::ValidatedEvent>,
+) -> futures::future::BoxFuture<'static, HandleResult>
++ Send
++ Sync {
     move |_message| {
         let calls = Arc::clone(&calls);
         Box::pin(async move {

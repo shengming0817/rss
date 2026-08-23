@@ -21,22 +21,20 @@ use crate::projection_events::ProjectionWriteRegistry;
 /// PostgreSQL 角色绑定生命周期 adapter。
 pub struct PgRoleBindingLifecycle {
     pool: TenantDb<ServingWriteLane>,
-    clock: Box<dyn Clock>,
 }
 
 impl PgRoleBindingLifecycle {
     /// integration-only 裸 store 测试 seam + 注入 envelope 时间源。
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new(store: &PgStore, _clock: Box<dyn Clock>) -> Self {
         Self {
             pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            clock,
         }
     }
 
     pub(crate) fn new_with_projection_registry(
         writer: &VerifiedPgWriteStore,
-        clock: Box<dyn Clock>,
+        _clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
@@ -44,24 +42,22 @@ impl PgRoleBindingLifecycle {
                 writer,
                 projection_registry,
             ),
-            clock,
         }
     }
 
-    fn envelope(&self, envelope: OutboxEnvelopeParts) -> (TenantId, OutboxEnvelope) {
+    fn envelope(
+        &self,
+        envelope: OutboxEnvelopeParts,
+        occurred_at: rss_contract::Timepoint,
+    ) -> (TenantId, OutboxEnvelope) {
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                    .unix_seconds(),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -84,8 +80,8 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
             )));
         }
         let generated_fact = event.fact();
-        let (entry, envelope, _fact) = event.into_parts();
-        let (env_tenant, env) = self.envelope(envelope);
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (env_tenant, env) = self.envelope(envelope, occurred_at);
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "role binding assign co-tx: envelope tenant does not match binding tenant",
@@ -129,8 +125,8 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
     ) -> Result<bool, OutboxEmitError> {
         let tenant = scope.tenant();
         let generated_fact = event.fact();
-        let (entry, envelope, _fact) = event.into_parts();
-        let (env_tenant, env) = self.envelope(envelope);
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (env_tenant, env) = self.envelope(envelope, occurred_at);
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "role binding revoke co-tx: envelope tenant does not match requested tenant",

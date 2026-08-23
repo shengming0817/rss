@@ -210,6 +210,20 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
         "resolve_append_and_mark_done",
     ),
     ("adapters/postgres/src/consumer_tx.rs", "mark_done_only"),
+    // Feature-gated PostgreSQL-owned settlement fault injectors exercise the infra transaction
+    // funnel itself; exact function allowlisting keeps that authority out of normal adapters.
+    (
+        "adapters/postgres/src/consumer_tx.rs",
+        "consumer_tx_settlement_for_test",
+    ),
+    (
+        "adapters/postgres/src/consumer_tx.rs",
+        "consumer_tx_stale_lease_for_test",
+    ),
+    (
+        "adapters/postgres/src/consumer_tx.rs",
+        "consumer_tx_confirmed_rollback_for_test",
+    ),
     (
         "adapters/postgres/src/consumer_tx.rs",
         "consumer_tx_settlement_for_test",

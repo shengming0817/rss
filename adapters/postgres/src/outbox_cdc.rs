@@ -13,7 +13,7 @@
 //! logical replication to publish those columns — **not** an in-repo enforcement carrier.
 
 use consistency::{EventEntry, OutboxAppendOutcome, OutboxFactFingerprint};
-use diport::{Clock, EnvelopeSubjectId, OutboxEmitError};
+use diport::{EnvelopeSubjectId, OutboxEmitError};
 use eventexec::event::{ReviewedEvent, ReviewedEventWriter};
 use futures::future::BoxFuture;
 
@@ -32,44 +32,36 @@ use crate::pool::VerifiedPgWriteStore;
 /// This adapter is explicit opt-in and does not write to the relay `outbox` table.
 pub struct PgOutboxCdcEmitter {
     pool: TenantDb<ServingWriteLane>,
-    clock: Box<dyn Clock>,
 }
 
 impl PgOutboxCdcEmitter {
     /// Construct the CDC emitter from the sealed store funnel.
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            clock,
         }
     }
 
-    pub(crate) fn new_with_store(store: &VerifiedPgWriteStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new_with_store(store: &VerifiedPgWriteStore) -> Self {
         Self {
             pool: TenantDb::<ServingWriteLane>::new(store),
-            clock,
         }
     }
 }
 
 impl ReviewedEventWriter for PgOutboxCdcEmitter {
     async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
-        let (entry, envelope, _fact) = event.into_parts();
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let aggregate_id = aggregate_id_for_log(&subject_id);
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                    .unix_seconds(),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

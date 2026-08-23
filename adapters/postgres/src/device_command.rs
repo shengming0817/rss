@@ -606,7 +606,6 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
                         &receipt,
                     )
                     .await?;
-                    let occurred_at = receipt.committed_at();
                     let public = project_application_receipt(scope, &receipt, lineage)?;
                     let event = public
                         .reviewed_event()
@@ -616,7 +615,6 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
                         crate::cotx::identity::CanonicalDeviceIngressFact::from_reviewed_event(
                             scope,
                             event,
-                            occurred_at,
                             credential_generation,
                         )
                         .map_err(StoreError::from_outbox_append)?;
@@ -701,7 +699,6 @@ async fn expected_receipt_fact(
     crate::cotx::identity::CanonicalDeviceIngressFact::from_reviewed_event(
         scope,
         reviewed,
-        receipt.committed_at(),
         credential_generation,
     )
     .map_err(StoreError::from_outbox_append)

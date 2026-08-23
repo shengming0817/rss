@@ -218,12 +218,20 @@ pub async fn emit<E: super::EventEmit>(
     emitter: &E,
     payload: SettingsConfigVersionChangedPayload,
     tenant: ::rss_request_context::TenantId,
+    occurred_at: ::rss_contract::Timepoint,
     subject_id: E::SubjectId,
     actor: E::Actor,
     idempotency_key: E::IdempotencyKey,
 ) -> ::core::result::Result<E::Output, E::Error> {
     emitter
-        .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+        .emit::<Contract>(
+            &payload,
+            tenant,
+            occurred_at,
+            subject_id,
+            actor,
+            idempotency_key,
+        )
         .await
 }
 

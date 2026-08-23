@@ -35,7 +35,6 @@ use crate::PgStore;
 pub struct PgAuthGrantLifecycle {
     read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
-    clock: Box<dyn Clock>,
     #[cfg(all(test, feature = "integration"))]
     login_fault: Option<(String, AuthGrantLoginFault)>,
     #[cfg(all(test, feature = "integration"))]
@@ -91,11 +90,10 @@ impl AuthGrantLoginLockGate {
 
 impl PgAuthGrantLifecycle {
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new(store: &PgStore, _clock: Box<dyn Clock>) -> Self {
         Self {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            clock,
             login_fault: None,
             login_lock_gate: None,
         }
@@ -104,7 +102,7 @@ impl PgAuthGrantLifecycle {
     pub(crate) fn new_with_projection_registry(
         reader: &VerifiedPgReadStore,
         writer: &VerifiedPgWriteStore,
-        clock: Box<dyn Clock>,
+        _clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
@@ -113,7 +111,6 @@ impl PgAuthGrantLifecycle {
                 writer,
                 projection_registry,
             ),
-            clock,
             #[cfg(all(test, feature = "integration"))]
             login_fault: None,
             #[cfg(all(test, feature = "integration"))]
@@ -144,7 +141,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
         let (grant, initial_refresh, persistence) = mutation.into_parts();
         let generated_fact = event.fact();
-        let (entry, envelope, _fact) = event.into_parts();
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let tenant = grant.tenant();
@@ -153,14 +150,9 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         let env = OutboxEnvelope::new(
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                    .unix_seconds(),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

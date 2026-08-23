@@ -151,6 +151,7 @@ pub struct MemPublisher {
 
 impl Publisher for MemPublisher {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        request.try_header().map_err(PublisherError::permanent)?;
         self.bus.publish_sync(request);
         Ok(())
     }
@@ -201,22 +202,29 @@ impl Subscriber for MemSubscriber {
 /// 闭合 demo 侧 EventId 传播（消费侧 `run_consumer` 据此幂等去重）。
 pub struct MemEmitter {
     bus: MemBus,
+    clock: Arc<dyn Clock>,
     tenant_signer: Option<Arc<dyn TenantMetadataSigner>>,
 }
 
 impl MemEmitter {
     /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）。
-    pub fn new(bus: MemBus) -> Self {
+    pub fn new(bus: MemBus, clock: Arc<dyn Clock>) -> Self {
         Self {
             bus,
+            clock,
             tenant_signer: None,
         }
     }
 
     /// 绑定 tenant metadata signer，供 demo/journey provider 演练 consumer fail-closed tenantAuthority 语义。
-    pub fn with_tenant_metadata_signer(bus: MemBus, signer: Arc<dyn TenantMetadataSigner>) -> Self {
+    pub fn with_tenant_metadata_signer(
+        bus: MemBus,
+        signer: Arc<dyn TenantMetadataSigner>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             bus,
+            clock,
             tenant_signer: Some(signer),
         }
     }
@@ -305,9 +313,14 @@ fn envelope_metadata(
     topic: &str,
     message_id: &str,
     signer: Option<&dyn TenantMetadataSigner>,
+    occurred_at: rss_contract::Timepoint,
 ) -> Result<diport::EnvelopeMetadata, Box<dyn Error + Send + Sync>> {
     let mut metadata = diport::EnvelopeMetadata::empty();
     metadata.insert_wire_pair(diport::KEY_TENANT_ID, envelope.tenant().to_string());
+    metadata.insert_wire_pair(
+        diport::KEY_OCCURRED_AT,
+        occurred_at.unix_seconds().to_string(),
+    );
     metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, envelope.contract().version());
     metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, envelope.contract().schema_hash());
     if let Some(signer) = signer {
@@ -337,6 +350,8 @@ impl OutboxEmitter for MemEmitter {
         entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
+        let occurred_at =
+            rss_contract::Timepoint::try_from(self.clock.now()).map_err(OutboxEmitError::new)?;
         let topic = entry.topic().as_str();
         let message_id = entry.idem_key().as_str();
         let request = PublishRequest::new(
@@ -345,8 +360,14 @@ impl OutboxEmitter for MemEmitter {
             entry.payload().to_vec(),
         )
         .with_metadata(
-            envelope_metadata(&envelope, topic, message_id, self.tenant_signer.as_deref())
-                .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
+            envelope_metadata(
+                &envelope,
+                topic,
+                message_id,
+                self.tenant_signer.as_deref(),
+                occurred_at,
+            )
+            .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
         );
         self.bus
             .publisher()
@@ -379,8 +400,8 @@ pub struct MemAuthGrantStore {
 }
 
 impl MemAuthGrantStore {
-    /// Bind the provider to the same in-memory bus and clock used by the demo composition.
-    pub fn new(bus: MemBus, _clock: Arc<dyn Clock>) -> Self {
+    /// Bind the provider to the in-memory bus used by the demo composition.
+    pub fn new(bus: MemBus) -> Self {
         Self {
             bus,
             tenant_signer: None,
@@ -388,12 +409,8 @@ impl MemAuthGrantStore {
         }
     }
 
-    /// Bind a tenant metadata signer and authoritative writer clock for fail-closed journey coverage.
-    pub fn with_tenant_metadata_signer(
-        bus: MemBus,
-        signer: Arc<dyn TenantMetadataSigner>,
-        _clock: Arc<dyn Clock>,
-    ) -> Self {
+    /// Bind a tenant metadata signer for fail-closed journey coverage.
+    pub fn with_tenant_metadata_signer(bus: MemBus, signer: Arc<dyn TenantMetadataSigner>) -> Self {
         Self {
             bus,
             tenant_signer: Some(signer),
@@ -447,7 +464,7 @@ impl AuthGrantLifecycle for MemAuthGrantStore {
                     "login producer does not authorize session-created envelope",
                 ))
             })?;
-        let (entry, envelope, _fact) = event.into_parts();
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
         let topic = entry.topic().as_str();
         let message_id = entry.idem_key().as_str();
         let request = PublishRequest::new(
@@ -456,8 +473,14 @@ impl AuthGrantLifecycle for MemAuthGrantStore {
             entry.payload().to_vec(),
         )
         .with_metadata(
-            envelope_metadata(&envelope, topic, message_id, self.tenant_signer.as_deref())
-                .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
+            envelope_metadata(
+                &envelope,
+                topic,
+                message_id,
+                self.tenant_signer.as_deref(),
+                occurred_at,
+            )
+            .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
         );
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.grants.contains_key(grant.id())
@@ -2781,6 +2804,15 @@ mod tests {
     const TOPIC: &str = "identity.session-created";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    fn valid_metadata() -> diport::EnvelopeMetadata {
+        let mut metadata = diport::EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
+        metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, "1");
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, "v1");
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, HASH);
+        metadata
+    }
+
     fn global_cas_test_key(id: u8) -> GlobalCasStoreKey {
         let mut digest = [0_u8; 32];
         digest[31] = id;
@@ -3143,11 +3175,14 @@ mod tests {
             .await
             .expect("subscribe");
         bus.publisher()
-            .publish(PublishRequest::new(
-                Topic::new(TOPIC),
-                MessageId::new("evt-roundtrip"),
-                b"hello".to_vec(),
-            ))
+            .publish(
+                PublishRequest::new(
+                    Topic::new(TOPIC),
+                    MessageId::new("evt-roundtrip"),
+                    b"hello".to_vec(),
+                )
+                .with_metadata(valid_metadata()),
+            )
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
@@ -3176,11 +3211,14 @@ mod tests {
             .await
             .expect("subscribe b");
         bus.publisher()
-            .publish(PublishRequest::new(
-                Topic::new(TOPIC),
-                MessageId::new("evt-fanout"),
-                b"x".to_vec(),
-            ))
+            .publish(
+                PublishRequest::new(
+                    Topic::new(TOPIC),
+                    MessageId::new("evt-fanout"),
+                    b"x".to_vec(),
+                )
+                .with_metadata(valid_metadata()),
+            )
             .await
             .expect("publish");
         assert_eq!(a.next().await.expect("a msg").payload().as_bytes(), b"x");
@@ -3198,14 +3236,39 @@ mod tests {
             .await
             .expect("subscribe");
         bus.publisher()
-            .publish(PublishRequest::new(
-                Topic::new(TOPIC),
-                MessageId::new("evt-other"),
-                b"x".to_vec(),
-            ))
+            .publish(
+                PublishRequest::new(
+                    Topic::new(TOPIC),
+                    MessageId::new("evt-other"),
+                    b"x".to_vec(),
+                )
+                .with_metadata(valid_metadata()),
+            )
             .await
             .expect("publish");
         // 取消后流终止：不同 topic 无投递 ⇒ None。
+        token.cancel();
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn publisher_rejects_invalid_envelope_before_enqueue() {
+        let bus = MemBus::new();
+        let token = CancellationToken::new();
+        let mut stream = bus
+            .subscriber()
+            .subscribe(Topic::new(TOPIC), token.clone())
+            .await
+            .expect("subscribe");
+        let result = bus
+            .publisher()
+            .publish(PublishRequest::new(
+                Topic::new(TOPIC),
+                MessageId::new("invalid-envelope"),
+                Vec::new(),
+            ))
+            .await;
+        assert!(result.is_err());
         token.cancel();
         assert!(stream.next().await.is_none());
     }
@@ -3240,10 +3303,13 @@ mod tests {
                 rss_request_context::RowScope::SelfOnly,
             ),
         );
-        MemEmitter::new(bus.clone())
-            .emit(entry, env)
-            .await
-            .expect("emit");
+        MemEmitter::new(
+            bus.clone(),
+            Arc::new(FixedClock::at_unix_secs(1_700_000_000)),
+        )
+        .emit(entry, env)
+        .await
+        .expect("emit");
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(
             msg.id().as_str(),
@@ -3252,11 +3318,9 @@ mod tests {
         );
         assert_eq!(msg.payload().as_bytes(), b"payload");
         assert_eq!(
-            msg.metadata().tenant_id(),
-            Some(
-                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
-                    .expect("tenant")
-            ),
+            msg.try_header().expect("complete envelope").tenant_id(),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("tenant"),
             "MemEmitter 应透传 tenantId metadata"
         );
         assert_eq!(msg.metadata().get(diport::KEY_SCHEMA_VERSION), Some("v1"));
@@ -3302,13 +3366,20 @@ mod tests {
             ),
         );
 
-        MemEmitter::with_tenant_metadata_signer(bus.clone(), signer.clone())
-            .emit(entry, env)
-            .await
-            .expect("emit");
+        MemEmitter::with_tenant_metadata_signer(
+            bus.clone(),
+            signer.clone(),
+            Arc::new(FixedClock::at_unix_secs(1_700_000_000)),
+        )
+        .emit(entry, env)
+        .await
+        .expect("emit");
 
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.metadata().tenant_id(), Some(tenant));
+        assert_eq!(
+            msg.try_header().expect("complete envelope").tenant_id(),
+            tenant
+        );
         assert_eq!(
             msg.metadata().get(diport::KEY_TENANT_AUTHORITY),
             Some("signed-tenant-authority"),
@@ -3340,11 +3411,7 @@ mod tests {
         let event = session_created_event("evt-session-mem-tenant", &grant).await;
 
         let signer = Arc::new(RecordingTenantSigner::default());
-        let store = MemAuthGrantStore::with_tenant_metadata_signer(
-            bus.clone(),
-            signer,
-            Arc::new(FixedClock::at_unix_secs(1_000)),
-        );
+        let store = MemAuthGrantStore::with_tenant_metadata_signer(bus.clone(), signer);
         let _persisted = store
             .persist_login_grant(
                 login_receipt(),
@@ -3357,9 +3424,14 @@ mod tests {
 
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(
-            msg.metadata().tenant_id(),
-            Some(tenant),
+            msg.try_header().expect("complete envelope").tenant_id(),
+            tenant,
             "MemAuthGrantStore co-tx path must carry tenantId metadata"
+        );
+        assert_eq!(
+            msg.try_header().expect("complete envelope").occurred_at(),
+            rss_contract::Timepoint::try_from(1_000_i64).expect("time"),
+            "durable writer must preserve the authoring time instead of resampling its clock"
         );
         assert_eq!(
             msg.metadata().get(diport::KEY_TENANT_AUTHORITY),
@@ -3405,7 +3477,7 @@ mod tests {
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-publish-order", [17; 32]);
         let refresh_hash = refresh.token_hash().clone();
-        let store = MemAuthGrantStore::new(bus, Arc::new(FixedClock::at_unix_secs(1_000)));
+        let store = MemAuthGrantStore::new(bus);
         let writer = {
             let store = store.clone();
             let grant = grant.clone();
@@ -3460,11 +3532,7 @@ mod tests {
         let event = session_created_event("evt-session-mem-mismatch", &grant).await;
 
         let signer = Arc::new(RecordingTenantSigner::default());
-        let store = MemAuthGrantStore::with_tenant_metadata_signer(
-            MemBus::new(),
-            signer.clone(),
-            Arc::new(FixedClock::at_unix_secs(1_000)),
-        );
+        let store = MemAuthGrantStore::with_tenant_metadata_signer(MemBus::new(), signer.clone());
         let result = store
             .persist_login_grant(
                 login_receipt(),
@@ -3501,11 +3569,7 @@ mod tests {
         let event = session_created_event("evt-session-mem-envelope-mismatch", &other_grant).await;
 
         let signer = Arc::new(RecordingTenantSigner::default());
-        let store = MemAuthGrantStore::with_tenant_metadata_signer(
-            MemBus::new(),
-            signer.clone(),
-            Arc::new(FixedClock::at_unix_secs(1_000)),
-        );
+        let store = MemAuthGrantStore::with_tenant_metadata_signer(MemBus::new(), signer.clone());
         let result = store
             .persist_login_grant(
                 login_receipt(),
@@ -3556,7 +3620,10 @@ mod tests {
             .await
             .expect("subscribe");
         let mut md = diport::EnvelopeMetadata::empty();
+        md.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
         md.insert_wire_pair(diport::KEY_OCCURRED_AT, "1700000003");
+        md.insert_wire_pair(diport::KEY_SCHEMA_VERSION, "v1");
+        md.insert_wire_pair(diport::KEY_SCHEMA_HASH, HASH);
         md.insert_wire_pair(diport::KEY_CORRELATION, "corr-mem-1");
         md.insert_wire_pair(diport::KEY_SUBJECT_ID, "subj-mem");
         md.insert_wire_pair(diport::KEY_ACTOR, "actor-mem");
@@ -3574,8 +3641,8 @@ mod tests {
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(msg.payload().as_bytes(), b"with-meta");
         assert_eq!(
-            msg.metadata().occurred_at_secs(),
-            Some(1_700_000_003_i64),
+            msg.metadata().get(diport::KEY_OCCURRED_AT),
+            Some("1700000003"),
             "occurred_at 应透传到 Message::metadata()"
         );
         assert_eq!(

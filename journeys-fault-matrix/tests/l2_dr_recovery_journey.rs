@@ -10,8 +10,8 @@ use amqp::{AmqpPublisher, AmqpSubscriber};
 use anyhow::{Context, Result, ensure};
 use consistency::IdemKey;
 use diport::{
-    AckAction, AckableSubscriber, Acker, DynPublisher, ManagedResource, MessageId, PublishRequest,
-    Publisher, Topic,
+    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeMetadata, ManagedResource,
+    MessageId, PublishRequest, Publisher, Topic,
 };
 use eventexec::{
     L2DrRecoveryError, L2DrRecoveryOperatorSubject, L2DrRecoveryOutcome, L2DrRecoveryPlan,
@@ -270,14 +270,20 @@ async fn publish_duplicate_events(
     topic: &Topic,
     event_id: &str,
     payload: &[u8],
+    tenant: rss_request_context::TenantId,
 ) -> Result<()> {
+    let contract = generated::event::identity_v1::session_created::CONTRACT;
     for _ in 0..2 {
+        let mut metadata = EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(diport::KEY_TENANT_ID, tenant.to_string());
+        metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, TEST_OCCURRED_AT.to_string());
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, contract.version());
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, contract.schema_hash());
         publisher
-            .publish(PublishRequest::new(
-                topic.clone(),
-                MessageId::new(event_id),
-                payload.to_vec(),
-            ))
+            .publish(
+                PublishRequest::new(topic.clone(), MessageId::new(event_id), payload.to_vec())
+                    .with_metadata(metadata),
+            )
             .await?;
     }
     Ok(())
@@ -294,7 +300,7 @@ async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
     let publisher =
         connect_publisher(&harness.rabbit_url, &harness.name("broker-ahead-pub")).await?;
     let payload = serde_json::to_vec(&session_created_payload(harness.tenant, session_id))?;
-    publish_duplicate_events(&publisher, &topic, &event_id, &payload).await?;
+    publish_duplicate_events(&publisher, &topic, &event_id, &payload, harness.tenant).await?;
 
     let epoch = RecoveryEpochId::new(Uuid::new_v4())?;
     let start_audit_id = Uuid::new_v4();

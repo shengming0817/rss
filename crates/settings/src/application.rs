@@ -516,11 +516,11 @@ impl SettingsService {
         change_kind: SettingsConfigChangeKind,
         source_version: Option<u64>,
     ) -> Result<ReviewedEvent, SettingsServiceError> {
+        let occurred_at = rss_contract::Timepoint::saturating_from_system_time(self.clock.now());
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.as_str().to_string(),
-            occurred_at: rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                .unix_seconds(),
+            occurred_at: occurred_at.unix_seconds(),
             source_version: source_version.map(wire_version),
             tenant_id: tenant.to_string(),
             version: wire_version(version),
@@ -538,6 +538,7 @@ impl SettingsService {
             &GeneratedEventEncoder,
             payload,
             tenant,
+            occurred_at,
             subject_id,
             actor,
             IdemKey::parse(&event_id).map_err(SettingsServiceError::IdempotencyKey)?,

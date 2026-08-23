@@ -538,8 +538,9 @@ async fn login_audit_durable_topology() -> Result<()> {
             .map(|message| &message.metadata)
             .find(|metadata| !metadata.is_empty())
             .ok_or_else(|| anyhow::anyhow!("consumer 未收到任何携 envelope metadata 的消息"))?;
+        let expected_occurred_at = NOW_SECS.to_string();
         anyhow::ensure!(
-            md.occurred_at_secs() == Some(NOW_SECS as i64),
+            md.get(diport::KEY_OCCURRED_AT) == Some(expected_occurred_at.as_str()),
             "occurred_at（注入 Clock）应经 outbox.metadata→relay→broker→consumer 全链保真"
         );
         anyhow::ensure!(

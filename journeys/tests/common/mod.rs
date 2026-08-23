@@ -292,6 +292,7 @@ pub fn signed_metadata(
     let mut metadata = EnvelopeMetadata::empty();
     metadata.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
     metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, "1700000000");
     metadata.insert_wire_pair(
         diport::KEY_SCHEMA_VERSION,
         generated::event::identity_v1::session_created::CONTRACT.version(),

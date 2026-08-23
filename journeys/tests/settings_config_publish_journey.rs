@@ -114,7 +114,11 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     ));
     let domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
-            MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
+            MemEmitter::with_tenant_metadata_signer(
+                bus.clone(),
+                memory_tenant_signer(),
+                Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+            ),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         )),
         secret_repo,
@@ -244,7 +248,11 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
 
     // 4. 发布配置：注入 MemEmitter + 固定时钟，CAS 写 v1 + 发 version-changed fact。
     let service = SettingsService::with_seed(
-        MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
+        MemEmitter::with_tenant_metadata_signer(
+            bus.clone(),
+            memory_tenant_signer(),
+            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+        ),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let actor = actor(tenant)?;
@@ -298,7 +306,11 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
 
     // 3. service（with_seed 注入 MemEmitter + 固定时钟）。
     let service = SettingsService::with_seed(
-        MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
+        MemEmitter::with_tenant_metadata_signer(
+            bus.clone(),
+            memory_tenant_signer(),
+            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+        ),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let query = service.config_query_service();

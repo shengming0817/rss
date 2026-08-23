@@ -257,11 +257,19 @@ async fn run_consumer_ackable_quarantines_untrusted_envelope_in_broker_dlq()
     );
     let drive = async {
         publisher
-            .publish(PublishRequest::new(
-                topic.clone(),
-                MessageId::new("evt-consumer-alo-untrusted"),
-                b"untrusted-envelope".to_vec(),
-            ))
+            .publish(
+                PublishRequest::new(
+                    topic.clone(),
+                    MessageId::new("evt-consumer-alo-untrusted"),
+                    b"untrusted-envelope".to_vec(),
+                )
+                .with_metadata(common::signed_metadata(
+                    "untrusted-domain",
+                    REJECT_TOPIC,
+                    REJECT_TOPIC,
+                    "evt-consumer-alo-untrusted",
+                )?),
+            )
             .await?;
         await_map(Duration::from_secs(10), async || {
             (sub.broker_dead_letter_depth_for_test(&topic).await.ok() == Some(1)).then_some(())

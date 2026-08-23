@@ -421,7 +421,11 @@ async fn credential_security_event_consumer_appends_current_and_all_without_iden
         assert!(matches!(
             std::sync::Arc::clone(&handler)
                 .handle(
-                    diport::Message::new(&event_id, serde_json::to_vec(&payload)?),
+                    validated_event_message(
+                        diport::Message::new(&event_id, serde_json::to_vec(&payload)?),
+                        tenant,
+                        1_700_000_400_i64 + index,
+                    ),
                     ctx.clone(),
                     key.clone(),
                     lease
@@ -476,7 +480,11 @@ async fn credential_security_event_consumer_appends_current_and_all_without_iden
     assert!(matches!(
         handler
             .handle(
-                diport::Message::new(&invalid_id, serde_json::to_vec(&invalid)?),
+                validated_event_message(
+                    diport::Message::new(&invalid_id, serde_json::to_vec(&invalid)?),
+                    tenant,
+                    1_700_000_500_i64,
+                ),
                 ctx,
                 invalid_key,
                 invalid_lease

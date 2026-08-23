@@ -45,6 +45,8 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use bootstrap::{KernelError, SubscriberCapability};
 use diport::Message;
+use eventexec::consumer::ValidatedEvent;
+use eventexec::event_metadata::EventMetadata;
 #[cfg(test)]
 use generated::event::SubscriptionExecution;
 #[cfg(test)]
@@ -171,6 +173,8 @@ impl SecurityAuditCommand {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuditEventRecordError {
+    #[error("audit event envelope validation failed")]
+    Envelope(#[source] diport::EnvelopeHeaderError),
     #[error("audit event payload decode failed")]
     Decode(#[source] serde_json::Error),
     #[error("audit event tenant parse failed")]
@@ -187,6 +191,10 @@ pub enum AuditEventRecordError {
     SecurityKind,
     #[error("audit event timestamp is outside the Unix int64 range")]
     Time(#[source] rss_contract::TimepointError),
+    #[error("audit event tenant does not match the validated envelope")]
+    TenantMismatch,
+    #[error("audit event occurrence time does not match the validated envelope")]
+    OccurredAtMismatch,
 }
 
 /// Decode a generated identity event payload into the audit domain record shape.
@@ -195,20 +203,28 @@ pub enum AuditEventRecordError {
 /// storage transaction capability and call this domain helper.
 pub fn audit_record_from_event_message(
     kind: AuditEventKind,
-    message: &Message,
+    event: &ValidatedEvent,
 ) -> Result<AuditRecord, AuditEventRecordError> {
+    let message = event.message();
+    let event_metadata = event.metadata();
     match kind {
-        AuditEventKind::SessionCreated => session_created_record_from_message(message),
-        AuditEventKind::RoleAssigned => role_assigned_record_from_message(message),
-        AuditEventKind::RoleRevoked => role_revoked_record_from_message(message),
-        AuditEventKind::PolicyUpdated => policy_updated_record_from_message(message),
+        AuditEventKind::SessionCreated => {
+            session_created_record_from_message(message, event_metadata)
+        }
+        AuditEventKind::RoleAssigned => role_assigned_record_from_message(message, event_metadata),
+        AuditEventKind::RoleRevoked => role_revoked_record_from_message(message, event_metadata),
+        AuditEventKind::PolicyUpdated => {
+            policy_updated_record_from_message(message, event_metadata)
+        }
         AuditEventKind::SecurityEvent => Err(AuditEventRecordError::SecurityKind),
     }
 }
 
 pub fn security_audit_command_from_message(
-    message: &Message,
+    event: &ValidatedEvent,
 ) -> Result<SecurityAuditCommand, AuditEventRecordError> {
+    let message = event.message();
+    let event_metadata = event.metadata();
     let payload: IdentitySecurityEventPayload =
         serde_json::from_slice(message.payload().as_bytes())
             .map_err(AuditEventRecordError::Decode)?;
@@ -278,7 +294,7 @@ pub fn security_audit_command_from_message(
             action,
             resource: ResourceRef::new(RESOURCE_KIND_SECURITY_TARGET, target_ref.to_string()),
             outcome: AuditOutcome::Success,
-            recorded_at: from_unix_secs(payload.occurred_at)?,
+            recorded_at: recorded_at_from_payload(tenant, payload.occurred_at, event_metadata)?,
         },
     })
 }
@@ -325,15 +341,29 @@ where
     }
 }
 
-/// i64 unix 秒 → `SystemTime`，任何负值或平台范围溢出都显式失败。
-fn from_unix_secs(secs: i64) -> Result<SystemTime, AuditEventRecordError> {
-    rss_contract::Timepoint::try_from(secs)
-        .and_then(rss_contract::Timepoint::to_system_time)
+/// Join payload coordinates to the validated envelope before creating a durable audit record.
+fn recorded_at_from_payload(
+    tenant: rss_request_context::TenantId,
+    occurred_at_secs: i64,
+    event_metadata: &EventMetadata,
+) -> Result<SystemTime, AuditEventRecordError> {
+    if tenant != event_metadata.tenant_id() {
+        return Err(AuditEventRecordError::TenantMismatch);
+    }
+    let occurred_at =
+        rss_contract::Timepoint::try_from(occurred_at_secs).map_err(AuditEventRecordError::Time)?;
+    if occurred_at != event_metadata.occurred_at() {
+        return Err(AuditEventRecordError::OccurredAtMismatch);
+    }
+    event_metadata
+        .occurred_at()
+        .to_system_time()
         .map_err(AuditEventRecordError::Time)
 }
 
 fn session_created_record_from_message(
     message: &Message,
+    event_metadata: &EventMetadata,
 ) -> Result<AuditRecord, AuditEventRecordError> {
     let payload: IdentitySessionCreatedPayload =
         serde_json::from_slice(message.payload().as_bytes())
@@ -350,7 +380,7 @@ fn session_created_record_from_message(
         action,
         resource: ResourceRef::new(RESOURCE_KIND_SESSION, resource_id.into_string()),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at)?,
+        recorded_at: recorded_at_from_payload(tenant, payload.occurred_at, event_metadata)?,
     })
 }
 
@@ -385,6 +415,7 @@ impl SessionAuditResourceId {
 
 fn role_assigned_record_from_message(
     message: &Message,
+    event_metadata: &EventMetadata,
 ) -> Result<AuditRecord, AuditEventRecordError> {
     let payload: IdentityRoleAssignedPayload = serde_json::from_slice(message.payload().as_bytes())
         .map_err(AuditEventRecordError::Decode)?;
@@ -399,12 +430,13 @@ fn role_assigned_record_from_message(
         action,
         resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at)?,
+        recorded_at: recorded_at_from_payload(tenant, payload.occurred_at, event_metadata)?,
     })
 }
 
 fn role_revoked_record_from_message(
     message: &Message,
+    event_metadata: &EventMetadata,
 ) -> Result<AuditRecord, AuditEventRecordError> {
     let payload: IdentityRoleRevokedPayload = serde_json::from_slice(message.payload().as_bytes())
         .map_err(AuditEventRecordError::Decode)?;
@@ -419,12 +451,13 @@ fn role_revoked_record_from_message(
         action,
         resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at)?,
+        recorded_at: recorded_at_from_payload(tenant, payload.occurred_at, event_metadata)?,
     })
 }
 
 fn policy_updated_record_from_message(
     message: &Message,
+    event_metadata: &EventMetadata,
 ) -> Result<AuditRecord, AuditEventRecordError> {
     let payload: IdentityPolicyUpdatedPayload =
         serde_json::from_slice(message.payload().as_bytes())
@@ -448,7 +481,7 @@ fn policy_updated_record_from_message(
             ),
         ),
         outcome: AuditOutcome::Success,
-        recorded_at: from_unix_secs(payload.occurred_at)?,
+        recorded_at: recorded_at_from_payload(tenant, payload.occurred_at, event_metadata)?,
     })
 }
 
@@ -1279,6 +1312,23 @@ mod tests {
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
     const AUDIT_TENANT_ENTRIES_PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";
 
+    fn audit_record_from_event_message(
+        kind: AuditEventKind,
+        message: &Message,
+    ) -> Result<AuditRecord, AuditEventRecordError> {
+        let event =
+            ValidatedEvent::for_test(message.clone()).map_err(AuditEventRecordError::Envelope)?;
+        super::audit_record_from_event_message(kind, &event)
+    }
+
+    fn security_audit_command_from_message(
+        message: &Message,
+    ) -> Result<SecurityAuditCommand, AuditEventRecordError> {
+        let event =
+            ValidatedEvent::for_test(message.clone()).map_err(AuditEventRecordError::Envelope)?;
+        super::security_audit_command_from_message(&event)
+    }
+
     #[allow(clippy::expect_used)]
     fn admit_test_writes(registry: bootstrap::Registry) -> bootstrap::WriteAdmittedRegistry {
         let (admission_control, _, _, write_admission) =
@@ -1816,6 +1866,42 @@ mod tests {
         serde_json::to_vec(&payload).expect("encode")
     }
 
+    const EVENT_SCHEMA_HASH: &str =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[allow(clippy::expect_used)]
+    fn event_message(id: impl Into<String>, payload: Vec<u8>) -> Message {
+        let value = serde_json::from_slice::<serde_json::Value>(&payload).ok();
+        let tenant = value
+            .as_ref()
+            .and_then(|value| value.get("tenantId"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| rss_request_context::TenantId::parse(value).is_ok())
+            .unwrap_or(CANON_TENANT);
+        let occurred_at = value
+            .as_ref()
+            .and_then(|value| value.get("occurredAt"))
+            .and_then(serde_json::Value::as_i64)
+            .filter(|value| *value >= 0)
+            .unwrap_or(0);
+        event_message_with_coordinates(id, payload, tenant, occurred_at)
+    }
+
+    fn event_message_with_coordinates(
+        id: impl Into<String>,
+        payload: Vec<u8>,
+        tenant: &str,
+        occurred_at: i64,
+    ) -> Message {
+        let mut metadata = diport::EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(diport::KEY_TENANT_ID, tenant);
+        metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, occurred_at.to_string());
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, "v1");
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, EVENT_SCHEMA_HASH);
+        metadata.insert_wire_pair(diport::KEY_CORRELATION, "audit-test-correlation");
+        Message::new_with_metadata(id, payload, metadata)
+    }
+
     #[allow(clippy::expect_used)]
     fn role_assigned_payload_bytes() -> Vec<u8> {
         role_assigned_payload_bytes_for("target-subject")
@@ -1908,7 +1994,7 @@ mod tests {
             let payload = format!(
                 r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"{kind}","occurredAt":1700000400,"target":{{"keyId":1,"kind":"{target_kind}","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
             );
-            let command = security_audit_command_from_message(&Message::new(
+            let command = security_audit_command_from_message(&event_message(
                 "security",
                 payload.into_bytes(),
             ))
@@ -1931,7 +2017,7 @@ mod tests {
             let payload = format!(
                 r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"{kind}","occurredAt":1,"target":{{"keyId":1,"kind":"{mismatched_target_kind}","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
             );
-            let error = security_audit_command_from_message(&Message::new(
+            let error = security_audit_command_from_message(&event_message(
                 "security",
                 payload.into_bytes(),
             ))
@@ -1943,14 +2029,14 @@ mod tests {
             r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"logoutAll","occurredAt":-1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
         );
         let error =
-            security_audit_command_from_message(&Message::new("security", pre_epoch.into_bytes()))
+            security_audit_command_from_message(&event_message("security", pre_epoch.into_bytes()))
                 .expect_err("pre-epoch security event must fail closed");
         assert!(matches!(error, AuditEventRecordError::Time(_)));
 
         let payload_with_unknown_field = format!(
             r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}"}},"kind":"logoutAll","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}","sid":"secret"}}"#
         );
-        let error = security_audit_command_from_message(&Message::new(
+        let error = security_audit_command_from_message(&event_message(
             "security",
             payload_with_unknown_field.into_bytes(),
         ))
@@ -1965,7 +2051,7 @@ mod tests {
             let payload = format!(
                 r#"{{"actor":{{"keyId":1,"kind":"{actor_kind}","ref":"{actor_ref}"}},"kind":"accountReactivated","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
             );
-            let record = security_audit_command_from_message(&Message::new(
+            let record = security_audit_command_from_message(&event_message(
                 "security",
                 payload.into_bytes(),
             ))
@@ -1978,7 +2064,7 @@ mod tests {
         let payload_with_unknown_actor_field = format!(
             r#"{{"actor":{{"keyId":1,"kind":"admin","ref":"{actor_ref}","subject":"secret"}},"kind":"logoutAll","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
         );
-        let error = security_audit_command_from_message(&Message::new(
+        let error = security_audit_command_from_message(&event_message(
             "security",
             payload_with_unknown_actor_field.into_bytes(),
         ))
@@ -1993,7 +2079,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("handle ok");
@@ -2021,11 +2107,62 @@ mod tests {
     }
 
     #[test]
+    fn session_created_rejects_envelope_tenant_mismatch_before_record_creation() {
+        let message = event_message_with_coordinates(
+            CANON_EVENT_ID,
+            payload_bytes(CANON_SUBJECT, CANON_TENANT),
+            "550e8400-e29b-41d4-a716-446655440000",
+            1_700_000_000,
+        );
+
+        let error = audit_record_from_event_message(AuditEventKind::SessionCreated, &message)
+            .err()
+            .expect("envelope and payload tenants must match");
+
+        assert!(matches!(error, AuditEventRecordError::TenantMismatch));
+    }
+
+    #[test]
+    fn session_created_rejects_invalid_envelope_before_payload_decode() {
+        let mut metadata = diport::EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, "v1");
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, EVENT_SCHEMA_HASH);
+        let message =
+            Message::new_with_metadata(CANON_EVENT_ID, b"payload-is-not-json".to_vec(), metadata);
+
+        let error = audit_record_from_event_message(AuditEventKind::SessionCreated, &message)
+            .err()
+            .expect("invalid envelope must fail before payload decode");
+
+        assert!(matches!(
+            error,
+            AuditEventRecordError::Envelope(diport::EnvelopeHeaderError::MissingOccurredAt)
+        ));
+    }
+
+    #[test]
+    fn session_created_rejects_envelope_time_mismatch_before_record_creation() {
+        let message = event_message_with_coordinates(
+            CANON_EVENT_ID,
+            payload_bytes(CANON_SUBJECT, CANON_TENANT),
+            CANON_TENANT,
+            1_700_000_001,
+        );
+
+        let error = audit_record_from_event_message(AuditEventKind::SessionCreated, &message)
+            .err()
+            .expect("envelope and payload occurrence times must match");
+
+        assert!(matches!(error, AuditEventRecordError::OccurredAtMismatch));
+    }
+
+    #[test]
     #[allow(clippy::expect_used)]
     fn session_created_rejects_non_uuid_event_id() {
         let error = audit_record_from_event_message(
             AuditEventKind::SessionCreated,
-            &Message::new(
+            &event_message(
                 "not-an-event-uuid",
                 payload_bytes(CANON_SUBJECT, CANON_TENANT),
             ),
@@ -2041,7 +2178,7 @@ mod tests {
     fn session_created_rejects_non_v4_event_id() {
         let error = audit_record_from_event_message(
             AuditEventKind::SessionCreated,
-            &Message::new(
+            &event_message(
                 "33333333-4444-1555-8666-777777777777",
                 payload_bytes(CANON_SUBJECT, CANON_TENANT),
             ),
@@ -2064,7 +2201,7 @@ mod tests {
         ] {
             let error = audit_record_from_event_message(
                 AuditEventKind::SessionCreated,
-                &Message::new(event_id, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                &event_message(event_id, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .err()
             .expect("session audit EventId must be canonical UUID v4 in the RFC variant");
@@ -2077,7 +2214,7 @@ mod tests {
     fn session_created_rejects_event_id_equal_to_session_id() {
         let error = audit_record_from_event_message(
             AuditEventKind::SessionCreated,
-            &Message::new(CANON_SESSION, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            &event_message(CANON_SESSION, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .err()
         .expect("EventId must be independent from the bearer session id");
@@ -2092,7 +2229,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::RoleAssigned,
-            Message::new("m-role-assigned", role_assigned_payload_bytes()),
+            event_message("m-role-assigned", role_assigned_payload_bytes()),
         )
         .await
         .expect("handle ok");
@@ -2131,7 +2268,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::RoleRevoked,
-            Message::new("m-role-revoked", role_revoked_payload_bytes()),
+            event_message("m-role-revoked", role_revoked_payload_bytes()),
         )
         .await
         .expect("handle ok");
@@ -2170,7 +2307,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::PolicyUpdated,
-            Message::new(
+            event_message(
                 "m-policy-updated",
                 policy_updated_payload_bytes(IdentityPolicyUpdatedPayloadChangeKind::Updated),
             ),
@@ -2214,7 +2351,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::RoleAssigned,
-            Message::new(
+            event_message(
                 "m-role-assigned-service",
                 role_assigned_payload_bytes_for_kind(
                     "target-subject",
@@ -2251,7 +2388,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::RoleAssigned,
-            Message::new(
+            event_message(
                 "m-role-assigned-a",
                 role_assigned_payload_bytes_for("target-a"),
             ),
@@ -2261,7 +2398,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::RoleAssigned,
-            Message::new(
+            event_message(
                 "m-role-assigned-b",
                 role_assigned_payload_bytes_for("target-b"),
             ),
@@ -2296,7 +2433,7 @@ mod tests {
         let result = append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m-bad", b"not json".to_vec()),
+            event_message("m-bad", b"not json".to_vec()),
         )
         .await;
         assert!(result.is_err());
@@ -2325,7 +2462,7 @@ mod tests {
         let result = append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", raw),
+            event_message("m", raw),
         )
         .await;
         assert!(result.is_err());
@@ -2338,9 +2475,12 @@ mod tests {
             r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_SUBJECT}","tenantId":"00000000-0000-0000-0000-000000000000","occurredAt":1700000000}}"#
         )
         .into_bytes();
-        let result =
-            append_event_for_test(repo, AuditEventKind::SessionCreated, Message::new("m", raw))
-                .await;
+        let result = append_event_for_test(
+            repo,
+            AuditEventKind::SessionCreated,
+            event_message("m", raw),
+        )
+        .await;
         assert!(result.is_err(), "nil tenant must fail the TenantId funnel");
     }
 
@@ -2357,7 +2497,7 @@ mod tests {
         let result = append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", raw),
+            event_message("m", raw),
         )
         .await;
         assert!(
@@ -2378,7 +2518,7 @@ mod tests {
         let result = append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", raw),
+            event_message("m", raw),
         )
         .await;
         assert!(result.is_err(), "非 canonical session_id 须拒绝");
@@ -2865,7 +3005,7 @@ mod tests {
             append_event_for_test(
                 repo.clone(),
                 AuditEventKind::SessionCreated,
-                Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .await
             .expect("append");
@@ -2926,7 +3066,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("append");
@@ -2967,7 +3107,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("append");
@@ -3455,7 +3595,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("append");
@@ -3513,7 +3653,7 @@ mod tests {
             append_event_for_test(
                 repo.clone(),
                 AuditEventKind::SessionCreated,
-                Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .await
             .expect("append");
@@ -3985,7 +4125,7 @@ mod tests {
             append_event_for_test(
                 repo.clone(),
                 AuditEventKind::SessionCreated,
-                Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                event_message(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .await
             .expect("append");

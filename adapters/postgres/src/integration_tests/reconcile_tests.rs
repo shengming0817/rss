@@ -44,7 +44,11 @@ async fn settings_consumer_tx_reconcile_failure_keeps_receipt_reclaimable() -> T
     );
     let outcome = std::sync::Arc::new(handler)
         .handle(
-            diport::Message::new(&event_id, b"{}".to_vec()),
+            validated_event_message(
+                diport::Message::new(&event_id, b"{}".to_vec()),
+                ctx.tenant_id(),
+                1,
+            ),
             ctx.clone(),
             key.clone(),
             first_lease,

@@ -16,6 +16,7 @@ pub use consumer::{
     ConsumerMeta, LeaseConfig, ManagedDeliveryStream, run_consumer, run_consumer_ackable,
 };
 pub mod consumer_tx;
+pub mod event_metadata;
 pub mod tenant_authority;
 pub use tenant_authority::{
     TenantAuthority, TenantAuthorityBinding, TenantAuthorityConfigError, TenantAuthorityError,
@@ -341,7 +342,7 @@ use futures::future::BoxFuture;
 // 消息原语（Message / MessageId / EnvelopeMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
 // （issue #1075，ADR-003 DI port 收敛）；本 crate 经 `diport::Message` 消费（HandlerFn/ConsumerFn 入参）。
 // 统一 delivery envelope（#1160）：`Message::metadata()` 返回的只读元数据从 broker header 透传，
-// handler 经 `msg.metadata().get(..)` / `.occurred_at_secs()` 读 transport-safe occurred_at / correlation 等元数据；
+// handler 经 validated `EventMetadata` 读 tenant/time/audit correlation；raw bag 仅供 transport 边界逐键读取；
 // subjectId / actor 是 persisted-only，不从 broker header 回流。
 use diport::{Message, RedactedSource};
 

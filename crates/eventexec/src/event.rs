@@ -58,6 +58,9 @@ pub enum EventEncodeError {
     /// Typed payload serialization failed.
     #[error("generated event payload serialization failed")]
     Serialization(#[source] serde_json::Error),
+    /// The author-provided occurrence time is outside the canonical wire range.
+    #[error("generated event occurrence time is invalid")]
+    OccurredAt(#[source] rss_contract::TimepointError),
 }
 
 /// One generated, encoded event whose fact and envelope identity were bound atomically.
@@ -68,6 +71,7 @@ pub enum EventEncodeError {
 pub struct ReviewedEvent {
     entry: EventEntry,
     envelope: OutboxEnvelopeParts,
+    occurred_at: rss_contract::Timepoint,
     fact: vocab::EventFactBinding,
 }
 
@@ -97,9 +101,21 @@ impl ReviewedEvent {
         &self.envelope
     }
 
+    /// Canonical occurrence time fixed once at the authoring boundary.
+    pub const fn occurred_at(&self) -> rss_contract::Timepoint {
+        self.occurred_at
+    }
+
     /// Consume the capability at a persistence boundary.
-    pub fn into_parts(self) -> (EventEntry, OutboxEnvelopeParts, vocab::EventFactBinding) {
-        (self.entry, self.envelope, self.fact)
+    pub fn into_parts(
+        self,
+    ) -> (
+        EventEntry,
+        OutboxEnvelopeParts,
+        rss_contract::Timepoint,
+        vocab::EventFactBinding,
+    ) {
+        (self.entry, self.envelope, self.occurred_at, self.fact)
     }
 }
 
@@ -131,6 +147,7 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
         &self,
         payload: &C::Payload,
         tenant: rss_request_context::TenantId,
+        occurred_at: rss_contract::Timepoint,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Self::IdempotencyKey,
@@ -166,6 +183,7 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
         Ok(ReviewedEvent {
             entry,
             envelope,
+            occurred_at,
             fact,
         })
     }
@@ -201,6 +219,7 @@ mod tests {
             &GeneratedEventEncoder,
             payload,
             tenant,
+            rss_contract::Timepoint::try_from(1_i64).expect("time"),
             diport::EnvelopeSubjectId::from_opaque("app.theme").expect("subject"),
             actor,
             IdemKey::parse("event-actor-tenant-mismatch").expect("idempotency key"),
@@ -226,6 +245,7 @@ mod tests {
             &GeneratedEventEncoder,
             payload,
             tenant,
+            rss_contract::Timepoint::try_from(1_i64).expect("time"),
             diport::EnvelopeSubjectId::from_opaque("root.event").expect("subject"),
             diport::OutboxActor::scoped(
                 rss_request_context::PrincipalKind::Service,

@@ -30,6 +30,10 @@ use generated::event::identity_v1::session_created::{
 };
 use rss_request_context::TenantId;
 
+fn occurred_at(value: i64) -> Result<rss_contract::Timepoint, EventEncodeError> {
+    rss_contract::Timepoint::try_from(value).map_err(EventEncodeError::OccurredAt)
+}
+
 /// Login / session-created：envelope subject + actor = canonical [`ids::UserId`].
 pub(crate) async fn emit_session_created(
     payload: IdentitySessionCreatedPayload,
@@ -37,10 +41,12 @@ pub(crate) async fn emit_session_created(
     user_id: ids::UserId,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
+    let occurred_at = occurred_at(payload.occurred_at)?;
     session_created::emit(
         &GeneratedEventEncoder,
         payload,
         tenant,
+        occurred_at,
         EnvelopeSubjectId::from_user_id(user_id),
         OutboxActor::scoped(
             rss_request_context::PrincipalKind::User,
@@ -61,10 +67,12 @@ pub(crate) async fn emit_role_assigned(
     actor_kind: rss_request_context::PrincipalKind,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
+    let occurred_at = occurred_at(payload.occurred_at)?;
     role_assigned::emit(
         &GeneratedEventEncoder,
         payload,
         tenant,
+        occurred_at,
         EnvelopeSubjectId::from_user_id(actor),
         OutboxActor::scoped(
             actor_kind,
@@ -85,10 +93,12 @@ pub(crate) async fn emit_role_revoked(
     actor_kind: rss_request_context::PrincipalKind,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
+    let occurred_at = occurred_at(payload.occurred_at)?;
     role_revoked::emit(
         &GeneratedEventEncoder,
         payload,
         tenant,
+        occurred_at,
         EnvelopeSubjectId::from_user_id(actor),
         OutboxActor::scoped(
             actor_kind,
@@ -109,10 +119,12 @@ pub(crate) async fn emit_policy_updated(
     actor_kind: rss_request_context::PrincipalKind,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
+    let occurred_at = occurred_at(payload.occurred_at)?;
     policy_updated::emit(
         &GeneratedEventEncoder,
         payload,
         tenant,
+        occurred_at,
         EnvelopeSubjectId::from_user_id(actor),
         OutboxActor::scoped(
             actor_kind,
@@ -134,10 +146,12 @@ pub(crate) async fn emit_security_event(
     actor_pseudonym: uuid::Uuid,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
+    let occurred_at = occurred_at(payload.occurred_at)?;
     security_event::emit(
         &GeneratedEventEncoder,
         payload,
         tenant,
+        occurred_at,
         EnvelopeSubjectId::from_uuid(target_pseudonym),
         OutboxActor::scoped(
             initiator_kind,
@@ -154,6 +168,7 @@ pub(crate) async fn emit_security_event(
 pub(crate) async fn emit_device_ingress_receipted(
     payload: IdentityDeviceIngressReceiptedPayload,
     tenant: TenantId,
+    occurred_at: rss_contract::Timepoint,
     device: ids::DeviceId,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
@@ -161,6 +176,7 @@ pub(crate) async fn emit_device_ingress_receipted(
         &GeneratedEventEncoder,
         payload,
         tenant,
+        occurred_at,
         EnvelopeSubjectId::from_uuid(device.as_uuid()),
         OutboxActor::scoped(
             rss_request_context::PrincipalKind::Device,

@@ -367,7 +367,7 @@ mod metadata_carry {
         md.insert_wire_pair(KEY_SUBJECT_ID, "user-7");
         let req = PublishRequest::new(Topic::new("t"), MessageId::new("e"), b"p".to_vec())
             .with_metadata(md);
-        assert_eq!(req.metadata().occurred_at_secs(), Some(1_700_000_000));
+        assert_eq!(req.metadata().get(KEY_OCCURRED_AT), Some("1700000000"));
         assert_eq!(req.metadata().get(KEY_SUBJECT_ID), Some("user-7"));
         // into_payload move 出字节。
         assert_eq!(req.into_payload(), b"p".to_vec());

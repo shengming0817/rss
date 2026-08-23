@@ -1,11 +1,13 @@
-error[E0451]: fields `entry`, `envelope` and `fact` of struct `ReviewedEvent` are private
-  --> tests/ui/reviewed_event_constructor_private_fail.rs:11:9
+error: cannot construct `ReviewedEvent` with struct literal syntax due to private fields
+  --> tests/ui/reviewed_event_constructor_private_fail.rs:10:5
    |
 10 |     ReviewedEvent {
-   |     ------------- in this type
+   |     ^^^^^^^^^^^^^
 11 |         entry,
-   |         ^^^^^ private field
+   |         ----- private field
 12 |         envelope,
-   |         ^^^^^^^^ private field
+   |         -------- private field
 13 |         fact,
-   |         ^^^^ private field
+   |         ---- private field
+   |
+   = note: ...and other private field `occurred_at` that was not provided

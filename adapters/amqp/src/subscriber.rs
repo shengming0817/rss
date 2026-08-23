@@ -1207,8 +1207,8 @@ mod tests {
 #[cfg(test)]
 mod extract_metadata_tests {
     use diport::{
-        KEY_ACTOR, KEY_CORRELATION, KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
-        KEY_SUBJECT_ID,
+        KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SCHEMA_HASH,
+        KEY_SCHEMA_VERSION, KEY_SUBJECT_ID,
     };
     use lapin::BasicProperties;
     use lapin::types::{AMQPValue, FieldTable};
@@ -1226,7 +1226,7 @@ mod extract_metadata_tests {
     fn timestamp_maps_to_occurred_at() {
         let props = BasicProperties::default().with_timestamp(1_700_000_000_u64);
         let md = extract_metadata(&props);
-        assert_eq!(md.occurred_at_secs(), Some(1_700_000_000_i64));
+        assert_eq!(md.get(KEY_OCCURRED_AT), Some("1700000000"));
     }
 
     #[test]
@@ -1307,7 +1307,7 @@ mod extract_metadata_tests {
             .with_timestamp(1_700_000_001_u64)
             .with_headers(table);
         let md = extract_metadata(&props);
-        assert_eq!(md.occurred_at_secs(), Some(1_700_000_001_i64));
+        assert_eq!(md.get(KEY_OCCURRED_AT), Some("1700000001"));
         assert_eq!(md.get(KEY_CORRELATION), Some("corr-full"));
     }
 }

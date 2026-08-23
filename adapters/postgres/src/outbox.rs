@@ -466,6 +466,8 @@ impl<'a> TenantAuthoritySignInput<'a> {
 enum RelayEnvelopeValidationReason {
     MissingTenantId,
     InvalidTenantId,
+    MissingOccurredAt,
+    InvalidOccurredAt,
     MissingSchemaVersion,
     InvalidSchemaVersion,
     MissingSchemaHash,
@@ -479,6 +481,8 @@ impl RelayEnvelopeValidationReason {
         match self {
             Self::MissingTenantId => "envelope_missing_tenant_id",
             Self::InvalidTenantId => "envelope_invalid_tenant_id",
+            Self::MissingOccurredAt => "envelope_missing_occurred_at",
+            Self::InvalidOccurredAt => "envelope_invalid_occurred_at",
             Self::MissingSchemaVersion => "envelope_missing_schema_version",
             Self::InvalidSchemaVersion => "envelope_invalid_schema_version",
             Self::MissingSchemaHash => "envelope_missing_schema_hash",
@@ -494,6 +498,8 @@ impl From<&EnvelopeHeaderError> for RelayEnvelopeValidationReason {
         match error {
             EnvelopeHeaderError::MissingTenantId => Self::MissingTenantId,
             EnvelopeHeaderError::InvalidTenantId => Self::InvalidTenantId,
+            EnvelopeHeaderError::MissingOccurredAt => Self::MissingOccurredAt,
+            EnvelopeHeaderError::InvalidOccurredAt => Self::InvalidOccurredAt,
             EnvelopeHeaderError::MissingSchemaVersion => Self::MissingSchemaVersion,
             EnvelopeHeaderError::InvalidSchemaVersion => Self::InvalidSchemaVersion,
             EnvelopeHeaderError::MissingSchemaHash => Self::MissingSchemaHash,
@@ -1743,7 +1749,7 @@ enum ClaimPublishError {
 /// outbox.metadata（jsonb→text）→ [`EnvelopeMetadata`]：逐 key-value 经 `insert_wire_pair` 透传。
 ///
 /// string 值直接用；number / bool 等 stringify（occurred_at 在 DB 存 number → 十进制 string，
-/// [`EnvelopeMetadata::occurred_at_secs`] 再反解析）。
+/// 随后由 `Message::try_header` 统一验证并解析为 `Timepoint`）。
 // reason: fail-safe——非对象 JSON / 解析失败返 empty 而非 Err，不阻 relay；relay 核心语义是
 // at-least-once 投递，envelope 降级省略 metadata 比阻断投递更安全。
 #[cfg(test)]
@@ -2409,10 +2415,10 @@ mod tests {
         with_publisher_watchdog,
     };
     use diport::{
-        EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
-        KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID, KEY_TRACE, MessageId, MetadataError,
-        OpaqueActorId, OutboxActor, PublishErrorKind, PublishRequest, PublisherError,
-        RESERVED_METADATA_KEYS, Topic as PublishTopic,
+        EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION,
+        KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID, KEY_TRACE, MessageId,
+        MetadataError, OpaqueActorId, OutboxActor, PublishErrorKind, PublishRequest,
+        PublisherError, RESERVED_METADATA_KEYS, Topic as PublishTopic,
     };
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -2877,6 +2883,18 @@ mod tests {
         assert!(
             rendered.contains(r#"reason="envelope_missing_schema_version""#),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn relay_validation_maps_required_time_failures_to_closed_reasons() {
+        assert_eq!(
+            RelayEnvelopeValidationReason::from(&EnvelopeHeaderError::MissingOccurredAt).as_label(),
+            "envelope_missing_occurred_at"
+        );
+        assert_eq!(
+            RelayEnvelopeValidationReason::from(&EnvelopeHeaderError::InvalidOccurredAt).as_label(),
+            "envelope_invalid_occurred_at"
         );
     }
 
@@ -3886,7 +3904,7 @@ mod tests {
 
     // ── hydrate_envelope_metadata 表驱动（#1160 A4）──────────────────────────
 
-    // occurredAt number → 十进制 string（occurred_at_secs() 可反解析）。
+    // occurredAt number → 十进制 string（typed header 可验证并解析）。
     // subjectId string → 原值透传。
     // correlation string → 原值透传。
     // 空对象 → empty metadata。
@@ -3895,11 +3913,11 @@ mod tests {
     // boolean/null value → compact string（other.to_string() 分支）。
     #[test]
     fn hydrate_envelope_metadata_table() {
-        // occurredAt number → string（occurred_at_secs 解析为 i64）。
+        // occurredAt number → string（typed header 解析为 Timepoint）。
         let md = hydrate_envelope_metadata(r#"{"occurredAt":1700000000}"#);
         assert_eq!(
-            md.occurred_at_secs(),
-            Some(1_700_000_000),
+            md.get(KEY_OCCURRED_AT),
+            Some("1700000000"),
             "occurredAt number → parseable string"
         );
 
@@ -3930,7 +3948,7 @@ mod tests {
         // 多键：全部可读。
         let md =
             hydrate_envelope_metadata(r#"{"correlation":"c","occurredAt":42,"subjectId":"u"}"#);
-        assert_eq!(md.occurred_at_secs(), Some(42), "multi-key occurredAt");
+        assert_eq!(md.get(KEY_OCCURRED_AT), Some("42"), "multi-key occurredAt");
         assert_eq!(md.get("subjectId"), Some("u"), "multi-key subjectId");
         assert_eq!(md.get("correlation"), Some("c"), "multi-key correlation");
 

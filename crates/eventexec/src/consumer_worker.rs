@@ -73,7 +73,7 @@ use consistency::InboxStore;
 use consistency::{HandleResult, OutboxRelay};
 use diport::{
     AckableSubscriber, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
-    DynAckableSubscriber, DynDeadLetterStore, Message, Topic,
+    DynAckableSubscriber, DynDeadLetterStore, Topic,
 };
 #[cfg(any(test, feature = "test-support"))]
 use diport::{DeliveryStream, MessageStream};
@@ -83,7 +83,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ManagedBlockingWorker;
 #[cfg(any(test, feature = "test-support"))]
 use crate::consumer::run_consumer;
-use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer_ackable};
+use crate::consumer::{ConsumerMeta, LeaseConfig, ValidatedEvent, run_consumer_ackable};
 use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
 use crate::reconcile::{BackoffPolicy, wait_or_cancel};
 use crate::relay::WorkerHealth;
@@ -172,7 +172,7 @@ pub fn spawn_test_consumer<S, H>(
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+    H: Fn(Arc<ValidatedEvent>) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
     spawn_on_dedicated_runtime(
@@ -270,7 +270,7 @@ pub fn spawn_test_ackable_consumer<S, H>(
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+    H: Fn(Arc<ValidatedEvent>) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
     spawn_on_dedicated_runtime(
@@ -500,7 +500,7 @@ pub fn spawn_consumer_ackable_subscriber<S, H>(
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
-    H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+    H: Fn(Arc<ValidatedEvent>) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
     let domain = meta.domain().to_owned();
@@ -551,10 +551,11 @@ mod tests {
     };
     use diport::{
         AckAction, AckError, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
-        ManagedResource, SubscriberError, Topic,
+        ManagedResource, Message, SubscriberError, Topic,
     };
     use diport::{
-        EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
+        EnvelopeMetadata, KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
     };
     use futures::StreamExt;
     use primitives::healthz::{HealthStatus, ProbeName};
@@ -562,7 +563,7 @@ mod tests {
 
     use super::{
         BoxFuture, CancellationToken, ConsumerMeta, DeliveryStream, DynDeadLetterStore,
-        EVENT_CONSUMER_PROBE, HandleResult, InboxStore, LeaseConfig, Message, MessageStream,
+        EVENT_CONSUMER_PROBE, HandleResult, InboxStore, LeaseConfig, MessageStream, ValidatedEvent,
         WorkerHealth, health_reporting_dlx, run_ackable_subscription_loop,
         spawn_consumer_ackable_subscriber, spawn_relay, spawn_test_ackable_consumer,
         spawn_test_consumer,
@@ -809,6 +810,7 @@ mod tests {
             .expect("tenant authority test signing cannot fail");
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, SCHEMA_HASH);
@@ -835,7 +837,8 @@ mod tests {
 
     fn handler_ack(
         counter: Arc<AtomicU32>,
-    ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static {
+    ) -> impl Fn(Arc<ValidatedEvent>) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static
+    {
         move |_msg| {
             let counter = counter.clone();
             Box::pin(async move {
@@ -848,7 +851,8 @@ mod tests {
     #[allow(clippy::panic)]
     // reason: 故意 panic，验证 worker 线程 panic 经 completion 包成 ShutdownError 上抛。
     fn handler_panic()
-    -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static {
+    -> impl Fn(Arc<ValidatedEvent>) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static
+    {
         move |_msg| Box::pin(async move { panic!("consumer-worker-test-panic") })
     }
 
@@ -1080,7 +1084,7 @@ mod tests {
                 .build()
                 .unwrap_or_else(|error| panic!("test runtime: {error}"));
             runtime.block_on(async move {
-                let handler = move |_message: Message| {
+                let handler = move |_event: Arc<ValidatedEvent>| {
                     let started = Arc::clone(&thread_started);
                     let release = Arc::clone(&thread_release);
                     Box::pin(async move {

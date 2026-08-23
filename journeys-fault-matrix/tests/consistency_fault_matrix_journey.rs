@@ -13,8 +13,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use consistency::{Disposition, IdemKey, SeenState};
 use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use diport::{
-    AckAction, AckableSubscriber, Acker, DynPublisher, ManagedResource, MessageId, PublishRequest,
-    Publisher, PublisherError, Topic,
+    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeMetadata, ManagedResource,
+    MessageId, PublishRequest, Publisher, PublisherError, Topic,
 };
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
@@ -42,6 +42,21 @@ use uuid::Uuid;
 const RABBIT_VHOST: &str = "rss_fault_matrix";
 const PROJECTION_OWNER: &str = "fault-matrix-projection";
 const TEST_OCCURRED_AT: i64 = 1_700_000_000;
+
+fn complete_publish_request(
+    topic: Topic,
+    event_id: MessageId,
+    payload: Vec<u8>,
+    tenant: rss_request_context::TenantId,
+) -> PublishRequest {
+    let contract = generated::event::identity_v1::session_created::CONTRACT;
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, tenant.to_string());
+    metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, TEST_OCCURRED_AT.to_string());
+    metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, contract.version());
+    metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, contract.schema_hash());
+    PublishRequest::new(topic, event_id, payload).with_metadata(metadata)
+}
 
 /// INVARIANT: CONSISTENCY-READY-CONTRACT-BINDING-01 { level = "Hard", exec = "native-compile", source = "code", native = "each ready case carries one generated ContractBinding and CrashFaultSpec dispatch is exhaustive" }
 struct ReadyCaseRunner {
@@ -596,10 +611,11 @@ async fn rabbit_unsettled_redelivers_through_consumer_tx(
             .subscribe_ackable(topic.clone(), token.clone())
             .await?;
         publisher
-            .publish(PublishRequest::new(
+            .publish(complete_publish_request(
                 topic.clone(),
                 MessageId::new(event_id),
                 serde_json::to_vec(&session_created_payload(scope.tenant, session_id))?,
+                scope.tenant,
             ))
             .await?;
 
@@ -866,10 +882,11 @@ fn run_outbox_confirm_lost_channel_close<'a>(
             let stale_message_id = Uuid::new_v4().to_string();
             Publisher::publish(
                 publisher.as_ref(),
-                PublishRequest::new(
+                complete_publish_request(
                     topic,
                     MessageId::new(&stale_message_id),
                     b"stale-prior-run-delivery".to_vec(),
+                    scope.tenant,
                 ),
             )
             .await?;

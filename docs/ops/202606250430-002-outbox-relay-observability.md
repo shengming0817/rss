@@ -64,6 +64,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   禁止携带 handler error、tenant、message id 或 payload 派生值。当前闭集：
   `malformed_id` / `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
   `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
+  `envelope_missing_occurred_at` / `envelope_invalid_occurred_at` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
   `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch` /
   `inbox_receipt_invalid_consumer_group` / `inbox_receipt_empty_domain` / `inbox_receipt_empty_topic` /

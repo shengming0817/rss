@@ -19,6 +19,8 @@ use consistency::{HandleResult, Settled};
 #[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use consistency::{IdemKey, InboxReceiptContext, LeaseToken};
 #[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+use eventexec::consumer::ValidatedEvent;
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use eventexec::consumer_tx::ConsumerTxOutcome;
 #[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use eventexec::consumer_tx::RejectKind;
@@ -116,15 +118,15 @@ where
 
     async fn handle_attempt(
         &self,
-        message: diport::Message,
+        event: Arc<ValidatedEvent>,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
         if self.kind == AuditEventKind::SecurityEvent {
-            return self.handle_security_attempt(message, ctx, key, lease).await;
+            return self.handle_security_attempt(event, ctx, key, lease).await;
         }
-        let record = match self.validated_record_from_message(&message, &ctx) {
+        let record = match self.validated_record_from_message(&event, &ctx) {
             Ok(record) => record,
             Err(outcome) => return outcome,
         };
@@ -136,12 +138,12 @@ where
 
     async fn handle_security_attempt(
         &self,
-        message: diport::Message,
+        event: Arc<ValidatedEvent>,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
-        let command = match security_audit_command_from_message(&message) {
+        let command = match security_audit_command_from_message(&event) {
             Ok(command) if command.tenant() == ctx.tenant_id() => command,
             Ok(command) => {
                 return reject_audit_tenant_mismatch(command.tenant(), &ctx);
@@ -190,18 +192,18 @@ where
 
     fn record_from_message(
         &self,
-        message: &diport::Message,
+        event: &ValidatedEvent,
     ) -> Result<AuditRecord, AuditEventRecordError> {
-        audit_record_from_event_message(self.kind, message)
+        audit_record_from_event_message(self.kind, event)
     }
 
     fn validated_record_from_message(
         &self,
-        message: &diport::Message,
+        event: &ValidatedEvent,
         ctx: &InboxReceiptContext,
     ) -> Result<AuditRecord, ConsumerTxOutcome<PgConsumerTxCommitProof>> {
         let record = self
-            .record_from_message(message)
+            .record_from_message(event)
             .map_err(|error| reject_audit_payload(&error))?;
         if record.tenant != ctx.tenant_id() {
             return Err(reject_audit_tenant_mismatch(record.tenant, ctx));
@@ -217,12 +219,12 @@ where
 {
     pub fn handle(
         self: Arc<Self>,
-        message: diport::Message,
+        event: Arc<ValidatedEvent>,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> futures::future::BoxFuture<'static, ConsumerTxOutcome<PgConsumerTxCommitProof>> {
-        Box::pin(async move { self.handle_attempt(message, ctx, key, lease).await })
+        Box::pin(async move { self.handle_attempt(event, ctx, key, lease).await })
     }
 }
 
@@ -247,15 +249,17 @@ impl PgSettingsConsumerTx {
 
     async fn handle_attempt(
         &self,
-        message: diport::Message,
+        event: Arc<ValidatedEvent>,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
         let tenant = ctx.tenant_id();
-        if let Err(outcome) =
-            settings_refresh_outcome(self.reconciler.reconcile(message, tenant).await)
-        {
+        if let Err(outcome) = settings_refresh_outcome(
+            self.reconciler
+                .reconcile(event.message().clone(), tenant)
+                .await,
+        ) {
             return outcome;
         }
         pg_consumer_tx_outcome("settings", self.mark_done_only(ctx, key, lease).await)
@@ -292,12 +296,12 @@ impl PgSettingsConsumerTx {
 impl PgSettingsConsumerTx {
     pub fn handle(
         self: Arc<Self>,
-        message: diport::Message,
+        event: Arc<ValidatedEvent>,
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
     ) -> futures::future::BoxFuture<'static, ConsumerTxOutcome<PgConsumerTxCommitProof>> {
-        Box::pin(async move { self.handle_attempt(message, ctx, key, lease).await })
+        Box::pin(async move { self.handle_attempt(event, ctx, key, lease).await })
     }
 }
 
@@ -541,6 +545,38 @@ mod tests {
         diport::Message::new("33333333-4444-4555-8666-777777777777", payload.into())
     }
 
+    fn validated_message(payload: impl Into<Vec<u8>>) -> eventexec::consumer::ValidatedEvent {
+        let payload = payload.into();
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("json fixture");
+        let mut metadata = diport::EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(
+            diport::KEY_TENANT_ID,
+            value
+                .get("tenantId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(TENANT),
+        );
+        metadata.insert_wire_pair(
+            diport::KEY_OCCURRED_AT,
+            value
+                .get("occurredAt")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+                .to_string(),
+        );
+        metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, "v1");
+        metadata.insert_wire_pair(
+            diport::KEY_SCHEMA_HASH,
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        eventexec::consumer::ValidatedEvent::for_test(diport::Message::new_with_metadata(
+            "33333333-4444-4555-8666-777777777777",
+            payload,
+            metadata,
+        ))
+        .expect("valid event fixture")
+    }
+
     #[derive(Default)]
     struct CapturedFields(BTreeMap<String, String>);
 
@@ -640,7 +676,7 @@ mod tests {
 
         let record = audit_record_from_event_message(
             AuditEventKind::SessionCreated,
-            &message(payload.into_bytes()),
+            &validated_message(payload.into_bytes()),
         )?;
 
         assert_eq!(record.tenant, rss_request_context::TenantId::parse(TENANT)?);
@@ -672,7 +708,7 @@ mod tests {
 
         let record = audit_record_from_event_message(
             AuditEventKind::RoleAssigned,
-            &message(payload.into_bytes()),
+            &validated_message(payload.into_bytes()),
         )?;
 
         assert_eq!(record.tenant, rss_request_context::TenantId::parse(TENANT)?);
@@ -706,7 +742,7 @@ mod tests {
 
         let record = audit_record_from_event_message(
             AuditEventKind::RoleRevoked,
-            &message(payload.into_bytes()),
+            &validated_message(payload.into_bytes()),
         )?;
 
         assert_eq!(record.tenant, rss_request_context::TenantId::parse(TENANT)?);
@@ -739,7 +775,7 @@ mod tests {
         assert!(
             audit_record_from_event_message(
                 AuditEventKind::RoleAssigned,
-                &message(payload.into_bytes())
+                &validated_message(payload.into_bytes())
             )
             .is_err()
         );

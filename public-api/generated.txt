@@ -543,7 +543,7 @@ pub const generated::event::_seed_v1::DESCRIPTOR: rss_contract::ContractDescript
 pub const generated::event::_seed_v1::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::_seed_v1::SPEC: generated::event::EventSpec
 pub const generated::event::_seed_v1::TOPIC: &str
-pub async fn generated::event::_seed_v1::emit<E: generated::event::EventEmit>(&E, generated::event::_seed_v1::SeedThingHappenedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::_seed_v1::emit<E: generated::event::EventEmit>(&E, generated::event::_seed_v1::SeedThingHappenedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1
 pub mod generated::event::identity_v1::device_certificate_reported
 pub mod generated::event::identity_v1::device_certificate_reported::error
@@ -698,7 +698,7 @@ pub const generated::event::identity_v1::device_certificate_reported::DESCRIPTOR
 pub const generated::event::identity_v1::device_certificate_reported::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::device_certificate_reported::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::device_certificate_reported::TOPIC: &str
-pub async fn generated::event::identity_v1::device_certificate_reported::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_certificate_reported::IdentityDeviceCertificateReportedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::device_certificate_reported::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_certificate_reported::IdentityDeviceCertificateReportedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1::device_command_acked
 pub mod generated::event::identity_v1::device_command_acked::error
 pub struct generated::event::identity_v1::device_command_acked::error::ConversionError(_)
@@ -1078,7 +1078,7 @@ pub const generated::event::identity_v1::device_command_acked::DESCRIPTOR: rss_c
 pub const generated::event::identity_v1::device_command_acked::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::device_command_acked::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::device_command_acked::TOPIC: &str
-pub async fn generated::event::identity_v1::device_command_acked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_command_acked::IdentityDeviceCommandAckedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::device_command_acked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_command_acked::IdentityDeviceCommandAckedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1::device_ingress_receipted
 pub mod generated::event::identity_v1::device_ingress_receipted::error
 pub struct generated::event::identity_v1::device_ingress_receipted::error::ConversionError(_)
@@ -1770,7 +1770,7 @@ pub const generated::event::identity_v1::device_ingress_receipted::DESCRIPTOR: r
 pub const generated::event::identity_v1::device_ingress_receipted::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::device_ingress_receipted::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::device_ingress_receipted::TOPIC: &str
-pub async fn generated::event::identity_v1::device_ingress_receipted::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressReceiptedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::device_ingress_receipted::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressReceiptedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1::policy_updated
 pub mod generated::event::identity_v1::policy_updated::error
 pub struct generated::event::identity_v1::policy_updated::error::ConversionError(_)
@@ -1938,7 +1938,7 @@ pub const generated::event::identity_v1::policy_updated::DESCRIPTOR: rss_contrac
 pub const generated::event::identity_v1::policy_updated::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::policy_updated::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::policy_updated::TOPIC: &str
-pub async fn generated::event::identity_v1::policy_updated::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::policy_updated::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::policy_updated::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::role_assigned
 pub mod generated::event::identity_v1::role_assigned::error
@@ -2060,7 +2060,7 @@ pub const generated::event::identity_v1::role_assigned::DESCRIPTOR: rss_contract
 pub const generated::event::identity_v1::role_assigned::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_assigned::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_assigned::TOPIC: &str
-pub async fn generated::event::identity_v1::role_assigned::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::role_assigned::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::role_assigned::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::role_revoked
 pub mod generated::event::identity_v1::role_revoked::error
@@ -2182,7 +2182,7 @@ pub const generated::event::identity_v1::role_revoked::DESCRIPTOR: rss_contract:
 pub const generated::event::identity_v1::role_revoked::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_revoked::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_revoked::TOPIC: &str
-pub async fn generated::event::identity_v1::role_revoked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::role_revoked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::role_revoked::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::security_event
 pub mod generated::event::identity_v1::security_event::error
@@ -2438,7 +2438,7 @@ pub const generated::event::identity_v1::security_event::DESCRIPTOR: rss_contrac
 pub const generated::event::identity_v1::security_event::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::security_event::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::security_event::TOPIC: &str
-pub async fn generated::event::identity_v1::security_event::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::security_event::IdentitySecurityEventPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::security_event::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::security_event::IdentitySecurityEventPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::security_event::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::session_created
 pub mod generated::event::identity_v1::session_created::error
@@ -2511,7 +2511,7 @@ pub const generated::event::identity_v1::session_created::DESCRIPTOR: rss_contra
 pub const generated::event::identity_v1::session_created::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::session_created::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::session_created::TOPIC: &str
-pub async fn generated::event::identity_v1::session_created::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::session_created::IdentitySessionCreatedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::session_created::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::session_created::IdentitySessionCreatedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::session_created::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::settings_v1
 pub mod generated::event::settings_v1::error
@@ -2630,7 +2630,7 @@ pub const generated::event::settings_v1::FACT: vocab::contract::binding::EventFa
 pub const generated::event::settings_v1::SETTINGS_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::settings_v1::SPEC: generated::event::EventSpec
 pub const generated::event::settings_v1::TOPIC: &str
-pub async fn generated::event::settings_v1::emit<E: generated::event::EventEmit>(&E, generated::event::settings_v1::SettingsConfigVersionChangedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::settings_v1::emit<E: generated::event::EventEmit>(&E, generated::event::settings_v1::SettingsConfigVersionChangedPayload, rss_request_context::TenantId, rss_contract::Timepoint, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::settings_v1::subscribe_settings<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub enum generated::event::PartitionKeyStrategy
 pub generated::event::PartitionKeyStrategy::Aggregate
@@ -2857,7 +2857,7 @@ pub type generated::event::EventEmit::Error
 pub type generated::event::EventEmit::IdempotencyKey: core::marker::Send
 pub type generated::event::EventEmit::Output
 pub type generated::event::EventEmit::SubjectId: core::marker::Send
-pub fn generated::event::EventEmit::emit<C>(&self, &<C as generated::event::EventContract>::Payload, rss_request_context::TenantId, Self::SubjectId, Self::Actor, Self::IdempotencyKey) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, Self::Error>> + core::marker::Send where C: generated::event::EventContract, <C as generated::event::EventContract>::Payload: core::marker::Send + core::marker::Sync
+pub fn generated::event::EventEmit::emit<C>(&self, &<C as generated::event::EventContract>::Payload, rss_request_context::TenantId, rss_contract::Timepoint, Self::SubjectId, Self::Actor, Self::IdempotencyKey) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, Self::Error>> + core::marker::Send where C: generated::event::EventContract, <C as generated::event::EventContract>::Payload: core::marker::Send + core::marker::Sync
 pub trait generated::event::EventSubscribe
 pub type generated::event::EventSubscribe::Capability
 pub type generated::event::EventSubscribe::Output

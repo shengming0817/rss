@@ -214,7 +214,11 @@ async fn settings_consumer_tx_commit_marks_done_and_next_claim_is_duplicate() ->
     );
     let outcome = std::sync::Arc::new(handler)
         .handle(
-            diport::Message::new(&event_id, b"{}".to_vec()),
+            validated_event_message(
+                diport::Message::new(&event_id, b"{}".to_vec()),
+                ctx.tenant_id(),
+                1,
+            ),
             ctx.clone(),
             key.clone(),
             lease,
@@ -4973,9 +4977,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         uuid::Uuid::from_u128(0x2001),
     )
     .await?;
-    crate::PgEmitter::new(&store, fixed_clock())
-        .write(event)
-        .await?;
+    crate::PgEmitter::new(&store).write(event).await?;
 
     let row: (
         String,
@@ -5091,7 +5093,7 @@ async fn t10c_pg_emitter_persists_only_scoped_ambient_correlation() -> TestResul
     let tenant = test_tenant();
     let scoped_event_id = unique_event_id("t10c-scoped");
     let unscoped_event_id = unique_event_id("t10c-unscoped");
-    let emitter = crate::PgEmitter::new(&store, fixed_clock());
+    let emitter = crate::PgEmitter::new(&store);
     let scoped_event = reviewed_session_event(
         &scoped_event_id,
         tenant,
@@ -5160,9 +5162,9 @@ async fn t10b_pg_emitter_persists_verified_consumer_causation() -> TestResult {
     let child_id = unique_event_id("t10-child");
     let group = unique_event_id("t10-causation-group");
     let tenant = test_tenant();
-    let emitter = Arc::new(crate::PgEmitter::new(&store, fixed_clock()));
+    let emitter = Arc::new(crate::PgEmitter::new(&store));
     let child_id_for_handler = child_id.clone();
-    let handler = move |_message: Message| {
+    let handler = move |_event: Arc<eventexec::consumer::ValidatedEvent>| {
         let emitter = Arc::clone(&emitter);
         let child_id = child_id_for_handler.clone();
         Box::pin(async move {
@@ -5227,7 +5229,7 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
         session_id,
     )
     .await?;
-    let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
+    let emitter = crate::PgOutboxCdcEmitter::new(&store);
     emitter.write(event.clone()).await?;
     emitter.write(event).await?;
 
@@ -5330,7 +5332,7 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
         second_session_id,
     )
     .await?;
-    let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
+    let emitter = crate::PgOutboxCdcEmitter::new(&store);
     emitter.write(first).await?;
     let conflict = emitter.write(second).await;
     let Err(conflict) = conflict else {

@@ -266,7 +266,7 @@ impl<E: OutboxEmitter + Send + Sync + 'static> InMemConfigUnitOfWork<E> {
                 "config producer authorization mismatch",
             ))));
         }
-        let (outbox_entry, envelope, _fact) = event.into_parts();
+        let (outbox_entry, envelope, _occurred_at, _fact) = event.into_parts();
         cas_mutation(&self.entries, tenant, &mutation)?;
         if let Err(error) = self.emitter.emit(outbox_entry, envelope).await {
             rollback_mutation(&self.entries, tenant, &mutation);

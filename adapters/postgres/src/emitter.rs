@@ -13,7 +13,7 @@
 //!
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 
-use diport::{Clock, OutboxEmitError};
+use diport::OutboxEmitError;
 use eventexec::event::{ReviewedEvent, ReviewedEventWriter};
 
 #[cfg(all(test, feature = "integration"))]
@@ -29,32 +29,25 @@ use crate::projection_events::ProjectionWriteRegistry;
 ///
 /// 经 exact serving-write [`TenantDb`] 持有 tenant-scoped write funnel；不暴露裸 pool / begin 出口。
 ///
-/// **时间源**：`clock` 是注入的 [`Clock`]（必填构造器位置参，缺失即编译错误——rust-standards §工程护栏），
-/// 仅用于 envelope `occurred_at`。与 [`crate::PgOutbox`] 刻意用 SQL `now()` 的 lease/retry 谓词（多实例需单一、
-/// 无跨进程偏移的时间源）**不同**：那是 relay 端时间，本 emitter 的 `occurred_at` 是 producer 端事件发生时刻，
-/// 故注入 `Clock`（#1129）。
+/// Envelope `occurred_at` comes from the sealed [`ReviewedEvent`]; this provider cannot resample
+/// or substitute an adapter clock.
 pub struct PgEmitter {
     pool: TenantDb<ServingWriteLane>,
-    clock: Box<dyn Clock>,
 }
 
 impl PgEmitter {
-    /// 由 [`PgStore`] 构造 tenant-scoped pool wrapper + 注入 [`Clock`]（envelope `occurred_at` 时间源）。
-    /// `clock` 为 `Box<dyn Clock>`（与全项目 clock 注入约定及 `diport::Clock` rustdoc 一致；adapter 独占其
-    /// 时钟、不跨线程共享，无需 `Arc`）。
+    /// 由 [`PgStore`] 构造 tenant-scoped pool wrapper。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::emitter`] 收口（provider-agnostic 基建，非单域）。
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            clock,
         }
     }
 
     pub(crate) fn new_with_projection_registry(
         store: &VerifiedPgWriteStore,
-        clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
@@ -62,33 +55,27 @@ impl PgEmitter {
                 store,
                 projection_registry,
             ),
-            clock,
         }
     }
 }
 
 impl ReviewedEventWriter for PgEmitter {
     async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
-        let (entry, envelope, _fact) = event.into_parts();
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id；OUTBOX-METADATA-FUNNEL-01）。`contract` 是契约派生
         // 绑定（#1193/#1618：domain + contract_id + version + schema_hash 同源、business 不可伪造），
         // routing 列经 `domain()`/`contract_id()` 取，标准 header 经 `version()`/`schema_hash()` 盖章。
-        // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接
-        // 编译期不可表达）；trace / correlation 经 sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
+        // reserved key occurred_at 由 sealed ReviewedEvent **构造期必填**携带；trace / correlation 经
+        // sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
         // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                    .unix_seconds(),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

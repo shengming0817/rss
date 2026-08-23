@@ -16,6 +16,7 @@ rss-request-context.workspace = true
 consistency = { path = "../../crates/consistency" }
 eventexec = { path = "../../crates/eventexec" }
 diport = { path = "../../crates/diport" }
+rss-contract.workspace = true
 secure = { path = "../../crates/secure" }
 primitives = { path = "../../crates/primitives" }
 # AuthGrant aggregate/value types are canonically owned by authn; the memory adapter implements

@@ -191,11 +191,8 @@ type LoginBundle = (
 fn login_service(bus: &MemBus, tenant: TenantId) -> Result<LoginBundle> {
     let mut refresh = None;
     let mut grant_lifecycle = None;
-    let grants = MemAuthGrantStore::with_tenant_metadata_signer(
-        bus.clone(),
-        memory_tenant_signer(),
-        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-    );
+    let grants =
+        MemAuthGrantStore::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer());
     let login = Arc::new(LoginService::with_seed_credential(
         |accounts| {
             let services = identity::seed_auth_grant_services(
@@ -391,7 +388,11 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_USER}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
     )
     .into_bytes();
-    let emitter = MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer());
+    let emitter = MemEmitter::with_tenant_metadata_signer(
+        bus.clone(),
+        memory_tenant_signer(),
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+    );
     let subject = EnvelopeSubjectId::from_opaque(CANON_USER)?;
     let actor = OutboxActor::scoped(
         rss_request_context::PrincipalKind::User,

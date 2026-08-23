@@ -496,6 +496,7 @@ where
 /// Exact generated application receipt and deterministic Outbox id.
 pub struct DeviceIngressApplicationReceipt {
     scope: DeviceCertificateScope,
+    occurred_at: rss_contract::Timepoint,
     payload: device_ingress_receipted::IdentityDeviceIngressReceiptedPayload,
     outbox_event_id: String,
 }
@@ -564,6 +565,7 @@ impl DeviceIngressApplicationReceipt {
         crate::outbox_emit::emit_device_ingress_receipted(
             self.payload.clone(),
             scope.tenant(),
+            self.occurred_at,
             scope.device(),
             consistency::IdemKey::parse(&self.outbox_event_id)
                 .map_err(|_| eventexec::event::EventEncodeError::IdempotencyKey)?,
@@ -596,6 +598,8 @@ fn application_receipt(
 ) -> Result<DeviceIngressApplicationReceipt, DeviceIngressError> {
     let event_id = receipt.evidence().envelope_id().as_str();
     let committed_at = epoch_micros(receipt.committed_at())?;
+    let occurred_at = rss_contract::Timepoint::try_from(receipt.committed_at())
+        .map_err(|_| DeviceIngressError::InvalidReceipt)?;
     let device_id = scope.device().as_uuid();
     let payload = match receipt.disposition() {
         DeviceIngressDisposition::Advanced | DeviceIngressDisposition::DeviceRejected => {
@@ -648,6 +652,7 @@ fn application_receipt(
             let Some(lineage) = lineage else {
                 return Ok(DeviceIngressApplicationReceipt {
                     scope,
+                    occurred_at,
                     payload: rejected_payload(
                         event_id,
                         device_id,
@@ -716,6 +721,7 @@ fn application_receipt(
     };
     Ok(DeviceIngressApplicationReceipt {
         scope,
+        occurred_at,
         payload,
         outbox_event_id: receipt_event_id(scope, event_id),
     })

@@ -162,6 +162,17 @@ fn consumer_tx_policy_capabilities_are_sealed() {
 }
 
 #[test]
+fn event_metadata_surface_is_narrow() {
+    let t = trybuild::TestCases::new();
+    t.pass("tests/ui/event_metadata_pass.rs");
+    t.compile_fail("tests/ui/event_metadata_private_fields_fail.rs");
+    t.compile_fail("tests/ui/event_metadata_debug_fail.rs");
+    t.compile_fail("tests/ui/event_metadata_display_fail.rs");
+    t.compile_fail("tests/ui/event_metadata_clone_fail.rs");
+    t.compile_fail("tests/ui/event_metadata_root_reexport_fail.rs");
+}
+
+#[test]
 fn managed_delivery_stream_constructor_is_private() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/managed_delivery_stream_constructor_private_fail.rs");

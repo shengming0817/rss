@@ -68,7 +68,6 @@ static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 pub struct PgConfigRepo {
     read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
-    clock: Arc<dyn Clock>,
     protection: ConfigValueProtection,
 }
 
@@ -322,13 +321,12 @@ impl PgConfigRepo {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn new(
         store: &PgStore,
-        clock: Arc<dyn Clock>,
+        _clock: Arc<dyn Clock>,
         protection: ConfigValueProtection,
     ) -> Self {
         Self {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            clock,
             protection,
         }
     }
@@ -336,7 +334,7 @@ impl PgConfigRepo {
     pub(crate) fn new_with_projection_registry(
         reader: &VerifiedPgReadStore,
         writer: &VerifiedPgWriteStore,
-        clock: Arc<dyn Clock>,
+        _clock: Arc<dyn Clock>,
         protection: ConfigValueProtection,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
@@ -346,7 +344,6 @@ impl PgConfigRepo {
                 writer,
                 projection_registry,
             ),
-            clock,
             protection,
         }
     }
@@ -1125,7 +1122,7 @@ impl PgConfigRepo {
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
         // occurred_at；漏接编译期不可表达）。
-        let (outbox_entry, envelope, _fact) = event.into_parts();
+        let (outbox_entry, envelope, occurred_at, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         if env_tenant != tenant {
@@ -1144,14 +1141,9 @@ impl PgConfigRepo {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                    .unix_seconds(),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

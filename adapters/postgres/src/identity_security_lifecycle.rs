@@ -216,7 +216,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("refresh receipt does not authorize security-event"))?;
         let (command, reviewed) = emission.into_parts();
-        let (entry, envelope_parts, _fact) = reviewed.into_parts();
+        let (entry, envelope_parts, _occurred_at, _fact) = reviewed.into_parts();
         let (source, rotation, event, pending) = command.into_parts();
         validate_refresh_command(scope, &source, rotation.as_ref(), &event)?;
         let envelope = security_envelope(scope, &event, envelope_parts)?;
@@ -336,7 +336,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("password-change receipt does not authorize security-event"))?;
         let (command, reviewed) = emission.into_parts();
-        let (entry, envelope_parts, _fact) = reviewed.into_parts();
+        let (entry, envelope_parts, _occurred_at, _fact) = reviewed.into_parts();
         let (expected, next, security) = command.into_parts();
         let (mutation, event, pending) = security.into_parts();
         let prepared = PreparedSecurityCommand {
@@ -843,7 +843,7 @@ impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
 
     fn try_from(emission: CredentialSecurityEmissionParts) -> Result<Self, Self::Error> {
         let (command, reviewed) = emission.into_parts();
-        let (entry, envelope_parts, _fact) = reviewed.into_parts();
+        let (entry, envelope_parts, _occurred_at, _fact) = reviewed.into_parts();
         match command {
             CredentialSecurityCommand::Account(command) => {
                 let (mutation, event, pending) = command.into_parts();

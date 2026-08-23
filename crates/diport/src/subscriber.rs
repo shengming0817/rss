@@ -288,7 +288,7 @@ mod smoke {
         md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_CORRELATION, "corr-3");
         let msg = Message::new_with_metadata("m-2", b"p".to_vec(), md);
-        assert_eq!(msg.metadata().occurred_at_secs(), Some(1_700_000_000));
+        assert_eq!(msg.metadata().get(KEY_OCCURRED_AT), Some("1700000000"));
         assert_eq!(msg.metadata().get(KEY_CORRELATION), Some("corr-3"));
     }
 

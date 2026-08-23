@@ -3913,12 +3913,13 @@ pub async fn emit<E: {sup}EventEmit>(
     emitter: &E,
     payload: {payload_type},
     tenant: ::rss_request_context::TenantId,
+    occurred_at: ::rss_contract::Timepoint,
     subject_id: E::SubjectId,
     actor: E::Actor,
     idempotency_key: E::IdempotencyKey,
 ) -> ::core::result::Result<E::Output, E::Error> {{
     emitter
-        .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+        .emit::<Contract>(&payload, tenant, occurred_at, subject_id, actor, idempotency_key)
         .await
 }}
 
@@ -4844,6 +4845,7 @@ pub trait EventEmit {
         &self,
         payload: &C::Payload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Self::IdempotencyKey,

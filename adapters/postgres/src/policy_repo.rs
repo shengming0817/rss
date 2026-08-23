@@ -45,21 +45,19 @@ impl PgPolicyRepo {
 
 pub struct PgPolicyLifecycle {
     pool: TenantDb<ServingWriteLane>,
-    clock: Box<dyn Clock>,
 }
 
 impl PgPolicyLifecycle {
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+    pub(crate) fn new(store: &PgStore, _clock: Box<dyn Clock>) -> Self {
         Self {
             pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            clock,
         }
     }
 
     pub(crate) fn new_with_projection_registry(
         writer: &VerifiedPgWriteStore,
-        clock: Box<dyn Clock>,
+        _clock: Box<dyn Clock>,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
@@ -67,27 +65,22 @@ impl PgPolicyLifecycle {
                 writer,
                 projection_registry,
             ),
-            clock,
         }
     }
 
     fn envelope(
         &self,
         envelope: OutboxEnvelopeParts,
+        occurred_at: rss_contract::Timepoint,
     ) -> Result<(TenantId, OutboxEnvelope), IdentityError> {
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
-                    .unix_seconds(),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -685,8 +678,8 @@ impl PolicyLifecycle for PgPolicyLifecycle {
             return Err(IdentityError::InvalidPolicy);
         }
         let generated_fact = event.fact();
-        let (entry, envelope, _fact) = event.into_parts();
-        let (env_tenant, env) = self.envelope(envelope)?;
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (env_tenant, env) = self.envelope(envelope, occurred_at)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
@@ -739,8 +732,8 @@ impl PolicyLifecycle for PgPolicyLifecycle {
             return Err(IdentityError::InvalidPolicy);
         }
         let generated_fact = event.fact();
-        let (entry, envelope, _fact) = event.into_parts();
-        let (env_tenant, env) = self.envelope(envelope)?;
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (env_tenant, env) = self.envelope(envelope, occurred_at)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
@@ -801,8 +794,8 @@ impl PolicyLifecycle for PgPolicyLifecycle {
     ) -> Result<bool, IdentityError> {
         let tenant = tenant_scope.tenant();
         let generated_fact = event.fact();
-        let (entry, envelope, _fact) = event.into_parts();
-        let (env_tenant, env) = self.envelope(envelope)?;
+        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (env_tenant, env) = self.envelope(envelope, occurred_at)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
         }

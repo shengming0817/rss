@@ -2950,12 +2950,11 @@ impl PgInfraDeps {
         PgSagaTerminalSweeper::new(self.stores.writer_capability(), self.saga_receipt.clone())
     }
 
-    /// Reviewed-event durable writer（envelope `occurred_at` 时间源经 `clock` 注入）。
+    /// Reviewed-event durable writer（envelope `occurred_at` 由 sealed event 携带）。
     #[must_use]
-    pub fn emitter(&self, clock: Box<dyn Clock>) -> PgEmitter {
+    pub fn emitter(&self) -> PgEmitter {
         PgEmitter::new_with_projection_registry(
             self.stores.writer_capability(),
-            clock,
             self.projection_registry.clone(),
         )
     }
@@ -2965,8 +2964,8 @@ impl PgInfraDeps {
     /// This explicit opt-in mode writes `outbox_log` and does not participate in the relay
     /// `outbox` status machine.
     #[must_use]
-    pub fn cdc_emitter(&self, clock: Box<dyn Clock>) -> PgOutboxCdcEmitter {
-        PgOutboxCdcEmitter::new_with_store(self.stores.writer_capability(), clock)
+    pub fn cdc_emitter(&self) -> PgOutboxCdcEmitter {
+        PgOutboxCdcEmitter::new_with_store(self.stores.writer_capability())
     }
 
     /// outbox backlog/sweeper maintenance 能力（不持 publisher）。
@@ -3055,8 +3054,8 @@ impl PgInfraDeps {
     /// command journal foundation store（schema-level capability，#1441）。
     ///
     /// This accessor exposes only the reviewed command journal API; it does not start a command
-    /// worker or expose raw transaction handles. Its outbox envelope `occurred_at` source is an
-    /// injected producer clock, matching [`PgInfraDeps::emitter`].
+    /// worker or expose raw transaction handles. Raw command authoring retains its own injected
+    /// producer clock; reviewed events instead carry occurrence time in their sealed capability.
     #[must_use]
     pub fn command_journal(&self, clock: Box<dyn Clock>) -> PgCommandJournal {
         PgCommandJournal::new(self.stores.writer_capability(), clock)
@@ -3468,7 +3467,7 @@ mod tests {
     async fn infra_accessors_construct() {
         // PgInfraDeps：framework/global 基建能力（F1 补齐）——纯 pool clone，无 I/O。
         let infra = deps().handle().infra();
-        let _ = infra.emitter(Box::new(EpochClock));
+        let _ = infra.emitter();
         let _ = infra.inbox();
         let _ = infra.outbox_maintenance();
         let _ = infra.dead_letter(payload_protector());

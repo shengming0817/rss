@@ -4,8 +4,6 @@
 //! an exact serving lane; neither façade exposes the underlying connection or a generic executor.
 
 use futures::future::BoxFuture;
-#[cfg(feature = "domain-identity")]
-use std::time::SystemTime;
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use super::LocalTxAttempt;
@@ -29,10 +27,9 @@ impl CanonicalDeviceIngressFact {
     pub(crate) fn from_reviewed_event(
         scope: ::identity::ports::device_certificate::DeviceCertificateScope,
         event: eventexec::event::ReviewedEvent,
-        occurred_at: SystemTime,
         credential_generation: u64,
     ) -> Result<Self, crate::outbox::OutboxAppendError> {
-        let (entry, envelope, fact) = event.into_parts();
+        let (entry, envelope, occurred_at, fact) = event.into_parts();
         let expected_device = scope.device().as_uuid().to_string();
         let envelope_valid = envelope.tenant() == scope.tenant()
             && envelope.subject_id().as_str() == expected_device
@@ -48,13 +45,10 @@ impl CanonicalDeviceIngressFact {
         }
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
-        let mut metadata = crate::outbox::OutboxMetadata::new(
-            rss_contract::Timepoint::saturating_from_system_time(occurred_at).unix_seconds(),
-            tenant,
-            contract,
-        )
-        .with_subject_id(subject_id)
-        .with_actor(actor);
+        let mut metadata =
+            crate::outbox::OutboxMetadata::new(occurred_at.unix_seconds(), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor);
         metadata
             .try_insert(
                 "credentialGeneration",

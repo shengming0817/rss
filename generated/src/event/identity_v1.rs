@@ -326,12 +326,20 @@ pub mod device_certificate_reported {
         emitter: &E,
         payload: IdentityDeviceCertificateReportedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -1106,12 +1114,20 @@ pub mod device_command_acked {
         emitter: &E,
         payload: IdentityDeviceCommandAckedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -2468,12 +2484,20 @@ pub mod device_ingress_receipted {
         emitter: &E,
         payload: IdentityDeviceIngressReceiptedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -2825,12 +2849,20 @@ pub mod policy_updated {
         emitter: &E,
         payload: IdentityPolicyUpdatedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -3109,12 +3141,20 @@ pub mod role_assigned {
         emitter: &E,
         payload: IdentityRoleAssignedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -3393,12 +3433,20 @@ pub mod role_revoked {
         emitter: &E,
         payload: IdentityRoleRevokedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -4008,12 +4056,20 @@ pub mod security_event {
         emitter: &E,
         payload: IdentitySecurityEventPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 
@@ -4186,12 +4242,20 @@ pub mod session_created {
         emitter: &E,
         payload: IdentitySessionCreatedPayload,
         tenant: ::rss_request_context::TenantId,
+        occurred_at: ::rss_contract::Timepoint,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
     ) -> ::core::result::Result<E::Output, E::Error> {
         emitter
-            .emit::<Contract>(&payload, tenant, subject_id, actor, idempotency_key)
+            .emit::<Contract>(
+                &payload,
+                tenant,
+                occurred_at,
+                subject_id,
+                actor,
+                idempotency_key,
+            )
             .await
     }
 

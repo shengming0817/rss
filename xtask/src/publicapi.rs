@@ -28,6 +28,233 @@ use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use workspacefacts::{PackageKey, PublicApiOwner, TargetKind, WorkspaceFacts};
 
+/// INVARIANT: EVENTING-EVENT-METADATA-PUBLIC-SURFACE-01 { level = "Medium", exec = "check", source = "public-api", synthetic_red = "tests::event_metadata_surface_rejects_extra_field|tests::event_metadata_surface_rejects_wrong_owner_type|tests::event_metadata_surface_rejects_debug_impl|tests::event_metadata_surface_rejects_qualified_debug_impl|tests::event_metadata_surface_rejects_private_owner_alias|tests::event_metadata_surface_rejects_private_use_alias|tests::event_metadata_surface_rejects_extra_method|tests::event_metadata_surface_root_rejects_alias|tests::event_metadata_surface_root_rejects_module_alias", anti_vacuity = "tests::real_event_metadata_surface_is_exact|tests::event_metadata_surface_allows_private_layout_freedom|tests::event_metadata_surface_root_allows_unrelated_identifier" } -- EventMetadata has one canonical owner, exactly three private typed fields and four public methods; compatibility facades and trait bridges are forbidden without constraining private implementation layout.
+fn validate_event_metadata_public_surface(root: &Path) -> Result<()> {
+    let path = root.join("crates/eventexec/src/event_metadata.rs");
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("读取 EventMetadata 公共面失败: {}", path.display()))?;
+    validate_event_metadata_public_source(&source)
+        .with_context(|| format!("EventMetadata 公共面不符合 exact-set: {}", path.display()))?;
+
+    let root_path = root.join("crates/eventexec/src/lib.rs");
+    let root_source = fs::read_to_string(&root_path)
+        .with_context(|| format!("读取 eventexec crate root 失败: {}", root_path.display()))?;
+    validate_event_metadata_root_source(&root_source).with_context(|| {
+        format!(
+            "EventMetadata crate-root facade 被禁止: {}",
+            root_path.display()
+        )
+    })
+}
+
+fn validate_event_metadata_public_source(source: &str) -> Result<()> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(source).context("解析 EventMetadata owner 模块失败")?;
+    let public_items = file
+        .items
+        .iter()
+        .filter(|item| match item {
+            syn::Item::Const(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Enum(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Fn(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Mod(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Static(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Struct(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Trait(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::TraitAlias(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Type(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Union(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Use(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        matches!(public_items.as_slice(), [syn::Item::Struct(item)] if item.ident == "EventMetadata"),
+        "owner module must expose only EventMetadata"
+    );
+    let syn::Item::Struct(event_metadata) = public_items[0] else {
+        unreachable!("exact public item checked above")
+    };
+    anyhow::ensure!(
+        event_metadata.generics.params.is_empty(),
+        "EventMetadata must not be generic"
+    );
+    anyhow::ensure!(
+        !event_metadata
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("derive")),
+        "EventMetadata derives are forbidden"
+    );
+    let syn::Fields::Named(fields) = &event_metadata.fields else {
+        bail!("EventMetadata must have named fields")
+    };
+    let actual_fields = fields
+        .named
+        .iter()
+        .map(|field| {
+            anyhow::ensure!(
+                matches!(field.vis, syn::Visibility::Inherited),
+                "EventMetadata fields must be private"
+            );
+            Ok((
+                field.ident.as_ref().expect("named field").to_string(),
+                field.ty.to_token_stream().to_string().replace(' ', ""),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        actual_fields
+            == [
+                (
+                    "tenant_id".to_owned(),
+                    "rss_request_context::TenantId".to_owned()
+                ),
+                (
+                    "occurred_at".to_owned(),
+                    "rss_contract::Timepoint".to_owned()
+                ),
+                (
+                    "audit_correlation".to_owned(),
+                    "Option<rss_diag_context::CorrelationId>".to_owned(),
+                ),
+            ],
+        "EventMetadata private field exact-set or canonical owner types drifted"
+    );
+
+    let expected_methods = [
+        "fnnew(tenant_id:rss_request_context::TenantId,occurred_at:rss_contract::Timepoint,audit_correlation:Option<rss_diag_context::CorrelationId>,)->Self",
+        "constfntenant_id(&self)->rss_request_context::TenantId",
+        "constfnoccurred_at(&self)->rss_contract::Timepoint",
+        "fnaudit_correlation(&self)->Option<&rss_diag_context::CorrelationId>",
+    ];
+    fn mentions_event_metadata(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => ident == "EventMetadata",
+            proc_macro2::TokenTree::Group(group) => mentions_event_metadata(group.stream()),
+            _ => false,
+        })
+    }
+
+    for item in &file.items {
+        if let syn::Item::Type(alias) = item {
+            anyhow::ensure!(
+                !mentions_event_metadata(alias.ty.to_token_stream()),
+                "EventMetadata type aliases are forbidden"
+            );
+        }
+        if let syn::Item::Use(alias) = item {
+            anyhow::ensure!(
+                !mentions_event_metadata(alias.tree.to_token_stream()),
+                "EventMetadata local use aliases are forbidden"
+            );
+        }
+    }
+
+    let mut actual_methods = Vec::new();
+    let mut found_owner_impl = false;
+    for item in &file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        let syn::Type::Path(owner) = item.self_ty.as_ref() else {
+            continue;
+        };
+        if owner.qself.is_some()
+            || !owner
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "EventMetadata")
+        {
+            continue;
+        }
+        anyhow::ensure!(
+            item.trait_.is_none(),
+            "EventMetadata trait bridges are forbidden"
+        );
+        found_owner_impl = true;
+        for member in &item.items {
+            match member {
+                syn::ImplItem::Fn(method) if matches!(method.vis, syn::Visibility::Public(_)) => {
+                    actual_methods.push(method.sig.to_token_stream().to_string().replace(' ', ""));
+                }
+                syn::ImplItem::Fn(_) => {}
+                syn::ImplItem::Const(item) if !matches!(item.vis, syn::Visibility::Public(_)) => {}
+                syn::ImplItem::Type(item) if !matches!(item.vis, syn::Visibility::Public(_)) => {}
+                _ => {
+                    bail!("EventMetadata public associated items other than methods are forbidden")
+                }
+            }
+        }
+    }
+    anyhow::ensure!(found_owner_impl, "EventMetadata inherent impl is missing");
+    actual_methods.sort();
+    let mut expected_methods = expected_methods.map(str::to_owned);
+    expected_methods.sort();
+    anyhow::ensure!(
+        actual_methods == expected_methods,
+        "EventMetadata method signature exact-set drifted: actual={actual_methods:?}"
+    );
+    Ok(())
+}
+
+fn validate_event_metadata_root_source(source: &str) -> Result<()> {
+    use quote::ToTokens as _;
+
+    fn exposes_event_metadata(item: &syn::Item) -> bool {
+        use quote::ToTokens as _;
+
+        if let syn::Item::Mod(module) = item {
+            if !matches!(module.vis, syn::Visibility::Public(_)) {
+                return false;
+            }
+            return module
+                .content
+                .as_ref()
+                .is_some_and(|(_, items)| items.iter().any(exposes_event_metadata));
+        }
+        let is_public = match item {
+            syn::Item::Const(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Enum(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::ExternCrate(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Fn(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Static(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Struct(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Trait(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::TraitAlias(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Type(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Union(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Use(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            _ => false,
+        };
+        fn contains_reserved_ident(tokens: proc_macro2::TokenStream) -> bool {
+            tokens.into_iter().any(|token| match token {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    ident == "EventMetadata" || ident == "event_metadata"
+                }
+                proc_macro2::TokenTree::Group(group) => contains_reserved_ident(group.stream()),
+                _ => false,
+            })
+        }
+        is_public && contains_reserved_ident(item.to_token_stream())
+    }
+
+    let file = syn::parse_file(source).context("解析 eventexec crate root 失败")?;
+    for item in &file.items {
+        if matches!(item, syn::Item::Mod(module) if module.ident == "event_metadata") {
+            continue;
+        }
+        anyhow::ensure!(
+            !exposes_event_metadata(item),
+            "EventMetadata root alias, facade, or re-export is forbidden: {}",
+            item.to_token_stream()
+        );
+    }
+    Ok(())
+}
+
 /// INVARIANT: EVENTING-CONSUMER-TX-PUBLIC-SURFACE-01 { level = "Medium", exec = "check", source = "public-api", synthetic_red = "tests::consumer_tx_surface_rejects_extra_public_owner|tests::consumer_tx_surface_rejects_trait_bridge|tests::consumer_tx_surface_rejects_associated_item|tests::consumer_tx_root_rejects_alias_facade", anti_vacuity = "tests::real_consumer_tx_surface_is_exact|tests::consumer_tx_surface_allows_private_implementation" } -- the current Eventing transaction seam exposes exactly one flat outcome and one reject kind from its owner module; runtime/provider types and compatibility facades are forbidden.
 fn validate_consumer_tx_public_surface(root: &Path) -> Result<()> {
     let path = root.join("crates/eventexec/src/consumer_tx.rs");
@@ -1827,6 +2054,7 @@ fn execute(root: &Path, plan: &BaselinePlan, check: bool) -> Result<BTreeMap<Str
     let owner = plan.scope.owner();
     if owner == BaselineOwner::Internal {
         validate_consumer_tx_public_surface(root)?;
+        validate_event_metadata_public_surface(root)?;
     }
     let _owner_lock = BaselineOwnerLock::acquire(root, owner, check)?;
     let dir = root.join(owner.directory());
@@ -2654,6 +2882,143 @@ mod tests {
             pub const fn as_label(&self) -> &'static str { "outcome" }
         }
     "#;
+
+    const SYNTHETIC_EVENT_METADATA_SURFACE: &str = r#"
+        pub struct EventMetadata {
+            tenant_id: rss_request_context::TenantId,
+            occurred_at: rss_contract::Timepoint,
+            audit_correlation: Option<rss_diag_context::CorrelationId>,
+        }
+        impl EventMetadata {
+            pub fn new(
+                tenant_id: rss_request_context::TenantId,
+                occurred_at: rss_contract::Timepoint,
+                audit_correlation: Option<rss_diag_context::CorrelationId>,
+            ) -> Self { Self { tenant_id, occurred_at, audit_correlation } }
+            pub const fn tenant_id(&self) -> rss_request_context::TenantId { self.tenant_id }
+            pub const fn occurred_at(&self) -> rss_contract::Timepoint { self.occurred_at }
+            pub fn audit_correlation(&self) -> Option<&rss_diag_context::CorrelationId> {
+                self.audit_correlation.as_ref()
+            }
+        }
+    "#;
+
+    #[test]
+    fn event_metadata_surface_rejects_extra_field() {
+        let source = SYNTHETIC_EVENT_METADATA_SURFACE.replace(
+            "audit_correlation: Option<rss_diag_context::CorrelationId>,",
+            "audit_correlation: Option<rss_diag_context::CorrelationId>, provider_source: String,",
+        );
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_rejects_wrong_owner_type() {
+        let source =
+            SYNTHETIC_EVENT_METADATA_SURFACE.replace("rss_contract::Timepoint", "vocab::Timepoint");
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_rejects_debug_impl() {
+        let source = format!(
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nimpl core::fmt::Debug for EventMetadata {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+        );
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_rejects_qualified_debug_impl() {
+        let source = format!(
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nimpl core::fmt::Debug for crate::event_metadata::EventMetadata {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+        );
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_rejects_private_owner_alias() {
+        let source = format!(
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\ntype Owner = EventMetadata; impl core::fmt::Debug for Owner {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+        );
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_rejects_private_use_alias() {
+        let source = format!(
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nuse crate::event_metadata::EventMetadata as Owner; impl core::fmt::Debug for Owner {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+        );
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_rejects_extra_method() {
+        let source = SYNTHETIC_EVENT_METADATA_SURFACE.replace(
+            "pub fn new(",
+            "pub fn provider_source(&self) -> Option<&str> { None } pub fn new(",
+        );
+        assert!(validate_event_metadata_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn event_metadata_surface_allows_private_free_helper() {
+        let source = format!(
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nfn private_helper(_: &EventMetadata) {{}}"
+        );
+        assert!(validate_event_metadata_public_source(&source).is_ok());
+    }
+
+    #[test]
+    fn event_metadata_surface_allows_private_layout_freedom() {
+        let source = SYNTHETIC_EVENT_METADATA_SURFACE.replace(
+            "pub const fn tenant_id(&self) -> rss_request_context::TenantId { self.tenant_id }",
+            "",
+        );
+        let source = format!(
+            "{source}\nimpl EventMetadata {{ fn helper(&self) {{}} pub const fn tenant_id(&self) -> rss_request_context::TenantId {{ self.tenant_id }} }}"
+        );
+        assert!(validate_event_metadata_public_source(&source).is_ok());
+    }
+
+    #[test]
+    fn event_metadata_surface_root_rejects_alias() {
+        assert!(
+            validate_event_metadata_root_source(
+                "pub mod event_metadata; pub use event_metadata::EventMetadata as Metadata;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn event_metadata_surface_root_rejects_module_alias() {
+        assert!(
+            validate_event_metadata_root_source(
+                "pub mod event_metadata; pub use self::event_metadata as events;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn event_metadata_surface_root_allows_only_canonical_module_path() {
+        assert!(validate_event_metadata_root_source("pub mod event_metadata;").is_ok());
+    }
+
+    #[test]
+    fn event_metadata_surface_root_allows_unrelated_identifier() {
+        assert!(
+            validate_event_metadata_root_source(
+                "pub mod event_metadata; pub fn event_metadata_count() -> usize { 0 }"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn real_event_metadata_surface_is_exact() -> Result<()> {
+        validate_event_metadata_public_surface(&crate::workspace_root()?)
+    }
 
     #[test]
     fn consumer_tx_surface_rejects_extra_public_owner() {
