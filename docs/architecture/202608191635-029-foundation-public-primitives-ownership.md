@@ -70,10 +70,10 @@ enforcement。carrier 按现有 PBI DAG 交付：
 | 风险 | Canonical carrier | 状态 / owner |
 |---|---|---|
 | canonical 类型夹带 internal / foreign public type | 当前 owner 的 private representation、直接 Cargo/type identity、Release API forbidden-type/source-identity projection | **active**；#2107 既有 Hard/Medium carrier；不宣称其能识别另一 package 新定义的同义类型 |
-| 非 canonical package 新定义同义 `TenantId` / `ContractDescriptor` 或跨 owner re-export | 在既有 typed rustdoc owner projection 中固定 canonical primitive→package 映射，同时拒绝 owner-local mirror 与 foreign source re-export，并配 synthetic red / anti-vacuity | **planned**；#2152 的 Medium ReleaseCheck，不建名称/source-shape scanner |
+| 非 canonical package 新定义同义 `TenantId` / `ContractDescriptor` 或跨 owner re-export | 在既有 typed rustdoc owner projection 中固定 canonical primitive→package 映射，同时拒绝 owner-local mirror 与 foreign source re-export，并配 synthetic red / anti-vacuity | **active**；#2152 的 `RELEASE-FOUNDATION-CANONICAL-OWNER-01` Medium ReleaseCheck，不建名称/source-shape scanner |
 | Timepoint/PageCursor/DataClass/SafeError 可被任意伪造或夹带内部值 | owner-local private newtype/closed enum、fallible constructor、safe `Debug`/`Display`、Cargo dependency direction | **active**；Timepoint/PageCursor 由 #2150、DataClass/SafeError 由 #2151 激活 Hard T1 |
 | 同义 old/new type、alias 或双路径并存 | 消费者在一次变更中直接迁移；旧 symbol 删除后由 rustc/Cargo 断开所有调用点；不保留 compile-fail 墓碑 | **active**；#2150 完成时间/分页、#2151 完成数据分类 cutover |
-| Release API、依赖闭包或 artifact 漂移 | 正向 Release Surface、default/all-features SemVer、release-api exact set、forbidden leakage 与 package proof | **部分 active**；#2150/#2151 已同步 exact set，#2152 扩展 owner projection 与 package proof |
+| Release API、依赖闭包或 artifact 漂移 | 正向 Release Surface、default/all-features SemVer、release-api exact set、forbidden leakage 与 package proof | **active**；#2150/#2151 同步 exact set，#2152 激活 owner projection 与新增 primitive archive consumer proof |
 | 无真实外部 consumer 的未来 API | registry-only、locked/offline external consumer，直接从唯一 package path 导入并覆盖拒绝路径 | **planned**；#2153 T2 |
 
 ## Four-principle check
@@ -81,10 +81,11 @@ enforcement。carrier 按现有 PBI DAG 交付：
 - **彻底**：六项均有当前 carrier、最终 owner、authority、兼容风险与删除条件；同义 generic carrier 不留成第二 owner。
 - **不向后兼容**：迁移直接切换并删除旧类型/路径，不保留 alias、shim、deprecated re-export、转换桥或双路径。
 - **优雅简洁**：复用两个既有 Foundation package 和现有 release proof；不新增 facade、registry、scanner、runner 或发布系统。
-- **AI-HARD**：只对既有 carrier 声称 active；未来约束明确交给后续 Hard/Medium owner，本文不冒充机器事实源。
+- **AI-HARD**：private representation/Cargo graph 为 Hard，typed rustdoc owner projection 与真实 archive consumer 为
+  带 synthetic red/anti-vacuity 的 Medium；#2153 external consumer 仍明确保持 planned，本文不以 package proof 冒充。
 
 ## Consequences
 
 #2148 只改变架构决策与现行规则说明，不改变代码、Cargo graph、Release API baseline、wire、版本或发布状态。
 #2149 将本决策纳入产品面 amendment；#2150/#2151 完成类型与原子 cutover；#2152 完成 candidate/package proof；
-#2153 完成真实外部消费。任一 planned carrier 未落地前，对应 public API 仍不存在，也不得由本文宣称完成。
+#2153 继续负责真实外部消费。其落地前不得宣称 external consumer 闭环、RC 或发布批准。

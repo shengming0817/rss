@@ -3,6 +3,19 @@ name = "rss-contract-package-proof"
 version = "0.0.0"
 edition = "2024"
 publish = false
+autobins = false
+default-run = "rss-contract-package-proof"
 [workspace]
+[features]
+hostile-compile-fail = []
 [dependencies]
 release_package = { package = "__RELEASE_PACKAGE__", version = "=__RELEASE_VERSION__", registry = "local" }
+
+[[bin]]
+name = "rss-contract-package-proof"
+path = "src/main.rs"
+
+[[bin]]
+name = "hostile-compile-fail"
+path = "src/hostile.rs"
+required-features = ["hostile-compile-fail"]

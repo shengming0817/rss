@@ -754,9 +754,32 @@ fn release_api_findings(
 
 #[derive(Debug)]
 struct ApiItemProjection {
+    profile: ApiProfile,
     rendered: String,
     tokens: Vec<public_api::tokens::Token>,
     source_paths: BTreeSet<String>,
+    foundation_exposure: Option<FoundationExposure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FoundationExposure {
+    Definition { name: String },
+    Reexport { name: String, source_root: String },
+    Alias { name: String, source_root: String },
+    GlobReexport { source_root: String },
+}
+
+const CANONICAL_FOUNDATION_PRIMITIVES: [(&str, &str); 6] = [
+    ("rss-request-context", "TenantId"),
+    ("rss-contract", "ContractDescriptor"),
+    ("rss-contract", "Timepoint"),
+    ("rss-contract", "PageCursor"),
+    ("rss-contract", "DataClass"),
+    ("rss-contract", "SafeError"),
+];
+
+const fn canonical_foundation_primitives() -> &'static [(&'static str, &'static str)] {
+    &CANONICAL_FOUNDATION_PRIMITIVES
 }
 
 #[derive(Debug)]
@@ -869,10 +892,349 @@ fn project_release_api_item(
     }
 
     Ok(ReleaseApiItemProjection::Owned(ApiItemProjection {
+        profile,
         rendered: format!("profile={} {}", profile.label(), item),
         tokens: item.tokens().cloned().collect(),
         source_paths: source_type_paths(krate, item.id())?,
+        foundation_exposure: foundation_exposure(krate, rustdoc_item)?,
     }))
+}
+
+fn foundation_exposure(
+    krate: &rustdoc_types::Crate,
+    item: &rustdoc_types::Item,
+) -> Result<Option<FoundationExposure>> {
+    let canonical_name = |name: &str| {
+        canonical_foundation_primitives()
+            .iter()
+            .any(|(_, canonical)| *canonical == name)
+    };
+    match &item.inner {
+        rustdoc_types::ItemEnum::Use(import) if import.is_glob => {
+            let Some(id) = import.id else {
+                bail!(
+                    "public glob re-export `{}` 缺 typed source identity",
+                    import.source
+                );
+            };
+            let source = typed_source_summary(krate, id, "foundation glob re-export")?;
+            let source_root = source
+                .path
+                .first()
+                .context("foundation glob re-export source path 为空")?
+                .to_owned();
+            Ok(Some(FoundationExposure::GlobReexport { source_root }))
+        }
+        rustdoc_types::ItemEnum::Use(import) => {
+            let Some(id) = import.id else {
+                let source_name = import
+                    .source
+                    .trim_start_matches("::")
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(import.source.as_str());
+                if canonical_name(&import.name) || canonical_name(source_name) {
+                    bail!(
+                        "canonical Foundation re-export `{}` 缺 typed source identity",
+                        import.name
+                    );
+                }
+                return Ok(None);
+            };
+            let source = typed_source_summary(krate, id, "public re-export")?;
+            let source_root = source
+                .path
+                .first()
+                .with_context(|| {
+                    format!(
+                        "canonical Foundation re-export `{}` source path 为空",
+                        import.name
+                    )
+                })?
+                .to_owned();
+            let source_name = source
+                .path
+                .last()
+                .context("public re-export source path 为空")?;
+            let canonical_source = canonical_foundation_primitives()
+                .iter()
+                .find(|(_, canonical)| *canonical == source_name);
+            if canonical_source.is_some() {
+                anyhow::ensure!(
+                    matches!(
+                        source.kind,
+                        rustdoc_types::ItemKind::Struct | rustdoc_types::ItemKind::Enum
+                    ),
+                    "canonical Foundation re-export `{}` source kind 不是 struct/enum: {:?}",
+                    import.name,
+                    source.kind
+                );
+            }
+            let name = canonical_source
+                .map(|(_, canonical)| (*canonical).to_owned())
+                .or_else(|| canonical_name(&import.name).then(|| import.name.clone()));
+            let Some(name) = name else {
+                return Ok(None);
+            };
+            Ok(Some(FoundationExposure::Reexport { name, source_root }))
+        }
+        rustdoc_types::ItemEnum::Struct(_)
+        | rustdoc_types::ItemEnum::Enum(_)
+        | rustdoc_types::ItemEnum::Union(_)
+            if item.name.as_deref().is_some_and(canonical_name) =>
+        {
+            Ok(Some(FoundationExposure::Definition {
+                name: item
+                    .name
+                    .clone()
+                    .context("canonical Foundation item 缺 name")?,
+            }))
+        }
+        rustdoc_types::ItemEnum::TypeAlias(_) => {
+            let item = krate.index.get(&item.id).with_context(|| {
+                format!("canonical Foundation alias {} 缺 index entry", item.id.0)
+            })?;
+            let value = serde_json::to_value(item).context("投影 Foundation alias 失败")?;
+            let mut ids = BTreeSet::new();
+            collect_source_ids(&value, &mut ids);
+            let mut canonical_target = None;
+            for raw_id in ids {
+                let source = typed_source_summary(
+                    krate,
+                    rustdoc_types::Id(raw_id),
+                    "canonical Foundation alias",
+                )?;
+                let Some(name) = source.path.last().filter(|name| canonical_name(name)) else {
+                    continue;
+                };
+                anyhow::ensure!(
+                    matches!(
+                        source.kind,
+                        rustdoc_types::ItemKind::Struct | rustdoc_types::ItemKind::Enum
+                    ),
+                    "canonical Foundation alias source kind 不是 struct/enum: {:?}",
+                    source.kind
+                );
+                let source_root = source
+                    .path
+                    .first()
+                    .context("canonical Foundation alias source path 为空")?
+                    .to_owned();
+                canonical_target = Some((name.to_owned(), source_root));
+                break;
+            }
+            let local_root = krate
+                .paths
+                .get(&krate.root)
+                .and_then(|root| root.path.first())
+                .context("rustdoc local crate root 缺 path identity")?
+                .to_owned();
+            let target = canonical_target.or_else(|| {
+                item.name
+                    .as_deref()
+                    .filter(|name| canonical_name(name))
+                    .map(|name| (name.to_owned(), local_root))
+            });
+            Ok(target.map(|(name, source_root)| FoundationExposure::Alias { name, source_root }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn typed_source_summary<'a>(
+    krate: &'a rustdoc_types::Crate,
+    id: rustdoc_types::Id,
+    context: &str,
+) -> Result<&'a rustdoc_types::ItemSummary> {
+    let summary = krate
+        .paths
+        .get(&id)
+        .with_context(|| format!("{context} source {} 缺 path identity", id.0))?;
+    let source_root = summary
+        .path
+        .first()
+        .with_context(|| format!("{context} source {} path 为空", id.0))?;
+    let root = krate
+        .index
+        .get(&krate.root)
+        .context("rustdoc crate root 缺 index entry")?;
+    if summary.crate_id == root.crate_id {
+        let local_root = krate
+            .paths
+            .get(&krate.root)
+            .and_then(|root| root.path.first())
+            .context("rustdoc local crate root 缺 path identity")?;
+        anyhow::ensure!(
+            source_root == local_root,
+            "{context} source {} local owner identity 冲突: path={} root={}",
+            id.0,
+            source_root,
+            local_root
+        );
+        let source_item = krate
+            .index
+            .get(&id)
+            .with_context(|| format!("{context} local source {} 缺 index entry", id.0))?;
+        anyhow::ensure!(
+            source_item.crate_id == summary.crate_id,
+            "{context} source {} owner identity 不一致: index={} path={}",
+            id.0,
+            source_item.crate_id,
+            summary.crate_id
+        );
+    } else {
+        let external = krate
+            .external_crates
+            .get(&summary.crate_id)
+            .with_context(|| {
+                format!(
+                    "{context} source {} 的 external owner {} 未声明",
+                    id.0, summary.crate_id
+                )
+            })?;
+        anyhow::ensure!(
+            normalized_crate_name(&external.name) == *source_root,
+            "{context} source {} external owner identity 冲突: path={} external={}",
+            id.0,
+            source_root,
+            external.name
+        );
+        if let Some(source_item) = krate.index.get(&id) {
+            anyhow::ensure!(
+                source_item.crate_id == summary.crate_id,
+                "{context} source {} owner identity 不一致: index={} path={}",
+                id.0,
+                source_item.crate_id,
+                summary.crate_id
+            );
+        }
+    }
+    Ok(summary)
+}
+
+/// INVARIANT: RELEASE-FOUNDATION-CANONICAL-OWNER-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::canonical_foundation_owner_policy_rejects_mirror_alias_and_foreign_reexport|tests::canonical_foundation_projection_requires_typed_reexport_identity", anti_vacuity = "tests::checked_in_typed_foundation_projection_is_exact_once_per_profile" }.
+fn append_foundation_owner_findings(
+    facts: &WorkspaceFacts,
+    surface: &crate::release_surface::ReleaseSurface,
+    items: &BTreeMap<String, Vec<ApiItemProjection>>,
+    findings: &mut Vec<crate::diagnostic::Finding<ReleaseApiRule>>,
+) {
+    let selected = surface
+        .packages()
+        .iter()
+        .map(|package| package.package())
+        .collect::<BTreeSet<_>>();
+    let mut occurrences = BTreeMap::<(&str, ApiProfile, &str), usize>::new();
+
+    for (package, package_items) in items {
+        for item in package_items {
+            let Some(exposure) = &item.foundation_exposure else {
+                continue;
+            };
+            if let FoundationExposure::GlobReexport { source_root } = exposure {
+                findings.push(crate::diagnostic::finding(
+                    ReleaseApiRule::ForbiddenType,
+                    release_subject(package, &item.rendered),
+                    format!(
+                        "public glob re-export from crate `{source_root}` cannot prove canonical Foundation provenance"
+                    ),
+                ));
+                continue;
+            }
+
+            let named = match exposure {
+                FoundationExposure::Definition { name } => {
+                    Some((name.as_str(), package.to_owned(), false))
+                }
+                FoundationExposure::Reexport { name, source_root } => Some((
+                    name.as_str(),
+                    resolved_source_package(facts, package, source_root),
+                    false,
+                )),
+                FoundationExposure::Alias { name, source_root } => Some((
+                    name.as_str(),
+                    resolved_source_package(facts, package, source_root),
+                    true,
+                )),
+                FoundationExposure::GlobReexport { .. } => None,
+            };
+            let Some((name, source_package, alias)) = named else {
+                continue;
+            };
+            let Some((owner, _)) = canonical_foundation_primitives()
+                .iter()
+                .find(|(_, canonical)| *canonical == name)
+            else {
+                continue;
+            };
+            if !selected.contains(owner) {
+                continue;
+            }
+            let correct_owner = package == owner;
+            let correct_source = source_package == *owner;
+            if alias || !correct_owner || !correct_source {
+                findings.push(crate::diagnostic::finding(
+                    ReleaseApiRule::ForbiddenType,
+                    release_subject(package, &item.rendered),
+                    format!(
+                        "canonical Foundation primitive `{name}` must be defined only by `{owner}`; exposure package=`{package}` source-package=`{source_package}` alias={alias}"
+                    ),
+                ));
+                continue;
+            }
+            *occurrences.entry((owner, item.profile, name)).or_default() += 1;
+        }
+    }
+
+    for (owner, name) in canonical_foundation_primitives() {
+        if !selected.contains(owner) {
+            continue;
+        }
+        for profile in ApiProfile::RELEASE {
+            let count = occurrences
+                .get(&(owner, profile, name))
+                .copied()
+                .unwrap_or(0);
+            if count != 1 {
+                findings.push(crate::diagnostic::finding(
+                    ReleaseApiRule::ForbiddenType,
+                    format!(
+                        "package={owner}/profile={}/canonical={name}",
+                        profile.label()
+                    ),
+                    format!(
+                        "canonical Foundation primitive must have exactly one typed owner exposure; observed={count}"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn resolved_source_package(facts: &WorkspaceFacts, package: &str, source_root: &str) -> String {
+    if normalized_crate_name(package) == source_root {
+        return package.to_owned();
+    }
+    let Ok(package_key) = facts.package_key(package) else {
+        return format!("<unresolved:{source_root}>");
+    };
+    let Ok(dependencies) = facts.direct_dependencies_for(&package_key) else {
+        return format!("<unresolved:{source_root}>");
+    };
+    dependencies
+        .iter()
+        .filter(|dependency| dependency.kind() == workspacefacts::DependencyKind::Normal)
+        .find(|dependency| {
+            normalized_crate_name(dependency.name()) == source_root
+                || dependency
+                    .resolved()
+                    .is_some_and(|resolved| normalized_crate_name(resolved.as_str()) == source_root)
+        })
+        .and_then(workspacefacts::DirectDependencyFacts::resolved)
+        .map_or_else(
+            || format!("<unresolved:{source_root}>"),
+            |resolved| resolved.as_str().to_owned(),
+        )
 }
 
 fn release_api_findings_from_items(
@@ -891,6 +1253,8 @@ fn release_api_findings_from_items(
         .map(|package| package.package().to_owned())
         .collect::<BTreeSet<_>>();
     let mut findings = Vec::new();
+
+    append_foundation_owner_findings(facts, surface, items, &mut findings);
 
     for release_package in surface.packages() {
         let package = release_package.package();
@@ -983,11 +1347,13 @@ fn source_type_paths(
     let value = serde_json::to_value(item).context("投影 rustdoc item 失败")?;
     let mut ids = BTreeSet::new();
     collect_source_ids(&value, &mut ids);
-    Ok(ids
-        .into_iter()
-        .filter_map(|id| krate.paths.get(&rustdoc_types::Id(id)))
-        .map(|summary| summary.path.join("::"))
-        .collect())
+    let mut paths = BTreeSet::new();
+    for id in ids {
+        let summary =
+            typed_source_summary(krate, rustdoc_types::Id(id), "public API source projection")?;
+        paths.insert(summary.path.join("::"));
+    }
+    Ok(paths)
 }
 
 fn collect_source_ids(value: &serde_json::Value, ids: &mut BTreeSet<u32>) {
@@ -2530,6 +2896,60 @@ mod tests {
         )?)
     }
 
+    fn facts_with_renamed_foundation_dependency() -> Result<WorkspaceFacts> {
+        let platform_path = "/workspace/crates/platform";
+        let contract_path = "/workspace/crates/contract";
+        let mut dependency = path_dependency("rss-contract", contract_path);
+        dependency["rename"] = json!("foundation_contract");
+        let platform = path_package(
+            "rss-platform",
+            platform_path,
+            vec![target(
+                "rss_platform",
+                "lib",
+                &format!("{platform_path}/src/lib.rs"),
+                true,
+                &[],
+            )],
+            vec![dependency],
+            json!({}),
+        );
+        let contract = path_package(
+            "rss-contract",
+            contract_path,
+            vec![target(
+                "rss_contract",
+                "lib",
+                &format!("{contract_path}/src/lib.rs"),
+                true,
+                &[],
+            )],
+            vec![],
+            json!({}),
+        );
+        let platform_id = platform["id"]
+            .as_str()
+            .context("synthetic platform id")?
+            .to_owned();
+        let contract_id = contract["id"]
+            .as_str()
+            .context("synthetic contract id")?
+            .to_owned();
+        let metadata = metadata_json(
+            "/workspace",
+            vec![platform, contract],
+            vec![platform_id.clone(), contract_id.clone()],
+            vec![
+                resolve_node(&platform_id, &[("foundation_contract", &contract_id)]),
+                resolve_node(&contract_id, &[]),
+            ],
+        );
+        Ok(WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &metadata,
+        )?)
+    }
+
     #[test]
     fn closed_owner_routes_are_distinct() {
         assert_eq!(BaselineOwner::Internal.directory(), "public-api");
@@ -2604,6 +3024,7 @@ mod tests {
             vec![
                 "rss-conformance",
                 "rss-contract",
+                "rss-device-security-contracts",
                 "rss-diag-context",
                 "rss-platform",
                 "rss-request-context",
@@ -3870,6 +4291,546 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     }
 
     #[test]
+    fn canonical_foundation_owner_catalog_is_closed_and_anti_vacuous() {
+        assert_eq!(
+            canonical_foundation_primitives(),
+            &[
+                ("rss-request-context", "TenantId"),
+                ("rss-contract", "ContractDescriptor"),
+                ("rss-contract", "Timepoint"),
+                ("rss-contract", "PageCursor"),
+                ("rss-contract", "DataClass"),
+                ("rss-contract", "SafeError"),
+            ]
+        );
+    }
+
+    fn real_release_surface_for_foundation_owner_test()
+    -> anyhow::Result<crate::release_surface::ReleaseSurface> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let (surface, findings) = crate::release_surface::validate(facts, &[]);
+        assert!(findings.is_empty(), "{findings:?}");
+        surface.context("real Release Surface missing")
+    }
+
+    fn canonical_foundation_green_items() -> BTreeMap<String, Vec<ApiItemProjection>> {
+        let mut items = BTreeMap::<String, Vec<ApiItemProjection>>::new();
+        for (owner, name) in canonical_foundation_primitives() {
+            for profile in ApiProfile::RELEASE {
+                items
+                    .entry((*owner).to_owned())
+                    .or_default()
+                    .push(ApiItemProjection {
+                        profile,
+                        rendered: format!(
+                            "profile={} pub use {}::{name}",
+                            profile.label(),
+                            normalized_crate_name(owner)
+                        ),
+                        tokens: Vec::new(),
+                        source_paths: BTreeSet::new(),
+                        foundation_exposure: Some(FoundationExposure::Reexport {
+                            name: (*name).to_owned(),
+                            source_root: normalized_crate_name(owner),
+                        }),
+                    });
+            }
+        }
+        items
+    }
+
+    fn unique_public_item_containing<'a>(
+        api: &'a public_api::PublicApi,
+        needle: &str,
+    ) -> anyhow::Result<&'a public_api::PublicItem> {
+        let mut matches = api.items().filter(|item| item.to_string().contains(needle));
+        let Some(public_item) = matches.next() else {
+            bail!("typed fixture item containing `{needle}` missing")
+        };
+        if matches.next().is_some() {
+            bail!("typed fixture item containing `{needle}` is ambiguous")
+        }
+        Ok(public_item)
+    }
+
+    #[test]
+    fn typed_fixture_item_lookup_rejects_missing_and_ambiguous_matches() -> anyhow::Result<()> {
+        let fixture =
+            crate::workspace_root()?.join("xtask/tests/fixtures/release_api/reexport.json");
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+
+        let Err(missing) = unique_public_item_containing(&api, "DefinitelyMissing") else {
+            bail!("missing typed fixture identity must fail closed")
+        };
+        assert!(missing.to_string().contains("missing"), "{missing:#}");
+
+        let Err(ambiguous) = unique_public_item_containing(&api, "") else {
+            bail!("ambiguous typed fixture identity must fail closed")
+        };
+        assert!(ambiguous.to_string().contains("ambiguous"), "{ambiguous:#}");
+        Ok(())
+    }
+
+    fn checked_in_typed_foundation_items()
+    -> anyhow::Result<BTreeMap<String, Vec<ApiItemProjection>>> {
+        let fixture =
+            crate::workspace_root()?.join("xtask/tests/fixtures/release_api/reexport.json");
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let public_item = unique_public_item_containing(&api, "Secret")?;
+        let base: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        let mut items = BTreeMap::<String, Vec<ApiItemProjection>>::new();
+        for (owner, name) in canonical_foundation_primitives() {
+            for profile in ApiProfile::RELEASE {
+                let mut rustdoc = base.clone();
+                let source_root = normalized_crate_name(owner);
+                rustdoc
+                    .paths
+                    .get_mut(&rustdoc_types::Id(2))
+                    .context("typed fixture source path missing")?
+                    .path = vec![source_root.clone(), (*name).to_owned()];
+                rustdoc
+                    .external_crates
+                    .get_mut(&1)
+                    .context("typed fixture external crate missing")?
+                    .name = source_root.clone();
+                let rustdoc_types::ItemEnum::Use(import) = &mut rustdoc
+                    .index
+                    .get_mut(&public_item.id())
+                    .context("typed fixture re-export missing")?
+                    .inner
+                else {
+                    bail!("typed fixture item is not a re-export")
+                };
+                import.source = format!("{source_root}::{name}");
+                import.name = (*name).to_owned();
+                let ReleaseApiItemProjection::Owned(projected) =
+                    project_release_api_item(&rustdoc, profile, public_item)?
+                else {
+                    bail!("typed Foundation fixture cannot be blanket noise")
+                };
+                items
+                    .entry((*owner).to_owned())
+                    .or_default()
+                    .push(projected);
+            }
+        }
+        Ok(items)
+    }
+
+    #[test]
+    fn checked_in_typed_foundation_projection_is_exact_once_per_profile() -> anyhow::Result<()> {
+        let surface = real_release_surface_for_foundation_owner_test()?;
+        let root = crate::workspace_root()?;
+        let typed_items = checked_in_typed_foundation_items()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let mut findings = Vec::new();
+        append_foundation_owner_findings(facts, &surface, &typed_items, &mut findings);
+        assert!(findings.is_empty(), "{findings:#?}");
+
+        let mut missing = canonical_foundation_green_items();
+        missing
+            .get_mut("rss-contract")
+            .context("rss-contract synthetic items missing")?
+            .retain(|item| {
+                !(item.profile == ApiProfile::Default
+                    && matches!(
+                        item.foundation_exposure,
+                        Some(FoundationExposure::Reexport { ref name, .. }) if name == "SafeError"
+                    ))
+            });
+        let duplicate = missing
+            .get("rss-contract")
+            .context("rss-contract synthetic items missing")?
+            .iter()
+            .find(|item| {
+                item.profile == ApiProfile::AllFeatures
+                    && matches!(
+                        item.foundation_exposure,
+                        Some(FoundationExposure::Reexport { ref name, .. }) if name == "Timepoint"
+                    )
+            })
+            .context("Timepoint synthetic item missing")?;
+        let duplicate = ApiItemProjection {
+            profile: duplicate.profile,
+            rendered: duplicate.rendered.clone(),
+            tokens: Vec::new(),
+            source_paths: BTreeSet::new(),
+            foundation_exposure: duplicate.foundation_exposure.clone(),
+        };
+        missing
+            .get_mut("rss-contract")
+            .context("rss-contract synthetic items missing")?
+            .push(duplicate);
+        let mut findings = Vec::new();
+        append_foundation_owner_findings(facts, &surface, &missing, &mut findings);
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("canonical=SafeError") && finding.detail.contains("observed=0")
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("canonical=Timepoint") && finding.detail.contains("observed=2")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_foundation_owner_policy_rejects_mirror_alias_and_foreign_reexport()
+    -> anyhow::Result<()> {
+        let surface = real_release_surface_for_foundation_owner_test()?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let mut items = canonical_foundation_green_items();
+        items.entry("rss-platform".to_owned()).or_default().extend([
+            ApiItemProjection {
+                profile: ApiProfile::Default,
+                rendered: "profile=default pub struct rss_platform::Timepoint".to_owned(),
+                tokens: Vec::new(),
+                source_paths: BTreeSet::new(),
+                foundation_exposure: Some(FoundationExposure::Definition {
+                    name: "Timepoint".to_owned(),
+                }),
+            },
+            ApiItemProjection {
+                profile: ApiProfile::AllFeatures,
+                rendered: "profile=all-features pub use rss_contract::DataClass".to_owned(),
+                tokens: Vec::new(),
+                source_paths: BTreeSet::new(),
+                foundation_exposure: Some(FoundationExposure::Reexport {
+                    name: "DataClass".to_owned(),
+                    source_root: "rss_contract".to_owned(),
+                }),
+            },
+        ]);
+        items
+            .get_mut("rss-contract")
+            .context("rss-contract synthetic items missing")?
+            .push(ApiItemProjection {
+                profile: ApiProfile::Default,
+                rendered: "profile=default pub type rss_contract::SafeError".to_owned(),
+                tokens: Vec::new(),
+                source_paths: BTreeSet::new(),
+                foundation_exposure: Some(FoundationExposure::Alias {
+                    name: "SafeError".to_owned(),
+                    source_root: "rss_contract".to_owned(),
+                }),
+            });
+
+        let mut findings = Vec::new();
+        append_foundation_owner_findings(facts, &surface, &items, &mut findings);
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("rss_platform::Timepoint")
+                && finding.detail.contains("exposure package=`rss-platform`")
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("rss_contract::DataClass")
+                && finding.detail.contains("exposure package=`rss-platform`")
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("rss_contract::SafeError")
+                && finding.detail.contains("alias=true")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_foundation_owner_policy_resolves_cargo_renamed_source_package()
+    -> anyhow::Result<()> {
+        let facts = facts_with_renamed_foundation_dependency()?;
+        assert_eq!(
+            resolved_source_package(&facts, "rss-platform", "foundation_contract"),
+            "rss-contract"
+        );
+        let surface = real_release_surface_for_foundation_owner_test()?;
+        let mut items = canonical_foundation_green_items();
+        items.entry("rss-platform".to_owned()).or_default().extend([
+            ApiItemProjection {
+                profile: ApiProfile::Default,
+                rendered:
+                    "profile=default pub use foundation_contract::Timepoint as FoundationTime"
+                        .to_owned(),
+                tokens: Vec::new(),
+                source_paths: BTreeSet::new(),
+                foundation_exposure: Some(FoundationExposure::Reexport {
+                    name: "Timepoint".to_owned(),
+                    source_root: "foundation_contract".to_owned(),
+                }),
+            },
+            ApiItemProjection {
+                profile: ApiProfile::AllFeatures,
+                rendered: "profile=all-features pub use foundation_contract::*".to_owned(),
+                tokens: Vec::new(),
+                source_paths: BTreeSet::new(),
+                foundation_exposure: Some(FoundationExposure::GlobReexport {
+                    source_root: "foundation_contract".to_owned(),
+                }),
+            },
+        ]);
+        let mut findings = Vec::new();
+        append_foundation_owner_findings(&facts, &surface, &items, &mut findings);
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("FoundationTime")
+                && finding.detail.contains("source-package=`rss-contract`")
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.subject.contains("foundation_contract::*")
+                && finding
+                    .detail
+                    .contains("cannot prove canonical Foundation provenance")
+        }));
+        Ok(())
+    }
+
+    fn canonical_reexport_fixture() -> anyhow::Result<(PathBuf, rustdoc_types::Crate)> {
+        let fixture =
+            crate::workspace_root()?.join("xtask/tests/fixtures/release_api/reexport.json");
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc
+            .paths
+            .get_mut(&rustdoc_types::Id(2))
+            .context("fixture source path missing")?
+            .path = vec!["rss_contract".to_owned(), "Timepoint".to_owned()];
+        rustdoc
+            .external_crates
+            .get_mut(&1)
+            .context("fixture external crate missing")?
+            .name = "rss_contract".to_owned();
+        {
+            let rustdoc_item = rustdoc
+                .index
+                .get_mut(&rustdoc_types::Id(1))
+                .context("fixture re-export item missing")?;
+            let rustdoc_types::ItemEnum::Use(import) = &mut rustdoc_item.inner else {
+                bail!("fixture item is not a re-export")
+            };
+            import.source = "rss_contract::Timepoint".to_owned();
+            import.name = "FoundationTime".to_owned();
+        }
+        Ok((fixture, rustdoc))
+    }
+
+    #[test]
+    fn canonical_foundation_projection_requires_typed_reexport_identity() -> anyhow::Result<()> {
+        let (fixture, rustdoc) = canonical_reexport_fixture()?;
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let public_item = unique_public_item_containing(&api, "Secret")?;
+        let projected = project_release_api_item(&rustdoc, ApiProfile::Default, public_item)?;
+        let ReleaseApiItemProjection::Owned(projected) = projected else {
+            bail!("canonical re-export cannot be blanket noise")
+        };
+        assert_eq!(
+            projected.foundation_exposure,
+            Some(FoundationExposure::Reexport {
+                name: "Timepoint".to_owned(),
+                source_root: "rss_contract".to_owned(),
+            })
+        );
+
+        let mut primitive = rustdoc.clone();
+        let rustdoc_types::ItemEnum::Use(import) = &mut primitive
+            .index
+            .get_mut(&public_item.id())
+            .context("fixture primitive re-export item missing")?
+            .inner
+        else {
+            bail!("fixture item is not a re-export")
+        };
+        import.source = "u32".to_owned();
+        import.name = "PrimitiveU32".to_owned();
+        import.id = None;
+        let ReleaseApiItemProjection::Owned(projected) =
+            project_release_api_item(&primitive, ApiProfile::Default, public_item)?
+        else {
+            bail!("primitive re-export cannot be blanket noise")
+        };
+        assert_eq!(projected.foundation_exposure, None);
+
+        let mut missing_id = rustdoc.clone();
+        let rustdoc_types::ItemEnum::Use(import) = &mut missing_id
+            .index
+            .get_mut(&public_item.id())
+            .context("fixture re-export item missing")?
+            .inner
+        else {
+            bail!("fixture item is not a re-export")
+        };
+        import.id = None;
+        let Err(error) = project_release_api_item(&missing_id, ApiProfile::Default, public_item)
+        else {
+            bail!("renamed canonical re-export without identity must fail closed")
+        };
+        assert!(
+            error.to_string().contains("缺 typed source identity"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_foundation_projection_rejects_glob_owner_and_kind_conflicts() -> anyhow::Result<()>
+    {
+        let (fixture, rustdoc) = canonical_reexport_fixture()?;
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let public_item = unique_public_item_containing(&api, "Secret")?;
+        let mut missing_glob_id = rustdoc.clone();
+        let rustdoc_types::ItemEnum::Use(import) = &mut missing_glob_id
+            .index
+            .get_mut(&public_item.id())
+            .context("fixture re-export item missing")?
+            .inner
+        else {
+            bail!("fixture item is not a re-export")
+        };
+        import.source = "::foundation_contract".to_owned();
+        import.is_glob = true;
+        import.id = None;
+        let Err(error) =
+            project_release_api_item(&missing_glob_id, ApiProfile::Default, public_item)
+        else {
+            bail!("canonical glob without identity must fail closed")
+        };
+        assert!(error.to_string().contains("glob re-export"), "{error:#}");
+
+        let mut owner_conflict = rustdoc.clone();
+        owner_conflict
+            .external_crates
+            .get_mut(&1)
+            .context("fixture external crate missing")?
+            .name = "forged_owner".to_owned();
+        let Err(error) =
+            project_release_api_item(&owner_conflict, ApiProfile::Default, public_item)
+        else {
+            bail!("conflicting canonical owner identity must fail closed")
+        };
+        assert!(
+            error.to_string().contains("owner identity 冲突"),
+            "{error:#}"
+        );
+
+        let mut wrong_kind = rustdoc.clone();
+        wrong_kind
+            .paths
+            .get_mut(&rustdoc_types::Id(2))
+            .context("fixture source path missing")?
+            .kind = rustdoc_types::ItemKind::Function;
+        let Err(error) = project_release_api_item(&wrong_kind, ApiProfile::Default, public_item)
+        else {
+            bail!("canonical source with non-type kind must fail closed")
+        };
+        assert!(error.to_string().contains("source kind"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_foundation_projection_rejects_unresolved_alias() -> anyhow::Result<()> {
+        let (fixture, mut unresolved_alias) = canonical_reexport_fixture()?;
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let public_item = unique_public_item_containing(&api, "Secret")?;
+        let item = unresolved_alias
+            .index
+            .get_mut(&public_item.id())
+            .context("fixture alias item missing")?;
+        item.name = Some("FoundationTime".to_owned());
+        item.inner = serde_json::from_value(json!({
+            "type_alias": {
+                "type": {
+                    "resolved_path": {
+                        "path": "rss_contract::Timepoint",
+                        "id": 99,
+                        "args": null
+                    }
+                },
+                "generics": {"params": [], "where_predicates": []}
+            }
+        }))?;
+        let Err(error) =
+            project_release_api_item(&unresolved_alias, ApiProfile::Default, public_item)
+        else {
+            bail!("canonical alias with unresolved identity must fail closed")
+        };
+        assert!(error.to_string().contains("缺 path identity"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_foundation_projection_rejects_union_mirror() -> anyhow::Result<()> {
+        let fixture =
+            crate::workspace_root()?.join("xtask/tests/fixtures/release_api/reexport.json");
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let public_item = unique_public_item_containing(&api, "Secret")?;
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        let item = rustdoc
+            .index
+            .get_mut(&public_item.id())
+            .context("fixture item missing")?;
+        item.name = Some("Timepoint".to_owned());
+        item.inner = serde_json::from_value(json!({
+            "union": {
+                "generics": {"params": [], "where_predicates": []},
+                "fields": [],
+                "impls": [],
+                "has_stripped_fields": false
+            }
+        }))?;
+        let ReleaseApiItemProjection::Owned(projected) =
+            project_release_api_item(&rustdoc, ApiProfile::Default, public_item)?
+        else {
+            bail!("union mirror cannot be blanket noise")
+        };
+        assert_eq!(
+            projected.foundation_exposure,
+            Some(FoundationExposure::Definition {
+                name: "Timepoint".to_owned()
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn platform_signature_can_reference_foundation_type_without_exposing_owner() -> Result<()> {
+        let surface = real_release_surface_for_foundation_owner_test()?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let fixture = root.join("xtask/tests/fixtures/release_api/owner-aware-blanket.json");
+        let api = public_api::Builder::from_rustdoc_json(&fixture).build()?;
+        let public_item = api
+            .items()
+            .find(|item| item.to_string().contains("leak"))
+            .context("typed function fixture missing")?;
+        let mut rustdoc: rustdoc_types::Crate = serde_json::from_slice(&fs::read(&fixture)?)?;
+        rustdoc
+            .paths
+            .get_mut(&rustdoc_types::Id(12))
+            .context("typed function source path missing")?
+            .path = vec!["rss_contract".to_owned(), "Timepoint".to_owned()];
+        rustdoc
+            .external_crates
+            .get_mut(&1)
+            .context("typed function external crate missing")?
+            .name = "rss_contract".to_owned();
+        let ReleaseApiItemProjection::Owned(projected) =
+            project_release_api_item(&rustdoc, ApiProfile::Default, public_item)?
+        else {
+            bail!("Platform signature cannot be blanket noise")
+        };
+        assert!(projected.source_paths.contains("rss_contract::Timepoint"));
+        assert_eq!(projected.foundation_exposure, None);
+
+        let mut items = canonical_foundation_green_items();
+        items
+            .entry("rss-platform".to_owned())
+            .or_default()
+            .push(projected);
+        let mut findings = Vec::new();
+        append_foundation_owner_findings(facts, &surface, &items, &mut findings);
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
     fn nonempty_release_surface_green_and_forbidden_workspace_type_red() -> anyhow::Result<()> {
         use public_api::tokens::Token::{Identifier, Symbol, Type};
 
@@ -3884,6 +4845,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let green = BTreeMap::from([(
             "alpha-release".to_owned(),
             vec![ApiItemProjection {
+                profile: ApiProfile::Default,
                 rendered: "pub fn alpha_release::clean() -> core::Result".to_owned(),
                 tokens: vec![
                     Identifier("alpha_release".into()),
@@ -3894,6 +4856,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                     Type("Result".into()),
                 ],
                 source_paths: BTreeSet::new(),
+                foundation_exposure: None,
             }],
         )]);
         assert!(release_api_findings_from_items(&facts, &surface, &green)?.is_empty());
@@ -3901,6 +4864,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let red = BTreeMap::from([(
             "alpha-release".to_owned(),
             vec![ApiItemProjection {
+                profile: ApiProfile::Default,
                 rendered: "pub fn alpha_release::leak() -> vocab::Secret".to_owned(),
                 tokens: vec![
                     Identifier("vocab".into()),
@@ -3908,6 +4872,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                     Type("Secret".into()),
                 ],
                 source_paths: BTreeSet::new(),
+                foundation_exposure: None,
             }],
         )]);
         let findings = release_api_findings_from_items(&facts, &surface, &red)?;
@@ -3927,6 +4892,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let reexport_red = BTreeMap::from([(
             "alpha-release".to_owned(),
             vec![ApiItemProjection {
+                profile: ApiProfile::Default,
                 rendered: "pub use alpha_release::Secret".to_owned(),
                 tokens: vec![
                     Identifier("alpha_release".into()),
@@ -3934,6 +4900,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                     Type("Secret".into()),
                 ],
                 source_paths: BTreeSet::from(["vocab::Secret".to_owned()]),
+                foundation_exposure: None,
             }],
         )]);
         let findings = release_api_findings_from_items(&facts, &surface, &reexport_red)?;
@@ -4158,6 +5125,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             (
                 "alpha-release".to_owned(),
                 vec![ApiItemProjection {
+                    profile: ApiProfile::Default,
                     rendered: "pub fn facade_api::api() -> beta_api::Public".to_owned(),
                     tokens: vec![
                         Identifier("facade_api".into()),
@@ -4168,14 +5136,17 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                         Type("Public".into()),
                     ],
                     source_paths: BTreeSet::new(),
+                    foundation_exposure: None,
                 }],
             ),
             (
                 "beta-release".to_owned(),
                 vec![ApiItemProjection {
+                    profile: ApiProfile::Default,
                     rendered: "pub struct beta_release::Public".to_owned(),
                     tokens: vec![Type("Public".into())],
                     source_paths: BTreeSet::new(),
+                    foundation_exposure: None,
                 }],
             ),
         ]);

@@ -450,7 +450,21 @@ fn platform_receipt() -> serde_json::Value {
 fn contract_receipt() -> serde_json::Value {
     json!({
         "package": "rss-contract", "dottedId": true, "version": "v12",
-        "digest": true, "descriptor": true, "invalidRejected": true
+        "digest": true, "descriptor": true, "invalidRejected": true,
+        "timepointRoundtrip": true,
+        "timepointOrdered": true,
+        "negativeTimepointRejected": true,
+        "cursorRoundtrip": true,
+        "malformedCursorRejected": true,
+        "oversizedCursorRejected": true,
+        "cursorDebugRedacted": true,
+        "dataClassLabels": ["public", "internal", "pii", "secret"],
+        "safeErrorCode": "internal",
+        "safeErrorCategory": "internal",
+        "safeErrorMessage": "internal error",
+        "safeErrorSourceAbsent": true,
+        "safeErrorDiagnosticsRedacted": true,
+        "hostileInputCompileRejected": true
     })
 }
 
@@ -877,6 +891,26 @@ fn run_archive_consumer(
         &consumer,
         "build independent local-registry consumer",
     )?;
+    let hostile_input_compile_rejected = if plan.behavior == ProofBehavior::Contract {
+        run_cargo_expected_failure_env(
+            crate::cmd::CargoSubcommand::Check,
+            &[
+                "--locked",
+                "--offline",
+                "--features",
+                "hostile-compile-fail",
+                "--bin",
+                "hostile-compile-fail",
+            ],
+            &env,
+            &consumer,
+            "reject hostile provider error conversion",
+            &["HostileProviderError", "SafeError"],
+        )?;
+        true
+    } else {
+        false
+    };
     let receipt = run_cargo_output_env(
         crate::cmd::CargoSubcommand::Run,
         &["--locked", "--offline"],
@@ -884,8 +918,14 @@ fn run_archive_consumer(
         &consumer,
         "run independent package consumer",
     )?;
-    let receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout)
+    let mut receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout)
         .context("package consumer stdout is not the structured receipt")?;
+    if hostile_input_compile_rejected {
+        receipt
+            .as_object_mut()
+            .context("contract consumer receipt must be an object")?
+            .insert("hostileInputCompileRejected".to_owned(), json!(true));
+    }
     plan.behavior.validate_receipt(&receipt)
 }
 
@@ -945,6 +985,30 @@ fn run_cargo_output_env(
         );
     }
     Ok(output)
+}
+
+fn run_cargo_expected_failure_env(
+    subcommand: crate::cmd::CargoSubcommand,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: &Path,
+    operation: &str,
+    required_diagnostics: &[&str],
+) -> Result<()> {
+    let output = crate::cmd::cargo_cmd(subcommand, args, env, Some(cwd))
+        .output()
+        .with_context(|| operation.to_owned())?;
+    if output.status.success() {
+        bail!("{operation} unexpectedly compiled");
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for diagnostic in required_diagnostics {
+        anyhow::ensure!(
+            stderr.contains(diagnostic),
+            "{operation} failed without required diagnostic `{diagnostic}`"
+        );
+    }
+    Ok(())
 }
 
 fn render_consumer_manifest(path: &Path, plan: &PackageProofPlan) -> Result<()> {
@@ -1445,6 +1509,20 @@ mod tests {
                     "digest",
                     "descriptor",
                     "invalidRejected",
+                    "timepointRoundtrip",
+                    "timepointOrdered",
+                    "negativeTimepointRejected",
+                    "cursorRoundtrip",
+                    "malformedCursorRejected",
+                    "oversizedCursorRejected",
+                    "cursorDebugRedacted",
+                    "dataClassLabels",
+                    "safeErrorCode",
+                    "safeErrorCategory",
+                    "safeErrorMessage",
+                    "safeErrorSourceAbsent",
+                    "safeErrorDiagnosticsRedacted",
+                    "hostileInputCompileRejected",
                 ][..],
             ),
             (
