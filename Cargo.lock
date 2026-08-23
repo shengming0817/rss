@@ -5800,6 +5800,7 @@ dependencies = [
  "argon2",
  "base64",
  "hmac 0.12.1",
+ "rss-contract",
  "rss-request-context",
  "rstest",
  "secrecy",

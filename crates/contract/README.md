@@ -1,7 +1,8 @@
 # rss-contract
 
 `rss-contract` provides canonical, authority-free values used by RSS public APIs: contract
-identities, absolute timepoints, and opaque pagination cursors.
+identities, absolute timepoints, opaque pagination cursors, data classification, and redact-safe
+errors.
 
 Values can be parsed at runtime or authored as validated constants. The package deliberately does
 not contain a registry, generated catalog, runtime binding, or admission authority.
@@ -15,8 +16,16 @@ conversions. It does not provide a clock, `now`, deadlines, or scheduling author
 Foundation: consumers classify a well-formed token as `Stale` when it no longer matches their
 tenant, query, version, or provider state. Cursor diagnostics never echo the token.
 
+`DataClass` is the sole closed vocabulary for public, internal, PII, and secret data. It does not
+contain redaction engines or policy. `SafeError` stores only a closed `SafeErrorCode`; its category
+and message are fixed by that code, and it cannot carry provider sources, arbitrary messages,
+payloads, or details.
+
 ```rust
-use rss_contract::{ContractDescriptor, ContractId, ContractVersion, PageCursor, Timepoint};
+use rss_contract::{
+    ContractDescriptor, ContractId, ContractVersion, DataClass, PageCursor, SafeError,
+    SafeErrorCode, Timepoint,
+};
 
 let id = ContractId::parse("runtime.inventory")?;
 let version = ContractVersion::parse("v1")?;
@@ -24,6 +33,11 @@ assert_eq!(id.as_str(), "runtime.inventory");
 assert_eq!(version.major(), 1);
 assert_eq!(Timepoint::try_from(42)?.unix_seconds(), 42);
 assert_eq!(PageCursor::parse("AQ")?.as_str(), "AQ");
+assert_eq!(DataClass::Pii.as_str(), "pii");
+assert_eq!(
+    SafeError::new(SafeErrorCode::Unavailable).to_string(),
+    "service unavailable"
+);
 
 const INVENTORY: ContractDescriptor = ContractDescriptor::from_static(
     "runtime.inventory",

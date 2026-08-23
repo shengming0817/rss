@@ -4,18 +4,20 @@
 //! - **sink/key funnel**：[`redact_error`]（顶层 `Display`-only）/ [`redact_field`]（按 key 判敏感）/
 //!   [`redact_url_credentials`]（剥 URL userinfo）——span error / tracing sink / last_error 一律经此收口
 //!   （`docs/rules/observability.md` §redaction），敏感 key 判定与 free-form scrub 不散落各 consumer。
-//! - **字段级策略模型**（#1360）：[`Sensitivity`] / [`PiiKind`] / [`RedactionMode`] / `RedactionCtx` /
+//! - **字段级策略模型**（#1360）：[`rss_contract::DataClass`] / [`PiiKind`] / [`RedactionMode`] / `RedactionCtx` /
 //!   [`Redact`] + 公开 funnel [`redact_struct`]。配 `#[derive(Redact)]`（securederive）让任意 struct
 //!   字段**显式声明** public / internal / pii / secret 与脱敏模式，派生安全 `Debug`——替换各 crate 手写 `Debug`。
 //!
-//! `redact_field` 的 key 判敏感逻辑已**单源**进 [`Sensitivity::from_key`]，`Redacted::new` 仍 `pub(crate)`
+//! `redact_field` 的 key 判敏感逻辑由本模块私有 classifier 单源维护，分类结果使用
+//! [`rss_contract::DataClass`]；`Redacted::new` 仍 `pub(crate)`
 //! 封闭（外部只经公开 funnel 取 `Redacted`，不可伪造安全值）。
 
 use hmac::{Hmac, Mac as _};
+use rss_contract::DataClass;
 use sha2::Sha256;
 use std::fmt::{Debug, Write as _};
 
-/// 敏感 key 关键字白名单（小写包含匹配）。由 [`Sensitivity::from_key`] 单源消费。
+/// 敏感 key 关键字白名单（小写包含匹配）。由私有 [`data_class_from_key`] 单源消费。
 const SENSITIVE_KEY_PATTERNS: &[&str] = &[
     "password",
     "secret",
@@ -123,20 +125,6 @@ impl RedactionHashKey {
 
 // ===== 字段级脱敏策略模型（#1360）=====
 
-/// 字段敏感度（「是什么」）。闭值集——`Public` 可下发、`Internal` 仅服务端、`Pii` 个人信息、`Secret` 密钥物料。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Sensitivity {
-    /// 可对外下发（非敏感）。
-    Public,
-    /// 仅服务端日志，不进 wire / `Debug`。
-    Internal,
-    /// 个人可识别信息（子类驱动默认脱敏 mode）。
-    Pii(PiiKind),
-    /// 密钥 / 密码 / token 等机密物料。
-    Secret,
-}
-
 /// PII 子类——驱动默认脱敏 [`RedactionMode`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -172,34 +160,6 @@ pub enum RedactionMode {
     Drop,
 }
 
-impl Sensitivity {
-    /// 按字段 key 判敏感（搬入旧 `redact_field` 的子串白名单判定，单源）。命中 → [`Secret`](Self::Secret)，
-    /// 否则 [`Public`](Self::Public)。
-    pub fn from_key(key: &str) -> Self {
-        let lower = key.to_lowercase();
-        if SENSITIVE_KEY_PATTERNS
-            .iter()
-            .any(|pattern| lower.contains(pattern))
-        {
-            Sensitivity::Secret
-        } else {
-            Sensitivity::Public
-        }
-    }
-
-    /// 该敏感度的默认脱敏 mode（`sensitivity → mode` 单源映射；`#[derive(Redact)]` 对只给
-    /// `sensitivity` 的字段经此解析最终 mode，不在宏内复制映射）。fail-closed：`Internal`/`Secret`/多数
-    /// `Pii` → `Fixed`。
-    pub const fn default_mode(self) -> RedactionMode {
-        match self {
-            Sensitivity::Public => RedactionMode::Show,
-            Sensitivity::Internal => RedactionMode::Fixed,
-            Sensitivity::Pii(kind) => kind.default_mode(),
-            Sensitivity::Secret => RedactionMode::Fixed,
-        }
-    }
-}
-
 impl PiiKind {
     /// 该 PII 子类的默认脱敏 mode。
     pub const fn default_mode(self) -> RedactionMode {
@@ -208,6 +168,50 @@ impl PiiKind {
             PiiKind::Phone => RedactionMode::Last4,
             PiiKind::Name | PiiKind::Address | PiiKind::Generic => RedactionMode::Fixed,
         }
+    }
+}
+
+impl RedactionMode {
+    /// Return the secure-layer default for a canonical data class.
+    #[must_use]
+    pub const fn default_for_data_class(data_class: DataClass) -> Self {
+        match data_class {
+            DataClass::Public => Self::Show,
+            DataClass::Internal | DataClass::Pii | DataClass::Secret => Self::Fixed,
+        }
+    }
+
+    /// Derive helper for a field declared public without a mode override.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn default_for_public() -> Self {
+        Self::default_for_data_class(DataClass::Public)
+    }
+
+    /// Derive helper for a field declared internal without a mode override.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn default_for_internal() -> Self {
+        Self::default_for_data_class(DataClass::Internal)
+    }
+
+    /// Derive helper for a field declared secret without a mode override.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn default_for_secret() -> Self {
+        Self::default_for_data_class(DataClass::Secret)
+    }
+}
+
+fn data_class_from_key(key: &str) -> DataClass {
+    let lower = key.to_lowercase();
+    if SENSITIVE_KEY_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        DataClass::Secret
+    } else {
+        DataClass::Public
     }
 }
 
@@ -496,22 +500,20 @@ fn scalar_to_string(value: RedactValue<'_>) -> String {
     }
 }
 
-/// 字段脱敏策略：绑定 [`Sensitivity`] 与最终 [`RedactionMode`]。
+/// 字段脱敏策略：把 canonical [`DataClass`] 收敛到最终 [`RedactionMode`]。
 ///
 /// `pub(crate)`（#1361 review A-F1/C-F5）：`apply` 不应用 [`RedactScope`] Wire 塌缩，crate 外直用会绕过
 /// 字段级 funnel；仅 [`redact_field`] 等 sink funnel 内部消费。字段级输出走 [`safe`]（单一命名入口）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RedactionCtx {
-    sensitivity: Sensitivity,
     mode: RedactionMode,
 }
 
 impl RedactionCtx {
-    /// 由 sensitivity（+可选显式 mode override）构造策略；`mode` 缺省取 [`Sensitivity::default_mode`]。
-    pub(crate) fn new(sensitivity: Sensitivity, mode: Option<RedactionMode>) -> Self {
+    /// 由 canonical data class（+可选显式 mode override）构造策略。
+    pub(crate) fn new(data_class: DataClass, mode: Option<RedactionMode>) -> Self {
         Self {
-            sensitivity,
-            mode: mode.unwrap_or(sensitivity.default_mode()),
+            mode: mode.unwrap_or(RedactionMode::default_for_data_class(data_class)),
         }
     }
 
@@ -695,9 +697,8 @@ pub fn redact_error(error: &dyn std::error::Error) -> Redacted {
 
 /// 统一脱敏 funnel：按敏感 key 判定清洗单个字段值（敏感 key → 脱敏，否则原样）。
 ///
-/// 重构为字段级模型的一行入口（#1360）：key 判敏感经 [`Sensitivity::from_key`] 单源、脱敏经
-/// `RedactionCtx`——非第二份实现，无双路径。敏感 key → `Secret`→`Fixed`→`<redacted>`；普通 key →
-/// `Public`→`Show`→原样。
+/// key classifier 单源产出 canonical [`DataClass`]，再经 `RedactionCtx` 脱敏。敏感 key →
+/// `DataClass::Secret`→`Fixed`→`<redacted>`；普通 key → `DataClass::Public`→`Show`→原样。
 ///
 /// # ⚠️ key-sweep 盲区（#1361）
 ///
@@ -709,9 +710,7 @@ pub fn redact_error(error: &dyn std::error::Error) -> Redacted {
 pub fn redact_field(key: &str, value: &str) -> Redacted {
     // apply 产出已脱敏 String 片段；本 sink funnel 经 pub(crate) Redacted::new 封装为安全值
     //（key 判敏感固定语义，非调用方选 mode，故可信地产出 Redacted）。
-    Redacted::new(
-        RedactionCtx::new(Sensitivity::from_key(key), None).apply(RedactValue::Str(value)),
-    )
+    Redacted::new(RedactionCtx::new(data_class_from_key(key), None).apply(RedactValue::Str(value)))
 }
 
 /// Observation sink funnel: apply the canonical sensitive-key policy, then scrub URL userinfo.
@@ -819,11 +818,12 @@ impl std::fmt::Debug for LastError {
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldRedaction, LastError, PiiKind, RedactField, RedactScope, RedactValue, Redacted,
-        RedactionCtx, RedactionHashError, RedactionHashKey, RedactionMode, Sensitivity,
-        redact_error, redact_field, redact_hash, redact_observation_field, redact_struct,
-        redact_url_credentials, safe,
+        FieldRedaction, LastError, RedactField, RedactScope, RedactValue, Redacted, RedactionCtx,
+        RedactionHashError, RedactionHashKey, RedactionMode, data_class_from_key, redact_error,
+        redact_field, redact_hash, redact_observation_field, redact_struct, redact_url_credentials,
+        safe,
     };
+    use rss_contract::DataClass;
     use rstest::rstest;
 
     fn hash_key(fill: u8) -> Result<RedactionHashKey, RedactionHashError> {
@@ -921,28 +921,24 @@ mod tests {
         assert_eq!(redact_field(key, value).as_str(), want);
     }
 
-    // --- Sensitivity / 模型 ---
+    // --- DataClass / 模型 ---
 
     #[rstest]
-    #[case("password", Sensitivity::Secret)]
-    #[case("api_key", Sensitivity::Secret)]
-    #[case("username", Sensitivity::Public)]
-    #[case("userId", Sensitivity::Public)]
-    fn sensitivity_from_key_classifies(#[case] key: &str, #[case] want: Sensitivity) {
-        assert_eq!(Sensitivity::from_key(key), want);
+    #[case("password", DataClass::Secret)]
+    #[case("api_key", DataClass::Secret)]
+    #[case("username", DataClass::Public)]
+    #[case("userId", DataClass::Public)]
+    fn key_classifier_returns_canonical_data_class(#[case] key: &str, #[case] want: DataClass) {
+        assert_eq!(data_class_from_key(key), want);
     }
 
     #[rstest]
-    #[case(Sensitivity::Public, RedactionMode::Show)]
-    #[case(Sensitivity::Internal, RedactionMode::Fixed)]
-    #[case(Sensitivity::Secret, RedactionMode::Fixed)]
-    #[case(Sensitivity::Pii(PiiKind::Email), RedactionMode::EmailMask)]
-    #[case(Sensitivity::Pii(PiiKind::Phone), RedactionMode::Last4)]
-    #[case(Sensitivity::Pii(PiiKind::Name), RedactionMode::Fixed)]
-    #[case(Sensitivity::Pii(PiiKind::Address), RedactionMode::Fixed)]
-    #[case(Sensitivity::Pii(PiiKind::Generic), RedactionMode::Fixed)]
-    fn sensitivity_default_mode(#[case] sens: Sensitivity, #[case] want: RedactionMode) {
-        assert_eq!(sens.default_mode(), want);
+    #[case(DataClass::Public, RedactionMode::Show)]
+    #[case(DataClass::Internal, RedactionMode::Fixed)]
+    #[case(DataClass::Pii, RedactionMode::Fixed)]
+    #[case(DataClass::Secret, RedactionMode::Fixed)]
+    fn data_class_default_mode(#[case] class: DataClass, #[case] want: RedactionMode) {
+        assert_eq!(RedactionMode::default_for_data_class(class), want);
     }
 
     // --- RedactionMode::mask（每模式掩码语义）---
@@ -1049,9 +1045,8 @@ mod tests {
     // --- RedactionCtx ---
 
     #[test]
-    fn redaction_ctx_defaults_mode_from_sensitivity() {
-        // 默认 mode 由 sensitivity 解析（Secret→Fixed）；经 apply() 输出验证（accessor 已收为 pub(crate) 内部）。
-        let ctx = RedactionCtx::new(Sensitivity::Secret, None);
+    fn redaction_ctx_defaults_mode_from_data_class() {
+        let ctx = RedactionCtx::new(DataClass::Secret, None);
         assert_eq!(ctx.apply(RedactValue::Str("k")), "<redacted>");
     }
 

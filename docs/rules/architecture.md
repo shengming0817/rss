@@ -62,7 +62,7 @@ RC、registry upload 或 published。
 | Assembly | `assemblies/{name}/` 的 `assembly.toml`(+ `bins/server` / bin crate) | 依赖闭包 = 物理打包；static assembly intent + DI provider 声明源 |
 | 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 + typed `[capabilities.*]` 证据块；L4 另需顶层 `[reconcile]` block；active HTTP 同源派生 `ROUTE: vocab::HttpRouteBinding<RouteMarker, ConsistencyMarker>`，`HttpSpec::route` 由 `ROUTE.evidence()` 擦除供元数据查询 | `ConsistencyMarker` 由 manifest codegen 单源选择，不可手写替换；非 L0 state 经 `.with_state`闭合，L0 只允许 stateless 或 `.with_classified_state` 的 Read/Auth + LocalPrivilege；`xtask` R22 强制等级、能力证据与 L4 reconcile 声明一致；endpoint 构造要求 binding marker 与 handler `ContractMarker` 相同，request extension 传播同一 evidence |
 | context 控制流值(tenant/principal) | `rss-request-context` canonical value/read view；仓内 ambient carrier 为 `runctx::RequestCtx`/`AppCtx` | Foundation 值不是 evidence；production trusted concrete 仅由 AuthZ 后的 assembly bridge 私有构造，`runctx → rss-request-context` |
-| Foundation 公共原语 owner | 当前 `rss-contract` 唯一拥有 contract identity/descriptor、`Timepoint` 与 `PageCursor`；`rss-request-context` 唯一拥有 authority-free request values；DataClass/SafeError 的 planned owner 为 `rss-contract` | [ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md) 冻结 owner 与 carrier handoff；#2150 已原子删除重叠 internal carrier，#2151/#2152/#2153 继续交付剩余类型、owner projection 与 external consumer，禁止 facade、镜像或跨 owner re-export |
+| Foundation 公共原语 owner | 当前 `rss-contract` 唯一拥有 contract identity/descriptor、`Timepoint`、`PageCursor`、`DataClass` 与 `SafeError`；`rss-request-context` 唯一拥有 authority-free request values | [ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md) 冻结 owner 与 carrier handoff；#2150/#2151 已原子删除重叠 internal carrier 并激活 owner-local API/exact-set，#2152/#2153 继续交付跨 owner projection/package proof 与 external consumer，禁止 facade、镜像或跨 owner re-export |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
 active HTTP L2 producer 的 route 绑定必须走 move-only typed 链：`HttpProducerBinding<RouteMarker>` →
@@ -150,11 +150,12 @@ rss/
 
 - **FoundationPublic** `rss-contract` / `rss-request-context`：全 workspace 最低位公开层；前者 std-only，后者
   只依赖外部 `uuid` 且公共签名不泄漏该类型，二者均无 internal workspace 出边。它们分别唯一拥有 contract
-  identity/descriptor、`Timepoint`/`PageCursor` 与 authority-free request values/read-only views；不拥有 registry、generated catalog、crypto、
+  identity/descriptor、`Timepoint`/`PageCursor`/`DataClass`/`SafeError` 与 authority-free request values/read-only views；不拥有 registry、generated catalog、crypto、
   trusted mint、cancel authority 或跨租户 capability。[ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md)
   `Timepoint`/`PageCursor` 已由 #2150 以 private representation、fallible funnel 与 Release API exact set 激活；
-  DataClass/SafeError 仍是 planned owner 分配。在 #2152/#2153 的 owner projection 与 external consumer 落地前，
-  不宣称长期同义类型检测闭环，也不允许 Platform/generated/内部 crate 建镜像、alias 或 re-export 路径。
+  `DataClass`/`SafeError` 已由 #2151 以闭值、私有表示、安全诊断与 Release API exact set 激活。在 #2152/#2153
+  的跨 owner projection/package proof 与 external consumer 落地前，不宣称长期同义类型检测或外部消费闭环，
+  也不允许 Platform/generated/内部 crate 建镜像、alias 或 re-export 路径。
 - **PlatformPublic** `rss-platform`：位于 Foundation 之上，normal/build workspace 出边精确限定为两个 Foundation
   package。它只拥有 typed async application/module/dispatch waist、闭合 dispatch 结果与只读 `HostView`；不拥有
   JWT/JWKS/token verifier、listener/provider、进程 lifecycle、RuntimePlan、inventory publisher 或 drain authority。

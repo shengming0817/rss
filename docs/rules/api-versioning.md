@@ -41,7 +41,7 @@ fallback。旧 #2045 executable contract 已原子删除，同样不构成 compa
 
 [ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md) 分配的 Foundation primitive
 owner 不因 Markdown、internal `pub`、public-api baseline 或同名 internal carrier 而自动激活。#2150 已按本节规则
-激活 `Timepoint`/`PageCursor`；DataClass/SafeError 仍为 planned。提升必须由 owner package 新建
+激活 `Timepoint`/`PageCursor`，#2151 已按同一规则激活 `DataClass`/`SafeError`。提升必须由 owner package 新建
 private-representation / closed-value public type，consumer 直接
 切到该 owner，并在同一 cutover 删除语义重叠的 internal generic type；不得保留 alias、deprecated re-export、
 `From`/`TryFrom`、feature flag、双读写或 convenience facade。语义不同的 Deadline、Clock、领域 cursor 与内部错误
@@ -50,7 +50,8 @@ carrier 可以继续 internal，但不获得 Release API 或 compatibility 身�
 该提升进入轴 A 后，构造器、闭值、trait 与公开路径按 Release Surface、default/all-features SemVer、typed rustdoc
 owner projection、release-api exact set 和 package proof 守。任何公开 package 从另一 owner `pub use` 同一类型都视为
 新的兼容路径；FoundationPublic 间由现有 forbidden-type policy 拒绝，Platform 的 owner-aware re-export rejection 由
-#2152 在既有 rustdoc source-identity projection 内扩展，不建立第二 scanner。
+#2152 继续在既有 rustdoc source-identity projection 内扩展，package proof 亦由 #2152 完成；不建立第二 scanner。
+#2153 负责真实 external consumer proof。二者未完成不回退 #2150/#2151 已激活的 owner-local API 或 exact-set。
 
 轴 A 的 additive type 不授权改变轴 B。时间 wire/range、分页排序/token 失效、DataClass schema label，以及错误
 code/category/message/retryable/status 的 active contract 变化仍按本文件轴 B 规则独立判定，必要时新建 contract ID/version。

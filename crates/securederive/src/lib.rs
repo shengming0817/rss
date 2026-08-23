@@ -13,8 +13,8 @@
 //! （compile-fail golden 见 `tests/`）。
 //!
 //! 不依赖 `secure` crate：只生成 `::secure::…` 绝对路径 token（无编译环；`secure` 内自用经
-//! `extern crate self as secure` 解析）。`sensitivity → mode` 默认映射不在此重复，运行期经
-//! `::secure::Sensitivity::default_mode()` 单源解析。
+//! `extern crate self as secure` 解析）。属性中的 sensitivity 只作为宏 grammar AST；生成代码不会
+//! 引用或复制 canonical `rss_contract::DataClass`，默认 mode 经 `secure` owner 的 helper 单源解析。
 //!
 //! ref: iqlusioninc/crates secrecy/src/lib.rs@main（`SecretBox` Debug `[REDACTED]` 脱敏 + `ExposeSecret`
 //! 受控借出范式；RSS 偏离：构造封闭 `Redacted::new` + 字段级 declared policy，而非 `Secret<T>` 包装）。
@@ -65,9 +65,9 @@ enum PiiKind {
     Generic,
 }
 
-/// 敏感度（与 `secure::Sensitivity` 对应）。
+/// 属性 grammar 中的 data-class 声明；仅用于编译期解析，不是运行时语义类型。
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Sens {
+enum ParsedDataClass {
     Public,
     Internal,
     Pii(PiiKind),
@@ -152,8 +152,10 @@ fn field_policy(field: &syn::Field, idx: usize) -> syn::Result<FieldPolicy> {
     let (mode, sens) = parse_redact_attr(field)?;
     // 防误标：非 public 敏感字段（internal / pii / secret）不得标成明文 show。
     // 仅 public（或不声明 sensitivity）可用 show——fail-closed。
-    if matches!(sens, Some(Sens::Secret | Sens::Pii(_) | Sens::Internal))
-        && mode == Some(Mode::Show)
+    if matches!(
+        sens,
+        Some(ParsedDataClass::Secret | ParsedDataClass::Pii(_) | ParsedDataClass::Internal)
+    ) && mode == Some(Mode::Show)
     {
         return Err(syn::Error::new(
             field.span(),
@@ -170,10 +172,7 @@ fn field_policy(field: &syn::Field, idx: usize) -> syn::Result<FieldPolicy> {
         }
         (Some(m), Some(_)) => mode_path(m),
         // 只给 sensitivity：经 secure 单源映射解析默认 mode（不在宏内复制映射）。
-        (None, Some(s)) => {
-            let s_expr = sens_expr(s);
-            quote!((#s_expr).default_mode())
-        }
+        (None, Some(s)) => default_mode_expr(s),
         (None, None) => {
             return Err(syn::Error::new(
                 field.span(),
@@ -203,9 +202,9 @@ fn field_policy(field: &syn::Field, idx: usize) -> syn::Result<FieldPolicy> {
 }
 
 /// 解析单字段的 `#[redact(...)]`。返回 `(mode, sensitivity)`。
-fn parse_redact_attr(field: &syn::Field) -> syn::Result<(Option<Mode>, Option<Sens>)> {
+fn parse_redact_attr(field: &syn::Field) -> syn::Result<(Option<Mode>, Option<ParsedDataClass>)> {
     let mut mode: Option<Mode> = None;
-    let mut sens: Option<Sens> = None;
+    let mut sens: Option<ParsedDataClass> = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("redact") {
             continue;
@@ -249,7 +248,11 @@ fn parse_redact_attr(field: &syn::Field) -> syn::Result<(Option<Mode>, Option<Se
     Ok((mode, sens))
 }
 
-fn set_sens(sens: &mut Option<Sens>, next: Sens, span: proc_macro2::Span) -> syn::Result<()> {
+fn set_sens(
+    sens: &mut Option<ParsedDataClass>,
+    next: ParsedDataClass,
+    span: proc_macro2::Span,
+) -> syn::Result<()> {
     if sens.replace(next).is_some() {
         return Err(syn::Error::new(
             span,
@@ -277,16 +280,16 @@ fn parse_mode(value: &LitStr) -> syn::Result<Mode> {
     }
 }
 
-fn parse_sensitivity(value: &Ident) -> syn::Result<Sens> {
+fn parse_sensitivity(value: &Ident) -> syn::Result<ParsedDataClass> {
     match value.to_string().as_str() {
-        "public" => Ok(Sens::Public),
-        "internal" => Ok(Sens::Internal),
-        "secret" => Ok(Sens::Secret),
-        "pii" => Ok(Sens::Pii(PiiKind::Generic)),
-        "pii_email" => Ok(Sens::Pii(PiiKind::Email)),
-        "pii_phone" => Ok(Sens::Pii(PiiKind::Phone)),
-        "pii_name" => Ok(Sens::Pii(PiiKind::Name)),
-        "pii_address" => Ok(Sens::Pii(PiiKind::Address)),
+        "public" => Ok(ParsedDataClass::Public),
+        "internal" => Ok(ParsedDataClass::Internal),
+        "secret" => Ok(ParsedDataClass::Secret),
+        "pii" => Ok(ParsedDataClass::Pii(PiiKind::Generic)),
+        "pii_email" => Ok(ParsedDataClass::Pii(PiiKind::Email)),
+        "pii_phone" => Ok(ParsedDataClass::Pii(PiiKind::Phone)),
+        "pii_name" => Ok(ParsedDataClass::Pii(PiiKind::Name)),
+        "pii_address" => Ok(ParsedDataClass::Pii(PiiKind::Address)),
         other => Err(syn::Error::new(
             value.span(),
             format!(
@@ -306,15 +309,15 @@ fn mode_path(m: Mode) -> TokenStream2 {
     }
 }
 
-fn sens_expr(s: Sens) -> TokenStream2 {
+fn default_mode_expr(s: ParsedDataClass) -> TokenStream2 {
     match s {
-        Sens::Public => quote!(::secure::Sensitivity::Public),
-        Sens::Internal => quote!(::secure::Sensitivity::Internal),
-        Sens::Pii(kind) => {
+        ParsedDataClass::Public => quote!(::secure::RedactionMode::default_for_public()),
+        ParsedDataClass::Internal => quote!(::secure::RedactionMode::default_for_internal()),
+        ParsedDataClass::Pii(kind) => {
             let kind = pii_kind_path(kind);
-            quote!(::secure::Sensitivity::Pii(#kind))
+            quote!((#kind).default_mode())
         }
-        Sens::Secret => quote!(::secure::Sensitivity::Secret),
+        ParsedDataClass::Secret => quote!(::secure::RedactionMode::default_for_secret()),
     }
 }
 
@@ -330,7 +333,7 @@ fn pii_kind_path(kind: PiiKind) -> TokenStream2 {
 
 fn redact_value_expr(
     mode: Option<Mode>,
-    sens: Option<Sens>,
+    sens: Option<ParsedDataClass>,
     accessor: &TokenStream2,
 ) -> TokenStream2 {
     match mode {
@@ -340,15 +343,15 @@ fn redact_value_expr(
             quote!(::secure::RedactField::as_redact_value(#accessor))
         }
         None => match sens {
-            Some(Sens::Public) => quote!(::secure::RedactValue::Debug(#accessor)),
+            Some(ParsedDataClass::Public) => quote!(::secure::RedactValue::Debug(#accessor)),
             Some(
-                Sens::Internal
-                | Sens::Secret
-                | Sens::Pii(PiiKind::Generic | PiiKind::Name | PiiKind::Address),
+                ParsedDataClass::Internal
+                | ParsedDataClass::Secret
+                | ParsedDataClass::Pii(PiiKind::Generic | PiiKind::Name | PiiKind::Address),
             ) => {
                 quote!(::secure::RedactValue::Absent)
             }
-            Some(Sens::Pii(PiiKind::Email | PiiKind::Phone)) => {
+            Some(ParsedDataClass::Pii(PiiKind::Email | PiiKind::Phone)) => {
                 quote!(::secure::RedactField::as_redact_value(#accessor))
             }
             None => quote!(::secure::RedactValue::Absent),
@@ -380,9 +383,10 @@ mod tests {
         );
         assert!(out.contains("redact_struct"));
         assert!(out.contains("false")); // is_tuple = false
-        // 显式 mode = fixed 直接选 RedactionMode::Fixed；secret 经 default_mode() 解析。
+        // 显式 mode = fixed 直接选 RedactionMode::Fixed；secret 经 secure helper 解析。
         assert!(out.contains("RedactionMode :: Fixed"));
-        assert!(out.contains("default_mode"));
+        assert!(out.contains("default_for_secret"));
+        assert!(!out.contains("Sensitivity"));
     }
 
     #[test]

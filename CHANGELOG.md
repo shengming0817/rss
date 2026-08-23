@@ -9,6 +9,10 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 ### rss-contract 0.1.0
 
 - Establish the sole public owner for canonical contract IDs, versions, SHA-256 schema digests and descriptors.
+- Establish the sole public owner for the closed `DataClass`, `SafeErrorCode`, and
+  `SafeErrorCategory` vocabularies and the code-only `SafeError` projection.
+- Remove `secure::Sensitivity` without an alias, shim, conversion, or dual API; redaction
+  mechanisms remain owned by `secure`.
 - Keep registries, generated catalogs, runtime bindings and admission authority outside the package.
 
 ### rss-request-context 0.1.0

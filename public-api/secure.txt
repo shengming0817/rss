@@ -725,6 +725,8 @@ pub secure::redaction::RedactionMode::EmailMask
 pub secure::redaction::RedactionMode::Fixed
 pub secure::redaction::RedactionMode::Last4
 pub secure::redaction::RedactionMode::Show
+impl secure::redaction::RedactionMode
+pub const fn secure::redaction::RedactionMode::default_for_data_class(rss_contract::data_class::DataClass) -> Self
 impl core::clone::Clone for secure::redaction::RedactionMode
 pub fn secure::redaction::RedactionMode::clone(&self) -> secure::redaction::RedactionMode
 impl core::cmp::Eq for secure::redaction::RedactionMode
@@ -741,30 +743,6 @@ impl core::marker::Unpin for secure::redaction::RedactionMode
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionMode
-#[non_exhaustive] pub enum secure::redaction::Sensitivity
-pub secure::redaction::Sensitivity::Internal
-pub secure::redaction::Sensitivity::Pii(secure::redaction::PiiKind)
-pub secure::redaction::Sensitivity::Public
-pub secure::redaction::Sensitivity::Secret
-impl secure::redaction::Sensitivity
-pub const fn secure::redaction::Sensitivity::default_mode(self) -> secure::redaction::RedactionMode
-pub fn secure::redaction::Sensitivity::from_key(&str) -> Self
-impl core::clone::Clone for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::clone(&self) -> secure::redaction::Sensitivity
-impl core::cmp::Eq for secure::redaction::Sensitivity
-impl core::cmp::PartialEq for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::eq(&self, &secure::redaction::Sensitivity) -> bool
-impl core::fmt::Debug for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for secure::redaction::Sensitivity
-impl core::marker::StructuralPartialEq for secure::redaction::Sensitivity
-impl core::marker::Freeze for secure::redaction::Sensitivity
-impl core::marker::Send for secure::redaction::Sensitivity
-impl core::marker::Sync for secure::redaction::Sensitivity
-impl core::marker::Unpin for secure::redaction::Sensitivity
-impl core::marker::UnsafeUnpin for secure::redaction::Sensitivity
-impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Sensitivity
-impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Sensitivity
 pub struct secure::redaction::FieldRedaction<'a>
 pub secure::redaction::FieldRedaction::mode: secure::redaction::RedactionMode
 pub secure::redaction::FieldRedaction::name: core::option::Option<&'static str>
@@ -1472,6 +1450,8 @@ pub secure::RedactionMode::EmailMask
 pub secure::RedactionMode::Fixed
 pub secure::RedactionMode::Last4
 pub secure::RedactionMode::Show
+impl secure::redaction::RedactionMode
+pub const fn secure::redaction::RedactionMode::default_for_data_class(rss_contract::data_class::DataClass) -> Self
 impl core::clone::Clone for secure::redaction::RedactionMode
 pub fn secure::redaction::RedactionMode::clone(&self) -> secure::redaction::RedactionMode
 impl core::cmp::Eq for secure::redaction::RedactionMode
@@ -1511,30 +1491,6 @@ impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrit
 impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityError
 impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityError
-#[non_exhaustive] pub enum secure::Sensitivity
-pub secure::Sensitivity::Internal
-pub secure::Sensitivity::Pii(secure::redaction::PiiKind)
-pub secure::Sensitivity::Public
-pub secure::Sensitivity::Secret
-impl secure::redaction::Sensitivity
-pub const fn secure::redaction::Sensitivity::default_mode(self) -> secure::redaction::RedactionMode
-pub fn secure::redaction::Sensitivity::from_key(&str) -> Self
-impl core::clone::Clone for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::clone(&self) -> secure::redaction::Sensitivity
-impl core::cmp::Eq for secure::redaction::Sensitivity
-impl core::cmp::PartialEq for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::eq(&self, &secure::redaction::Sensitivity) -> bool
-impl core::fmt::Debug for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for secure::redaction::Sensitivity
-impl core::marker::StructuralPartialEq for secure::redaction::Sensitivity
-impl core::marker::Freeze for secure::redaction::Sensitivity
-impl core::marker::Send for secure::redaction::Sensitivity
-impl core::marker::Sync for secure::redaction::Sensitivity
-impl core::marker::Unpin for secure::redaction::Sensitivity
-impl core::marker::UnsafeUnpin for secure::redaction::Sensitivity
-impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Sensitivity
-impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Sensitivity
 #[non_exhaustive] pub enum secure::Transform
 pub secure::Transform::DigitsOnly
 pub secure::Transform::LastN(usize)

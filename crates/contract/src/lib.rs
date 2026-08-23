@@ -1,5 +1,11 @@
 #![doc = include_str!("../README.md")]
 
+mod data_class;
+mod safe_error;
+
+pub use data_class::DataClass;
+pub use safe_error::{SafeError, SafeErrorCategory, SafeErrorCode};
+
 use std::error::Error;
 use std::fmt;
 use std::hash::{Hash, Hasher};

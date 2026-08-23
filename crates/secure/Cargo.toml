@@ -10,6 +10,7 @@ default = []
 test-support = []
 
 [dependencies]
+rss-contract.workspace = true
 rss-request-context.workspace = true
 thiserror = { workspace = true }
 vocab = { path = "../vocab" }
