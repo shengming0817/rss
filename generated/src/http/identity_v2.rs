@@ -35,102 +35,118 @@ pub mod device_certificate_policy_put {
     /// ```json
     ///{
     ///  "title": "IdentityDeviceCertificatePolicyPutConflictError",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "code"
-    ///  ],
-    ///  "properties": {
-    ///    "code": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "ExpectedGenerationConflict",
-    ///        "IdempotencyKeyConflict"
-    ///      ]
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
+    ///      ],
+    ///      "properties": {
+    ///        "code": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ERR_CORE_VERSION_CONFLICT"
+    ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "version conflict"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
+    ///      ],
+    ///      "properties": {
+    ///        "code": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ERR_CORE_CONFLICT"
+    ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "conflict"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
     ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityDeviceCertificatePolicyPutConflictError {
-        #[redact(sensitivity = public)]
-        pub code: IdentityDeviceCertificatePolicyPutConflictErrorCode,
-    }
-    ///`IdentityDeviceCertificatePolicyPutConflictErrorCode`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "ExpectedGenerationConflict",
-    ///    "IdempotencyKeyConflict"
     ///  ]
     ///}
     /// ```
     /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityDeviceCertificatePolicyPutConflictErrorCode {
-        ExpectedGenerationConflict,
-        IdempotencyKeyConflict,
-    }
-    impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutConflictErrorCode {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::ExpectedGenerationConflict => f.write_str("ExpectedGenerationConflict"),
-                Self::IdempotencyKeyConflict => f.write_str("IdempotencyKeyConflict"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutConflictErrorCode {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "ExpectedGenerationConflict" => Ok(Self::ExpectedGenerationConflict),
-                "IdempotencyKeyConflict" => Ok(Self::IdempotencyKeyConflict),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutConflictErrorCode {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityDeviceCertificatePolicyPutConflictErrorCode
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityDeviceCertificatePolicyPutConflictErrorCode
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "code", deny_unknown_fields)]
+    pub enum IdentityDeviceCertificatePolicyPutConflictError {
+        #[serde(rename = "ERR_CORE_VERSION_CONFLICT")]
+        ErrCoreVersionConflict {
+            details: ::std::vec::Vec<
+                ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+            >,
+            message: IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage,
+            #[serde(rename = "requestId")]
+            request_id: ::std::string::String,
+            retryable: bool,
+        },
+        #[serde(rename = "ERR_CORE_CONFLICT")]
+        ErrCoreConflict {
+            details: ::std::vec::Vec<
+                ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+            >,
+            message: IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage,
+            #[serde(rename = "requestId")]
+            request_id: ::std::string::String,
+            retryable: bool,
+        },
     }
     ///A generation mismatch or idempotency-key fingerprint mismatch rejects the write.
     ///
@@ -147,20 +163,92 @@ pub mod device_certificate_policy_put {
     ///  "properties": {
     ///    "error": {
     ///      "title": "IdentityDeviceCertificatePolicyPutConflictError",
-    ///      "type": "object",
-    ///      "required": [
-    ///        "code"
-    ///      ],
-    ///      "properties": {
-    ///        "code": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "ExpectedGenerationConflict",
-    ///            "IdempotencyKeyConflict"
-    ///          ]
+    ///      "oneOf": [
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "code",
+    ///            "details",
+    ///            "message",
+    ///            "requestId",
+    ///            "retryable"
+    ///          ],
+    ///          "properties": {
+    ///            "code": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "ERR_CORE_VERSION_CONFLICT"
+    ///              ]
+    ///            },
+    ///            "details": {
+    ///              "type": "array",
+    ///              "items": {
+    ///                "type": "object",
+    ///                "additionalProperties": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "maxItems": 0
+    ///            },
+    ///            "message": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "version conflict"
+    ///              ]
+    ///            },
+    ///            "requestId": {
+    ///              "type": "string"
+    ///            },
+    ///            "retryable": {
+    ///              "type": "boolean",
+    ///              "const": false
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "code",
+    ///            "details",
+    ///            "message",
+    ///            "requestId",
+    ///            "retryable"
+    ///          ],
+    ///          "properties": {
+    ///            "code": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "ERR_CORE_CONFLICT"
+    ///              ]
+    ///            },
+    ///            "details": {
+    ///              "type": "array",
+    ///              "items": {
+    ///                "type": "object",
+    ///                "additionalProperties": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "maxItems": 0
+    ///            },
+    ///            "message": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "conflict"
+    ///              ]
+    ///            },
+    ///            "requestId": {
+    ///              "type": "string"
+    ///            },
+    ///            "retryable": {
+    ///              "type": "boolean",
+    ///              "const": false
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
     ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      ]
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -173,6 +261,79 @@ pub mod device_certificate_policy_put {
         #[redact(sensitivity = public)]
         pub error: IdentityDeviceCertificatePolicyPutConflictError,
     }
+    ///`IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "version conflict"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage {
+        #[serde(rename = "version conflict")]
+        VersionConflict,
+    }
+    impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::VersionConflict => f.write_str("version conflict"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "version conflict" => Ok(Self::VersionConflict),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str>
+        for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///`IdentityDeviceCertificatePolicyPutData`
     ///
     /// <details><summary>JSON schema</summary>
@@ -183,6 +344,7 @@ pub mod device_certificate_policy_put {
     ///  "type": "object",
     ///  "required": [
     ///    "acceptedGeneration",
+    ///    "authorizationReceiptId",
     ///    "condition"
     ///  ],
     ///  "properties": {
@@ -190,6 +352,10 @@ pub mod device_certificate_policy_put {
     ///      "type": "integer",
     ///      "format": "int64",
     ///      "minimum": 1.0
+    ///    },
+    ///    "authorizationReceiptId": {
+    ///      "$ref": "#/definitions/AuthorizationReceiptId",
+    ///      "x-redaction": "internal"
     ///    },
     ///    "condition": {
     ///      "type": "string",
@@ -209,6 +375,9 @@ pub mod device_certificate_policy_put {
         #[serde(rename = "acceptedGeneration")]
         #[redact(sensitivity = public)]
         pub accepted_generation: ::std::num::NonZeroU64,
+        #[serde(rename = "authorizationReceiptId")]
+        #[redact(sensitivity = internal)]
+        pub authorization_receipt_id: crate::device_certificate::AuthorizationReceiptId,
         #[redact(sensitivity = public)]
         pub condition: IdentityDeviceCertificatePolicyPutDataCondition,
     }
@@ -295,14 +464,41 @@ pub mod device_certificate_policy_put {
     ///  "title": "IdentityDeviceCertificatePolicyPutNotFoundError",
     ///  "type": "object",
     ///  "required": [
-    ///    "code"
+    ///    "code",
+    ///    "details",
+    ///    "message",
+    ///    "requestId",
+    ///    "retryable"
     ///  ],
     ///  "properties": {
     ///    "code": {
     ///      "type": "string",
     ///      "enum": [
-    ///        "NotFound"
+    ///        "ERR_CORE_NOT_FOUND"
     ///      ]
+    ///    },
+    ///    "details": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "object",
+    ///        "additionalProperties": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "maxItems": 0
+    ///    },
+    ///    "message": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "not found"
+    ///      ]
+    ///    },
+    ///    "requestId": {
+    ///      "type": "string"
+    ///    },
+    ///    "retryable": {
+    ///      "type": "boolean",
+    ///      "const": false
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -314,6 +510,17 @@ pub mod device_certificate_policy_put {
     pub struct IdentityDeviceCertificatePolicyPutNotFoundError {
         #[redact(sensitivity = public)]
         pub code: IdentityDeviceCertificatePolicyPutNotFoundErrorCode,
+        #[redact(sensitivity = public)]
+        pub details: ::std::vec::Vec<
+            ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+        >,
+        #[redact(sensitivity = public)]
+        pub message: IdentityDeviceCertificatePolicyPutNotFoundErrorMessage,
+        #[serde(rename = "requestId")]
+        #[redact(sensitivity = public)]
+        pub request_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub retryable: bool,
     }
     ///`IdentityDeviceCertificatePolicyPutNotFoundErrorCode`
     ///
@@ -323,7 +530,7 @@ pub mod device_certificate_policy_put {
     ///{
     ///  "type": "string",
     ///  "enum": [
-    ///    "NotFound"
+    ///    "ERR_CORE_NOT_FOUND"
     ///  ]
     ///}
     /// ```
@@ -341,12 +548,13 @@ pub mod device_certificate_policy_put {
         PartialOrd,
     )]
     pub enum IdentityDeviceCertificatePolicyPutNotFoundErrorCode {
-        NotFound,
+        #[serde(rename = "ERR_CORE_NOT_FOUND")]
+        ErrCoreNotFound,
     }
     impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutNotFoundErrorCode {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
-                Self::NotFound => f.write_str("NotFound"),
+                Self::ErrCoreNotFound => f.write_str("ERR_CORE_NOT_FOUND"),
             }
         }
     }
@@ -354,7 +562,7 @@ pub mod device_certificate_policy_put {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
-                "NotFound" => Ok(Self::NotFound),
+                "ERR_CORE_NOT_FOUND" => Ok(Self::ErrCoreNotFound),
                 _ => Err("invalid value".into()),
             }
         }
@@ -385,6 +593,77 @@ pub mod device_certificate_policy_put {
             value.parse()
         }
     }
+    ///`IdentityDeviceCertificatePolicyPutNotFoundErrorMessage`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "not found"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityDeviceCertificatePolicyPutNotFoundErrorMessage {
+        #[serde(rename = "not found")]
+        NotFound,
+    }
+    impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutNotFoundErrorMessage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::NotFound => f.write_str("not found"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutNotFoundErrorMessage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "not found" => Ok(Self::NotFound),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutNotFoundErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///A hidden or absent device uses the same public response surface.
     ///
     /// <details><summary>JSON schema</summary>
@@ -402,14 +681,41 @@ pub mod device_certificate_policy_put {
     ///      "title": "IdentityDeviceCertificatePolicyPutNotFoundError",
     ///      "type": "object",
     ///      "required": [
-    ///        "code"
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
     ///      ],
     ///      "properties": {
     ///        "code": {
     ///          "type": "string",
     ///          "enum": [
-    ///            "NotFound"
+    ///            "ERR_CORE_NOT_FOUND"
     ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "not found"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": false
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -764,6 +1070,7 @@ pub mod device_certificate_policy_put {
     ///      "type": "object",
     ///      "required": [
     ///        "acceptedGeneration",
+    ///        "authorizationReceiptId",
     ///        "condition"
     ///      ],
     ///      "properties": {
@@ -771,6 +1078,10 @@ pub mod device_certificate_policy_put {
     ///          "type": "integer",
     ///          "format": "int64",
     ///          "minimum": 1.0
+    ///        },
+    ///        "authorizationReceiptId": {
+    ///          "$ref": "#/definitions/AuthorizationReceiptId",
+    ///          "x-redaction": "internal"
     ///        },
     ///        "condition": {
     ///          "type": "string",
@@ -802,7 +1113,7 @@ pub mod device_certificate_policy_put {
         ::rss_contract::ContractDescriptor::from_static_version(
             "identity.device-certificate-policy-put",
             "v2",
-            "sha256:7c298c8b77aae9704e743ea393cb63543f7063b75bd16ef0eaaf3384e52c266f",
+            "sha256:c6cbd07a3dbdf14d9cb17dcacf4b460e6e7ffcd69800a9d08d3ae2527314b1a2",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =
@@ -985,6 +1296,123 @@ pub mod device_certificate_status_get {
             fn from(value: String) -> Self {
                 Self(value.into())
             }
+        }
+    }
+    ///`ActiveCommand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityDeviceCertificateStatusGetActiveCommand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "fenceEpoch",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "fenceEpoch": {
+    ///      "type": "integer",
+    ///      "format": "int64",
+    ///      "minimum": 1.0
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "queued",
+    ///        "published",
+    ///        "received"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct ActiveCommand {
+        #[serde(rename = "fenceEpoch")]
+        #[redact(sensitivity = public)]
+        pub fence_epoch: ::std::num::NonZeroU64,
+        #[redact(sensitivity = public)]
+        pub state: ActiveCommandState,
+    }
+    ///`ActiveCommandState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "queued",
+    ///    "published",
+    ///    "received"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum ActiveCommandState {
+        #[serde(rename = "queued")]
+        Queued,
+        #[serde(rename = "published")]
+        Published,
+        #[serde(rename = "received")]
+        Received,
+    }
+    impl ::std::fmt::Display for ActiveCommandState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Queued => f.write_str("queued"),
+                Self::Published => f.write_str("published"),
+                Self::Received => f.write_str("received"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for ActiveCommandState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "queued" => Ok(Self::Queued),
+                "published" => Ok(Self::Published),
+                "received" => Ok(Self::Received),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for ActiveCommandState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for ActiveCommandState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for ActiveCommandState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
         }
     }
     ///`Condition`
@@ -1350,37 +1778,38 @@ pub mod device_certificate_status_get {
             value.parse()
         }
     }
-    ///`IdentityDeviceCertificateStatusGetActiveCommand`
+    ///`Desired`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityDeviceCertificateStatusGetActiveCommand",
+    ///  "title": "IdentityDeviceCertificateStatusGetDesired",
     ///  "type": "object",
     ///  "required": [
-    ///    "fenceEpoch",
-    ///    "generation",
-    ///    "state"
+    ///    "activeCommand",
+    ///    "authorizationReceiptId",
+    ///    "generation"
     ///  ],
     ///  "properties": {
-    ///    "fenceEpoch": {
-    ///      "type": "integer",
-    ///      "format": "int64",
-    ///      "minimum": 1.0
+    ///    "activeCommand": {
+    ///      "oneOf": [
+    ///        {
+    ///          "type": "null"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/activeCommand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "authorizationReceiptId": {
+    ///      "$ref": "#/definitions/AuthorizationReceiptId",
+    ///      "x-redaction": "internal"
     ///    },
     ///    "generation": {
     ///      "type": "integer",
     ///      "format": "int64",
     ///      "minimum": 1.0
-    ///    },
-    ///    "state": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "queued",
-    ///        "published",
-    ///        "received"
-    ///      ]
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -1389,95 +1818,15 @@ pub mod device_certificate_status_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityDeviceCertificateStatusGetActiveCommand {
-        #[serde(rename = "fenceEpoch")]
+    pub struct Desired {
+        #[serde(rename = "activeCommand")]
         #[redact(sensitivity = public)]
-        pub fence_epoch: ::std::num::NonZeroU64,
+        pub active_command: ::std::option::Option<ActiveCommand>,
+        #[serde(rename = "authorizationReceiptId")]
+        #[redact(sensitivity = internal)]
+        pub authorization_receipt_id: crate::device_certificate::AuthorizationReceiptId,
         #[redact(sensitivity = public)]
         pub generation: ::std::num::NonZeroU64,
-        #[redact(sensitivity = public)]
-        pub state: IdentityDeviceCertificateStatusGetActiveCommandState,
-    }
-    ///`IdentityDeviceCertificateStatusGetActiveCommandState`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "queued",
-    ///    "published",
-    ///    "received"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityDeviceCertificateStatusGetActiveCommandState {
-        #[serde(rename = "queued")]
-        Queued,
-        #[serde(rename = "published")]
-        Published,
-        #[serde(rename = "received")]
-        Received,
-    }
-    impl ::std::fmt::Display for IdentityDeviceCertificateStatusGetActiveCommandState {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Queued => f.write_str("queued"),
-                Self::Published => f.write_str("published"),
-                Self::Received => f.write_str("received"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityDeviceCertificateStatusGetActiveCommandState {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "queued" => Ok(Self::Queued),
-                "published" => Ok(Self::Published),
-                "received" => Ok(Self::Received),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificateStatusGetActiveCommandState {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityDeviceCertificateStatusGetActiveCommandState
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityDeviceCertificateStatusGetActiveCommandState
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
     }
     ///`IdentityDeviceCertificateStatusGetData`
     ///
@@ -1489,53 +1838,25 @@ pub mod device_certificate_status_get {
     ///  "type": "object",
     ///  "required": [
     ///    "conditions",
-    ///    "desiredGeneration",
+    ///    "desired",
     ///    "observedGeneration"
     ///  ],
     ///  "properties": {
-    ///    "activeCommand": {
-    ///      "title": "IdentityDeviceCertificateStatusGetActiveCommand",
-    ///      "type": [
-    ///        "object",
-    ///        "null"
-    ///      ],
-    ///      "required": [
-    ///        "fenceEpoch",
-    ///        "generation",
-    ///        "state"
-    ///      ],
-    ///      "properties": {
-    ///        "fenceEpoch": {
-    ///          "type": "integer",
-    ///          "format": "int64",
-    ///          "minimum": 1.0
-    ///        },
-    ///        "generation": {
-    ///          "type": "integer",
-    ///          "format": "int64",
-    ///          "minimum": 1.0
-    ///        },
-    ///        "state": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "queued",
-    ///            "published",
-    ///            "received"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
     ///    "conditions": {
     ///      "type": "array",
     ///      "items": {
     ///        "$ref": "#/definitions/condition"
     ///      }
     ///    },
-    ///    "desiredGeneration": {
-    ///      "type": "integer",
-    ///      "format": "int64",
-    ///      "minimum": 0.0
+    ///    "desired": {
+    ///      "oneOf": [
+    ///        {
+    ///          "type": "null"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/desired"
+    ///        }
+    ///      ]
     ///    },
     ///    "observedGeneration": {
     ///      "type": "integer",
@@ -1550,18 +1871,10 @@ pub mod device_certificate_status_get {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityDeviceCertificateStatusGetData {
-        #[serde(
-            rename = "activeCommand",
-            default,
-            skip_serializing_if = "::std::option::Option::is_none"
-        )]
-        #[redact(sensitivity = public)]
-        pub active_command: ::std::option::Option<IdentityDeviceCertificateStatusGetActiveCommand>,
         #[redact(sensitivity = public)]
         pub conditions: ::std::vec::Vec<Condition>,
-        #[serde(rename = "desiredGeneration")]
         #[redact(sensitivity = public)]
-        pub desired_generation: i64,
+        pub desired: ::std::option::Option<Desired>,
         #[serde(rename = "observedGeneration")]
         #[redact(sensitivity = public)]
         pub observed_generation: i64,
@@ -1588,14 +1901,14 @@ pub mod device_certificate_status_get {
             Self {}
         }
     }
-    ///LocalOnly desired and reported certificate status.
+    ///LocalOnly desired authorization lineage and reported certificate status.
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
     ///  "title": "IdentityDeviceCertificateStatusGetResponse",
-    ///  "description": "LocalOnly desired and reported certificate status.",
+    ///  "description": "LocalOnly desired authorization lineage and reported certificate status.",
     ///  "type": "object",
     ///  "required": [
     ///    "data"
@@ -1606,53 +1919,25 @@ pub mod device_certificate_status_get {
     ///      "type": "object",
     ///      "required": [
     ///        "conditions",
-    ///        "desiredGeneration",
+    ///        "desired",
     ///        "observedGeneration"
     ///      ],
     ///      "properties": {
-    ///        "activeCommand": {
-    ///          "title": "IdentityDeviceCertificateStatusGetActiveCommand",
-    ///          "type": [
-    ///            "object",
-    ///            "null"
-    ///          ],
-    ///          "required": [
-    ///            "fenceEpoch",
-    ///            "generation",
-    ///            "state"
-    ///          ],
-    ///          "properties": {
-    ///            "fenceEpoch": {
-    ///              "type": "integer",
-    ///              "format": "int64",
-    ///              "minimum": 1.0
-    ///            },
-    ///            "generation": {
-    ///              "type": "integer",
-    ///              "format": "int64",
-    ///              "minimum": 1.0
-    ///            },
-    ///            "state": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "queued",
-    ///                "published",
-    ///                "received"
-    ///              ]
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
-    ///        },
     ///        "conditions": {
     ///          "type": "array",
     ///          "items": {
     ///            "$ref": "#/definitions/condition"
     ///          }
     ///        },
-    ///        "desiredGeneration": {
-    ///          "type": "integer",
-    ///          "format": "int64",
-    ///          "minimum": 0.0
+    ///        "desired": {
+    ///          "oneOf": [
+    ///            {
+    ///              "type": "null"
+    ///            },
+    ///            {
+    ///              "$ref": "#/definitions/desired"
+    ///            }
+    ///          ]
     ///        },
     ///        "observedGeneration": {
     ///          "type": "integer",
@@ -1682,7 +1967,7 @@ pub mod device_certificate_status_get {
         ::rss_contract::ContractDescriptor::from_static_version(
             "identity.device-certificate-status-get",
             "v2",
-            "sha256:e554542947aecbdc688c8969e32933bf4026fe6194b48d98a3fd83e5450d5ef8",
+            "sha256:1f570c405743957459475674e37dca8d0ce81c0e017b2670dc0d656c9909fd75",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =

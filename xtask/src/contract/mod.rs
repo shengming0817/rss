@@ -35,10 +35,12 @@ pub(crate) struct DeviceCertificateCandidateSpec {
     pub(crate) consistency_level: manifest::ConsistencyLevel,
     pub(crate) lifecycle: manifest::Lifecycle,
     pub(crate) source_dir: &'static str,
+    pub(crate) public_module: &'static str,
+    pub(crate) carries_authorization_lineage: bool,
 }
 
 macro_rules! device_certificate_candidate_catalog {
-    ($( $variant:ident => ($id:literal, $kind:ident, $consistency:ident, $source:literal), )+) => {
+    ($( $variant:ident => ($id:literal, $kind:ident, $consistency:ident, $source:literal, $module:literal, $lineaged:literal), )+) => {
         impl DeviceCertificateCandidateId {
             pub(crate) const ALL: [Self; [$(stringify!($variant)),+].len()] = [
                 $(Self::$variant),+
@@ -52,6 +54,8 @@ macro_rules! device_certificate_candidate_catalog {
                         consistency_level: manifest::ConsistencyLevel::$consistency,
                         lifecycle: manifest::Lifecycle::Draft,
                         source_dir: $source,
+                        public_module: $module,
+                        carries_authorization_lineage: $lineaged,
                     }),+
                 }
             }
@@ -64,37 +68,49 @@ device_certificate_candidate_catalog! {
         "identity.device-certificate-policy-put",
         Http,
         DeviceLatent,
-        "contracts/http/identity/v2/device-certificate-policy-put"
+        "contracts/http/identity/v2/device-certificate-policy-put",
+        "policy_put",
+        true
     ),
     StatusGet => (
         "identity.device-certificate-status-get",
         Http,
         LocalOnly,
-        "contracts/http/identity/v2/device-certificate-status-get"
+        "contracts/http/identity/v2/device-certificate-status-get",
+        "status_get",
+        true
     ),
     ApplyCommand => (
         "identity.apply-device-certificate",
         Command,
         OutboxFact,
-        "contracts/command/identity/v1"
+        "contracts/command/identity/v1",
+        "apply_device_certificate",
+        true
     ),
     CommandAcked => (
         "identity.device-command-acked",
         Event,
         OutboxFact,
-        "contracts/event/identity/v1/device-command-acked"
+        "contracts/event/identity/v1/device-command-acked",
+        "device_command_acked",
+        false
     ),
     CertificateReported => (
         "identity.device-certificate-reported",
         Event,
         OutboxFact,
-        "contracts/event/identity/v1/device-certificate-reported"
+        "contracts/event/identity/v1/device-certificate-reported",
+        "device_certificate_reported",
+        false
     ),
     IngressReceipted => (
         "identity.device-ingress-receipted",
         Event,
         OutboxFact,
-        "contracts/event/identity/v1/device-ingress-receipted"
+        "contracts/event/identity/v1/device-ingress-receipted",
+        "device_ingress_receipted",
+        true
     ),
 }
 

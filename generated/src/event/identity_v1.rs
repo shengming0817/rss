@@ -1161,16 +1161,28 @@ pub mod device_ingress_receipted {
     ///  "title": "IdentityDeviceIngressCommittedPayload",
     ///  "type": "object",
     ///  "required": [
+    ///    "authorizationReceiptId",
     ///    "committedAt",
+    ///    "desiredGeneration",
     ///    "deviceId",
     ///    "ingressEnvelopeId",
     ///    "outcome",
     ///    "reason"
     ///  ],
     ///  "properties": {
+    ///    "authorizationReceiptId": {
+    ///      "$ref": "#/definitions/AuthorizationReceiptId",
+    ///      "x-redaction": "internal"
+    ///    },
     ///    "committedAt": {
     ///      "type": "integer",
     ///      "format": "int64"
+    ///    },
+    ///    "desiredGeneration": {
+    ///      "type": "integer",
+    ///      "format": "int64",
+    ///      "maximum": 9.223372036854776e+18,
+    ///      "minimum": 1.0
     ///    },
     ///    "deviceId": {
     ///      "type": "string",
@@ -1202,9 +1214,15 @@ pub mod device_ingress_receipted {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityDeviceIngressCommittedPayload {
+        #[serde(rename = "authorizationReceiptId")]
+        #[redact(sensitivity = internal)]
+        pub authorization_receipt_id: crate::device_certificate::AuthorizationReceiptId,
         #[serde(rename = "committedAt")]
         #[redact(sensitivity = public)]
         pub committed_at: i64,
+        #[serde(rename = "desiredGeneration")]
+        #[redact(sensitivity = public)]
+        pub desired_generation: ::std::num::NonZeroU64,
         #[serde(rename = "deviceId")]
         #[redact(sensitivity = public)]
         pub device_id: ::uuid::Uuid,
@@ -1448,16 +1466,28 @@ pub mod device_ingress_receipted {
     ///  "title": "IdentityDeviceIngressDuplicatePayload",
     ///  "type": "object",
     ///  "required": [
+    ///    "authorizationReceiptId",
     ///    "committedAt",
+    ///    "desiredGeneration",
     ///    "deviceId",
     ///    "ingressEnvelopeId",
     ///    "outcome",
     ///    "reason"
     ///  ],
     ///  "properties": {
+    ///    "authorizationReceiptId": {
+    ///      "$ref": "#/definitions/AuthorizationReceiptId",
+    ///      "x-redaction": "internal"
+    ///    },
     ///    "committedAt": {
     ///      "type": "integer",
     ///      "format": "int64"
+    ///    },
+    ///    "desiredGeneration": {
+    ///      "type": "integer",
+    ///      "format": "int64",
+    ///      "maximum": 9.223372036854776e+18,
+    ///      "minimum": 1.0
     ///    },
     ///    "deviceId": {
     ///      "type": "string",
@@ -1489,9 +1519,15 @@ pub mod device_ingress_receipted {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityDeviceIngressDuplicatePayload {
+        #[serde(rename = "authorizationReceiptId")]
+        #[redact(sensitivity = internal)]
+        pub authorization_receipt_id: crate::device_certificate::AuthorizationReceiptId,
         #[serde(rename = "committedAt")]
         #[redact(sensitivity = public)]
         pub committed_at: i64,
+        #[serde(rename = "desiredGeneration")]
+        #[redact(sensitivity = public)]
+        pub desired_generation: ::std::num::NonZeroU64,
         #[serde(rename = "deviceId")]
         #[redact(sensitivity = public)]
         pub device_id: ::uuid::Uuid,
@@ -2091,16 +2127,28 @@ pub mod device_ingress_receipted {
     ///  "title": "IdentityDeviceIngressStalePayload",
     ///  "type": "object",
     ///  "required": [
+    ///    "authorizationReceiptId",
     ///    "committedAt",
+    ///    "desiredGeneration",
     ///    "deviceId",
     ///    "ingressEnvelopeId",
     ///    "outcome",
     ///    "reason"
     ///  ],
     ///  "properties": {
+    ///    "authorizationReceiptId": {
+    ///      "$ref": "#/definitions/AuthorizationReceiptId",
+    ///      "x-redaction": "internal"
+    ///    },
     ///    "committedAt": {
     ///      "type": "integer",
     ///      "format": "int64"
+    ///    },
+    ///    "desiredGeneration": {
+    ///      "type": "integer",
+    ///      "format": "int64",
+    ///      "maximum": 9.223372036854776e+18,
+    ///      "minimum": 1.0
     ///    },
     ///    "deviceId": {
     ///      "type": "string",
@@ -2134,9 +2182,15 @@ pub mod device_ingress_receipted {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityDeviceIngressStalePayload {
+        #[serde(rename = "authorizationReceiptId")]
+        #[redact(sensitivity = internal)]
+        pub authorization_receipt_id: crate::device_certificate::AuthorizationReceiptId,
         #[serde(rename = "committedAt")]
         #[redact(sensitivity = public)]
         pub committed_at: i64,
+        #[serde(rename = "desiredGeneration")]
+        #[redact(sensitivity = public)]
+        pub desired_generation: ::std::num::NonZeroU64,
         #[serde(rename = "deviceId")]
         #[redact(sensitivity = public)]
         pub device_id: ::uuid::Uuid,
@@ -2388,7 +2442,7 @@ pub mod device_ingress_receipted {
         ::rss_contract::ContractDescriptor::from_static_version(
             "identity.device-ingress-receipted",
             "v1",
-            "sha256:f07059aec22d50bef04571af06b1024ef4710400419224fb41097c782b460b2d",
+            "sha256:95f384f11c6812158a3ac66c80abfbfaa3856f8c2b0a86f6d32fc25466aabc9c",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =

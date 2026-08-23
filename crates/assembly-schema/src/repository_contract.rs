@@ -227,6 +227,8 @@ impl std::ops::Deref for ResolvedSchema {
 #[derive(Debug, Clone, Copy)]
 pub struct DeclaredSchema<'a> {
     file: &'a str,
+    bytes: &'a [u8],
+    source_digest: &'a str,
     raw: &'a Value,
     resolved: &'a ResolvedSchema,
 }
@@ -236,8 +238,21 @@ impl<'a> DeclaredSchema<'a> {
         self.file
     }
 
+    pub const fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub const fn source_digest(self) -> &'a str {
+        self.source_digest
+    }
+
     pub const fn resolved(self) -> &'a ResolvedSchema {
         self.resolved
+    }
+
+    /// Captured authored JSON value from the repository's parse-once source funnel.
+    pub const fn authored(self) -> &'a Value {
+        self.raw
     }
 
     pub fn property_references(self, property: &str) -> Vec<Option<String>> {
@@ -559,6 +574,8 @@ impl RepositoryContract {
         let resolved = self.source.resolved_schemas.get(file)?;
         Some(DeclaredSchema {
             file,
+            bytes: &source.source.bytes,
+            source_digest: &source.source.digest,
             raw,
             resolved,
         })

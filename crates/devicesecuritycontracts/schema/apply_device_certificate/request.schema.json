@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuthorizationReceiptId": {
+      "format": "uuid",
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "title": "AuthorizationReceiptId",
+      "type": "string",
+      "x-redaction": "internal"
+    }
+  },
+  "description": "Draft OutboxFact command payload proposal. It can represent only an opaque authorized public artifact reference.",
+  "properties": {
+    "artifactDigest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "artifactId": {
+      "maxLength": 256,
+      "minLength": 16,
+      "type": "string"
+    },
+    "authorizationReceiptId": {
+      "$ref": "#/definitions/AuthorizationReceiptId",
+      "x-redaction": "internal"
+    },
+    "deadlineEpochSeconds": {
+      "format": "int64",
+      "maximum": 9223372036854,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "desiredGeneration": {
+      "format": "int64",
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "deviceId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "fenceEpoch": {
+      "format": "int64",
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "intentDigest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string",
+      "x-redaction": "secret"
+    },
+    "policyHash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "deviceId",
+    "authorizationReceiptId",
+    "desiredGeneration",
+    "fenceEpoch",
+    "intentDigest",
+    "policyHash",
+    "artifactId",
+    "artifactDigest",
+    "deadlineEpochSeconds"
+  ],
+  "title": "IdentityApplyDeviceCertificateRequest",
+  "type": "object"
+}

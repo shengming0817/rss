@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "deviceId",
+    "authorizationReceiptId",
     "desiredGeneration",
     "fenceEpoch",
     "intentDigest",
@@ -17,6 +18,10 @@
     "deviceId": {
       "type": "string",
       "format": "uuid"
+    },
+    "authorizationReceiptId": {
+      "$ref": "#/definitions/authorizationReceiptId",
+      "x-redaction": "internal"
     },
     "desiredGeneration": {
       "type": "integer",
@@ -53,6 +58,17 @@
       "format": "int64",
       "minimum": 1,
       "maximum": 9223372036854
+    }
+  },
+  "definitions": {
+    "authorizationReceiptId": {
+      "title": "AuthorizationReceiptId",
+      "type": "string",
+      "format": "uuid",
+      "x-redaction": "internal",
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      }
     }
   },
   "additionalProperties": false

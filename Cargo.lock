@@ -5270,6 +5270,17 @@ name = "rss-contract"
 version = "0.1.0"
 
 [[package]]
+name = "rss-device-security-contracts"
+version = "0.1.0"
+dependencies = [
+ "regress",
+ "rss-contract",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "rss-diag-context"
 version = "0.1.0"
 dependencies = [

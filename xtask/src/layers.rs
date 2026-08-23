@@ -63,6 +63,7 @@ pub(crate) const ENGINE_CRATES: &[&str] = &[
     "consistency",
     "primitives",
     "rss-conformance",
+    "rss-device-security-contracts",
     "rss-trace-context",
 ];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的

@@ -23,12 +23,13 @@ pub use domain::{
 };
 pub use eventexec::reconcile::{DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError};
 pub use ingress::{
+    DeviceIngressApplicationLineage, DeviceIngressApplicationLineageAuthority,
     DeviceIngressApplicationReceipt, DeviceIngressContract, DeviceIngressDelivery,
     DeviceIngressDomainOutcome, DeviceIngressError, DeviceIngressPreparation,
     DeviceIngressReceiptMismatch, DeviceIngressRepository, DeviceIngressWrite,
     PendingDeviceIngress, PreparedDeviceIngress, UnaddressableDeviceIngress,
-    UnaddressableDeviceIngressReason, application_receipt, device_ingress_receipt_fact,
-    prepare_device_ingress,
+    UnaddressableDeviceIngressReason, application_receipt_with_lineage,
+    application_receipt_without_lineage, device_ingress_receipt_fact, prepare_device_ingress,
 };
 pub use port::{
     ArtifactAppendOutcome, CertificateAttemptAuthority, CertificateAttemptFence,
@@ -762,12 +763,16 @@ mod tests {
             .unwrap();
             let json = serde_json::to_value(evidence.to_wire_response().unwrap()).unwrap();
             assert_eq!(
-                json["data"]["activeCommand"],
+                json["data"]["desired"]["activeCommand"],
                 serde_json::json!({
-                    "generation": 7,
                     "fenceEpoch": 11,
                     "state": expected_state,
                 })
+            );
+            assert_eq!(json["data"]["desired"]["generation"], 7);
+            assert_eq!(
+                json["data"]["desired"]["authorizationReceiptId"],
+                "0191f7d4-34d7-7b42-9fcb-9e85b92f42a1"
             );
             let rendered = serde_json::to_string(&json).unwrap();
             for forbidden in [
@@ -781,6 +786,28 @@ mod tests {
                 assert!(!rendered.contains(forbidden));
             }
         }
+    }
+
+    #[test]
+    fn status_wire_projects_authorized_unconfigured_scope_as_desired_null() {
+        let evidence = DeviceCertificateStatusEvidence::unconfigured(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+        );
+        let json = serde_json::to_value(evidence.to_wire_response().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "data": {
+                    "conditions": [],
+                    "desired": null,
+                    "observedGeneration": 0
+                }
+            })
+        );
+        assert_eq!(
+            evidence.observation().unwrap(),
+            observ::DeviceLatentObservation::new(0, None, None, None)
+        );
     }
 
     #[test]

@@ -206,7 +206,7 @@ impl std::fmt::Debug for DeviceCertificateActiveCommand {
 
 /// Provider-neutral authorized status evidence.
 pub struct DeviceCertificateStatusEvidence {
-    state: DeviceCertificateStateSnapshot,
+    state: Option<DeviceCertificateStateSnapshot>,
     active_command: Option<DeviceCertificateActiveCommand>,
     observed_at: std::time::SystemTime,
 }
@@ -240,10 +240,21 @@ impl DeviceCertificateStatusEvidence {
             return Err(DeviceCertificateError::InvalidPersistedValue);
         }
         Ok(Self {
-            state,
+            state: Some(state),
             active_command,
             observed_at,
         })
+    }
+
+    /// Represent an authorized device scope that has no desired certificate policy yet.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn unconfigured(observed_at: std::time::SystemTime) -> Self {
+        Self {
+            state: None,
+            active_command: None,
+            observed_at,
+        }
     }
 
     /// Derive identifier-free numeric convergence observations at one authoritative instant.
@@ -251,19 +262,20 @@ impl DeviceCertificateStatusEvidence {
         &self,
     ) -> Result<observ::DeviceLatentObservation, DeviceLatentObservationError> {
         let now = self.observed_at;
-        if !timestamps_are_authoritative_at(&self.state, self.active_command.as_ref(), now) {
+        let Some(state) = self.state.as_ref() else {
+            return Ok(observ::DeviceLatentObservation::new(0, None, None, None));
+        };
+        if !timestamps_are_authoritative_at(state, self.active_command.as_ref(), now) {
             return Err(DeviceLatentObservationError);
         }
-        let desired = self.state.desired().generation().get();
-        let observed = self
-            .state
+        let desired = state.desired().generation().get();
+        let observed = state
             .reported()
             .map_or(0, |reported| reported.observed_generation().get());
         let generation_lag = desired
             .checked_sub(observed)
             .ok_or(DeviceLatentObservationError)?;
-        let drift_age = self
-            .state
+        let drift_age = state
             .conditions()
             .iter()
             .find_map(|condition| match condition {
@@ -301,7 +313,15 @@ impl DeviceCertificateStatusEvidence {
         wire::IdentityDeviceCertificateStatusGetResponse,
         DeviceCertificateStatusProjectionError,
     > {
-        let state = &self.state;
+        let Some(state) = self.state.as_ref() else {
+            return Ok(wire::IdentityDeviceCertificateStatusGetResponse {
+                data: wire::IdentityDeviceCertificateStatusGetData {
+                    conditions: Vec::new(),
+                    desired: None,
+                    observed_generation: 0,
+                },
+            });
+        };
         let conditions = state
             .conditions()
             .iter()
@@ -314,9 +334,17 @@ impl DeviceCertificateStatusEvidence {
             .transpose()?;
         Ok(wire::IdentityDeviceCertificateStatusGetResponse {
             data: wire::IdentityDeviceCertificateStatusGetData {
-                active_command,
                 conditions,
-                desired_generation: bounded_i64(state.desired().generation().get())?,
+                desired: Some(wire::Desired {
+                    active_command,
+                    authorization_receipt_id:
+                        generated::device_certificate::AuthorizationReceiptId::try_from_uuid(
+                            state.desired().authorization_receipt_id().as_uuid(),
+                        )
+                        .map_err(|_| DeviceCertificateStatusProjectionError)?,
+                    generation: std::num::NonZeroU64::new(state.desired().generation().get())
+                        .ok_or(DeviceCertificateStatusProjectionError)?,
+                }),
                 observed_generation: state.reported().map_or(Ok(0), |reported| {
                     bounded_i64(reported.observed_generation().get())
                 })?,
@@ -361,30 +389,15 @@ fn epoch_seconds(
 
 fn project_active_command(
     command: &DeviceCertificateActiveCommand,
-) -> Result<
-    wire::IdentityDeviceCertificateStatusGetActiveCommand,
-    DeviceCertificateStatusProjectionError,
-> {
-    let generation = std::num::NonZeroU64::new(command.generation.get())
-        .ok_or(DeviceCertificateStatusProjectionError)?;
+) -> Result<wire::ActiveCommand, DeviceCertificateStatusProjectionError> {
     let fence_epoch = std::num::NonZeroU64::new(command.fence_epoch.get())
         .ok_or(DeviceCertificateStatusProjectionError)?;
     let state = match command.state {
-        DeviceCertificateActiveCommandState::Queued => {
-            wire::IdentityDeviceCertificateStatusGetActiveCommandState::Queued
-        }
-        DeviceCertificateActiveCommandState::Published => {
-            wire::IdentityDeviceCertificateStatusGetActiveCommandState::Published
-        }
-        DeviceCertificateActiveCommandState::Received => {
-            wire::IdentityDeviceCertificateStatusGetActiveCommandState::Received
-        }
+        DeviceCertificateActiveCommandState::Queued => wire::ActiveCommandState::Queued,
+        DeviceCertificateActiveCommandState::Published => wire::ActiveCommandState::Published,
+        DeviceCertificateActiveCommandState::Received => wire::ActiveCommandState::Received,
     };
-    Ok(wire::IdentityDeviceCertificateStatusGetActiveCommand {
-        fence_epoch,
-        generation,
-        state,
-    })
+    Ok(wire::ActiveCommand { fence_epoch, state })
 }
 
 fn condition_transition_time(condition: &DeviceConditionSnapshot) -> std::time::SystemTime {

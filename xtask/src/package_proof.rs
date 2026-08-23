@@ -213,6 +213,7 @@ fn write_archive_patch_config(
 enum ProofBehavior {
     Conformance,
     Contract,
+    DeviceSecurityContracts,
     RequestContext,
     Platform,
     DiagContext,
@@ -224,6 +225,7 @@ impl ProofBehavior {
         match package {
             "rss-conformance" => Ok(Self::Conformance),
             "rss-contract" => Ok(Self::Contract),
+            "rss-device-security-contracts" => Ok(Self::DeviceSecurityContracts),
             "rss-request-context" => Ok(Self::RequestContext),
             "rss-platform" => Ok(Self::Platform),
             "rss-diag-context" => Ok(Self::DiagContext),
@@ -236,6 +238,7 @@ impl ProofBehavior {
         match self {
             Self::Conformance => "conformance",
             Self::Contract => "contract",
+            Self::DeviceSecurityContracts => "device-security-contracts",
             Self::RequestContext => "request-context",
             Self::Platform => "platform",
             Self::DiagContext => "diag-context",
@@ -247,6 +250,7 @@ impl ProofBehavior {
         let expected = match self {
             Self::Conformance => conformance_receipt(),
             Self::Contract => contract_receipt(),
+            Self::DeviceSecurityContracts => device_security_contracts_receipt(),
             Self::RequestContext => request_context_receipt(),
             Self::Platform => platform_receipt(),
             Self::DiagContext => diag_context_receipt(),
@@ -447,6 +451,28 @@ fn contract_receipt() -> serde_json::Value {
     json!({
         "package": "rss-contract", "dottedId": true, "version": "v12",
         "digest": true, "descriptor": true, "invalidRejected": true
+    })
+}
+
+fn device_security_contracts_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-device-security-contracts",
+        "sixModulesConsumed": true,
+        "descriptorsVerified": true,
+        "schemaBytesAndDigestsVerified": true,
+        "draftLifecycleVerified": true,
+        "policyLineageRequired": true,
+        "policySchemaConstraintsEnforced": true,
+        "policyErrorEnvelopeUniform": true,
+        "statusClosedVariants": true,
+        "commandLineageRequired": true,
+        "ackLineageInjectionRejected": true,
+        "reportLineageInjectionRejected": true,
+        "committedLineageRequired": true,
+        "rejectedLineageInjectionRejected": true,
+        "receiptConversionsConverge": true,
+        "receiptDebugRedacted": true,
+        "nilReceiptRejected": true
     })
 }
 
@@ -1537,7 +1563,12 @@ mod tests {
     fn every_release_surface_archive_has_a_non_vacuous_doctest_source() -> Result<()> {
         let root = crate::workspace_root()?;
         for (package, path) in [
+            ("rss-conformance", "crates/conformance"),
             ("rss-contract", "crates/contract"),
+            (
+                "rss-device-security-contracts",
+                "crates/devicesecuritycontracts",
+            ),
             ("rss-request-context", "crates/request-context"),
             ("rss-platform", "crates/platform"),
             ("rss-diag-context", "crates/diagctx"),
@@ -1601,21 +1632,27 @@ mod tests {
             BTreeMap::from([
                 ("rss-conformance", ProofBehavior::Conformance),
                 ("rss-contract", ProofBehavior::Contract),
+                (
+                    "rss-device-security-contracts",
+                    ProofBehavior::DeviceSecurityContracts,
+                ),
                 ("rss-diag-context", ProofBehavior::DiagContext),
                 ("rss-platform", ProofBehavior::Platform),
                 ("rss-request-context", ProofBehavior::RequestContext),
                 ("rss-trace-context", ProofBehavior::TraceContext),
             ])
         );
+        let selected_names = release_identities
+            .iter()
+            .map(|(package, _)| package.as_str())
+            .collect::<BTreeSet<_>>();
         for plan in &plans {
             assert_eq!(plan.minimum_rust_version, "1.96.0");
             assert!(plan.dependencies.iter().all(|dependency| {
                 (dependency["registry"].as_str().is_some()
-                    || (plan.package == "rss-platform"
-                        && matches!(
-                            dependency["name"].as_str(),
-                            Some("rss-contract" | "rss-request-context")
-                        )))
+                    || dependency["name"]
+                        .as_str()
+                        .is_some_and(|name| selected_names.contains(name)))
                     && dependency["target"].is_null()
                     && dependency["kind"] != "dev"
             }));
@@ -1634,6 +1671,20 @@ mod tests {
             projected_surface_dependencies,
             BTreeSet::from(["rss-contract", "rss-request-context"])
         );
+        let device_security = plans
+            .iter()
+            .find(|plan| plan.package == "rss-device-security-contracts")
+            .expect("device-security plan");
+        let device_security_surface_dependencies = device_security
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency["registry"].is_null())
+            .map(|dependency| dependency["name"].as_str().expect("dependency name"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            device_security_surface_dependencies,
+            BTreeSet::from(["rss-contract"])
+        );
     }
 
     #[test]
@@ -1647,6 +1698,10 @@ mod tests {
             ProofBehavior::Platform
         );
         assert_eq!(
+            ProofBehavior::for_package("rss-device-security-contracts")?,
+            ProofBehavior::DeviceSecurityContracts
+        );
+        assert_eq!(
             ProofBehavior::for_package("rss-diag-context")?,
             ProofBehavior::DiagContext
         );
@@ -1656,6 +1711,45 @@ mod tests {
         );
         assert!(ProofBehavior::for_package("future-release").is_err());
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn device_security_contracts_receipt_requires_every_public_axis() {
+        let green = device_security_contracts_receipt();
+        assert!(
+            ProofBehavior::DeviceSecurityContracts
+                .validate_receipt(&green)
+                .is_ok()
+        );
+        for field in [
+            "package",
+            "sixModulesConsumed",
+            "descriptorsVerified",
+            "schemaBytesAndDigestsVerified",
+            "draftLifecycleVerified",
+            "policyLineageRequired",
+            "policySchemaConstraintsEnforced",
+            "policyErrorEnvelopeUniform",
+            "statusClosedVariants",
+            "commandLineageRequired",
+            "ackLineageInjectionRejected",
+            "reportLineageInjectionRejected",
+            "committedLineageRequired",
+            "rejectedLineageInjectionRejected",
+            "receiptConversionsConverge",
+            "receiptDebugRedacted",
+            "nilReceiptRejected",
+        ] {
+            let mut red = green.clone();
+            red.as_object_mut().expect("receipt object").remove(field);
+            assert!(
+                ProofBehavior::DeviceSecurityContracts
+                    .validate_receipt(&red)
+                    .is_err(),
+                "missing {field} must fail"
+            );
+        }
     }
 
     #[test]
@@ -1961,6 +2055,10 @@ mod tests {
             concat!("const ", "PACKAGE:"),
             concat!("const ", "VERSION:"),
             concat!(".cache/cargo-target", "/package"),
+            concat!("STANDALONE_", "CONSUMER_PATH"),
+            concat!("STANDALONE_", "REPOSITORY"),
+            concat!("consumers/", "standalone"),
+            concat!("standalone_", "upgrade_cmd"),
         ] {
             assert!(
                 !source.contains(forbidden),

@@ -244,6 +244,7 @@ impl CertificateReadyProof {
             || command.device_id() != scope.device().as_uuid()
             || u64::try_from(command.desired_generation().get()).ok()
                 != Some(desired.generation().get())
+            || command.authorization_receipt_id() != desired.authorization_receipt_id().as_uuid()
             || command.policy_hash() != desired.policy_hash().as_bytes()
             || receipt.policy_hash() != desired.policy_hash()
             || command.artifact_id() != receipt.artifact_id().as_str()
@@ -815,7 +816,8 @@ where
                     CertificateCommandKind::Update => ConvergeAction::Update,
                 };
                 let reviewed = match attempt.review_device_certificate_command(
-                    receipt.generation().get(),
+                    desired.generation().get(),
+                    desired.authorization_receipt_id().as_uuid(),
                     receipt.artifact_id().as_str(),
                     *receipt.artifact_digest().as_bytes(),
                     *receipt.policy_hash().as_bytes(),
@@ -1388,24 +1390,27 @@ mod tests {
     }
 
     fn command_intent() -> CommandIntentDigest {
-        let digest = ArtifactDigest::parse(
-            "sha256:5235fccf9c0cdc3ccb274a3e9447af6d05eb602385287e39f1510caae609ac5c",
-        )
-        .unwrap();
+        let payload = command_payload(9);
+        let digest = ArtifactDigest::parse(payload["intentDigest"].as_str().unwrap()).unwrap();
         CommandIntentDigest::from_bytes(*digest.as_bytes())
     }
 
     fn command_payload(epoch: u64) -> serde_json::Value {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "artifactDigest": digest('a'),
             "artifactId": "artifact-device-certificate-v1",
+            "authorizationReceiptId": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a1",
             "deadlineEpochSeconds": 4_000_000_000_u64,
             "desiredGeneration": 7_u64,
             "deviceId": "44444444-4444-4444-4444-444444444444",
             "fenceEpoch": epoch,
-            "intentDigest": "sha256:5235fccf9c0cdc3ccb274a3e9447af6d05eb602385287e39f1510caae609ac5c",
             "policyHash": digest('b'),
-        })
+        });
+        let command = eventexec::reconcile::device_certificate_command_fixture(payload.clone())
+            .expect("command fixture");
+        let view = eventexec::reconcile::device_certificate_command_fixture_view(&command);
+        payload["intentDigest"] = serde_json::json!(view.intent_digest);
+        payload
     }
 
     fn command_audit(epoch: i64) -> DeviceCommandAuditProof {

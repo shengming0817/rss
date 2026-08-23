@@ -429,8 +429,18 @@ pub(in super::super) async fn reviewed_reconcile_command_at_generation(
         return Err("test artifact authority unexpectedly lost its fence".into());
     }
     let artifact_digest = snapshot.artifact_digest().as_bytes();
+    let authorization_receipt_id: String = sqlx::query_scalar(
+        "SELECT authorization_receipt_id::text FROM device_certificate_desired_generation_lineage \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=$3",
+    )
+    .bind(attempt.target().tenant().to_string())
+    .bind(attempt.target().resource_id())
+    .bind(i64::try_from(generation)?)
+    .fetch_one(&store.pool)
+    .await?;
     let command = crate::reconcile_test_driver::canonical_device_command(serde_json::json!({
         "deviceId": attempt.target().resource_id(),
+        "authorizationReceiptId": authorization_receipt_id,
         "desiredGeneration": generation,
         "fenceEpoch": attempt.target().epoch(),
         "policyHash": format!("sha256:{}", "1".repeat(64)),
@@ -447,13 +457,15 @@ pub(in super::super) async fn reviewed_reconcile_command_at_generation(
 }
 
 pub(in super::super) async fn reviewed_bound_certificate_command(
+    store: &PgStore,
     attempt: &ReconcileAttempt,
     generation: u64,
     policy_hash: &[u8],
     artifact_id: &str,
     artifact_digest: &[u8],
-) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
+) -> Result<ReviewedFencedCommand, TestError> {
     reviewed_bound_certificate_command_with_deadline(
+        store,
         attempt,
         generation,
         policy_hash,
@@ -465,13 +477,55 @@ pub(in super::super) async fn reviewed_bound_certificate_command(
 }
 
 pub(in super::super) async fn reviewed_bound_certificate_command_with_deadline(
+    store: &PgStore,
     attempt: &ReconcileAttempt,
     generation: u64,
     policy_hash: &[u8],
     artifact_id: &str,
     artifact_digest: &[u8],
     deadline_epoch_seconds: u64,
-) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
+) -> Result<ReviewedFencedCommand, TestError> {
+    let encoded = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let authorization_receipt_id: String = sqlx::query_scalar(
+        "SELECT authorization_receipt_id::text FROM device_certificate_desired_generation_lineage \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=$3",
+    )
+    .bind(attempt.target().tenant().to_string())
+    .bind(attempt.target().resource_id())
+    .bind(i64::try_from(generation)?)
+    .fetch_one(&store.pool)
+    .await?;
+    let command = crate::reconcile_test_driver::canonical_device_command(serde_json::json!({
+        "deviceId": attempt.target().resource_id(),
+        "authorizationReceiptId": authorization_receipt_id,
+        "desiredGeneration": generation,
+        "fenceEpoch": attempt.target().epoch(),
+        "policyHash": format!("sha256:{}", encoded(policy_hash)),
+        "artifactId": artifact_id,
+        "artifactDigest": format!("sha256:{}", encoded(artifact_digest)),
+        "deadlineEpochSeconds": deadline_epoch_seconds
+    }))?;
+    Ok(crate::reconcile_test_driver::drive_reviewed_device_command(
+        attempt,
+        command,
+        Arc::clone(&command_keyring()),
+    )
+    .await?)
+}
+
+pub(in super::super) async fn reviewed_bound_certificate_command_with_receipt(
+    attempt: &ReconcileAttempt,
+    generation: u64,
+    authorization_receipt_id: uuid::Uuid,
+    policy_hash: &[u8],
+    artifact_id: &str,
+    artifact_digest: &[u8],
+) -> Result<ReviewedFencedCommand, TestError> {
     let encoded = |bytes: &[u8]| {
         bytes
             .iter()
@@ -480,19 +534,20 @@ pub(in super::super) async fn reviewed_bound_certificate_command_with_deadline(
     };
     let command = crate::reconcile_test_driver::canonical_device_command(serde_json::json!({
         "deviceId": attempt.target().resource_id(),
+        "authorizationReceiptId": authorization_receipt_id,
         "desiredGeneration": generation,
         "fenceEpoch": attempt.target().epoch(),
         "policyHash": format!("sha256:{}", encoded(policy_hash)),
         "artifactId": artifact_id,
         "artifactDigest": format!("sha256:{}", encoded(artifact_digest)),
-        "deadlineEpochSeconds": deadline_epoch_seconds
+        "deadlineEpochSeconds": 4_000_000_000_u64
     }))?;
-    crate::reconcile_test_driver::drive_reviewed_device_command(
+    Ok(crate::reconcile_test_driver::drive_reviewed_device_command(
         attempt,
         command,
         Arc::clone(&command_keyring()),
     )
-    .await
+    .await?)
 }
 
 pub(in super::super) async fn rss_app_write_device_certificate_condition_vector(

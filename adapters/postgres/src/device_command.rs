@@ -26,7 +26,9 @@ use deviceloop::{
 use deviceloop::{CreateDeviceCommand, CreateDeviceCommandOutcome};
 use identity::ports::device_certificate::{
     ArtifactEligibility, CertificateAttemptFence, CurrentCommandExpiryOutcome,
-    DeviceCertificateScope, DeviceIngressWrite, ReportedStateWrite,
+    DeviceCertificateScope, DeviceIngressApplicationLineage,
+    DeviceIngressApplicationLineageAuthority, DeviceIngressWrite,
+    DevicePolicyAuthorizationReceiptId, ReportedStateWrite,
 };
 use sqlx::PgConnection;
 
@@ -88,7 +90,13 @@ impl<E: ArtifactEligibility> PgDeviceIngressCommit<E> {
 pub(crate) enum DeviceIngressFault {
     CommitUnknown,
     AfterOutbox,
+    LineageLookup,
 }
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Debug, thiserror::Error)]
+#[error("injected application-lineage lookup failure")]
+struct InjectedLineageLookupFailure;
 
 impl<'tx> DeviceIngressReadbackTx<'tx> {
     pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
@@ -545,6 +553,8 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
     #[cfg(all(test, feature = "integration"))] fault: Option<DeviceIngressFault>,
 ) -> Result<PgDeviceIngressCommit<E>, StoreError> {
     let scope = input.scope();
+    let lineage_authority = input.application_lineage_authority();
+    let readback_lineage_authority = input.application_lineage_authority();
     let expected_evidence = input.evidence().clone();
     let write_evidence = expected_evidence.clone();
     let reported = input.reported().cloned();
@@ -565,11 +575,12 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
                             .inject_failure_after_outbox_append_before_commit()
                             .await
                             .map_err(storage)?,
-                        None => {}
+                        Some(DeviceIngressFault::LineageLookup) | None => {}
                     }
                     let mut identity = tx.identity();
                     let commands = identity.device_commands();
-                    let outcome = FencedIngressTx { commands }
+                    let mut ingress = FencedIngressTx { commands };
+                    let outcome = ingress
                         .record(
                             scope,
                             write_evidence,
@@ -585,10 +596,18 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
                             return Err(StoreError::InvariantViolation);
                         }
                     };
+                    #[cfg(all(test, feature = "integration"))]
+                    if matches!(fault, Some(DeviceIngressFault::LineageLookup)) {
+                        return Err(StoreError::storage_transient(InjectedLineageLookupFailure));
+                    }
+                    let lineage = load_application_lineage(
+                        &mut *ingress.commands.conn,
+                        lineage_authority,
+                        &receipt,
+                    )
+                    .await?;
                     let occurred_at = receipt.committed_at();
-                    let public =
-                        identity::ports::device_certificate::application_receipt(scope, &receipt)
-                            .map_err(|_| StoreError::InvariantViolation)?;
+                    let public = project_application_receipt(scope, &receipt, lineage)?;
                     let event = public
                         .reviewed_event()
                         .await
@@ -618,7 +637,7 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
         Err(error) if commit_unknown => {
             match exact_device_ingress_readback(
                 read_pool,
-                scope,
+                readback_lineage_authority,
                 &expected_evidence,
                 credential_generation,
             )
@@ -634,10 +653,11 @@ pub(crate) async fn commit_device_ingress<E: ArtifactEligibility>(
 
 async fn exact_device_ingress_readback(
     read_pool: &TenantDb<ServingReadLane>,
-    scope: DeviceCertificateScope,
+    authority: DeviceIngressApplicationLineageAuthority,
     evidence: &DeviceIngressEvidence,
     credential_generation: u64,
 ) -> Result<Option<DeviceIngressReceipt>, StoreError> {
+    let scope = authority.scope();
     let expected = evidence.clone();
     read_pool
         .identity_repeatable_read_map(
@@ -649,8 +669,11 @@ async fn exact_device_ingress_readback(
                     let Some(receipt) = readback.exact_receipt(scope, &expected).await? else {
                         return Ok(None);
                     };
+                    let lineage =
+                        load_application_lineage(&mut *readback.conn, authority, &receipt).await?;
                     let fact =
-                        expected_receipt_fact(scope, &receipt, credential_generation).await?;
+                        expected_receipt_fact(scope, &receipt, lineage, credential_generation)
+                            .await?;
                     let stored = readback
                         .outbox_fingerprint(scope.tenant(), fact.event_id())
                         .await?;
@@ -667,10 +690,10 @@ async fn exact_device_ingress_readback(
 async fn expected_receipt_fact(
     scope: DeviceCertificateScope,
     receipt: &DeviceIngressReceipt,
+    lineage: Option<DeviceIngressApplicationLineage>,
     credential_generation: u64,
 ) -> Result<crate::cotx::identity::CanonicalDeviceIngressFact, StoreError> {
-    let public = identity::ports::device_certificate::application_receipt(scope, receipt)
-        .map_err(|_| StoreError::InvariantViolation)?;
+    let public = project_application_receipt(scope, receipt, lineage)?;
     let reviewed = public
         .reviewed_event()
         .await
@@ -682,6 +705,79 @@ async fn expected_receipt_fact(
         credential_generation,
     )
     .map_err(StoreError::from_outbox_append)
+}
+
+fn project_application_receipt(
+    scope: DeviceCertificateScope,
+    receipt: &DeviceIngressReceipt,
+    lineage: Option<DeviceIngressApplicationLineage>,
+) -> Result<identity::ports::device_certificate::DeviceIngressApplicationReceipt, StoreError> {
+    match lineage {
+        Some(lineage) => {
+            identity::ports::device_certificate::application_receipt_with_lineage(lineage, receipt)
+        }
+        None => {
+            identity::ports::device_certificate::application_receipt_without_lineage(scope, receipt)
+        }
+    }
+    .map_err(|_| StoreError::InvariantViolation)
+}
+
+async fn load_application_lineage(
+    conn: &mut PgConnection,
+    authority: DeviceIngressApplicationLineageAuthority,
+    receipt: &DeviceIngressReceipt,
+) -> Result<Option<DeviceIngressApplicationLineage>, StoreError> {
+    let scope = authority.scope();
+    let generation = match receipt.disposition() {
+        DeviceIngressDisposition::Advanced
+        | DeviceIngressDisposition::DeviceRejected
+        | DeviceIngressDisposition::Duplicate
+        | DeviceIngressDisposition::StaleGeneration
+        | DeviceIngressDisposition::StaleFence
+        | DeviceIngressDisposition::StaleSequence => match receipt.evidence().view() {
+            DeviceIngressEvidenceView::AckReceived { coordinate, .. }
+            | DeviceIngressEvidenceView::AckRejected { coordinate, .. } => coordinate.generation(),
+            DeviceIngressEvidenceView::Report {
+                observed_generation,
+                ..
+            } => DesiredGeneration::try_new(observed_generation.get())
+                .map_err(|_| StoreError::InvariantViolation)?,
+            DeviceIngressEvidenceView::ProtocolViolation { .. } => {
+                return Err(StoreError::InvariantViolation);
+            }
+        },
+        DeviceIngressDisposition::Late
+        | DeviceIngressDisposition::Rejected
+        | DeviceIngressDisposition::ScopeMismatch
+        | DeviceIngressDisposition::OutOfOrder => return Ok(None),
+    };
+    let (tenant, device) = scope_params(scope);
+    let (stored, current_generation): (Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT \
+           (SELECT authorization_receipt_id::text \
+              FROM device_certificate_desired_generation_lineage \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=$3), \
+           (SELECT generation FROM device_certificate_desired_states \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid)",
+    )
+    .bind(tenant)
+    .bind(device)
+    .bind(coordinate_to_i64(generation.get())?)
+    .fetch_one(conn)
+    .await
+    .map_err(storage)?;
+    let Some(stored) = stored else {
+        if current_generation.is_some_and(|current| generation.get() <= current as u64) {
+            return Err(StoreError::InvariantViolation);
+        }
+        return Ok(None);
+    };
+    let receipt_id = DevicePolicyAuthorizationReceiptId::restore(
+        uuid::Uuid::parse_str(&stored).map_err(|_| StoreError::InvariantViolation)?,
+    )
+    .map_err(|_| StoreError::InvariantViolation)?;
+    Ok(Some(authority.bind_persisted_join(receipt_id, generation)))
 }
 
 /// Tenant/device-scoped PostgreSQL command facade bound to one sealed artifact eligibility.
@@ -2765,9 +2861,11 @@ mod integration_tests {
         let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         let committed_target = new_target();
         let rolled_back_target = new_target();
+        let lineage_error_target = new_target();
         for (target, command_id) in [
             (committed_target, "commit-unknown-command"),
             (rolled_back_target, "rollback-command"),
+            (lineage_error_target, "lineage-error-command"),
         ] {
             insert_desired(&owner, target).await?;
             let created =
@@ -2781,6 +2879,18 @@ mod integration_tests {
             )
             .await?;
         }
+        assert!(
+            sqlx::query(
+                "DELETE FROM device_certificate_desired_generation_lineage
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+            )
+            .bind(committed_target.scope.tenant().to_string())
+            .bind(committed_target.scope.device().as_uuid().to_string())
+            .execute(&owner.pool)
+            .await
+            .is_err(),
+            "the desired-row composite FK must make known lineage impossible to remove"
+        );
         let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
         let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
 
@@ -2813,15 +2923,44 @@ mod integration_tests {
         assert!(
             super::exact_device_ingress_readback(
                 &command_store.read_pool,
-                committed_target.scope,
+                identity::ports::device_certificate::DeviceIngressApplicationLineageAuthority::for_test(committed_target.scope),
                 &committed_evidence,
                 1,
             )
             .await?
             .is_some()
         );
+        let mut lineage_conn = owner.pool.acquire().await?;
+        let foreign_scope = DeviceCertificateScope::for_test(
+            committed_target.scope.tenant(),
+            ids::DeviceId::new(uuid::Uuid::new_v4()),
+        );
+        let foreign_lineage = super::load_application_lineage(
+            &mut lineage_conn,
+            identity::ports::device_certificate::DeviceIngressApplicationLineageAuthority::for_test(
+                foreign_scope,
+            ),
+            &committed_receipt,
+        )
+        .await?;
+        assert!(foreign_lineage.is_none());
+        assert!(
+            super::expected_receipt_fact(foreign_scope, &committed_receipt, None, 1)
+                .await
+                .is_err(),
+            "another device scope cannot borrow a committed receipt lineage"
+        );
+        let lineage = super::load_application_lineage(
+            &mut lineage_conn,
+            identity::ports::device_certificate::DeviceIngressApplicationLineageAuthority::for_test(
+                committed_target.scope,
+            ),
+            &committed_receipt,
+        )
+        .await?;
         let receipt_fact =
-            super::expected_receipt_fact(committed_target.scope, &committed_receipt, 1).await?;
+            super::expected_receipt_fact(committed_target.scope, &committed_receipt, lineage, 1)
+                .await?;
         let receipt_event_id = receipt_fact.event_id().to_owned();
         let original_payload: Vec<u8> = sqlx::query_scalar(
             "UPDATE outbox SET payload=payload || decode('00','hex')
@@ -2834,7 +2973,7 @@ mod integration_tests {
         assert!(
             super::exact_device_ingress_readback(
                 &command_store.read_pool,
-                committed_target.scope,
+                identity::ports::device_certificate::DeviceIngressApplicationLineageAuthority::for_test(committed_target.scope),
                 &committed_evidence,
                 1,
             )
@@ -2859,7 +2998,7 @@ mod integration_tests {
         assert!(
             super::exact_device_ingress_readback(
                 &command_store.read_pool,
-                committed_target.scope,
+                identity::ports::device_certificate::DeviceIngressApplicationLineageAuthority::for_test(committed_target.scope),
                 &committed_evidence,
                 1,
             )
@@ -2894,9 +3033,43 @@ mod integration_tests {
         .await?;
         assert_eq!(rollback_state, ("published".to_owned(), 0, 0));
 
+        let lineage_error_repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::<DraftEligibility>::
+                from_unverified_stores_for_test(&reader, &writer)
+                .with_device_ingress_fault_for_test(super::DeviceIngressFault::LineageLookup),
+        );
+        let (delivery, settled) = ack_delivery(
+            lineage_error_target,
+            "lineage-error-ingress",
+            "lineage-error-command",
+        );
+        assert!(
+            run_device_ingress(delivery, lineage_error_repository.as_ref())
+                .await
+                .is_err(),
+            "lineage lookup failure must abort the complete ingress transaction"
+        );
+        assert!(!settled.load(Ordering::SeqCst));
+        let lineage_error_state: (String, i64, i64) = sqlx::query_as(
+            "SELECT command.state,
+                (SELECT count(*) FROM device_ingress_receipts
+                  WHERE tenant_id=$1::uuid AND event_id='lineage-error-ingress'),
+                (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
+                  AND contract_id='identity.device-ingress-receipted'
+                  AND metadata->>'subjectId'=$2)
+             FROM device_commands command
+             WHERE command.tenant_id=$1::uuid AND command.command_id='lineage-error-command'",
+        )
+        .bind(lineage_error_target.scope.tenant().to_string())
+        .bind(lineage_error_target.scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(lineage_error_state, ("published".to_owned(), 0, 0));
+
         drop((
             commit_unknown_repository,
             rollback_repository,
+            lineage_error_repository,
             command_store,
         ));
         reader.shutdown().await?;
@@ -3213,6 +3386,53 @@ mod integration_tests {
         .fetch_all(&owner.pool)
         .await?;
         assert_eq!(public_reasons, vec!["NotAccepted", "NotAccepted"]);
+        let lineage_payloads: Vec<serde_json::Value> = sqlx::query_scalar::<_, String>(
+            "SELECT convert_from(payload,'UTF8') FROM outbox
+             WHERE tenant_id=$1::uuid
+               AND convert_from(payload,'UTF8')::jsonb->>'ingressEnvelopeId'
+                 IN ('matrix-ack','stale-generation','future-generation')
+             ORDER BY convert_from(payload,'UTF8')::jsonb->>'ingressEnvelopeId'",
+        )
+        .bind(target.scope.tenant().to_string())
+        .fetch_all(&owner.pool)
+        .await?
+        .into_iter()
+        .map(|payload| serde_json::from_str(&payload))
+        .collect::<Result<_, _>>()?;
+        let by_envelope = lineage_payloads
+            .into_iter()
+            .map(|payload| {
+                (
+                    payload["ingressEnvelopeId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    payload,
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let durable_receipt: String = sqlx::query_scalar(
+            "SELECT authorization_receipt_id::text
+               FROM device_certificate_desired_generation_lineage
+              WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+        )
+        .bind(target.scope.tenant().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        for envelope in ["matrix-ack", "stale-generation"] {
+            let payload = &by_envelope[envelope];
+            assert_eq!(payload["desiredGeneration"], 1);
+            assert_eq!(
+                payload["authorizationReceiptId"].as_str(),
+                Some(durable_receipt.as_str())
+            );
+        }
+        let unknown = &by_envelope["future-generation"];
+        assert_eq!(unknown["outcome"], "rejected");
+        assert_eq!(unknown["reason"], "NotAccepted");
+        assert!(unknown.get("desiredGeneration").is_none());
+        assert!(unknown.get("authorizationReceiptId").is_none());
 
         drop((repository, command_store));
         reader.shutdown().await?;

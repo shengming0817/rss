@@ -4,9 +4,9 @@
 
 These files freeze target identities, kinds, consistency, and payload shapes. The six identities now have `contracts/**`
 manifests and generated candidate bindings, but every lifecycle remains `draft`; they are not mounted transport routes,
-active public contracts, or evidence that a production path exists. ADR-028 reserves a future
-`rss-device-security-contracts` candidate package derived from this exact set without making that package a current artifact;
-its internal-to-public identity and registry owner are defined only by
+active public contracts, or evidence that a production path exists. `rss-device-security-contracts` is now an experimental
+Release Surface package generated from this exact set. Its `.crate`/offline-consumer proof is a candidate artifact proof,
+not a profile activation, production assembly, or T3 claim. Its internal-to-public identity and registry owner are defined by
 [`architecture.md` §公开发布命名](../../../rules/architecture.md#公开发布命名).
 
 ## Frozen set
@@ -36,6 +36,7 @@ parallel six/seven path.
 - HTTP responses have exactly one top-level `data` member.
 - HTTP body schemas do not repeat the path device identifier or tenant identifier as authorization facts. Tenant comes from authenticated scope and device comes from the validated route.
 - Policy PUT requires a UUID `idempotencyKey` scoped to authenticated tenant and path device. Same key plus the same canonical policy/expected generation returns the same `200` accepted result; different canonical input returns `409`. Expected-generation conflict also returns `409`. A cross-tenant or otherwise hidden device returns the same `404` surface as an absent device.
+- Policy PUT success requires the server-minted non-nil `authorizationReceiptId` and positive `acceptedGeneration`; an identical replay returns the same pair. Status represents absence as `desired: null`, otherwise nests generation, authorization receipt, and optional active-command summary in one closed `desired` value; the removed top-level desired-generation/active-command shape has no compatibility reader.
 - Policy duration fields have finite schema bounds; the sealed policy constructor additionally enforces `renewBeforeSeconds < validitySeconds`, which Draft-07 cannot express between sibling properties.
 - A command ID is the generated stable command-envelope identity and is not duplicated in its payload. An ACK's `commandId` correlates to that envelope identity. Likewise, the event envelope identity is the single event ID and event payloads do not duplicate it. The application receipt's `ingressEnvelopeId` is correlation to the receipted inbound envelope, not the receipt event's own identity.
 - Event and command payloads do not accept a tenant field. Authenticated transport scope and generated transport coordinates establish tenant scope.
@@ -44,7 +45,10 @@ parallel six/seven path.
 - ACK and receipt results are closed sums rather than independent enum products: `received` pairs only with `None`; `rejected` pairs only with an ACK failure reason. Application receipt pairs are `committed→None`, `duplicate→AlreadyCommitted`, `stale→{GenerationStale,FenceEpochStale,DeviceSequenceStale}`, and `rejected→{NotAccepted,SchemaRejected,ProtocolViolation}`. No cross-variant reason pair is valid.
 - ACK advances command receipt/state only. Only a positive-generation report matching the current desired generation, policy-bound state, and artifact, with an unexpired typed `CertNotAfter` and a current not-revoked `PgRevocationStore` result for typed `CertScope`/`CertSerial`, can establish `Ready=True`. Revocation lookup failure is non-ready and `Degraded`.
 - An ACK-triggered reconcile wake awaits a current `received` command's report and does not issue a same-generation replacement. That exact command's generation/fence remains authoritative for its report across reconcile lease renewal; unrelated old fences remain stale.
-- Commands carry an opaque artifact ID and digest only. Private keys, raw CSRs, and unapproved certificate bytes cannot be represented.
+- Commands carry the durable desired authorization receipt and generation in addition to an opaque artifact ID/digest; command authoring obtains R/G only from the desired snapshot, and the canonical intent digest binds them. Private keys, raw CSRs, and unapproved certificate bytes cannot be represented.
+- ACK and report payloads have no authorization-receipt field and reject its injection. Committed, duplicate, and stale application receipts carry server-restored `authorizationReceiptId + desiredGeneration`; rejected receipts structurally carry neither. An unknown generation maps to non-oracle `rejected/NotAccepted`, never a fabricated stale lineage.
+- The lineaged application-receipt projection uses the `identity.device-ingress-receipted:v2` durable identity domain. It cannot reuse a pre-lineage v1 event ID with a different payload fingerprint.
+- Policy PUT 404/409 responses use the canonical `ERR_CORE_*` envelope (`message`, `retryable`, `details`, and framework-injected `requestId`). Public request deserialization enforces the schema's integer ranges, non-empty/unique usages, bounded unique SANs, and `renewBeforeSeconds < validitySeconds`.
 - Public application-receipt reasons do not distinguish unknown commands, unauthorized callers, or scope mismatch; all use `NotAccepted`. More detailed reasons belong only in authorized internal audit evidence.
 - Production MQTT authentication derives a sealed `(tenant, device, credentialGeneration)` principal from the verified mTLS credential. Payload and topic fields cannot override it; mismatch or stale credential generation fails closed against transport credential policy. Credential generation is not the desired certificate generation being installed.
 - The authorized operator surface in this frozen set is the `LocalOnly` status read only. Automatic repair and fenced supersession are internal behavior, not manual resync, quarantine, unquarantine, cancel, supersede, or delete contracts.

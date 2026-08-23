@@ -487,6 +487,25 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .await
     }
 
+    async fn reconcile_desired_authorization_receipt_id(
+        &mut self,
+        device_id: uuid::Uuid,
+        generation: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT authorization_receipt_id::text
+            FROM device_certificate_desired_generation_lineage
+            WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=$3
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(device_id.hyphenated().to_string())
+        .bind(generation)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
     async fn reconcile_install_fenced_command(
         &mut self,
         attempt_id: &str,
@@ -870,6 +889,25 @@ impl ReconcileTx<'_, ServingWriteLane> {
         };
         if desired_generation != enqueue.evidence.desired_generation().get() {
             return Ok(CommittedActionOutcome::Lost);
+        }
+        let Some(authorization_receipt_id) = self
+            .reconcile_desired_authorization_receipt_id(
+                enqueue.evidence.device_id(),
+                desired_generation,
+            )
+            .await
+            .map_err(ReconcileScheduleError::new)?
+        else {
+            return Err(ReconcileScheduleError::invariant_violation());
+        };
+        if authorization_receipt_id
+            != enqueue
+                .evidence
+                .authorization_receipt_id()
+                .hyphenated()
+                .to_string()
+        {
+            return Err(ReconcileScheduleError::invariant_violation());
         }
         sqlx::query("SAVEPOINT reconcile_command_write")
             .execute(&mut *self.conn)

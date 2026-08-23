@@ -11,9 +11,9 @@ use eventexec::command::CommandIdempotencyKeyring;
 use eventexec::reconcile::DeviceCertificateCommandEvidence;
 use eventexec::reconcile::{
     AttemptResult, DeviceCertificateCommandTtl, DeviceCertificateSystemProducer,
-    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReviewedFencedCommand,
-    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome, ScheduleLeaseOutcome,
-    ScheduleResultOutcome, Tenancy, Trigger,
+    ReconcileScheduleErrorKind, ReconcileScheduleStore, ReconcileSchedulerBuilder,
+    ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    ScheduleCompletionOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome, Tenancy, Trigger,
 };
 use identity::ports::device_certificate::{
     ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
@@ -377,6 +377,7 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
         artifact_append_fixture(&store, "command-exact-artifact").await?;
 
     let missing = reviewed_bound_certificate_command(
+        &store,
         &attempt,
         1,
         &policy_hash,
@@ -413,6 +414,27 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
             .await?,
         ArtifactAppendOutcome::Appended
     );
+    let substituted_receipt = reviewed_bound_certificate_command_with_receipt(
+        &attempt,
+        1,
+        uuid::Uuid::new_v4(),
+        &policy_hash,
+        persisted.artifact_id().as_str(),
+        persisted.artifact_digest().as_bytes(),
+    )
+    .await?;
+    let substituted_error = ReconcileScheduleStore::record_fenced_command(
+        &store.reconcile(),
+        &attempt,
+        ConvergeAction::Create,
+        substituted_receipt,
+    )
+    .await
+    .expect_err("caller-supplied authorization receipt substitution must fail before writes");
+    assert_eq!(
+        substituted_error.kind(),
+        ReconcileScheduleErrorKind::InvariantViolation
+    );
     let mismatch_cases = [
         (
             "artifact id",
@@ -435,16 +457,10 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
             persisted.artifact_id().as_str(),
             persisted.artifact_digest().as_bytes().to_vec(),
         ),
-        (
-            "generation",
-            2,
-            policy_hash.clone(),
-            persisted.artifact_id().as_str(),
-            persisted.artifact_digest().as_bytes().to_vec(),
-        ),
     ];
     for (coordinate, generation, candidate_policy, artifact_id, artifact_digest) in mismatch_cases {
         let mismatched = reviewed_bound_certificate_command(
+            &store,
             &attempt,
             generation,
             &candidate_policy,
@@ -464,6 +480,34 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
             "mismatched {coordinate} must be rejected"
         );
     }
+    let durable_receipt: String = sqlx::query_scalar(
+        "SELECT authorization_receipt_id::text FROM device_certificate_desired_generation_lineage \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(scope.tenant().to_string())
+    .bind(scope.device().as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    let substituted_generation = reviewed_bound_certificate_command_with_receipt(
+        &attempt,
+        2,
+        uuid::Uuid::parse_str(&durable_receipt)?,
+        &policy_hash,
+        persisted.artifact_id().as_str(),
+        persisted.artifact_digest().as_bytes(),
+    )
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::record_fenced_command(
+            &store.reconcile(),
+            &attempt,
+            ConvergeAction::Create,
+            substituted_generation,
+        )
+        .await?,
+        ScheduleActionOutcome::Lost,
+        "generation substitution without an exact durable lineage must be rejected"
+    );
 
     let durable_writes: i64 = sqlx::query_scalar(
         "SELECT \
@@ -530,6 +574,7 @@ async fn current_command_expiry_is_durable_closed_and_fenced_for_every_active_st
             ArtifactAppendOutcome::Appended
         );
         let command = reviewed_bound_certificate_command_with_deadline(
+            &store,
             &attempt,
             1,
             &policy_hash,
@@ -1149,6 +1194,7 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
     );
 
     let command = reviewed_bound_certificate_command(
+        &store,
         &attempt,
         1,
         &policy_hash,
@@ -1224,10 +1270,12 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
         .await?
         .ok_or("ready fixture desired state was missing")?;
     let status_wire = serde_json::to_value(status.to_wire_response()?)?;
-    assert_eq!(status_wire["data"]["desiredGeneration"], 1);
+    assert_eq!(status_wire["data"]["desired"]["generation"], 1);
     assert_eq!(status_wire["data"]["observedGeneration"], 1);
-    assert_eq!(status_wire["data"]["activeCommand"]["generation"], 1);
-    assert_eq!(status_wire["data"]["activeCommand"]["state"], "received");
+    assert_eq!(
+        status_wire["data"]["desired"]["activeCommand"]["state"],
+        "received"
+    );
     assert!(status.observation().is_ok());
     assert!(!serde_json::to_string(&status_wire)?.contains(&command_id));
     let proof_authority = CertificateAttemptAuthority::for_test(scope, &attempt)?;
@@ -1527,7 +1575,10 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
         .await?
         .ok_or("fresh Ready inspection lost desired state")?;
     let ready_wire = serde_json::to_value(inspected_ready.to_wire_response()?)?;
-    assert_eq!(ready_wire["data"]["activeCommand"]["state"], "received");
+    assert_eq!(
+        ready_wire["data"]["desired"]["activeCommand"]["state"],
+        "received"
+    );
     assert!(
         ready_wire["data"]["conditions"]
             .as_array()
@@ -2520,6 +2571,7 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
         FencedMutationOutcome::Applied
     );
     let command = reviewed_bound_certificate_command(
+        &store,
         &ready_attempt,
         2,
         &policy_hash,
@@ -2584,9 +2636,12 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
         .await?
         .ok_or("reactivated desired state was missing")?;
     let status_wire = serde_json::to_value(status.to_wire_response()?)?;
-    assert_eq!(status_wire["data"]["desiredGeneration"], 2);
+    assert_eq!(status_wire["data"]["desired"]["generation"], 2);
     assert_eq!(status_wire["data"]["observedGeneration"], 2);
-    assert_eq!(status_wire["data"]["activeCommand"]["state"], "received");
+    assert_eq!(
+        status_wire["data"]["desired"]["activeCommand"]["state"],
+        "received"
+    );
     assert!(status.observation().is_ok());
     let ready_authority = CertificateAttemptAuthority::for_test(scope, &ready_attempt)?;
     let ready_view = reconcile_repository

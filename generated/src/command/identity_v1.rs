@@ -38,6 +38,7 @@ pub mod error {
 ///  "required": [
 ///    "artifactDigest",
 ///    "artifactId",
+///    "authorizationReceiptId",
 ///    "deadlineEpochSeconds",
 ///    "desiredGeneration",
 ///    "deviceId",
@@ -54,6 +55,10 @@ pub mod error {
 ///      "type": "string",
 ///      "maxLength": 256,
 ///      "minLength": 16
+///    },
+///    "authorizationReceiptId": {
+///      "$ref": "#/definitions/AuthorizationReceiptId",
+///      "x-redaction": "internal"
 ///    },
 ///    "deadlineEpochSeconds": {
 ///      "type": "integer",
@@ -100,6 +105,9 @@ pub struct IdentityApplyDeviceCertificateRequest {
     #[serde(rename = "artifactId")]
     #[redact(sensitivity = public)]
     pub artifact_id: IdentityApplyDeviceCertificateRequestArtifactId,
+    #[serde(rename = "authorizationReceiptId")]
+    #[redact(sensitivity = internal)]
+    pub authorization_receipt_id: crate::device_certificate::AuthorizationReceiptId,
     #[serde(rename = "deadlineEpochSeconds")]
     #[redact(sensitivity = public)]
     pub deadline_epoch_seconds: ::std::num::NonZeroU64,
@@ -443,7 +451,7 @@ pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
     ::rss_contract::ContractDescriptor::from_static_version(
         "identity.apply-device-certificate",
         "v1",
-        "sha256:b5e4a88a6b3b5c11dc928d5d723fe615a23e9560808164d66c260dc8ff415365",
+        "sha256:a45a6ce5b930e2921919b10d688321bb05f59117fa8b8cb9076a7c455bff213b",
     );
 
 pub const CONTRACT: ::vocab::ContractBinding =

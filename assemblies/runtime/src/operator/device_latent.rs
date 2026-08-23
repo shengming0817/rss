@@ -895,14 +895,21 @@ mod tests {
     async fn real_json_and_prometheus_outputs_are_closed_and_identifier_free() -> anyhow::Result<()>
     {
         use generated::http::identity_v2::device_certificate_status_get::{
-            IdentityDeviceCertificateStatusGetData, IdentityDeviceCertificateStatusGetResponse,
+            Desired, IdentityDeviceCertificateStatusGetData,
+            IdentityDeviceCertificateStatusGetResponse,
         };
 
         let json = render_device_latent_json(&IdentityDeviceCertificateStatusGetResponse {
             data: IdentityDeviceCertificateStatusGetData {
-                active_command: None,
                 conditions: Vec::new(),
-                desired_generation: 7,
+                desired: Some(Desired {
+                    active_command: None,
+                    authorization_receipt_id:
+                        generated::device_certificate::AuthorizationReceiptId::try_from_uuid(
+                            uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1")?,
+                        )?,
+                    generation: std::num::NonZeroU64::new(7).expect("positive fixture"),
+                }),
                 observed_generation: 4,
             },
         })?;
@@ -911,7 +918,11 @@ mod tests {
             serde_json::json!({
                 "data": {
                     "conditions": [],
-                    "desiredGeneration": 7,
+                    "desired": {
+                        "activeCommand": null,
+                        "authorizationReceiptId": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a1",
+                        "generation": 7
+                    },
                     "observedGeneration": 4
                 }
             })
@@ -1054,7 +1065,7 @@ mod tests {
                 start_audit: Ok(()),
                 connect_reader: Ok(()),
                 command: Ok(
-                    r#"{"data":{"conditions":[],"desiredGeneration":1,"observedGeneration":0}}"#
+                    r#"{"data":{"conditions":[],"desired":null,"observedGeneration":0}}"#
                         .to_owned(),
                 ),
                 reader_shutdown: Ok(()),

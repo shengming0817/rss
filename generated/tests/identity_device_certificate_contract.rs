@@ -20,6 +20,23 @@ use generated::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+const AUTHORIZATION_RECEIPT_ID: &str = "6cce9c6b-a7c3-4c95-91db-c744dcee8958";
+
+#[test]
+fn generated_authorization_receipt_identity_is_non_nil_and_redacted() {
+    let receipt = AUTHORIZATION_RECEIPT_ID
+        .parse::<generated::device_certificate::AuthorizationReceiptId>()
+        .expect("non-nil receipt");
+    let debug = format!("{receipt:?}");
+    assert!(!debug.contains(AUTHORIZATION_RECEIPT_ID));
+    assert!(
+        serde_json::from_value::<generated::device_certificate::AuthorizationReceiptId>(json!(
+            "00000000-0000-0000-0000-000000000000"
+        ))
+        .is_err()
+    );
+}
+
 fn schema(source: &str) -> Value {
     serde_json::from_str(source).expect("committed contract schema must be valid JSON")
 }
@@ -151,6 +168,7 @@ fn generated_device_command_and_facts_bind_the_frozen_wire_shapes() {
 
     let command = json!({
         "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
+        "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
         "desiredGeneration": 2,
         "fenceEpoch": 3,
         "intentDigest": format!("sha256:{}", "4".repeat(64)),
@@ -169,6 +187,11 @@ fn generated_device_command_and_facts_bind_the_frozen_wire_shapes() {
         {
             let mut invalid = command.clone();
             invalid["privateKey"] = json!("forbidden");
+            invalid
+        },
+        {
+            let mut invalid = command.clone();
+            invalid["authorizationReceiptId"] = json!("00000000-0000-0000-0000-000000000000");
             invalid
         },
     ] {
@@ -245,6 +268,8 @@ fn generated_device_command_and_facts_bind_the_frozen_wire_shapes() {
     let receipt = json!({
         "ingressEnvelopeId": "ingress-envelope-1",
         "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
+        "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
+        "desiredGeneration": 2,
         "outcome": "committed",
         "reason": "None",
         "committedAt": 44
@@ -254,6 +279,14 @@ fn generated_device_command_and_facts_bind_the_frozen_wire_shapes() {
             receipt.clone()
         )
         .is_ok()
+    );
+    let mut nil_receipt = receipt.clone();
+    nil_receipt["authorizationReceiptId"] = json!("00000000-0000-0000-0000-000000000000");
+    assert!(
+        serde_json::from_value::<device_ingress_receipted::IdentityDeviceIngressReceiptedPayload>(
+            nil_receipt
+        )
+        .is_err()
     );
     for (outcome, reason) in [
         ("committed", "ProtocolViolation"),
@@ -272,6 +305,46 @@ fn generated_device_command_and_facts_bind_the_frozen_wire_shapes() {
             "receipt must reject the illegal {outcome}/{reason} combination"
         );
     }
+
+    for mut device_authored in [ack.clone(), reported.clone()] {
+        device_authored["authorizationReceiptId"] = json!(AUTHORIZATION_RECEIPT_ID);
+        let serialized =
+            serde_json::to_string(&device_authored).expect("JSON value must serialize");
+        assert!(
+            serde_json::from_str::<device_command_acked::IdentityDeviceCommandAckedPayload>(
+                &serialized
+            )
+            .is_err()
+                && serde_json::from_str::<
+                    device_certificate_reported::IdentityDeviceCertificateReportedPayload,
+                >(&serialized)
+                .is_err(),
+            "device-authored ingress must not accept authorization lineage"
+        );
+    }
+
+    let rejected = json!({
+        "ingressEnvelopeId": "ingress-envelope-2",
+        "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
+        "outcome": "rejected",
+        "reason": "NotAccepted",
+        "committedAt": 45
+    });
+    assert!(
+        serde_json::from_value::<device_ingress_receipted::IdentityDeviceIngressReceiptedPayload>(
+            rejected.clone()
+        )
+        .is_ok()
+    );
+    let mut forged_rejected = rejected;
+    forged_rejected["authorizationReceiptId"] = json!(AUTHORIZATION_RECEIPT_ID);
+    forged_rejected["desiredGeneration"] = json!(2);
+    assert!(
+        serde_json::from_value::<device_ingress_receipted::IdentityDeviceIngressReceiptedPayload>(
+            forged_rejected
+        )
+        .is_err()
+    );
 
     for mut forbidden in [command, ack, reported, receipt] {
         forbidden
@@ -484,18 +557,34 @@ fn policy_response_only_represents_acceptance_not_convergence() {
     let validator =
         jsonschema::validator_for(&schema).expect("policy response schema must compile");
     assert!(validator.is_valid(&json!({
-        "data": {"acceptedGeneration": 1, "condition": "Reconciling"}
+        "data": {
+            "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
+            "acceptedGeneration": 1,
+            "condition": "Reconciling"
+        }
     })));
     for invalid in [
-        json!({"data": {"acceptedGeneration": 0, "condition": "Reconciling"}}),
-        json!({"data": {"acceptedGeneration": 1, "condition": "Ready"}}),
-        json!({"data": {"acceptedGeneration": 1, "condition": "PendingDevice", "completed": true}}),
+        json!({"data": {"acceptedGeneration": 1, "condition": "Reconciling"}}),
+        json!({"data": {"authorizationReceiptId": AUTHORIZATION_RECEIPT_ID, "acceptedGeneration": 0, "condition": "Reconciling"}}),
+        json!({"data": {"authorizationReceiptId": "00000000-0000-0000-0000-000000000000", "acceptedGeneration": 1, "condition": "Reconciling"}}),
+        json!({"data": {"authorizationReceiptId": AUTHORIZATION_RECEIPT_ID, "acceptedGeneration": 1, "condition": "Ready"}}),
+        json!({"data": {"authorizationReceiptId": AUTHORIZATION_RECEIPT_ID, "acceptedGeneration": 1, "condition": "PendingDevice", "completed": true}}),
     ] {
         assert!(
             !validator.is_valid(&invalid),
             "unexpectedly valid: {invalid}"
         );
     }
+    assert!(
+        serde_json::from_value::<IdentityDeviceCertificatePolicyPutResponse>(json!({
+            "data": {
+                "authorizationReceiptId": "00000000-0000-0000-0000-000000000000",
+                "acceptedGeneration": 1,
+                "condition": "Reconciling"
+            }
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -530,29 +619,33 @@ fn policy_known_responses_are_typed_and_status_bound() {
 }
 
 #[test]
-fn status_command_is_optional_nullable_and_payload_free() {
+fn status_desired_lineage_is_atomic_and_active_command_is_nested() {
     let schema = schema(include_str!(
         "../../contracts/http/identity/v2/device-certificate-status-get/response.schema.json"
     ));
     let validator = jsonschema::validator_for(&schema).expect("status schema must compile");
     let without_command = json!({
-        "data": {"desiredGeneration": 0, "observedGeneration": 0, "conditions": []}
-    });
-    let null_command = json!({
-        "data": {"desiredGeneration": 0, "observedGeneration": 0, "conditions": [], "activeCommand": null}
+        "data": {"desired": null, "observedGeneration": 0, "conditions": []}
     });
     let command = json!({
         "data": {
-            "desiredGeneration": 2,
+            "desired": {
+                "generation": 2,
+                "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
+                "activeCommand": {"fenceEpoch": 1, "state": "published"}
+            },
             "observedGeneration": 1,
             "conditions": [{
                 "type": "Reconciling", "status": "True", "reason": "AwaitingDevice",
                 "observedGeneration": 1, "lastTransitionAt": 42
-            }],
-            "activeCommand": {"generation": 2, "fenceEpoch": 1, "state": "published"}
+            }]
         }
     });
-    for valid in [without_command, null_command, command] {
+    let configured =
+        serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(command.clone())
+            .expect("configured status must decode");
+    assert!(!format!("{configured:?}").contains(AUTHORIZATION_RECEIPT_ID));
+    for valid in [without_command, command] {
         assert!(validator.is_valid(&valid));
         assert!(
             serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(valid).is_ok()
@@ -561,33 +654,39 @@ fn status_command_is_optional_nullable_and_payload_free() {
 
     for invalid in [
         json!({
-            "data": {"desiredGeneration": -1, "observedGeneration": 0, "conditions": []}
+            "data": {"desiredGeneration": 0, "desired": null, "observedGeneration": 0, "conditions": []}
         }),
         json!({
-            "data": {"desiredGeneration": 0, "observedGeneration": -1, "conditions": []}
+            "data": {"desired": null, "observedGeneration": -1, "conditions": []}
         }),
         json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"generation": 0, "fenceEpoch": 1,
-                    "state": "published"}}
+            "data": {"desired": {"generation": 1, "activeCommand": null},
+                "observedGeneration": 0, "conditions": []}
         }),
         json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"generation": 1, "fenceEpoch": 0,
-                    "state": "published"}}
+            "data": {"desired": {"generation": 1,
+                "authorizationReceiptId": "00000000-0000-0000-0000-000000000000",
+                "activeCommand": null}, "observedGeneration": 0, "conditions": []}
         }),
         json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"generation": 1, "fenceEpoch": 1,
-                    "state": "published", "payload": {"certificate": "forbidden"}}}
+            "data": {"desired": {"generation": 1,
+                "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
+                "activeCommand": {"fenceEpoch": 0, "state": "published"}},
+                "observedGeneration": 0, "conditions": []}
         }),
         json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"commandId": "command-1", "generation": 1, "fenceEpoch": 1,
-                    "state": "published"}}
+            "data": {"desired": {"generation": 1,
+                "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
+                "activeCommand": {"fenceEpoch": 1, "state": "published",
+                    "payload": {"certificate": "forbidden"}}},
+                "observedGeneration": 0, "conditions": []}
         }),
         json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0,
+            "data": {"desired": null, "observedGeneration": 0, "conditions": [],
+                "activeCommand": {"fenceEpoch": 1, "state": "published"}}
+        }),
+        json!({
+            "data": {"desired": null, "observedGeneration": 0,
                 "conditions": [{"type": "UnknownType", "status": "True", "reason": "AwaitingDevice",
                     "observedGeneration": 0, "lastTransitionAt": 42}]}
         }),
@@ -599,23 +698,24 @@ fn status_command_is_optional_nullable_and_payload_free() {
     }
     assert!(
         serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"generation": 1, "fenceEpoch": 1,
-                    "state": "published", "payload": {"certificate": "forbidden"}}}
+            "data": {"desired": {"generation": 1,
+                "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
+                "activeCommand": {"fenceEpoch": 1, "state": "published",
+                    "payload": {"certificate": "forbidden"}}},
+                "observedGeneration": 0, "conditions": []}
         }))
         .is_err()
     );
     assert!(
         serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"commandId": "command-1", "generation": 1, "fenceEpoch": 1,
-                    "state": "published"}}
+            "data": {"desired": null, "observedGeneration": 0, "conditions": [],
+                "activeCommand": {"fenceEpoch": 1, "state": "published"}}
         }))
         .is_err()
     );
     assert!(
         serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(json!({
-            "data": {"desiredGeneration": 1, "observedGeneration": 0,
+            "data": {"desired": null, "observedGeneration": 0,
                 "conditions": [{"type": "UnknownType", "status": "True", "reason": "AwaitingDevice",
                     "observedGeneration": 0, "lastTransitionAt": 42}]}
         }))

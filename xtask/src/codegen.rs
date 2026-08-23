@@ -243,6 +243,31 @@ fn plan_codegen_transaction(
         Some(normalize(&render_projected_contract_rule_docs(root)?).into_bytes()),
     )?);
 
+    let public_root = root.join("crates/devicesecuritycontracts");
+    let public = render_public_device_security_contracts(contracts)?;
+    let mut public_expected = BTreeSet::new();
+    for (relative, source) in public.rust {
+        let path = public_root.join(relative);
+        let content = normalize(&format_rust(&source)?).into_bytes();
+        public_expected.insert(path.clone());
+        outputs.push(planned_output(path, Some(content))?);
+    }
+    for (relative, bytes) in public.schemas {
+        let path = public_root.join(relative);
+        public_expected.insert(path.clone());
+        outputs.push(planned_output(path, Some(bytes))?);
+    }
+    let mut public_actual = Vec::new();
+    collect_rs_files(&public_root.join("src"), &mut public_actual)?;
+    collect_regular_files(&public_root.join("schema"), &mut public_actual)?;
+    public_actual.sort();
+    for orphan in public_actual
+        .into_iter()
+        .filter(|path| !public_expected.contains(path))
+    {
+        outputs.push(planned_output(orphan, None)?);
+    }
+
     let mut unique = BTreeSet::new();
     for output in &outputs {
         if !unique.insert(output.path.clone()) {
@@ -585,6 +610,67 @@ fn render_device_certificate_candidates(
 //! This registry is governance metadata only. Draft candidates are deliberately excluded from
 //! active HTTP/event registries, L2 assurance, runtime wiring, and production artifacts.
 
+/// A non-nil, opaque authorization correlation identity shared by the generated Draft carriers.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ::secure::Redact)]
+pub struct AuthorizationReceiptId(
+    #[redact(sensitivity = internal)]
+    ::uuid::Uuid,
+);
+
+/// A generated authorization receipt identity was nil or malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizationReceiptIdError;
+
+impl ::std::fmt::Display for AuthorizationReceiptIdError {{
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{
+        formatter.write_str("authorization receipt identity is invalid")
+    }}
+}}
+
+impl ::std::error::Error for AuthorizationReceiptIdError {{}}
+
+impl AuthorizationReceiptId {{
+    /// Restore a non-nil correlation identity at a trusted boundary.
+    pub fn try_from_uuid(value: ::uuid::Uuid) -> Result<Self, AuthorizationReceiptIdError> {{
+        (!value.is_nil()).then_some(Self(value)).ok_or(AuthorizationReceiptIdError)
+    }}
+
+    /// Return the opaque UUID value. It is not an authorization capability.
+    pub const fn as_uuid(self) -> ::uuid::Uuid {{ self.0 }}
+}}
+
+impl ::std::str::FromStr for AuthorizationReceiptId {{
+    type Err = AuthorizationReceiptIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {{
+        let value = ::uuid::Uuid::parse_str(value).map_err(|_| AuthorizationReceiptIdError)?;
+        Self::try_from_uuid(value)
+    }}
+}}
+
+impl ::std::convert::TryFrom<::uuid::Uuid> for AuthorizationReceiptId {{
+    type Error = AuthorizationReceiptIdError;
+
+    fn try_from(value: ::uuid::Uuid) -> Result<Self, Self::Error> {{
+        Self::try_from_uuid(value)
+    }}
+}}
+
+impl ::serde::Serialize for AuthorizationReceiptId {{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: ::serde::Serializer {{
+        <::uuid::Uuid as ::serde::Serialize>::serialize(&self.0, serializer)
+    }}
+}}
+
+impl<'de> ::serde::Deserialize<'de> for AuthorizationReceiptId {{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {{
+        let value = <::uuid::Uuid as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_from_uuid(value).map_err(<D::Error as ::serde::de::Error>::custom)
+    }}
+}}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Typed governance metadata for one device-certificate Draft candidate.
 pub struct DeviceCertificateCandidateSpec {{
@@ -622,6 +708,590 @@ pub const CANDIDATE_CONTRACTS: &[DeviceCertificateCandidateSpec] = &[
         entries.join("\n")
     )))
 }
+
+struct PublicDeviceSecurityProjection {
+    rust: Vec<(PathBuf, String)>,
+    schemas: Vec<(PathBuf, Vec<u8>)>,
+}
+
+fn render_public_device_security_contracts(
+    contracts: &[GovernedContract],
+) -> Result<PublicDeviceSecurityProjection> {
+    render_device_certificate_candidates(contracts, true)?;
+    validate_public_authorization_receipt_shape(contracts)?;
+    let mut rust = Vec::new();
+    let mut schemas = Vec::new();
+    let mut modules = Vec::new();
+    for candidate in DeviceCertificateCandidateId::ALL {
+        let spec = candidate.spec();
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.id() == spec.id)
+            .with_context(|| format!("public device-security contract {} is missing", spec.id))?;
+        modules.push(spec.public_module);
+        rust.push((
+            PathBuf::from("src").join(format!("{}.rs", spec.public_module)),
+            render_public_device_security_module(contract, spec.public_module)?,
+        ));
+        for file in contract.manifest().declared_schema_files() {
+            let schema = contract.declared_schema(file).with_context(|| {
+                format!(
+                    "public device-security schema {}/{} is missing",
+                    spec.id, file
+                )
+            })?;
+            schemas.push((
+                PathBuf::from("schema").join(spec.public_module).join(file),
+                public_schema_bytes(schema)?,
+            ));
+        }
+    }
+    rust.push((
+        PathBuf::from("src/lib.rs"),
+        render_public_device_security_lib(&modules),
+    ));
+    Ok(PublicDeviceSecurityProjection { rust, schemas })
+}
+
+fn validate_public_authorization_receipt_shape(contracts: &[GovernedContract]) -> Result<()> {
+    for candidate in DeviceCertificateCandidateId::ALL {
+        let spec = candidate.spec();
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.id() == spec.id)
+            .with_context(|| format!("public device-security contract {} is missing", spec.id))?;
+        let mut property_count = 0;
+        for file in contract.manifest().declared_schema_files() {
+            let schema = contract.declared_schema(file).with_context(|| {
+                format!(
+                    "public device-security schema {}/{} is missing",
+                    spec.id, file
+                )
+            })?;
+            let authored = schema.authored();
+            let before = property_count;
+            validate_authorization_receipt_document(spec.id, file, authored, &mut property_count)?;
+            if property_count > before {
+                validate_authorization_receipt_component(spec.id, file, schema.resolved().value())?;
+            }
+        }
+        validate_authorization_receipt_ownership(
+            spec.id,
+            spec.carries_authorization_lineage,
+            property_count,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_authorization_receipt_component(
+    contract_id: &str,
+    file: &str,
+    resolved: &serde_json::Value,
+) -> Result<()> {
+    let canonical = serde_json::json!({
+        "title": "AuthorizationReceiptId",
+        "type": "string",
+        "format": "uuid",
+        "x-redaction": "internal",
+        "not": {"const": "00000000-0000-0000-0000-000000000000"}
+    });
+    if resolved.pointer("/definitions/AuthorizationReceiptId") != Some(&canonical) {
+        bail!("public authorization receipt component diverged in {contract_id}/{file}");
+    }
+    Ok(())
+}
+
+fn validate_authorization_receipt_ownership(
+    contract_id: &str,
+    expected_lineage: bool,
+    property_count: usize,
+) -> Result<()> {
+    if expected_lineage != (property_count > 0) {
+        bail!(
+            "public authorization receipt ownership diverged for {contract_id}: expected_lineage={expected_lineage} properties={property_count}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_authorization_receipt_document(
+    contract_id: &str,
+    file: &str,
+    authored: &serde_json::Value,
+    property_count: &mut usize,
+) -> Result<()> {
+    let canonical_property = serde_json::json!({
+        "$ref": "rss://component/identity/v1/authorization-receipt-id",
+        "x-redaction": "internal"
+    });
+    visit_named_json_property(authored, "authorizationReceiptId", &mut |property| {
+        *property_count += 1;
+        if property != &canonical_property {
+            bail!("public authorization receipt property diverged in {contract_id}/{file}");
+        }
+        Ok(())
+    })
+}
+
+fn visit_named_json_property(
+    value: &serde_json::Value,
+    name: &str,
+    visitor: &mut impl FnMut(&serde_json::Value) -> Result<()>,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(property) = object.get("properties").and_then(|value| value.get(name)) {
+                visitor(property)?;
+            }
+            for child in object.values() {
+                visit_named_json_property(child, name, visitor)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                visit_named_json_property(child, name, visitor)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn render_public_device_security_module(
+    contract: &GovernedContract,
+    module: &str,
+) -> Result<String> {
+    let mut settings = TypeSpaceSettings::default();
+    settings.with_struct_builder(false);
+    settings.with_replacement(
+        "AuthorizationReceiptId",
+        "crate::AuthorizationReceiptId",
+        std::iter::empty::<typify::TypeSpaceImpl>(),
+    );
+    let mut space = TypeSpace::new(&settings);
+    let mut shared_definitions = BTreeMap::new();
+    let mut roots = Vec::new();
+    for file in contract.manifest().declared_schema_files() {
+        let schema = contract.declared_schema(file).with_context(|| {
+            format!(
+                "public device-security schema {}/{} is missing",
+                contract.id(),
+                file
+            )
+        })?;
+        let mut root: RootSchema = serde_json::from_value(schema.resolved().value().clone())
+            .with_context(|| {
+                format!(
+                    "parse public device-security schema {}/{}",
+                    contract.id(),
+                    file
+                )
+            })?;
+        for (name, definition) in std::mem::take(&mut root.definitions) {
+            if let Some(existing) = shared_definitions.get(&name) {
+                if existing != &definition {
+                    bail!(
+                        "public device-security definition {name:?} conflicts in {}",
+                        contract.id()
+                    );
+                }
+            } else {
+                shared_definitions.insert(name, definition);
+            }
+        }
+        roots.push((file.to_owned(), root));
+    }
+    space.add_ref_types(shared_definitions).map_err(|error| {
+        anyhow::anyhow!("derive public definitions for {}: {error}", contract.id())
+    })?;
+    for (file, root) in roots {
+        space.add_root_schema(root).map_err(|error| {
+            anyhow::anyhow!("derive public schema {}/{}: {error}", contract.id(), file)
+        })?;
+    }
+    let mut parsed = syn::parse2::<syn::File>(space.to_stream())
+        .with_context(|| format!("parse public DTO tokens for {}", contract.id()))?;
+    remove_debug_derives(&mut parsed);
+    if module == "policy_put" {
+        privatize_struct_fields(
+            &mut parsed,
+            &[
+                "IdentityDeviceCertificatePolicyPutPolicy",
+                "IdentityDeviceCertificatePolicyPutRequest",
+            ],
+        );
+        remove_deserialize_derives(
+            &mut parsed,
+            &[
+                "IdentityDeviceCertificatePolicyPutPolicy",
+                "IdentityDeviceCertificatePolicyPutRequest",
+            ],
+        );
+    }
+    allow_derivable_default_impls(&mut parsed);
+    allow_unwrap_in_defaults_mod(&mut parsed);
+    allow_unwrap_in_static_regex_impls(&mut parsed);
+    let mut dto = prettyplease::unparse(&parsed);
+    if module == "policy_put" {
+        dto.push_str(PUBLIC_POLICY_PUT_VALIDATION);
+    }
+    let mut schema_entries = Vec::new();
+    for file in contract.manifest().declared_schema_files() {
+        let schema = contract.declared_schema(file).with_context(|| {
+            format!(
+                "public device-security schema {}/{} is missing",
+                contract.id(),
+                file
+            )
+        })?;
+        let role = public_schema_role(contract, file)?;
+        let schema_bytes = public_schema_bytes(schema)?;
+        let digest = format!("sha256:{:x}", sha2::Sha256::digest(&schema_bytes));
+        schema_entries.push(format!(
+            "    crate::SchemaArtifact::new({role:?}, {digest:?}, include_bytes!(\"../schema/{module}/{file}\")),",
+        ));
+    }
+    Ok(format!(
+        "//! Generated from the canonical `{id}` Draft contract. Do not edit.\n\n{dto}\n\
+         /// Canonical contract identity and aggregate schema digest.\n\
+         pub const DESCRIPTOR: ::rss_contract::ContractDescriptor = ::rss_contract::ContractDescriptor::from_static_version({id:?}, {version:?}, {digest:?});\n\
+         /// Candidate lifecycle; this package does not activate the contract.\n\
+         pub const LIFECYCLE: &str = \"draft\";\n\
+         /// Exact authored schema artifacts embedded in this package.\n\
+         pub const SCHEMAS: &[crate::SchemaArtifact] = &[\n{}\n];\n",
+        schema_entries.join("\n"),
+        id = contract.id(),
+        version = contract.manifest().version,
+        digest = contract.schema_hash(),
+    ))
+}
+
+fn public_schema_bytes(
+    schema: assembly_schema::repository_contract::DeclaredSchema<'_>,
+) -> Result<Vec<u8>> {
+    const AUTHORIZATION_RECEIPT_COMPONENT: &str =
+        "rss://component/identity/v1/authorization-receipt-id";
+    if !schema
+        .property_references("authorizationReceiptId")
+        .iter()
+        .flatten()
+        .any(|reference| reference == AUTHORIZATION_RECEIPT_COMPONENT)
+    {
+        return Ok(schema.bytes().to_vec());
+    }
+    let mut bytes = serde_json::to_vec_pretty(schema.resolved().value())?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn public_schema_role(contract: &GovernedContract, file: &str) -> Result<String> {
+    let schemas = &contract.manifest().schemas;
+    if schemas.request.as_deref() == Some(file) {
+        return Ok("request".to_owned());
+    }
+    if schemas.response.as_deref() == Some(file) {
+        return Ok("response".to_owned());
+    }
+    if schemas.payload.as_deref() == Some(file) {
+        return Ok("payload".to_owned());
+    }
+    if let Some((status, _)) = schemas
+        .responses
+        .iter()
+        .find(|(_, schema_file)| schema_file.as_str() == file)
+    {
+        return Ok(format!("response:{}", status.get()));
+    }
+    bail!(
+        "public device-security schema role is not declared for {}/{}",
+        contract.id(),
+        file
+    )
+}
+
+fn render_public_device_security_lib(modules: &[&str]) -> String {
+    let module_declarations = modules
+        .iter()
+        .map(|module| format!("pub mod {module};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"#![doc = include_str!("../README.md")]
+
+/// Opaque, authority-free correlation identity for one durable authorization decision.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AuthorizationReceiptId(::uuid::Uuid);
+
+/// Stable, payload-free error returned for malformed or nil receipt identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizationReceiptIdError;
+
+impl ::std::fmt::Display for AuthorizationReceiptIdError {{
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{
+        formatter.write_str("invalid authorization receipt id")
+    }}
+}}
+
+impl ::std::error::Error for AuthorizationReceiptIdError {{}}
+
+impl AuthorizationReceiptId {{
+    /// Restore a non-nil correlation identity at a trusted boundary.
+    pub fn try_from_uuid(value: ::uuid::Uuid) -> Result<Self, AuthorizationReceiptIdError> {{
+        (!value.is_nil())
+            .then_some(Self(value))
+            .ok_or(AuthorizationReceiptIdError)
+    }}
+
+    /// Return the opaque UUID value. This value is not an authorization capability.
+    #[must_use]
+    pub const fn as_uuid(self) -> ::uuid::Uuid {{ self.0 }}
+}}
+
+impl ::std::fmt::Debug for AuthorizationReceiptId {{
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {{
+        formatter.write_str("AuthorizationReceiptId(<redacted>)")
+    }}
+}}
+
+impl ::std::str::FromStr for AuthorizationReceiptId {{
+    type Err = AuthorizationReceiptIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {{
+        let value = ::uuid::Uuid::parse_str(value).map_err(|_| AuthorizationReceiptIdError)?;
+        Self::try_from_uuid(value)
+    }}
+}}
+
+impl ::std::convert::TryFrom<::uuid::Uuid> for AuthorizationReceiptId {{
+    type Error = AuthorizationReceiptIdError;
+
+    fn try_from(value: ::uuid::Uuid) -> Result<Self, Self::Error> {{
+        Self::try_from_uuid(value)
+    }}
+}}
+
+impl ::serde::Serialize for AuthorizationReceiptId {{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: ::serde::Serializer {{
+        <::uuid::Uuid as ::serde::Serialize>::serialize(&self.0, serializer)
+    }}
+}}
+
+impl<'de> ::serde::Deserialize<'de> for AuthorizationReceiptId {{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {{
+        let value = <::uuid::Uuid as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_from_uuid(value).map_err(<D::Error as ::serde::de::Error>::custom)
+    }}
+}}
+
+/// One standalone resolved JSON Schema artifact embedded in the candidate package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaArtifact {{
+    role: &'static str,
+    digest: &'static str,
+    json: &'static [u8],
+}}
+
+impl SchemaArtifact {{
+    pub(crate) const fn new(role: &'static str, digest: &'static str, json: &'static [u8]) -> Self {{
+        Self {{ role, digest, json }}
+    }}
+
+    /// Manifest schema role such as `request`, `response`, or `payload`.
+    #[must_use]
+    pub const fn role(self) -> &'static str {{ self.role }}
+    /// SHA-256 digest of the exact authored schema bytes.
+    #[must_use]
+    pub const fn digest(self) -> &'static str {{ self.digest }}
+    /// Standalone resolved JSON Schema bytes.
+    #[must_use]
+    pub const fn json(self) -> &'static [u8] {{ self.json }}
+}}
+
+{module_declarations}
+"#,
+    )
+}
+
+fn remove_debug_derives(file: &mut syn::File) {
+    for item in &mut file.items {
+        let attrs = match item {
+            syn::Item::Struct(item) => &mut item.attrs,
+            syn::Item::Enum(item) => &mut item.attrs,
+            _ => continue,
+        };
+        for attr in attrs {
+            if !attr.path().is_ident("derive") {
+                continue;
+            }
+            let Ok(paths) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            ) else {
+                continue;
+            };
+            let kept: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> = paths
+                .into_iter()
+                .filter(|path| {
+                    path.segments
+                        .last()
+                        .is_none_or(|segment| segment.ident != "Debug")
+                })
+                .collect();
+            attr.meta = syn::parse_quote!(derive(#kept));
+        }
+    }
+}
+
+fn remove_deserialize_derives(file: &mut syn::File, struct_names: &[&str]) {
+    for item in &mut file.items {
+        let syn::Item::Struct(item) = item else {
+            continue;
+        };
+        if !struct_names.iter().any(|name| item.ident == *name) {
+            continue;
+        }
+        for attr in &mut item.attrs {
+            if !attr.path().is_ident("derive") {
+                continue;
+            }
+            let Ok(paths) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            ) else {
+                continue;
+            };
+            let kept: syn::punctuated::Punctuated<syn::Path, syn::Token![,]> = paths
+                .into_iter()
+                .filter(|path| {
+                    path.segments
+                        .last()
+                        .is_none_or(|segment| segment.ident != "Deserialize")
+                })
+                .collect();
+            attr.meta = syn::parse_quote!(derive(#kept));
+        }
+    }
+}
+
+fn privatize_struct_fields(file: &mut syn::File, struct_names: &[&str]) {
+    for item in &mut file.items {
+        let syn::Item::Struct(item) = item else {
+            continue;
+        };
+        if struct_names.iter().any(|name| item.ident == *name) {
+            for field in &mut item.fields {
+                field.vis = syn::Visibility::Inherited;
+            }
+        }
+    }
+}
+
+const PUBLIC_POLICY_PUT_VALIDATION: &str = r#"
+/// Stable, payload-free policy constraint violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyConstraintError;
+
+impl ::std::fmt::Display for PolicyConstraintError {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str("device certificate policy violates schema constraints")
+    }
+}
+
+impl ::std::error::Error for PolicyConstraintError {}
+
+impl IdentityDeviceCertificatePolicyPutPolicy {
+    pub fn try_new(
+        key_usages: Vec<IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem>,
+        renew_before_seconds: i64,
+        sans: Option<Vec<IdentityDeviceCertificatePolicyPutPolicySansItem>>,
+        validity_seconds: i64,
+    ) -> Result<Self, PolicyConstraintError> {
+        if !(300..=31_536_000).contains(&validity_seconds)
+            || !(60..=31_535_999).contains(&renew_before_seconds)
+            || renew_before_seconds >= validity_seconds
+            || key_usages.is_empty()
+            || key_usages.iter().collect::<::std::collections::BTreeSet<_>>().len()
+                != key_usages.len()
+            || sans.as_ref().is_some_and(|sans| {
+                sans.len() > 32
+                    || sans.iter().collect::<::std::collections::BTreeSet<_>>().len() != sans.len()
+            })
+        {
+            return Err(PolicyConstraintError);
+        }
+        Ok(Self { key_usages, renew_before_seconds, sans, validity_seconds })
+    }
+
+    pub fn key_usages(&self) -> &[IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem] {
+        &self.key_usages
+    }
+    pub const fn renew_before_seconds(&self) -> i64 { self.renew_before_seconds }
+    pub fn sans(&self) -> Option<&[IdentityDeviceCertificatePolicyPutPolicySansItem]> {
+        self.sans.as_deref()
+    }
+    pub const fn validity_seconds(&self) -> i64 { self.validity_seconds }
+}
+
+#[derive(::serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityDeviceCertificatePolicyPutPolicyWire {
+    #[serde(rename = "keyUsages")]
+    key_usages: Vec<IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem>,
+    #[serde(rename = "renewBeforeSeconds")]
+    renew_before_seconds: i64,
+    #[serde(default)]
+    sans: Option<Vec<IdentityDeviceCertificatePolicyPutPolicySansItem>>,
+    #[serde(rename = "validitySeconds")]
+    validity_seconds: i64,
+}
+
+impl<'de> ::serde::Deserialize<'de> for IdentityDeviceCertificatePolicyPutPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let wire = <IdentityDeviceCertificatePolicyPutPolicyWire as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(
+            wire.key_usages,
+            wire.renew_before_seconds,
+            wire.sans,
+            wire.validity_seconds,
+        ).map_err(<D::Error as ::serde::de::Error>::custom)
+    }
+}
+
+#[derive(::serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityDeviceCertificatePolicyPutRequestWire {
+    #[serde(rename = "expectedGeneration")]
+    expected_generation: i64,
+    #[serde(rename = "idempotencyKey")]
+    idempotency_key: ::uuid::Uuid,
+    policy: IdentityDeviceCertificatePolicyPutPolicy,
+}
+
+impl<'de> ::serde::Deserialize<'de> for IdentityDeviceCertificatePolicyPutRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let wire = <IdentityDeviceCertificatePolicyPutRequestWire as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_new(wire.expected_generation, wire.idempotency_key, wire.policy)
+            .map_err(<D::Error as ::serde::de::Error>::custom)
+    }
+}
+
+impl IdentityDeviceCertificatePolicyPutRequest {
+    pub fn try_new(
+        expected_generation: i64,
+        idempotency_key: ::uuid::Uuid,
+        policy: IdentityDeviceCertificatePolicyPutPolicy,
+    ) -> Result<Self, PolicyConstraintError> {
+        if expected_generation < 0 { return Err(PolicyConstraintError); }
+        Ok(Self { expected_generation, idempotency_key, policy })
+    }
+    pub const fn expected_generation(&self) -> i64 { self.expected_generation }
+    pub const fn idempotency_key(&self) -> ::uuid::Uuid { self.idempotency_key }
+    pub const fn policy(&self) -> &IdentityDeviceCertificatePolicyPutPolicy { &self.policy }
+}
+"#;
 
 fn render_saga_test_support(fixtures: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> {
     if fixtures
@@ -828,6 +1498,11 @@ fn render_contract_body(
     }
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
+    settings.with_replacement(
+        "AuthorizationReceiptId",
+        "crate::device_certificate::AuthorizationReceiptId",
+        std::iter::empty::<typify::TypeSpaceImpl>(),
+    );
     let mut space = TypeSpace::new(&settings);
     let source = format!(
         "contracts/{}/{}/{}/",
@@ -854,6 +1529,7 @@ fn render_contract_body(
             .with_context(|| format!("契约 {source} 未捕获 promoted schema: {schema_file}"))?;
         let schema_label = schema.file();
         let value = schema.resolved();
+        let authored = schema.authored();
         merge_deferred_string_lengths(
             &mut deferred_string_lengths,
             collect_deferred_string_lengths(value)
@@ -874,17 +1550,21 @@ fn render_contract_body(
                 TENANT_SCOPE_SOURCE_RULE
             );
         }
-        let schema_policies = redaction::collect_struct_policies(value).map_err(|violations| {
-            anyhow::anyhow!(
-                "redaction policy invalid in {}: {}",
-                schema_label,
-                violations
-                    .iter()
-                    .map(|v| format!("{}: {}", v.pointer, v.detail))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        })?;
+        // Redaction annotations on `$ref` siblings belong to the authored property. Resolution
+        // deliberately feeds typify, but must not erase those sibling annotations before policy
+        // collection.
+        let schema_policies =
+            redaction::collect_struct_policies(authored).map_err(|violations| {
+                anyhow::anyhow!(
+                    "redaction policy invalid in {}: {}",
+                    schema_label,
+                    violations
+                        .iter()
+                        .map(|v| format!("{}: {}", v.pointer, v.detail))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
         redaction_policies.extend(schema_policies);
         let schema_protection_policies =
             protection::collect_struct_policies(value).map_err(|violations| {
@@ -4095,6 +4775,28 @@ fn allow_unwrap_in_defaults_mod(file: &mut syn::File) {
     }
 }
 
+/// typify emits fallible construction for compile-time-authored `regress` patterns inside
+/// conversion impls. The canonical schema has already been parsed and governed, so the static
+/// pattern cannot be caller-controlled. Keep the exception on only the generated impls that
+/// contain such initialization.
+fn allow_unwrap_in_static_regex_impls(file: &mut syn::File) {
+    use quote::ToTokens as _;
+
+    for item in &mut file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        if item
+            .to_token_stream()
+            .to_string()
+            .contains("regress :: Regex")
+        {
+            item.attrs
+                .push(syn::parse_quote!(#[allow(clippy::unwrap_used)]));
+        }
+    }
+}
+
 /// 文件头：`@generated` 标记。派生码经 typify→prettyplease→rustfmt 三段成形（见模块 doc），勿手改。
 fn generated_header(source: &str) -> String {
     format!("// @generated by `cargo xtask codegen` — DO NOT EDIT. Source: {source}\n")
@@ -5247,6 +5949,26 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn collect_regular_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir).with_context(|| format!("读目录 {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_regular_files(&path, out)?;
+        } else if path.is_file() {
+            out.push(path);
+        } else {
+            bail!(
+                "generated public schema path must be a regular file: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5260,6 +5982,75 @@ mod tests {
 
     fn assert_generated_contains(source: &str, needle: &str, message: &str) {
         assert!(source.contains(needle), "{message}:\n{source}");
+    }
+
+    #[test]
+    fn public_authorization_receipt_shape_has_synthetic_red_proofs() -> Result<()> {
+        let canonical = serde_json::json!({
+            "properties": {"authorizationReceiptId": {
+                "$ref": "rss://component/identity/v1/authorization-receipt-id",
+                "x-redaction": "internal"
+            }}
+        });
+        let mut count = 0;
+        validate_authorization_receipt_document(
+            "identity.test",
+            "payload.json",
+            &canonical,
+            &mut count,
+        )?;
+        validate_authorization_receipt_ownership("identity.test", true, count)?;
+
+        let resolved = serde_json::json!({"definitions": {"AuthorizationReceiptId": {
+            "title": "AuthorizationReceiptId", "type": "string", "format": "uuid",
+            "x-redaction": "internal",
+            "not": {"const": "00000000-0000-0000-0000-000000000000"}
+        }}});
+        validate_authorization_receipt_component("identity.test", "payload.json", &resolved)?;
+        let mut nil_allowed = resolved.clone();
+        nil_allowed
+            .pointer_mut("/definitions/AuthorizationReceiptId/not")
+            .expect("definition")
+            .take();
+        assert!(
+            validate_authorization_receipt_component("identity.test", "payload.json", &nil_allowed)
+                .is_err()
+        );
+
+        let mut parallel_definition = canonical.clone();
+        parallel_definition
+            .pointer_mut("/properties/authorizationReceiptId/$ref")
+            .expect("property")
+            .clone_from(&serde_json::json!("#/definitions/authorizationReceiptId"));
+        let mut red_count = 0;
+        assert!(
+            validate_authorization_receipt_document(
+                "identity.test",
+                "payload.json",
+                &parallel_definition,
+                &mut red_count
+            )
+            .is_err()
+        );
+
+        let mut unredacted = canonical.clone();
+        unredacted
+            .pointer_mut("/properties/authorizationReceiptId/x-redaction")
+            .expect("property")
+            .take();
+        let mut red_count = 0;
+        assert!(
+            validate_authorization_receipt_document(
+                "identity.test",
+                "payload.json",
+                &unredacted,
+                &mut red_count
+            )
+            .is_err()
+        );
+        assert!(validate_authorization_receipt_ownership("identity.lineaged", true, 0).is_err());
+        assert!(validate_authorization_receipt_ownership("identity.unlineaged", false, 1).is_err());
+        Ok(())
     }
 
     fn assert_subscription_wire_semantics(rendered: &str, root_module: &str) {
@@ -8663,6 +9454,34 @@ mod tests {
     }
 
     #[test]
+    fn public_candidate_outputs_fail_closed_on_missing_drift_and_orphan() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-public-candidate-drift");
+        let module = root.join("crates/devicesecuritycontracts/src/policy.rs");
+        let schema = root.join("crates/devicesecuritycontracts/schema/policy/response.schema.json");
+        let orphan = root.join("crates/devicesecuritycontracts/src/orphan.rs");
+        std::fs::create_dir_all(module.parent().context("module parent")?)?;
+        std::fs::create_dir_all(schema.parent().context("schema parent")?)?;
+        std::fs::write(&module, b"// tampered\n")?;
+        std::fs::write(&orphan, b"// forbidden seventh output\n")?;
+        let mut transaction = CodegenTransaction {
+            outputs: vec![
+                planned_output(module.clone(), Some(b"// governed module\n".to_vec()))?,
+                planned_output(schema.clone(), Some(br#"{"title":"Governed"}"#.to_vec()))?,
+                planned_output(orphan.clone(), None)?,
+            ],
+            touched: Vec::new(),
+        };
+
+        assert!(transaction.check().is_err());
+        transaction.apply()?;
+        assert_eq!(std::fs::read(&module)?, b"// governed module\n");
+        assert_eq!(std::fs::read(&schema)?, br#"{"title":"Governed"}"#);
+        assert!(!orphan.exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn empty_contract_repository_cannot_touch_existing_outputs() -> anyhow::Result<()> {
         let root = unique_tmp("codegen-empty-contract-repository");
         let contracts = root.join("contracts");
@@ -8787,6 +9606,64 @@ mod tests {
                     spec.id
                 );
             }
+
+            let public = render_public_device_security_contracts(contracts)?;
+            let expected_modules = DeviceCertificateCandidateId::ALL
+                .into_iter()
+                .map(|candidate| format!("src/{}.rs", candidate.spec().public_module))
+                .chain(std::iter::once("src/lib.rs".to_owned()))
+                .map(PathBuf::from)
+                .collect::<BTreeSet<_>>();
+            let actual_modules = public
+                .rust
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual_modules, expected_modules);
+            let rendered_public = public
+                .rust
+                .iter()
+                .map(|(_, source)| source.as_str())
+                .collect::<String>();
+            assert!(!rendered_public.contains("resource-security-fact"));
+            for candidate in DeviceCertificateCandidateId::ALL {
+                let spec = candidate.spec();
+                let module = public
+                    .rust
+                    .iter()
+                    .find_map(|(path, source)| {
+                        (path == &PathBuf::from(format!("src/{}.rs", spec.public_module)))
+                            .then_some(source)
+                    })
+                    .context("candidate public module exists")?;
+                assert!(module.contains("pub const LIFECYCLE: &str = \"draft\""));
+                assert!(module.contains(spec.id));
+            }
+            let expected_schemas = DeviceCertificateCandidateId::ALL
+                .into_iter()
+                .flat_map(|candidate| {
+                    let spec = candidate.spec();
+                    contracts
+                        .iter()
+                        .find(|contract| contract.id() == spec.id)
+                        .into_iter()
+                        .flat_map(move |contract| {
+                            contract.manifest().declared_schema_files().into_iter().map(
+                                move |file| {
+                                    PathBuf::from("schema").join(spec.public_module).join(file)
+                                },
+                            )
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                public
+                    .schemas
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_schemas
+            );
             Ok(())
         })
     }

@@ -4,6 +4,7 @@
 //! define adapters, provider drivers, fixtures, schedulers, artifact selectors, CI receipts, or
 //! T3/product maturity.
 
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 pub mod localtx;

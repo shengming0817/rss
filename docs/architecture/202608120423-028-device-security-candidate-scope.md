@@ -40,7 +40,7 @@ T3 默认拒绝、独立 issue/PR 规则冲突。
 | assembly owner | `assemblies/deviceidentity` / Cargo package `deviceidentity` | demo、compile-only draft pilot |
 | candidate binary | package `deviceidentity` / target `deviceidentity-server` | 尚不存在，不是当前 artifact |
 | candidate image | `Dockerfile` target `deviceidentity-runtime` | 尚不存在，不是当前 artifact |
-| public contract package | internal owner `crates/devicesecuritycontracts` / `devicesecuritycontracts` → public `rss-device-security-contracts` | candidate Release Surface identity，尚未物化；映射与 registry owner 只由 [`architecture.md` §公开发布命名](../rules/architecture.md#公开发布命名) 持有 |
+| public contract package | internal owner `crates/devicesecuritycontracts` / `devicesecuritycontracts` → public `rss-device-security-contracts` | 已物化的 experimental candidate Release Surface；六契约仍全部为 Draft，未发布、未激活 profile |
 | real consumer | `rss-incubator` 的 Secure Device Credential Rotation product/agent | 外部产品 owner，尚无消费回执 |
 
 冻结名称不等于注册 artifact。`assemblies/artifacts.toml` 在 binary、image、typed config、Health inventory 和非空 acceptance
@@ -48,7 +48,7 @@ carrier 全部真实存在前继续保留 `deviceidentity = compile-only`；本 
 
 ### 六契约公共窄腰
 
-未来 `rss-device-security-contracts`（名称映射消费
+`rss-device-security-contracts`（名称映射消费
 [`architecture.md` §公开发布命名](../rules/architecture.md#公开发布命名)）只允许从现有 contract/schema 单源派生以下 exact set：
 
 1. `identity.device-certificate-policy-put`
@@ -60,7 +60,8 @@ carrier 全部真实存在前继续保留 `deviceidentity = compile-only`；本 
 
 Candidate package 可公开稳定 contract ID/version、DTO、schema digest、兼容元数据和规范化错误；不得公开 identity domain
 service/repository、`diport`、provider catalog、RuntimePlan、AssemblyLock、generated internal registry 或通用 HTTP/MQTT SDK。
-本 ADR 不创建 package，也不改变六个 contract 的 `draft` lifecycle。
+该 package 由同一 contract governance/codegen transaction 派生，不改变六个 contract 的 `draft` lifecycle，
+也不注册 route、profile、binary、image、selector 或 T3 evidence。
 
 六契约是一次 breaking exact-set 裁决，不保留 six/seven 双集、alias、shim、双 codegen 或兼容入口。未来若真实 RSS runtime
 consumer 必须持续接收新的 device security fact，必须另立 scope/ADR/PBI，证明 authority、freshness、replay、idempotency、
@@ -137,7 +138,8 @@ profile，也不能成为 RSS production acceptance owner。
 | simulator artifact 进入 production slot | sealed `DraftEligibility`/`ProductionEligibility`、closure + move-only evidence 的消费式 production authorize、compile-fail tests；`pkiauthmint` wrapper/callsite exact-set 仅作 Medium 纵深门 | 已有 Hard/T1；正式 mint 仅由 provider config identity 一致的 Vault verified evidence + current receipt-bound acquisition 进入 |
 | draft pilot 被误报为 deployable artifact | assembly manifest/lock/RuntimePlan、`assemblies/artifacts.toml` 与 artifact validation | 已有 Hard/Medium；当前结论为 compile-only |
 | incubator 反向依赖 RSS internals | ADR-026 的独立 repository/Cargo source policy/candidate proof | 已有物理/Cargo/T2 owner |
-| future public/package/assembly/activation partial cutover | contract lifecycle/codegen、Release Surface/package proof、assembly artifact chain | future implementation handoff；未落地前不得声明 invariant 已闭合 |
+| public candidate/package drift | contract lifecycle/codegen、Release Surface、release API 与 locked/offline package proof | experimental Draft package 已物化；仍不构成 activation 或 production eligibility |
+| future assembly/activation partial cutover | assembly manifest/lock/RuntimePlan 与 profile artifact chain | future implementation handoff；未落地前不得声明 production invariant 已闭合 |
 
 不新增 Markdown scanner、当前数量 gate、device-security 专用 registry、Evidence database 或 shape-only temporary guard。未来 PBI
 必须优先使用 schema/codegen、sealed type、必填构造器和既有 assembly/Release Surface gate，并配置与真实风险对应的

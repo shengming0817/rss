@@ -420,16 +420,23 @@ impl<E: ArtifactEligibility> DeviceCertificateStatusStore for PgDeviceCertificat
                             .status_snapshot_with_ready_evidence::<E>(scope, &tenant, &device)
                             .await?;
                         let observed_at = certificates.authoritative_now().await?;
-                        state
-                            .map(|state| {
-                                DeviceCertificateStatusEvidence::restore(
-                                    state,
-                                    active_command,
-                                    observed_at,
-                                )
-                                .map_err(DeviceCertificateStatusStoreError::CorruptState)
-                            })
-                            .transpose()
+                        let evidence = match state {
+                            Some(state) => DeviceCertificateStatusEvidence::restore(
+                                state,
+                                active_command,
+                                observed_at,
+                            )
+                            .map_err(DeviceCertificateStatusStoreError::CorruptState)?,
+                            None if active_command.is_none() => {
+                                DeviceCertificateStatusEvidence::unconfigured(observed_at)
+                            }
+                            None => {
+                                return Err(DeviceCertificateStatusStoreError::CorruptState(
+                                    identity::ports::device_certificate::DeviceCertificateError::InvalidPersistedValue,
+                                ));
+                            }
+                        };
+                        Ok(Some(evidence))
                     })
                 },
                 status_storage,
@@ -2902,8 +2909,20 @@ mod integration_tests {
             .ok_or("tenant B status was missing")?;
         let wire_a = serde_json::to_value(inspected_a.to_wire_response()?)?;
         let wire_b = serde_json::to_value(inspected_b.to_wire_response()?)?;
-        assert_eq!(wire_a["data"]["desiredGeneration"], 1);
-        assert_eq!(wire_b["data"]["desiredGeneration"], 2);
+        assert_eq!(wire_a["data"]["desired"]["generation"], 1);
+        assert_eq!(wire_b["data"]["desired"]["generation"], 2);
+        let durable_receipt_a: String = sqlx::query_scalar(
+            "SELECT authorization_receipt_id::text FROM device_certificate_desired_states \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        )
+        .bind(tenant_a.to_string())
+        .bind(device.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            wire_a["data"]["desired"]["authorizationReceiptId"],
+            durable_receipt_a
+        );
         assert_eq!(
             inspected_a.observation().expect("tenant A observation"),
             observ::DeviceLatentObservation::new(1, None, None, None)
@@ -2923,8 +2942,16 @@ mod integration_tests {
             hidden_tenant,
             ids::DeviceId::new(uuid::Uuid::new_v4()),
         );
-        assert!(status.inspect(status_query(foreign_scope)).await?.is_none());
-        assert!(status.inspect(status_query(missing_scope)).await?.is_none());
+        for unconfigured_scope in [foreign_scope, missing_scope] {
+            let unconfigured = status
+                .inspect(status_query(unconfigured_scope))
+                .await?
+                .ok_or("authorized unconfigured scope was hidden")?;
+            let wire = serde_json::to_value(unconfigured.to_wire_response()?)?;
+            assert_eq!(wire["data"]["desired"], serde_json::Value::Null);
+            assert_eq!(wire["data"]["observedGeneration"], 0);
+            assert_eq!(wire["data"]["conditions"], serde_json::json!([]));
+        }
 
         let after: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
             "SELECT \

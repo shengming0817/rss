@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "rss://component/identity/v1/authorization-receipt-id",
+  "title": "AuthorizationReceiptId",
+  "type": "string",
+  "format": "uuid",
+  "x-redaction": "internal",
+  "not": {
+    "const": "00000000-0000-0000-0000-000000000000"
+  }
+}

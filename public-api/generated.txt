@@ -109,6 +109,7 @@ impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::F
 pub struct generated::command::identity_v1::IdentityApplyDeviceCertificateRequest
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::artifact_digest: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactDigest
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::artifact_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId
+pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::authorization_receipt_id: generated::device_certificate::AuthorizationReceiptId
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::deadline_epoch_seconds: core::num::nonzero::NonZeroU64
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::desired_generation: core::num::nonzero::NonZeroU64
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::device_id: uuid::Uuid
@@ -403,6 +404,64 @@ pub fn generated::command::identity_v1::FencedReconcileCommand::request(&self) -
 pub trait generated::command::JournaledCommandContract: generated::command::CommandContract
 impl generated::command::JournaledCommandContract for generated::command::_seed_v1::Contract
 pub mod generated::device_certificate
+pub struct generated::device_certificate::AuthorizationReceiptId(_)
+impl generated::device_certificate::AuthorizationReceiptId
+pub const fn generated::device_certificate::AuthorizationReceiptId::as_uuid(self) -> uuid::Uuid
+pub fn generated::device_certificate::AuthorizationReceiptId::try_from_uuid(uuid::Uuid) -> core::result::Result<Self, generated::device_certificate::AuthorizationReceiptIdError>
+impl core::clone::Clone for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::clone(&self) -> generated::device_certificate::AuthorizationReceiptId
+impl core::cmp::Eq for generated::device_certificate::AuthorizationReceiptId
+impl core::cmp::Ord for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::cmp(&self, &generated::device_certificate::AuthorizationReceiptId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::eq(&self, &generated::device_certificate::AuthorizationReceiptId) -> bool
+impl core::cmp::PartialOrd for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::partial_cmp(&self, &generated::device_certificate::AuthorizationReceiptId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<uuid::Uuid> for generated::device_certificate::AuthorizationReceiptId
+pub type generated::device_certificate::AuthorizationReceiptId::Error = generated::device_certificate::AuthorizationReceiptIdError
+pub fn generated::device_certificate::AuthorizationReceiptId::try_from(uuid::Uuid) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::device_certificate::AuthorizationReceiptId
+impl core::marker::StructuralPartialEq for generated::device_certificate::AuthorizationReceiptId
+impl core::str::traits::FromStr for generated::device_certificate::AuthorizationReceiptId
+pub type generated::device_certificate::AuthorizationReceiptId::Err = generated::device_certificate::AuthorizationReceiptIdError
+pub fn generated::device_certificate::AuthorizationReceiptId::from_str(&str) -> core::result::Result<Self, Self::Err>
+impl secure::redaction::Redact for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::device_certificate::AuthorizationReceiptId
+pub fn generated::device_certificate::AuthorizationReceiptId::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::device_certificate::AuthorizationReceiptId
+impl core::marker::Send for generated::device_certificate::AuthorizationReceiptId
+impl core::marker::Sync for generated::device_certificate::AuthorizationReceiptId
+impl core::marker::Unpin for generated::device_certificate::AuthorizationReceiptId
+impl core::marker::UnsafeUnpin for generated::device_certificate::AuthorizationReceiptId
+impl core::panic::unwind_safe::RefUnwindSafe for generated::device_certificate::AuthorizationReceiptId
+impl core::panic::unwind_safe::UnwindSafe for generated::device_certificate::AuthorizationReceiptId
+pub struct generated::device_certificate::AuthorizationReceiptIdError
+impl core::clone::Clone for generated::device_certificate::AuthorizationReceiptIdError
+pub fn generated::device_certificate::AuthorizationReceiptIdError::clone(&self) -> generated::device_certificate::AuthorizationReceiptIdError
+impl core::cmp::Eq for generated::device_certificate::AuthorizationReceiptIdError
+impl core::cmp::PartialEq for generated::device_certificate::AuthorizationReceiptIdError
+pub fn generated::device_certificate::AuthorizationReceiptIdError::eq(&self, &generated::device_certificate::AuthorizationReceiptIdError) -> bool
+impl core::error::Error for generated::device_certificate::AuthorizationReceiptIdError
+impl core::fmt::Debug for generated::device_certificate::AuthorizationReceiptIdError
+pub fn generated::device_certificate::AuthorizationReceiptIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::device_certificate::AuthorizationReceiptIdError
+pub fn generated::device_certificate::AuthorizationReceiptIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::device_certificate::AuthorizationReceiptIdError
+impl core::marker::StructuralPartialEq for generated::device_certificate::AuthorizationReceiptIdError
+impl core::marker::Freeze for generated::device_certificate::AuthorizationReceiptIdError
+impl core::marker::Send for generated::device_certificate::AuthorizationReceiptIdError
+impl core::marker::Sync for generated::device_certificate::AuthorizationReceiptIdError
+impl core::marker::Unpin for generated::device_certificate::AuthorizationReceiptIdError
+impl core::marker::UnsafeUnpin for generated::device_certificate::AuthorizationReceiptIdError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::device_certificate::AuthorizationReceiptIdError
+impl core::panic::unwind_safe::UnwindSafe for generated::device_certificate::AuthorizationReceiptIdError
 pub struct generated::device_certificate::DeviceCertificateCandidateSpec
 impl generated::device_certificate::DeviceCertificateCandidateSpec
 pub const fn generated::device_certificate::DeviceCertificateCandidateSpec::binding(self) -> vocab::contract::binding::ContractBinding
@@ -1420,7 +1479,9 @@ impl core::marker::UnsafeUnpin for generated::event::identity_v1::device_ingress
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::device_ingress_receipted::Contract
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::device_ingress_receipted::Contract
 pub struct generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload
+pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload::authorization_receipt_id: generated::device_certificate::AuthorizationReceiptId
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload::committed_at: i64
+pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload::desired_generation: core::num::nonzero::NonZeroU64
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload::device_id: uuid::Uuid
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload::ingress_envelope_id: generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayloadIngressEnvelopeId
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayload::outcome: generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayloadOutcome
@@ -1490,7 +1551,9 @@ impl core::marker::UnsafeUnpin for generated::event::identity_v1::device_ingress
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayloadIngressEnvelopeId
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressCommittedPayloadIngressEnvelopeId
 pub struct generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload
+pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload::authorization_receipt_id: generated::device_certificate::AuthorizationReceiptId
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload::committed_at: i64
+pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload::desired_generation: core::num::nonzero::NonZeroU64
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload::device_id: uuid::Uuid
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload::ingress_envelope_id: generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayloadIngressEnvelopeId
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayload::outcome: generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressDuplicatePayloadOutcome
@@ -1630,7 +1693,9 @@ impl core::marker::UnsafeUnpin for generated::event::identity_v1::device_ingress
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressRejectedPayloadIngressEnvelopeId
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressRejectedPayloadIngressEnvelopeId
 pub struct generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload
+pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload::authorization_receipt_id: generated::device_certificate::AuthorizationReceiptId
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload::committed_at: i64
+pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload::desired_generation: core::num::nonzero::NonZeroU64
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload::device_id: uuid::Uuid
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload::ingress_envelope_id: generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayloadIngressEnvelopeId
 pub generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayload::outcome: generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayloadOutcome
@@ -10587,49 +10652,74 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_po
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
-pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::ExpectedGenerationConflict
-pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::IdempotencyKeyConflict
-impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::cmp::Eq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::cmp::Ord for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::cmp(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode) -> core::cmp::Ordering
-impl core::cmp::PartialEq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::eq(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode) -> bool
-impl core::cmp::PartialOrd for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::partial_cmp(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode) -> core::option::Option<core::cmp::Ordering>
-impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
-impl core::convert::TryFrom<&str> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::try_from(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
-impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
-impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::marker::StructuralPartialEq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::str::traits::FromStr for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::Err = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::from_str(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
-impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
+pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreConflict
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreConflict::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreConflict::message: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreConflict::request_id: alloc::string::String
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreConflict::retryable: bool
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreVersionConflict
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreVersionConflict::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreVersionConflict::message: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreVersionConflict::request_id: alloc::string::String
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::ErrCoreVersionConflict::retryable: bool
+impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::VersionConflict
+impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::cmp::Eq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::cmp::Ord for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::cmp(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::eq(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::partial_cmp(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::try_from(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::marker::StructuralPartialEq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::str::traits::FromStr for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::Err = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::from_str(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
 pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutDataCondition
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutDataCondition::PendingDevice
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutDataCondition::Reconciling
@@ -10674,7 +10764,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certific
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutDataCondition
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutDataCondition
 pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
-pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode::NotFound
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode::ErrCoreNotFound
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
 pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
 impl core::cmp::Eq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
@@ -10715,6 +10805,48 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_po
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
+pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::NotFound
+impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::cmp::Eq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::cmp::Ord for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::cmp(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::eq(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::partial_cmp(&self, &generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::try_from(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::Error = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::marker::StructuralPartialEq for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::str::traits::FromStr for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::Err = generated::http::identity_v2::device_certificate_policy_put::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::from_str(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
 pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem::ClientAuth
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem::ServerAuth
@@ -10770,25 +10902,6 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_po
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
-pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::code: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
-impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
-impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse::error: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
 impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
@@ -10816,6 +10929,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData::accepted_generation: core::num::nonzero::NonZeroU64
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData::authorization_receipt_id: generated::device_certificate::AuthorizationReceiptId
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData::condition: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutDataCondition
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
 pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
@@ -10848,6 +10962,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::code: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::message: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorMessage
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::request_id: alloc::string::String
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::retryable: bool
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
 pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
 impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
@@ -11040,6 +11158,50 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_st
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::error::ConversionError
+pub enum generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Published
+pub generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Queued
+pub generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Received
+impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::cmp::Eq for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::cmp::Ord for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::cmp(&self, &generated::http::identity_v2::device_certificate_status_get::ActiveCommandState) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::eq(&self, &generated::http::identity_v2::device_certificate_status_get::ActiveCommandState) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::partial_cmp(&self, &generated::http::identity_v2::device_certificate_status_get::ActiveCommandState) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub type generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub type generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::try_from(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub type generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::marker::StructuralPartialEq for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::str::traits::FromStr for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub type generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::Err = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::from_str(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommandState::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::marker::Send for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
 pub enum generated::http::identity_v2::device_certificate_status_get::ConditionReason
 pub generated::http::identity_v2::device_certificate_status_get::ConditionReason::ArtifactUnavailable
 pub generated::http::identity_v2::device_certificate_status_get::ConditionReason::AwaitingDevice
@@ -11186,50 +11348,26 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_st
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::ConditionType
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::ConditionType
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::ConditionType
-pub enum generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Published
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Queued
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Received
-impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::cmp::Eq for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::cmp::Ord for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::cmp(&self, &generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState) -> core::cmp::Ordering
-impl core::cmp::PartialEq for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::eq(&self, &generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState) -> bool
-impl core::cmp::PartialOrd for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::partial_cmp(&self, &generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState) -> core::option::Option<core::cmp::Ordering>
-impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl core::convert::TryFrom<&str> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::try_from(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl core::fmt::Debug for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::marker::StructuralPartialEq for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::str::traits::FromStr for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::Err = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::from_str(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::marker::Send for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::marker::Sync for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::marker::Unpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
+pub struct generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+pub generated::http::identity_v2::device_certificate_status_get::ActiveCommand::fence_epoch: core::num::nonzero::NonZeroU64
+pub generated::http::identity_v2::device_certificate_status_get::ActiveCommand::state: generated::http::identity_v2::device_certificate_status_get::ActiveCommandState
+impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommand::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::fmt::Debug for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommand::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommand::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommand::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+pub fn generated::http::identity_v2::device_certificate_status_get::ActiveCommand::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::marker::Send for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::ActiveCommand
 pub struct generated::http::identity_v2::device_certificate_status_get::Condition
 pub generated::http::identity_v2::device_certificate_status_get::Condition::last_transition_at: i64
 pub generated::http::identity_v2::device_certificate_status_get::Condition::observed_generation: i64
@@ -11253,31 +11391,30 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_st
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::Condition
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::Condition
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::Condition
-pub struct generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::fence_epoch: core::num::nonzero::NonZeroU64
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::generation: core::num::nonzero::NonZeroU64
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::state: generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
-impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::fmt::Debug for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::marker::Send for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::marker::Sync for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::marker::Unpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
+pub struct generated::http::identity_v2::device_certificate_status_get::Desired
+pub generated::http::identity_v2::device_certificate_status_get::Desired::active_command: core::option::Option<generated::http::identity_v2::device_certificate_status_get::ActiveCommand>
+pub generated::http::identity_v2::device_certificate_status_get::Desired::authorization_receipt_id: generated::device_certificate::AuthorizationReceiptId
+pub generated::http::identity_v2::device_certificate_status_get::Desired::generation: core::num::nonzero::NonZeroU64
+impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::Desired
+pub fn generated::http::identity_v2::device_certificate_status_get::Desired::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::fmt::Debug for generated::http::identity_v2::device_certificate_status_get::Desired
+pub fn generated::http::identity_v2::device_certificate_status_get::Desired::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v2::device_certificate_status_get::Desired
+pub fn generated::http::identity_v2::device_certificate_status_get::Desired::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_status_get::Desired
+pub fn generated::http::identity_v2::device_certificate_status_get::Desired::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_status_get::Desired
+pub fn generated::http::identity_v2::device_certificate_status_get::Desired::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::marker::Send for generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::Desired
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::Desired
 pub struct generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::active_command: core::option::Option<generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand>
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::conditions: alloc::vec::Vec<generated::http::identity_v2::device_certificate_status_get::Condition>
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::desired_generation: i64
+pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::desired: core::option::Option<generated::http::identity_v2::device_certificate_status_get::Desired>
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::observed_generation: i64
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData
 pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData

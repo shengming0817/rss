@@ -139,6 +139,7 @@ struct CaptureReconciler {
 struct TestCertificateAuthorization {
     device_id: uuid::Uuid,
     generation: u64,
+    authorization_receipt_id: uuid::Uuid,
     artifact_id: String,
     artifact_digest: [u8; 32],
     policy_hash: [u8; 32],
@@ -170,6 +171,7 @@ fn semantic_device_command(
     Ok(TestCertificateAuthorization {
         device_id: request.device_id,
         generation: request.desired_generation,
+        authorization_receipt_id: request.authorization_receipt_id,
         artifact_id: request.artifact_id.to_owned(),
         artifact_digest: parse_sha256_label(request.artifact_digest)?,
         policy_hash: parse_sha256_label(request.policy_hash)?,
@@ -198,6 +200,7 @@ impl DurableReconciler<CaptureStore> for CaptureReconciler {
         let reviewed = attempt
             .review_device_certificate_command(
                 command.generation,
+                command.authorization_receipt_id,
                 &command.artifact_id,
                 command.artifact_digest,
                 command.policy_hash,

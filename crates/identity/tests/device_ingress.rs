@@ -7,7 +7,7 @@ use deviceloop::{
 };
 use identity::ports::device_certificate::{
     DeviceIngressContract, DeviceIngressDelivery, DeviceIngressPreparation,
-    UnaddressableDeviceIngressReason, application_receipt, prepare_device_ingress,
+    UnaddressableDeviceIngressReason, application_receipt_without_lineage, prepare_device_ingress,
 };
 use std::time::SystemTime;
 
@@ -154,7 +154,7 @@ fn malformed_payload_with_stable_envelope_becomes_durable_protocol_violation() {
         SystemTime::UNIX_EPOCH,
     )
     .expect("rejected receipt");
-    let public = application_receipt(scope, &rejected).expect("public rejection");
+    let public = application_receipt_without_lineage(scope, &rejected).expect("public rejection");
     let payload = match public.payload() {
         generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressReceiptedPayload::RejectedPayload(payload) => {
             Some(payload)

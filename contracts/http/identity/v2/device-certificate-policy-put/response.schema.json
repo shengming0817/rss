@@ -11,10 +11,15 @@
       "title": "IdentityDeviceCertificatePolicyPutData",
       "type": "object",
       "required": [
+        "authorizationReceiptId",
         "acceptedGeneration",
         "condition"
       ],
       "properties": {
+        "authorizationReceiptId": {
+          "$ref": "rss://component/identity/v1/authorization-receipt-id",
+          "x-redaction": "internal"
+        },
         "acceptedGeneration": {
           "type": "integer",
           "format": "int64",

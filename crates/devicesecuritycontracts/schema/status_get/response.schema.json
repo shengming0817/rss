@@ -1,0 +1,172 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuthorizationReceiptId": {
+      "format": "uuid",
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "title": "AuthorizationReceiptId",
+      "type": "string",
+      "x-redaction": "internal"
+    },
+    "activeCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "fenceEpoch": {
+          "format": "int64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "published",
+            "received"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "fenceEpoch",
+        "state"
+      ],
+      "title": "IdentityDeviceCertificateStatusGetActiveCommand",
+      "type": "object"
+    },
+    "condition": {
+      "additionalProperties": false,
+      "properties": {
+        "lastTransitionAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "observedGeneration": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "enum": [
+            "DesiredAccepted",
+            "CommandQueued",
+            "AwaitingDevice",
+            "DeviceReported",
+            "StateMatches",
+            "StateDrift",
+            "CommandRejected",
+            "CommandTimedOut",
+            "ProtocolViolation",
+            "QuarantinedByOperator",
+            "DeletionPending",
+            "DeletionComplete",
+            "ArtifactUnavailable",
+            "TransportUnavailable"
+          ],
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "True",
+            "False",
+            "Unknown"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "Ready",
+            "Reconciling",
+            "PendingDevice",
+            "Degraded",
+            "Quarantined",
+            "Deleting"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "status",
+        "reason",
+        "observedGeneration",
+        "lastTransitionAt"
+      ],
+      "title": "IdentityDeviceCertificateStatusGetCondition",
+      "type": "object"
+    },
+    "desired": {
+      "additionalProperties": false,
+      "properties": {
+        "activeCommand": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/activeCommand"
+            }
+          ]
+        },
+        "authorizationReceiptId": {
+          "$ref": "#/definitions/AuthorizationReceiptId",
+          "x-redaction": "internal"
+        },
+        "generation": {
+          "format": "int64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "authorizationReceiptId",
+        "activeCommand"
+      ],
+      "title": "IdentityDeviceCertificateStatusGetDesired",
+      "type": "object"
+    }
+  },
+  "description": "LocalOnly desired authorization lineage and reported certificate status.",
+  "properties": {
+    "data": {
+      "additionalProperties": false,
+      "properties": {
+        "conditions": {
+          "items": {
+            "$ref": "#/definitions/condition"
+          },
+          "type": "array"
+        },
+        "desired": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/desired"
+            }
+          ]
+        },
+        "observedGeneration": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "desired",
+        "observedGeneration",
+        "conditions"
+      ],
+      "title": "IdentityDeviceCertificateStatusGetData",
+      "type": "object"
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "IdentityDeviceCertificateStatusGetResponse",
+  "type": "object"
+}

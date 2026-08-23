@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "IdentityDeviceCertificateStatusGetResponse",
-  "description": "LocalOnly desired and reported certificate status.",
+  "description": "LocalOnly desired authorization lineage and reported certificate status.",
   "type": "object",
   "required": [
     "data"
@@ -11,15 +11,20 @@
       "title": "IdentityDeviceCertificateStatusGetData",
       "type": "object",
       "required": [
-        "desiredGeneration",
+        "desired",
         "observedGeneration",
         "conditions"
       ],
       "properties": {
-        "desiredGeneration": {
-          "type": "integer",
-          "format": "int64",
-          "minimum": 0
+        "desired": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/desired"
+            }
+          ]
         },
         "observedGeneration": {
           "type": "integer",
@@ -31,45 +36,67 @@
           "items": {
             "$ref": "#/definitions/condition"
           }
-        },
-        "activeCommand": {
-          "title": "IdentityDeviceCertificateStatusGetActiveCommand",
-          "type": [
-            "object",
-            "null"
-          ],
-          "required": [
-            "generation",
-            "fenceEpoch",
-            "state"
-          ],
-          "properties": {
-            "generation": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 1
-            },
-            "fenceEpoch": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 1
-            },
-            "state": {
-              "type": "string",
-              "enum": [
-                "queued",
-                "published",
-                "received"
-              ]
-            }
-          },
-          "additionalProperties": false
         }
       },
       "additionalProperties": false
     }
   },
   "definitions": {
+    "desired": {
+      "title": "IdentityDeviceCertificateStatusGetDesired",
+      "type": "object",
+      "required": [
+        "generation",
+        "authorizationReceiptId",
+        "activeCommand"
+      ],
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "authorizationReceiptId": {
+          "$ref": "rss://component/identity/v1/authorization-receipt-id",
+          "x-redaction": "internal"
+        },
+        "activeCommand": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/activeCommand"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "activeCommand": {
+      "title": "IdentityDeviceCertificateStatusGetActiveCommand",
+      "type": "object",
+      "required": [
+        "fenceEpoch",
+        "state"
+      ],
+      "properties": {
+        "fenceEpoch": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "published",
+            "received"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "condition": {
       "title": "IdentityDeviceCertificateStatusGetCondition",
       "type": "object",

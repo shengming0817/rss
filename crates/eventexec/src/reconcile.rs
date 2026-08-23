@@ -115,6 +115,18 @@ impl ReconcileScheduleError {
         }
     }
 
+    /// Report a payload-free durable invariant violation discovered by a provider exact join.
+    pub fn invariant_violation() -> Self {
+        #[derive(Debug, thiserror::Error)]
+        #[error("durable reconcile invariant was violated")]
+        struct DurableInvariantViolation;
+
+        Self {
+            kind: ReconcileScheduleErrorKind::InvariantViolation,
+            source: RedactedSource::new(DurableInvariantViolation),
+        }
+    }
+
     fn fenced_review(source: FencedCommandReviewError) -> Self {
         let kind = match source {
             FencedCommandReviewError::Digest | FencedCommandReviewError::DeadlineRange => {
@@ -986,6 +998,7 @@ impl DeviceCertificateCommandTtl {
 
 struct DeviceCertificateCommand {
     device_id: uuid::Uuid,
+    authorization_receipt_id: uuid::Uuid,
     desired_generation: std::num::NonZeroU64,
     artifact_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId,
     artifact_digest:
@@ -997,6 +1010,7 @@ struct DeviceCertificateCommand {
 impl DeviceCertificateCommand {
     fn from_coordinates(
         device_id: uuid::Uuid,
+        authorization_receipt_id: uuid::Uuid,
         desired_generation: std::num::NonZeroU64,
         artifact_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId,
         artifact_digest: [u8; 32],
@@ -1005,6 +1019,7 @@ impl DeviceCertificateCommand {
     ) -> Result<Self, FencedCommandReviewError> {
         Ok(Self {
             device_id,
+            authorization_receipt_id,
             desired_generation,
             artifact_id,
             artifact_digest: sha256_label(&artifact_digest)
@@ -1028,6 +1043,7 @@ impl DeviceCertificateCommand {
         let mut semantic_value = serde_json::json!({
             "artifactDigest": self.artifact_digest.as_str(),
             "artifactId": self.artifact_id.as_str(),
+            "authorizationReceiptId": self.authorization_receipt_id,
             "deadlineEpochSeconds": self.deadline_epoch_seconds,
             "desiredGeneration": self.desired_generation,
             "deviceId": self.device_id,
@@ -1222,6 +1238,7 @@ impl DeviceCommandAuditProof {
 /// canonical intent digest, so a raw command row or payload alone cannot become readiness evidence.
 pub struct DeviceCertificateCommandEvidence {
     audit: DeviceCommandAuditProof,
+    authorization_receipt_id: uuid::Uuid,
     artifact_id: String,
     artifact_digest: [u8; 32],
     policy_hash: [u8; 32],
@@ -1245,6 +1262,7 @@ impl DeviceCertificateCommandEvidence {
         let request: generated::command::identity_v1::IdentityApplyDeviceCertificateRequest =
             serde_json::from_slice(payload)
                 .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
+        let authorization_receipt_id = request.authorization_receipt_id.as_uuid();
         let artifact_id = request.artifact_id.as_str().to_owned();
         let artifact_digest = parse_sha256_label(request.artifact_digest.as_str())?;
         let policy_hash = parse_sha256_label(request.policy_hash.as_str())?;
@@ -1271,6 +1289,7 @@ impl DeviceCertificateCommandEvidence {
 
         Ok(Self {
             audit,
+            authorization_receipt_id,
             artifact_id,
             artifact_digest,
             policy_hash,
@@ -1306,6 +1325,12 @@ impl DeviceCertificateCommandEvidence {
     #[must_use]
     pub const fn intent_digest(&self) -> &[u8; 32] {
         self.audit.intent_digest()
+    }
+
+    /// Durable authorization receipt identity carried by the reviewed command.
+    #[must_use]
+    pub const fn authorization_receipt_id(&self) -> uuid::Uuid {
+        self.authorization_receipt_id
     }
 
     /// Authorized artifact reference encoded in the reviewed payload.
@@ -1559,10 +1584,12 @@ pub fn device_certificate_command_fixture(
 #[doc(hidden)]
 pub struct DeviceCertificateCommandFixtureView<'a> {
     pub device_id: uuid::Uuid,
+    pub authorization_receipt_id: uuid::Uuid,
     pub desired_generation: u64,
     pub artifact_id: &'a str,
     pub artifact_digest: &'a str,
     pub policy_hash: &'a str,
+    pub intent_digest: &'a str,
     pub deadline_epoch_seconds: u64,
 }
 
@@ -1575,10 +1602,12 @@ pub fn device_certificate_command_fixture_view(
     let request = command.request();
     DeviceCertificateCommandFixtureView {
         device_id: request.device_id,
+        authorization_receipt_id: request.authorization_receipt_id.as_uuid(),
         desired_generation: request.desired_generation.get(),
         artifact_id: request.artifact_id.as_str(),
         artifact_digest: request.artifact_digest.as_str(),
         policy_hash: request.policy_hash.as_str(),
+        intent_digest: request.intent_digest.as_str(),
         deadline_epoch_seconds: request.deadline_epoch_seconds.get(),
     }
 }
@@ -1874,6 +1903,7 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
     pub fn review_device_certificate_command(
         &self,
         desired_generation: u64,
+        authorization_receipt_id: uuid::Uuid,
         artifact_id: &str,
         artifact_digest: [u8; 32],
         policy_hash: [u8; 32],
@@ -1885,6 +1915,11 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
             std::num::NonZeroU64::new(desired_generation).ok_or_else(|| {
                 ReconcileScheduleError::fenced_review(FencedCommandReviewError::CoordinateRange)
             })?;
+        if authorization_receipt_id.is_nil() {
+            return Err(ReconcileScheduleError::fenced_review(
+                FencedCommandReviewError::CoordinateRange,
+            ));
+        }
         let artifact_id = artifact_id.try_into().map_err(|_| {
             ReconcileScheduleError::fenced_review(FencedCommandReviewError::RequestEncoding)
         })?;
@@ -1897,6 +1932,7 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
             })?;
         let command = DeviceCertificateCommand::from_coordinates(
             snapshot.device_id(),
+            authorization_receipt_id,
             desired_generation,
             artifact_id,
             artifact_digest,
@@ -1994,13 +2030,21 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
             .store
             .record_fenced_command(&self.attempt, action, command)
             .await;
-        if let Err(error) = &outcome
-            && error.kind() == ReconcileScheduleErrorKind::FactConflict
-        {
-            self.quarantine_reason.store(
-                ReconcileQuarantineReason::FactConflict.code(),
-                Ordering::Release,
-            );
+        if let Err(error) = &outcome {
+            let reason = match error.kind() {
+                ReconcileScheduleErrorKind::FactConflict => {
+                    Some(ReconcileQuarantineReason::FactConflict)
+                }
+                ReconcileScheduleErrorKind::InvariantViolation => {
+                    Some(ReconcileQuarantineReason::InvariantViolation)
+                }
+                ReconcileScheduleErrorKind::Infrastructure
+                | ReconcileScheduleErrorKind::PermanentFailure => None,
+            };
+            if let Some(reason) = reason {
+                self.quarantine_reason
+                    .store(reason.code(), Ordering::Release);
+            }
         }
         outcome
     }
@@ -3914,6 +3958,11 @@ mod tests {
         result.unwrap_or_default()
     }
 
+    fn authorization_receipt_id() -> uuid::Uuid {
+        uuid::Uuid::parse_str("6cce9c6b-a7c3-4c95-91db-c744dcee8958")
+            .unwrap_or_else(|_| unreachable!("fixed receipt UUID is valid"))
+    }
+
     #[test]
     fn schedule_error_classification_is_closed_and_redacted() {
         let infrastructure =
@@ -4263,6 +4312,7 @@ mod tests {
         let mut value = serde_json::json!({
             "artifactDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "artifactId": "artifact-device-certificate-v1",
+            "authorizationReceiptId": authorization_receipt_id(),
             "deadlineEpochSeconds": 4_000_000_000_u64,
             "desiredGeneration": 7_u64,
             "deviceId": "44444444-4444-4444-4444-444444444444",
@@ -4461,6 +4511,7 @@ mod tests {
         release_outcome: Option<ScheduleLeaseOutcome>,
         release_error: bool,
         fact_conflict_on_action: bool,
+        invariant_violation_on_action: bool,
         quarantines: u32,
         result_outcome: Option<ScheduleResultOutcome>,
         result_error: bool,
@@ -4782,6 +4833,9 @@ mod tests {
                 return Err(ReconcileScheduleError::fact_conflict(
                     consistency::OutboxFactConflict,
                 ));
+            }
+            if state.invariant_violation_on_action {
+                return Err(ReconcileScheduleError::invariant_violation());
             }
             state.actions.push(action);
             let current = intent.aliases().current().expect("keyed reconcile command");
@@ -5215,6 +5269,7 @@ mod tests {
             let reviewed = attempt
                 .review_device_certificate_command(
                     7,
+                    authorization_receipt_id(),
                     "artifact-device-certificate-v1",
                     [0xaa; 32],
                     [0xbb; 32],
@@ -5290,6 +5345,10 @@ mod tests {
         )?;
         assert_eq!(evidence.tenant(), tenant());
         assert_eq!(evidence.device_id(), audit.device_id());
+        assert_eq!(
+            evidence.authorization_receipt_id(),
+            authorization_receipt_id()
+        );
         assert_eq!(evidence.desired_generation().get(), 7);
         assert_eq!(evidence.fence_epoch().get(), 9);
         assert_eq!(evidence.intent_digest(), audit.intent_digest());
@@ -5318,7 +5377,7 @@ mod tests {
         let mut value = canonical_device_command_value(9);
         assert_eq!(
             value["intentDigest"].as_str(),
-            Some("sha256:5235fccf9c0cdc3ccb274a3e9447af6d05eb602385287e39f1510caae609ac5c")
+            Some("sha256:042e29f4b15e3452108cd1d7a6a77b75f142f249aaf5fbb97a3b537443669019")
         );
 
         value["artifactId"] = serde_json::Value::String("artifact-device-certificate-v2".into());
@@ -5650,6 +5709,7 @@ mod tests {
         let (now, ttl) = command_time();
         let reviewed = scope.review_device_certificate_command(
             7,
+            authorization_receipt_id(),
             "artifact-device-certificate-v1",
             [0xaa; 32],
             [0xbb; 32],
@@ -5665,6 +5725,43 @@ mod tests {
         assert_eq!(state.actions, vec![ConvergeAction::Create]);
         assert_eq!(state.command_keys.len(), 1);
         assert_eq!(state.command_keys[0], "current:32");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_invariant_violation_quarantines_the_attempt_scope() -> TestResult {
+        let store = FakeScheduleStore::default();
+        store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .invariant_violation_on_action = true;
+        let keys = keyring();
+        let scope = AttemptScope::new(
+            &store,
+            &keys,
+            DeviceCertificateSystemProducer::install(),
+            ReconcileAttempt::new("attempt-invariant", claimed_device_target()),
+        );
+        let (now, ttl) = command_time();
+        let reviewed = scope.review_device_certificate_command(
+            7,
+            authorization_receipt_id(),
+            "artifact-device-certificate-v1",
+            [0xaa; 32],
+            [0xbb; 32],
+            now,
+            ttl,
+        )?;
+        let error = scope
+            .record_device_certificate_command(ConvergeAction::Create, reviewed)
+            .await
+            .expect_err("durable invariant violation must fail");
+        assert_eq!(error.kind(), ReconcileScheduleErrorKind::InvariantViolation);
+        assert_eq!(
+            scope.quarantine_reason(),
+            Some(ReconcileQuarantineReason::InvariantViolation)
+        );
         Ok(())
     }
 
@@ -5688,6 +5785,7 @@ mod tests {
         let (now, ttl) = command_time();
         let reviewed = source.review_device_certificate_command(
             7,
+            authorization_receipt_id(),
             "artifact-device-certificate-v1",
             [0xaa; 32],
             [0xbb; 32],

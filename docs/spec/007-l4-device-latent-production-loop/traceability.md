@@ -9,7 +9,8 @@ provenance, explicit authorizer basis, canonical contributing policy/obligation/
 device policy/status receipts. It intentionally makes no PostgreSQL, wire-schema, mounted-handler or T3 claim;
 #2113 now supplies the T2 PostgreSQL handoff: one append-only authorization/idempotency ledger, normalized policy
 basis, atomic desired-generation lineage for policy accept and rotation, deterministic replay, and typed unsafe
-settlement. #2114 and #2115 remain the public-schema and mounted production-handler handoffs respectively.
+settlement. #2114 closes the Draft public-schema/candidate-package handoff and the internal command/application-receipt
+lineage joins; #2115 remains the mounted production-handler handoff.
 The #2113 T1 boundary proves that denied or unavailable authorization cannot construct
 `AcceptDesiredPolicy`; #2115 owns the mounted route proof that Deny, NoMatch, resource-fact
 Missing/Stale/Future/type-mismatch, and PIP/store errors never invoke the repository. Those cases
@@ -26,12 +27,12 @@ must not be represented by forged database inputs in this persistence PBI.
 | FR-007 | #1893 | T1 — closed condition type/status/reason construction and golden projection |
 | FR-008 | #1894 | T1 — two HTTP contract kind/consistency schema and code-generation golden |
 | FR-009 | #1894 | T1 — HTTP schema and route-auth golden/red validation |
-| FR-010 | #1895 | T1 — generated command/event envelope identity, ACK correlation, and payload-exclusion golden/synthetic-red proof |
+| FR-010 | #2114 | T1/T2 — generated command binds desired R/G into canonical intent; ACK/report reject receipt injection; PostgreSQL enqueue exact-joins durable lineage before writes |
 | FR-011 | #1894 | T1 — direct-replacement golden rejecting alias, shim, second reader, and dual write |
-| FR-012 | #1895 | T1 — distinct generated command/ACK/report/receipt type and link golden |
-| FR-013 | #1895 | T1 — generated command schema and typed-authoring compile/golden proof |
+| FR-012 | #2114 | T1 — distinct generated command/ACK/report/closed application-receipt variants plus six-module public package proof |
+| FR-013 | #2114 | T1/T2 — required command R/G schema, desired-snapshot authoring, canonical digest and PostgreSQL substitution rejection |
 | FR-014 | #1893 | T1 — positive epoch constructor and generation/epoch transition property test |
-| FR-015 | #1895 | T1 — command schema exclusion golden and validator red case |
+| FR-015 | #2114 | T1 — command schema admits only opaque R/G and artifact coordinates; ACK/report injection and forbidden fields fail closed |
 | FR-016 | #1900 | T2 — PostgreSQL newer-generation supersede atomicity test |
 | FR-017 | #1897 | T2 — command/receipt restart restoration PostgreSQL conformance |
 | FR-018 | #1898 | T2 — durable schedule restart and lost-notification repair test |
@@ -41,7 +42,7 @@ must not be represented by forged database inputs in this persistence PBI.
 | FR-021 | #1902 | T2 — hermetic Mosquitto mutual-TLS, stable `clean_start=false` session/restart, manual-ACK and exact typed topic/ACL conformance |
 | FR-022 | #1902 | T1/T2 — non-copyable `BrokerAccepted` surface plus broker PUBACK proof that cannot mint device ACK, durable ingress or application receipt |
 | FR-023 | #1903 | T2 — missing stable envelope identity fail-closed ingress test |
-| FR-024 | #1903 | T2 — commit-before-application-receipt crash test |
+| FR-024 | #2114 | T2 — commit-unknown exact readback restores application lineage; pre-commit lineage/store failure rolls back receipt publication |
 | FR-025 | #1903 | T2 — saturation/pre-commit failure and replay-repair test |
 | FR-026 | #1903 | T2 — tenant/device/command/generation/epoch dedup and high-water conformance |
 | FR-027 | #1905 | T2 — authenticated tenant-scoped LocalOnly inspection authorization and redaction test |

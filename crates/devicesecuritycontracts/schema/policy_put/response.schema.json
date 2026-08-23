@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuthorizationReceiptId": {
+      "format": "uuid",
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      },
+      "title": "AuthorizationReceiptId",
+      "type": "string",
+      "x-redaction": "internal"
+    }
+  },
+  "description": "A 200 response records desired state but does not claim device convergence; an identical idempotency replay returns the same data value.",
+  "properties": {
+    "data": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptedGeneration": {
+          "format": "int64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "authorizationReceiptId": {
+          "$ref": "#/definitions/AuthorizationReceiptId",
+          "x-redaction": "internal"
+        },
+        "condition": {
+          "enum": [
+            "Reconciling",
+            "PendingDevice"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorizationReceiptId",
+        "acceptedGeneration",
+        "condition"
+      ],
+      "title": "IdentityDeviceCertificatePolicyPutData",
+      "type": "object"
+    }
+  },
+  "required": [
+    "data"
+  ],
+  "title": "IdentityDeviceCertificatePolicyPutResponse",
+  "type": "object"
+}

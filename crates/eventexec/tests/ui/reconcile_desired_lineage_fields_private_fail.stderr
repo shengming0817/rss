@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `DeviceCertificateDesiredLineage` in module `eventexec::reconcile`
+ --> tests/ui/reconcile_desired_lineage_fields_private_fail.rs:4:35
+  |
+4 |     let _ = eventexec::reconcile::DeviceCertificateDesiredLineage;
+  |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `eventexec::reconcile`

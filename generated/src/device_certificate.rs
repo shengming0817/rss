@@ -3,6 +3,72 @@
 //! This registry is governance metadata only. Draft candidates are deliberately excluded from
 //! active HTTP/event registries, L2 assurance, runtime wiring, and production artifacts.
 
+/// A non-nil, opaque authorization correlation identity shared by the generated Draft carriers.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ::secure::Redact)]
+pub struct AuthorizationReceiptId(#[redact(sensitivity = internal)] ::uuid::Uuid);
+
+/// A generated authorization receipt identity was nil or malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizationReceiptIdError;
+
+impl ::std::fmt::Display for AuthorizationReceiptIdError {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        formatter.write_str("authorization receipt identity is invalid")
+    }
+}
+
+impl ::std::error::Error for AuthorizationReceiptIdError {}
+
+impl AuthorizationReceiptId {
+    /// Restore a non-nil correlation identity at a trusted boundary.
+    pub fn try_from_uuid(value: ::uuid::Uuid) -> Result<Self, AuthorizationReceiptIdError> {
+        (!value.is_nil())
+            .then_some(Self(value))
+            .ok_or(AuthorizationReceiptIdError)
+    }
+
+    /// Return the opaque UUID value. It is not an authorization capability.
+    pub const fn as_uuid(self) -> ::uuid::Uuid {
+        self.0
+    }
+}
+
+impl ::std::str::FromStr for AuthorizationReceiptId {
+    type Err = AuthorizationReceiptIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = ::uuid::Uuid::parse_str(value).map_err(|_| AuthorizationReceiptIdError)?;
+        Self::try_from_uuid(value)
+    }
+}
+
+impl ::std::convert::TryFrom<::uuid::Uuid> for AuthorizationReceiptId {
+    type Error = AuthorizationReceiptIdError;
+
+    fn try_from(value: ::uuid::Uuid) -> Result<Self, Self::Error> {
+        Self::try_from_uuid(value)
+    }
+}
+
+impl ::serde::Serialize for AuthorizationReceiptId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: ::serde::Serializer,
+    {
+        <::uuid::Uuid as ::serde::Serialize>::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for AuthorizationReceiptId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        let value = <::uuid::Uuid as ::serde::Deserialize>::deserialize(deserializer)?;
+        Self::try_from_uuid(value).map_err(<D::Error as ::serde::de::Error>::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Typed governance metadata for one device-certificate Draft candidate.
 pub struct DeviceCertificateCandidateSpec {

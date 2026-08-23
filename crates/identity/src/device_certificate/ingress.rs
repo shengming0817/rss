@@ -16,13 +16,16 @@ use sha2::{Digest as _, Sha256};
 use crate::cert_artifact::ArtifactEligibility;
 
 use super::{
-    ArtifactDigest, DeviceCertificateScope, ReportEnvelopeId, ReportedStateHash, ReportedStateWrite,
+    ArtifactDigest, DeviceCertificateScope, DevicePolicyAuthorizationReceiptId, ReportEnvelopeId,
+    ReportedStateHash, ReportedStateWrite,
 };
 
 const FINGERPRINT_DOMAIN: &[u8] = b"rss.identity.device-ingress-fingerprint.v1";
 const PROTOCOL_VIOLATION_FINGERPRINT_DOMAIN: &[u8] =
     b"rss.identity.device-ingress-protocol-violation.v1";
-const RECEIPT_ID_DOMAIN: &[u8] = b"identity.device-ingress-receipted:v1";
+// Payload lineage became mandatory in the v2 projection. The identity version is part of the
+// durable id so replay can never reinterpret a pre-lineage v1 fact under the same event id.
+const RECEIPT_ID_DOMAIN: &[u8] = b"identity.device-ingress-receipted:v2";
 
 /// Closed set of authenticated MQTT uplink contracts handled by this durable ingress path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +123,11 @@ impl DeviceIngressWrite {
 
     pub const fn payload_scope_matches(&self) -> bool {
         self.payload_scope_matches
+    }
+
+    /// Derive authority to bind a persistence-joined lineage to this reviewed write.
+    pub const fn application_lineage_authority(&self) -> DeviceIngressApplicationLineageAuthority {
+        DeviceIngressApplicationLineageAuthority { scope: self.scope }
     }
 }
 
@@ -492,6 +500,51 @@ pub struct DeviceIngressApplicationReceipt {
     outbox_event_id: String,
 }
 
+/// Server-restored authorization lineage used only to author a public application receipt.
+pub struct DeviceIngressApplicationLineage {
+    scope: DeviceCertificateScope,
+    authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+    desired_generation: DesiredGeneration,
+}
+
+/// Move-only authority derived from one identity-reviewed ingress write.
+pub struct DeviceIngressApplicationLineageAuthority {
+    scope: DeviceCertificateScope,
+}
+
+impl DeviceIngressApplicationLineageAuthority {
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only constructor for provider conformance and persistence fault proofs.
+    pub const fn for_test(scope: DeviceCertificateScope) -> Self {
+        Self { scope }
+    }
+
+    /// Scope that the persistence join must use.
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+
+    /// Bind the tenant/device/generation persistence join to the reviewed scope.
+    #[must_use]
+    pub const fn bind_persisted_join(
+        self,
+        authorization_receipt_id: DevicePolicyAuthorizationReceiptId,
+        desired_generation: DesiredGeneration,
+    ) -> DeviceIngressApplicationLineage {
+        DeviceIngressApplicationLineage {
+            scope: self.scope,
+            authorization_receipt_id,
+            desired_generation,
+        }
+    }
+}
+
+impl std::fmt::Debug for DeviceIngressApplicationLineage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeviceIngressApplicationLineage(<redacted>)")
+    }
+}
+
 impl DeviceIngressApplicationReceipt {
     pub const fn payload(
         &self,
@@ -519,18 +572,45 @@ impl DeviceIngressApplicationReceipt {
     }
 }
 
-/// Map an immutable internal receipt to the frozen public non-oracle contract.
-pub fn application_receipt(
+/// Map a receipt carrying verified tenant/device lineage to the frozen public contract.
+pub fn application_receipt_with_lineage(
+    lineage: DeviceIngressApplicationLineage,
+    receipt: &DeviceIngressReceipt,
+) -> Result<DeviceIngressApplicationReceipt, DeviceIngressError> {
+    let scope = lineage.scope;
+    application_receipt(scope, receipt, Some(lineage))
+}
+
+/// Map only a non-oracle rejection that has no verified authorization lineage.
+pub fn application_receipt_without_lineage(
     scope: DeviceCertificateScope,
     receipt: &DeviceIngressReceipt,
+) -> Result<DeviceIngressApplicationReceipt, DeviceIngressError> {
+    application_receipt(scope, receipt, None)
+}
+
+fn application_receipt(
+    scope: DeviceCertificateScope,
+    receipt: &DeviceIngressReceipt,
+    lineage: Option<DeviceIngressApplicationLineage>,
 ) -> Result<DeviceIngressApplicationReceipt, DeviceIngressError> {
     let event_id = receipt.evidence().envelope_id().as_str();
     let committed_at = epoch_micros(receipt.committed_at())?;
     let device_id = scope.device().as_uuid();
     let payload = match receipt.disposition() {
         DeviceIngressDisposition::Advanced | DeviceIngressDisposition::DeviceRejected => {
+            let lineage = exact_application_lineage(scope, receipt, lineage)?;
             device_ingress_receipted::IdentityDeviceIngressCommittedPayload {
+                authorization_receipt_id:
+                    generated::device_certificate::AuthorizationReceiptId::try_from_uuid(
+                        lineage.authorization_receipt_id.as_uuid(),
+                    )
+                    .map_err(|_| DeviceIngressError::InvalidReceipt)?,
                 committed_at,
+                desired_generation: std::num::NonZeroU64::new(
+                    lineage.desired_generation.get(),
+                )
+                .ok_or(DeviceIngressError::InvalidReceipt)?,
                 device_id,
                 ingress_envelope_id: event_id
                     .parse()
@@ -541,8 +621,18 @@ pub fn application_receipt(
             .into()
         }
         DeviceIngressDisposition::Duplicate => {
+            let lineage = exact_application_lineage(scope, receipt, lineage)?;
             device_ingress_receipted::IdentityDeviceIngressDuplicatePayload {
+                authorization_receipt_id:
+                    generated::device_certificate::AuthorizationReceiptId::try_from_uuid(
+                        lineage.authorization_receipt_id.as_uuid(),
+                    )
+                    .map_err(|_| DeviceIngressError::InvalidReceipt)?,
                 committed_at,
+                desired_generation: std::num::NonZeroU64::new(
+                    lineage.desired_generation.get(),
+                )
+                .ok_or(DeviceIngressError::InvalidReceipt)?,
                 device_id,
                 ingress_envelope_id: event_id
                     .parse()
@@ -555,6 +645,19 @@ pub fn application_receipt(
         DeviceIngressDisposition::StaleGeneration
         | DeviceIngressDisposition::StaleFence
         | DeviceIngressDisposition::StaleSequence => {
+            let Some(lineage) = lineage else {
+                return Ok(DeviceIngressApplicationReceipt {
+                    scope,
+                    payload: rejected_payload(
+                        event_id,
+                        device_id,
+                        committed_at,
+                        device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::NotAccepted,
+                    )?,
+                    outbox_event_id: receipt_event_id(scope, event_id),
+                });
+            };
+            let lineage = exact_application_lineage(scope, receipt, Some(lineage))?;
             let reason = match receipt.disposition() {
                 DeviceIngressDisposition::StaleGeneration => device_ingress_receipted::IdentityDeviceIngressStalePayloadReason::GenerationStale,
                 DeviceIngressDisposition::StaleFence => device_ingress_receipted::IdentityDeviceIngressStalePayloadReason::FenceEpochStale,
@@ -562,7 +665,14 @@ pub fn application_receipt(
                 _ => return Err(DeviceIngressError::InvalidReceipt),
             };
             device_ingress_receipted::IdentityDeviceIngressStalePayload {
+                authorization_receipt_id:
+                    generated::device_certificate::AuthorizationReceiptId::try_from_uuid(
+                        lineage.authorization_receipt_id.as_uuid(),
+                    )
+                    .map_err(|_| DeviceIngressError::InvalidReceipt)?,
                 committed_at,
+                desired_generation: std::num::NonZeroU64::new(lineage.desired_generation.get())
+                    .ok_or(DeviceIngressError::InvalidReceipt)?,
                 device_id,
                 ingress_envelope_id: event_id
                     .parse()
@@ -573,9 +683,20 @@ pub fn application_receipt(
             .into()
         }
         DeviceIngressDisposition::ScopeMismatch => {
-            rejected_payload(event_id, device_id, committed_at, device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::NotAccepted)?
+            if lineage.is_some() {
+                return Err(DeviceIngressError::InvalidReceipt);
+            }
+            rejected_payload(
+                event_id,
+                device_id,
+                committed_at,
+                device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::NotAccepted,
+            )?
         }
         DeviceIngressDisposition::Rejected => {
+            if lineage.is_some() {
+                return Err(DeviceIngressError::InvalidReceipt);
+            }
             let reason = if matches!(
                 receipt.evidence().view(),
                 DeviceIngressEvidenceView::ProtocolViolation { .. }
@@ -587,6 +708,9 @@ pub fn application_receipt(
             rejected_payload(event_id, device_id, committed_at, reason)?
         }
         DeviceIngressDisposition::OutOfOrder | DeviceIngressDisposition::Late => {
+            if lineage.is_some() {
+                return Err(DeviceIngressError::InvalidReceipt);
+            }
             rejected_payload(event_id, device_id, committed_at, device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::ProtocolViolation)?
         }
     };
@@ -595,6 +719,30 @@ pub fn application_receipt(
         payload,
         outbox_event_id: receipt_event_id(scope, event_id),
     })
+}
+
+fn exact_application_lineage(
+    scope: DeviceCertificateScope,
+    receipt: &DeviceIngressReceipt,
+    lineage: Option<DeviceIngressApplicationLineage>,
+) -> Result<DeviceIngressApplicationLineage, DeviceIngressError> {
+    let lineage = lineage.ok_or(DeviceIngressError::InvalidReceipt)?;
+    let evidence_generation = match receipt.evidence().view() {
+        DeviceIngressEvidenceView::AckReceived { coordinate, .. }
+        | DeviceIngressEvidenceView::AckRejected { coordinate, .. } => coordinate.generation(),
+        DeviceIngressEvidenceView::Report {
+            observed_generation,
+            ..
+        } => DesiredGeneration::try_new(observed_generation.get())
+            .map_err(|_| DeviceIngressError::InvalidReceipt)?,
+        DeviceIngressEvidenceView::ProtocolViolation { .. } => {
+            return Err(DeviceIngressError::InvalidReceipt);
+        }
+    };
+    if lineage.scope != scope || evidence_generation != lineage.desired_generation {
+        return Err(DeviceIngressError::InvalidReceipt);
+    }
+    Ok(lineage)
 }
 
 fn rejected_payload(
@@ -667,13 +815,34 @@ mod tests {
         .expect("receipt")
     }
 
+    fn lineage() -> DeviceIngressApplicationLineage {
+        DeviceIngressWrite {
+            scope: scope(),
+            credential_generation: 1,
+            evidence: receipt(DeviceIngressDisposition::Advanced)
+                .evidence()
+                .clone(),
+            reported: None,
+            payload_scope_matches: true,
+        }
+        .application_lineage_authority()
+        .bind_persisted_join(
+            DevicePolicyAuthorizationReceiptId::restore(
+                uuid::Uuid::parse_str("6cce9c6b-a7c3-4c95-91db-c744dcee8958").expect("receipt id"),
+            )
+            .expect("receipt id"),
+            DesiredGeneration::try_new(1).expect("generation"),
+        )
+    }
+
     #[test]
     fn non_oracle_failures_share_not_accepted_wire_reason() {
         for disposition in [
             DeviceIngressDisposition::ScopeMismatch,
             DeviceIngressDisposition::Rejected,
         ] {
-            let receipt = application_receipt(scope(), &receipt(disposition)).expect("mapping");
+            let receipt = application_receipt_without_lineage(scope(), &receipt(disposition))
+                .expect("mapping");
             let json = serde_json::to_value(receipt.payload()).expect("json");
             assert_eq!(json["outcome"], "rejected");
             assert_eq!(json["reason"], "NotAccepted");
@@ -682,12 +851,71 @@ mod tests {
 
     #[test]
     fn receipt_event_id_is_stable_and_tenant_scoped() {
-        let first = application_receipt(scope(), &receipt(DeviceIngressDisposition::Advanced))
-            .expect("mapping");
-        let second = application_receipt(scope(), &receipt(DeviceIngressDisposition::Advanced))
-            .expect("mapping");
+        let first = application_receipt_with_lineage(
+            lineage(),
+            &receipt(DeviceIngressDisposition::Advanced),
+        )
+        .expect("mapping");
+        let second = application_receipt_with_lineage(
+            lineage(),
+            &receipt(DeviceIngressDisposition::Advanced),
+        )
+        .expect("mapping");
         assert_eq!(first.outbox_event_id(), second.outbox_event_id());
         assert_ne!(first.outbox_event_id(), "ingress-1");
+        let json = serde_json::to_value(first.payload()).expect("json");
+        assert_eq!(
+            json["authorizationReceiptId"],
+            "6cce9c6b-a7c3-4c95-91db-c744dcee8958"
+        );
+        assert_eq!(json["desiredGeneration"], 1);
+    }
+
+    #[test]
+    fn lineaged_receipt_identity_never_aliases_pre_lineage_v1_payload() {
+        let current = receipt_event_id(scope(), "ingress-1");
+        let mut legacy = Sha256::new();
+        legacy.update(b"identity.device-ingress-receipted:v1");
+        legacy.update(scope().tenant().to_string().as_bytes());
+        legacy.update(b"ingress-1");
+        assert_ne!(current, format!("sha256:{:x}", legacy.finalize()));
+    }
+
+    #[test]
+    fn lineaged_outcomes_fail_closed_without_exact_join() {
+        let advanced = receipt(DeviceIngressDisposition::Advanced);
+        assert!(matches!(
+            application_receipt_without_lineage(scope(), &advanced),
+            Err(DeviceIngressError::InvalidReceipt)
+        ));
+
+        let mismatched = DeviceIngressWrite {
+            scope: scope(),
+            credential_generation: 1,
+            evidence: advanced.evidence().clone(),
+            reported: None,
+            payload_scope_matches: true,
+        }
+        .application_lineage_authority()
+        .bind_persisted_join(
+            DevicePolicyAuthorizationReceiptId::restore(
+                uuid::Uuid::parse_str("6cce9c6b-a7c3-4c95-91db-c744dcee8958").expect("receipt"),
+            )
+            .expect("receipt"),
+            DesiredGeneration::try_new(2).expect("generation"),
+        );
+        assert!(matches!(
+            application_receipt_with_lineage(mismatched, &advanced),
+            Err(DeviceIngressError::InvalidReceipt)
+        ));
+
+        assert!(matches!(
+            application_receipt_with_lineage(
+                lineage(),
+                &receipt(DeviceIngressDisposition::Rejected),
+            ),
+            Err(DeviceIngressError::InvalidReceipt)
+        ));
     }
 
     #[test]

@@ -142,6 +142,8 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
         let reviewed = attempt
             .review_device_certificate_command(
                 2,
+                uuid::Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1")
+                    .expect("receipt uuid"),
                 "certificate-artifact-1",
                 [0x22; 32],
                 [0x11; 32],

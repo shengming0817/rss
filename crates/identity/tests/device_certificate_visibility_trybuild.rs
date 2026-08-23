@@ -21,4 +21,5 @@ fn device_certificate_is_exposed_only_through_the_ports_facade() {
     tests.compile_fail("tests/ui/device_policy_authorization_receipt_non_serialize_fail.rs");
     tests.compile_fail("tests/ui/device_policy_accept_input_non_clone_fail.rs");
     tests.compile_fail("tests/ui/device_policy_legacy_scope_constructor_removed_fail.rs");
+    tests.compile_fail("tests/ui/device_ingress_lineage_restore_forge_fail.rs");
 }

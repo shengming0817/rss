@@ -108,13 +108,17 @@ fn collect_struct_policies_node(schema: &Value, out: &mut StructPolicies) {
         return;
     };
 
-    if let Some(title) = map.get("title").and_then(Value::as_str)
-        && let Some(props) = map.get(PROPS).and_then(Value::as_object)
-    {
-        let fields = out.entry(title.to_string()).or_default();
-        for (name, prop_schema) in props {
-            if let Ok(policy) = parse_policy(name, prop_schema) {
-                fields.insert(name.clone(), policy);
+    if let Some(title) = map.get("title").and_then(Value::as_str) {
+        collect_properties_for_type(title, map, out);
+    }
+    // typify names definitions from their map key, even when an authored `title` is longer.
+    // Preserve both aliases so `$ref` sibling policies reach the actual generated Rust struct.
+    for definitions_key in NAMED_SUBSCHEMA_KEYS {
+        if let Some(definitions) = map.get(*definitions_key).and_then(Value::as_object) {
+            for (name, definition) in definitions {
+                if let Some(definition) = definition.as_object() {
+                    collect_properties_for_type(&definition_type_name(name), definition, out);
+                }
             }
         }
     }
@@ -122,6 +126,34 @@ fn collect_struct_policies_node(schema: &Value, out: &mut StructPolicies) {
     for value in map.values() {
         recurse_schema_value(value, out);
     }
+}
+
+fn collect_properties_for_type(
+    type_name: &str,
+    schema: &serde_json::Map<String, Value>,
+    out: &mut StructPolicies,
+) {
+    let Some(props) = schema.get(PROPS).and_then(Value::as_object) else {
+        return;
+    };
+    let fields = out.entry(type_name.to_string()).or_default();
+    for (name, prop_schema) in props {
+        if let Ok(policy) = parse_policy(name, prop_schema) {
+            fields.insert(name.clone(), policy);
+        }
+    }
+}
+
+fn definition_type_name(name: &str) -> String {
+    let mut output = String::new();
+    for segment in name.split(['-', '_']).filter(|segment| !segment.is_empty()) {
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            output.push(first.to_ascii_uppercase());
+            output.extend(chars);
+        }
+    }
+    output
 }
 
 fn recurse_schema_value(value: &Value, out: &mut StructPolicies) {
@@ -511,6 +543,30 @@ mod tests {
         let findings = validate_schema(&schema);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].detail.contains("password"));
+    }
+
+    #[test]
+    fn definition_key_alias_preserves_ref_sibling_redaction_for_typify_name() {
+        let policies = collect_struct_policies(&json!({
+            "title": "Root",
+            "definitions": {
+                "desired": {
+                    "title": "LongDesiredTitle",
+                    "type": "object",
+                    "properties": {
+                        "authorizationReceiptId": {
+                            "$ref": "#/definitions/authorizationReceiptId",
+                            "x-redaction": "internal"
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("valid policies");
+        assert_eq!(
+            policies["Desired"]["authorizationReceiptId"].sensitivity,
+            Sensitivity::Internal
+        );
     }
 
     #[test]

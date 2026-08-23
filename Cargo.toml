@@ -11,6 +11,8 @@ members = [
   "crates/platform",
   # Provider-neutral public LocalTx conformance assertions.
   "crates/conformance",
+  # Transport-neutral DTO/schema projection for the six device-security Draft candidates.
+  "crates/devicesecuritycontracts",
   # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 architecture.md）
   "crates/vocab",
   "crates/ids",
@@ -110,6 +112,7 @@ exclude = ["lints", "vendor/sqlx-core-0.8.6"]
 packages = [
   { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
+  { package = "rss-device-security-contracts", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
   { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
   { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
@@ -158,6 +161,7 @@ repository = "https://github.com/shengming0817/rss"
 # pin 必须被 Cargo.lock 的 resolved 版本满足（或为带注释的 inert 前瞻）——由 `cargo xtask wsdeps-drift` 守（#1185）。
 [workspace.dependencies]
 rss-contract = { path = "crates/contract", version = "0.1.0" }
+rss-device-security-contracts = { path = "crates/devicesecuritycontracts", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }
 # 运行时 / 序列化 / 错误 / 日志
