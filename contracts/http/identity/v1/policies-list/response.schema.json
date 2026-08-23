@@ -108,7 +108,9 @@
       }
     },
     "nextCursor": {
-      "type": "string"
+      "type": "string",
+      "format": "rss-page-cursor-v1",
+      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position."
     },
     "hasMore": {
       "type": "boolean"

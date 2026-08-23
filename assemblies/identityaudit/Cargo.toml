@@ -41,6 +41,7 @@ path = "tests/runtime_image_acceptance.rs"
 required-features = ["artifact-acceptance"]
 
 [dependencies]
+rss-contract.workspace = true
 rss-request-context.workspace = true
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
 anyhow = { workspace = true }

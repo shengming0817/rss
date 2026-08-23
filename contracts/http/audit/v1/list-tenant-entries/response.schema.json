@@ -25,7 +25,11 @@
         "additionalProperties": false
       }
     },
-    "nextCursor": { "type": "string" },
+    "nextCursor": {
+      "type": "string",
+      "format": "rss-page-cursor-v1",
+      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, target tenant, and sequence position."
+    },
     "hasMore": { "type": "boolean" }
   },
   "additionalProperties": false

@@ -8075,7 +8075,9 @@ pub mod policies_list {
     ///  "type": "object",
     ///  "properties": {
     ///    "cursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position. Tokens issued before this intentional v1 cutover are stale.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    },
     ///    "limit": {
     ///      "description": "Page size; minimum 1, maximum 500, default 50.",
@@ -8093,6 +8095,7 @@ pub mod policies_list {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityPoliciesListRequest {
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position. Tokens issued before this intentional v1 cutover are stale.
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub cursor: ::std::option::Option<::std::string::String>,
@@ -8227,7 +8230,9 @@ pub mod policies_list {
     ///      "type": "boolean"
     ///    },
     ///    "nextCursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -8242,6 +8247,7 @@ pub mod policies_list {
         #[serde(rename = "hasMore")]
         #[redact(sensitivity = public)]
         pub has_more: bool,
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position.
         #[serde(
             rename = "nextCursor",
             default,
@@ -10933,7 +10939,7 @@ pub mod policies_list {
         ::rss_contract::ContractDescriptor::from_static_version(
             "identity.policies-list",
             "v1",
-            "sha256:4ee4b3cc0ca8f9e3487454687dd02cd68f7532c20919e178666fdb224aba442c",
+            "sha256:9f75bb6e0be89c974cea124e1b127ae1e2bb3eaf738b66db82351c0ee5564bb1",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =
@@ -15156,7 +15162,9 @@ pub mod roles_list {
     ///  "type": "object",
     ///  "properties": {
     ///    "cursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position. Tokens issued before this intentional v1 cutover are stale.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    },
     ///    "limit": {
     ///      "description": "Page size; minimum 1, maximum 500, default 50.",
@@ -15174,6 +15182,7 @@ pub mod roles_list {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityRolesListRequest {
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position. Tokens issued before this intentional v1 cutover are stale.
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub cursor: ::std::option::Option<::std::string::String>,
@@ -15235,7 +15244,9 @@ pub mod roles_list {
     ///      "type": "boolean"
     ///    },
     ///    "nextCursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -15250,6 +15261,7 @@ pub mod roles_list {
         #[serde(rename = "hasMore")]
         #[redact(sensitivity = public)]
         pub has_more: bool,
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and query position.
         #[serde(
             rename = "nextCursor",
             default,
@@ -15278,7 +15290,7 @@ pub mod roles_list {
         ::rss_contract::ContractDescriptor::from_static_version(
             "identity.roles-list",
             "v1",
-            "sha256:6bdaa66424e945b48b364503afd7a5dae1a552cd08af62045b5a43ffc4b9b993",
+            "sha256:a669f5d89f1d2e9755784fa34ff07cedef8d2add2a7f941c62e0f5ab7b30e320",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =

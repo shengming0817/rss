@@ -12,6 +12,7 @@ workspace = true
 test-support = []
 
 [dependencies]
+rss-contract.workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
@@ -39,7 +40,7 @@ serde_json = { workspace = true }
 axum = { workspace = true }
 # 审计 handler 失败路径（decode / tenant / append）结构化日志——审计管道失败不可静默（observability.md §日志）。
 tracing = { workspace = true }
-# 跨租户 admin 读分页游标（vocab::Cursor 是 base64url 不透明 token；in-mem 编码子链下标）。
+# 跨租户 admin 读分页游标（PageCursor 是 base64url 不透明 token；in-mem 编码子链下标）。
 base64 = { workspace = true }
 
 [dev-dependencies]

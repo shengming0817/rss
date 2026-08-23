@@ -753,7 +753,7 @@ async fn ta7_audit_list_invalid_cursor_fail_closed() -> TestResult {
         .await?;
 
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-a-number");
-    let cursor = vocab::Cursor::parse(&raw).unwrap();
+    let cursor = rss_contract::PageCursor::parse(&raw).unwrap();
     let result = repo
         .list(audit_scope(tenant), audit_page(10, Some(cursor)))
         .await;

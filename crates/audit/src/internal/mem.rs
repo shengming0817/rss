@@ -144,7 +144,7 @@ where
         self.hasher.verify(chain)?;
         // 续页游标语义无效即 fail-closed（不静默回退首页，防重复页，F4）。
         let start = match page.cursor.as_ref() {
-            Some(cursor) => usize::try_from(decode_sequence_cursor(cursor)?)
+            Some(cursor) => usize::try_from(decode_sequence_cursor(tenant, cursor)?)
                 .map_err(|_| AuditError::InvalidCursor)?,
             None => 0,
         };
@@ -154,6 +154,7 @@ where
         let has_more = end < chain.len();
         let next_cursor = if has_more {
             Some(encode_sequence_cursor(
+                tenant,
                 u64::try_from(end).map_err(|_| AuditError::InvalidCursor)?,
             )?)
         } else {
@@ -222,7 +223,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn page(limit: u16, cursor: Option<vocab::Cursor>) -> AuditPage {
+    fn page(limit: u16, cursor: Option<rss_contract::PageCursor>) -> AuditPage {
         AuditPage {
             limit: vocab::Limit::new(limit).expect("limit ≤500"),
             cursor,
@@ -397,9 +398,9 @@ mod tests {
                 .await
                 .expect("append");
         }
-        // 构造 base64url 编码了 "not-a-number" 的游标（Cursor::parse 接受，但语义无效）。
+        // 构造 base64url 编码了 "not-a-number" 的游标（PageCursor::parse 接受，但语义无效）。
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-a-number");
-        let cursor = vocab::Cursor::parse(&raw).expect("cursor parse");
+        let cursor = rss_contract::PageCursor::parse(&raw).expect("cursor parse");
         let result = repo.list(scope(TENANT_A), page(10, Some(cursor))).await;
         assert!(
             matches!(result, Err(AuditError::InvalidCursor)),

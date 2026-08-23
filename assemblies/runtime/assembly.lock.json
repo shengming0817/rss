@@ -7,7 +7,7 @@
   "digests": {
     "manifest": "sha256:dd9e4e5a69e5be0496c786eaf4a6b3706d0257eceb4f9384f0dad705c792309b",
     "generated": "sha256:044c94a942940e4444a15f19e083c2a7d386de1bd1ba6bbabf090257b5d4ba8c",
-    "contracts": "sha256:6f2c21b55a519a88dcbbe8f8771a7a7746e360337e0981460995687236c118af"
+    "contracts": "sha256:2ff88ee7506795ee5b1fcc711c16e12e2031822f070dbedd86cc4b80c200c422"
   },
-  "fingerprint": "sha256:3403c6c45d080f33beb774e2df903ad234707eeed675f6b1bf1caafa81d1b7b8"
+  "fingerprint": "sha256:c034afff1c3a80b240a8dffa65df87c790df0bf2913b571d1f8684d9c9cd94d0"
 }

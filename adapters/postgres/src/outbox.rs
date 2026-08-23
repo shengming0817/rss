@@ -594,7 +594,7 @@ impl OutboxMetadata {
     /// occurred_at / tenantId / schemaVersion / schemaHash 注入折叠进构造器 ⇒「缺标准 header 的 outbox
     /// metadata」**类型层不可表达**（Hard），杜绝
     /// producer 漏接：三条生产路径（`PgEmitter` / `PgAuthGrantLifecycle` / `PgConfigRepo`）各从注入 `Clock`
-    /// 经 `vocab::UnixEpochSeconds::saturating_from_system_time` 编码后传入，新增 producer 也必须提供
+    /// 经 `rss_contract::Timepoint::saturating_from_system_time` 编码后传入，新增 producer 也必须提供
     /// （缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
@@ -764,7 +764,7 @@ pub(crate) fn metadata_with_ambient(
 }
 
 /// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`：与
-/// `vocab::UnixEpochSeconds::saturating_from_system_time` 的编码语义对称。负值（早于 epoch，理论不可达）
+/// `rss_contract::Timepoint::saturating_from_system_time` 的编码语义对称。负值（早于 epoch，理论不可达）
 /// 收口 epoch 0，不 panic。session / credential 等 adapter 读路径共用此 decode 单源（#1316 review C-F1）。
 #[cfg(feature = "domain-identity")]
 pub(crate) fn epoch_secs_to_time(secs: i64) -> std::time::SystemTime {

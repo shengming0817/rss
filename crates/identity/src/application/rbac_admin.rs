@@ -125,7 +125,7 @@ impl RbacAdminService {
             assigned_by: actor.as_uuid(),
             actor_kind: role_assigned_actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
-            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(now).get(),
+            occurred_at: rss_contract::Timepoint::saturating_from_system_time(now).unix_seconds(),
         };
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
         // #1235 / #648 F1：经 outbox_emit UserId funnel。
@@ -178,7 +178,7 @@ impl RbacAdminService {
             revoked_by: actor.as_uuid(),
             actor_kind: role_revoked_actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
-            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(now).get(),
+            occurred_at: rss_contract::Timepoint::saturating_from_system_time(now).unix_seconds(),
         };
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
         // #1235 / #648 F1：经 outbox_emit UserId funnel。

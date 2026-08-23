@@ -668,7 +668,9 @@ pub mod list_entries {
     ///  "type": "object",
     ///  "properties": {
     ///    "cursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and sequence position. Tokens issued before this intentional v1 cutover are stale.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    },
     ///    "limit": {
     ///      "description": "Page size; minimum 1, maximum 500, default 50. Values outside 1..=500 are rejected (400).",
@@ -686,6 +688,7 @@ pub mod list_entries {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct AuditListEntriesRequest {
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and sequence position. Tokens issued before this intentional v1 cutover are stale.
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub cursor: ::std::option::Option<::std::string::String>,
@@ -778,7 +781,9 @@ pub mod list_entries {
     ///      "type": "boolean"
     ///    },
     ///    "nextCursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and sequence position.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -793,6 +798,7 @@ pub mod list_entries {
         #[serde(rename = "hasMore")]
         #[redact(sensitivity = public)]
         pub has_more: bool,
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and sequence position.
         #[serde(
             rename = "nextCursor",
             default,
@@ -821,7 +827,7 @@ pub mod list_entries {
         ::rss_contract::ContractDescriptor::from_static_version(
             "audit.list-entries",
             "v1",
-            "sha256:c11a70b0493a5f46a95b250c31800d0824fa9abfda48b55a3e35f3ff260ae1ef",
+            "sha256:0338486d70e22e4a1a4b65e558344276206aa097cad76f7587fc1d9e0f67285a",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =
@@ -1144,7 +1150,9 @@ pub mod list_tenant_entries {
     ///  "type": "object",
     ///  "properties": {
     ///    "cursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, target tenant, and sequence position. Tokens issued before this intentional v1 cutover are stale.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    },
     ///    "limit": {
     ///      "description": "Page size; minimum 1, maximum 500, default 50. Values outside 1..=500 are rejected (400).",
@@ -1162,6 +1170,7 @@ pub mod list_tenant_entries {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct AuditListTenantEntriesRequest {
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, target tenant, and sequence position. Tokens issued before this intentional v1 cutover are stale.
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub cursor: ::std::option::Option<::std::string::String>,
@@ -1254,7 +1263,9 @@ pub mod list_tenant_entries {
     ///      "type": "boolean"
     ///    },
     ///    "nextCursor": {
-    ///      "type": "string"
+    ///      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, target tenant, and sequence position.",
+    ///      "type": "string",
+    ///      "format": "rss-page-cursor-v1"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -1269,6 +1280,7 @@ pub mod list_tenant_entries {
         #[serde(rename = "hasMore")]
         #[redact(sensitivity = public)]
         pub has_more: bool,
+        ///Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, target tenant, and sequence position.
         #[serde(
             rename = "nextCursor",
             default,
@@ -1391,7 +1403,7 @@ pub mod list_tenant_entries {
         ::rss_contract::ContractDescriptor::from_static_version(
             "audit.list-tenant-entries",
             "v1",
-            "sha256:ff4c0c6f07d77407a909be50f9f231a74164d354c639363c6e418b632b6dca1d",
+            "sha256:0be0ace3c6ce09291b0e6aa92d7686adab2024acf9623ec8192f2c6d74cf45d7",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =

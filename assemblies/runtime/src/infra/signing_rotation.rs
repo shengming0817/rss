@@ -73,7 +73,7 @@ impl SigningKeyRotationProbe {
     }
 
     fn now_unix(&self) -> i64 {
-        vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get()
+        rss_contract::Timepoint::saturating_from_system_time(self.clock.now()).unix_seconds()
     }
 
     fn nearest_deadline(&self) -> Option<i64> {

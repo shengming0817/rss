@@ -63,7 +63,8 @@ impl ReviewedEventWriter for PgOutboxCdcEmitter {
             contract.domain().to_string(),
             contract.contract_id().to_string(),
             metadata_with_ambient(
-                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
+                    .unix_seconds(),
                 tenant,
                 contract,
             )

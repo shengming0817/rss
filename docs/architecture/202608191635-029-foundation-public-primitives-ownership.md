@@ -71,8 +71,8 @@ enforcement。carrier 按现有 PBI DAG 交付：
 |---|---|---|
 | canonical 类型夹带 internal / foreign public type | 当前 owner 的 private representation、直接 Cargo/type identity、Release API forbidden-type/source-identity projection | **active**；#2107 既有 Hard/Medium carrier；不宣称其能识别另一 package 新定义的同义类型 |
 | 非 canonical package 新定义同义 `TenantId` / `ContractDescriptor` 或跨 owner re-export | 在既有 typed rustdoc owner projection 中固定 canonical primitive→package 映射，同时拒绝 owner-local mirror 与 foreign source re-export，并配 synthetic red / anti-vacuity | **planned**；#2152 的 Medium ReleaseCheck，不建名称/source-shape scanner |
-| Timepoint/PageCursor/DataClass/SafeError 可被任意伪造或夹带内部值 | owner-local private newtype/closed enum、fallible constructor、safe `Debug`/`Display`、Cargo dependency direction | **planned**；#2150/#2151 的 Hard T1 |
-| 同义 old/new type、alias 或双路径并存 | 消费者在一次变更中直接迁移；旧 symbol 删除后由 rustc/Cargo 断开所有调用点；不保留 compile-fail 墓碑 | **planned**；#2150/#2151 的 Hard cutover |
+| Timepoint/PageCursor/DataClass/SafeError 可被任意伪造或夹带内部值 | owner-local private newtype/closed enum、fallible constructor、safe `Debug`/`Display`、Cargo dependency direction | **部分 active**；Timepoint/PageCursor 由 #2150 Hard T1 激活，DataClass/SafeError 等待 #2151 |
+| 同义 old/new type、alias 或双路径并存 | 消费者在一次变更中直接迁移；旧 symbol 删除后由 rustc/Cargo 断开所有调用点；不保留 compile-fail 墓碑 | **部分 active**；#2150 已完成时间/分页 cutover，#2151 交付剩余类型 |
 | Release API、依赖闭包或 artifact 漂移 | 正向 Release Surface、default/all-features SemVer、release-api exact set、forbidden leakage 与 package proof | **planned extension**；#2152 |
 | 无真实外部 consumer 的未来 API | registry-only、locked/offline external consumer，直接从唯一 package path 导入并覆盖拒绝路径 | **planned**；#2153 T2 |
 

@@ -1508,7 +1508,9 @@ async fn run_dlx_lifecycle_tick<L, B>(
 {
     let started = clock.now();
     let report = lifecycle
-        .tick_observation(vocab::UnixEpochSeconds::saturating_from_system_time(started).get())
+        .tick_observation(
+            rss_contract::Timepoint::saturating_from_system_time(started).unix_seconds(),
+        )
         .await;
     let lifecycle_health = match backlog_repository.read_archive_backlog().await {
         Ok(backlog) => {
@@ -2455,7 +2457,7 @@ fn parse_required_u64_env(
 }
 
 fn system_epoch_secs() -> i64 {
-    vocab::UnixEpochSeconds::saturating_from_system_time(SystemClock.now()).get()
+    rss_contract::Timepoint::saturating_from_system_time(SystemClock.now()).unix_seconds()
 }
 
 fn build_tenant_authority_from(

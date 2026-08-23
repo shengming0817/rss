@@ -39,9 +39,10 @@ fallback。旧 #2045 executable contract 已原子删除，同样不构成 compa
 
 ### Internal → Foundation 公共原语提升
 
-[ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md) 分配的 planned
-Timepoint/PageCursor/DataClass/SafeError owner 不因 Markdown、internal `pub`、public-api baseline 或同名 internal
-carrier 而自动激活。提升必须由 owner package 新建 private-representation / closed-value public type，consumer 直接
+[ADR-029](../architecture/202608191635-029-foundation-public-primitives-ownership.md) 分配的 Foundation primitive
+owner 不因 Markdown、internal `pub`、public-api baseline 或同名 internal carrier 而自动激活。#2150 已按本节规则
+激活 `Timepoint`/`PageCursor`；DataClass/SafeError 仍为 planned。提升必须由 owner package 新建
+private-representation / closed-value public type，consumer 直接
 切到该 owner，并在同一 cutover 删除语义重叠的 internal generic type；不得保留 alias、deprecated re-export、
 `From`/`TryFrom`、feature flag、双读写或 convenience facade。语义不同的 Deadline、Clock、领域 cursor 与内部错误
 carrier 可以继续 internal，但不获得 Release API 或 compatibility 身份。

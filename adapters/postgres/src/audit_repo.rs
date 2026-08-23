@@ -188,8 +188,9 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditReadRepo for PgAuditRepo<M> {
         scope: TenantRepoScope,
         page: AuditPage,
     ) -> Result<AuditListResult, AuditError> {
+        let tenant = scope.tenant();
         let start_seq = match page.cursor.as_ref() {
-            Some(c) => decode_sequence_cursor(c)?,
+            Some(c) => decode_sequence_cursor(tenant, c)?,
             None => 0u64,
         };
         let limit = usize::from(page.limit.get());
@@ -225,7 +226,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
     ) -> Result<AuditListResult, AuditError> {
         let tenant = scope.target();
         let start_seq = match page.cursor.as_ref() {
-            Some(c) => decode_sequence_cursor(c)?,
+            Some(c) => decode_sequence_cursor(tenant, c)?,
             None => 0u64,
         };
         let limit = usize::from(page.limit.get());

@@ -1114,20 +1114,6 @@ pub const vocab::projection::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: vocab:
 pub const vocab::projection::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
 pub const vocab::projection::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub mod vocab::query
-#[non_exhaustive] pub enum vocab::query::CursorError
-pub vocab::query::CursorError::Malformed
-impl core::error::Error for vocab::query::CursorError
-impl core::fmt::Debug for vocab::query::CursorError
-pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::query::CursorError
-pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for vocab::query::CursorError
-impl core::marker::Send for vocab::query::CursorError
-impl core::marker::Sync for vocab::query::CursorError
-impl core::marker::Unpin for vocab::query::CursorError
-impl core::marker::UnsafeUnpin for vocab::query::CursorError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::CursorError
-impl core::panic::unwind_safe::UnwindSafe for vocab::query::CursorError
 #[non_exhaustive] pub enum vocab::query::LimitError
 pub vocab::query::LimitError::TooLarge
 impl core::error::Error for vocab::query::LimitError
@@ -1142,25 +1128,6 @@ impl core::marker::Unpin for vocab::query::LimitError
 impl core::marker::UnsafeUnpin for vocab::query::LimitError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::LimitError
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::LimitError
-pub struct vocab::query::Cursor(_)
-impl vocab::query::Cursor
-pub fn vocab::query::Cursor::as_str(&self) -> &str
-pub fn vocab::query::Cursor::parse(&str) -> core::result::Result<Self, vocab::query::CursorError>
-impl core::clone::Clone for vocab::query::Cursor
-pub fn vocab::query::Cursor::clone(&self) -> vocab::query::Cursor
-impl core::cmp::Eq for vocab::query::Cursor
-impl core::cmp::PartialEq for vocab::query::Cursor
-pub fn vocab::query::Cursor::eq(&self, &vocab::query::Cursor) -> bool
-impl core::fmt::Debug for vocab::query::Cursor
-pub fn vocab::query::Cursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::query::Cursor
-impl core::marker::Freeze for vocab::query::Cursor
-impl core::marker::Send for vocab::query::Cursor
-impl core::marker::Sync for vocab::query::Cursor
-impl core::marker::Unpin for vocab::query::Cursor
-impl core::marker::UnsafeUnpin for vocab::query::Cursor
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Cursor
-impl core::panic::unwind_safe::UnwindSafe for vocab::query::Cursor
 pub struct vocab::query::Limit(_)
 impl vocab::query::Limit
 pub fn vocab::query::Limit::get(&self) -> u16
@@ -1262,61 +1229,6 @@ impl core::marker::Unpin for vocab::tenant::RowVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowVisibility
-pub mod vocab::time
-pub enum vocab::time::UnixEpochSecondsError
-pub vocab::time::UnixEpochSecondsError::BeforeEpoch
-pub vocab::time::UnixEpochSecondsError::Overflow
-impl core::clone::Clone for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::clone(&self) -> vocab::time::UnixEpochSecondsError
-impl core::cmp::Eq for vocab::time::UnixEpochSecondsError
-impl core::cmp::PartialEq for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::eq(&self, &vocab::time::UnixEpochSecondsError) -> bool
-impl core::error::Error for vocab::time::UnixEpochSecondsError
-impl core::fmt::Debug for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::time::UnixEpochSecondsError
-impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSecondsError
-impl core::marker::Freeze for vocab::time::UnixEpochSecondsError
-impl core::marker::Send for vocab::time::UnixEpochSecondsError
-impl core::marker::Sync for vocab::time::UnixEpochSecondsError
-impl core::marker::Unpin for vocab::time::UnixEpochSecondsError
-impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSecondsError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSecondsError
-impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSecondsError
-pub struct vocab::time::UnixEpochSeconds(_)
-impl vocab::time::UnixEpochSeconds
-pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64
-pub fn vocab::time::UnixEpochSeconds::saturating_from_system_time(std::time::SystemTime) -> Self
-pub fn vocab::time::UnixEpochSeconds::to_system_time(self) -> core::result::Result<std::time::SystemTime, vocab::time::UnixEpochSecondsError>
-pub fn vocab::time::UnixEpochSeconds::try_from_duration(core::time::Duration) -> core::result::Result<Self, vocab::time::UnixEpochSecondsError>
-impl core::clone::Clone for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::clone(&self) -> vocab::time::UnixEpochSeconds
-impl core::cmp::Eq for vocab::time::UnixEpochSeconds
-impl core::cmp::Ord for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::cmp(&self, &vocab::time::UnixEpochSeconds) -> core::cmp::Ordering
-impl core::cmp::PartialEq for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::eq(&self, &vocab::time::UnixEpochSeconds) -> bool
-impl core::cmp::PartialOrd for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::partial_cmp(&self, &vocab::time::UnixEpochSeconds) -> core::option::Option<core::cmp::Ordering>
-impl core::convert::TryFrom<i64> for vocab::time::UnixEpochSeconds
-pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSeconds::try_from(i64) -> core::result::Result<Self, Self::Error>
-impl core::convert::TryFrom<std::time::SystemTime> for vocab::time::UnixEpochSeconds
-pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSeconds::try_from(std::time::SystemTime) -> core::result::Result<Self, Self::Error>
-impl core::fmt::Debug for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::time::UnixEpochSeconds
-impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSeconds
-impl core::marker::Freeze for vocab::time::UnixEpochSeconds
-impl core::marker::Send for vocab::time::UnixEpochSeconds
-impl core::marker::Sync for vocab::time::UnixEpochSeconds
-impl core::marker::Unpin for vocab::time::UnixEpochSeconds
-impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSeconds
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSeconds
-impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSeconds
 #[non_exhaustive] pub enum vocab::ActionError
 pub vocab::ActionError::Empty
 pub vocab::ActionError::Format
@@ -1366,20 +1278,6 @@ impl core::marker::Unpin for vocab::error::CoreErrorKind
 impl core::marker::UnsafeUnpin for vocab::error::CoreErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreErrorKind
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreErrorKind
-#[non_exhaustive] pub enum vocab::CursorError
-pub vocab::CursorError::Malformed
-impl core::error::Error for vocab::query::CursorError
-impl core::fmt::Debug for vocab::query::CursorError
-pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::query::CursorError
-pub fn vocab::query::CursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for vocab::query::CursorError
-impl core::marker::Send for vocab::query::CursorError
-impl core::marker::Sync for vocab::query::CursorError
-impl core::marker::Unpin for vocab::query::CursorError
-impl core::marker::UnsafeUnpin for vocab::query::CursorError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::CursorError
-impl core::panic::unwind_safe::UnwindSafe for vocab::query::CursorError
 #[non_exhaustive] pub enum vocab::Decision
 pub vocab::Decision::Allow
 pub vocab::Decision::Deny
@@ -1897,28 +1795,6 @@ impl core::marker::Unpin for vocab::contract::step::StepNameError
 impl core::marker::UnsafeUnpin for vocab::contract::step::StepNameError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepNameError
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepNameError
-pub enum vocab::UnixEpochSecondsError
-pub vocab::UnixEpochSecondsError::BeforeEpoch
-pub vocab::UnixEpochSecondsError::Overflow
-impl core::clone::Clone for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::clone(&self) -> vocab::time::UnixEpochSecondsError
-impl core::cmp::Eq for vocab::time::UnixEpochSecondsError
-impl core::cmp::PartialEq for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::eq(&self, &vocab::time::UnixEpochSecondsError) -> bool
-impl core::error::Error for vocab::time::UnixEpochSecondsError
-impl core::fmt::Debug for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSecondsError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::time::UnixEpochSecondsError
-impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSecondsError
-impl core::marker::Freeze for vocab::time::UnixEpochSecondsError
-impl core::marker::Send for vocab::time::UnixEpochSecondsError
-impl core::marker::Sync for vocab::time::UnixEpochSecondsError
-impl core::marker::Unpin for vocab::time::UnixEpochSecondsError
-impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSecondsError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSecondsError
-impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSecondsError
 #[non_exhaustive] pub enum vocab::VisibilityScope
 pub vocab::VisibilityScope::All
 pub vocab::VisibilityScope::Device
@@ -2080,25 +1956,6 @@ impl core::marker::Unpin for vocab::tenant::CrossTenantVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::CrossTenantVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::CrossTenantVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::CrossTenantVisibility
-pub struct vocab::Cursor(_)
-impl vocab::query::Cursor
-pub fn vocab::query::Cursor::as_str(&self) -> &str
-pub fn vocab::query::Cursor::parse(&str) -> core::result::Result<Self, vocab::query::CursorError>
-impl core::clone::Clone for vocab::query::Cursor
-pub fn vocab::query::Cursor::clone(&self) -> vocab::query::Cursor
-impl core::cmp::Eq for vocab::query::Cursor
-impl core::cmp::PartialEq for vocab::query::Cursor
-pub fn vocab::query::Cursor::eq(&self, &vocab::query::Cursor) -> bool
-impl core::fmt::Debug for vocab::query::Cursor
-pub fn vocab::query::Cursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::query::Cursor
-impl core::marker::Freeze for vocab::query::Cursor
-impl core::marker::Send for vocab::query::Cursor
-impl core::marker::Sync for vocab::query::Cursor
-impl core::marker::Unpin for vocab::query::Cursor
-impl core::marker::UnsafeUnpin for vocab::query::Cursor
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Cursor
-impl core::panic::unwind_safe::UnwindSafe for vocab::query::Cursor
 pub struct vocab::DomainName(_)
 impl vocab::contract::owner::DomainName
 pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
@@ -2448,38 +2305,6 @@ impl core::marker::Unpin for vocab::contract::step::StepName
 impl core::marker::UnsafeUnpin for vocab::contract::step::StepName
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepName
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepName
-pub struct vocab::UnixEpochSeconds(_)
-impl vocab::time::UnixEpochSeconds
-pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64
-pub fn vocab::time::UnixEpochSeconds::saturating_from_system_time(std::time::SystemTime) -> Self
-pub fn vocab::time::UnixEpochSeconds::to_system_time(self) -> core::result::Result<std::time::SystemTime, vocab::time::UnixEpochSecondsError>
-pub fn vocab::time::UnixEpochSeconds::try_from_duration(core::time::Duration) -> core::result::Result<Self, vocab::time::UnixEpochSecondsError>
-impl core::clone::Clone for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::clone(&self) -> vocab::time::UnixEpochSeconds
-impl core::cmp::Eq for vocab::time::UnixEpochSeconds
-impl core::cmp::Ord for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::cmp(&self, &vocab::time::UnixEpochSeconds) -> core::cmp::Ordering
-impl core::cmp::PartialEq for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::eq(&self, &vocab::time::UnixEpochSeconds) -> bool
-impl core::cmp::PartialOrd for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::partial_cmp(&self, &vocab::time::UnixEpochSeconds) -> core::option::Option<core::cmp::Ordering>
-impl core::convert::TryFrom<i64> for vocab::time::UnixEpochSeconds
-pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSeconds::try_from(i64) -> core::result::Result<Self, Self::Error>
-impl core::convert::TryFrom<std::time::SystemTime> for vocab::time::UnixEpochSeconds
-pub type vocab::time::UnixEpochSeconds::Error = vocab::time::UnixEpochSecondsError
-pub fn vocab::time::UnixEpochSeconds::try_from(std::time::SystemTime) -> core::result::Result<Self, Self::Error>
-impl core::fmt::Debug for vocab::time::UnixEpochSeconds
-pub fn vocab::time::UnixEpochSeconds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::time::UnixEpochSeconds
-impl core::marker::StructuralPartialEq for vocab::time::UnixEpochSeconds
-impl core::marker::Freeze for vocab::time::UnixEpochSeconds
-impl core::marker::Send for vocab::time::UnixEpochSeconds
-impl core::marker::Sync for vocab::time::UnixEpochSeconds
-impl core::marker::Unpin for vocab::time::UnixEpochSeconds
-impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSeconds
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSeconds
-impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSeconds
 pub const vocab::AUDIT_ACTOR_FIELD_OBLIGATION: &str
 pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: vocab::authz::RoutePermissionId

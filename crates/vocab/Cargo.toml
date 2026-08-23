@@ -10,8 +10,6 @@ rss-contract.workspace = true
 rss-request-context.workspace = true
 thiserror = { workspace = true }
 serde = { workspace = true }
-# Cursor 不透明 token = base64url（URL_SAFE_NO_PAD）；parse 仅做可解码校验，拒畸形游标。
-base64 = { workspace = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }

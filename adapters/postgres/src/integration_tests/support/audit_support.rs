@@ -49,7 +49,7 @@ pub(in super::super) fn make_audit_record(
 // reason: 集成测试 helper——limit 值由测试代码控制，均合法；item-level carve-out。
 pub(in super::super) fn audit_page(
     limit: u16,
-    cursor: Option<vocab::Cursor>,
+    cursor: Option<rss_contract::PageCursor>,
 ) -> audit::ports::AuditPage {
     audit::ports::AuditPage {
         limit: vocab::Limit::new(limit).unwrap(),

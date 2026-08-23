@@ -79,6 +79,8 @@ use crate::ports::{
 
 /// 本域 DomainId（在 generated event spec 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
 const AUDIT_DOMAIN: &str = "audit";
+const TARGET_CURSOR_VERSION: &str = "v1";
+const TARGET_CURSOR_KIND: &str = "audit.target";
 
 /// 审计资源类别（const literal）。
 const RESOURCE_KIND_SESSION: &str = "session";
@@ -184,7 +186,7 @@ pub enum AuditEventRecordError {
     #[error("audit security event kind is not auditable")]
     SecurityKind,
     #[error("audit event timestamp is outside the Unix int64 range")]
-    Time(#[source] vocab::UnixEpochSecondsError),
+    Time(#[source] rss_contract::TimepointError),
 }
 
 /// Decode a generated identity event payload into the audit domain record shape.
@@ -282,12 +284,6 @@ pub fn security_audit_command_from_message(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetCursorError {
-    Invalid,
-    TenantMismatch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PageRequestError;
 
 enum TargetPageRequestError {
@@ -331,8 +327,8 @@ where
 
 /// i64 unix 秒 → `SystemTime`，任何负值或平台范围溢出都显式失败。
 fn from_unix_secs(secs: i64) -> Result<SystemTime, AuditEventRecordError> {
-    vocab::UnixEpochSeconds::try_from(secs)
-        .and_then(vocab::UnixEpochSeconds::to_system_time)
+    rss_contract::Timepoint::try_from(secs)
+        .and_then(rss_contract::Timepoint::to_system_time)
         .map_err(AuditEventRecordError::Time)
 }
 
@@ -516,8 +512,8 @@ fn project_audit_entry(entry: &AuditEntry, projection: ResourceProjection) -> Pr
             entry.resource().id(),
         ),
         outcome: outcome_wire(entry.outcome()).to_string(),
-        recorded_at: vocab::UnixEpochSeconds::saturating_from_system_time(entry.recorded_at())
-            .get(),
+        recorded_at: rss_contract::Timepoint::saturating_from_system_time(entry.recorded_at())
+            .unix_seconds(),
         entry_hash: encode_hash(entry.entry_hash().as_bytes()),
     }
 }
@@ -575,7 +571,7 @@ fn to_target_response(
     tenant: rss_request_context::TenantId,
     result: AuditListResult,
     projection: ResourceProjection,
-) -> Result<AuditListTenantEntriesResponse, TargetCursorError> {
+) -> Result<AuditListTenantEntriesResponse, rss_contract::PageCursorError> {
     let next_cursor = match result.next_cursor {
         Some(cursor) => Some(encode_target_cursor(tenant, &cursor)?),
         None => None,
@@ -597,30 +593,38 @@ fn to_target_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditTe
 
 fn encode_target_cursor(
     tenant: rss_request_context::TenantId,
-    inner: &vocab::Cursor,
-) -> Result<vocab::Cursor, TargetCursorError> {
-    let raw = format!("{tenant}:{}", inner.as_str());
+    inner: &rss_contract::PageCursor,
+) -> Result<rss_contract::PageCursor, rss_contract::PageCursorError> {
+    let raw = format!(
+        "{TARGET_CURSOR_VERSION}|{TARGET_CURSOR_KIND}|{tenant}|{}",
+        inner.as_str()
+    );
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
-    vocab::Cursor::parse(&encoded).map_err(|_| TargetCursorError::Invalid)
+    rss_contract::PageCursor::parse(&encoded)
 }
 
 fn decode_target_cursor(
     expected_tenant: rss_request_context::TenantId,
-    cursor: &vocab::Cursor,
-) -> Result<vocab::Cursor, TargetCursorError> {
+    cursor: &rss_contract::PageCursor,
+) -> Result<rss_contract::PageCursor, rss_contract::PageCursorError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cursor.as_str())
-        .map_err(|_| TargetCursorError::Invalid)?;
-    let raw = std::str::from_utf8(&bytes).map_err(|_| TargetCursorError::Invalid)?;
-    let Some((tenant_raw, inner_raw)) = raw.split_once(':') else {
-        return Err(TargetCursorError::Invalid);
-    };
-    let tenant =
-        rss_request_context::TenantId::parse(tenant_raw).map_err(|_| TargetCursorError::Invalid)?;
-    if tenant != expected_tenant {
-        return Err(TargetCursorError::TenantMismatch);
+        .map_err(|_| rss_contract::PageCursorError::Stale)?;
+    let raw = std::str::from_utf8(&bytes).map_err(|_| rss_contract::PageCursorError::Stale)?;
+    let mut parts = raw.split('|');
+    let version = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let kind = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let tenant_raw = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let inner_raw = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    if version != TARGET_CURSOR_VERSION || kind != TARGET_CURSOR_KIND || parts.next().is_some() {
+        return Err(rss_contract::PageCursorError::Stale);
     }
-    vocab::Cursor::parse(inner_raw).map_err(|_| TargetCursorError::Invalid)
+    let tenant = rss_request_context::TenantId::parse(tenant_raw)
+        .map_err(|_| rss_contract::PageCursorError::Stale)?;
+    if tenant != expected_tenant {
+        return Err(rss_contract::PageCursorError::Stale);
+    }
+    rss_contract::PageCursor::parse(inner_raw).map_err(|_| rss_contract::PageCursorError::Stale)
 }
 
 fn request_id_from_parts(
@@ -658,7 +662,7 @@ fn page_from_parts(
     let limit = vocab::Limit::new(limit).map_err(|_| PageRequestError)?;
     let cursor = match cursor {
         None => None,
-        Some(raw) => Some(vocab::Cursor::parse(raw).map_err(|_| PageRequestError)?),
+        Some(raw) => Some(rss_contract::PageCursor::parse(raw).map_err(|_| PageRequestError)?),
     };
     Ok(AuditPage { limit, cursor })
 }
@@ -2891,6 +2895,32 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn admin_read_rejects_cross_tenant_and_legacy_cursors() {
+        let other_tenant =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000abc")
+                .expect("other tenant");
+        let cursor =
+            crate::ports::encode_sequence_cursor(other_tenant, 1).expect("cross-tenant cursor");
+
+        let (status, body) =
+            get_entries(repo(), &format!("?limit=1&cursor={}", cursor.as_str())).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let raw = std::str::from_utf8(&body).expect("utf8");
+        assert!(
+            !raw.contains(cursor.as_str()),
+            "response must redact cursor"
+        );
+
+        let legacy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("1");
+        let (status, body) = get_entries(repo(), &format!("?limit=1&cursor={legacy}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let raw = std::str::from_utf8(&body).expect("utf8");
+        assert!(!raw.contains(&legacy), "response must redact legacy cursor");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn admin_read_masks_sensitive_fields_by_default() {
         let repo = repo();
         append_event_for_test(
@@ -4001,6 +4031,40 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn target_cursor_classifies_semantic_mismatches_as_stale() {
+        let expected = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
+        let other = "00000000-0000-4000-8000-000000000abc";
+        for decoded in [
+            format!("v1|audit.target|{other}|AQ"),
+            format!("v2|audit.target|{expected}|AQ"),
+            format!("v1|audit.entries|{expected}|AQ"),
+            "missing-separator".to_string(),
+        ] {
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(decoded);
+            let cursor = rss_contract::PageCursor::parse(&encoded).expect("cursor shape");
+            assert_eq!(
+                decode_target_cursor(expected, &cursor),
+                Err(rss_contract::PageCursorError::Stale)
+            );
+        }
+        let ordinary = crate::ports::encode_sequence_cursor(expected, 1).expect("cursor");
+        assert_eq!(
+            decode_target_cursor(expected, &ordinary),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+        let legacy_inner = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("1");
+        let legacy_target = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(format!("{expected}:{legacy_inner}"));
+        let legacy_target =
+            rss_contract::PageCursor::parse(&legacy_target).expect("legacy cursor shape");
+        assert_eq!(
+            decode_target_cursor(expected, &legacy_target),
+            Err(rss_contract::PageCursorError::Stale)
+        );
     }
 
     #[tokio::test]

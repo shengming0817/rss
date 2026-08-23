@@ -348,9 +348,9 @@ pub async fn credential_security_fact(
         .privacy_ref(pseudonym_keys)
         .map_err(security_fact_build)?;
     let actor_uuid = uuid::Uuid::from_bytes(actor_ref.as_bytes());
-    let occurred_at = vocab::UnixEpochSeconds::try_from(event.occurred_at())
+    let occurred_at = rss_contract::Timepoint::try_from(event.occurred_at())
         .map_err(security_fact_build)?
-        .get();
+        .unix_seconds();
     let payload = IdentitySecurityEventPayload {
         actor: IdentitySecurityEventPayloadActor {
             kind: actor_kind,

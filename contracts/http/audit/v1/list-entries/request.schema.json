@@ -11,7 +11,11 @@
       "default": 50,
       "description": "Page size; minimum 1, maximum 500, default 50. Values outside 1..=500 are rejected (400)."
     },
-    "cursor": { "type": "string" }
+    "cursor": {
+      "type": "string",
+      "format": "rss-page-cursor-v1",
+      "description": "Opaque canonical base64url-no-pad page cursor bound to this contract version, cursor kind, tenant, and sequence position. Tokens issued before this intentional v1 cutover are stale."
+    }
   },
   "additionalProperties": false
 }

@@ -38,6 +38,9 @@ pub use crate::domain::{
 };
 use rss_request_context::TenantId;
 
+const AUDIT_CURSOR_VERSION: &str = "v1";
+const AUDIT_SEQUENCE_CURSOR_KIND: &str = "audit.entries";
+
 /// Generated route marker retained by the target-tenant audit append command.
 pub type AuditListTenantRouteMarker = generated::http::audit_v1::list_tenant_entries::RouteMarker;
 
@@ -223,7 +226,7 @@ pub struct AuditPage {
     /// 单页上限（≤500，funnel 保证）。
     pub limit: vocab::Limit,
     /// 续页游标（首页 `None`）。
-    pub cursor: Option<vocab::Cursor>,
+    pub cursor: Option<rss_contract::PageCursor>,
 }
 
 /// 分页结果（对应 wire `data` / `nextCursor` / `hasMore`）。adapter `list` 构造、handler 读出转 wire。
@@ -231,28 +234,58 @@ pub struct AuditListResult {
     /// 本页条目。
     pub entries: Vec<AuditEntry>,
     /// 下一页游标（`has_more` 为 false 时 `None`）。
-    pub next_cursor: Option<vocab::Cursor>,
+    pub next_cursor: Option<rss_contract::PageCursor>,
     /// 是否还有更多页。
     pub has_more: bool,
 }
 
 /// Encode the next audit sequence as the single opaque cursor representation shared by every
 /// repository provider.
-pub fn encode_sequence_cursor(sequence: u64) -> Result<vocab::Cursor, AuditError> {
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sequence.to_string());
-    vocab::Cursor::parse(&raw)
+pub fn encode_sequence_cursor(
+    tenant: TenantId,
+    sequence: u64,
+) -> Result<rss_contract::PageCursor, AuditError> {
+    let semantic =
+        format!("{AUDIT_CURSOR_VERSION}|{AUDIT_SEQUENCE_CURSOR_KIND}|{tenant}|{sequence}");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(semantic);
+    rss_contract::PageCursor::parse(&raw)
         .map_err(|_| AuditError::storage(std::io::Error::other("cursor encode failed")))
 }
 
 /// Decode an opaque audit cursor into its sequence, rejecting every malformed semantic value.
-pub fn decode_sequence_cursor(cursor: &vocab::Cursor) -> Result<u64, AuditError> {
+pub fn decode_sequence_cursor(
+    tenant: TenantId,
+    cursor: &rss_contract::PageCursor,
+) -> Result<u64, AuditError> {
+    decode_sequence_cursor_semantics(tenant, cursor).map_err(|_| AuditError::InvalidCursor)
+}
+
+fn decode_sequence_cursor_semantics(
+    expected_tenant: TenantId,
+    cursor: &rss_contract::PageCursor,
+) -> Result<u64, rss_contract::PageCursorError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cursor.as_str())
-        .map_err(|_| AuditError::InvalidCursor)?;
-    std::str::from_utf8(&bytes)
-        .map_err(|_| AuditError::InvalidCursor)?
+        .map_err(|_| rss_contract::PageCursorError::Stale)?;
+    let decoded = std::str::from_utf8(&bytes).map_err(|_| rss_contract::PageCursorError::Stale)?;
+    let mut parts = decoded.split('|');
+    let version = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let kind = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let tenant_raw = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let sequence_raw = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    if version != AUDIT_CURSOR_VERSION
+        || kind != AUDIT_SEQUENCE_CURSOR_KIND
+        || parts.next().is_some()
+    {
+        return Err(rss_contract::PageCursorError::Stale);
+    }
+    let tenant = TenantId::parse(tenant_raw).map_err(|_| rss_contract::PageCursorError::Stale)?;
+    if tenant != expected_tenant {
+        return Err(rss_contract::PageCursorError::Stale);
+    }
+    sequence_raw
         .parse::<u64>()
-        .map_err(|_| AuditError::InvalidCursor)
+        .map_err(|_| rss_contract::PageCursorError::Stale)
 }
 
 /// 单租户审计链全链验证报告。
@@ -408,10 +441,12 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn sequence_cursor_round_trips_boundaries() {
+        let tenant =
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant");
         for sequence in [0, 1, u64::MAX] {
-            let cursor = super::encode_sequence_cursor(sequence).expect("encode cursor");
+            let cursor = super::encode_sequence_cursor(tenant, sequence).expect("encode cursor");
             assert_eq!(
-                super::decode_sequence_cursor(&cursor).expect("decode cursor"),
+                super::decode_sequence_cursor(tenant, &cursor).expect("decode cursor"),
                 sequence
             );
         }
@@ -420,17 +455,52 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn sequence_cursor_rejects_invalid_semantics() {
+        let tenant =
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant");
         for bytes in [
+            b"7".as_slice(),
             b"not-a-number".as_slice(),
             &[0xff, 0xfe],
             b"18446744073709551616",
         ] {
             let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-            let cursor = vocab::Cursor::parse(&raw).expect("base64url cursor shape");
+            let cursor = rss_contract::PageCursor::parse(&raw).expect("base64url cursor shape");
+            assert_eq!(
+                super::decode_sequence_cursor_semantics(tenant, &cursor),
+                Err(rss_contract::PageCursorError::Stale)
+            );
             assert!(matches!(
-                super::decode_sequence_cursor(&cursor),
+                super::decode_sequence_cursor(tenant, &cursor),
                 Err(super::AuditError::InvalidCursor)
             ));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn sequence_cursor_rejects_cross_tenant_kind_version_and_structure_mismatches() {
+        let tenant =
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant");
+        let other =
+            TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("canonical tenant");
+        let cross_tenant = super::encode_sequence_cursor(other, 7).expect("encode cursor");
+        assert_eq!(
+            super::decode_sequence_cursor_semantics(tenant, &cross_tenant),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+
+        for semantic in [
+            format!("v2|audit.entries|{tenant}|7"),
+            format!("v1|audit.target|{tenant}|7"),
+            format!("v1|audit.entries|{tenant}"),
+            format!("v1|audit.entries|{tenant}|7|extra"),
+        ] {
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(semantic);
+            let cursor = rss_contract::PageCursor::parse(&raw).expect("cursor shape");
+            assert_eq!(
+                super::decode_sequence_cursor_semantics(tenant, &cursor),
+                Err(rss_contract::PageCursorError::Stale)
+            );
         }
     }
 

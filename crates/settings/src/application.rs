@@ -519,8 +519,8 @@ impl SettingsService {
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.as_str().to_string(),
-            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now())
-                .get(),
+            occurred_at: rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
+                .unix_seconds(),
             source_version: source_version.map(wire_version),
             tenant_id: tenant.to_string(),
             version: wire_version(version),

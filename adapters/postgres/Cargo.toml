@@ -11,6 +11,7 @@ workspace = true
 # adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
 # 不预连全服务层（见 architecture.md §分层「adapters 实现基础/引擎/服务定义的 trait」+ PR #137 review A1/B1/C1）。
 [dependencies]
+rss-contract.workspace = true
 rss-request-context.workspace = true
 postgres-migration-inventory = { path = "../../crates/postgres-migration-inventory" }
 vocab = { path = "../../crates/vocab" }
@@ -72,7 +73,7 @@ serde_json_canonicalizer = { workspace = true, optional = true }
 serde = { workspace = true }
 # Saga lease token parsing.
 uuid = { workspace = true }
-# audit_repo cursor encode/decode（base64url URL_SAFE_NO_PAD；与 vocab::Cursor 相同引擎）。
+# audit_repo cursor encode/decode（base64url URL_SAFE_NO_PAD；语义由 audit owner 解释）。
 base64 = { workspace = true }
 # Stable deployment generation for additive projection-input registration.
 sha2 = { workspace = true }

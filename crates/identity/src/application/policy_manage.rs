@@ -452,8 +452,8 @@ impl PolicyManageService {
             updated_by: actor.as_uuid(),
             actor_kind: actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
-            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now())
-                .get(),
+            occurred_at: rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
+                .unix_seconds(),
         };
         // #1235 / #648 F1：canonical UserId typed funnel（actor = 策略变更操作者，非 login/PII）。
         crate::outbox_emit::emit_policy_updated(
@@ -1504,13 +1504,13 @@ impl WirePolicyView {
             version: policy.version().get(),
             contract_id: policy.route_scope().contract_id().to_string(),
             permission: policy.route_scope().permission().as_str().to_string(),
-            effective_from: vocab::UnixEpochSeconds::saturating_from_system_time(
+            effective_from: rss_contract::Timepoint::saturating_from_system_time(
                 policy.effective_from(),
             )
-            .get(),
-            effective_until: policy
-                .effective_until()
-                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
+            .unix_seconds(),
+            effective_until: policy.effective_until().map(|value| {
+                rss_contract::Timepoint::saturating_from_system_time(value).unix_seconds()
+            }),
             rules: policy
                 .rules()
                 .iter()

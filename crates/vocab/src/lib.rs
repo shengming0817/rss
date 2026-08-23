@@ -11,7 +11,6 @@ pub mod projection;
 pub mod query;
 pub mod service;
 pub mod tenant;
-pub mod time;
 
 /// crate-name 形标识符校验：`[a-z][a-z0-9_]*`，整串非空（单一事实源，供 authz / contract 复用）。
 pub(crate) fn is_crate_name(s: &str) -> bool {
@@ -50,10 +49,9 @@ pub use projection::{
     IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION, IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION,
     IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION, ProjectionField,
 };
-pub use query::{Cursor, CursorError, Limit, LimitError};
+pub use query::{Limit, LimitError};
 pub use service::ServiceCallerDomain;
 pub use tenant::{CrossTenantVisibility, RowVisibility, VisibilityScope};
-pub use time::{UnixEpochSeconds, UnixEpochSecondsError};
 
 /// Closed policy for effects outside a durable ConsumerTx database transaction.
 ///

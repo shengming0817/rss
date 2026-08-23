@@ -482,7 +482,10 @@ impl AuditReadTx<'_> {
         }
         hasher.verify_window(predecessor.as_ref(), &entries)?;
         let next_cursor = if has_more {
-            Some(encode_sequence_cursor(start_sequence + limit as u64)?)
+            Some(encode_sequence_cursor(
+                self.tenant,
+                start_sequence + limit as u64,
+            )?)
         } else {
             None
         };

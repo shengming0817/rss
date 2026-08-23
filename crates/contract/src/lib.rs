@@ -3,6 +3,165 @@
 use std::error::Error;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, SystemTime};
+
+/// Conversion failure for an absolute Unix timestamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimepointError {
+    /// The value precedes the Unix epoch.
+    BeforeEpoch,
+    /// The value cannot be represented by the wire `int64` range or this platform.
+    Overflow,
+}
+
+impl fmt::Display for TimepointError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BeforeEpoch => "time precedes the Unix epoch",
+            Self::Overflow => "time exceeds the Unix int64 range",
+        })
+    }
+}
+impl Error for TimepointError {}
+
+/// Authority-free absolute time represented as non-negative Unix seconds.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Timepoint(i64);
+
+impl Timepoint {
+    /// Convert a `SystemTime` to the wire range, clamping at both boundaries.
+    #[must_use]
+    pub fn saturating_from_system_time(value: SystemTime) -> Self {
+        value
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(Self(0), Self::saturating_from_duration)
+    }
+
+    fn saturating_from_duration(duration: Duration) -> Self {
+        Self(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+    }
+
+    /// Convert a duration since the epoch without saturating.
+    pub fn try_from_duration(duration: Duration) -> Result<Self, TimepointError> {
+        i64::try_from(duration.as_secs())
+            .map(Self)
+            .map_err(|_| TimepointError::Overflow)
+    }
+
+    /// Return the canonical Unix-seconds wire value.
+    #[must_use]
+    pub const fn unix_seconds(self) -> i64 {
+        self.0
+    }
+
+    /// Rebuild `SystemTime`; platforms with a narrower range fail closed.
+    pub fn to_system_time(self) -> Result<SystemTime, TimepointError> {
+        let seconds = u64::try_from(self.0).map_err(|_| TimepointError::BeforeEpoch)?;
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))
+            .ok_or(TimepointError::Overflow)
+    }
+}
+
+impl TryFrom<SystemTime> for Timepoint {
+    type Error = TimepointError;
+
+    fn try_from(value: SystemTime) -> Result<Self, Self::Error> {
+        value
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| TimepointError::BeforeEpoch)
+            .and_then(Self::try_from_duration)
+    }
+}
+
+impl TryFrom<i64> for Timepoint {
+    type Error = TimepointError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if value < 0 {
+            Err(TimepointError::BeforeEpoch)
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+/// Closed rejection categories for an opaque pagination token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageCursorError {
+    /// The token is not canonical unpadded base64url.
+    Malformed,
+    /// The encoded token exceeds the fixed protocol bound.
+    TooLong,
+    /// The token is validly encoded but invalid for the current pagination scope.
+    Stale,
+}
+
+impl fmt::Display for PageCursorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Malformed => "page cursor is malformed",
+            Self::TooLong => "page cursor is too long",
+            Self::Stale => "page cursor is stale",
+        })
+    }
+}
+impl Error for PageCursorError {}
+
+/// Opaque, bounded canonical base64url pagination token.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PageCursor(Box<str>);
+
+impl PageCursor {
+    /// Parse an encoded token without interpreting provider-owned contents.
+    pub fn parse(raw: &str) -> Result<Self, PageCursorError> {
+        if raw.len() > 4096 {
+            return Err(PageCursorError::TooLong);
+        }
+        if !canonical_base64url_no_pad(raw) {
+            return Err(PageCursorError::Malformed);
+        }
+        Ok(Self(raw.into()))
+    }
+
+    /// Return the opaque wire token.
+    #[must_use]
+    pub const fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PageCursor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PageCursor([REDACTED])")
+    }
+}
+
+fn canonical_base64url_no_pad(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() % 4 == 1 {
+        return false;
+    }
+    if !bytes.iter().all(|byte| base64url_value(*byte).is_some()) {
+        return false;
+    }
+    match bytes.len() % 4 {
+        2 => base64url_value(bytes[bytes.len() - 1]).is_some_and(|value| value & 0x0f == 0),
+        3 => base64url_value(bytes[bytes.len() - 1]).is_some_and(|value| value & 0x03 == 0),
+        _ => true,
+    }
+}
+
+const fn base64url_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 enum Text {
@@ -325,6 +484,7 @@ const fn parse_static_version(value: &str) -> ContractVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn canonical_values_round_trip() -> Result<(), IdentityError> {
@@ -428,5 +588,84 @@ mod tests {
             )?
         );
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn timepoint_rejects_out_of_range_values_and_round_trips() {
+        assert_eq!(Timepoint::try_from(-1), Err(TimepointError::BeforeEpoch));
+        assert_eq!(
+            Timepoint::try_from(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
+            Err(TimepointError::BeforeEpoch)
+        );
+        assert_eq!(
+            Timepoint::try_from_duration(Duration::from_secs(i64::MAX as u64 + 1)),
+            Err(TimepointError::Overflow)
+        );
+
+        let epoch = Timepoint::try_from(0).expect("epoch is representable");
+        let later = Timepoint::try_from(42).expect("timestamp is representable");
+        assert!(epoch < later);
+        assert_eq!(later.unix_seconds(), 42);
+        assert_eq!(
+            later
+                .to_system_time()
+                .expect("system time is representable"),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(42)
+        );
+        assert_eq!(
+            Timepoint::try_from(i64::MAX)
+                .expect("wire maximum is representable")
+                .unix_seconds(),
+            i64::MAX
+        );
+    }
+
+    #[test]
+    fn timepoint_saturating_conversion_clamps_both_boundaries() {
+        assert_eq!(
+            Timepoint::saturating_from_system_time(SystemTime::UNIX_EPOCH - Duration::from_secs(1))
+                .unix_seconds(),
+            0
+        );
+        assert_eq!(
+            Timepoint::saturating_from_duration(Duration::from_secs(i64::MAX as u64 + 1))
+                .unix_seconds(),
+            i64::MAX
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn page_cursor_accepts_only_bounded_canonical_base64url() {
+        for raw in ["AQ", "AAE", "cGFnZTo0Mg", &"A".repeat(4096)] {
+            let cursor = PageCursor::parse(raw).expect("canonical cursor");
+            assert_eq!(cursor.as_str(), raw);
+        }
+
+        for raw in ["", "A", "AR", "AAF", "abc=", "abc+", "abc/", "not valid"] {
+            assert_eq!(PageCursor::parse(raw), Err(PageCursorError::Malformed));
+        }
+        assert_eq!(
+            PageCursor::parse(&"A".repeat(4097)),
+            Err(PageCursorError::TooLong)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn page_cursor_diagnostics_are_closed_and_redacted() {
+        let raw = "c2VjcmV0LXRva2Vu";
+        let cursor = PageCursor::parse(raw).expect("canonical cursor");
+        assert!(!format!("{cursor:?}").contains(raw));
+
+        let errors = [
+            PageCursorError::Malformed,
+            PageCursorError::TooLong,
+            PageCursorError::Stale,
+        ];
+        for error in errors {
+            assert!(!error.to_string().contains(raw));
+        }
     }
 }

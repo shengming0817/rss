@@ -469,7 +469,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             // 收紧后非 UUID subject 在 wire decode 即不可表达，consumer 无需 parse）。
             subject: user_id.as_uuid(),
             tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
-            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(now).get(),
+            occurred_at: rss_contract::Timepoint::saturating_from_system_time(now).unix_seconds(),
         };
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
         let event_id = Uuid::new_v4().to_string();
@@ -511,7 +511,8 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         Ok(IdentityLoginResponse {
             data: IdentityLoginData {
                 session_id: grant_id.to_wire(),
-                expires_at: vocab::UnixEpochSeconds::saturating_from_system_time(expires_at).get(),
+                expires_at: rss_contract::Timepoint::saturating_from_system_time(expires_at)
+                    .unix_seconds(),
                 access_token: bundle.access.as_str().to_string(),
                 refresh_token: bundle.refresh.as_str().to_string(),
                 access_expires_at: bundle.access.expires_at(),
@@ -2441,34 +2442,78 @@ fn role_id_from_wire(raw: &str) -> Result<RoleId, ()> {
     RoleId::parse(raw).map_err(|_| ())
 }
 
-fn decode_role_cursor(raw: &str) -> Result<RoleId, ()> {
-    let cursor = vocab::Cursor::parse(raw).map_err(|_| ())?;
+const IDENTITY_CURSOR_VERSION: &str = "v1";
+const ROLE_CURSOR_KIND: &str = "identity.roles";
+const POLICY_CURSOR_KIND: &str = "identity.policies";
+
+fn decode_identity_list_cursor(
+    raw: &str,
+    expected_kind: &str,
+    expected_tenant: rss_request_context::TenantId,
+) -> Result<String, rss_contract::PageCursorError> {
+    let cursor = rss_contract::PageCursor::parse(raw)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cursor.as_str())
-        .map_err(|_| ())?;
-    let decoded = std::str::from_utf8(&bytes).map_err(|_| ())?;
-    role_id_from_wire(decoded)
+        .map_err(|_| rss_contract::PageCursorError::Stale)?;
+    let decoded = std::str::from_utf8(&bytes).map_err(|_| rss_contract::PageCursorError::Stale)?;
+    let mut parts = decoded.split('|');
+    let version = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let kind = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let tenant_raw = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    let after = parts.next().ok_or(rss_contract::PageCursorError::Stale)?;
+    if version != IDENTITY_CURSOR_VERSION || kind != expected_kind || parts.next().is_some() {
+        return Err(rss_contract::PageCursorError::Stale);
+    }
+    let tenant = rss_request_context::TenantId::parse(tenant_raw)
+        .map_err(|_| rss_contract::PageCursorError::Stale)?;
+    if tenant != expected_tenant {
+        return Err(rss_contract::PageCursorError::Stale);
+    }
+    Ok(after.to_string())
 }
 
-fn encode_role_cursor(role_id: &RoleId) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(role_id.as_str().as_bytes())
+fn encode_identity_list_cursor(
+    kind: &str,
+    tenant: rss_request_context::TenantId,
+    after: &str,
+) -> Result<String, rss_contract::PageCursorError> {
+    let semantic = format!("{IDENTITY_CURSOR_VERSION}|{kind}|{tenant}|{after}");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(semantic);
+    rss_contract::PageCursor::parse(&raw).map(|cursor| cursor.as_str().to_string())
+}
+
+fn decode_role_cursor(
+    tenant: rss_request_context::TenantId,
+    raw: &str,
+) -> Result<RoleId, rss_contract::PageCursorError> {
+    let decoded = decode_identity_list_cursor(raw, ROLE_CURSOR_KIND, tenant)?;
+    role_id_from_wire(&decoded).map_err(|_| rss_contract::PageCursorError::Stale)
+}
+
+fn encode_role_cursor(
+    tenant: rss_request_context::TenantId,
+    role_id: &RoleId,
+) -> Result<String, rss_contract::PageCursorError> {
+    encode_identity_list_cursor(ROLE_CURSOR_KIND, tenant, role_id.as_str())
 }
 
 fn policy_id_from_wire(raw: &str) -> Result<PolicyId, ()> {
     policy_manage::policy_id_from_wire(raw).map_err(|_| ())
 }
 
-fn decode_policy_cursor(raw: &str) -> Result<PolicyId, ()> {
-    let cursor = vocab::Cursor::parse(raw).map_err(|_| ())?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor.as_str())
-        .map_err(|_| ())?;
-    let decoded = std::str::from_utf8(&bytes).map_err(|_| ())?;
-    policy_id_from_wire(decoded)
+fn decode_policy_cursor(
+    tenant: rss_request_context::TenantId,
+    raw: &str,
+) -> Result<PolicyId, rss_contract::PageCursorError> {
+    let decoded = decode_identity_list_cursor(raw, POLICY_CURSOR_KIND, tenant)?;
+    policy_id_from_wire(&decoded).map_err(|_| rss_contract::PageCursorError::Stale)
 }
 
-fn encode_policy_cursor(policy_id: &PolicyId) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(policy_id.as_str().as_bytes())
+fn encode_policy_cursor(
+    tenant: rss_request_context::TenantId,
+    policy_id: &PolicyId,
+) -> Result<String, rss_contract::PageCursorError> {
+    encode_identity_list_cursor(POLICY_CURSOR_KIND, tenant, policy_id.as_str())
 }
 
 async fn roles_assign_handler(
@@ -2594,11 +2639,11 @@ async fn roles_list_handler(
     let after = match request
         .cursor
         .as_deref()
-        .map(decode_role_cursor)
+        .map(|raw| decode_role_cursor(auth.tenant, raw))
         .transpose()
     {
         Ok(after) => after,
-        Err(()) => return httpserve::error::validation_bad_request(&request_id),
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     let tenant_scope = tenant_repo_scope(auth.tenant);
     let result = match state
@@ -2621,10 +2666,15 @@ async fn roles_list_handler(
         }
     };
     let next_cursor = if result.has_more {
-        result
+        match result
             .roles
             .last()
-            .map(|role| encode_role_cursor(role.id()))
+            .map(|role| encode_role_cursor(auth.tenant, role.id()))
+            .transpose()
+        {
+            Ok(cursor) => cursor,
+            Err(_) => return core_response(CoreErrorKind::Internal, &request_id),
+        }
     } else {
         None
     };
@@ -2914,11 +2964,11 @@ async fn policies_list_handler(
     let after = match request
         .cursor
         .as_deref()
-        .map(decode_policy_cursor)
+        .map(|raw| decode_policy_cursor(subject.tenant, raw))
         .transpose()
     {
         Ok(after) => after,
-        Err(()) => return httpserve::error::validation_bad_request(&request_id),
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     let result = match query
         .list_policies(subject.tenant, PolicyPage { limit, after })
@@ -2935,10 +2985,15 @@ async fn policies_list_handler(
         }
     };
     let next_cursor = if result.has_more {
-        result
+        match result
             .policies
             .last()
-            .map(|policy| encode_policy_cursor(policy.id()))
+            .map(|policy| encode_policy_cursor(subject.tenant, policy.id()))
+            .transpose()
+        {
+            Ok(cursor) => cursor,
+            Err(_) => return core_response(CoreErrorKind::Internal, &request_id),
+        }
     } else {
         None
     };
@@ -3792,6 +3847,56 @@ mod tests {
                 map_account_transition_error(error),
                 AccountStatusChangeError::Store(IdentityError::Storage(_))
             ));
+        }
+    }
+
+    #[test]
+    fn list_cursor_decoders_preserve_shape_errors_and_classify_stale_semantics() {
+        let tenant = tid(CANON_TENANT);
+        let other = tid(OTHER_TENANT);
+        assert_eq!(
+            decode_role_cursor(tenant, "="),
+            Err(rss_contract::PageCursorError::Malformed)
+        );
+        let invalid = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(format!("v1|identity.roles|{tenant}|invalid id!"));
+        assert_eq!(
+            decode_role_cursor(tenant, &invalid),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+        let role_id = RoleId::parse("role-a").expect("role id");
+        let role_cursor = encode_role_cursor(tenant, &role_id).expect("cursor");
+        let legacy_role_cursor =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(role_id.as_str());
+        assert_eq!(
+            decode_role_cursor(tenant, &legacy_role_cursor),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+        let policy_id = PolicyId::parse("policy-a").expect("policy id");
+        let legacy_policy_cursor =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(policy_id.as_str());
+        assert_eq!(
+            decode_policy_cursor(tenant, &legacy_policy_cursor),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+        assert_eq!(
+            decode_policy_cursor(tenant, &role_cursor),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+        assert_eq!(
+            decode_role_cursor(other, &role_cursor),
+            Err(rss_contract::PageCursorError::Stale)
+        );
+        for semantic in [
+            format!("v2|identity.roles|{tenant}|role-a"),
+            format!("v1|identity.roles|{tenant}"),
+            format!("v1|identity.roles|{tenant}|role-a|extra"),
+        ] {
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(semantic);
+            assert_eq!(
+                decode_role_cursor(tenant, &raw),
+                Err(rss_contract::PageCursorError::Stale)
+            );
         }
     }
 
@@ -8897,12 +9002,56 @@ mod tests {
         assert!(decoded.has_more);
         assert!(decoded.next_cursor.is_some());
 
-        let resp_bad = testkit::call(router, ContractRequest::get("/roles?cursor=not-base64"))
-            .await
-            .expect("call");
+        let resp_bad = testkit::call(
+            router.clone(),
+            ContractRequest::get("/roles?cursor=not-base64"),
+        )
+        .await
+        .expect("call");
         resp_bad
             .ensure_status(StatusCode::BAD_REQUEST)
             .expect("bad cursor -> 400");
+
+        let legacy_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("role-a");
+        let legacy = testkit::call(
+            router.clone(),
+            ContractRequest::get(format!("/roles?cursor={legacy_cursor}")),
+        )
+        .await
+        .expect("call legacy cursor");
+        legacy
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("pre-cutover v1 cursor -> 400");
+
+        let policy_cursor = encode_policy_cursor(
+            tid(CANON_TENANT),
+            &PolicyId::parse("policy-a").expect("policy id"),
+        )
+        .expect("policy cursor");
+        let wrong_kind = testkit::call(
+            router.clone(),
+            ContractRequest::get(format!("/roles?cursor={policy_cursor}")),
+        )
+        .await
+        .expect("call wrong-kind cursor");
+        wrong_kind
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("policy cursor on roles endpoint -> 400");
+
+        let cross_tenant_cursor = encode_role_cursor(
+            tid(OTHER_TENANT),
+            &RoleId::parse("role-a").expect("role id"),
+        )
+        .expect("cross-tenant role cursor");
+        let cross_tenant = testkit::call(
+            router,
+            ContractRequest::get(format!("/roles?cursor={cross_tenant_cursor}")),
+        )
+        .await
+        .expect("call cross-tenant cursor");
+        cross_tenant
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("cross-tenant role cursor -> 400");
     }
 
     #[tokio::test]

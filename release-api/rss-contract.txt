@@ -24,6 +24,51 @@ impl core::marker::Unpin for rss_contract::IdentityError
 impl core::marker::UnsafeUnpin for rss_contract::IdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::IdentityError
 impl core::panic::unwind_safe::UnwindSafe for rss_contract::IdentityError
+pub enum rss_contract::PageCursorError
+pub rss_contract::PageCursorError::Malformed
+pub rss_contract::PageCursorError::Stale
+pub rss_contract::PageCursorError::TooLong
+impl core::clone::Clone for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::clone(&self) -> rss_contract::PageCursorError
+impl core::cmp::Eq for rss_contract::PageCursorError
+impl core::cmp::PartialEq for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::eq(&self, &rss_contract::PageCursorError) -> bool
+impl core::error::Error for rss_contract::PageCursorError
+impl core::fmt::Debug for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::PageCursorError
+impl core::marker::StructuralPartialEq for rss_contract::PageCursorError
+impl core::marker::Freeze for rss_contract::PageCursorError
+impl core::marker::Send for rss_contract::PageCursorError
+impl core::marker::Sync for rss_contract::PageCursorError
+impl core::marker::Unpin for rss_contract::PageCursorError
+impl core::marker::UnsafeUnpin for rss_contract::PageCursorError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::PageCursorError
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::PageCursorError
+pub enum rss_contract::TimepointError
+pub rss_contract::TimepointError::BeforeEpoch
+pub rss_contract::TimepointError::Overflow
+impl core::clone::Clone for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::clone(&self) -> rss_contract::TimepointError
+impl core::cmp::Eq for rss_contract::TimepointError
+impl core::cmp::PartialEq for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::eq(&self, &rss_contract::TimepointError) -> bool
+impl core::error::Error for rss_contract::TimepointError
+impl core::fmt::Debug for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::TimepointError
+impl core::marker::StructuralPartialEq for rss_contract::TimepointError
+impl core::marker::Freeze for rss_contract::TimepointError
+impl core::marker::Send for rss_contract::TimepointError
+impl core::marker::Sync for rss_contract::TimepointError
+impl core::marker::Unpin for rss_contract::TimepointError
+impl core::marker::UnsafeUnpin for rss_contract::TimepointError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::TimepointError
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::TimepointError
 pub struct rss_contract::ContractDescriptor
 impl rss_contract::ContractDescriptor
 pub const fn rss_contract::ContractDescriptor::from_static(&'static str, u32, &'static str) -> Self
@@ -99,6 +144,25 @@ impl core::marker::Unpin for rss_contract::ContractVersion
 impl core::marker::UnsafeUnpin for rss_contract::ContractVersion
 impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractVersion
 impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractVersion
+pub struct rss_contract::PageCursor(_)
+impl rss_contract::PageCursor
+pub const fn rss_contract::PageCursor::as_str(&self) -> &str
+pub fn rss_contract::PageCursor::parse(&str) -> core::result::Result<Self, rss_contract::PageCursorError>
+impl core::clone::Clone for rss_contract::PageCursor
+pub fn rss_contract::PageCursor::clone(&self) -> rss_contract::PageCursor
+impl core::cmp::Eq for rss_contract::PageCursor
+impl core::cmp::PartialEq for rss_contract::PageCursor
+pub fn rss_contract::PageCursor::eq(&self, &rss_contract::PageCursor) -> bool
+impl core::fmt::Debug for rss_contract::PageCursor
+pub fn rss_contract::PageCursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_contract::PageCursor
+impl core::marker::Freeze for rss_contract::PageCursor
+impl core::marker::Send for rss_contract::PageCursor
+impl core::marker::Sync for rss_contract::PageCursor
+impl core::marker::Unpin for rss_contract::PageCursor
+impl core::marker::UnsafeUnpin for rss_contract::PageCursor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::PageCursor
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::PageCursor
 pub struct rss_contract::SchemaDigest(_)
 impl rss_contract::SchemaDigest
 pub const fn rss_contract::SchemaDigest::as_str(&self) -> &str
@@ -123,6 +187,38 @@ impl core::marker::Unpin for rss_contract::SchemaDigest
 impl core::marker::UnsafeUnpin for rss_contract::SchemaDigest
 impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::SchemaDigest
 impl core::panic::unwind_safe::UnwindSafe for rss_contract::SchemaDigest
+pub struct rss_contract::Timepoint(_)
+impl rss_contract::Timepoint
+pub fn rss_contract::Timepoint::saturating_from_system_time(std::time::SystemTime) -> Self
+pub fn rss_contract::Timepoint::to_system_time(self) -> core::result::Result<std::time::SystemTime, rss_contract::TimepointError>
+pub fn rss_contract::Timepoint::try_from_duration(core::time::Duration) -> core::result::Result<Self, rss_contract::TimepointError>
+pub const fn rss_contract::Timepoint::unix_seconds(self) -> i64
+impl core::clone::Clone for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::clone(&self) -> rss_contract::Timepoint
+impl core::cmp::Eq for rss_contract::Timepoint
+impl core::cmp::Ord for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::cmp(&self, &rss_contract::Timepoint) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::eq(&self, &rss_contract::Timepoint) -> bool
+impl core::cmp::PartialOrd for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::partial_cmp(&self, &rss_contract::Timepoint) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<i64> for rss_contract::Timepoint
+pub type rss_contract::Timepoint::Error = rss_contract::TimepointError
+pub fn rss_contract::Timepoint::try_from(i64) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<std::time::SystemTime> for rss_contract::Timepoint
+pub type rss_contract::Timepoint::Error = rss_contract::TimepointError
+pub fn rss_contract::Timepoint::try_from(std::time::SystemTime) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::Timepoint
+impl core::marker::StructuralPartialEq for rss_contract::Timepoint
+impl core::marker::Freeze for rss_contract::Timepoint
+impl core::marker::Send for rss_contract::Timepoint
+impl core::marker::Sync for rss_contract::Timepoint
+impl core::marker::Unpin for rss_contract::Timepoint
+impl core::marker::UnsafeUnpin for rss_contract::Timepoint
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::Timepoint
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::Timepoint
 == release-api profile: all-features ==
 pub mod rss_contract
 #[non_exhaustive] pub enum rss_contract::IdentityError
@@ -149,6 +245,51 @@ impl core::marker::Unpin for rss_contract::IdentityError
 impl core::marker::UnsafeUnpin for rss_contract::IdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::IdentityError
 impl core::panic::unwind_safe::UnwindSafe for rss_contract::IdentityError
+pub enum rss_contract::PageCursorError
+pub rss_contract::PageCursorError::Malformed
+pub rss_contract::PageCursorError::Stale
+pub rss_contract::PageCursorError::TooLong
+impl core::clone::Clone for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::clone(&self) -> rss_contract::PageCursorError
+impl core::cmp::Eq for rss_contract::PageCursorError
+impl core::cmp::PartialEq for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::eq(&self, &rss_contract::PageCursorError) -> bool
+impl core::error::Error for rss_contract::PageCursorError
+impl core::fmt::Debug for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::PageCursorError
+pub fn rss_contract::PageCursorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::PageCursorError
+impl core::marker::StructuralPartialEq for rss_contract::PageCursorError
+impl core::marker::Freeze for rss_contract::PageCursorError
+impl core::marker::Send for rss_contract::PageCursorError
+impl core::marker::Sync for rss_contract::PageCursorError
+impl core::marker::Unpin for rss_contract::PageCursorError
+impl core::marker::UnsafeUnpin for rss_contract::PageCursorError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::PageCursorError
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::PageCursorError
+pub enum rss_contract::TimepointError
+pub rss_contract::TimepointError::BeforeEpoch
+pub rss_contract::TimepointError::Overflow
+impl core::clone::Clone for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::clone(&self) -> rss_contract::TimepointError
+impl core::cmp::Eq for rss_contract::TimepointError
+impl core::cmp::PartialEq for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::eq(&self, &rss_contract::TimepointError) -> bool
+impl core::error::Error for rss_contract::TimepointError
+impl core::fmt::Debug for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::TimepointError
+pub fn rss_contract::TimepointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::TimepointError
+impl core::marker::StructuralPartialEq for rss_contract::TimepointError
+impl core::marker::Freeze for rss_contract::TimepointError
+impl core::marker::Send for rss_contract::TimepointError
+impl core::marker::Sync for rss_contract::TimepointError
+impl core::marker::Unpin for rss_contract::TimepointError
+impl core::marker::UnsafeUnpin for rss_contract::TimepointError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::TimepointError
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::TimepointError
 pub struct rss_contract::ContractDescriptor
 impl rss_contract::ContractDescriptor
 pub const fn rss_contract::ContractDescriptor::from_static(&'static str, u32, &'static str) -> Self
@@ -224,6 +365,25 @@ impl core::marker::Unpin for rss_contract::ContractVersion
 impl core::marker::UnsafeUnpin for rss_contract::ContractVersion
 impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractVersion
 impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractVersion
+pub struct rss_contract::PageCursor(_)
+impl rss_contract::PageCursor
+pub const fn rss_contract::PageCursor::as_str(&self) -> &str
+pub fn rss_contract::PageCursor::parse(&str) -> core::result::Result<Self, rss_contract::PageCursorError>
+impl core::clone::Clone for rss_contract::PageCursor
+pub fn rss_contract::PageCursor::clone(&self) -> rss_contract::PageCursor
+impl core::cmp::Eq for rss_contract::PageCursor
+impl core::cmp::PartialEq for rss_contract::PageCursor
+pub fn rss_contract::PageCursor::eq(&self, &rss_contract::PageCursor) -> bool
+impl core::fmt::Debug for rss_contract::PageCursor
+pub fn rss_contract::PageCursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_contract::PageCursor
+impl core::marker::Freeze for rss_contract::PageCursor
+impl core::marker::Send for rss_contract::PageCursor
+impl core::marker::Sync for rss_contract::PageCursor
+impl core::marker::Unpin for rss_contract::PageCursor
+impl core::marker::UnsafeUnpin for rss_contract::PageCursor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::PageCursor
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::PageCursor
 pub struct rss_contract::SchemaDigest(_)
 impl rss_contract::SchemaDigest
 pub const fn rss_contract::SchemaDigest::as_str(&self) -> &str
@@ -248,3 +408,35 @@ impl core::marker::Unpin for rss_contract::SchemaDigest
 impl core::marker::UnsafeUnpin for rss_contract::SchemaDigest
 impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::SchemaDigest
 impl core::panic::unwind_safe::UnwindSafe for rss_contract::SchemaDigest
+pub struct rss_contract::Timepoint(_)
+impl rss_contract::Timepoint
+pub fn rss_contract::Timepoint::saturating_from_system_time(std::time::SystemTime) -> Self
+pub fn rss_contract::Timepoint::to_system_time(self) -> core::result::Result<std::time::SystemTime, rss_contract::TimepointError>
+pub fn rss_contract::Timepoint::try_from_duration(core::time::Duration) -> core::result::Result<Self, rss_contract::TimepointError>
+pub const fn rss_contract::Timepoint::unix_seconds(self) -> i64
+impl core::clone::Clone for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::clone(&self) -> rss_contract::Timepoint
+impl core::cmp::Eq for rss_contract::Timepoint
+impl core::cmp::Ord for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::cmp(&self, &rss_contract::Timepoint) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::eq(&self, &rss_contract::Timepoint) -> bool
+impl core::cmp::PartialOrd for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::partial_cmp(&self, &rss_contract::Timepoint) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<i64> for rss_contract::Timepoint
+pub type rss_contract::Timepoint::Error = rss_contract::TimepointError
+pub fn rss_contract::Timepoint::try_from(i64) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<std::time::SystemTime> for rss_contract::Timepoint
+pub type rss_contract::Timepoint::Error = rss_contract::TimepointError
+pub fn rss_contract::Timepoint::try_from(std::time::SystemTime) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for rss_contract::Timepoint
+pub fn rss_contract::Timepoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::Timepoint
+impl core::marker::StructuralPartialEq for rss_contract::Timepoint
+impl core::marker::Freeze for rss_contract::Timepoint
+impl core::marker::Send for rss_contract::Timepoint
+impl core::marker::Sync for rss_contract::Timepoint
+impl core::marker::Unpin for rss_contract::Timepoint
+impl core::marker::UnsafeUnpin for rss_contract::Timepoint
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::Timepoint
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::Timepoint

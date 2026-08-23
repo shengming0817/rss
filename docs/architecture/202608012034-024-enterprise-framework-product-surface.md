@@ -25,8 +25,8 @@ Foundation Public 继续只有两个 package owner，不增加聚合层：
 |---|---|---|
 | tenant value | `rss-request-context::TenantId` | existing / keep |
 | contract identity 与 descriptor | `rss-contract::{ContractId, ContractVersion, SchemaDigest, ContractDescriptor}` | existing / keep |
-| absolute time | planned `rss-contract::Timepoint` | #2150 前不存在 Release API |
-| opaque pagination token | planned `rss-contract::PageCursor` | #2150 前不存在 Release API |
+| absolute time | `rss-contract::Timepoint` | active；非负 Unix `int64` 秒，不拥有 Clock/Deadline authority |
+| opaque pagination token | `rss-contract::PageCursor` | active；4096-byte bounded canonical base64url，语义 stale 由 consumer 判定 |
 | stable data classification | planned `rss-contract::DataClass` | #2151 前不存在 Release API |
 | redact-safe error projection | planned `rss-contract::SafeError` | #2151 前不存在 Release API |
 

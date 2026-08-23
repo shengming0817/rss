@@ -463,7 +463,8 @@ impl PgIdentitySecurityLifecycle {
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
             metadata_with_ambient(
-                vocab::UnixEpochSeconds::saturating_from_system_time(event.occurred_at()).get(),
+                rss_contract::Timepoint::saturating_from_system_time(event.occurred_at())
+                    .unix_seconds(),
                 event.tenant(),
                 contract,
             )
@@ -623,7 +624,8 @@ fn security_envelope(
         contract.domain().to_owned(),
         contract.contract_id().to_owned(),
         metadata_with_ambient(
-            vocab::UnixEpochSeconds::saturating_from_system_time(event.occurred_at()).get(),
+            rss_contract::Timepoint::saturating_from_system_time(event.occurred_at())
+                .unix_seconds(),
             event.tenant(),
             contract,
         )
@@ -988,8 +990,8 @@ impl TryFrom<(AccountSecurityMutation, &CredentialSecurityEvent)> for AccountSec
         }
         Ok(Self {
             state: AccountStateCasRow::from_states(expected, next)?,
-            occurred_at: vocab::UnixEpochSeconds::saturating_from_system_time(event.occurred_at())
-                .get(),
+            occurred_at: rss_contract::Timepoint::saturating_from_system_time(event.occurred_at())
+                .unix_seconds(),
             reason: event.kind().as_db_str(),
         })
     }

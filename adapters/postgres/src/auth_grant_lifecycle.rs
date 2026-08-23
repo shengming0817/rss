@@ -154,7 +154,8 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
             metadata_with_ambient(
-                vocab::UnixEpochSeconds::saturating_from_system_time(self.clock.now()).get(),
+                rss_contract::Timepoint::saturating_from_system_time(self.clock.now())
+                    .unix_seconds(),
                 tenant,
                 contract,
             )
@@ -369,16 +370,16 @@ impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
             epoch: i64::try_from(next.authn_epoch_at_issue().get())
                 .map_err(|_| corrupt("auth grant epoch exceeds PostgreSQL bigint"))?,
             expected_status: expected.status().as_db_str(),
-            expected_closed_at: expected
-                .closed_at()
-                .map(|value| vocab::UnixEpochSeconds::saturating_from_system_time(value).get()),
+            expected_closed_at: expected.closed_at().map(|value| {
+                rss_contract::Timepoint::saturating_from_system_time(value).unix_seconds()
+            }),
             expected_reason: expected.close_reason().map(|reason| reason.as_db_str()),
             next_status: next.status().as_db_str(),
-            closed_at: vocab::UnixEpochSeconds::saturating_from_system_time(
+            closed_at: rss_contract::Timepoint::saturating_from_system_time(
                 next.closed_at()
                     .ok_or_else(|| corrupt("closed auth grant lacks closed_at"))?,
             )
-            .get(),
+            .unix_seconds(),
             reason: next
                 .close_reason()
                 .ok_or_else(|| corrupt("closed auth grant lacks close_reason"))?

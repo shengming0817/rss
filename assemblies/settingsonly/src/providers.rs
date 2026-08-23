@@ -704,7 +704,7 @@ fn build_tenant_authority(
 
 fn system_epoch_seconds() -> i64 {
     use diport::Clock as _;
-    vocab::UnixEpochSeconds::saturating_from_system_time(crate::SystemClock.now()).get()
+    rss_contract::Timepoint::saturating_from_system_time(crate::SystemClock.now()).unix_seconds()
 }
 
 async fn build_s3_archive_store(

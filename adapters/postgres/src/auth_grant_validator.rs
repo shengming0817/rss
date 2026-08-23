@@ -92,7 +92,8 @@ impl AuthGrantValidator for PgAuthGrantValidator {
             .map_err(|_| corruption("authentication time exceeds persistence boundary"))?;
         let expected_epoch = i64::try_from(input.authn_epoch().get())
             .map_err(|_| corruption("authentication epoch exceeds persistence boundary"))?;
-        let observed_at = vocab::UnixEpochSeconds::saturating_from_system_time(observed_at).get();
+        let observed_at =
+            rss_contract::Timepoint::saturating_from_system_time(observed_at).unix_seconds();
         let grant_id = input.grant_id().clone();
         let user_id = input.user_id();
 
