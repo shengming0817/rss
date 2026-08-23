@@ -42,9 +42,40 @@ docker build --target settingsonly-runtime -t rss-settingsonly:1796 .
 （uid 65532），固定 entrypoint `/usr/local/bin/settingsonly-server`，只包含该 binary 与
 `/usr/share/rss/settingsonly/config.schema.json`。
 
-## Production artifact 机器验收
+## Eventing profile transition status
 
-production artifact 的唯一 machine carrier 是 `journeys` 的
+[ADR-024](../architecture/202608012034-024-enterprise-framework-product-surface.md) 只授权
+`eventing` official profile 中的两项闭值 T3 evidence。Azure PBI
+[#2125](https://dev.azure.com/shengming0923/rss/_workitems/edit/2125) 是
+`CP-T3-EVENTING-VALUE-STREAM` 的唯一完整 Evidence Plan，选中的 accepted value stream 为
+`settings.config-version-changed`。本文不复制该计划的 selector、receipt 或调度协议，也不是
+enforcement carrier。
+
+当前六项 SettingsOnly T3 evidence 只作为冻结的迁移来源，不是 Eventing profile owner：
+
+- `SETTINGSONLY-T3-L2-JOIN-01` 与 `SETTINGSONLY-T3-SIGKILL-01` 分别提供
+  `settings.config-version-changed` 的 PG→outbox→AMQP→inbox 正向来源和 restart/redelivery
+  来源，最终由 #2128 的唯一 exact value-stream selector 取代。
+- `SETTINGSONLY-T3-INPUT-READY-01` 与 `SETTINGSONLY-T3-SIGTERM-01` 的 lifecycle 迁移归
+  #2169/#2170；`SETTINGSONLY-T3-PROJECTION-SHADOW-START-RESTART-DRAIN-01` 与
+  `SETTINGSONLY-T3-PROJECTION-FATAL-EXIT-READINESS-01` 没有获批的 Eventing T3 映射，只能降为
+  最低充分的 reference/T2 regression。
+- `identityaudit_login_audit_ready_sigterm_drain` 和 `event_transport_durable_e2e` 继续是
+  reference/T2 owner，不得获得 Eventing T3 ID、包装新 selector 或冒充 production join。
+
+transition 严格分为 #2166 profile/artifact T1/T2 first-green、#2170 lifecycle first-green 与 #2128
+value-stream first-green 三道门。#2128 单项通过只产生 review-only candidate receipt；只有后两项在
+同一 #2166 exact closure 上均绿，才能原子激活 Eventing artifact/profile/selectors，并同时删除
+SettingsOnly 六项的 T3 ID、selector mapping 与 owner 身份。需要保留的底层行为只以无 T3 身份的
+reference/T2 test 继续；禁止 alias、shim、fallback 或长期双 owner。
+
+永久事实交给 #2166 的 typed profile closure、AssemblyLock、RuntimePlan 和 generated binding（Hard）；
+production restart/composition join 只由 #2128 的 exact selector（Medium）证明。same-head receipt 只进入
+issue/PR review evidence，不写入 artifact manifest、generated inventory、registry 或新 gate。
+
+## 过渡期 SettingsOnly production artifact 机器验收
+
+Eventing profile 完成上述原子激活前，SettingsOnly production artifact 的唯一 machine carrier 仍是 `journeys` 的
 `settingsonly_production_artifact` target（需要 `integration` feature）。六个独立、精确可选的 T3 join
 hazard 为：
 
