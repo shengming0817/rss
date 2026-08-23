@@ -4,26 +4,26 @@
 //! - `SoftCaSigner`（sealed-marker）：始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-11）；
 //!   `backend` 增补 `impl diport::Signer`（**ECDSA P-256 软件 dev CA**：构造时生成 / 加载注入的 CA 私钥，对
 //!   deviceloop 递来的 TBS `message` 字节签名，输出 DER ECDSA 签名字节）。
-//! - `InMemRevocationLedger`（#1260 P0-2 首切片）：`backend` 时 `impl diport::RevocationStore`——in-mem 撤销集，
+//! - `InMemRevocationLedger`（#1260 测试/开发实现）：`backend` 时 `impl diport::RevocationStore`——in-mem 撤销集，
 //!   按 `(CertScope, CertSerial)` 键 correct-by-construction 租户 + 设备隔离，Clock 戳撤销时刻、`revoke` 幂等。
 //!
 //! **provider 范式**：对标 `adapters/vault`（Transit `sign` 切片，#1011）——sealed-marker + `backend` feature +
 //!   fail-fast 构造。`diport::Signer` 是 provider 无关「签字节」port（无 cert 授权 / X.509 组装语义）；X.509
 //!   TBS 组装与签名嵌入是消费方 `deviceloop` 的职责，softca 只持 CA 私钥签字节。
 //!
-//! **两级 CA / 共享 Ledger / CRL 仍不在本切片**：root→intermediate split、signer/revocation 同源共享 Ledger、
-//!   DER CRL 单调 Number 导出 + `revoked_at` 生产读路径属 P0-2 后续 wave（epic #991）；本切片
-//!   `InMemRevocationLedger` 是独立测试/开发用的非持久 store（重启清空）；runtime assembly 固定使用
-//!   PostgreSQL 持久 provider。
+//! **PKI owner / 测试开发边界**：本 adapter 不拥有生产 root→intermediate CA、证书签名、CRL/OCSP 发布或
+//!   certificate lifecycle；这些能力由 External control plane 唯一拥有（ADR-022/ADR-028），RSS 只消费窄
+//!   closure/artifact，并维护决策侧 revocation projection/cache/lookup。本切片的 `InMemRevocationLedger` 是独立
+//!   测试/开发用的非持久 store（重启清空）；runtime assembly 固定使用 PostgreSQL 持久 provider。
 //!   `InMemRevocationLedger` 不在 runtime provider catalog 中提供 constructor 或 fallback。
 //!
 //! **CA 私钥 custody（软件 CA 固有边界——诚实声明，勿夸大）**：
 //!   - **进程内裸持是软件 CA 固有的**：CA 私钥 scalar 由 ring `EcdsaKeyPair` 持有**进程生命周期**，ring 不提供
 //!     清零句柄（无 public API 暴露私钥，但也**无法**经 ring API zeroize）。`generate` 路径的瞬态 PKCS#8
 //!     `Document`（含私钥）同样**不** zeroize-on-drop（ring 0.17 `src/pkcs8.rs` 限制）——drop ≠ 清零。两者皆
-//!     无法在 softca 内消除。**故 softca 是 dev / demo CA**；生产签名应走 HSM/KMS 后端（`adapters/vault` 的
-//!     `Signer`），不在进程内裸持 CA 私钥。`from_pkcs8` 注入路径中 softca 只借 `&[u8]`、不存副本，调用方负责其
-//!     buffer 清零（见该构造器 rustdoc）。
+//!     无法在 softca 内消除。**故 softca 是 dev / demo CA**；生产证书签名和 lifecycle 由 External control
+//!     plane 拥有，RSS 不在进程内裸持其 CA 私钥。`from_pkcs8` 注入路径中 softca 只借 `&[u8]`、不存副本，
+//!     调用方负责其 buffer 清零（见该构造器 rustdoc）。
 //!   - **Debug 不泄漏私钥（SOFTCA-CA-KEY-NO-DEBUG-01，Medium）**：`EcdsaKeyPair` **虽 impl `Debug`**，但经 ring
 //!     `derive_debug_via_field!(.., public_key)` **只渲染 public_key 字段**（私钥 scalar `d` / `nonce_key` 不进
 //!     Debug，见 ring 0.17.14 `src/ec/suite_b/ecdsa/signing.rs`）——即便 `SoftCaSigner` 被 Debug-print 私钥也不
@@ -278,14 +278,13 @@ impl ManagedResource for SoftCaSigner {
 ///
 /// **测试 / 开发边界**：进程内、非持久（重启即清空撤销集），仅作为独立 adapter/conformance
 /// 实现；runtime assembly 不提供可选 constructor 或 fallback，固定使用 PostgreSQL 持久 provider。
-/// 与 [`SoftCaSigner`] 解耦（独立 struct）：本切片只落 store，signer / revocation 共享 Ledger（同源、两级 CA）
-/// 属 P0-2 后续 wave。
+/// 与 [`SoftCaSigner`] 解耦（独立 struct）；它不统一生产 signer/revocation，也不构成 CRL/OCSP publication
+/// carrier。生产 PKI lifecycle 仍由 External control plane 拥有。
 #[cfg(feature = "backend")]
 pub struct InMemRevocationLedger {
     clock: Box<dyn Clock>,
-    // value = 首次撤销时刻（Clock 戳）。**CRL 前瞻**：本切片只记不经 port 暴露——`revoked_at` 读路径 + DER CRL
-    // 单调 Number 导出由 P0-2 后续 wave 落地（届时 is_revoked 之外增 revocation-list 查询）。当前由
-    // `#[cfg(test)]` 的 `revoked_at` 断言记录正确，非死状态。
+    // value 保留首次撤销时刻（Clock 戳），用于锁定幂等 revoke 语义；`RevocationStore` 不暴露 CRL publication，
+    // `#[cfg(test)]` 的 `revoked_at` 仅验证该现有状态，不构成未来 production carrier 承诺。
     revoked: Mutex<HashMap<(CertScope, CertSerial), InMemRevocation>>,
 }
 
@@ -403,7 +402,7 @@ impl ManagedResource for InMemRevocationLedger {
 #[cfg(all(test, feature = "backend"))]
 impl InMemRevocationLedger {
     /// 测试支持：读回撤销时刻——断言 Clock 戳的时间被正确记录（让记录的时间在本切片即被测，非死状态）。
-    /// `#[cfg(test)]`：生产读路径（CRL 导出）属 P0-2 后续 wave，不在本切片暴露。
+    /// `#[cfg(test)]`：仅测试现有 store 的幂等状态，不是 production API 或 CRL publication carrier。
     pub(crate) fn revoked_at(&self, serial: CertSerial, scope: CertScope) -> Option<SystemTime> {
         let guard = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
         guard.get(&(scope, serial)).map(|record| record.revoked_at)

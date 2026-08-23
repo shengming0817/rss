@@ -2,7 +2,7 @@
 
 - **状态**：Accepted + **Landed**（PR-diport #1049，2026-06-22）。派发策略（dynosaur）已落地；§8 三项开放风险已实测，结论见下「落地结论」——**dynosaur 可行，且比本 ADR 原设更简**（无 unsafe 例外）。
 - **日期**：2026-06-21（落地回写：2026-06-22）
-- **关联**：issue #995 [RW-G0.5] · epic #991 · 落地单元 #1049 · `docs/migration-from-gocell/gocell-rust-crate-mapping.md`
+- **关联**：issue #995 [RW-G0.5] · epic #991 · 落地单元 #1049
 - **后续修订**：**ADR-005**（#1083，2026-06-23）把「所有 DI port 收敛 diport」部分化——域形 repo/service port 归域 crate（§6 偏离 2 + §7 行 1 已就地重写并重评威胁矩阵）。
 - **后续修订**：**Amendment（#1095，2026-06-23）**——async DI port 注入形态收口（`make(X: Send)` 的 `DynX` 是 Send 非 Sync ⇒ `Arc<DynX>` 是 `!Send`；多次调用 async 消费者用泛型静态分发而非 `Arc<DynX>`）。§4.3 / §4.5 冲突段就地重写、§7 威胁矩阵补行、Option A defer。见下「Amendment」节。
 - **后续修订**：**Amendment（#1142，2026-06-25）**——新增 ack-capable delivery seam（`Acker` / `AckableSubscriber` 两个 async DI port + `Delivery`/`AckAction` 值类型），照本 ADR 既定 `make(X: Send)`+dynosaur 范式扩端口（**非新机制**），使 AMQP 消费达成 at-least-once。§7 补行、威胁矩阵重评。见下「Amendment（#1142）」节。
@@ -225,7 +225,7 @@ associated types 表达；eventexec 在 `DlxLifecycle` bound 中把 associated t
 GoCell→Rust 迁移的 G0「接缝冻结」阶段需要先定下一个贯穿所有后续单元的基础决策：**依赖注入（DI）
 trait 的 async 方法如何做动态派发**。
 
-根因（`gocell-rust-crate-mapping.md` §三）：组合根（`bins/`、assembly）重度持有
+根因：组合根（`bins/`、assembly）需要持有
 `Arc<dyn Authorizer / Signer / Store / Publisher / ...>` 这类可替换 provider 接缝。而 Rust 的
 **async fn in trait（AFIT，1.75 起稳定）静态分发 OK、`dyn` 不行**——`async fn` 脱糖成 RPITIT，返回
 每个 impl 各异的 opaque type，尺寸不定，无法进 vtable，trait 因此非 dyn-compatible（object-unsafe）。

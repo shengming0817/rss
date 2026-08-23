@@ -6,30 +6,29 @@
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入 tonic 依赖。
 //! feature-on（`--features backend`）：`serve_with_token(addr, token)` bind TcpListener → 托管 tonic Router
-//! （health_service）→ serve task 监听注入的 [`CancellationToken`]；`shutdown()` `cancel()` token + await
+//! （health_service）→ serve task 监听注入的 `tokio_util::sync::CancellationToken`；`shutdown()` `cancel()` token + await
 //! JoinHandle 收敛。
 //!
 //! # graceful shutdown：经 ShutdownStack token funnel
 //!
 //! 后台 serve task 的关闭信号是组合根经 `bootstrap::ShutdownStack::register_with_token` 注入的 child
-//! [`CancellationToken`]（SHUTDOWN-TOKEN-FUNNEL-01）：阶段 1 广播 `cancel()` 即 serve 退出，阶段 2
+//! `tokio_util::sync::CancellationToken`（SHUTDOWN-TOKEN-FUNNEL-01）：阶段 1 广播 `cancel()` 即 serve 退出，阶段 2
 //! `shutdown()` await task 收敛。`serve(addr)` 是 detached 便捷构造（内部 token，不接外部广播；测试 /
 //! 简单 caller 用）。**不**自建 oneshot 绕过 funnel。
 //!
 //! # 安全：plaintext fail-closed
 //!
 //! 本切片 plaintext（无 TLS/auth）。`serve_with_token` **fail-closed**：拒绝绑定非 loopback 地址（返回
-//! [`GrpcServeError::NonLoopbackPlaintext`]），安全边界落在类型/Result，不靠注释。生产对外暴露须等 TLS
-//! 三模式落地（P2-6）；TLS 落地前确需非 loopback（如容器内跨 pod 明文）只能经显式
+//! `GrpcServeError::NonLoopbackPlaintext`），安全边界落在类型/Result，不靠注释。当前未配置 TLS；
+//! 确需非 loopback（如容器内明文 sidecar）只能经显式
 //! `serve_insecure_with_token` opt-in（对标 vault `new` / `new_allow_http`）。
-//! 见 docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md P2-6。
 //!
 //! # gRPC health 语义：liveness-only
 //!
 //! overall service `""` = SERVING 是 gRPC 健康协议的 server **overall liveness**（进程已起、可服务）——
 //! 标准 gRPC liveness 探针查 `""`，故保留。本 scaffold **不**承载 per-service readiness：未注册的业务
 //! service 名 Check 返回 NOT_FOUND（不被误报为 SERVING，见 `health_does_not_advertise_unknown_service`
-//! 测试锁定）。readiness 聚合（probe 驱动）为 follow-up（P2-6）；**k8s readiness probe 应对接 HTTP
+//! 测试锁定）。本 adapter 不承载 readiness 聚合；**k8s readiness probe 应对接 HTTP
 //! HealthListener，不要用本 gRPC `""` 端点判 readiness**。
 //!
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints，不 invoke dynosaur 宏）。
@@ -40,7 +39,7 @@ use diport::{ManagedResource, ShutdownError};
 /// gRPC 传输 adapter。
 ///
 /// `backend` feature 关时为空壳（仅供 freeze smoke 类型断言）；
-/// 开时持有 bind 成功的 TCP listener 地址、graceful-shutdown 的 [`CancellationToken`] 与 serve 任务句柄。
+/// 开时持有 bind 成功的 TCP listener 地址、graceful-shutdown 的 `tokio_util::sync::CancellationToken` 与 serve 任务句柄。
 pub struct GrpcServer {
     #[cfg(feature = "backend")]
     local_addr: std::net::SocketAddr,
@@ -62,9 +61,10 @@ pub enum GrpcServeError {
     /// listener local_addr 读回失败（bind 后内核返回 EBADF / 类似）。
     #[error("grpc server local addr unavailable")]
     LocalAddr(#[source] std::io::Error),
-    /// plaintext scaffold fail-closed 拒绝绑定非 loopback 地址（TLS 落地前用 `serve_insecure_*` 显式 opt-in）。
+    /// plaintext scaffold fail-closed 拒绝绑定非 loopback 地址；接受该风险的调用方必须用
+    /// `serve_insecure_*` 显式 opt-in。
     #[error(
-        "grpc plaintext server refused a non-loopback bind address; use serve_insecure_* until TLS lands"
+        "grpc plaintext server refused a non-loopback bind address; use serve_insecure_* for an explicit plaintext opt-in"
     )]
     NonLoopbackPlaintext,
 }
@@ -88,8 +88,9 @@ impl GrpcServer {
 
     /// 同 [`serve_with_token`](Self::serve_with_token)，但**显式允许非 loopback** plaintext 绑定。
     ///
-    /// TLS 三模式落地前的临时 opt-in（如容器内明文 sidecar）；命名即声明 insecure，杜绝静默对外暴露
-    /// （对标 vault `new_allow_http`）。生产应等 TLS（P2-6）。
+    /// 当前未配置 TLS 时的显式 opt-in。仅当调用方已建立独立、受访问控制的 trust boundary（如同一
+    /// pod 内的明文 sidecar channel），并能保证流量不跨越公网、跨租户或其他不可信网络时使用；该入口
+    /// 不提供传输加密或身份认证。命名即声明 insecure，杜绝静默对外暴露（对标 vault `new_allow_http`）。
     pub async fn serve_insecure_with_token(
         addr: std::net::SocketAddr,
         token: tokio_util::sync::CancellationToken,
@@ -162,7 +163,7 @@ impl GrpcServer {
             // 只有经 serve_insecure_* opt-in 才到这；warn 让明文对外在 ops 日志可见。
             tracing::warn!(
                 addr = %local_addr,
-                "grpc plaintext server bound to non-loopback address via insecure opt-in; TLS deferred (P2-6)"
+                "grpc plaintext server bound to non-loopback address via insecure opt-in; TLS is not configured"
             );
         }
     }

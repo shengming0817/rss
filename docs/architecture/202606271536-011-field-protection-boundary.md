@@ -8,7 +8,7 @@
   #1465 framework 底座 / #1466 KeyProvider-Vault / #1467 settings ConfigValue 加密逐个落地）
 - **日期**：2026-06-27
 - **关联**：issue #1478 [blind index 等值查询策略 #1478] · issue #1471 [field-protection ADR] · 子 Feature #1465 [framework 底座] / #1466 [KeyProvider 与 Vault Transit] /
-  #1467 [settings ConfigValue 静态加密] · capability gap **P1-9**（`docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md`）
+  #1467 [settings ConfigValue 静态加密]
   · **子设计 ADR-012**（`202606271755-012-settings-configvalue-encryption-design.md`，issue **#1473**：把 §D7 #1467 具体化到 settings —— AADForConfig 字节编码 / 存储列 migration / 旧明文读 + 回滚 / 保护策略分层）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发 → KeyProvider port 归属）· **ADR-005**（域形 vs infra port category line，本 ADR 复用其归属判据不重证）
 - **既有能力**：#1359/#1360 已交付 observe-time 字段级 **redaction**（`securederive::Redact` derive + `secure` redaction funnel）；本 ADR 在其上把 **storage encryption** 划成独立面
@@ -23,10 +23,14 @@
 派生 fail-closed 的安全 `Debug`（`crates/securederive/src/lib.rs`、`crates/secure/src/redaction.rs`、`crates/observ`、`secure::redact_error` 与 typed metric enums
 §Redaction）。这条能力只作用于**可观测面**（Debug / 日志 / trace / `last_error`）——它把明文挡在「输出到人能看见的地方」之外。
 
-但**静态存储面（at-rest）的加密**至今无统一设计单源。P1-9 capability gap 仍指出四项缺口：`diport` 无 `KeyProvider` port；
+在 2026-06-27 本 ADR 做决策时，**静态存储面（at-rest）的加密**尚无统一设计单源，当时有四项具体问题：`diport` 无 `KeyProvider` port；
 `secure::Aead` 的 `seal(plaintext)`/`open(ct)` **无 AAD 参数**（`crates/secure/src/aead.rs`，纯接缝）；`primitives/crypto.rs` rustdoc
 指向**不存在**的 `diport::KeyProvider`（doc 落空）；`settings` `ConfigValue` 仍是明文 newtype（`crates/settings/src/domain/mod.rs`，
 Debug 脱敏 + 敏感 key 拒写，材料不落库但无加密）。
+
+这些决策后由 #1465–#1467 与 ADR-012 落地；当前可执行 carrier 包括
+`crates/diport/src/key_provider.rs`、`crates/secure` 的 protection/AAD 类型、contract protection validate/breaking、
+`adapters/postgres/migrations/0029_add_config_value_encryption.sql` 与 settings protection/maintenance 集成测试。
 
 若不先立设计边界直接实现，redaction（脱敏展示）/ encryption（静态加密）/ secret resolver（外部 store 坐标引用）/ Vault signer
 （签名）四件事容易混成一套模糊能力。本 ADR 把**字段级数据保护边界**定为架构单源：哪些是 observe-time、哪些是 at-rest、AAD 为何
@@ -42,7 +46,7 @@ Debug 脱敏 + 敏感 key 拒写，材料不落库但无加密）。
 | 面 | 触发时机 | 保护对象 | 载体 | 状态 |
 |----|---------|---------|------|------|
 | **observe-redaction** | observe-time（Debug / 日志 / trace / `last_error`） | 「值被人/外部看见」 | `securederive::Redact` + `secure` redaction funnel | **已交付**（#1359/#1360） |
-| **storage-encryption** | at-rest（落库 / 跨信任边界持久化） | 「值在静态存储被读取」 | `secure` AEAD v2 envelope + `diport::KeyProvider` + 域持久化路径 | **待落**（#1465/#1466/#1467） |
+| **storage-encryption** | at-rest（落库 / 跨信任边界持久化） | 「值在静态存储被读取」 | `secure` AEAD v2 envelope + `diport::KeyProvider` + 域持久化路径 | **已落地**（#1465/#1466/#1467） |
 
 不变式：**redaction ≠ encryption**；**debug / 日志 / trace 面永不出现解密结果**（D5）。对标 `redactable`
 （`TracingRedactedExt` 在 subscriber 之前脱敏，observe-time redaction 与 at-rest encryption 完全解耦）。
@@ -162,9 +166,10 @@ Tink DAEAD「leaks plaintext equality」作为 AES-SIV 路径的否决论据（�
 （「此 port 能否在 `diport` 内编译而不让 diport 新增域依赖」=能）见 ADR-005 §2.1，本 ADR 不重证。`adapters/vault` 经 DIP 内向边
 impl，不被域依赖。本 ADR 即修正 `primitives/crypto.rs` / `secure/aead.rs` 指向本 ADR（消除 doc 落空）。
 
-### D7 — 3-feature 拆分 + 单源验收清单
+### D7 — 3-feature 拆分 + 决策时验收清单
 
-能力拆为三个 feature 自底向上长出，本 ADR 是其**共同设计单源 + 单源验收清单**（逐条对齐各 feature body 的验收标准 + INVARIANT ID）：
+能力拆为三个 feature 自底向上长出，本 ADR 是其共同设计单源。下列勾选值冻结为 2026-06-27 决策时与后续修订快照，
+只用于说明验收来源和 INVARIANT ID；不表示当前实施状态。当前状态以 tracker 及 §1 列出的 executable carrier 为准。
 
 **#1465 framework 底座**（声明层，不接 Vault / 不改持久化）
 - [ ] redaction↔encryption 职责边界有 ADR / rules 单源（**=本 ADR-011 + `crates/observ`、`secure::redact_error` 与 typed metric enums 同步**）。
@@ -184,8 +189,8 @@ impl，不被域依赖。本 ADR 即修正 `primitives/crypto.rs` / `secure/aead
 - [ ] 支持 key id / version / **current-primary + previous-read** 轮换（D3）。
 - [x] AAD mismatch fail-closed（`FIELDPROT-AAD-MANDATORY-01`；Vault provider 经 Transit derived-key `context` 绑定，
   默认可跑测试覆盖请求构造 / context funnel / 本地错误收敛；`#[ignore]` live smoke 覆盖 changed-field AAD mismatch）。
-- [ ] 跨租 / 跨字段 replay fail-closed 具备默认可执行治理门（当前只有 changed-field live smoke；跨 tenant live / mock contract
-  lane 未接入默认验证）。
+- [x] 跨租 / 跨字段 replay fail-closed 具备默认可执行验证：`secure` AEAD 单测覆盖 tenant / config-key /
+  field / schema-version 四维 AAD 错配，Postgres settings 集成测试覆盖跨租密文复制拒绝。
 - [ ] master-key compromise 应急运维流程记录（rewrap 仅重包裹 DEK、不覆盖此场景，须全量 DEK 重加密，D3/§5）。
 
 **#1467 settings ConfigValue 静态加密落地**（持久化层）
@@ -234,7 +239,7 @@ DETERMINISTIC / NODBG 类型）/ #1466（DIPORT-* + KEYPROV-AUDIT 守卫）/ #14
 | HMAC blind index 索引列频率/字典分析（旁路泄漏） | 索引列相等性可观察，可离线频率/字典攻击 | D4 FilterBits 截断钝化（默认 256 bit，可调低）+ opt-in 仅限低基数/可接受字段（`x-protection.mode=blindIndex` 的 reason 必填文档化，#1468 R17）+ 等值-only 不保序（无序位不可排序遍历） |
 | HMAC blind index 截断碰撞 → 误命中 | 索引列不精确匹配返回错误行 | D4 截断设计语义：碰撞候选由解密后明文比对过滤兜底（不是 bug，是 Bloom-ish 权衡；FilterBits 调高可降碰撞率） |
 | 明文经 Debug / 日志 / trace 泄漏 | 解密结果可渲染 | D5 no-decrypt-in-debug（Hard `FIELDPROT-NODBG-DECRYPT-01`） |
-| 静态数据无加密（settings 现状） | ConfigValue 明文落库 | D1/D3 storage-encryption envelope（#1467 落地） |
+| 静态数据无加密（settings 决策时基线） | ConfigValue 明文落库 | D1/D3 storage-encryption envelope（#1467 落地） |
 | 密钥材料经错误链泄漏 | 错误源未脱敏 | D5 KeyProvider 访问审计 + 错误源脱敏（#1466） |
 | key-id 匹配 timing oracle | 非常数时间比较 | D3 `constant_time_eq`（`primitives::crypto`） |
 

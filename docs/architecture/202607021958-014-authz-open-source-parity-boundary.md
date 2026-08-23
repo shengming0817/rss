@@ -48,17 +48,18 @@ RowVisibility / FieldMask 经 sealed obligation 和 `ResourceProjection` 消费�
 - **Governance gate**：`cargo xtask tenancy-closeout` keeps this ADR, `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL, and ADR-006 linked and checks matrix coverage.
 - **Operational tradeoff**：RSS accepts redeploy-based typed policy evolution in exchange for fewer moving parts and stronger local boundaries in the current pre-GA architecture.
 
-## 4. Gap mapping
+## 4. Scope exclusions
 
-Known gaps remain tracked outside #1587. This ADR only records their boundary so the parity matrix does not imply delivery:
+This ADR defines an authorization parity boundary; it does not authorize or promise delivery of adjacent capabilities.
+In particular, explicit-subject/background authorization bridges, a registry runtime control plane, credential revocation,
+audit-ledger tamper evidence, field protection at rest, and gRPC transport parity are adjacent concerns whose ownership and
+implementation status are outside this ADR. Listing them here neither asserts that a tracker or executable carrier exists
+nor makes a delivery commitment. Where a tracker, ADR, or current carrier exists, its live state is authoritative; historical
+pointers include #1317/#1353 for credential revocation and #1465–#1467 plus ADR-011 for field protection.
 
-- Explicit-subject / background authorization bridge: capability gap P1-4 in
-  `docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md`.
-- Registry runtime control plane: capability gap P0-7 in the same gap document.
-- Credential/session hard revocation: #1317 and #1353.
-- Audit HMAC chain / tamper-evidence: capability gap P0-8 in the same gap document.
-- Field protection at rest: #1465 / #1466 / #1467 and ADR-011.
-- gRPC parity caveat: `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL defines the target rule; any implementation claim must cite the contract/codegen/runtime evidence in its own PBI.
+For gRPC, `TenantId`, `RowScope`, `pg_tenant_tx_guard` and PostgreSQL RLS/ACL define the target tenancy rule. Any
+implementation claim must cite its own contract/codegen/runtime evidence. None of these exclusions changes this ADR's
+in-process `RouteAuthorizer` decision or its no-external-PDP boundary.
 
 ## 5. Enforcement
 

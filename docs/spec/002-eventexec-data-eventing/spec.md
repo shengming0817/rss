@@ -266,5 +266,8 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - G1 追踪弹（identity→in-mem→audit）已绿，作为 #1100 durable 替换的起点与回归基线。
 - reconcile Loop harness 的最终 crate 落位（eventexec vs 独立 home）与 saga/projection 共享 checkpoint store 的先后，由 `/speckit-plan` 阶段裁定（不阻塞拆解）。
 - postgres 索引/migration 形态遵 rust-standards §数据库迁移（pre-GA 普通 `CREATE INDEX`，migration 只增不改）。
-- 持久化测试经集成 feature 门控（`#[cfg(feature = "integration")]`），单测以 fake/in-mem 替身；CI 形态见 gocell-rust 的历史 CI 设计文档。
+- 持久化集成 test target 的 eligibility 由各 adapter `Cargo.toml` 的 `[[test]].required-features = ["integration"]`
+  持有；源码 `#[cfg(feature = "integration")]` 只裁剪同 feature 下的测试实现，不是 eligibility carrier。单测以
+  fake/in-mem 替身；CI 形态以 `.github/workflows/ci.yml`、`xtask/src/ci_lanes.rs` 的 fixed jobs 与
+  `xtask/src/integration_shards.rs` 的 typed shard catalog 为准。
 - 七机制依赖序：引擎类型(P1/P2)+postgres 基座(P3) → outbox(P4)/idempotency(P5)/amqp(P6) → ConsumerBase(P7) → #1100(P8) → saga(P9)/projection(P10)/reconcile(P11)/command(P12) 并行收尾。

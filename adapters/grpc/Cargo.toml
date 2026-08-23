@@ -13,8 +13,8 @@ workspace = true
 # 已裁——按 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`，不预连全层」（cargo-udeps 守）。
 [dependencies]
 diport = { path = "../../crates/diport" }
-# gRPC server scaffold（plaintext，无 TLS——TLS 三模式 deferred P2-6；
-#   见 docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md P2-6）：
+# gRPC server scaffold（plaintext，无 TLS）；`serve_with_token` 默认拒绝 non-loopback，
+# 非 loopback 只能通过显式命名的 `serve_insecure_with_token` opt-in：
 #   tonic      = server+router（Server::builder / add_service / serve_with_incoming_shutdown）
 #   tonic-health = 标准 gRPC 健康服务（health_reporter，无需直接依赖 prost）
 #   tokio      = rt（spawn serve task）+ net（TcpListener::bind）+ sync（Mutex<Option<JoinHandle>>）

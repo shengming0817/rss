@@ -234,9 +234,10 @@ tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security
 # ref: antifuchs/governor src/state/keyed.rs
 governor = "0.8"
 # gRPC 传输（adapters/grpc，#1011）+ otel OTLP/gRPC 导出（adapters/otel）共用一份。tonic 0.14 把 prost 集成
-# 拆出 tonic-prost/tonic-prost-build（core tonic codec-agnostic）。grpc 直接消费 tonic（server+router，不启 tls：
-# plaintext，TLS 三模式 deferred P2-6）+ tonic-health（标准 gRPC 健康服务，server scaffold 的 baseline service）；
-# prost 当前仅经 tonic-prost 传递进 lock@0.14（直接 workspace 消费随 P2-7 proto codegen 落地）。与 otel 的
+# 拆出 tonic-prost/tonic-prost-build（core tonic codec-agnostic）。grpc 直接消费 tonic（server+router，当前
+# 不配置 TLS；默认入口拒绝 non-loopback plaintext，只有显式 insecure opt-in 可对外绑定）+
+# tonic-health（标准 gRPC 健康服务，server scaffold 的 baseline service）；prost 当前仅经
+# tonic-prost 传递进 lock@0.14。与 otel 的
 # opentelemetry-otlp 0.32（grpc-tonic → tonic 0.14.6）统一到 0.14，避免 0.13/0.14 双版本（#1185）。
 # ref: hyperium/tonic examples/src/health/server.rs@master
 tonic = "0.14"
@@ -326,8 +327,8 @@ tracing-opentelemetry = "0.33"
 # ref: servo/rust-url url/src/lib.rs（Url::host/username/password）
 url = "2"
 x509-parser = "0.18"
-# 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。Rust 可观测 facade 选 `metrics` crate（冻结
-# 迁移决策 gocell-rust-crate-mapping.md：slog+otel+prometheus → tracing+tracing-opentelemetry+metrics facade）；
+# 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。当前可观测组合使用
+# `tracing` + `tracing-opentelemetry` 承载 trace，`metrics` facade + Prometheus adapter 承载指标；
 # 发射点经 `metrics::counter!` 全局 facade，adapter 持 PrometheusHandle 渲染 exposition。
 # default-features=false 关 http-listener/push-gateway——避免拉 hyper/rustls/ring/aws-lc（TLS + HTTP-server
 # 供应链面；/metrics HTTP serving 是组合根/httpserve 关注点，不在 adapter；同 s3/lapin 的 TLS 收口范式，

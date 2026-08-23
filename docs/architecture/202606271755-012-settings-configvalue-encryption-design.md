@@ -6,9 +6,8 @@
 - **日期**：2026-06-27
 - **关联**：issue **#1473** [settings-encryption — ConfigValue AAD + migration design] · **父 ADR-011**
   [字段级数据保护边界]（本 ADR 是其 §D7「#1467 settings ConfigValue 静态加密」checklist 的 settings 具体化，
-  并补齐 ADR-011 对 settings 留下的 under-spec）· capability gap **P1-9**
-  （`docs/migration-from-gocell/202606240130-006-gocell-rss-capability-gaps.md`，指认 `AADForConfig` 归 settings、
-  GoCell 前身 `configcore/crypto/aad.go`）
+  并补齐 ADR-011 对 settings 留下的 under-spec）· #1465 framework 底座 · #1466 KeyProvider/Vault ·
+  #1467 settings ConfigValue 静态加密
 - **依赖 ADR**：**ADR-004**（`ConfigValue` 冻结终态 → 加密落持久化边界、不改域类型）· **ADR-005**（域形 vs
   provider-agnostic infra port category line → `KeyProvider` 归 `diport`，本 ADR 复用不重证）· **ADR-011**
   （AAD 必填 / 上下文派生 / envelope / 轮换 / no-decrypt-in-debug 通用语义，本 ADR 继承不重证）
@@ -27,10 +26,13 @@
 
 ## 1. 背景
 
-`settings::ConfigValue`（`crates/settings/src/domain/mod.rs`）当前是 opaque `String` newtype：Debug 已脱敏
+2026-06-27 本 ADR 做决策时，`settings::ConfigValue`（`crates/settings/src/domain/mod.rs`）是 opaque `String` newtype：Debug 已脱敏
 （`ConfigValue(<redacted>)`）、`SettingKey::parse` 用子串黑名单（`secret`/`token`/`password`/`credential`）fail-closed
 拒敏感 key——但这两项都只作用在 **observe 面 + 写入校验**，**落库仍是明文**：Postgres `config_entries.value text NOT NULL`
-（`adapters/postgres/migrations/0006_create_config.sql`）持久态在脱敏边界之外。这正是 P1-9 capability gap 的 at-rest 缺口。
+（`adapters/postgres/migrations/0006_create_config.sql`）持久态在脱敏边界之外。这是本 ADR 需要闭合的 at-rest 问题。
+
+后续 #1465–#1467 与 #1477 已将设计落到 `KeyProvider`、protection/AAD 类型、contract protection 校验、
+`0029_add_config_value_encryption.sql` 及 settings protection/maintenance 集成测试；本节仅记录决策时的输入，不是当前状态清单。
 
 ADR-011 已把**字段级数据保护边界**立为架构单源：observe-redaction 与 storage-encryption 双层分离（D1），AAD 必填且
 **从受信上下文派生、绝不回灌 stored bytes**（D2），envelope `vN:` + DEK/EDK + 轮换（D3），deterministic 默认 off
@@ -39,7 +41,7 @@ ADR-011 已把**字段级数据保护边界**立为架构单源：observe-redact
 「field」「scheme-version」维度具体取什么？存储列怎么演进才既满足 only-add 迁移又支持轮换/backfill？旧明文怎么透明读？
 回滚到底指什么？错误怎么分流？seal 与 DB 事务谁先谁后？
 
-本 ADR 把这些 settings 具体问题钉死，作为 **settings ConfigValue 静态加密的设计单源**，供底座落地后的实现 PR 直接执行。
+本 ADR 把这些 settings 具体问题钉死，作为 **settings ConfigValue 静态加密的设计单源**，并作为后续实现 PR 的决策输入。
 **本 ADR 不引入任何新 crate / 新分层**——`AADForConfig` 归 settings、通用 `Aad`/envelope 归 `secure`、`KeyProvider` 归
 `diport`、加解密接缝落 `adapters/postgres` 持久化边界，全部沿用既有结构。
 
@@ -50,7 +52,7 @@ ADR-011 已把**字段级数据保护边界**立为架构单源：observe-redact
 `ConfigValue` 是 **ADR-004 冻结终态**（opaque-String、`pub(crate)`、`hydrate(明文)` / `value() -> &str` 契约不破）。
 静态加密是 **at-rest 持久化关注点**（ADR-011 D1），故：
 
-- **seal 点 = `config_repo::cas_insert`（写）**：`cas_insert` 当前 bind `entry.value()` 明文；加密后改 bind
+- **seal 点 = `config_repo::cas_insert`（写）**：决策时 `cas_insert` bind `entry.value()` 明文；落地实现改为 bind
   `value_enc`/`key_id`/`protection_scheme`（`value` bind NULL）。
 - **open 点 = `config_repo::hydrate_row`（读）**：按 `protection_scheme` 分支（D6），密文→明文后再
   `ConfigEntry::hydrate(key, 明文, tenant, version)`。`ConfigValue` 全程**不知道**自己被加密过。
@@ -269,20 +271,21 @@ seal（含 KeyProvider/Vault 生成/包裹 DEK 的**网络往返**）必须在 `
 事务体只 bind 已封装字节。**禁止**持 DB 事务 / 行锁跨 KMS 网络调用（会把锁时长与事务存活绑到 KMS 延迟）。逻辑 seal 点 =
 「先产出 envelope 字节，**再**进 `business_write` 闭包 INSERT」。ADR-011 未触及事务/KMS 调用顺序，settings 落地须显式遵守。
 
-### D9 — 错误分流（**MUST 落地，归实现 PR**）
+### D9 — 决策时错误分流（已落地）
 
-`ConfigRepoError`（现 `#[non_exhaustive]`，仅 `VersionConflict`/`Storage`）**必须（MUST）**新增**两个**变体：
+决策时 `ConfigRepoError`（`#[non_exhaustive]`）仅有 `VersionConflict`/`Storage`，因此本 ADR 要求新增两个变体；
+当前 `crates/settings/src/domain/mod.rs` 已承载：
 
 - **`ProtectionUnavailable`**（对应 F1：KeyProvider/KMS 不可达，瞬态可重试）
 - **`ProtectionAuthFailure`**（对应 F5：AEAD tag 校验失败 = 篡改/跨租/降级，安全事件、不可重试、触发 security incident）
 
-单变体无法达成 F1/F5 两路区分（把二者都映射成 `Storage` 会丢运维区分度）。加变体是对已 `#[non_exhaustive]` 枚举的
+单变体无法达成 F1/F5 两路区分（把二者都映射成 `Storage` 会丢运维区分度）。该变更是对 `#[non_exhaustive]` 枚举的
 **增量**，**不触碰冻结的 `ConfigValue`**、保持 fail-closed，给 ops 两条独立可告警信号——F1 走 infra-availability 告警、
 F5 走 security incident 告警（见 §3 `CONFIGENC-ERR-SPLIT-01`）。
 
 ### D10 — 保护策略分层（「重构」方向：config / secret-ref / feature-flag 三类不同保护）
 
-| 数据类 | 今 | 未来（落地后） | 保护机制 | 存储 | AAD 适用 |
+| 数据类 | 决策时基线 | 决策目标 | 保护机制 | 存储 | AAD 适用 |
 |--------|----|----------------|----------|------|----------|
 | **普通 config 值** | 明文 `value text` + 脱敏 Debug + 敏感 key 拒写 | 可选 at-rest AEAD envelope；**敏感 key 拒写保留** | 注入 `ValueTransformer`/`KeyProvider` 的 `secure::Envelope`（AES-GCM 随机 nonce）；`AADForConfig` 绑四维 | `config_entries`（D5 新增列） | **是**：tenant / config_key / `settings.config.value` / scheme |
 | **secret refs** | 坐标-only、材料从不落库（**已正确**） | 不变 | `SecretResolver` 在调用栈把坐标解析成 `SecretMaterial`（ZeroizeOnDrop、无 Clone） | `secret_refs`（仅坐标） | **N/A**：无材料落库，保护委托外部 store + transit auth |
@@ -342,16 +345,18 @@ fail-fast）：
   （沿用 `secure` + `diport` + `adapters/postgres` 持久化边界）；加密是纯 adapter-边界变换，域 `ConfigValue`（冻结）与 secret-ref
   路径不动，唯一域向改动是 adapter 注入 `KeyProvider`/`ValueTransformer`（构造器必填参）+ 每次读写建 `ProtectionContext`；
   AAD 必填 / 派生自上下文 / no-decrypt-in-debug / canonical 字节落地时由类型系统 + golden 免费成立（Hard）。
-- **负 / 代价**：① 本设计 **blocked-by 底座**（AEAD v2 + `KeyProvider`），落地排在其后；② `ProtectionContext` 接缝非平凡——
-  `config_repo` 现仅有裸 `TenantId` 参，须把 capability-gated `ProtectionContext`（含「授权维护」变体供 backfill）接进读写路径；
+- **决策时的负 / 代价**：① 本设计当时 **blocked-by 底座**（AEAD v2 + `KeyProvider`），规划落地排在其后；② `ProtectionContext` 接缝非平凡——
+  `config_repo` 当时仅有裸 `TenantId` 参，设计要求把 capability-gated `ProtectionContext`（含「授权维护」变体供 backfill）
+  接进读写路径；当前 `config_repo` 已使用 authenticated/authorized-maintenance `ProtectionContext`；
   ③ deterministic/blind-index 对 settings **实务无用**（config 按 key 查、从不按 value 查）⇒ 默认不开，仅靠 D5 列形态保留可扩展性。
-- **下游**：底座 framework → KeyProvider/Vault → **本设计落地（settings 持久化）**，按序勾 ADR-011 §D7 #1467 checklist + 本 ADR §3 INVARIANT。
+- **决策时的下游顺序**：底座 framework → KeyProvider/Vault → **本设计落地（settings 持久化）**；
+  现行实施状态以 tracker 和 §1 的 executable carrier 为准。
 
 ## 5. 威胁矩阵（继承 ADR-011 + settings 具体化）
 
 | 威胁 | 缺失的约束 | 缓解（本 ADR 决策） |
 |------|-----------|---------------------|
-| settings 静态明文落库（现状） | ConfigValue 明文落 `value text` | D1/D5 storage-encryption envelope（落地后 encrypt-on-write + backfill） |
+| settings 静态明文落库（决策时基线） | ConfigValue 明文落 `value text` | D1/D5 storage-encryption envelope（encrypt-on-write + backfill） |
 | copy `(ciphertext, stored_aad)` 跨租（open 用存储 AAD 自洽验签） | `open` 从 row 取 stored AAD 而非上下文派生 | D2 `FIELDPROT-AAD-DERIVE-FROM-CTX-01`（AAD 经 `ProtectionContext` 从受信坐标重派生，stored 仅标识/审计） |
 | 跨租/跨 key/跨字段密文重放 | AAD 缺失或可选 | D2/D3 四维复合 AAD + length-prefix + `MAGIC` 域分隔（`CONFIGENC-AAD-COMPOSE/CANON`） |
 | 改 scheme 试探降级 | scheme-version 可篡改 / 信任 stored byte | D4 scheme 取码器关联常量、`vN:` 仅选码器；AEAD tag 覆盖 AAD → 降级认证失败 fail-closed |
@@ -396,4 +401,3 @@ fail-fast）：
   （绑定到 message header、非机密、best practice）+ key commitment，对应 D2（AAD 绑定语义）/ D3（EDK 结构）。
 - `ref: iqlusioninc/crates secrecy/src/lib.rs@main`（https://docs.rs/secrecy）— `Secret<T>` + `ExposeSecret`，`Debug` =
   `[REDACTED]` + `Drop` zeroize，对应 D6/§3 no-decrypt-in-debug（解密产出经 `secrecy::Secret`）。
-- AADForConfig 字节编码前身参考 GoCell `configcore/crypto/aad.go`（capability-gap P1-9 指认 settings 加密路径 + AADForConfig）。

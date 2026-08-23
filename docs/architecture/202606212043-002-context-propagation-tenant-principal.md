@@ -8,8 +8,7 @@
 > `rss-request-context::TenantId`，`runctx::AppCtx` 直接消费该类型；本文其余 context 传播、principal 擦除、
 > fail-closed 与 diagctx 决策继续有效。下文旧路径保留为历史迁移记录，不构成 alias、shim 或兼容 authority。
 >
-> 上游冻结：`docs/migration-from-gocell/gocell-rust-crate-mapping.md` §二.1 ·
-> `docs/migration-from-gocell/gocell-rewrite-sequence.md` §P1.5
+> 决策顺序：在 listener 与组合根扩展前先冻结 context 传播接缝，避免后续在每条请求链上重复改签名。
 >
 > 约束源（本 ADR 引用、不复述）：`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`
 > `crates/observ`、`secure::redact_error` 与 typed metric enums · `CLAUDE.md`
@@ -27,11 +26,11 @@ GoCell（Go）用单一 `context.Context` 同时承载两类语义完全不同�
 - **可观测 ID**：trace / correlation / request / cell —— 诊断信号，喂 slog + otel + 关联。
 - **控制流值**：tenant / principal —— 授权判定的输入（RLS tenant 边界、`RowScope` 派生、PDP 决策）。
 
-外加取消（cancel）与 deadline。Rust **没有 ambient context**，三条直译路都更差（`gocell-rust-tradeoff.md` §1）：
+外加取消（cancel）与 deadline。Rust **没有 ambient context**，三条直译路都不能同时保持显式权限边界与可用性：
 显式传参污染几乎每个函数签名；纯 `tokio::task_local` 对这套丰富 ID 集很别扭；自建 Context struct 到处传又回到显式传参。
 
-而 P2 组合根（装配骨架 + listener）会重度依赖「ctx 全程穿透」。若不先冻结传播接缝，P2 之后到处返工
-（`gocell-rewrite-sequence.md` §P1.5：「**必须在动 P2 之前先定**」）。本 ADR 即该接缝冻结的形式化记录。
+而 listener 与组合根会重度依赖「ctx 全程穿透」。若不先冻结传播接缝，后续每增加一条请求链都会扩大返工面。
+本 ADR 即该接缝冻结的形式化记录。
 
 关键事实：诊断信号与授权控制流**本质不同**——span 字段可被采样丢弃、可被任意层改写、是字符串擦除的；
 而 tenant/principal 是 row-scope 授权闸门的输入，必须精确、不可丢、不可被下游伪造。二者混在一个载体里

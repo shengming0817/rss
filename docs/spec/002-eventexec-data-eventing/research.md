@@ -16,8 +16,9 @@
 - **ref**: ADR-003；diport/src/lib.rs:7-46。
 
 ### D3. 持久化库选型
-- **postgres** = `sqlx`（编译期查询校验 + `sqlx::migrate!` 命名空间；outbox/inbox/DLX）；**amqp** = `lapin`；**redis** = `redis`（distlock/CAS/历史 replaydeps 后端，不再作为 runtime event consumer claimer）。
-- **ref**: gocell-rust-directory-structure §四 工具链清单；framework-comparison（omicron db 层 RLS / SET LOCAL；lapin AMQP）。
+- **postgres** = `sqlx`（编译期查询校验 + `sqlx::migrate!` 命名空间；outbox/inbox/DLX）；**amqp** = `lapin`；**redis** = `deadpool-redis`（distlock/CAS 后端，不作为 runtime event consumer claimer）。
+- **ref**: `Cargo.toml` 与 `adapters/{postgres,amqp,redis}/Cargo.toml` 的当前依赖/feature；
+  `docs/references/framework-comparison.md`（sqlx/PostgreSQL RLS 与 lapin AMQP 的上游对标）。
 
 ### D4. topology-gated resolver fail-closed
 - **Decision**: resolver 在 demo(in-mem)/durable 间选型；eventtransport durable 使用 broker+PG inbox/DLX，Redis 只随需要它的 runtime 原语启用。durable 缺对应配置 → 启动期 `Err`，绝不回落 in-mem。in-mem 原语 sealed（`pub(crate)` + resolver 私有构造），生产代码类型层不可达。

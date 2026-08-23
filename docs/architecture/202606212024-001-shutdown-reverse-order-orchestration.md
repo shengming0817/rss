@@ -3,11 +3,12 @@
 - 状态：Accepted（spike RW-G0.6 接缝冻结）· **Amended**（PR-diport #1049，ManagedResource 派发收敛，见下「落地修订」）
 - 日期：2026-06-21（修订：2026-06-22）
 - 关联：Issue #996（RW-G0.6 spike）· Epic #991（最大并行迁移）· 修订单元 #1049
-- 阶段：G0「接缝冻结」——重写顺序见 `docs/migration-from-gocell/gocell-rewrite-sequence.md` P2/§三
+- 阶段：G0「接缝冻结」——先固定资源关闭协议与逆序编排，再扩展依赖这一语义的 runtime 组合
 - 落地：`crates/bootstrap/src/shutdown.rs`（编排）+ `crates/diport/src/managed_resource.rs`（port trait）
 
 > 本 ADR 是 RSS workspace 的首个架构决策记录，确立**进程关闭时资源按依赖逆序 await 关干净**的范式。
-> 这是 G0 阶段要冻结的边界之一（rewrite-sequence §「历史里代价最大的晚做」：边界越晚改越贵）。
+> 这是 G0 阶段要冻结的边界之一：所有 runtime 资源都依赖关闭协议，若在组合根扩展后再改，
+> 会迫使每个 provider 和 lifecycle 调用点同步返工。
 
 ---
 

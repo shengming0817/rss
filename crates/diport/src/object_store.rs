@@ -1,6 +1,5 @@
 //! `ObjectStore` —— 对象存储 provider DI port（可替换：aws-sdk-s3 / 未来 MinIO / GCS 等 S3-兼容后端）。
 //!
-//! 对标 GoCell `s3.ObjectUploader`（`aws-sdk-go-v2`，`docs/migration-from-gocell/gocell-package-overview.md`）。
 //! provider-agnostic：bucket / endpoint / 凭据是 **adapter 构造配置**，不进 port——port 只认对象 key + 字节，
 //! 故同一 port 可被任意 S3-兼容 provider 实现（与 cert-manager / SPIFFE 的 provider-agnostic 范式一致）。
 //!
