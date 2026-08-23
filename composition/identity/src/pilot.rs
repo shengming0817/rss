@@ -1559,18 +1559,24 @@ impl DeviceIdentityPilot {
             reconcile_token,
             move |task_token| scheduler.run(task_token),
         );
+        let ingress_mqtt = Arc::clone(&mqtt);
+        let ingress_task_control = ingress_control.clone();
+        let ingress_shutdown_failed = Arc::clone(&transport_shutdown_failed);
         let ingress_token = cancellation.child_token();
         let ingress_task =
             spawn_pilot_task("deviceidentity-ingress", ingress_token, move |task_token| {
                 run_ingress_loop(
                     repository,
-                    Arc::clone(&mqtt),
+                    ingress_mqtt,
                     relay_budget.settle_timeout(),
                     task_token,
-                    ingress_control.clone(),
-                    Arc::clone(&transport_shutdown_failed),
+                    ingress_task_control,
+                    ingress_shutdown_failed,
                 )
             });
+        let command_relay_outbox = Arc::clone(&outbox);
+        let command_relay_publisher = publisher.clone();
+        let command_relay_task_control = command_relay_control.clone();
         let command_relay_token = cancellation.child_token();
         let command_relay_task = spawn_pilot_task(
             "deviceidentity-command-relay",
@@ -1578,16 +1584,17 @@ impl DeviceIdentityPilot {
             move |task_token| {
                 DeviceRelayRuntime {
                     kind: DeviceRelayKind::Command,
-                    outbox: Arc::clone(&outbox),
-                    publisher: publisher.clone(),
+                    outbox: command_relay_outbox,
+                    publisher: command_relay_publisher,
                     config: command_relay,
                     budget: relay_budget,
                     cancellation: task_token,
-                    control: command_relay_control.clone(),
+                    control: command_relay_task_control,
                 }
                 .run()
             },
         );
+        let receipt_relay_task_control = receipt_relay_control.clone();
         let receipt_relay_token = cancellation.child_token();
         let receipt_relay_task = spawn_pilot_task(
             "deviceidentity-receipt-relay",
@@ -1600,7 +1607,7 @@ impl DeviceIdentityPilot {
                     config: receipt_relay,
                     budget: relay_budget,
                     cancellation: task_token,
-                    control: receipt_relay_control.clone(),
+                    control: receipt_relay_task_control,
                 }
                 .run()
             },

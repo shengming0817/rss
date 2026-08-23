@@ -1,7 +1,7 @@
 //! `Locker` —— typed 分布式互斥锁 facade：把 `LockKey` + TTL 经 [`diport::DynLockStore`] 落地，产出
 //! 持锁凭据 [`LockGrant`]（key + fencing token + ttl）。
 //!
-//! 锁无 payload（区别于 `StateCas` 的 typed `T`），故本 facade 不序列化——只做类型映射：
+//! 锁无 payload（区别于 crate-private maintenance state-CAS 的 typed `T`），故本 facade 不序列化——只做类型映射：
 //! `LockKey` ↔ `diport::LockStoreKey`、`FencingToken` ↔ `vocab::Epoch`、port outcome ↔ `Option<LockGrant>`、
 //! `diport::LockStoreError` ↔ `DistError::Transport`。
 //!

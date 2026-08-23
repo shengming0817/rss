@@ -141,7 +141,8 @@ pub use acker::{
 pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
 pub use broker_acceptance::{BrokerAcceptanceMint, BrokerAccepted};
 pub use cas_store::{
-    CasStore, CasStoreError, CasStoreKey, CasStoreOutcome, CasStoreRequest, DynCasStore,
+    CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, DynCasStore, GlobalCasResource,
+    GlobalCasStoreKey,
 };
 pub use checkpoint_store::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,

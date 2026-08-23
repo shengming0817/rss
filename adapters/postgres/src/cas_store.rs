@@ -147,7 +147,8 @@ mod smoke {
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
-    use diport::{CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, ManagedResource};
+    use diport::{CasStore, CasStoreOutcome, CasStoreRequest, GlobalCasStoreKey, ManagedResource};
+    use sha2::{Digest, Sha256};
 
     use crate::{PgConfig, PgPassword, PgStore};
 
@@ -159,8 +160,12 @@ mod integration_tests {
         new_value: &[u8],
         expected_token: Option<vocab::Epoch>,
     ) -> CasStoreRequest {
+        let topology_scope_sha256: [u8; 32] = Sha256::digest(key.as_bytes()).into();
         CasStoreRequest {
-            key: CasStoreKey::new(key),
+            key: GlobalCasStoreKey::for_resource(
+                diport::GlobalCasResource::OutboxBacklog,
+                topology_scope_sha256,
+            ),
             expected: expected.map(|expected| Vec::from(expected).into()),
             new_value: Vec::from(new_value).into(),
             expected_token,

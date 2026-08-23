@@ -1,17 +1,35 @@
-//! distributed — RSS 分布式原语（provider-agnostic 值类型）+ typed state-CAS facade。
+//! distributed — RSS 分布式原语（provider-agnostic 值类型）与 global maintenance coordination。
 //!
-//! 提供 fencing token 单调性、分布式锁 key、CAS 请求/结果、共识传输消息和节点角色。
-//! distlock / CAS DI port trait 集中在 `diport`；本 crate 定义值类型并实现 [`StateCas`]（state-CAS）/
-//! [`Locker`]（分布式互斥锁）facade。
+//! 提供 fencing token 单调性、分布式锁 key、共识传输消息和节点角色。distlock / CAS DI port trait
+//! 集中在 `diport`；本 crate 公开 [`Locker`]（分布式互斥锁）facade，state-CAS 仅服务于内部 sealed
+//! maintenance lane，不暴露无 tenant/scope 义务的通用 facade。
 //!
 //! ref: databendlabs/openraft openraft/src/lib.rs@main
 //!   LogId/Vote 单调性 = fencing 语义；ServerState = NodeRole。
+//!
+//! state-CAS 是 crate-private 的 global maintenance implementation detail；外部 consumer
+//! 不能恢复旧的无 scope facade：
+//!
+//! ```compile_fail
+//! use distributed::CasKey;
+//! ```
+//!
+//! ```compile_fail
+//! use distributed::StateCas;
+//! ```
+//!
+//! ```compile_fail
+//! use distributed::CasRequest;
+//! ```
+//!
+//! ```compile_fail
+//! use distributed::CasOutcome;
+//! ```
 
 mod cas;
 mod locker;
 mod maintenance;
 mod transport;
-pub use cas::StateCas;
 pub use locker::Locker;
 pub use maintenance::{
     CoordinatedRetentionSweeper, InboxBacklogMaintenance, MaintenanceCoordinator,
@@ -77,23 +95,6 @@ pub enum LockKeyError {
     NotCanonical,
 }
 
-/// CAS 操作 key（newtype，不与 `LockKey` 或裸 `String` 混用）。
-/// typed facade key，经 `StateCas` 映射为 `diport::CasStoreKey` 下沉端口。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CasKey(String);
-
-impl CasKey {
-    /// 构造 CAS key。
-    pub fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
-    }
-
-    /// 返回底层字符串切片。
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 /// 分布式锁授权凭据 —— **不可伪造的 opaque capability**。字段私有 + 仅 crate 内 [`LockGrant::new`] 构造，
 /// 故仅 [`Locker`] 能从 provider outcome mint；外部 crate 无法构造 ⇒ token-as-capability 由**类型系统封闭**
 /// （非运行期约定）：无法伪造 grant 调 `release`/`renew` 顶替持有者。外部经 getter 只读。
@@ -127,60 +128,6 @@ impl LockGrant {
     /// 锁的租约时长（holder 须在过期前 `renew` 续租；超时未续 ⇒ 他者可接管，token 单调递增）。
     pub fn ttl(&self) -> std::time::Duration {
         self.ttl
-    }
-}
-
-/// CAS 请求（对齐 openraft client_write typed AppData）。
-#[derive(Clone)]
-pub struct CasRequest<T> {
-    pub key: CasKey,
-    pub expected: Option<T>,
-    pub new_value: T,
-    pub token: Option<FencingToken>,
-}
-
-/// CAS 操作结果。
-#[derive(Clone)]
-#[non_exhaustive]
-pub enum CasOutcome<T> {
-    /// CAS 成功应用，返回新 fencing token。
-    Applied { token: FencingToken },
-    /// CAS 冲突，当前值与 expected 不符。
-    Conflict { current: Option<T> },
-    /// CAS 被 fence：`expected_token` 低于该 key 当前 token（旧 leader stale 写被挡）。返回当前 token
-    /// 供调用方重读 / 停写重选举——fence 是**预期控制流**（与 [`CasOutcome::Conflict`] 同档、非 error），
-    /// 对齐 diport 端口层 `CasStoreOutcome::Fenced`，不把高水位 token 压扁进无字段错误。
-    Fenced { token: FencingToken },
-}
-
-/// PII 边界：手写 `Debug` 对 payload 字段（`expected`/`new_value`，可能含敏感 MDM 设备状态/凭据）输出
-/// `<redacted>`；`key`/`token` 是路由/版本元数据，可观测。与 diport 端口层 `CasStoreRequest` 脱敏纪律一致
-/// （INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }同源）。
-impl<T> std::fmt::Debug for CasRequest<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CasRequest")
-            .field("key", &self.key)
-            .field("expected", &"<redacted>")
-            .field("new_value", &"<redacted>")
-            .field("token", &self.token)
-            .finish()
-    }
-}
-
-/// PII 边界：`Conflict.current`（当前状态 payload）输出 `<redacted>`；`Applied.token` / `Fenced.token`
-/// 是版本元数据，可观测。
-impl<T> std::fmt::Debug for CasOutcome<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CasOutcome::Applied { token } => {
-                f.debug_struct("Applied").field("token", token).finish()
-            }
-            CasOutcome::Conflict { .. } => f
-                .debug_struct("Conflict")
-                .field("current", &"<redacted>")
-                .finish(),
-            CasOutcome::Fenced { token } => f.debug_struct("Fenced").field("token", token).finish(),
-        }
     }
 }
 
@@ -221,12 +168,12 @@ pub enum NodeRole {
 
 /// distributed crate 错误类型。
 ///
-/// `#[non_exhaustive]` 含**预留扩展点**：当前 facade（[`StateCas`] / [`Locker`]）把「冲突 / fence / 已持有」
-/// 等表达为 **typed outcome**（`CasOutcome::{Conflict,Fenced}` / `Locker::acquire→Ok(None)`，非 error），
+/// `#[non_exhaustive]` 含**预留扩展点**：当前 facade 把「已持有」表达为 typed outcome
+///（`Locker::acquire→Ok(None)`，非 error），
 /// 故下列 variant 当前不由任一 facade 返回；保留供未来生产 provider（raft transport / etcd-lock 等）的
 /// **error 路径**使用，删除前须确认无 provider 需要：
 /// - [`DistError::NotLeader`]：共识 provider 非 leader（raft transport）。
-/// - [`DistError::FencingMismatch`]：fencing 失配（CAS 现以 `CasOutcome::Fenced` 表达，预留 provider error 形态）。
+/// - [`DistError::FencingMismatch`]：fencing 失配的预留 provider error 形态。
 /// - [`DistError::LockAlreadyHeld`]：锁已被持有（`Locker::acquire` 现以 `Ok(None)` 表达，预留 provider error 形态）。
 ///
 /// 当前 facade 实际返回的是 [`DistError::Transport`]（infra 故障，可重试）与 [`DistError::Fatal`]（不可恢复 /
@@ -237,13 +184,13 @@ pub enum DistError {
     /// 预留：共识 provider 非 leader（当前无 facade 返回，见枚举级文档）。
     #[error("not leader")]
     NotLeader,
-    /// 预留：fencing 失配（当前 CAS 以 `CasOutcome::Fenced` 表达，无 facade 返回此 error）。
+    /// 预留：fencing 失配（当前无公开 facade 返回此 error）。
     #[error("fencing token mismatch")]
     FencingMismatch,
     /// 预留：锁已被持有（当前 `Locker::acquire` 以 `Ok(None)` 表达，无 facade 返回此 error）。
     #[error("lock already held")]
     LockAlreadyHeld,
-    /// infra 故障（provider 端口返回错误），可重试。`StateCas` / `Locker` 实际返回此变体。
+    /// infra 故障（provider 端口返回错误），可重试。内部 maintenance CAS / [`Locker`] 返回此变体。
     #[error("transport error")]
     Transport,
     /// 不可恢复错误 / 未知 typed-outcome 变体的 fail-safe 兜底。
@@ -325,22 +272,16 @@ mod smoke {
         }
     }
 
-    /// 证明 FencingToken / CasKey 往返正确 + LockKey fail-closed parse（接受 canonical、拒空/空白/控制字符）。
+    /// 证明 FencingToken 往返正确 + LockKey fail-closed parse（接受 canonical、拒空/空白/控制字符）。
     #[test]
     #[allow(clippy::expect_used)]
     // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out。
-    fn fencing_token_and_keys_round_trip() {
+    fn fencing_token_and_lock_key_round_trip() {
         // FencingToken 真实调用。
         let t = FencingToken::new(42);
         assert_eq!(t.value(), 42);
         let t0 = FencingToken::new(0);
         assert_eq!(t0.value(), 0);
-
-        // CasKey 真实调用。
-        let k = CasKey::new("tenant-1/state");
-        assert_eq!(k.as_str(), "tenant-1/state");
-        let k2 = CasKey::new(String::from("owned-string"));
-        assert_eq!(k2.as_str(), "owned-string");
 
         // LockKey fail-closed parse：canonical 接受。
         let lk = LockKey::parse("tenant-2/reconcile/cert-9").expect("canonical");
@@ -383,37 +324,6 @@ mod smoke {
         );
     }
 
-    /// 证明 CasOutcome::<u64> Applied / Conflict 各 variant 可在运行时构造。
-    #[test]
-    fn cas_outcome_constructible() {
-        let applied: CasOutcome<u64> = CasOutcome::Applied {
-            token: FencingToken::new(1),
-        };
-        assert!(matches!(applied, CasOutcome::Applied { token } if token.value() == 1));
-
-        let conflict: CasOutcome<u64> = CasOutcome::Conflict { current: Some(42) };
-        assert!(matches!(
-            conflict,
-            CasOutcome::Conflict { current: Some(42) }
-        ));
-    }
-
-    /// 证明 CasRequest 字段布局正确，key/expected/new_value/token 可构造。
-    #[test]
-    fn cas_request_field_layout() {
-        let key = CasKey::new("req-key");
-        let req: CasRequest<u32> = CasRequest {
-            key,
-            expected: Some(0u32),
-            new_value: 1u32,
-            token: Some(FencingToken::new(3)),
-        };
-        assert_eq!(req.key.as_str(), "req-key");
-        assert_eq!(req.expected, Some(0u32));
-        assert_eq!(req.new_value, 1u32);
-        assert_eq!(req.token.map(|t| t.value()), Some(3));
-    }
-
     /// 证明 LockGrant crate 内 mint（`new`）+ getter 读回（字段私有，外部不可伪造）。
     #[test]
     #[allow(clippy::expect_used)]
@@ -434,48 +344,5 @@ mod smoke {
     fn lock_grant_send_sync() {
         fn _assert_send_sync<T: Send + Sync>() {}
         _assert_send_sync::<LockGrant>();
-    }
-
-    /// PII 边界：CasRequest<T>/CasOutcome<T> 手写 Debug 对 expected/new_value/Conflict.current 输出
-    /// `<redacted>`；key/token 可观测（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }同源）。
-    #[test]
-    fn cas_request_and_outcome_debug_redacts_payload() {
-        // anti-vacuity：裸 &str 的 Debug 包含原始值。
-        assert!(format!("{:?}", "topsecret").contains("topsecret"));
-
-        let req: CasRequest<String> = CasRequest {
-            key: CasKey::new("device-1/state"),
-            expected: Some("topsecret".into()),
-            new_value: "new-secret".into(),
-            token: Some(FencingToken::new(7)),
-        };
-        let dbg = format!("{req:?}");
-        assert!(
-            !dbg.contains("topsecret"),
-            "expected 不应在 Debug 输出中: {dbg}"
-        );
-        assert!(
-            !dbg.contains("new-secret"),
-            "new_value 不应在 Debug 输出中: {dbg}"
-        );
-        assert!(
-            dbg.contains("<redacted>"),
-            "Debug 输出应含 <redacted>: {dbg}"
-        );
-        assert!(
-            dbg.contains("device-1/state"),
-            "key 应在 Debug 输出中: {dbg}"
-        );
-        assert!(dbg.contains('7'), "token 值应在 Debug 输出中: {dbg}");
-
-        let conflict: CasOutcome<String> = CasOutcome::Conflict {
-            current: Some("topsecret".into()),
-        };
-        let dbg = format!("{conflict:?}");
-        assert!(
-            !dbg.contains("topsecret"),
-            "Conflict.current 不应在 Debug 输出中: {dbg}"
-        );
-        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
     }
 }

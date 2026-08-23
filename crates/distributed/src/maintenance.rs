@@ -18,9 +18,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tokio::time;
 
-use crate::{
-    CasKey, CasOutcome, CasRequest, DistError, FencingToken, LockGrant, LockKey, Locker, StateCas,
-};
+use crate::cas::{CasOutcome, CasRequest, StateCas};
+use crate::{DistError, FencingToken, LockGrant, LockKey, Locker};
 
 #[cfg(test)]
 const MAINTENANCE_RENEW_INTERVAL: Duration = Duration::from_millis(5);
@@ -31,9 +30,8 @@ mod sealed {
 
 #[doc(hidden)]
 pub trait MaintenanceLane: sealed::Sealed {
-    const NAME: &'static str;
-    const LOCK_KEY: &'static str;
-    const CAS_KEY: &'static str;
+    /// Single typed identity owner for lock, CAS, and observability projections.
+    const RESOURCE: diport::GlobalCasResource;
 }
 
 /// Typed outbox backlog observation lane.
@@ -41,9 +39,7 @@ pub struct OutboxBacklogMaintenance;
 
 impl sealed::Sealed for OutboxBacklogMaintenance {}
 impl MaintenanceLane for OutboxBacklogMaintenance {
-    const NAME: &'static str = "outbox_backlog";
-    const LOCK_KEY: &'static str = "runtime/event/outbox-backlog";
-    const CAS_KEY: &'static str = "runtime/event/outbox-backlog";
+    const RESOURCE: diport::GlobalCasResource = diport::GlobalCasResource::OutboxBacklog;
 }
 
 /// Typed outbox retention lane, isolated from the continuously held backlog-observation lease.
@@ -51,9 +47,7 @@ pub struct OutboxRetentionMaintenance;
 
 impl sealed::Sealed for OutboxRetentionMaintenance {}
 impl MaintenanceLane for OutboxRetentionMaintenance {
-    const NAME: &'static str = "outbox_retention";
-    const LOCK_KEY: &'static str = "runtime/event/outbox-retention";
-    const CAS_KEY: &'static str = "runtime/event/outbox-retention";
+    const RESOURCE: diport::GlobalCasResource = diport::GlobalCasResource::OutboxRetention;
 }
 
 /// Typed inbox backlog maintenance lane.
@@ -61,9 +55,43 @@ pub struct InboxBacklogMaintenance;
 
 impl sealed::Sealed for InboxBacklogMaintenance {}
 impl MaintenanceLane for InboxBacklogMaintenance {
-    const NAME: &'static str = "inbox_backlog";
-    const LOCK_KEY: &'static str = "runtime/event/inbox-backlog";
-    const CAS_KEY: &'static str = "runtime/event/inbox-backlog";
+    const RESOURCE: diport::GlobalCasResource = diport::GlobalCasResource::InboxBacklog;
+}
+
+/// Opaque global CAS key minted only by this sealed maintenance module.
+///
+/// INVARIANT: CAS-GLOBAL-KEY-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code" }
+/// （private mint owner + closed maintenance resource constructors）。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GlobalCasKey(diport::GlobalCasStoreKey);
+
+impl GlobalCasKey {
+    fn for_lane<L: MaintenanceLane>(topology_scope_sha256: [u8; 32]) -> Self {
+        Self(diport::GlobalCasStoreKey::for_resource(
+            L::RESOURCE,
+            topology_scope_sha256,
+        ))
+    }
+
+    pub(crate) fn into_store_key(self) -> diport::GlobalCasStoreKey {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(id: u8) -> Self {
+        let mut digest = [0_u8; 32];
+        digest[31] = id;
+        Self(diport::GlobalCasStoreKey::for_resource(
+            diport::GlobalCasResource::OutboxBacklog,
+            digest,
+        ))
+    }
+}
+
+impl std::fmt::Debug for GlobalCasKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GlobalCasKey").field(&"<redacted>").finish()
+    }
 }
 
 /// Ownership-aware result of one coordinated operation.
@@ -94,7 +122,7 @@ pub struct MaintenanceCoordinator<L> {
     cas_state: Arc<Mutex<Option<CasState>>>,
     ttl: Duration,
     lock_key: String,
-    cas_key: String,
+    cas_key: GlobalCasKey,
     lane: PhantomData<fn() -> L>,
 }
 
@@ -155,14 +183,16 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
             digest.update(label.len().to_be_bytes());
             digest.update(label.as_bytes());
         }
-        let suffix = format!("{:x}", digest.finalize());
+        let topology_scope_sha256 = digest.finalize();
+        let suffix = format!("{topology_scope_sha256:x}");
+        let topology_scope_sha256: [u8; 32] = topology_scope_sha256.into();
         Self {
             locker: Arc::new(Mutex::new(Locker::new(lock_store))),
             state_cas: Arc::new(Mutex::new(StateCas::new(cas_store))),
             cas_state: Arc::new(Mutex::new(None)),
             ttl,
-            lock_key: format!("{}/{}", L::LOCK_KEY, suffix),
-            cas_key: format!("{}/{}", L::CAS_KEY, suffix),
+            lock_key: format!("{}/{}", L::RESOURCE.as_str(), suffix),
+            cas_key: GlobalCasKey::for_lane::<L>(topology_scope_sha256),
             lane: PhantomData,
         }
     }
@@ -172,7 +202,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
     // and every release path; splitting it obscures the fencing audit trail.
     async fn try_acquire(&self) -> Result<MaintenanceLease, DistError> {
         let key = LockKey::parse(&self.lock_key).map_err(|error| {
-            tracing::warn!(lane = L::NAME, error = %error, "maintenance lock key invalid");
+            tracing::warn!(lane = L::RESOURCE.label(), error = %error, "maintenance lock key invalid");
             DistError::Fatal
         })?;
         let grant = {
@@ -181,7 +211,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
         };
         let Some(grant) = grant else {
             tracing::debug!(
-                lane = L::NAME,
+                lane = L::RESOURCE.label(),
                 "maintenance standby: distributed lock held by peer"
             );
             return Ok(MaintenanceLease::Standby);
@@ -192,7 +222,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
         };
         let expected_state = *self.cas_state.lock().await;
         let request = CasRequest {
-            key: CasKey::new(&self.cas_key),
+            key: self.cas_key.clone(),
             expected: expected_state.map(|state| state.value),
             new_value: new_epoch,
             token: expected_state.and_then(|state| state.token),
@@ -215,7 +245,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
                     *self.cas_state.lock().await = None;
                     self.release_best_effort(grant).await;
                     tracing::debug!(
-                        lane = L::NAME,
+                        lane = L::RESOURCE.label(),
                         "maintenance standby: CAS key absent under contention"
                     );
                     return Ok(MaintenanceLease::Standby);
@@ -225,13 +255,20 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
                     token: None,
                 });
                 self.release_best_effort(grant).await;
-                tracing::debug!(lane = L::NAME, "maintenance standby: CAS conflict");
+                tracing::debug!(
+                    lane = L::RESOURCE.label(),
+                    "maintenance standby: CAS conflict"
+                );
                 Ok(MaintenanceLease::Standby)
             }
             CasOutcome::Fenced { token } => {
                 *self.cas_state.lock().await = None;
                 self.release_best_effort(grant).await;
-                tracing::debug!(lane = L::NAME, token = token.value(), "maintenance fenced");
+                tracing::debug!(
+                    lane = L::RESOURCE.label(),
+                    token = token.value(),
+                    "maintenance fenced"
+                );
                 Ok(MaintenanceLease::Standby)
             }
         }
@@ -240,7 +277,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
     async fn release_best_effort(&self, grant: LockGrant) {
         let locker = self.locker.lock().await;
         if let Err(error) = locker.release(grant).await {
-            tracing::warn!(lane = L::NAME, error = %error, "maintenance lock release failed");
+            tracing::warn!(lane = L::RESOURCE.label(), error = %error, "maintenance lock release failed");
         }
     }
 
@@ -257,7 +294,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
     ) -> Result<Option<LockGrant>, EngineError> {
         let Some(grant) = renewed.map_err(Self::renew_error_to_engine)? else {
             tracing::debug!(
-                lane = L::NAME,
+                lane = L::RESOURCE.label(),
                 "maintenance lease lost; cancelling current operation"
             );
             return Ok(None);
@@ -266,7 +303,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
     }
 
     fn renew_error_to_engine(error: DistError) -> EngineError {
-        tracing::warn!(lane = L::NAME, error = %error, "maintenance lock renew failed");
+        tracing::warn!(lane = L::RESOURCE.label(), error = %error, "maintenance lock renew failed");
         EngineError::new(EngineErrorKind::Transient)
     }
 
@@ -287,7 +324,7 @@ impl<L: MaintenanceLane> MaintenanceCoordinator<L> {
             Ok(MaintenanceLease::Standby) => Ok(None),
             Ok(MaintenanceLease::Active { grant }) => Ok(Some(grant)),
             Err(error) => {
-                tracing::warn!(lane = L::NAME, error = %error, "distributed maintenance coordinator failed");
+                tracing::warn!(lane = L::RESOURCE.label(), error = %error, "distributed maintenance coordinator failed");
                 Err(EngineError::new(EngineErrorKind::Transient))
             }
         }
@@ -477,35 +514,23 @@ mod tests {
             .locks
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        assert!(
-            locks
-                .keys()
-                .any(|key| key.starts_with("runtime/event/outbox-backlog/"))
-        );
-        assert!(
-            locks
-                .keys()
-                .any(|key| key.starts_with("runtime/event/outbox-retention/"))
-        );
-        assert!(
-            locks
-                .keys()
-                .any(|key| key.starts_with("runtime/event/inbox-backlog/"))
-        );
+        const TEST_SCOPE_SHA256: &str =
+            "09a7d352412717c7e0b93286eb544f83ddf6da4260b795e90aa44e8e58f5dadd";
+        let expected_keys = [
+            format!("runtime/event/outbox-backlog/{TEST_SCOPE_SHA256}"),
+            format!("runtime/event/outbox-retention/{TEST_SCOPE_SHA256}"),
+            format!("runtime/event/inbox-backlog/{TEST_SCOPE_SHA256}"),
+        ];
+        assert_eq!(locks.len(), expected_keys.len());
+        for key in &expected_keys {
+            assert!(locks.contains_key(key), "missing physical lock key {key}");
+        }
         drop(locks);
         let cas = store.cas.lock().unwrap_or_else(|error| error.into_inner());
-        assert!(
-            cas.keys()
-                .any(|key| key.starts_with("runtime/event/outbox-backlog/"))
-        );
-        assert!(
-            cas.keys()
-                .any(|key| key.starts_with("runtime/event/outbox-retention/"))
-        );
-        assert!(
-            cas.keys()
-                .any(|key| key.starts_with("runtime/event/inbox-backlog/"))
-        );
+        assert_eq!(cas.len(), expected_keys.len());
+        for key in &expected_keys {
+            assert!(cas.contains_key(key), "missing physical CAS key {key}");
+        }
         Ok(())
     }
 

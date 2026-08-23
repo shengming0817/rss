@@ -29,12 +29,12 @@ use consistency::{
     SagaLease, SagaLeaseOutcome, SagaOperatorReason, SagaReceiptScope, SeenState,
 };
 use diport::{
-    AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreKey, CasStoreOutcome,
+    AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreOutcome,
     CasStoreRequest, Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError,
     CheckpointVersion, Clock, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
-    FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError, LeaderElector,
-    LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore,
-    LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
+    FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError, GlobalCasStoreKey,
+    LeaderElector, LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome,
+    LockStore, LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
     OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
     PublisherError, SagaClaimOutcome, SagaClaimRequest, SagaCompensationProgress,
     SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore, SagaDurableStoreError,
@@ -976,7 +976,7 @@ impl FencedWriter for MemFencedWriter {
 // ── MemCasStore：in-mem state-CAS 替身（etcd-revision 条件写）──────────────────────────────────────
 
 /// `MemCasStore` 内部 HashMap 类型别名（规避 clippy::type_complexity）。
-type CasStateMap = HashMap<CasStoreKey, (Vec<u8>, vocab::Epoch)>;
+type CasStateMap = HashMap<GlobalCasStoreKey, (Vec<u8>, vocab::Epoch)>;
 
 /// in-mem state-CAS 替身（impl [`diport::CasStore`]）：per-key `(value, revision token)`，etcd-revision 条件写。
 /// 生产替身走 etcd/redis/postgres adapter；本 crate 仅测试/demo 用。
@@ -2781,6 +2781,12 @@ mod tests {
     const TOPIC: &str = "identity.session-created";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    fn global_cas_test_key(id: u8) -> GlobalCasStoreKey {
+        let mut digest = [0_u8; 32];
+        digest[31] = id;
+        GlobalCasStoreKey::for_resource(diport::GlobalCasResource::OutboxBacklog, digest)
+    }
+
     fn login_receipt() -> identity::ports::LoginProducerReceipt {
         identity::test_support::login_producer_receipt()
     }
@@ -4038,7 +4044,7 @@ mod tests {
         let store = MemCasStore::new();
         let outcome = store
             .compare_and_swap(CasStoreRequest {
-                key: CasStoreKey::new("k1"),
+                key: global_cas_test_key(1),
                 expected: None,
                 new_value: b"v1".to_vec().into(),
                 expected_token: None,
@@ -4058,7 +4064,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn match_applies_and_bumps_token() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k2");
+        let key = global_cas_test_key(2);
         // 首写
         store
             .compare_and_swap(CasStoreRequest {
@@ -4093,7 +4099,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn mismatch_conflicts() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k3");
+        let key = global_cas_test_key(3);
         store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
@@ -4125,7 +4131,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn expected_none_on_existing_conflicts() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k4");
+        let key = global_cas_test_key(4);
         store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
@@ -4158,7 +4164,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn stale_token_fenced() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k5");
+        let key = global_cas_test_key(5);
         store
             .compare_and_swap(CasStoreRequest {
                 key: key.clone(),
@@ -4190,7 +4196,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn token_monotonic_across_swaps() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k6");
+        let key = global_cas_test_key(6);
         // 首写 → token=1
         let r1 = store
             .compare_and_swap(CasStoreRequest {
@@ -4246,7 +4252,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn anti_vacuity_old_expected_after_write() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k7");
+        let key = global_cas_test_key(7);
         // 首写 v1
         store
             .compare_and_swap(CasStoreRequest {
@@ -4293,7 +4299,7 @@ mod tests {
         let store = MemCasStore::new();
         let outcome = store
             .compare_and_swap(CasStoreRequest {
-                key: CasStoreKey::new("absent-key"),
+                key: global_cas_test_key(8),
                 expected: Some(b"something".to_vec().into()),
                 new_value: b"new".to_vec().into(),
                 expected_token: None,
@@ -4312,7 +4318,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn equal_token_is_not_fenced() {
         let store = MemCasStore::new();
-        let key = CasStoreKey::new("k-equal-token");
+        let key = global_cas_test_key(9);
         // create → token=Epoch(1)
         store
             .compare_and_swap(CasStoreRequest {

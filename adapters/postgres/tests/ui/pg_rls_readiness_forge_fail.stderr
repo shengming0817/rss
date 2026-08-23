@@ -9,13 +9,10 @@ note: constructor is not visible here due to private fields
   |
   | pub struct PgRlsReadiness(AtomicBool);
   |                           ^^^^^^^^^^ private field
-help: you might have meant to use an associated function to build this type
+help: you might have meant to use the `verified` associated function
   |
 5 -     let _readiness = PgRlsReadiness(AtomicBool::new(true));
 5 +     let _readiness = PgRlsReadiness::verified();
-  |
-5 -     let _readiness = PgRlsReadiness(AtomicBool::new(true));
-5 +     let _readiness = PgRlsReadiness::for_test(_);
   |
 
 error[E0624]: method `mark` is private

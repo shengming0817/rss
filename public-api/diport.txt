@@ -300,6 +300,31 @@ impl core::marker::Unpin for diport::cas_store::CasStoreOutcome
 impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreOutcome
 impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreOutcome
+pub enum diport::cas_store::GlobalCasResource
+pub diport::cas_store::GlobalCasResource::InboxBacklog
+pub diport::cas_store::GlobalCasResource::OutboxBacklog
+pub diport::cas_store::GlobalCasResource::OutboxRetention
+impl diport::cas_store::GlobalCasResource
+pub const fn diport::cas_store::GlobalCasResource::as_str(self) -> &'static str
+pub const fn diport::cas_store::GlobalCasResource::label(self) -> &'static str
+impl core::clone::Clone for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::clone(&self) -> diport::cas_store::GlobalCasResource
+impl core::cmp::Eq for diport::cas_store::GlobalCasResource
+impl core::cmp::PartialEq for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::eq(&self, &diport::cas_store::GlobalCasResource) -> bool
+impl core::fmt::Debug for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::cas_store::GlobalCasResource
+impl core::marker::StructuralPartialEq for diport::cas_store::GlobalCasResource
+impl core::marker::Freeze for diport::cas_store::GlobalCasResource
+impl core::marker::Send for diport::cas_store::GlobalCasResource
+impl core::marker::Sync for diport::cas_store::GlobalCasResource
+impl core::marker::Unpin for diport::cas_store::GlobalCasResource
+impl core::marker::UnsafeUnpin for diport::cas_store::GlobalCasResource
+impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::GlobalCasResource
+impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::GlobalCasResource
 pub struct diport::cas_store::CasStoreError
 impl diport::cas_store::CasStoreError
 pub fn diport::cas_store::CasStoreError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
@@ -316,31 +341,10 @@ impl core::marker::Unpin for diport::cas_store::CasStoreError
 impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreError
 impl !core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreError
-pub struct diport::cas_store::CasStoreKey(_)
-impl diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::as_str(&self) -> &str
-pub fn diport::cas_store::CasStoreKey::new(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::clone::Clone for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::clone(&self) -> diport::cas_store::CasStoreKey
-impl core::cmp::Eq for diport::cas_store::CasStoreKey
-impl core::cmp::PartialEq for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::eq(&self, &diport::cas_store::CasStoreKey) -> bool
-impl core::fmt::Debug for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for diport::cas_store::CasStoreKey
-impl core::marker::Freeze for diport::cas_store::CasStoreKey
-impl core::marker::Send for diport::cas_store::CasStoreKey
-impl core::marker::Sync for diport::cas_store::CasStoreKey
-impl core::marker::Unpin for diport::cas_store::CasStoreKey
-impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreKey
-impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreKey
-impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreKey
 pub struct diport::cas_store::CasStoreRequest
 pub diport::cas_store::CasStoreRequest::expected: core::option::Option<diport::RedactedBytes>
 pub diport::cas_store::CasStoreRequest::expected_token: core::option::Option<vocab::epoch::Epoch>
-pub diport::cas_store::CasStoreRequest::key: diport::cas_store::CasStoreKey
+pub diport::cas_store::CasStoreRequest::key: diport::cas_store::GlobalCasStoreKey
 pub diport::cas_store::CasStoreRequest::new_value: diport::RedactedBytes
 impl core::clone::Clone for diport::cas_store::CasStoreRequest
 pub fn diport::cas_store::CasStoreRequest::clone(&self) -> diport::cas_store::CasStoreRequest
@@ -386,6 +390,27 @@ impl<'dynosaur_struct> !core::marker::Unpin for diport::DynCasStore<'dynosaur_st
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynCasStore<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynCasStore<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynCasStore<'dynosaur_struct>
+pub struct diport::cas_store::GlobalCasStoreKey(_)
+impl diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::as_str(&self) -> &str
+pub fn diport::cas_store::GlobalCasStoreKey::for_resource(diport::cas_store::GlobalCasResource, [u8; 32]) -> Self
+impl core::clone::Clone for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::clone(&self) -> diport::cas_store::GlobalCasStoreKey
+impl core::cmp::Eq for diport::cas_store::GlobalCasStoreKey
+impl core::cmp::PartialEq for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::eq(&self, &diport::cas_store::GlobalCasStoreKey) -> bool
+impl core::fmt::Debug for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Freeze for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Send for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Sync for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Unpin for diport::cas_store::GlobalCasStoreKey
+impl core::marker::UnsafeUnpin for diport::cas_store::GlobalCasStoreKey
+impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::GlobalCasStoreKey
+impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::GlobalCasStoreKey
 pub trait diport::cas_store::CasStore: core::marker::Send
 pub fn diport::cas_store::CasStore::compare_and_swap(&self, diport::cas_store::CasStoreRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::cas_store::CasStoreOutcome, diport::cas_store::CasStoreError>> + core::marker::Send
 pub fn diport::cas_store::CasStore::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::cas_store::CasStoreError>> + core::marker::Send
@@ -6358,6 +6383,31 @@ impl core::marker::Unpin for diport::pdp::FederatedAccessProfile
 impl core::marker::UnsafeUnpin for diport::pdp::FederatedAccessProfile
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::FederatedAccessProfile
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::FederatedAccessProfile
+pub enum diport::GlobalCasResource
+pub diport::GlobalCasResource::InboxBacklog
+pub diport::GlobalCasResource::OutboxBacklog
+pub diport::GlobalCasResource::OutboxRetention
+impl diport::cas_store::GlobalCasResource
+pub const fn diport::cas_store::GlobalCasResource::as_str(self) -> &'static str
+pub const fn diport::cas_store::GlobalCasResource::label(self) -> &'static str
+impl core::clone::Clone for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::clone(&self) -> diport::cas_store::GlobalCasResource
+impl core::cmp::Eq for diport::cas_store::GlobalCasResource
+impl core::cmp::PartialEq for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::eq(&self, &diport::cas_store::GlobalCasResource) -> bool
+impl core::fmt::Debug for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::cas_store::GlobalCasResource
+pub fn diport::cas_store::GlobalCasResource::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for diport::cas_store::GlobalCasResource
+impl core::marker::StructuralPartialEq for diport::cas_store::GlobalCasResource
+impl core::marker::Freeze for diport::cas_store::GlobalCasResource
+impl core::marker::Send for diport::cas_store::GlobalCasResource
+impl core::marker::Sync for diport::cas_store::GlobalCasResource
+impl core::marker::Unpin for diport::cas_store::GlobalCasResource
+impl core::marker::UnsafeUnpin for diport::cas_store::GlobalCasResource
+impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::GlobalCasResource
+impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::GlobalCasResource
 #[non_exhaustive] pub enum diport::KeyParseError
 pub diport::KeyParseError::Empty
 pub diport::KeyParseError::Malformed
@@ -7713,31 +7763,10 @@ impl core::marker::Unpin for diport::cas_store::CasStoreError
 impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreError
 impl !core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreError
-pub struct diport::CasStoreKey(_)
-impl diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::as_str(&self) -> &str
-pub fn diport::cas_store::CasStoreKey::new(impl core::convert::Into<alloc::string::String>) -> Self
-impl core::clone::Clone for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::clone(&self) -> diport::cas_store::CasStoreKey
-impl core::cmp::Eq for diport::cas_store::CasStoreKey
-impl core::cmp::PartialEq for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::eq(&self, &diport::cas_store::CasStoreKey) -> bool
-impl core::fmt::Debug for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for diport::cas_store::CasStoreKey
-pub fn diport::cas_store::CasStoreKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for diport::cas_store::CasStoreKey
-impl core::marker::Freeze for diport::cas_store::CasStoreKey
-impl core::marker::Send for diport::cas_store::CasStoreKey
-impl core::marker::Sync for diport::cas_store::CasStoreKey
-impl core::marker::Unpin for diport::cas_store::CasStoreKey
-impl core::marker::UnsafeUnpin for diport::cas_store::CasStoreKey
-impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::CasStoreKey
-impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::CasStoreKey
 pub struct diport::CasStoreRequest
 pub diport::CasStoreRequest::expected: core::option::Option<diport::RedactedBytes>
 pub diport::CasStoreRequest::expected_token: core::option::Option<vocab::epoch::Epoch>
-pub diport::CasStoreRequest::key: diport::cas_store::CasStoreKey
+pub diport::CasStoreRequest::key: diport::cas_store::GlobalCasStoreKey
 pub diport::CasStoreRequest::new_value: diport::RedactedBytes
 impl core::clone::Clone for diport::cas_store::CasStoreRequest
 pub fn diport::cas_store::CasStoreRequest::clone(&self) -> diport::cas_store::CasStoreRequest
@@ -9207,6 +9236,27 @@ impl core::marker::Unpin for diport::fenced_writer::FencedWriterError
 impl core::marker::UnsafeUnpin for diport::fenced_writer::FencedWriterError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::fenced_writer::FencedWriterError
 impl !core::panic::unwind_safe::UnwindSafe for diport::fenced_writer::FencedWriterError
+pub struct diport::GlobalCasStoreKey(_)
+impl diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::as_str(&self) -> &str
+pub fn diport::cas_store::GlobalCasStoreKey::for_resource(diport::cas_store::GlobalCasResource, [u8; 32]) -> Self
+impl core::clone::Clone for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::clone(&self) -> diport::cas_store::GlobalCasStoreKey
+impl core::cmp::Eq for diport::cas_store::GlobalCasStoreKey
+impl core::cmp::PartialEq for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::eq(&self, &diport::cas_store::GlobalCasStoreKey) -> bool
+impl core::fmt::Debug for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for diport::cas_store::GlobalCasStoreKey
+pub fn diport::cas_store::GlobalCasStoreKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Freeze for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Send for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Sync for diport::cas_store::GlobalCasStoreKey
+impl core::marker::Unpin for diport::cas_store::GlobalCasStoreKey
+impl core::marker::UnsafeUnpin for diport::cas_store::GlobalCasStoreKey
+impl core::panic::unwind_safe::RefUnwindSafe for diport::cas_store::GlobalCasStoreKey
+impl core::panic::unwind_safe::UnwindSafe for diport::cas_store::GlobalCasStoreKey
 pub struct diport::JwtSigningBinding<P: diport::pdp::TokenProfileMarker>
 impl diport::pdp::JwtSigningBinding<diport::pdp::RssAccessProfile>
 pub fn diport::pdp::JwtSigningBinding<diport::pdp::RssAccessProfile>::rss_access(diport::signer::KeyId) -> Self

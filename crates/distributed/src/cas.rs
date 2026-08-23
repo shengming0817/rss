@@ -1,5 +1,5 @@
-//! `StateCas` —— typed state-CAS facade：把 `CasRequest<T>` 序列化成 **canonical JSON** 字节经
-//! [`diport::DynCasStore`] 落地。
+//! Crate-private global maintenance state-CAS：把 `CasRequest<T>` 序列化成 **canonical JSON**
+//! 字节经 [`diport::DynCasStore`] 落地。
 //!
 //! 泛型 `T` 留在本层（dyn port 不能有泛型方法，ADR-003 §4.6）。
 //!
@@ -15,8 +15,50 @@
 //! ref: databendlabs/openraft openraft/src/lib.rs（LogId/Vote 单调性 = fencing token）；
 //! ref: RFC 8785 JSON Canonicalization Scheme via `serde_json_canonicalizer`.
 
-use crate::{CasOutcome, CasRequest, DistError, FencingToken};
+use crate::maintenance::GlobalCasKey;
+use crate::{DistError, FencingToken};
 use diport::CasStore as _;
+
+/// Crate-private typed CAS 请求；仅 sealed maintenance coordinator 可生产消费。
+#[derive(Clone)]
+pub(crate) struct CasRequest<T> {
+    pub(crate) key: GlobalCasKey,
+    pub(crate) expected: Option<T>,
+    pub(crate) new_value: T,
+    pub(crate) token: Option<FencingToken>,
+}
+
+/// Crate-private typed CAS 结论。
+#[derive(Clone)]
+pub(crate) enum CasOutcome<T> {
+    Applied { token: FencingToken },
+    Conflict { current: Option<T> },
+    Fenced { token: FencingToken },
+}
+
+impl<T> std::fmt::Debug for CasRequest<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CasRequest")
+            .field("key", &self.key)
+            .field("expected", &"<redacted>")
+            .field("new_value", &"<redacted>")
+            .field("token", &self.token)
+            .finish()
+    }
+}
+
+impl<T> std::fmt::Debug for CasOutcome<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Applied { token } => f.debug_struct("Applied").field("token", token).finish(),
+            Self::Conflict { .. } => f
+                .debug_struct("Conflict")
+                .field("current", &"<redacted>")
+                .finish(),
+            Self::Fenced { token } => f.debug_struct("Fenced").field("token", token).finish(),
+        }
+    }
+}
 
 /// IEEE 754 binary64 / JS `Number.MAX_SAFE_INTEGER`：`2⁵³ − 1`。
 const JS_SAFE_INTEGER_MAX: u64 = (1u64 << 53) - 1;
@@ -56,13 +98,13 @@ fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, serde
 }
 
 /// Typed state-CAS facade。组合根经构造器注入 [`diport::DynCasStore`] provider（必填位置参，缺失即编译错误）。
-pub struct StateCas {
+pub(crate) struct StateCas {
     store: Box<diport::DynCasStore<'static>>,
 }
 
 impl StateCas {
     /// 组合根注入 CAS provider（必填位置参，缺失即编译错误）。
-    pub fn new(store: Box<diport::DynCasStore<'static>>) -> Self {
+    pub(crate) fn new(store: Box<diport::DynCasStore<'static>>) -> Self {
         Self { store }
     }
 
@@ -73,26 +115,32 @@ impl StateCas {
     /// - `Ok(CasOutcome::Fenced{token})`：`expected_token` stale，回当前 token，调用方应停写重选举（fence 是预期控制流）。
     /// - `Err(DistError::Fatal)`：serde 序列化/反序列化失败（payload 不合法，不可重试）。
     /// - `Err(DistError::Transport)`：infra 故障（port 返回 `CasStoreError`，可重试）。
-    pub async fn compare_and_swap<T>(
+    pub(crate) async fn compare_and_swap<T>(
         &self,
         request: CasRequest<T>,
     ) -> Result<CasOutcome<T>, DistError>
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
-        let key = diport::CasStoreKey::new(request.key.as_str());
-        let expected = match request.expected {
+        let CasRequest {
+            key,
+            expected,
+            new_value,
+            token,
+        } = request;
+        let key = key.into_store_key();
+        let expected = match expected {
             Some(v) => Some(canonical_json_bytes(&v).map_err(|e| {
                 tracing::warn!(error = %e, "cas facade: serialize expected failed");
                 DistError::Fatal
             })?),
             None => None,
         };
-        let new_value = canonical_json_bytes(&request.new_value).map_err(|e| {
+        let new_value = canonical_json_bytes(&new_value).map_err(|e| {
             tracing::warn!(error = %e, "cas facade: serialize new_value failed");
             DistError::Fatal
         })?;
-        let expected_token = request.token.map(|t| vocab::Epoch::new(t.value()));
+        let expected_token = token.map(|t| vocab::Epoch::new(t.value()));
 
         let outcome = self
             .store
@@ -138,17 +186,11 @@ impl StateCas {
             _ => Err(DistError::Fatal),
         }
     }
-
-    /// 委派注入的 provider 释放 infra 资源（生产 adapter 经 `bootstrap::ShutdownStack` 编排；本方法是 port-local 关闭路径）。
-    pub async fn shutdown(&self) -> Result<(), diport::CasStoreError> {
-        self.store.shutdown().await
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CasKey;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -211,13 +253,59 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn global_cas_key_preserves_physical_bytes_and_redacts_debug() {
+        let resource = concat!(
+            "runtime/event/outbox-backlog/",
+            "000000000000000000000000000000000000000000000000000000000000002a"
+        );
+        let key = GlobalCasKey::for_test(42);
+        let dbg = format!("{key:?}");
+        assert!(!dbg.contains(resource), "global CAS key leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"), "missing redaction: {dbg}");
+        assert_eq!(key.into_store_key().as_str(), resource);
+    }
+
+    #[test]
+    fn cas_request_and_outcome_debug_redact_key_and_payload() {
+        let request = CasRequest {
+            key: GlobalCasKey::for_test(1),
+            expected: Some("top-secret"),
+            new_value: "new-secret",
+            token: Some(FencingToken::new(7)),
+        };
+        let dbg = format!("{request:?}");
+        for secret in [
+            concat!(
+                "runtime/event/outbox-backlog/",
+                "0000000000000000000000000000000000000000000000000000000000000001"
+            ),
+            "top-secret",
+            "new-secret",
+        ] {
+            assert!(!dbg.contains(secret), "CAS request leaked {secret}: {dbg}");
+        }
+        assert!(dbg.contains("<redacted>"), "missing redaction: {dbg}");
+        assert!(dbg.contains('7'), "token should remain observable: {dbg}");
+
+        let conflict: CasOutcome<&str> = CasOutcome::Conflict {
+            current: Some("top-secret"),
+        };
+        let dbg = format!("{conflict:?}");
+        assert!(
+            !dbg.contains("top-secret"),
+            "conflict leaked payload: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "missing redaction: {dbg}");
+    }
+
     /// create-if-absent（expected=None）→ Applied{token=FencingToken(1)}。
     #[tokio::test]
     async fn create_if_absent_returns_applied_with_token_one() -> Result<(), DistError> {
         let cas = make_facade();
         let outcome = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("state/device-1"),
+                key: GlobalCasKey::for_test(2),
                 expected: None::<u64>,
                 new_value: 42u64,
                 token: None,
@@ -237,7 +325,7 @@ mod tests {
 
         // 先建 key。
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("state/device-2"),
+            key: GlobalCasKey::for_test(3),
             expected: None::<u64>,
             new_value: 100u64,
             token: None,
@@ -247,7 +335,7 @@ mod tests {
         // 值匹配更新 → Applied{token=2}。
         let outcome = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("state/device-2"),
+                key: GlobalCasKey::for_test(3),
                 expected: Some(100u64),
                 new_value: 200u64,
                 token: None,
@@ -266,7 +354,7 @@ mod tests {
         let cas = make_facade();
 
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("state/device-3"),
+            key: GlobalCasKey::for_test(4),
             expected: None::<u64>,
             new_value: 77u64,
             token: None,
@@ -276,7 +364,7 @@ mod tests {
         // Conflict 是 Ok 分支，不是 Err，用 `?` 正常传播。
         let outcome = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("state/device-3"),
+                key: GlobalCasKey::for_test(4),
                 expected: Some(999u64), // 故意错误
                 new_value: 88u64,
                 token: None,
@@ -297,7 +385,7 @@ mod tests {
 
         // 建 key，current_token = 1。
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("state/device-4"),
+            key: GlobalCasKey::for_test(5),
             expected: None::<u64>,
             new_value: 1u64,
             token: None,
@@ -307,7 +395,7 @@ mod tests {
         // expected_token=0 < current_token=1 → Fenced{token=1}（Ok 分支，携当前高水位）。
         let outcome = cas
             .compare_and_swap(CasRequest::<u64> {
-                key: CasKey::new("state/device-4"),
+                key: GlobalCasKey::for_test(5),
                 expected: Some(1u64),
                 new_value: 2u64,
                 token: Some(FencingToken::new(0)),
@@ -366,7 +454,7 @@ mod tests {
         initial.insert("beta".to_owned(), 2u64);
         initial.insert("alpha".to_owned(), 1u64);
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("state/map"),
+            key: GlobalCasKey::for_test(6),
             expected: None::<HashMap<String, u64>>,
             new_value: initial,
             token: None,
@@ -381,7 +469,7 @@ mod tests {
         next.insert("alpha".to_owned(), 9u64);
         let outcome = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("state/map"),
+                key: GlobalCasKey::for_test(6),
                 expected: Some(expected),
                 new_value: next,
                 token: None,
@@ -402,7 +490,7 @@ mod tests {
         const JS_SAFE_MAX: u64 = (1u64 << 53) - 1;
 
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("serde/u64"),
+            key: GlobalCasKey::for_test(7),
             expected: None::<u64>,
             new_value: JS_SAFE_MAX,
             token: None,
@@ -411,7 +499,7 @@ mod tests {
 
         let outcome = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("serde/u64"),
+                key: GlobalCasKey::for_test(7),
                 expected: Some(JS_SAFE_MAX),
                 new_value: 0u64,
                 token: None,
@@ -430,7 +518,7 @@ mod tests {
         let cas = make_facade();
         let err = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("serde/u64-unsafe"),
+                key: GlobalCasKey::for_test(8),
                 expected: None::<u64>,
                 new_value: JS_SAFE_INTEGER_MAX + 1,
                 token: None,
@@ -513,13 +601,6 @@ mod tests {
         );
     }
 
-    /// shutdown 委派：FakeCasStore 注入后 state_cas.shutdown().await 返回 Ok(())。
-    #[tokio::test]
-    async fn shutdown_delegates_to_store() -> Result<(), diport::CasStoreError> {
-        let cas = make_facade();
-        cas.shutdown().await
-    }
-
     /// Fix 4：expected=Some + 键不存在 → Conflict{current:None}（None 路径不触发反序列化）。
     #[tokio::test]
     async fn expected_some_key_absent_returns_conflict_with_current_none() -> Result<(), DistError>
@@ -527,7 +608,7 @@ mod tests {
         let cas = make_facade();
         let outcome = cas
             .compare_and_swap(CasRequest::<u64> {
-                key: CasKey::new("state/absent-key"),
+                key: GlobalCasKey::for_test(9),
                 expected: Some(42u64),
                 new_value: 99u64,
                 token: None,
@@ -546,7 +627,7 @@ mod tests {
         let cas = make_facade();
         // create → current_token = FencingToken(1)
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("state/equal-token"),
+            key: GlobalCasKey::for_test(10),
             expected: None::<u64>,
             new_value: 1u64,
             token: None,
@@ -555,7 +636,7 @@ mod tests {
         // expected_token=Some(FencingToken(1)) == 当前 token → Applied（非 Fenced）
         let outcome = cas
             .compare_and_swap(CasRequest::<u64> {
-                key: CasKey::new("state/equal-token"),
+                key: GlobalCasKey::for_test(10),
                 expected: Some(1u64),
                 new_value: 2u64,
                 token: Some(FencingToken::new(1)),
@@ -584,7 +665,7 @@ mod tests {
         };
 
         cas.compare_and_swap(CasRequest {
-            key: CasKey::new("serde/struct"),
+            key: GlobalCasKey::for_test(11),
             expected: None::<DeviceState>,
             new_value: initial.clone(),
             token: None,
@@ -594,7 +675,7 @@ mod tests {
         // 值不符 → Conflict，current 应反序列化回 initial。Conflict 是 Ok 分支。
         let outcome = cas
             .compare_and_swap(CasRequest {
-                key: CasKey::new("serde/struct"),
+                key: GlobalCasKey::for_test(11),
                 expected: Some(DeviceState {
                     version: 99,
                     label: "wrong".into(),

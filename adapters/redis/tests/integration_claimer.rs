@@ -15,10 +15,11 @@ use consistency::{
 };
 use deadpool_redis::{Config, Runtime};
 use diport::{
-    CasStore, CasStoreKey, CasStoreOutcome, CasStoreRequest, LockAcquireOutcome, LockRenewOutcome,
-    LockStore, LockStoreKey, ManagedResource,
+    CasStore, CasStoreOutcome, CasStoreRequest, GlobalCasStoreKey, LockAcquireOutcome,
+    LockRenewOutcome, LockStore, LockStoreKey, ManagedResource,
 };
 use redis::{RedisInboxStore, RedisPrivateCa, RedisRuntimeDeps};
+use sha2::{Digest, Sha256};
 use testkit::{FixtureError, await_try};
 use tokio::sync::Barrier;
 
@@ -60,10 +61,15 @@ fn unique_lock_key(label: &str) -> LockStoreKey {
     LockStoreKey::new(format!("{label}:pid{pid}:n{n}"))
 }
 
-fn unique_cas_key(label: &str) -> CasStoreKey {
+fn unique_cas_key(label: &str) -> GlobalCasStoreKey {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    CasStoreKey::new(format!("{label}:pid{pid}:n{n}"))
+    let topology_scope_sha256: [u8; 32] =
+        Sha256::digest(format!("{label}:pid{pid}:n{n}").as_bytes()).into();
+    GlobalCasStoreKey::for_resource(
+        diport::GlobalCasResource::OutboxBacklog,
+        topology_scope_sha256,
+    )
 }
 
 /// 铸出一个新的随机 lease token（uuid v4）；消费方在真实协议中每次 claim 前铸出。

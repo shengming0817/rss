@@ -8,8 +8,8 @@
 //! - **值不符**（含 expected!=None 但键不存在）→ [`CasStoreOutcome::Conflict`]（回当前值供重读重试）；
 //! - **`expected_token` 低于该 key 当前 token**（旧 leader stale 写）→ [`CasStoreOutcome::Fenced`]（拒写、回当前 token）。
 //!
-//! 泛型 `T` 不下沉 port（dyn-compatible 不能有泛型方法，ADR-003 §4.6）——typed `CasRequest<T>`/`CasOutcome<T>`
-//! 由 `distributed::StateCas` facade 序列化成字节后经本 port 落地。
+//! 泛型 `T` 不下沉 port（dyn-compatible 不能有泛型方法，ADR-003 §4.6）——global maintenance
+//! facade 在 `distributed` 内部序列化成字节后经本 port 落地。
 //!
 //! ref: etcd-io/etcd client/v3/txn.go（`If(Compare(ModRevision)).Then(Put).Else(Get)` = compare-and-swap-by-revision）；
 //! ref: databendlabs/openraft openraft/src/lib.rs（LogId/Vote 单调 = token 防脑裂）；
@@ -19,26 +19,107 @@
 //! 本模块 smoke reference impl）。该不变式是 **Medium（运行期 `#[test]`）固有**：单调性是对**运行期** token 值的
 //! 比较（当前 token 在运行期才知），无法上移编译期类型系统；守卫是 adapter 行为测试 + anti-vacuity（写后用旧
 //! expected 必 Conflict / token stale 必 Fenced），非 Hard。
+//!
+//! Global scope 是当前 port 唯一可表达的 CAS key intent；旧的无 scope key 不得恢复：
+//!
+//! ```compile_fail
+//! use diport::CasStoreKey;
+//!
+//! let _ = CasStoreKey::new("runtime/event/outbox-backlog");
+//! ```
+//!
+//! ```
+//! use diport::{GlobalCasResource, GlobalCasStoreKey};
+//!
+//! let key = GlobalCasStoreKey::for_resource(GlobalCasResource::OutboxBacklog, [0_u8; 32]);
+//! assert_eq!(
+//!     key.as_str(),
+//!     "runtime/event/outbox-backlog/0000000000000000000000000000000000000000000000000000000000000000"
+//! );
+//! ```
+//!
+//! ```compile_fail
+//! use diport::GlobalCasStoreKey;
+//!
+//! let _ = GlobalCasStoreKey::new("tenant/device/session");
+//! ```
 
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
 use crate::redacted_bytes::RedactedBytes;
 
-/// CAS 操作 key（fencing/版本维度）。provider 按 key **各自**维护 revision token。
-/// newtype funnel（私有字段，单一构造入口）——独立语义不复用裸 `String`。
-/// 字节端口层 key，对应 typed facade `distributed::CasKey`（经 `StateCas` 映射）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CasStoreKey(String);
+/// Closed global maintenance resource identity shared by lock and CAS projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GlobalCasResource {
+    /// Outbox backlog observation lane.
+    OutboxBacklog,
+    /// Outbox retention lane.
+    OutboxRetention,
+    /// Inbox backlog observation lane.
+    InboxBacklog,
+}
 
-impl CasStoreKey {
-    /// 由状态标识构造（如 `tenant-42/desired-state`、设备收敛 key）。
-    pub fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
+impl GlobalCasResource {
+    /// Canonical physical resource prefix shared by lock and CAS keys.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OutboxBacklog => "runtime/event/outbox-backlog",
+            Self::OutboxRetention => "runtime/event/outbox-retention",
+            Self::InboxBacklog => "runtime/event/inbox-backlog",
+        }
     }
-    /// 借出底层 key。
+
+    /// Stable low-cardinality observability label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OutboxBacklog => "outbox_backlog",
+            Self::OutboxRetention => "outbox_retention",
+            Self::InboxBacklog => "inbox_backlog",
+        }
+    }
+}
+
+/// Global maintenance CAS key（fencing/版本维度）。provider 按 key **各自**维护 revision token。
+///
+/// [`GlobalCasResource`] 是当前真实 global maintenance resource 的闭集，只接受定长 topology digest；
+/// tenant-scoped identity 与自由字符串 namespace 当前不可表达。私有字段阻止裸 `String` 直接进入
+/// [`CasStoreRequest`]。
+///
+/// INVARIANT: CAS-GLOBAL-KEY-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code" }
+/// （具体 global key 类型 + 封闭 port 请求边界）。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct GlobalCasStoreKey(String);
+
+impl GlobalCasStoreKey {
+    /// 从 closed global resource 与 topology digest 构造。
+    pub fn for_resource(resource: GlobalCasResource, topology_scope_sha256: [u8; 32]) -> Self {
+        Self::format(resource.as_str(), topology_scope_sha256)
+    }
+
+    /// 唯一物理 formatter；保持既有 `<resource>/<lower-hex sha256>` wire bytes。
+    fn format(resource: &'static str, topology_scope_sha256: [u8; 32]) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut key = String::with_capacity(resource.len() + 1 + topology_scope_sha256.len() * 2);
+        key.push_str(resource);
+        key.push('/');
+        for byte in topology_scope_sha256 {
+            key.push(HEX[usize::from(byte >> 4)] as char);
+            key.push(HEX[usize::from(byte & 0x0f)] as char);
+        }
+        Self(key)
+    }
+    /// 仅供 provider seam 借出物理 key；不得写入日志、metric label 或 error detail。
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Debug for GlobalCasStoreKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GlobalCasStoreKey")
+            .field(&"<redacted>")
+            .finish()
     }
 }
 
@@ -46,14 +127,14 @@ impl CasStoreKey {
 /// + 可选 `expected_token`（fencing 防 stale）。
 ///
 /// PII 边界（类型层 Hard，同 [`crate::SignRequest`] / [`crate::FencedWriteRequest`]）：`expected` / `new_value`
-/// （状态 payload，可能含敏感设备状态 / 凭据）经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`），故
-/// `derive(Debug)` 即安全；`key` / `expected_token` 是路由 / 版本元数据，可观测。
+/// （状态 payload，可能含敏感设备状态 / 凭据）经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`）；
+/// [`GlobalCasStoreKey`] 自身也恒脱敏，仅 `expected_token` 作为版本元数据可观测。
 ///
 /// INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, Clone)]
 pub struct CasStoreRequest {
     /// 目标状态 key（revision token 按 key 隔离）。
-    pub key: CasStoreKey,
+    pub key: GlobalCasStoreKey,
     /// 期望当前值（provider-agnostic 字节，[`RedactedBytes`] 持有）；`None` = 期望键不存在（create-if-absent）。
     pub expected: Option<RedactedBytes>,
     /// 待写新值（provider-agnostic 字节，[`RedactedBytes`] 持有）。
@@ -106,7 +187,7 @@ impl CasStoreError {
 /// 状态 CAS provider DI port（async）。
 ///
 /// 公开 [`CasStore`] 是 **Send 变体**（adapters `impl CasStore for ...`），[`DynCasStore`] 是其 dyn-compatible
-/// wrapper（组合根经 `Box<DynCasStore>` 注入、`distributed::StateCas` facade 消费）。非 Send 基 trait
+/// wrapper（组合根经 `Box<DynCasStore>` 注入、`distributed` 内部 maintenance facade 消费）。非 Send 基 trait
 /// `CasStoreLocal` 不在 crate 根 re-export。
 #[trait_variant::make(CasStore: Send)]
 #[dynosaur(pub DynCasStore = dyn(box) CasStore, bridge(dyn))]
@@ -132,10 +213,17 @@ mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynCasStore>` 跨 spawn（Send）动态注入，
     //! 并以一个 etcd-revision reference impl 断言 Applied/Conflict/Fenced 三态契约（CAS-REVISION-MONO-01）。
     use super::{
-        CasStore, CasStoreError, CasStoreKey, CasStoreOutcome, CasStoreRequest, DynCasStore,
+        CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, DynCasStore, GlobalCasResource,
+        GlobalCasStoreKey,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    fn test_key(id: u8) -> GlobalCasStoreKey {
+        let mut digest = [0_u8; 32];
+        digest[31] = id;
+        GlobalCasStoreKey::for_resource(GlobalCasResource::OutboxBacklog, digest)
+    }
 
     #[test]
     fn cas_store_error_redacts_source() {
@@ -149,9 +237,16 @@ mod smoke {
     }
 
     #[test]
-    fn cas_store_key_round_trips() {
-        let key = CasStoreKey::new("tenant-42/desired-state");
-        assert_eq!(key.as_str(), "tenant-42/desired-state");
+    fn global_cas_store_key_preserves_physical_bytes_and_redacts_debug() {
+        let resource = concat!(
+            "runtime/event/outbox-backlog/",
+            "000000000000000000000000000000000000000000000000000000000000002a"
+        );
+        let key = test_key(42);
+        assert_eq!(key.as_str(), resource);
+        let dbg = format!("{key:?}");
+        assert!(!dbg.contains(resource), "global CAS key leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"), "missing redaction: {dbg}");
     }
 
     #[test]
@@ -159,7 +254,7 @@ mod smoke {
         // anti-vacuity：原始 Vec<u8> Debug 把 0xDE 渲染成 "222"。
         assert!(format!("{:?}", vec![0xDE_u8]).contains("222"));
         let req = CasStoreRequest {
-            key: CasStoreKey::new("state-1"),
+            key: test_key(1),
             expected: Some(vec![0xDE, 0xAD].into()),
             new_value: vec![0xBE, 0xEF].into(),
             expected_token: Some(vocab::Epoch::new(7)),
@@ -169,7 +264,10 @@ mod smoke {
         assert!(!dbg.contains("190"), "new_value 字节泄漏: {dbg}"); // 0xBE = 190
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains('7'), "expected_token 应可见: {dbg}");
-        assert!(dbg.contains("state-1"), "key 应可见: {dbg}");
+        assert!(
+            !dbg.contains("tenant-device-session-marker"),
+            "key 不应进入 Debug: {dbg}"
+        );
     }
 
     #[test]
@@ -259,7 +357,7 @@ mod smoke {
         let store: Box<DynCasStore> = DynCasStore::new_box(RevStore::default());
         let outcome = store
             .compare_and_swap(CasStoreRequest {
-                key: CasStoreKey::new("absent"),
+                key: test_key(1),
                 expected: Some(b"expect-something".to_vec().into()),
                 new_value: b"new".to_vec().into(),
                 expected_token: None,
@@ -280,7 +378,7 @@ mod smoke {
             // create-if-absent → Applied{token=1}。
             let applied = store
                 .compare_and_swap(CasStoreRequest {
-                    key: CasStoreKey::new("k"),
+                    key: test_key(2),
                     expected: None,
                     new_value: b"v1".to_vec().into(),
                     expected_token: None,
@@ -296,7 +394,7 @@ mod smoke {
             // 值不符（期望 v-wrong）→ Conflict{current=v1}。
             let conflict = store
                 .compare_and_swap(CasStoreRequest {
-                    key: CasStoreKey::new("k"),
+                    key: test_key(2),
                     expected: Some(b"v-wrong".to_vec().into()),
                     new_value: b"v2".to_vec().into(),
                     expected_token: None,
@@ -312,7 +410,7 @@ mod smoke {
             // stale token（expected_token=0 < 当前 1）→ Fenced{current_token=1}。
             let fenced = store
                 .compare_and_swap(CasStoreRequest {
-                    key: CasStoreKey::new("k"),
+                    key: test_key(2),
                     expected: Some(b"v1".to_vec().into()),
                     new_value: b"v2".to_vec().into(),
                     expected_token: Some(vocab::Epoch::new(0)),
