@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result, ensure};
 
 const SMOKE: &str = include_str!("../../deploy/smoke.sh");
 const RUNTIME_MANIFEST: &str = include_str!("../../assemblies/runtime/assembly.toml");
+const RUNTIME_PLAN: &[u8] = include_bytes!("../../assemblies/runtime/runtime-plan.json");
 const NOT_PRODUCTION_EVIDENCE: &str = "NOT PRODUCTION EVIDENCE";
 const RELEASE_DEMO_EVIDENCE: &str = "RELEASE IMAGE ON DEMO INFRA EVIDENCE";
 
@@ -52,6 +53,11 @@ impl SmokeFixture {
             r#"{"identity":{"name":"runtime"}}"#,
         )
         .context("write assembly identity fixture")?;
+        fs::write(
+            root.join("assemblies/runtime/runtime-plan.json"),
+            RUNTIME_PLAN,
+        )
+        .context("write governed RuntimePlan fixture")?;
         Ok(Self { root, script })
     }
 
