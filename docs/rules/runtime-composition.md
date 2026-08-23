@@ -47,5 +47,8 @@
 ## 载体
 
 - Hard：typed manifest/schema、generated Rust、private constructors、sealed RuntimePlan/receipt。
-- Medium：assembly validate、lock/runtime-plan drift、runtime-deps guard、provider conformance 与 lifecycle tests。
+- Medium：assembly validate、runtime-deps guard、provider conformance 与 lifecycle tests；committed
+  lock/runtime-plan raw-byte drift 只在 candidate/release final HEAD 验证，不进入普通 PR affected CI。
+- build-time repository verification 与 RuntimePlan 的 manifest + verified-lock bound parse 必须继续
+  fail-closed；将 raw-byte drift 延后到 candidate/release 不得产生未验证执行旁路。
 - production process/config/provider join 只有经正式 production acceptance 才进入 T3。

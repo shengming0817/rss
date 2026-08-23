@@ -31,8 +31,7 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "check", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
-//! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
+//! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once immediately after modules drift in every aggregate plan; release-check appends lock and RuntimePlan drift.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "dylint_workspace_ui_gate_is_release_owned_once", anti_vacuity = "dylint_workspace_ui_gate_is_release_owned_once" }—— Dylint UI goldens run once as typed `cargo test --locked --workspace` from `lints` in release-check; fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_typed_inventory_closes_active_l2" }—— L2 assurance closure validation is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! Fixed PR execution is projected by the closed [`FixedCiJob`] enum below. The committed caller
@@ -2739,6 +2738,8 @@ mod tests {
                 GateId::DylintWorkspaceUiTests,
                 GateId::PublicApi,
                 GateId::DenyAdvisories,
+                GateId::AssemblyLockCheck,
+                GateId::AssemblyRuntimePlanCheck,
             ]
             .into_iter()
             .collect(),
@@ -3714,8 +3715,6 @@ mod tests {
             GateId::AssemblyArtifactsCheck,
             GateId::AssemblyModulesCheck,
             GateId::AssemblyProvidersCheck,
-            GateId::AssemblyLockCheck,
-            GateId::AssemblyRuntimePlanCheck,
         ]
         .map(|id| {
             let members = plan
@@ -3839,13 +3838,9 @@ mod tests {
             .iter()
             .position(|step| step.id == GateId::AssemblyProvidersCheck)
             .context("plan lacks providers check")?;
-        let lock = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyLockCheck)
-            .context("plan lacks lock check")?;
         anyhow::ensure!(
-            providers == modules + 1 && lock == providers + 1,
-            "assembly order must be modules -> providers -> lock"
+            providers == modules + 1,
+            "assembly order must be modules -> providers"
         );
         Ok(())
     }
@@ -3901,7 +3896,7 @@ mod tests {
         );
         anyhow::ensure!(
             lock.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && lock.id.spec().included_in_verify()
+                && !lock.id.spec().included_in_verify()
                 && lock
                     .id
                     .spec()
@@ -3933,21 +3928,25 @@ mod tests {
     }
 
     #[test]
-    fn assembly_lock_check_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()>
-    {
-        for (name, plan) in [
-            ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
-            ("release-check", plan_for(RELEASE_CHECK)),
-        ] {
-            validate_assembly_lock_check(&plan).with_context(|| format!("{name} plan"))?;
-        }
+    fn assembly_lock_check_is_release_owned_once_and_ordered() -> anyhow::Result<()> {
+        let verify = plan_for(PlanProjection::Verify);
+        assert!(
+            verify
+                .iter()
+                .all(|step| step.id != GateId::AssemblyLockCheck),
+            "verify must omit release-only AssemblyLock drift"
+        );
 
-        let mut omitted = plan_for(PlanProjection::Verify);
+        let release = plan_for(RELEASE_CHECK);
+        validate_assembly_lock_check(&release).context("release-check plan")?;
+        validate_assembly_lock_check(&plan_for(PlanProjection::Lane(GateGroup::Meta)))
+            .context("release meta lane")?;
+
+        let mut omitted = release.clone();
         omitted.retain(|step| step.id != GateId::AssemblyLockCheck);
         assert!(validate_assembly_lock_check(&omitted).is_err());
 
-        let mut duplicated = plan_for(PlanProjection::Verify);
+        let mut duplicated = release;
         let duplicate = duplicated
             .iter()
             .find(|step| step.id == GateId::AssemblyLockCheck)
@@ -3988,7 +3987,7 @@ mod tests {
         );
         anyhow::ensure!(
             gate.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && gate.id.spec().included_in_verify()
+                && !gate.id.spec().included_in_verify()
                 && gate
                     .id
                     .spec()
@@ -4008,17 +4007,21 @@ mod tests {
     }
 
     #[test]
-    fn assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
-    -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("verify", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
-            ("release-check", plan_for(RELEASE_CHECK)),
-        ] {
-            validate_assembly_runtime_plan_gate(&plan).with_context(|| format!("{name} plan"))?;
-        }
+    fn assembly_runtime_plan_gate_is_release_owned_once_and_ordered() -> anyhow::Result<()> {
+        let verify = plan_for(PlanProjection::Verify);
+        assert!(
+            verify
+                .iter()
+                .all(|step| step.id != GateId::AssemblyRuntimePlanCheck),
+            "verify must omit release-only RuntimePlan drift"
+        );
 
-        let real = plan_for(PlanProjection::Verify);
+        let release = plan_for(RELEASE_CHECK);
+        validate_assembly_runtime_plan_gate(&release).context("release-check plan")?;
+        validate_assembly_runtime_plan_gate(&plan_for(PlanProjection::Lane(GateGroup::Meta)))
+            .context("release meta lane")?;
+
+        let real = release;
         let mut omitted = real.clone();
         omitted.retain(|step| step.id != GateId::AssemblyRuntimePlanCheck);
         assert!(validate_assembly_runtime_plan_gate(&omitted).is_err());
@@ -6318,6 +6321,28 @@ mod tests {
             include_str!("../../.github/actions/finalize-rss-ci/action.yml"),
             include_str!("../../.github/scripts/ci-cache-maintain.sh"),
         ));
+    }
+
+    #[test]
+    fn candidate_bundle_runs_assembly_drift_before_package_proof() {
+        let workflow = include_str!("../../.github/workflows/candidate-bundle.yml");
+        let lock = workflow
+            .find("xtask assembly lock check")
+            .expect("candidate workflow must verify AssemblyLock drift");
+        let runtime_plan = workflow
+            .find("xtask assembly generate-runtime-plans --check")
+            .expect("candidate workflow must verify RuntimePlan drift");
+        let package = workflow
+            .find("xtask package-proof")
+            .expect("candidate workflow must run package proof");
+        assert!(lock < runtime_plan && runtime_plan < package);
+        assert_eq!(workflow.matches("xtask assembly lock check").count(), 1);
+        assert_eq!(
+            workflow
+                .matches("xtask assembly generate-runtime-plans --check")
+                .count(),
+            1
+        );
     }
 
     #[test]

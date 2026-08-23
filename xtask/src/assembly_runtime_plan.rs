@@ -1,4 +1,6 @@
 //! Deterministic committed RuntimePlan generation from the canonical assembly manifest and lock.
+//!
+//! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_release_owned_once_and_ordered", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once after AssemblyLock in final-HEAD release validation.
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{

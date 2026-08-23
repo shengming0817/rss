@@ -320,7 +320,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        GatePolicy::OnChange,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             AssemblyRuntimePlanCheck => (step_assembly_runtime_plan_check, Some("xtask/src/assembly_runtime_plan.rs"),
@@ -331,7 +331,7 @@ macro_rules! gate_catalog {
                         CompileKind::NoCompile,
                         INTERNAL,
                         SOURCE,
-                        GatePolicy::OnChange,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             ContractBreaking => (step_contract_breaking, Some("xtask/src/contract/breaking.rs"),
@@ -945,9 +945,9 @@ impl GateId {
 
             Self::AssemblyArtifactsCheck
             | Self::AssemblyModulesCheck
-            | Self::AssemblyProvidersCheck
-            | Self::AssemblyLockCheck
-            | Self::AssemblyRuntimePlanCheck => Policy::OnImpact(Domain::AssemblyGeneration),
+            | Self::AssemblyProvidersCheck => Policy::OnImpact(Domain::AssemblyGeneration),
+
+            Self::AssemblyLockCheck | Self::AssemblyRuntimePlanCheck => Policy::FullOnly,
 
             Self::ConsistencyFixtures | Self::LocalTxCoverage | Self::LocalOnlyEffects => {
                 Policy::OnImpact(Domain::Consistency)
@@ -1251,7 +1251,12 @@ const fn executor_const_valid(spec: GateSpec) -> bool {
     match spec.executor {
         GateExecutor::Metadata => {
             matches!(spec.compile, CompileKind::NoCompile)
-                && spec.primary_owner as u8 == ExecutionProfile::Check as u8
+                && (spec.primary_owner as u8 == ExecutionProfile::Check as u8
+                    || (matches!(
+                        spec.id,
+                        GateId::AssemblyLockCheck | GateId::AssemblyRuntimePlanCheck
+                    ) && spec.primary_owner as u8 == ExecutionProfile::ReleaseCheck as u8
+                        && matches!(spec.policy, GatePolicy::ReleaseOnChange)))
         }
         GateExecutor::CoreTest => {
             matches!(spec.tool, ToolRequirement::Nextest)
@@ -1414,8 +1419,6 @@ mod tests {
                 "assembly-artifacts-check",
                 "assembly-modules-check",
                 "assembly-providers-check",
-                "assembly-lock-check",
-                "assembly-runtime-plan-check",
                 "consistency-fixtures",
                 "localtx-coverage",
                 "local-only-effects",
@@ -1457,8 +1460,6 @@ mod tests {
                     "assembly-artifacts-check",
                     "assembly-modules-check",
                     "assembly-providers-check",
-                    "assembly-lock-check",
-                    "assembly-runtime-plan-check",
                 ],
             ),
             (
@@ -1496,6 +1497,8 @@ mod tests {
             full_only,
             BTreeSet::from([
                 "runtime-assembly-residual",
+                "assembly-lock-check",
+                "assembly-runtime-plan-check",
                 "l2-assurance-check",
                 "archrules",
                 "provider-capabilities-check",
@@ -1517,8 +1520,35 @@ mod tests {
         {
             let spec = id.spec();
             assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
-            assert_eq!(spec.primary_owner(), ExecutionProfile::Check, "{id:?}");
+            let expected_owner = if matches!(
+                id,
+                GateId::AssemblyLockCheck | GateId::AssemblyRuntimePlanCheck
+            ) {
+                ExecutionProfile::ReleaseCheck
+            } else {
+                ExecutionProfile::Check
+            };
+            assert_eq!(spec.primary_owner(), expected_owner, "{id:?}");
             assert_eq!(spec.executor(), GateExecutor::Metadata, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn assembly_drift_gates_are_release_owned_and_not_pr_projected() {
+        for id in [GateId::AssemblyLockCheck, GateId::AssemblyRuntimePlanCheck] {
+            let spec = id.spec();
+            assert_eq!(
+                spec.primary_owner(),
+                ExecutionProfile::ReleaseCheck,
+                "{id:?}"
+            );
+            assert_eq!(spec.policy(), GatePolicy::ReleaseOnChange, "{id:?}");
+            assert_eq!(id.local_meta_policy(), LocalMetaPolicy::FullOnly, "{id:?}");
+            assert!(!spec.included_in_verify(), "{id:?}");
+            assert!(
+                spec.included_in_profile(ExecutionProfile::ReleaseCheck),
+                "{id:?}"
+            );
         }
     }
 

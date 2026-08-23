@@ -118,8 +118,8 @@ cargo xtask contract validate                          # 契约元数据校验
 cargo xtask assembly validate                          # assembly 声明与依赖闭包校验
 cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask assembly generate-providers --check        # typed provider catalog 独立漂移门
-cargo xtask assembly generate-runtime-plans --check    # manifest + lock 派生 RuntimePlan 漂移门
-cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
+cargo xtask assembly generate-runtime-plans --check    # candidate/release final-HEAD RuntimePlan 漂移门
+cargo xtask assembly lock check                        # candidate/release final-HEAD AssemblyLock 漂移门
 cargo xtask verify --only runtime-assembly-residual         # runtime 跨文件 escape residuals（FullOnly）
 cargo xtask runtime-root guard                         # runtime root 纯声明 façade 守卫
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
@@ -150,8 +150,10 @@ install_redacted_panic_hook, activate_structured_panic_observation}`，不得直
 `providers_gen.rs` 是每个 assembly crate 内部编译的 provider constructor catalog，不是外部
 SDK/API，也不读取环境、配置或 secret。它只收 active provider，并通过闭合 role、consumer、factory
 symbol 与 `ProviderCatalogEntry::checked` 绑定 canonical registry evidence；现有 `modules_gen.rs`
-继续承载 live output composition，不能作为 catalog fallback。两类生成物分别漂移检查，固定聚合顺序为
-`assembly validate → artifacts check → modules check → providers check → lock check → runtime-plan check`；
+继续承载 live output composition，不能作为 catalog fallback。普通 PR 聚合顺序止于
+`assembly validate → artifacts check → modules check → providers check`；candidate/release final HEAD 再按
+`lock check → runtime-plan check` 收口 repository identity。lock 过期仍由各 assembly `build.rs` 的
+repository verification fail-closed，RuntimePlan fixture 仍通过 manifest + verified lock bound parse；
 assembly graph 仅由按需 presentation 命令构建，不注册独立 gate。live provider dispatch、
 手写旁路删除和 output bijection 由 #1792 完成。
 factory symbol 的 wire、Display 与 JSON Schema ID 统一使用显式 `consumer::factory` 声明；assembly

@@ -33,6 +33,12 @@ jobs:
           rustc --version --verbose
           cargo --version --verbose
 
+      - name: Verify final-HEAD assembly artifacts
+        run: |
+          set -euo pipefail
+          ./hack/cargo.sh xtask assembly lock check
+          ./hack/cargo.sh xtask assembly generate-runtime-plans --check
+
       - name: Prove and export candidate bundle
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/rss-candidate-target

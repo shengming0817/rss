@@ -18,6 +18,8 @@
 
 - 普通 PR 运行 affected T1、必要 T2 与已激活 canonical T3；分析失败可扩大 affected scope，但不得自动升级 full。
 - 完整 conformance、fault/recovery、coverage、performance/soak 属于 develop/release 或显式 full。
+- committed AssemblyLock/RuntimePlan 的 repository raw-byte drift 属于 candidate/release final-HEAD identity
+  验证；普通 PR 依赖 assembly build-time repository verification 与 RuntimePlan bound parse，不重复运行全仓漂移门。
 - performance 必须绑定已接纳 SLO；soak 必须绑定生产 SLO 或长时正确性/恢复 hazard。
 - Markdown、聚合 receipt 和静态 inventory 不得冒充运行证据。
 

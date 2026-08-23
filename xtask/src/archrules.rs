@@ -3068,7 +3068,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "repository compiler golden drift with synthetic red and three real locks",
-        binding: CHECK_UNIT_BINDING,
+        binding: RELEASE_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/assembly_lock.rs",
@@ -3084,7 +3084,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "effective git attribute synthetic reds and real-lock anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
+        binding: RELEASE_UNIT_BINDING,
     },
     InvariantCarrierBinding {
         path: "xtask/src/assembly_lock.rs",
@@ -3092,7 +3092,7 @@ const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "typed exact-once aggregate plan synthetic reds",
-        binding: CHECK_UNIT_BINDING,
+        binding: RELEASE_UNIT_BINDING,
     },
 ];
 
