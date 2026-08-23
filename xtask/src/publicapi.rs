@@ -28,6 +28,234 @@ use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use workspacefacts::{PackageKey, PublicApiOwner, TargetKind, WorkspaceFacts};
 
+/// INVARIANT: EVENTING-CONSUMER-TX-PUBLIC-SURFACE-01 { level = "Medium", exec = "check", source = "public-api", synthetic_red = "tests::consumer_tx_surface_rejects_extra_public_owner|tests::consumer_tx_surface_rejects_trait_bridge|tests::consumer_tx_surface_rejects_associated_item|tests::consumer_tx_root_rejects_alias_facade", anti_vacuity = "tests::real_consumer_tx_surface_is_exact|tests::consumer_tx_surface_allows_private_implementation" } -- the current Eventing transaction seam exposes exactly one flat outcome and one reject kind from its owner module; runtime/provider types and compatibility facades are forbidden.
+fn validate_consumer_tx_public_surface(root: &Path) -> Result<()> {
+    let path = root.join("crates/eventexec/src/consumer_tx.rs");
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("读取 ConsumerTx 公共面失败: {}", path.display()))?;
+    validate_consumer_tx_public_source(&source)
+        .with_context(|| format!("ConsumerTx 公共面不符合 exact-set: {}", path.display()))?;
+
+    let root_path = root.join("crates/eventexec/src/lib.rs");
+    let root_source = fs::read_to_string(&root_path)
+        .with_context(|| format!("读取 eventexec crate root 失败: {}", root_path.display()))?;
+    validate_consumer_tx_root_source(&root_source).with_context(|| {
+        format!(
+            "ConsumerTx crate-root facade 被禁止: {}",
+            root_path.display()
+        )
+    })
+}
+
+fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(source).context("解析 ConsumerTx owner 模块失败")?;
+    let public_items = file
+        .items
+        .iter()
+        .filter(|item| match item {
+            syn::Item::Const(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Enum(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Fn(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Mod(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Static(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Struct(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Trait(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::TraitAlias(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Type(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Union(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Use(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        public_items.len() == 2,
+        "owner module must expose exactly two public items"
+    );
+
+    let mut enums = BTreeMap::new();
+    for item in public_items {
+        let syn::Item::Enum(item) = item else {
+            bail!("ConsumerTx owner public surface may contain enums only")
+        };
+        enums.insert(item.ident.to_string(), item);
+    }
+    anyhow::ensure!(
+        enums.keys().map(String::as_str).collect::<Vec<_>>() == ["ConsumerTxOutcome", "RejectKind"],
+        "ConsumerTx owner enum exact-set drifted"
+    );
+
+    let reject = enums["RejectKind"];
+    anyhow::ensure!(
+        reject.generics.params.is_empty(),
+        "RejectKind must not be generic"
+    );
+    assert_enum_shape(reject, &[("Permanent", None), ("Invariant", None)])?;
+
+    let outcome = enums["ConsumerTxOutcome"];
+    anyhow::ensure!(
+        outcome.generics.params.len() == 1
+            && matches!(outcome.generics.params.first(), Some(syn::GenericParam::Type(param)) if param.ident == "C"),
+        "ConsumerTxOutcome must carry only generic commit proof C"
+    );
+    assert_enum_shape(
+        outcome,
+        &[
+            ("Committed", Some("C")),
+            ("HandlerTransient", None),
+            ("InfrastructureTransient", None),
+            ("Rejected", Some("RejectKind")),
+            ("CommitUnknown", None),
+            ("RollbackFailed", None),
+            ("Fenced", None),
+        ],
+    )?;
+
+    let mut public_methods = BTreeMap::<String, Vec<&syn::ImplItemFn>>::new();
+    for item in &file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        let owner = item.self_ty.to_token_stream().to_string().replace(' ', "");
+        if item.trait_.is_some() {
+            anyhow::ensure!(
+                !owner.starts_with("ConsumerTxOutcome"),
+                "ConsumerTxOutcome trait bridges are forbidden"
+            );
+            continue;
+        }
+        if owner != "RejectKind" && owner != "ConsumerTxOutcome<C>" {
+            continue;
+        }
+        for member in &item.items {
+            match member {
+                syn::ImplItem::Fn(method) if matches!(method.vis, syn::Visibility::Public(_)) => {
+                    public_methods
+                        .entry(owner.clone())
+                        .or_default()
+                        .push(method);
+                }
+                syn::ImplItem::Const(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                    bail!("public associated const is forbidden for {owner}")
+                }
+                syn::ImplItem::Type(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                    bail!("public associated type is forbidden for {owner}")
+                }
+                _ => {}
+            }
+        }
+    }
+    anyhow::ensure!(
+        public_methods
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            == ["ConsumerTxOutcome<C>", "RejectKind"],
+        "ConsumerTx owner public impl exact-set drifted"
+    );
+    for (owner, methods) in public_methods {
+        let expected_signature = match owner.as_str() {
+            "RejectKind" => "constfnas_label(self)->&'staticstr",
+            "ConsumerTxOutcome<C>" => "constfnas_label(&self)->&'staticstr",
+            _ => unreachable!("owner exact-set checked above"),
+        };
+        let actual_signature = methods
+            .first()
+            .map(|method| method.sig.to_token_stream().to_string().replace(' ', ""));
+        anyhow::ensure!(
+            methods.len() == 1
+                && methods[0].sig.ident == "as_label"
+                && actual_signature.as_deref() == Some(expected_signature),
+            "{owner} may expose only const as_label"
+        );
+    }
+    Ok(())
+}
+
+fn validate_consumer_tx_root_source(source: &str) -> Result<()> {
+    fn exposes_consumer_tx(item: &syn::Item) -> bool {
+        use quote::ToTokens as _;
+
+        if let syn::Item::Mod(module) = item {
+            if !matches!(module.vis, syn::Visibility::Public(_)) {
+                return false;
+            }
+            return module
+                .content
+                .as_ref()
+                .is_some_and(|(_, items)| items.iter().any(exposes_consumer_tx));
+        }
+        let is_public = match item {
+            syn::Item::Const(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Enum(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::ExternCrate(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Fn(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Static(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Struct(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Trait(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::TraitAlias(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Type(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Union(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            syn::Item::Use(item) => matches!(item.vis, syn::Visibility::Public(_)),
+            _ => false,
+        };
+        if !is_public {
+            return false;
+        }
+        let tokens = item.to_token_stream().to_string().replace(' ', "");
+        tokens.contains("ConsumerTxOutcome")
+            || tokens.contains("RejectKind")
+            || tokens.contains("consumer_tx::")
+    }
+
+    let file = syn::parse_file(source).context("解析 eventexec crate root 失败")?;
+    for item in &file.items {
+        if matches!(item, syn::Item::Mod(module) if module.ident == "consumer_tx") {
+            continue;
+        }
+        anyhow::ensure!(
+            !exposes_consumer_tx(item),
+            "ConsumerTx root alias, facade, or re-export is forbidden"
+        );
+    }
+    Ok(())
+}
+
+fn assert_enum_shape(item: &syn::ItemEnum, expected: &[(&str, Option<&str>)]) -> Result<()> {
+    use quote::ToTokens as _;
+
+    anyhow::ensure!(
+        item.variants.len() == expected.len(),
+        "{} variant count drifted",
+        item.ident
+    );
+    for (variant, (name, field_type)) in item.variants.iter().zip(expected) {
+        anyhow::ensure!(
+            variant.ident == *name,
+            "{} variant order/name drifted",
+            item.ident
+        );
+        match (&variant.fields, field_type) {
+            (syn::Fields::Unit, None) => {}
+            (syn::Fields::Unnamed(fields), Some(expected_type)) if fields.unnamed.len() == 1 => {
+                let actual = fields.unnamed[0]
+                    .ty
+                    .to_token_stream()
+                    .to_string()
+                    .replace(' ', "");
+                anyhow::ensure!(
+                    actual == *expected_type,
+                    "{}::{name} payload drifted",
+                    item.ident
+                );
+            }
+            _ => bail!("{}::{name} field shape drifted", item.ident),
+        }
+    }
+    Ok(())
+}
+
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
@@ -1231,6 +1459,9 @@ fn combine_release_captures(default: ApiCapture, all_features: ApiCapture) -> Ap
 
 fn execute(root: &Path, plan: &BaselinePlan, check: bool) -> Result<BTreeMap<String, ApiCapture>> {
     let owner = plan.scope.owner();
+    if owner == BaselineOwner::Internal {
+        validate_consumer_tx_public_surface(root)?;
+    }
     let _owner_lock = BaselineOwnerLock::acquire(root, owner, check)?;
     let dir = root.join(owner.directory());
     let before = scan_baselines(&dir)?;
@@ -2040,6 +2271,79 @@ mod tests {
         "consistency_level",
         "effect_profile",
     ];
+
+    const SYNTHETIC_CONSUMER_TX_SURFACE: &str = r#"
+        pub enum RejectKind { Permanent, Invariant }
+        impl RejectKind { pub const fn as_label(self) -> &'static str { "kind" } }
+        pub enum ConsumerTxOutcome<C> {
+            Committed(C),
+            HandlerTransient,
+            InfrastructureTransient,
+            Rejected(RejectKind),
+            CommitUnknown,
+            RollbackFailed,
+            Fenced,
+        }
+        impl<C> ConsumerTxOutcome<C> {
+            pub const fn as_label(&self) -> &'static str { "outcome" }
+        }
+    "#;
+
+    #[test]
+    fn consumer_tx_surface_rejects_extra_public_owner() {
+        let source = format!("{SYNTHETIC_CONSUMER_TX_SURFACE}\npub struct ConsumerTxRunner;");
+        assert!(validate_consumer_tx_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn consumer_tx_surface_allows_private_implementation() {
+        let source = format!(
+            "{SYNTHETIC_CONSUMER_TX_SURFACE}\nconst PRIVATE: &str = \"private\"; impl RejectKind {{ fn private_helper(self) -> &'static str {{ PRIVATE }} }}"
+        );
+        assert!(validate_consumer_tx_public_source(&source).is_ok());
+    }
+
+    #[test]
+    fn consumer_tx_surface_rejects_trait_bridge() {
+        let source = format!(
+            "{SYNTHETIC_CONSUMER_TX_SURFACE}\nimpl<C> core::fmt::Debug for ConsumerTxOutcome<C> {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+        );
+        assert!(validate_consumer_tx_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn consumer_tx_surface_rejects_associated_item() {
+        let source = SYNTHETIC_CONSUMER_TX_SURFACE.replace(
+            "impl RejectKind {",
+            "impl RejectKind { pub const COMPAT: &'static str = \"compat\";",
+        );
+        assert!(validate_consumer_tx_public_source(&source).is_err());
+    }
+
+    #[test]
+    fn consumer_tx_root_rejects_alias_facade() {
+        assert!(
+            validate_consumer_tx_root_source(
+                "pub mod consumer_tx; pub use consumer_tx::ConsumerTxOutcome as Outcome;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn consumer_tx_root_allows_private_implementation_inside_public_module() {
+        assert!(
+            validate_consumer_tx_root_source(
+                "pub mod consumer_tx; pub mod worker { fn private(_: crate::consumer_tx::RejectKind) {} }"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn real_consumer_tx_surface_is_exact() -> Result<()> {
+        validate_consumer_tx_public_surface(&crate::workspace_root()?)
+    }
 
     fn exposed_http_route_evidence_fields(baseline: &str) -> Vec<&'static str> {
         HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS

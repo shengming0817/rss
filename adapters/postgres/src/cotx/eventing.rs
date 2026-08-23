@@ -123,6 +123,20 @@ pub struct EventingTx<'tx, L: TenantLane, C: EventingConcern> {
     _concern: std::marker::PhantomData<fn() -> C>,
 }
 
+#[cfg(all(test, feature = "integration"))]
+impl EventingTx<'_, ServingWriteLane, ConsumerConcern> {
+    pub(crate) async fn insert_consumer_rollback_probe(
+        &mut self,
+        marker: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO rss_consumer_tx_rollback_probe (marker) VALUES ($1)")
+            .bind(marker)
+            .execute(&mut *self.conn)
+            .await?;
+        Ok(())
+    }
+}
+
 pub(crate) type CommandTx<'tx> = EventingTx<'tx, ServingWriteLane, CommandConcern>;
 #[cfg(all(test, feature = "integration"))]
 pub(crate) type SagaWriteTx<'tx> = EventingTx<'tx, ServingWriteLane, SagaConcern>;
@@ -132,6 +146,25 @@ pub type OutboxTx<'tx> = EventingTx<'tx, ServingWriteLane, OutboxConcern>;
 pub(crate) type InboxWriteTx<'tx> = EventingTx<'tx, ServingWriteLane, InboxConcern>;
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) type ConsumerTx<'tx> = EventingTx<'tx, ServingWriteLane, ConsumerConcern>;
+
+#[cfg(all(test, feature = "integration"))]
+impl ConsumerTx<'_> {
+    pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn inject_rollback_failed_after_rollback(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_rollback_failed_after_rollback', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+}
 
 impl<'tx, L: TenantLane, C: EventingConcern> EventingTx<'tx, L, C> {
     pub(in crate::cotx) fn from_raw(tx: &'tx mut TenantTx<'_, L>) -> Self {
@@ -252,10 +285,38 @@ eventing_write_runner!(ServingWriteLane, dlq_write, DlqConcern);
 eventing_write_runner!(MaintenanceWriteLane, dlq_write, DlqConcern);
 eventing_write_runner!(ServingWriteLane, outbox_write, OutboxConcern);
 eventing_write_runner!(ServingWriteLane, inbox_write, InboxConcern);
-#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
-eventing_write_runner!(ServingWriteLane, consumer_write, ConsumerConcern);
 
 impl TenantDb<ServingWriteLane> {
+    /// Consumer writes retain the opaque settlement until the adapter maps ambiguity and fencing
+    /// into the canonical Eventing outcome.
+    #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
+    pub(crate) async fn consumer_write_attempt<S, T, F, E>(
+        &self,
+        scope: S,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> super::LocalTxAttempt<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'tx> FnOnce(
+                EventingTx<'tx, ServingWriteLane, ConsumerConcern>,
+            ) -> BoxFuture<'tx, Result<T, E>>
+            + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        self.write_attempt(
+            scope,
+            move |tx| {
+                write(EventingTx::<ServingWriteLane, ConsumerConcern>::from_raw(
+                    tx,
+                ))
+            },
+            map_storage,
+        )
+        .await
+    }
+
     /// Saga receipt writes retain the opaque local transaction settlement until the adapter maps
     /// commit-unknown into its dedicated fail-closed port error.
     pub(crate) async fn saga_write_attempt<S, T, F, E>(

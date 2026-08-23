@@ -44,6 +44,7 @@ tracing = { workspace = true }
 vocab = { path = "../../crates/vocab" }
 
 [dev-dependencies]
+postgres = { path = "../../adapters/postgres", features = ["consumer-tx-composition-test-support"] }
 settings = { path = "../../crates/settings", features = ["test-support"] }
 testkit = { path = "../../crates/testkit" }
 tracing-subscriber = { workspace = true }

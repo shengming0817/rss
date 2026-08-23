@@ -10,6 +10,7 @@
 
 pub mod consumer;
 pub use consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
+pub mod consumer_tx;
 pub mod tenant_authority;
 pub use tenant_authority::{
     TenantAuthority, TenantAuthorityBinding, TenantAuthorityConfigError, TenantAuthorityError,

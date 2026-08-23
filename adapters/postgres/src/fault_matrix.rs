@@ -1174,12 +1174,15 @@ impl PgFaultMatrixHarness {
                         .session_created_consumer_tx(hasher),
                 );
                 match consumer.handle(message, ctx, key, lease).await {
-                    crate::PgConsumerTxOutcome::Committed(_) => {
+                    eventexec::consumer_tx::ConsumerTxOutcome::Committed(_) => {
                         Ok(FaultMatrixConsumerDelivery::Committed)
                     }
-                    crate::PgConsumerTxOutcome::Requeue(_)
-                    | crate::PgConsumerTxOutcome::LeaseLost { .. }
-                    | crate::PgConsumerTxOutcome::Reject { .. } => {
+                    eventexec::consumer_tx::ConsumerTxOutcome::HandlerTransient
+                    | eventexec::consumer_tx::ConsumerTxOutcome::InfrastructureTransient
+                    | eventexec::consumer_tx::ConsumerTxOutcome::Rejected(_)
+                    | eventexec::consumer_tx::ConsumerTxOutcome::CommitUnknown
+                    | eventexec::consumer_tx::ConsumerTxOutcome::RollbackFailed
+                    | eventexec::consumer_tx::ConsumerTxOutcome::Fenced => {
                         bail!("session-created ConsumerTx did not commit")
                     }
                 }

@@ -110,6 +110,11 @@ ref: sqlx sqlx-core/src/pool/connection.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d
 
 - attempt 状态是 crate-private opaque 和式类型，非法的 result/status 组合在类型层不可表达（Hard）。
   生产 mint 构造器只对 settlement funnel 可见，兄弟模块只能消费。
+- ConsumerTx 复用同一 opaque `LocalTxAttempt`，只通过私有穷尽 `fold` 投影到
+  `eventexec::consumer_tx::ConsumerTxOutcome<PgConsumerTxCommitProof>`。commit ACK 铸造私有 proof；commit ACK
+  缺失为 `CommitUnknown`；rollback ACK 缺失为 `RollbackFailed` 并覆盖原始错误/lease 分类；确认 rollback 后
+  lease lost 才是 `Fenced`，其余 storage failure 是 `InfrastructureTransient`。不得暴露内部状态、返回
+  `(status, Result)`，或用 bool/string 重建结算。
 - sealed `TenantDb<ServingWriteLane>` 是 serving tenant scope 与 write transaction capability 的唯一入口；
   maintenance 使用互不兼容的 `TenantDb<MaintenanceWriteLane>`。每次 attempt 内先显式 acquire 连接并立即
   装入默认 armed 的 lease；完成 tenant GUC/timeout setup 后才私有铸造

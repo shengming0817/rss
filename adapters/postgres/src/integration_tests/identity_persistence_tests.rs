@@ -427,7 +427,7 @@ async fn credential_security_event_consumer_appends_current_and_all_without_iden
                     lease
                 )
                 .await,
-            crate::PgConsumerTxOutcome::Committed(_)
+            eventexec::consumer_tx::ConsumerTxOutcome::Committed(_)
         ));
         let row: (String, String, String, String) = sqlx::query_as(
             "SELECT actor::text, actor_kind, action, resource_id FROM audit_entries \
@@ -482,7 +482,7 @@ async fn credential_security_event_consumer_appends_current_and_all_without_iden
                 invalid_lease
             )
             .await,
-        crate::PgConsumerTxOutcome::Reject { .. }
+        eventexec::consumer_tx::ConsumerTxOutcome::Rejected(_)
     ));
     let after_failure: (i64, i64) = sqlx::query_as(
         "SELECT \

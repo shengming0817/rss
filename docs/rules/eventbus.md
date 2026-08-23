@@ -230,13 +230,15 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 
 - 所有 consumer 使用 `ConsumerBase` 的 preflight / claim / lease / broker-settle 语义。
 - `HandleResult` 不得裸构造，只用 `ack` / `requeue` / `reject` 构造器。`reject` / `requeue` 携带的
-  error kind 必须经 `HandleResult::as_settled()` → `Settled::{Reject,Requeue}{summary}` 流到 DLX funnel，
-  不在结果边界静默丢弃（失败变体类型层必携摘要，#1285）。
+  error kind 必须经 `HandleResult::as_settled()` 保留；`Reject` 携闭合 typed kind，`Requeue` 携静态摘要，
+  不得从自由字符串反推分类。
 - durable PG runtime 必须使用 ConsumerTx：Fresh claim 后在同一 tenant-scoped 事务内完成业务写、
   outgoing append 与 inbox mark processed，commit 成功后才 broker Ack。旧 non-tx ackable spawn 不受支持。
-- ConsumerTx handler 由 postgres adapter 构造，外部 crate 不得构造或逃逸
-  `ConsumerTx`，也不能取得 `TenantTx<ServingWriteLane>`、raw connection 或通用 executor。
-  handler、outcome、runner 与 worker spawn 归 runtime assembly 私有。
+- ConsumerTx handler 由 postgres adapter 构造，外部 crate 不得构造或逃逸 `ConsumerTx`，也不能取得
+  `TenantTx<ServingWriteLane>`、raw connection 或通用 executor。当前唯一规范 outcome 是
+  `eventexec::consumer_tx::ConsumerTxOutcome<C>`；它只携七种闭合结算结果，Postgres 以私有构造的
+  `PgConsumerTxCommitProof` 绑定成功分支，sealed Composition handler/runner 直接消费同一类型身份。
+  禁止 provider/composition 镜像枚举、转换桥、crate-root re-export 或 `()` proof 替代。
 - 长驻 `!Send` event worker 的 OS thread、current-thread Tokio runtime、driver、build failure、health 与
   completion 统一归 `eventexec` typed dedicated-runtime factory；assembly 只提供业务 future，确需保留
   组合根健康证据时仅注入窄 build-failure observer，不得直接构造 `tokio::runtime::Builder`。
@@ -247,8 +249,9 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   `BackoffPolicy` 为 1s base / 60s cap（`base * 2^(attempts-1)` 封顶），经 spawn 注入（生产 default，
   测试可 tiny）。禁止 subscribe 失败后 one-shot `worker exiting`。载体：`CONSUMER-SUBSCRIBE-SUPERVISE-01`
   （Medium）。
-- 结算规则：`handler_transient` 耗尽后只 broker `Requeue`，不写 app DLX、不提交 inbox done、不 Ack；
-  `commit_unknown` / lease lost 立即 `Requeue`；只有永久 `Reject` 可写 app DLX 后 Ack。
+- 结算规则：`handler_transient` 才进入本地预算；耗尽后只 broker `Requeue`。`infrastructure_transient`、
+  `commit_unknown`、`rollback_failed`、`fenced` 均立即 `Requeue`，不得本地重试、写 app DLX、提交 inbox done
+  或 Ack；只有 `Rejected(_)` 可进入既有 DLX/terminal receipt 流程。
   Duplicate delivery 不进入 tx handler，直接 Ack。活跃 claim 是 typed `InProgress`，不是 backend
   `Transient`；consumer 按同源 lease 周期做有上限延迟后 `Requeue`，不进入 handler，也不发 backend-health warn。
 - 每条订阅必须在 `contract.toml` 声明 identity、闭枚举 `execution` 与逐订阅 `externalEffectPolicy`。
@@ -280,7 +283,7 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 | Reject | 永久失败 | broker nack/reject，进入 DLX |
 
 读路径用 `HandleResult::as_settled()` → 闭合枚举 `Settled`（禁 `#[non_exhaustive]`；
-`Reject`/`Requeue` 变体必携 PII-safe summary）；`Disposition` 仅作无摘要标签 / metrics
+`Reject` 必携 typed kind、`Requeue` 必携 PII-safe summary）；`Disposition` 仅作无摘要标签 / metrics
 （由 `as_settled` 派生，可 `#[non_exhaustive]`）。二者不是平行第二真源。
 
 `PermanentError` 只是错误分类，不自动把 Requeue 改成 Reject。

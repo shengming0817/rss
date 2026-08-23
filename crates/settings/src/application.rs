@@ -3514,14 +3514,14 @@ mod tests {
         assert_eq!(
             invalid.as_settled(),
             consistency::Settled::Reject {
-                summary: PermanentErrorKind::Permanent.message()
+                kind: PermanentErrorKind::Permanent
             }
         );
         assert_eq!(mismatch.disposition(), consistency::Disposition::Reject);
         assert_eq!(
             mismatch.as_settled(),
             consistency::Settled::Reject {
-                summary: PermanentErrorKind::Invariant.message()
+                kind: PermanentErrorKind::Invariant
             }
         );
     }

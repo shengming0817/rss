@@ -4,6 +4,7 @@
 //! `TenantTx` sealed inside this crate: runtime chooses a handler, but cannot construct or
 //! escape transaction capability values.
 
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use std::sync::Arc;
 
 #[cfg(feature = "domain-audit")]
@@ -11,17 +12,26 @@ use audit::ports::{
     AuditChainHasher, AuditEventKind, AuditEventRecordError, AuditRecord,
     audit_record_from_event_message, security_audit_command_from_message,
 };
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use consistency::idempotency::LeaseOutcome;
-use consistency::{EngineErrorKind, IdemKey, InboxReceiptContext, LeaseToken};
 #[cfg(feature = "domain-settings")]
 use consistency::{HandleResult, Settled};
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+use consistency::{IdemKey, InboxReceiptContext, LeaseToken};
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+use eventexec::consumer_tx::ConsumerTxOutcome;
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+use eventexec::consumer_tx::RejectKind;
 #[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 
 #[cfg(feature = "domain-audit")]
 use crate::cotx::settings_audit::audit_write_tx;
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use crate::inbox::commit_in_tx;
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use crate::pool::VerifiedPgWriteStore;
 
 /// Opaque evidence that the postgres ConsumerTx unit committed while its inbox lease was held.
@@ -38,56 +48,15 @@ impl PgConsumerTxCommitProof {
             _provider_owned: (),
         }
     }
-}
 
-/// Provider-owned result of one ConsumerTx attempt.
-///
-/// Only the concrete Postgres handler methods can return `Committed` with the opaque proof.
-/// The Ack-authorizing consumer trait and runner live crate-private in the runtime assembly.
-pub enum PgConsumerTxOutcome {
-    Committed(PgConsumerTxCommitProof),
-    Requeue(PgConsumerTxRequeue),
-    LeaseLost { summary: &'static str },
-    Reject { summary: &'static str },
-}
-
-pub struct PgConsumerTxRequeue {
-    category: PgConsumerTxRequeueCategory,
-    summary: &'static str,
-}
-
-enum PgConsumerTxRequeueCategory {
-    #[cfg(feature = "domain-settings")]
-    HandlerTransient,
-    CommitUnknown,
-}
-
-impl PgConsumerTxOutcome {
-    #[cfg(feature = "domain-settings")]
-    fn handler_transient(summary: &'static str) -> Self {
-        Self::Requeue(PgConsumerTxRequeue {
-            category: PgConsumerTxRequeueCategory::HandlerTransient,
-            summary,
-        })
-    }
-
-    fn commit_unknown(summary: &'static str) -> Self {
-        Self::Requeue(PgConsumerTxRequeue {
-            category: PgConsumerTxRequeueCategory::CommitUnknown,
-            summary,
-        })
-    }
-}
-
-impl PgConsumerTxRequeue {
-    #[must_use]
-    pub fn is_commit_unknown(&self) -> bool {
-        matches!(self.category, PgConsumerTxRequeueCategory::CommitUnknown)
-    }
-
-    #[must_use]
-    pub fn summary(&self) -> &'static str {
-        self.summary
+    /// Mint provider-owned proof only in test dependency graphs.
+    ///
+    /// Keeping the mint on the provider type lets Composition exercise its real Ack path without
+    /// reopening the production handler boundary to an arbitrary associated proof type.
+    #[cfg(feature = "consumer-tx-composition-test-support")]
+    #[doc(hidden)]
+    pub fn for_test() -> Self {
+        Self::committed()
     }
 }
 
@@ -151,7 +120,7 @@ where
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> PgConsumerTxOutcome {
+    ) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
         if self.kind == AuditEventKind::SecurityEvent {
             return self.handle_security_attempt(message, ctx, key, lease).await;
         }
@@ -171,7 +140,7 @@ where
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> PgConsumerTxOutcome {
+    ) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
         let command = match security_audit_command_from_message(&message) {
             Ok(command) if command.tenant() == ctx.tenant_id() => command,
             Ok(command) => {
@@ -192,11 +161,11 @@ where
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> Result<(), PgConsumerTxError> {
+    ) -> crate::cotx::LocalTxAttempt<(), PgConsumerTxError> {
         let tenant = record.tenant;
         let hasher = Arc::clone(&self.hasher);
         self.pool
-            .consumer_write(
+            .consumer_write_attempt(
                 infra_tenant_scope(tenant),
                 move |mut tx| {
                     Box::pin(async move {
@@ -230,7 +199,7 @@ where
         &self,
         message: &diport::Message,
         ctx: &InboxReceiptContext,
-    ) -> Result<AuditRecord, PgConsumerTxOutcome> {
+    ) -> Result<AuditRecord, ConsumerTxOutcome<PgConsumerTxCommitProof>> {
         let record = self
             .record_from_message(message)
             .map_err(|error| reject_audit_payload(&error))?;
@@ -252,7 +221,7 @@ where
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> futures::future::BoxFuture<'static, PgConsumerTxOutcome> {
+    ) -> futures::future::BoxFuture<'static, ConsumerTxOutcome<PgConsumerTxCommitProof>> {
         Box::pin(async move { self.handle_attempt(message, ctx, key, lease).await })
     }
 }
@@ -282,7 +251,7 @@ impl PgSettingsConsumerTx {
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> PgConsumerTxOutcome {
+    ) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
         let tenant = ctx.tenant_id();
         if let Err(outcome) =
             settings_refresh_outcome(self.reconciler.reconcile(message, tenant).await)
@@ -297,9 +266,9 @@ impl PgSettingsConsumerTx {
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> Result<(), PgConsumerTxError> {
+    ) -> crate::cotx::LocalTxAttempt<(), PgConsumerTxError> {
         self.pool
-            .consumer_write(
+            .consumer_write_attempt(
                 infra_tenant_scope(ctx.tenant_id()),
                 move |mut tx| {
                     Box::pin(async move {
@@ -327,67 +296,94 @@ impl PgSettingsConsumerTx {
         ctx: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> futures::future::BoxFuture<'static, PgConsumerTxOutcome> {
+    ) -> futures::future::BoxFuture<'static, ConsumerTxOutcome<PgConsumerTxCommitProof>> {
         Box::pin(async move { self.handle_attempt(message, ctx, key, lease).await })
     }
 }
 
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 fn pg_consumer_tx_outcome(
     scope: &'static str,
-    result: Result<(), PgConsumerTxError>,
-) -> PgConsumerTxOutcome {
-    match result {
-        Ok(()) => PgConsumerTxOutcome::Committed(PgConsumerTxCommitProof::committed()),
-        Err(PgConsumerTxError::LeaseLost) => PgConsumerTxOutcome::LeaseLost {
-            summary: EngineErrorKind::Transient.message(),
+    attempt: crate::cotx::LocalTxAttempt<(), PgConsumerTxError>,
+) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
+    attempt.fold(
+        |()| ConsumerTxOutcome::Committed(PgConsumerTxCommitProof::committed()),
+        |error| {
+            log_consumer_tx_error(scope, &error, "unsettled");
+            ConsumerTxOutcome::InfrastructureTransient
         },
-        Err(error) => {
-            tracing::warn!(
-                scope,
-                error = %secure::redact_error(&error),
-                "consumer-tx: postgres transaction failed"
-            );
-            PgConsumerTxOutcome::commit_unknown(EngineErrorKind::Transient.message())
-        }
-    }
+        |error| {
+            log_consumer_tx_error(scope, &error, "rolled_back");
+            match error {
+                PgConsumerTxError::LeaseLost => ConsumerTxOutcome::Fenced,
+                #[cfg(feature = "domain-audit")]
+                PgConsumerTxError::Audit(_) => ConsumerTxOutcome::InfrastructureTransient,
+                PgConsumerTxError::Storage(_) | PgConsumerTxError::Inbox(_) => {
+                    ConsumerTxOutcome::InfrastructureTransient
+                }
+            }
+        },
+        |error| {
+            log_consumer_tx_error(scope, &error, "rollback_failed");
+            ConsumerTxOutcome::RollbackFailed
+        },
+        |error| {
+            log_consumer_tx_error(scope, &error, "commit_unknown");
+            ConsumerTxOutcome::CommitUnknown
+        },
+    )
+}
+
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+fn log_consumer_tx_error(scope: &'static str, error: &PgConsumerTxError, settlement: &'static str) {
+    tracing::warn!(
+        scope,
+        settlement,
+        error = %secure::redact_error(error),
+        "consumer-tx: postgres transaction failed"
+    );
 }
 
 #[cfg(feature = "domain-audit")]
-fn reject_audit_payload(error: &AuditEventRecordError) -> PgConsumerTxOutcome {
+fn reject_audit_payload(
+    error: &AuditEventRecordError,
+) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
     tracing::warn!(
         error = %secure::redact_error(error),
         "consumer-tx: audit payload rejected"
     );
-    PgConsumerTxOutcome::Reject {
-        summary: consistency::PermanentErrorKind::Permanent.message(),
-    }
+    ConsumerTxOutcome::Rejected(RejectKind::Permanent)
 }
 
 #[cfg(feature = "domain-audit")]
 fn reject_audit_tenant_mismatch(
     payload_tenant: rss_request_context::TenantId,
     ctx: &InboxReceiptContext,
-) -> PgConsumerTxOutcome {
+) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
     tracing::warn!(
         payload_tenant = %payload_tenant,
         receipt_tenant = %ctx.tenant_id(),
         "consumer-tx: audit payload tenant does not match verified envelope tenant"
     );
-    PgConsumerTxOutcome::Reject {
-        summary: consistency::PermanentErrorKind::Invariant.message(),
-    }
+    ConsumerTxOutcome::Rejected(RejectKind::Invariant)
 }
 
 #[cfg(feature = "domain-settings")]
-fn settings_refresh_outcome(result: HandleResult) -> Result<(), PgConsumerTxOutcome> {
+fn settings_refresh_outcome(
+    result: HandleResult,
+) -> Result<(), ConsumerTxOutcome<PgConsumerTxCommitProof>> {
     match result.as_settled() {
         Settled::Ack => Ok(()),
-        Settled::Requeue { summary } => Err(PgConsumerTxOutcome::handler_transient(summary)),
-        Settled::Reject { summary } => Err(PgConsumerTxOutcome::Reject { summary }),
+        Settled::Requeue { .. } => Err(ConsumerTxOutcome::HandlerTransient),
+        Settled::Reject { kind } => Err(ConsumerTxOutcome::Rejected(match kind {
+            consistency::PermanentErrorKind::Permanent => RejectKind::Permanent,
+            consistency::PermanentErrorKind::Invariant => RejectKind::Invariant,
+        })),
     }
 }
 
 #[derive(Debug, thiserror::Error)]
+#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 enum PgConsumerTxError {
     #[error("consumer transaction storage failed")]
     Storage(#[source] sqlx::Error),
@@ -398,6 +394,127 @@ enum PgConsumerTxError {
     Inbox(#[source] consistency::EngineError),
     #[error("consumer transaction lease lost")]
     LeaseLost,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+pub(crate) enum ConsumerTxSettlementFault {
+    None,
+    CommitUnknown,
+    RollbackFailed,
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn consumer_tx_settlement_for_test(
+    store: &crate::PgStore,
+    tenant: rss_request_context::TenantId,
+    fault: ConsumerTxSettlementFault,
+    attempts: Arc<std::sync::atomic::AtomicUsize>,
+) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
+    let pool = TenantDb::<ServingWriteLane>::from_unverified_for_test(store);
+    let attempt_counter = Arc::clone(&attempts);
+    let attempt = pool
+        .consumer_write_attempt(
+            infra_tenant_scope(tenant),
+            move |mut tx| {
+                Box::pin(async move {
+                    attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    match fault {
+                        ConsumerTxSettlementFault::None => Ok(()),
+                        ConsumerTxSettlementFault::CommitUnknown => {
+                            tx.inject_commit_unknown_after_commit()
+                                .await
+                                .map_err(PgConsumerTxError::Storage)?;
+                            Ok(())
+                        }
+                        ConsumerTxSettlementFault::RollbackFailed => {
+                            tx.inject_rollback_failed_after_rollback()
+                                .await
+                                .map_err(PgConsumerTxError::Storage)?;
+                            Err(PgConsumerTxError::Storage(sqlx::Error::Protocol(
+                                "injected consumer transaction rollback".into(),
+                            )))
+                        }
+                    }
+                })
+            },
+            PgConsumerTxError::Storage,
+        )
+        .await;
+    pg_consumer_tx_outcome("integration-test", attempt)
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn consumer_tx_stale_lease_for_test(
+    store: &crate::PgStore,
+    tenant: rss_request_context::TenantId,
+    ctx: InboxReceiptContext,
+    key: IdemKey,
+    stale_lease: LeaseToken,
+    attempts: Arc<std::sync::atomic::AtomicUsize>,
+) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
+    let pool = TenantDb::<ServingWriteLane>::from_unverified_for_test(store);
+    let attempt_counter = Arc::clone(&attempts);
+    let attempt = pool
+        .consumer_write_attempt(
+            infra_tenant_scope(tenant),
+            move |mut tx| {
+                Box::pin(async move {
+                    attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    match commit_in_tx(&mut tx, &ctx, &key, &stale_lease)
+                        .await
+                        .map_err(PgConsumerTxError::Inbox)?
+                    {
+                        LeaseOutcome::Held => Ok(()),
+                        LeaseOutcome::Lost => Err(PgConsumerTxError::LeaseLost),
+                        _ => Err(PgConsumerTxError::LeaseLost),
+                    }
+                })
+            },
+            PgConsumerTxError::Storage,
+        )
+        .await;
+    pg_consumer_tx_outcome("integration-test-stale-lease", attempt)
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn consumer_tx_confirmed_rollback_for_test(
+    store: &crate::PgStore,
+    tenant: rss_request_context::TenantId,
+    ctx: InboxReceiptContext,
+    key: IdemKey,
+    lease: LeaseToken,
+    marker: String,
+    attempts: Arc<std::sync::atomic::AtomicUsize>,
+) -> ConsumerTxOutcome<PgConsumerTxCommitProof> {
+    let pool = TenantDb::<ServingWriteLane>::from_unverified_for_test(store);
+    let attempt_counter = Arc::clone(&attempts);
+    let attempt = pool
+        .consumer_write_attempt(
+            infra_tenant_scope(tenant),
+            move |mut tx| {
+                Box::pin(async move {
+                    attempt_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tx.insert_consumer_rollback_probe(&marker)
+                        .await
+                        .map_err(PgConsumerTxError::Storage)?;
+                    match commit_in_tx(&mut tx, &ctx, &key, &lease)
+                        .await
+                        .map_err(PgConsumerTxError::Inbox)?
+                    {
+                        LeaseOutcome::Held => {}
+                        LeaseOutcome::Lost => return Err(PgConsumerTxError::LeaseLost),
+                        _ => return Err(PgConsumerTxError::LeaseLost),
+                    }
+                    Err(PgConsumerTxError::Storage(sqlx::Error::Protocol(
+                        "injected ordinary consumer transaction failure".into(),
+                    )))
+                })
+            },
+            PgConsumerTxError::Storage,
+        )
+        .await;
+    pg_consumer_tx_outcome("integration-test-confirmed-rollback", attempt)
 }
 
 #[cfg(all(test, feature = "domain-audit"))]

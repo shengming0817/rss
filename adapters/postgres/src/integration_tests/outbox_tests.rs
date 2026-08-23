@@ -220,7 +220,10 @@ async fn settings_consumer_tx_commit_marks_done_and_next_claim_is_duplicate() ->
             lease,
         )
         .await;
-    assert!(matches!(outcome, crate::PgConsumerTxOutcome::Committed(_)));
+    assert!(matches!(
+        outcome,
+        eventexec::consumer_tx::ConsumerTxOutcome::Committed(_)
+    ));
 
     let receipt: (String, Option<String>) = sqlx::query_as(
         "SELECT status, committed_at::text FROM inbox_receipts \

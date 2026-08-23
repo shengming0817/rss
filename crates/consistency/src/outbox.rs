@@ -343,7 +343,6 @@ impl Disposition {
 
 /// 永久（不可重试）失败种类——**排除** `Transient`（类型层杜绝把瞬态误标永久）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum PermanentErrorKind {
     /// 永久失败（重试无意义）。
     Permanent,
@@ -380,19 +379,19 @@ impl PermanentError {
     }
 }
 
-/// 写路径私有形态：`Reject`/`Requeue` 变体**必**携 `&'static str` summary——类型层无法表达「失败无摘要」
-/// （#1285）。公面仍是 [`HandleResult`] + 三构造器 funnel，禁裸枚举字面量绕过 `*ErrorKind::message()`。
+/// 写路径私有形态：`Requeue` 携静态摘要，`Reject` 携闭合 typed kind。
+/// 公面仍是 [`HandleResult`] + 三构造器 funnel，禁裸枚举字面量绕过稳定分类。
 #[derive(Debug)]
 enum HandleInner {
     Ack,
     Requeue { summary: &'static str },
-    Reject { summary: &'static str },
+    Reject { kind: PermanentErrorKind },
 }
 
-/// 读路径穷尽形态：`Reject`/`Requeue` 变体必携 kind 摘要（Hard）。
+/// 读路径穷尽形态：`Reject` 携 typed kind，`Requeue` 携 kind 摘要（Hard）。
 ///
-/// ConsumerBase / ConsumerTx 经 [`HandleResult::as_settled`] 取摘要进 DLX——不再经 `Option` + `unwrap_or`
-/// （#1285）。摘要恒为 `&'static str` const（来自构造器内 `*ErrorKind::message()`）。
+/// ConsumerBase 经 [`HandleResult::as_settled`] 取得 DLX 摘要；ConsumerTx 保留 reject kind 的类型身份。
+/// Requeue 摘要恒为 `&'static str` const（来自构造器内 `EngineErrorKind::message()`）。
 ///
 /// **闭合值集**（非 `#[non_exhaustive]`）：结算协议三态固定；下游必须穷尽 match，新增变体强制编译失败
 /// （对齐 `architecture.md` 值集冻结 Hard / `std::ops::ControlFlow`）。
@@ -402,22 +401,19 @@ pub enum Settled {
     Ack,
     /// 瞬态失败：必携 engine kind 摘要。
     Requeue { summary: &'static str },
-    /// 永久失败：必携 permanent kind 摘要。
-    Reject { summary: &'static str },
+    /// 永久失败：携闭合 typed kind，调用方无需从摘要字符串反推分类。
+    Reject { kind: PermanentErrorKind },
 }
 
 /// 业务 handler 结果（私有字段；禁裸 struct literal，经 `ack`/`requeue`/`reject` 构造器 —— eventbus.md）。
 ///
-/// 写路径经构造器把 `reject`/`requeue` 的 error kind `&'static str` const message 嵌入 [`HandleInner`]
-/// （#1125/#1285）——error 不在 HandleResult 边界被静默丢弃；读路径经 [`HandleResult::as_settled`] →
-/// [`Settled`]，失败变体类型层必携摘要。摘要恒为 const literal（来自
-/// `EngineErrorKind`/`PermanentErrorKind::message()`，无 runtime 数据）⇒ PII-safe，对齐
-/// `diport::DeadLetterSummary` 的 const 收口（DIPORT-DLX-SUMMARY-STATIC-01）。
+/// 写路径经构造器把 `requeue` 的静态摘要与 `reject` 的 typed kind 嵌入 [`HandleInner`]；读路径经
+/// [`HandleResult::as_settled`] 保留同一分类。ConsumerBase 只在 DLX funnel 将 reject kind 映射为
+/// `PermanentErrorKind::message()`；ConsumerTx 可直接映射到规范 reject 类型。
 ///
-/// # INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "handle-inner-settled" }
+/// # INVARIANT: OUTBOX-HANDLERESULT-CLASSIFICATION-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "handle-inner-settled" }
 ///
-/// 摘要只能取 `*ErrorKind::message()` 的 `&'static str` const（构造器内单源填入）；`HandleInner`/
-/// [`Settled`] 使 Reject/Requeue 无法表达无摘要——类型层杜绝 runtime `String` 与「恒 Some 对消费侧不可见」。
+/// `HandleInner`/[`Settled`] 杜绝 runtime `String` 与从字符串反推 reject 分类。
 #[derive(Debug)]
 pub struct HandleResult {
     inner: HandleInner,
@@ -448,18 +444,16 @@ impl HandleResult {
     // reason: 同 `requeue`（签名冻结期 by-value 约定）；`error` 被消费为 const-message 摘要，不再丢弃（#1125）。
     pub fn reject(error: PermanentError) -> Self {
         Self {
-            inner: HandleInner::Reject {
-                summary: error.kind().message(),
-            },
+            inner: HandleInner::Reject { kind: error.kind() },
         }
     }
 
-    /// 读路径穷尽形态（失败变体必携摘要；ConsumerBase DLX / ConsumerTx 单源）。
+    /// 读路径穷尽形态（失败变体保留稳定分类；ConsumerBase DLX / ConsumerTx 单源）。
     pub fn as_settled(&self) -> Settled {
         match self.inner {
             HandleInner::Ack => Settled::Ack,
             HandleInner::Requeue { summary } => Settled::Requeue { summary },
-            HandleInner::Reject { summary } => Settled::Reject { summary },
+            HandleInner::Reject { kind } => Settled::Reject { kind },
         }
     }
 
@@ -1056,7 +1050,7 @@ mod tests {
         }
     }
 
-    // ack/requeue/reject 构造器置正确 disposition（error kind 摘要见 handle_result_carries_error_summary）。
+    // ack/requeue/reject 构造器置正确 disposition（分类保留见 handle_result_preserves_failure_classification）。
     #[test]
     fn handle_result_constructors_set_disposition() {
         assert_eq!(HandleResult::ack().disposition(), Disposition::Ack);
@@ -1070,11 +1064,11 @@ mod tests {
         );
     }
 
-    // reject/requeue 经 as_settled() 暴露必携摘要的 Settled 变体（#1125/#1285）；ack → Settled::Ack。
-    // 摘要恒 `&'static str` const（来自 *ErrorKind::message()），无 runtime 数据 ⇒ PII-safe。
-    // Hard 真源见同文件 production INVARIANT OUTBOX-HANDLERESULT-SUMMARY-01（native-compile）。
+    // reject/requeue 经 as_settled() 保留 typed kind / 静态摘要；ack → Settled::Ack。
+    // Requeue 摘要恒 `&'static str` const，无 runtime 数据 ⇒ PII-safe。
+    // Hard 真源见同文件 production INVARIANT OUTBOX-HANDLERESULT-CLASSIFICATION-01（native-compile）。
     #[test]
-    fn handle_result_carries_error_summary() {
+    fn handle_result_preserves_failure_classification() {
         assert_eq!(HandleResult::ack().as_settled(), Settled::Ack);
 
         // requeue：穷举 EngineErrorKind 全部变体 → 各自 const message（kind 增变体时本表须同步）。
@@ -1091,15 +1085,12 @@ mod tests {
             );
         }
 
-        // reject：穷举 PermanentErrorKind 全部变体 → 各自 const message。
-        let reject_cases: &[(PermanentErrorKind, &str)] = &[
-            (PermanentErrorKind::Permanent, "permanent error"),
-            (PermanentErrorKind::Invariant, "invariant violated"),
-        ];
-        for &(kind, expected) in reject_cases {
+        // reject：穷举 PermanentErrorKind 全部变体 → 保留 typed identity。
+        let reject_cases = [PermanentErrorKind::Permanent, PermanentErrorKind::Invariant];
+        for kind in reject_cases {
             assert_eq!(
                 HandleResult::reject(PermanentError::new(kind)).as_settled(),
-                Settled::Reject { summary: expected },
+                Settled::Reject { kind },
                 "reject kind={kind:?}"
             );
         }

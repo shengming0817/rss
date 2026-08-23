@@ -777,7 +777,7 @@ impl core::marker::Unpin for consistency::outbox::PartitionKeyError
 impl core::marker::UnsafeUnpin for consistency::outbox::PartitionKeyError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PartitionKeyError
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PartitionKeyError
-#[non_exhaustive] pub enum consistency::outbox::PermanentErrorKind
+pub enum consistency::outbox::PermanentErrorKind
 pub consistency::outbox::PermanentErrorKind::Invariant
 pub consistency::outbox::PermanentErrorKind::Permanent
 impl consistency::outbox::PermanentErrorKind
@@ -801,7 +801,7 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PermanentErro
 pub enum consistency::outbox::Settled
 pub consistency::outbox::Settled::Ack
 pub consistency::outbox::Settled::Reject
-pub consistency::outbox::Settled::Reject::summary: &'static str
+pub consistency::outbox::Settled::Reject::kind: consistency::outbox::PermanentErrorKind
 pub consistency::outbox::Settled::Requeue
 pub consistency::outbox::Settled::Requeue::summary: &'static str
 impl core::clone::Clone for consistency::outbox::Settled
@@ -3230,7 +3230,7 @@ impl core::marker::Unpin for consistency::outbox::PartitionKeyError
 impl core::marker::UnsafeUnpin for consistency::outbox::PartitionKeyError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PartitionKeyError
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PartitionKeyError
-#[non_exhaustive] pub enum consistency::PermanentErrorKind
+pub enum consistency::PermanentErrorKind
 pub consistency::PermanentErrorKind::Invariant
 pub consistency::PermanentErrorKind::Permanent
 impl consistency::outbox::PermanentErrorKind
@@ -3891,7 +3891,7 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::SeenStat
 pub enum consistency::Settled
 pub consistency::Settled::Ack
 pub consistency::Settled::Reject
-pub consistency::Settled::Reject::summary: &'static str
+pub consistency::Settled::Reject::kind: consistency::outbox::PermanentErrorKind
 pub consistency::Settled::Requeue
 pub consistency::Settled::Requeue::summary: &'static str
 impl core::clone::Clone for consistency::outbox::Settled

@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `eventexec::ConsumerTxHandlerFn`
- --> tests/ui/consumer_tx_bare_handler_alias_fail.rs:1:5
-  |
-1 | use eventexec::ConsumerTxHandlerFn;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ConsumerTxHandlerFn` in the root

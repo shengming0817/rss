@@ -3,6 +3,151 @@
 use super::support::*;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn consumer_tx_real_settlement_maps_without_replay() -> TestResult {
+    use crate::consumer_tx::{
+        ConsumerTxSettlementFault, consumer_tx_confirmed_rollback_for_test,
+        consumer_tx_settlement_for_test, consumer_tx_stale_lease_for_test,
+    };
+    use consistency::InboxStore as _;
+    use consistency::idempotency::{IdemKey, LeaseToken, SeenState};
+    use eventexec::consumer_tx::ConsumerTxOutcome;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    for fault in [
+        ConsumerTxSettlementFault::None,
+        ConsumerTxSettlementFault::CommitUnknown,
+        ConsumerTxSettlementFault::RollbackFailed,
+    ] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let outcome =
+            consumer_tx_settlement_for_test(&store, tenant, fault, Arc::clone(&attempts)).await;
+        match fault {
+            ConsumerTxSettlementFault::None => {
+                assert!(matches!(outcome, ConsumerTxOutcome::Committed(_)));
+            }
+            ConsumerTxSettlementFault::CommitUnknown => {
+                assert!(matches!(outcome, ConsumerTxOutcome::CommitUnknown));
+            }
+            ConsumerTxSettlementFault::RollbackFailed => {
+                assert!(matches!(outcome, ConsumerTxOutcome::RollbackFailed));
+            }
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rss_consumer_tx_rollback_probe (marker text PRIMARY KEY)",
+    )
+    .execute(&store.pool)
+    .await?;
+    let rollback_ctx = test_inbox_ctx_for(tenant, "consumer-tx-confirmed-rollback");
+    let rollback_key = IdemKey::parse(&unique_event_id("consumer-tx-confirmed-rollback"))?;
+    let rollback_lease = LeaseToken::mint();
+    assert_eq!(
+        store
+            .inbox()
+            .try_claim(&rollback_ctx, &rollback_key, &rollback_lease)
+            .await?,
+        SeenState::Fresh
+    );
+    let rollback_marker = unique_event_id("consumer-tx-rollback-probe");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = consumer_tx_confirmed_rollback_for_test(
+        &store,
+        tenant,
+        rollback_ctx.clone(),
+        rollback_key.clone(),
+        rollback_lease,
+        rollback_marker.clone(),
+        Arc::clone(&attempts),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        ConsumerTxOutcome::InfrastructureTransient
+    ));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let probe_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM rss_consumer_tx_rollback_probe WHERE marker = $1")
+            .bind(&rollback_marker)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        probe_count, 0,
+        "confirmed rollback must discard business writes"
+    );
+    let rollback_status: String = sqlx::query_scalar(
+        "SELECT status FROM inbox_receipts \
+         WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(rollback_key.as_str())
+    .bind(rollback_ctx.consumer_group().as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        rollback_status, "claimed",
+        "confirmed rollback must not commit inbox done"
+    );
+
+    let ctx = test_inbox_ctx_for(tenant, "consumer-tx-stale-lease");
+    let key = IdemKey::parse(&unique_event_id("consumer-tx-stale-lease"))?;
+    let stale_lease = LeaseToken::mint();
+    assert_eq!(
+        store.inbox().try_claim(&ctx, &key, &stale_lease).await?,
+        SeenState::Fresh
+    );
+    sqlx::query(
+        "UPDATE inbox_receipts SET claimed_at = now() - make_interval(secs => $1) \
+         WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
+    )
+    .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 1)
+    .bind(tenant.to_string())
+    .bind(key.as_str())
+    .bind(ctx.consumer_group().as_str())
+    .execute(&store.pool)
+    .await?;
+    let replacement_lease = LeaseToken::mint();
+    assert_eq!(
+        store
+            .inbox()
+            .try_claim(&ctx, &key, &replacement_lease)
+            .await?,
+        SeenState::Fresh
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let outcome = consumer_tx_stale_lease_for_test(
+        &store,
+        tenant,
+        ctx.clone(),
+        key.clone(),
+        stale_lease,
+        Arc::clone(&attempts),
+    )
+    .await;
+    assert!(matches!(outcome, ConsumerTxOutcome::Fenced));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM inbox_receipts \
+         WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(key.as_str())
+    .bind(ctx.consumer_group().as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        status, "claimed",
+        "stale lease must not mark the receipt done"
+    );
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
     let (_pg, store) = connect_pg().await?;
 

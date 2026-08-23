@@ -39,7 +39,11 @@ mod checkpoint;
 mod command_journal;
 #[cfg(feature = "domain-settings")]
 mod config_repo;
-#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-audit",
+    feature = "consumer-tx-composition-test-support"
+))]
 mod consumer_tx;
 #[cfg_attr(
     not(any(
@@ -211,12 +215,14 @@ pub use config_repo::{
 };
 #[cfg(feature = "domain-audit")]
 pub use consumer_tx::PgAuditConsumerTx;
-#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
+#[cfg(any(
+    feature = "domain-audit",
+    feature = "domain-settings",
+    feature = "consumer-tx-composition-test-support"
+))]
 pub use consumer_tx::PgConsumerTxCommitProof;
 #[cfg(feature = "domain-settings")]
 pub use consumer_tx::PgSettingsConsumerTx;
-#[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
-pub use consumer_tx::{PgConsumerTxOutcome, PgConsumerTxRequeue};
 #[cfg(feature = "domain-identity")]
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::PgDeadLetterStore;

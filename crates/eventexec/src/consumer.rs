@@ -668,7 +668,7 @@ async fn run_handler_loop<S, H>(
                 settle(acker, action, meta.domain(), msg.id().as_str()).await;
                 return;
             }
-            consistency::Settled::Reject { summary } => {
+            consistency::Settled::Reject { kind } => {
                 dead_letter(
                     dlx,
                     idempotency,
@@ -678,7 +678,7 @@ async fn run_handler_loop<S, H>(
                     meta,
                     &msg,
                     attempt,
-                    summary,
+                    kind.message(),
                     acker,
                     None,
                 )
@@ -787,9 +787,8 @@ where
 ///
 /// 各步错误结构化 error 日志（不 panic）。
 ///
-/// `error_summary` 是安全摘要：`&'static str` const（来自 handler 的 error kind message，经
-/// `HandleResult::as_settled()` → `Settled::{Reject,Requeue}{summary}` 流到此处，#1125/#1285），不含
-/// handler error/payload 原文。PII-safe（const literal，无 runtime 数据），下游
+/// `error_summary` 是安全摘要：`&'static str` const（Requeue 直接携带；Reject 由 typed kind 在
+/// ConsumerBase funnel 映射为稳定 message），不含 handler error/payload 原文。PII-safe（const literal，无 runtime 数据），下游
 /// `DeadLetterSummary::new` 仍强制 const 收口。
 #[allow(clippy::too_many_arguments)]
 // reason: 9 参数是 DLX 路径的最小必要集合（dlx/idempotency/key/lease/meta/msg/attempts/summary/acker 各自语义独立）；

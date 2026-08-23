@@ -386,6 +386,28 @@ impl<T, E> LocalTxAttempt<T, E> {
         }
     }
 
+    /// Consume every settlement state without exposing the private representation.
+    ///
+    /// This is the non-retrying projection used by ConsumerTx. Callers must classify unsettled,
+    /// acknowledged rollback, rollback failure, and commit ambiguity independently; impossible
+    /// `(status, result)` products remain unrepresentable.
+    pub(crate) fn fold<R>(
+        self,
+        committed: impl FnOnce(T) -> R,
+        unsettled: impl FnOnce(E) -> R,
+        rolled_back: impl FnOnce(E) -> R,
+        rollback_failed: impl FnOnce(E) -> R,
+        commit_unknown: impl FnOnce(E) -> R,
+    ) -> R {
+        match self.state {
+            LocalTxAttemptState::Committed(value) => committed(value),
+            LocalTxAttemptState::Unsettled(error, _) => unsettled(error),
+            LocalTxAttemptState::RolledBack(error, _) => rolled_back(error),
+            LocalTxAttemptState::RollbackFailed(error, _) => rollback_failed(error),
+            LocalTxAttemptState::CommitUnknown(error, _) => commit_unknown(error),
+        }
+    }
+
     /// Map the carrier error without changing settlement or deadline evidence.
     pub(super) fn map_error<M>(self, map: impl FnOnce(E) -> M) -> LocalTxAttempt<T, M> {
         let state = match self.state {
@@ -637,6 +659,46 @@ mod tests {
         assert_eq!(
             commit_unknown.retry_class(classify),
             Some(TxRetryClass::Permanent)
+        );
+    }
+
+    #[test]
+    fn settlement_fold_preserves_all_five_states() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Folded {
+            Committed(u32),
+            Unsettled(FakeError),
+            RolledBack(FakeError),
+            RollbackFailed(FakeError),
+            CommitUnknown(FakeError),
+        }
+
+        fn fold(attempt: LocalTxAttempt<u32, FakeError>) -> Folded {
+            attempt.fold(
+                Folded::Committed,
+                Folded::Unsettled,
+                Folded::RolledBack,
+                Folded::RollbackFailed,
+                Folded::CommitUnknown,
+            )
+        }
+
+        assert_eq!(fold(LocalTxAttempt::committed(7)), Folded::Committed(7));
+        assert_eq!(
+            fold(LocalTxAttempt::unsettled(FakeError::Transient)),
+            Folded::Unsettled(FakeError::Transient)
+        );
+        assert_eq!(
+            fold(LocalTxAttempt::rolled_back(FakeError::Conflict)),
+            Folded::RolledBack(FakeError::Conflict)
+        );
+        assert_eq!(
+            fold(LocalTxAttempt::rollback_failed(FakeError::Transient)),
+            Folded::RollbackFailed(FakeError::Transient)
+        );
+        assert_eq!(
+            fold(LocalTxAttempt::commit_unknown(FakeError::Transient)),
+            Folded::CommitUnknown(FakeError::Transient)
         );
     }
 

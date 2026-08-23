@@ -23,6 +23,7 @@ use eventexec::consumer::{
     emit_lease_lost, envelope_header_error_reason, log_lease_lost, receipt_context_error_reason,
     record_dead_letter_skip, renewal_loop, settle, settle_claim_in_progress,
 };
+use eventexec::consumer_tx::{ConsumerTxOutcome, RejectKind};
 
 /// Closed ConsumerTx external-effect policies used as type-level handler capabilities.
 pub(crate) mod policy {
@@ -53,36 +54,14 @@ pub(crate) mod policy {
 /// handlers selected by the closed generated plan. Downstream crates cannot add an implementation
 /// or enter the Ack-authorizing runner.
 pub(crate) trait ConsumerTxHandler<P: policy::Policy>: Send + Sync + 'static {
-    /// Opaque proof minted by the provider only after its transaction is confirmed committed.
-    type CommitProof: Send + 'static;
-
-    /// Execute one claimed delivery while retaining the policy marker and provider proof type.
+    /// Execute one claimed delivery while retaining the policy marker and concrete provider proof.
     fn handle(
         self: Arc<Self>,
         message: Message,
         context: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> BoxFuture<'static, ConsumerTxOutcome<Self::CommitProof>>;
-}
-
-#[cfg(any(feature = "audit-consumers", feature = "settings-consumers"))]
-fn map_postgres_outcome(outcome: postgres::PgConsumerTxOutcome) -> ConsumerTxOutcome<()> {
-    match outcome {
-        postgres::PgConsumerTxOutcome::Committed(_provider_proof) => {
-            ConsumerTxOutcome::Committed(())
-        }
-        postgres::PgConsumerTxOutcome::Requeue(requeue) if requeue.is_commit_unknown() => {
-            ConsumerTxOutcome::commit_unknown(requeue.summary())
-        }
-        postgres::PgConsumerTxOutcome::Requeue(requeue) => {
-            ConsumerTxOutcome::handler_transient(requeue.summary())
-        }
-        postgres::PgConsumerTxOutcome::LeaseLost { summary } => {
-            ConsumerTxOutcome::LeaseLost { summary }
-        }
-        postgres::PgConsumerTxOutcome::Reject { summary } => ConsumerTxOutcome::Reject { summary },
-    }
+    ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>>;
 }
 
 #[cfg(feature = "audit-consumers")]
@@ -90,110 +69,27 @@ impl<M> ConsumerTxHandler<policy::TransactionalOnly> for postgres::PgAuditConsum
 where
     M: primitives::MacVerifier + Send + Sync + 'static,
 {
-    type CommitProof = ();
-
     fn handle(
         self: Arc<Self>,
         message: Message,
         context: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> BoxFuture<'static, ConsumerTxOutcome<Self::CommitProof>> {
-        Box::pin(async move {
-            map_postgres_outcome(
-                postgres::PgAuditConsumerTx::handle(self, message, context, key, lease).await,
-            )
-        })
+    ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>> {
+        postgres::PgAuditConsumerTx::handle(self, message, context, key, lease)
     }
 }
 
 #[cfg(feature = "settings-consumers")]
 impl ConsumerTxHandler<policy::Reconcile> for postgres::PgSettingsConsumerTx {
-    type CommitProof = ();
-
     fn handle(
         self: Arc<Self>,
         message: Message,
         context: InboxReceiptContext,
         key: IdemKey,
         lease: LeaseToken,
-    ) -> BoxFuture<'static, ConsumerTxOutcome<Self::CommitProof>> {
-        Box::pin(async move {
-            map_postgres_outcome(
-                postgres::PgSettingsConsumerTx::handle(self, message, context, key, lease).await,
-            )
-        })
-    }
-}
-
-/// Typed transactional requeue reason.
-///
-/// Fields are private so adapters must choose an explicit category instead of smuggling storage
-/// uncertainty through a free-form retry summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ConsumerTxRequeue {
-    category: ConsumerTxRequeueCategory,
-    summary: &'static str,
-}
-
-impl ConsumerTxRequeue {
-    #[must_use]
-    pub(crate) const fn handler_transient(summary: &'static str) -> Self {
-        Self {
-            category: ConsumerTxRequeueCategory::HandlerTransient,
-            summary,
-        }
-    }
-
-    #[must_use]
-    pub(crate) const fn commit_unknown(summary: &'static str) -> Self {
-        Self {
-            category: ConsumerTxRequeueCategory::CommitUnknown,
-            summary,
-        }
-    }
-
-    const fn category(self) -> ConsumerTxRequeueCategory {
-        self.category
-    }
-
-    const fn summary(self) -> &'static str {
-        self.summary
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConsumerTxRequeueCategory {
-    HandlerTransient,
-    CommitUnknown,
-}
-
-/// Result of one transactional Fresh handling attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub(crate) enum ConsumerTxOutcome<C> {
-    /// The transactional unit has committed; broker may be Acked.
-    Committed(C),
-    /// No transactional commit is confirmed; this driver may retry locally, then broker-requeues
-    /// without app DLX, receipt commit, or Ack.
-    Requeue(ConsumerTxRequeue),
-    /// The storage transaction observed a lost lease. The current claim is no longer authoritative,
-    /// so this driver immediately broker-requeues without app DLX or in-claim retry.
-    LeaseLost { summary: &'static str },
-    /// Permanent failure; this driver will write consumer DLX and mark the inbox receipt done via
-    /// the existing DLX path.
-    Reject { summary: &'static str },
-}
-
-impl<C> ConsumerTxOutcome<C> {
-    #[must_use]
-    pub(crate) const fn handler_transient(summary: &'static str) -> Self {
-        Self::Requeue(ConsumerTxRequeue::handler_transient(summary))
-    }
-
-    #[must_use]
-    pub(crate) const fn commit_unknown(summary: &'static str) -> Self {
-        Self::Requeue(ConsumerTxRequeue::commit_unknown(summary))
+    ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>> {
+        postgres::PgSettingsConsumerTx::handle(self, message, context, key, lease)
     }
 }
 
@@ -574,7 +470,8 @@ async fn run_tx_handler_loop<S, P, H>(
             .handle(msg.clone(), ctx.clone(), key.clone(), lease.clone())
             .await
         {
-            ConsumerTxOutcome::Committed(_proof) => {
+            outcome @ ConsumerTxOutcome::Committed(_) => {
+                record_consumer_tx_outcome(meta, outcome.as_label());
                 // The provider proof means the receipt/domain transaction is durably terminal.
                 // Stop lease fencing before broker settlement: a concurrent extend now observes
                 // `done` as Lost, but must not cancel the Ack authorized by that proof.
@@ -588,7 +485,8 @@ async fn run_tx_handler_loop<S, P, H>(
                 .await;
                 return;
             }
-            ConsumerTxOutcome::Reject { summary } => {
+            outcome @ ConsumerTxOutcome::Rejected(kind) => {
+                record_consumer_tx_outcome(meta, outcome.as_label());
                 dead_letter(
                     dlx,
                     idempotency,
@@ -598,35 +496,36 @@ async fn run_tx_handler_loop<S, P, H>(
                     meta,
                     &msg,
                     attempt,
-                    summary,
+                    reject_summary(kind),
                     acker,
                     Some(&terminal),
                 )
                 .await;
                 return;
             }
-            ConsumerTxOutcome::Requeue(requeue) => match requeue.category() {
-                ConsumerTxRequeueCategory::HandlerTransient => {
-                    last_requeue_summary = requeue.summary();
-                }
-                ConsumerTxRequeueCategory::CommitUnknown => {
-                    log_tx_commit_unknown(meta, &msg, requeue.summary());
-                    settle(
-                        acker,
-                        diport::AckAction::Requeue,
-                        meta.domain(),
-                        msg.id().as_str(),
-                    )
-                    .await;
-                    return;
-                }
-            },
-            ConsumerTxOutcome::LeaseLost { summary } => {
+            ConsumerTxOutcome::HandlerTransient => {
+                last_requeue_summary = EngineErrorKind::Transient.message();
+            }
+            outcome @ (ConsumerTxOutcome::InfrastructureTransient
+            | ConsumerTxOutcome::CommitUnknown
+            | ConsumerTxOutcome::RollbackFailed) => {
+                record_consumer_tx_outcome(meta, outcome.as_label());
+                log_tx_non_retryable_requeue(meta, &msg, outcome.as_label());
+                settle(
+                    acker,
+                    diport::AckAction::Requeue,
+                    meta.domain(),
+                    msg.id().as_str(),
+                )
+                .await;
+                return;
+            }
+            outcome @ ConsumerTxOutcome::Fenced => {
+                record_consumer_tx_outcome(meta, outcome.as_label());
                 log_lease_lost(meta, msg.id().as_str());
                 emit_lease_lost(meta.domain());
                 tracing::warn!(
                     message_id = msg.id().as_str(),
-                    summary,
                     "consumer-tx: lease lost in transaction, requeued without app dlx"
                 );
                 settle(
@@ -640,6 +539,10 @@ async fn run_tx_handler_loop<S, P, H>(
             }
         }
     }
+    record_consumer_tx_outcome(
+        meta,
+        ConsumerTxOutcome::<postgres::PgConsumerTxCommitProof>::HandlerTransient.as_label(),
+    );
     log_tx_handler_transient_exhausted(meta, &msg, last_requeue_summary);
     settle(
         acker,
@@ -650,15 +553,31 @@ async fn run_tx_handler_loop<S, P, H>(
     .await;
 }
 
-fn log_tx_commit_unknown(meta: &ConsumerMeta, msg: &Message, summary: &'static str) {
+fn record_consumer_tx_outcome(meta: &ConsumerMeta, outcome: &'static str) {
+    metrics::counter!(
+        "consumer_tx_outcome_total",
+        "domain" => meta.domain().to_owned(),
+        "outcome" => outcome,
+    )
+    .increment(1);
+}
+
+fn reject_summary(kind: RejectKind) -> &'static str {
+    match kind {
+        RejectKind::Permanent => consistency::PermanentErrorKind::Permanent.message(),
+        RejectKind::Invariant => consistency::PermanentErrorKind::Invariant.message(),
+    }
+}
+
+fn log_tx_non_retryable_requeue(meta: &ConsumerMeta, msg: &Message, outcome: &'static str) {
     tracing::warn!(
         message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
         consumer_group = meta.consumer_group(),
-        summary,
-        "consumer-tx: transaction commit status unknown, requeued without app dlx"
+        outcome,
+        "consumer-tx: transaction not locally retryable, requeued without app dlx"
     );
 }
 
@@ -818,7 +737,113 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
-    struct TestCommitProof;
+    type TestCommitProof = postgres::PgConsumerTxCommitProof;
+
+    fn test_commit_proof() -> TestCommitProof {
+        postgres::PgConsumerTxCommitProof::for_test()
+    }
+
+    #[derive(Default)]
+    struct RecordingMetricKeys(Mutex<Vec<metrics::Key>>);
+
+    impl metrics::Recorder for RecordingMetricKeys {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(key.to_retained());
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    #[test]
+    fn consumer_tx_outcome_metric_covers_the_closed_terminal_set() -> TestResult {
+        let recorder = RecordingMetricKeys::default();
+        let meta = meta()?;
+        let outcomes = [
+            ConsumerTxOutcome::Committed(test_commit_proof()),
+            ConsumerTxOutcome::HandlerTransient,
+            ConsumerTxOutcome::InfrastructureTransient,
+            ConsumerTxOutcome::Rejected(RejectKind::Permanent),
+            ConsumerTxOutcome::CommitUnknown,
+            ConsumerTxOutcome::RollbackFailed,
+            ConsumerTxOutcome::Fenced,
+        ];
+        let mut labels = std::collections::BTreeSet::new();
+        metrics::with_local_recorder(&recorder, || {
+            for outcome in outcomes {
+                let label = outcome.as_label();
+                assert!(labels.insert(label), "outcome labels must be unique");
+                record_consumer_tx_outcome(&meta, label);
+            }
+        });
+
+        assert_eq!(
+            labels.len(),
+            7,
+            "metric test must cover every closed outcome"
+        );
+        let keys = recorder
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(keys.len(), 7, "one terminal metric per closed outcome");
+        let observed = keys
+            .iter()
+            .map(|key| {
+                assert_eq!(key.name(), "consumer_tx_outcome_total");
+                let metric_labels = key
+                    .labels()
+                    .map(|label| (label.key(), label.value()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(metric_labels.len(), 2, "metric labels must stay closed");
+                assert_eq!(metric_labels.get("domain").copied(), Some("audit"));
+                metric_labels.get("outcome").copied().unwrap_or("")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(observed, labels);
+        Ok(())
+    }
 
     struct TestHandler<P, F> {
         inner: F,
@@ -838,15 +863,13 @@ mod tests {
             + Sync
             + 'static,
     {
-        type CommitProof = TestCommitProof;
-
         fn handle(
             self: Arc<Self>,
             message: Message,
             context: InboxReceiptContext,
             key: IdemKey,
             lease: LeaseToken,
-        ) -> BoxFuture<'static, ConsumerTxOutcome<Self::CommitProof>> {
+        ) -> BoxFuture<'static, ConsumerTxOutcome<postgres::PgConsumerTxCommitProof>> {
             (self.inner)(message, context, key, lease)
         }
     }
@@ -1301,7 +1324,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::Committed(TestCommitProof)
+                ConsumerTxOutcome::Committed(test_commit_proof())
             })
         });
 
@@ -1341,7 +1364,7 @@ mod tests {
             let handler_extend_started = Arc::clone(&handler_extend_started);
             Box::pin(async move {
                 handler_extend_started.notified().await;
-                ConsumerTxOutcome::Committed(TestCommitProof)
+                ConsumerTxOutcome::Committed(test_commit_proof())
             })
         });
         let dlx = noop_dlx();
@@ -1397,9 +1420,7 @@ mod tests {
             let handler_extend_started = Arc::clone(&handler_extend_started);
             Box::pin(async move {
                 handler_extend_started.notified().await;
-                ConsumerTxOutcome::Reject {
-                    summary: "test permanent rejection",
-                }
+                ConsumerTxOutcome::Rejected(RejectKind::Permanent)
             })
         });
         let dlx = recording_dlx(Arc::clone(&writes));
@@ -1453,7 +1474,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::Committed(TestCommitProof)
+                ConsumerTxOutcome::Committed(test_commit_proof())
             })
         });
 
@@ -1488,7 +1509,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::Committed(TestCommitProof)
+                ConsumerTxOutcome::Committed(test_commit_proof())
             })
         });
         let started = std::time::Instant::now();
@@ -1525,7 +1546,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::handler_transient(EngineErrorKind::Transient.message())
+                ConsumerTxOutcome::HandlerTransient
             })
         });
 
@@ -1561,7 +1582,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::commit_unknown(EngineErrorKind::Transient.message())
+                ConsumerTxOutcome::CommitUnknown
             })
         });
 
@@ -1575,7 +1596,6 @@ mod tests {
             consumer_admission(),
         )
         .await;
-
         assert_eq!(calls.load(Ordering::Acquire), 1);
         assert_eq!(dlx_writes.load(Ordering::Acquire), 0);
         assert_eq!(store.commits.load(Ordering::Acquire), 0);
@@ -1587,40 +1607,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tx_reject_dead_letters_once_and_commits_receipt() -> TestResult {
-        let actions = Arc::new(Mutex::new(Vec::new()));
-        let store = TxStore::fresh();
-        let dlx_writes = Arc::new(AtomicU32::new(0));
-        let calls = Arc::new(AtomicU32::new(0));
-        let handler_calls = Arc::clone(&calls);
-        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
-            let handler_calls = Arc::clone(&handler_calls);
-            Box::pin(async move {
-                handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::Reject {
-                    summary: consistency::PermanentErrorKind::Permanent.message(),
-                }
-            })
-        });
+    async fn tx_non_retryable_outcomes_requeue_once_without_side_effects() -> TestResult {
+        type OutcomeFactory = fn() -> ConsumerTxOutcome<TestCommitProof>;
+        let cases: [(&str, OutcomeFactory); 4] = [
+            ("evt-tx-infrastructure", || {
+                ConsumerTxOutcome::InfrastructureTransient
+            }),
+            ("evt-tx-unknown-table", || ConsumerTxOutcome::CommitUnknown),
+            ("evt-tx-rollback-failed", || {
+                ConsumerTxOutcome::RollbackFailed
+            }),
+            ("evt-tx-fenced-table", || ConsumerTxOutcome::Fenced),
+        ];
 
-        run_consumer_ackable_tx(
-            delivery_stream("evt-tx-reject", Arc::clone(&actions))?,
-            Arc::clone(&store),
-            (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
-            &(meta()?),
-            Arc::new(handler),
-            lease_cfg(),
-            consumer_admission(),
-        )
-        .await;
+        for (event_id, outcome) in cases {
+            let actions = Arc::new(Mutex::new(Vec::new()));
+            let store = TxStore::fresh();
+            let dlx_writes = Arc::new(AtomicU32::new(0));
+            let calls = Arc::new(AtomicU32::new(0));
+            let handler_calls = Arc::clone(&calls);
+            let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+                let handler_calls = Arc::clone(&handler_calls);
+                Box::pin(async move {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    outcome()
+                })
+            });
 
-        assert_eq!(calls.load(Ordering::Acquire), 1);
-        assert_eq!(dlx_writes.load(Ordering::Acquire), 1);
-        assert_eq!(store.commits.load(Ordering::Acquire), 1);
-        assert_eq!(
-            *actions.lock().unwrap_or_else(|e| e.into_inner()),
-            vec![AckAction::Ack]
-        );
+            run_consumer_ackable_tx(
+                delivery_stream(event_id, Arc::clone(&actions))?,
+                Arc::clone(&store),
+                (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+                &(meta()?),
+                Arc::new(handler),
+                lease_cfg(),
+                consumer_admission(),
+            )
+            .await;
+
+            assert_eq!(calls.load(Ordering::Acquire), 1, "event_id={event_id}");
+            assert_eq!(dlx_writes.load(Ordering::Acquire), 0, "event_id={event_id}");
+            assert_eq!(
+                store.commits.load(Ordering::Acquire),
+                0,
+                "event_id={event_id}"
+            );
+            assert_eq!(
+                *actions.lock().unwrap_or_else(|error| error.into_inner()),
+                vec![AckAction::Requeue],
+                "event_id={event_id}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tx_reject_kinds_dead_letter_once_and_commit_receipt() -> TestResult {
+        for (message_id, kind) in [
+            ("evt-tx-reject-permanent", RejectKind::Permanent),
+            ("evt-tx-reject-invariant", RejectKind::Invariant),
+        ] {
+            let actions = Arc::new(Mutex::new(Vec::new()));
+            let store = TxStore::fresh();
+            let dlx_writes = Arc::new(AtomicU32::new(0));
+            let calls = Arc::new(AtomicU32::new(0));
+            let handler_calls = Arc::clone(&calls);
+            let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+                let handler_calls = Arc::clone(&handler_calls);
+                Box::pin(async move {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    ConsumerTxOutcome::Rejected(kind)
+                })
+            });
+
+            run_consumer_ackable_tx(
+                delivery_stream(message_id, Arc::clone(&actions))?,
+                Arc::clone(&store),
+                (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+                &(meta()?),
+                Arc::new(handler),
+                lease_cfg(),
+                consumer_admission(),
+            )
+            .await;
+
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            assert_eq!(dlx_writes.load(Ordering::Acquire), 1);
+            assert_eq!(store.commits.load(Ordering::Acquire), 1);
+            assert_eq!(
+                *actions.lock().unwrap_or_else(|e| e.into_inner()),
+                vec![AckAction::Ack]
+            );
+        }
         Ok(())
     }
 
@@ -1635,9 +1714,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::LeaseLost {
-                    summary: EngineErrorKind::Transient.message(),
-                }
+                ConsumerTxOutcome::Fenced
             })
         });
 
@@ -1672,7 +1749,7 @@ mod tests {
             let handler_calls = Arc::clone(&handler_calls);
             Box::pin(async move {
                 handler_calls.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::Committed(TestCommitProof)
+                ConsumerTxOutcome::Committed(test_commit_proof())
             })
         });
 
@@ -1710,7 +1787,7 @@ mod tests {
                 let handler_calls = Arc::clone(&handler_calls);
                 Box::pin(async move {
                     handler_calls.fetch_add(1, Ordering::AcqRel);
-                    ConsumerTxOutcome::Committed(TestCommitProof)
+                    ConsumerTxOutcome::Committed(test_commit_proof())
                 })
             });
 
@@ -1861,7 +1938,7 @@ mod tests {
             noop_dlx(),
             meta()?,
             transactional_handler(move |_msg, _ctx, _key, _lease| {
-                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+                Box::pin(async { ConsumerTxOutcome::Committed(test_commit_proof()) })
             }),
             lease_cfg(),
             tokio_util::sync::CancellationToken::new(),
@@ -1887,7 +1964,7 @@ mod tests {
             noop_dlx(),
             meta()?,
             transactional_handler(move |_msg, _ctx, _key, _lease| {
-                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+                Box::pin(async { ConsumerTxOutcome::Committed(test_commit_proof()) })
             }),
             lease_cfg(),
             token.clone(),
@@ -1930,7 +2007,7 @@ mod tests {
             noop_dlx(),
             meta()?,
             transactional_handler(move |_msg, _ctx, _key, _lease| {
-                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+                Box::pin(async { ConsumerTxOutcome::Committed(test_commit_proof()) })
             }),
             lease_cfg(),
             token.clone(),
@@ -1973,7 +2050,7 @@ mod tests {
             noop_dlx(),
             meta()?,
             transactional_handler(move |_msg, _ctx, _key, _lease| {
-                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+                Box::pin(async { ConsumerTxOutcome::Committed(test_commit_proof()) })
             }),
             lease_cfg(),
             token.clone(),
@@ -2032,7 +2109,7 @@ mod tests {
                 handler_started_run.notify_one();
                 release_handler_run.notified().await;
                 committed_run.fetch_add(1, Ordering::AcqRel);
-                ConsumerTxOutcome::Committed(TestCommitProof)
+                ConsumerTxOutcome::Committed(test_commit_proof())
             })
         });
         let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(

@@ -2287,7 +2287,7 @@ mod transaction_boundary_tests {
         Ok(())
     }
 
-    #[cfg(feature = "domain-settings")]
+    #[cfg(all(feature = "domain-settings", feature = "domain-identity"))]
     #[tokio::test]
     async fn begin_failure_is_unsettled_for_all_write_adapters() -> Result<(), String> {
         use settings::ports::ConfigRepoError;
@@ -2440,9 +2440,11 @@ mod retry_settlement_tests {
     #[cfg(feature = "domain-settings")]
     use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 
-    #[cfg(feature = "domain-settings")]
+    use super::LocalTxAttempt;
+    #[cfg(all(feature = "domain-settings", feature = "domain-identity"))]
     use super::ProducerTxAttempt;
-    use super::{DevicePolicyAttemptError, DevicePolicyTxAttempt, LocalTxAttempt};
+    #[cfg(feature = "domain-identity")]
+    use super::{DevicePolicyAttemptError, DevicePolicyTxAttempt};
     use crate::tx_retry::run_pg_localtx_retry;
     #[cfg(feature = "domain-settings")]
     use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, SETTINGS_SECRET_BOUNDARY, run_pg_tx_retry};
@@ -2771,7 +2773,7 @@ mod retry_settlement_tests {
     }
 
     #[test]
-    #[cfg(feature = "domain-settings")]
+    #[cfg(all(feature = "domain-settings", feature = "domain-identity"))]
     fn plain_producer_attempt_observes_unsafe_settlement_before_result_flattening()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
