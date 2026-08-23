@@ -2611,13 +2611,13 @@ fn tracing_server_budget_timeout_uses_closed_reason_and_redacts_pii() {
     }
 }
 
-/// 四路 deny 分级（#1275 + review F1，spec SC-006/FR-009）：deny 路 tracing 须按 deny 来源记不同
+/// 四路 deny 分级（#1275 的 `AuthnError` deny taxonomy）：deny 路 tracing 须按 deny 来源记不同
 /// `authz.deny_reason` 闭值 **+ 对应 `AuthnError` 变体**（`error=?err`），且均无 PII（无 token / subject）：
 ///   坏签名（PDP `InvalidSignature`）          → `signature_invalid` / `TokenInvalid`；
 ///   错 issuer（PDP `Untrusted`）              → `untrusted`         / `TokenUntrusted`；
 ///   过期（PDP `Expired`）                     → `expired`           / `TokenExpired`；
 ///   **验签通过但缺 tenant**（authn 派生失败）  → `principal_invalid` / `PrincipalInvalid`。
-/// 末路是 review F1 回归锚：验签**通过后**的良性 principal 失败**不得**误报成 `signature_invalid` 攻击信号。
+/// 最后一路是回归锚：验签**通过后**的良性 principal 失败**不得**误报成 `signature_invalid` 攻击信号。
 /// 复用既有拒绝路径 token 构造（`bad_signature_is_401` / `wrong_issuer_is_401` / `expired_is_401`）。
 #[test]
 #[allow(clippy::unwrap_used)]

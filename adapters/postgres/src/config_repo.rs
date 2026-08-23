@@ -1121,7 +1121,7 @@ impl PgConfigRepo {
         M: Send + 'static,
     {
         let tenant = scope.tenant();
-        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgAuthGrantLifecycle）。
+        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId；OUTBOX-METADATA-FUNNEL-01，同 PgAuthGrantLifecycle）。
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
         // occurred_at；漏接编译期不可表达）。

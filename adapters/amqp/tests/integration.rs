@@ -501,7 +501,7 @@ async fn integration_connect_failure_returns_safe_error() {
         Ok(_) => panic!("connect to closed port must fail"),
         Err(err) => {
             assert_eq!(err.to_string(), "amqp connect failed");
-            // 凭据 non-leak：Display 与 Debug 均不得含 user:pass（FR-020）。
+            // `AmqpUrl` redaction contract：Display 与 Debug 均不得含 user:pass。
             let display = err.to_string();
             let debug = format!("{err:?}");
             for rendered in [&display, &debug] {

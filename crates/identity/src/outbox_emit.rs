@@ -53,7 +53,7 @@ pub(crate) async fn emit_session_created(
     .await
 }
 
-/// RBAC assign：envelope subject_id = **actor** UserId（FR-020；非 target binding subject）。
+/// RBAC assign：envelope subject_id 经 typed [`ids::UserId`] funnel 取 **actor**（非 target binding subject）。
 pub(crate) async fn emit_role_assigned(
     payload: IdentityRoleAssignedPayload,
     tenant: TenantId,

@@ -256,7 +256,7 @@ impl std::fmt::Debug for OutboxActor {
 /// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain / contract_id /
 /// version / schema_hash 同源契约归属，#1193/#1618——business 不再裸 string 分别 author，杜绝 envelope header 漂移）、`tenant` 是
 /// typed 租户 scope（adapter 盖章进 reserved `tenantId`）、`subject_id` 是
-/// **opaque** 主体标识（FR-020：不容完整 Principal / email / 姓名等 PII）、`causation_id` 是可选 opaque
+/// **opaque** 主体标识（由 `OutboxMetadata` typed funnel 限定，不容完整 Principal / email / 姓名等 PII）、`causation_id` 是可选 opaque
 /// 追因链锚点（persisted-only，不进 broker header / 日志 / metrics）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`

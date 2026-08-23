@@ -4950,7 +4950,7 @@ async fn generated_fingerprint_allows_real_claim_settle_and_redrive() -> TestRes
 }
 
 /// PgEmitter::write 落 durable outbox：恰 1 行 pending，event_id(=EventId)/domain/topic 正确，
-/// metadata 含标准 header + opaque subjectId（无完整 PII，FR-020）。
+/// metadata 含标准 header + opaque subjectId（无完整 PII；OUTBOX-METADATA-FUNNEL-01）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；函数级 item-level carve-out。
@@ -5006,7 +5006,7 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     );
     assert_eq!(row.6, None, "默认 causation_id 为 NULL");
     assert_eq!(row.7, "pending", "新 entry pending 待 relay");
-    // metadata 含标准 header + opaque subjectId + actor + sealed 注入的 reserved occurred_at（#1129/#1618）；无完整 PII（FR-020 funnel）。
+    // metadata 含标准 header + opaque subjectId + actor + sealed 注入的 reserved occurred_at（#1129/#1618）；无完整 PII（OUTBOX-METADATA-FUNNEL-01）。
     assert_eq!(
         row.8.get("subjectId").and_then(serde_json::Value::as_str),
         Some("subj-opaque-77"),

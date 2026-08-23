@@ -86,8 +86,8 @@ impl RbacAdminService {
     /// co-tx 落 binding + 发事件（both-or-neither）。跨租 find→None ⇒ `RoleNotFound`（不泄露存在性）。
     ///
     /// `actor` = 执行本次分配的**操作者**（authenticated principal，opaque 规范 UUID）；`subject` = 被授予
-    /// 角色的**目标主体**。两者分离（data-model.md `assignedBy`）：payload 同时携 `assigned_by`(actor) 与
-    /// `subject`(target)，envelope `subject_id` 取 **actor opaque id**（FR-020 非 PII originator），不写 target。
+    /// 角色的**目标主体**。payload wire shape 同时携 `assigned_by`(actor) 与 `subject`(target)，
+    /// envelope `subject_id` 经 typed [`ids::UserId`] funnel 取 **actor opaque id**，不写 target。
     ///
     /// `skip_all` 略过 `subject`(PII) / `role_id` / `actor`；审计归因走 audit/event payload 与 persisted-only
     /// outbox actor，不把 actor opaque id 写入默认 tracing span。
@@ -127,7 +127,7 @@ impl RbacAdminService {
             tenant_id: tenant.to_string(),
             occurred_at: rss_contract::Timepoint::saturating_from_system_time(now).unix_seconds(),
         };
-        // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
+        // envelope subject_id 经 typed UserId funnel 取 **actor** opaque id，非 target subject（F2）。
         // #1235 / #648 F1：经 outbox_emit UserId funnel。
         let event = crate::outbox_emit::emit_role_assigned(
             payload,
@@ -151,8 +151,8 @@ impl RbacAdminService {
     /// （co-tx）。命中返回 `Ok(true)`；未命中（不存在 / 跨租）→ `Ok(false)`（不发事件、隐藏存在性、幂等）。
     ///
     /// `actor` = 执行撤销的操作者（opaque 规范 UUID）；`subject` = 被撤角色的目标主体。两者分离
-    /// （data-model.md `revokedBy`）：payload 携 `revoked_by`(actor) + `subject`(target)，envelope `subject_id`
-    /// 取 **actor opaque id**（FR-020），不写 target。
+    /// payload wire shape 携 `revoked_by`(actor) + `subject`(target)，envelope `subject_id`
+    /// 经 typed [`ids::UserId`] funnel 取 **actor opaque id**，不写 target。
     ///
     /// `skip_all` 略过 `subject`(PII) / `role_id` / `actor`；审计归因走 audit/event payload 与 persisted-only
     /// outbox actor，不把 actor opaque id 写入默认 tracing span。
@@ -180,7 +180,7 @@ impl RbacAdminService {
             tenant_id: tenant.to_string(),
             occurred_at: rss_contract::Timepoint::saturating_from_system_time(now).unix_seconds(),
         };
-        // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
+        // envelope subject_id 经 typed UserId funnel 取 **actor** opaque id，非 target subject（F2）。
         // #1235 / #648 F1：经 outbox_emit UserId funnel。
         let event = crate::outbox_emit::emit_role_revoked(
             payload,
@@ -354,7 +354,7 @@ mod tests {
             "payload actorKind = authenticated actor kind"
         );
         assert_eq!(payload.tenant_id, t.to_string());
-        // envelope（F2/F3）：contract 绑定 + 租户 scope + subject_id = **actor opaque id**（非 target，FR-020）。
+        // envelope（F2/F3）：contract 绑定 + 租户 scope + subject_id = **actor opaque id**（非 target；typed UserId funnel）。
         assert_eq!(emitted[0].contract_id, "identity.role-assigned");
         assert_eq!(emitted[0].env_tenant, t.to_string());
         assert_eq!(
@@ -364,7 +364,7 @@ mod tests {
         );
         assert_ne!(
             emitted[0].subject_id, "alice",
-            "envelope 不得写 target subject（FR-020 opaque originator）"
+            "envelope 不得写 target subject（subject_id 必须来自 typed actor UserId）"
         );
     }
 

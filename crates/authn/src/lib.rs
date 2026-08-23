@@ -1264,8 +1264,8 @@ pub enum AuthnError {
     PrincipalInvalid,
     /// 凭据来源 / 路径不受信（verifier 报 [`diport::PdpError::Untrusted`]：iss / aud / key-path 不受信 / 未知 scheme）。
     /// **wire 语义与 [`AuthnError::TokenInvalid`] 相同**——同为 401 invalid_token（RFC 6750 §3.1，**非** 403）；
-    /// 独立变体仅为 deny 路 tracing 告警分级（区分疑似配置错 `Untrusted` vs 疑似攻击 `InvalidSignature`，#1275 /
-    /// spec SC-006），不改 HTTP 状态。
+    /// 独立变体仅为 deny 路 tracing 告警分级（区分疑似配置错 `Untrusted` vs 疑似攻击 `InvalidSignature`，
+    /// #1275 的 `AuthnError` deny taxonomy），不改 HTTP 状态。
     #[error("token is untrusted")]
     TokenUntrusted,
     /// 令牌过期（verifier 报 [`diport::PdpError::Expired`]，经 verify→mint bridge 的 `From<PdpError>` 产生）。

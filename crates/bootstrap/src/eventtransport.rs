@@ -26,7 +26,7 @@
 //!   dev root 经决策 `match` 收束（Medium 纪律，非编译期封闭）。落地在组合根，非本 crate
 //!   （bootstrap 命名不到 in-mem 类型）。
 //!
-//! 凭据 redaction（FR-020，Medium）：per-domain AMQP URL（含 `user:pass`）经 [`AmqpUrl`] 收口，
+//! 凭据 redaction（[`AmqpUrl`] typed funnel，Medium）：per-domain AMQP URL（含 `user:pass`）经该类型收口，
 //! 其 `Debug`/`Display` 走 `secure::redact_url_credentials` 抹 userinfo；原文仅 [`AmqpUrl::expose`]
 //! 受控可达。错误 message 不含凭据 / PII（[`TransportResolveError::MissingBrokerUrl`] 仅含大写 domain 名，
 //! 安全可诊断，review F6）。

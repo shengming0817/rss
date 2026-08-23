@@ -208,7 +208,7 @@ impl Credential {
         true
     }
 
-    /// 登录标识（opaque 查找键；store key 派生用，FR-020 准 PII）。`pub`（#1316 adapter 取 `(tenant, login)` PK）。
+    /// 登录标识（[`LoginIdentifier`] opaque 查找键；store key 派生用，按准 PII 处理）。`pub`（#1316 adapter 取 `(tenant, login)` PK）。
     pub fn login(&self) -> &LoginIdentifier {
         &self.login
     }

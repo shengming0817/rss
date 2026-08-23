@@ -204,7 +204,7 @@ async fn verify_path<P: TokenProfileMarker>(
         }
         VerifyOutcome::NoCandidate => {
             // kid 不在当前快照（未知 / JWKS 轮转出）→ 签名 key 不在受信集 → `Untrusted`（区别于签名结构坏的
-            // `InvalidSignature`；同 iss/aud 不受信，spec R2 / SC-005：kid 无匹配 → Untrusted）。
+            // `InvalidSignature`；同 iss/aud 不受信，`VerifyOutcome::NoCandidate` 契约要求 kid 无匹配 → Untrusted）。
             metrics::counter!(
                 METRIC_OIDC_VERIFY_KID_REJECTED_TOTAL,
                 "reason" => KID_REJECT_UNKNOWN

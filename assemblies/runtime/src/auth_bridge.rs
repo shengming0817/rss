@@ -342,7 +342,7 @@ struct AllowedEvidence {
 ///
 /// 各分支埋点拆独立 fn（每 fn 一条 `tracing` 宏；宏展开 cognitive-complexity 高，分摊保 ≤15）。
 ///
-/// 埋点变体粒度（#1275，spec SC-006/FR-009）：`Some(Err)` 记 `AuthnError` 变体 + 闭值 `authz.deny_reason`。
+/// 埋点变体粒度（#1275 的 `AuthnError` deny taxonomy）：`Some(Err)` 记错误变体 + 闭值 `authz.deny_reason`。
 /// `verify_jwt` 的 `From<PdpError>` 保真区分三种凭据拒绝与 provider outage；[`deny_reason`] 由此保留
 /// 疑似攻击、配置错、过期和基础设施故障四类低基数信号。
 /// 本桥不为日志粒度旁路 `verify_jwt` funnel（保「唯一信任原点」姿态）——`deny_reason` 只读已收敛的 `AuthnError`。
@@ -520,7 +520,7 @@ fn log_deny_verify(err: &authn::AuthnError) {
 }
 
 // deny 告警分级闭值集（`crates/observ`、`secure::redact_error` 与 typed metric enums「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
-// `authz.deny_reason` 仅取此 9 值（#1275，spec SC-006/FR-009）：
+// `authz.deny_reason` 仅取此 9 值（#1275 的 `AuthnError` deny taxonomy）：
 //   `SIGNATURE_INVALID` ← `TokenInvalid` = verifier 报告的**凭据签名/MAC/结构失败**（疑似攻击）；
 //   `UNTRUSTED`         ← `TokenUntrusted` = iss/aud/key-path 不受信（疑似配置错）；
 //   `EXPIRED`           ← `TokenExpired` = 时间窗越界；
@@ -594,8 +594,8 @@ fn log_service_boundary_invalid(req: &Request, span_name: &'static str) {
 
 /// Token-profile 验签桥：铸证据 + 埋点 + 透传（不自发裁决，见模块 doc）。
 ///
-/// allow/deny 事件落在 `verify_bridge` span 内（携 `scheme` + `request_id` 上下文，spec FR-009「tracing
-/// span」）。request_id 关联已落地（#1320）：`request_id` 中间件经唯一 bindable 出口封在本桥**外层**
+/// allow/deny 事件落在 `verify_bridge` span 内，且只携 `scheme` + `request_id` 闭值上下文。
+/// request_id 关联已落地（#1320）：`request_id` 中间件经唯一 bindable 出口封在本桥**外层**
 /// （ROUTE-REQUESTID-OUTERMOST-01），本桥运行时 RequestId 已就位 ⇒ 经 `httpserve::request_id_str` 读入
 /// span（不带凭据请求 request_id 为空——span 仅在有 bearer token 时建，无埋点需求）。
 // reason: this is the single request middleware junction for mTLS evidence, bearer extraction,

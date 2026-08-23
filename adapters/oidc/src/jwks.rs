@@ -2,10 +2,10 @@
 //! controller 经**各自的** TLS 拉取 + 轮转后写入），解析成 kid 索引的 [`KeySet`] 快照 + 后台 poll 周期重载 +
 //! fail-closed。
 //!
-//! **零 in-app HTTP/TLS provider**：传输完整性重定位到基础设施层——文件权限 / k8s Secret RBAC / 挂载 namespace
-//! 隔离（机器强制），落 spec.md FR-005「本地 sidecar / 文件源」分支，与 SPIFFE（UDS 内核 peer 鉴别）/
-//! cert-manager（Secret RBAC + 挂载）同构。**绝不裸 plain-HTTP-over-network**（research.md F2：内网 MITM 可替换
-//! 公钥）。选此 altitude 的根因：2026-06 无 license-clean 且生产成熟的 rustls TLS provider——`ring`/`aws-lc-rs`=
+//! **零 in-app HTTP/TLS provider**：[`JwksKeySource`] 只接受受文件权限 / k8s Secret RBAC / 挂载 namespace
+//! 隔离保护的本地源，与 SPIFFE（UDS 内核 peer 鉴别）/ cert-manager（Secret RBAC + 挂载）同构。
+//! **绝不裸 plain-HTTP-over-network**：本模块没有 network fetch provider，避免内网 MITM 替换公钥。
+//! 选此 altitude 的根因：2026-06 无 license-clean 且生产成熟的 rustls TLS provider——`ring`/`aws-lc-rs`=
 //! OpenSSL 派生（deny.toml 拒）、`rustls-rustcrypto`=alpha「勿用于生产」、`graviola`=纯 Rust 但未审计。in-app
 //! HTTPS = follow-up（待成熟 provider，复用本模块 [`KeySet`]/poll seam，仅换 transport）。
 //!
@@ -720,7 +720,7 @@ fn parse_jwks(bytes: &[u8]) -> Result<KeySet, JwksError> {
 /// 强制 JWKS key 携带非空 `kid`（**安全不变式**，#254 review F1）：JWKS entry 必须 kid-tagged，使
 /// [`crate::config`] `entry_matches` 的「untagged=通配候选」规则**只**适用于 operator 注入的静态 key
 /// （[`crate::config::AccessStaticKeySource`]，无 kid 概念、operator 受信）——动态 JWKS key 一律精确 kid 匹配 +
-/// fail-closed（spec FR-005：JWKS `kid` 缺失/未知必须拒，绝不让无-kid JWK 变成任意 token 的通配候选）。
+/// fail-closed（[`require_kid`]：JWKS `kid` 缺失/未知必须拒，绝不让无-kid JWK 变成任意 token 的通配候选）。
 /// 无 kid / 空 kid → `None`（该 key 跳过）。
 fn require_kid(jwk: &Jwk) -> Option<String> {
     let kid = jwk.kid.clone()?;
@@ -1563,7 +1563,7 @@ mod tests {
             .build()
             .expect("config");
 
-        // 旧 k1 token（kid 已轮转出快照）→ 无候选 → fail-closed (Untrusted，spec SC-005 / 验收场景②)。
+        // 旧 k1 token（kid 已轮转出快照）→ 无候选 → fail-closed（Untrusted；由本端到端轮转测试承载）。
         let tok_k1 = mint_es256_kid(&sk(&SK1_BYTES), "k1", &payload(NOW + 600));
         let r_old = verify_credential(
             &config,

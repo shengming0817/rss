@@ -7,7 +7,7 @@
 //!
 //! **单事实 emit 语义（#1100）**：本 adapter 将一条 [`consistency::EventEntry`] 原子落库（单事务），用于**无
 //! co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写（如 session 持久化）同事务的 **co-tx 原子性**
-//! （FR-003 完整 L2）**已交付**（#1083/#1192）：经 [`crate::PgAuthGrantLifecycle`]（复用 `append_outbox` + 同
+//! （INVARIANT OUTBOX-COTX-SESSION-01）**已交付**（#1083/#1192）：经 [`crate::PgAuthGrantLifecycle`]（复用 `append_outbox` + 同
 //! 一事务写 session 行，INVARIANT OUTBOX-COTX-SESSION-01）承载，与本 emit-only adapter 语义正交。本 adapter
 //! 的单事实写语义不变。
 //!
@@ -70,7 +70,7 @@ impl PgEmitter {
 impl ReviewedEventWriter for PgEmitter {
     async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
         let (entry, envelope, _fact) = event.into_parts();
-        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。`contract` 是契约派生
+        // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id；OUTBOX-METADATA-FUNNEL-01）。`contract` 是契约派生
         // 绑定（#1193/#1618：domain + contract_id + version + schema_hash 同源、business 不可伪造），
         // routing 列经 `domain()`/`contract_id()` 取，标准 header 经 `version()`/`schema_hash()` 盖章。
         // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接

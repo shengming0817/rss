@@ -1456,7 +1456,7 @@ where
     ///
     /// `config.owner` 是 DLX domain（如 `"billing"`）；contract identity 与完整 definition
     /// 均由同一个 typed factory 派生并在这里与 immutable registry 精确 join。owner 与派生的
-    /// contract id 同进 DLX 记录（SC-006）。
+    /// contract id 同进 [`DeadLetterStore`] durable 记录。
     pub fn new(
         deps: SagaExecutorDeps<R, D>,
         config: SagaExecutorConfig,
@@ -3940,7 +3940,7 @@ where
     }
 
     /// 补偿失败 → 结构化 error 日志（saga_id / step_name / error_summary）+ 写 dead-letter
-    /// （domain / contract_id 取 saga owner，SC-006）。DLX 写失败：记日志，journal `Failed` 行是 durable 审计。
+    /// （domain / contract_id 取 saga owner，由 [`DeadLetterStore`] durable record 承载）。DLX 写失败：记日志，journal `Failed` 行是 durable 审计。
     /// tracing 宏收口到 [`ExecCtx::error_compensation_failed`] / [`ExecCtx::error_dlx_write_failed`]，
     /// 控制本函数认知复杂度 ≤15（同 consumer.rs 日志 helper 范式）。
     async fn dead_letter_compensation_failure(
@@ -3988,7 +3988,8 @@ where
         .increment(1);
     }
 
-    /// 补偿失败结构化 error 日志（saga_id / step_name / failed_forward_step / error_summary，T009.6 / SC-006）。
+    /// 补偿失败结构化 error 日志（saga_id / step_name / failed_forward_step / error_summary），
+    /// 与 [`ExecCtx::error_dlx_write_failed`] 共同承载 durable DLX 可观测性。
     fn error_compensation_failed(
         &self,
         comp_step: &str,
