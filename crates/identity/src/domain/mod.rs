@@ -617,7 +617,7 @@ impl PolicyId {
 /// - `SecurityPayloadEncode`：事务开始前编码 generated security-event payload 失败。
 /// - `Storage`：持久化层错误（`RoleReadRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。
 ///   原始错误进 `#[source]`，不进 Display / wire——message 是 `&'static str` const literal，
-///   runtime 细节仅进服务端日志（error-handling.md §Message 与 PII）。
+///   runtime 细节仅进服务端日志。
 // reason: `RoleNotFound` / `PermissionDenied` / `InvalidPolicy` / `CredentialNotFound` / `VersionConflict`
 // 生产返回方（repo / handler 接线）待 W ⇒ 冻结期 dead（ADR-004 C8）；`Storage` 已由 PgRoleRepo + Role::hydrate
 // 真实构造（非 dead）。变体级 dead 由 enum 级 allow 覆盖该子集，待消费方落地后逐个收窄。

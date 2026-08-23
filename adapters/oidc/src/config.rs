@@ -712,7 +712,7 @@ impl VerifierConfigBuilder<ServiceTokenProfile> {
 #[cfg(test)]
 mod tests {
     //! builder fail-fast 单测：覆盖每个 ConfigError 变体 + happy path。
-    //! item-level `#[allow(clippy::expect_used)]` 按 error-handling.md §Carve-out 标注在用到 expect 的 fn 上。
+    //! `expect_used` carve-out 仅标注到需要的 test item。
 
     use std::sync::Arc;
 

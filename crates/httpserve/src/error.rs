@@ -1,4 +1,4 @@
-//! Wire error mapper：`vocab::CoreError` → JSON envelope（error-handling.md §Wire 格式）。
+//! Wire error mapper：`vocab::CoreError` → JSON envelope。
 //!
 //! DTO 为 wire 类型（非 domain entity），derive Serialize 合规。
 //! **detail 透传 + 5xx strip 已落地（#1361）**：[`core_error_response`] 对 4xx 下发 `public_details`、
@@ -32,7 +32,7 @@ pub fn body_error_is_length_limit(err: &axum::Error) -> bool {
     }
 }
 
-/// Wire 错误响应 envelope（camelCase；error-handling.md §Wire 格式）。
+/// Wire 错误响应 envelope（camelCase）。
 #[derive(Serialize)]
 struct ErrorEnvelope {
     error: ErrorBody,
@@ -133,7 +133,7 @@ fn render_public_detail(detail: &PublicDetail) -> Option<WireDetail> {
 }
 
 /// 构造 axum 错误响应：`CoreError` → JSON envelope。**4xx 下发 `public_details`、5xx 强制 strip**
-/// （error-handling.md §Message 与 PII）；`internal_attrs` 永不进 wire。status 经 [`status_for`] 由 `kind`
+/// `internal_attrs` 永不进 wire。status 经 [`status_for`] 由 `kind`
 /// 派生（与 `code`、`retryable` 同源），杜绝 wire 分类错配。
 pub fn core_error_response(err: &CoreError, request_id: &str) -> axum::response::Response {
     let kind = err.kind();

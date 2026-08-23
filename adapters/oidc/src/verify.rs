@@ -451,7 +451,7 @@ pub(crate) fn log_claim_fail(reason: TelemetryReason) {
 #[cfg(test)]
 mod tests {
     //! 表驱动验签矩阵 + RFC7515 known-answer + PII 边界回归。
-    //! 测试 expect/unwrap carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow]` 逐 fn 标注。
+    //! expect/unwrap carve-out 仅标注到需要的 test item。
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};

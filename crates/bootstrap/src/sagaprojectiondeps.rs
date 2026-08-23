@@ -39,7 +39,7 @@
 //! `DurableShared` 与 `DurableIsolated` 两 durable 变体都收敛为 PostgreSQL durable store；隔离语义由
 //! schema / row scope / lease fencing 承载，不在本选型层分叉。
 //!
-//! ref: docs/rules/eventbus.md §复用层选型（topology-gated）
+//! ref: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）
 
 use crate::topology::Topology;
 

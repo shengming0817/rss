@@ -1,5 +1,5 @@
 # settings config-version-changed event 契约（active）——RW-W 配置版本化发布/回滚 outbox fact。
-# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 格式冻结见 contracts/README.md；格式由 `assembly_schema::ContractManifest` 解析；语义由 contract validation 与 codegen 持有。
 # 发布/回滚均生成新活跃版本并发同一 fact ⇒ consistencyLevel = OutboxFact（L2）。`changeKind` 区分
 # published / rolledBack（contracts 布局每 domain/version 单事件，用 kind 判别承载两类版本变更语义）。
 # active：config publish/rollback → durable outbox → relay → settings cache subscriber decode/ready 闭环。

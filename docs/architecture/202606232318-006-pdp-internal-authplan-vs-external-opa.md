@@ -100,7 +100,7 @@ request future，耗尽 drop verifier + handler 且经共享 503 `ERR_CORE_UNAVA
 - **正**：授权决策进程内、编译期 typed（最小基建、零网络 hop）；`diport::Pdp` 接缝按 ADR-003 既定范式预留，未来换外置 OPA 只在 port 边界换 impl、不动 authplan / 域；符合「先内置简单 impl、port 预留、按需换外置」的分阶段节奏；与 #1109（验签接线）天然衔接。
 - **负 / 代价**：现阶段策略作者锁定为 Rust 工程师、策略变更需重部署（无运行期热更新）——这是 pre-GA 单进程下可接受的取舍，由 §4.1 切换判据兜住升级路径。
 - **负 / 安全空窗（见 §5 威胁矩阵）**：历史窗口曾把签名 / MAC / exp 校验停在 **Soft** 约定（rustdoc + 本 ADR）；#1109 / Closeout addendum（#1584 / #1586）后已收口为 Hard `VerifiedClaims` mint——httpserve 认证挂载不得在 verifier 未就绪时接线生产可达的认证路径。
-- **负 / 可观测**：内置授权决策须显式埋点——httpserve middleware / `resolve_requirement` 调用点埋 tracing span（`authz.decision = allow|deny`、`authz.scheme`、`authz.route`），保留与外置 OPA decision log 等价的可观测颗粒度（对齐 `tenancy.md` 的「gRPC 与 HTTP 同一 PDP 决策指标 family」），随 #1109 落地交付。
+- **负 / 可观测**：内置授权决策须显式埋点——httpserve middleware / `resolve_requirement` 调用点埋 tracing span（`authz.decision = allow|deny`、`authz.scheme`、`authz.route`），保留与外置 OPA decision log 等价的可观测颗粒度（对齐 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL 的「gRPC 与 HTTP 同一 PDP 决策指标 family」），随 #1109 落地交付。
 - **下游**：#1109 落地 `diport::Pdp` trait + `VerifiedClaims` mint funnel + httpserve↔authn 验签接线；W 阶段域行为消费 `AuthRequirement`，不感知 PDP 是内置还是外置。
 
 ### 4.1 切换判据（内置 → 外置 OPA，登记备查）

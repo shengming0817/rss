@@ -395,7 +395,7 @@ fn string_claim(extra: &serde_json::Map<String, serde_json::Value>, name: &str) 
 #[cfg(test)]
 mod tests {
     //! 私有 helper 单测：`now_unix_secs` / `trusted_kind` / `validate_time_window` 边界覆盖。
-    //! item-level `#[allow(clippy::expect_used)]` 按 error-handling.md §Carve-out 标注。
+    //! `expect_used` carve-out 仅标注到需要的 test item。
 
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

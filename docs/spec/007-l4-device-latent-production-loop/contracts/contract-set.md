@@ -7,7 +7,7 @@ manifests and generated candidate bindings, but every lifecycle remains `draft`;
 active public contracts, or evidence that a production path exists. `rss-device-security-contracts` is now an experimental
 Release Surface package generated from this exact set. Its `.crate`/offline-consumer proof is a candidate artifact proof,
 not a profile activation, production assembly, or T3 claim. Its internal-to-public identity and registry owner are defined by
-[`architecture.md` §公开发布命名](../../../rules/architecture.md#公开发布命名).
+`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
 
 ## Frozen set
 

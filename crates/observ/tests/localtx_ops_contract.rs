@@ -3,7 +3,7 @@
 //! 只锁真配置：`docs/ops/localtx-alerts.rules.yaml` 是告警系统实际消费的规则文件，
 //! descriptor 与它之间的 metric/label/anchor 漂移会让告警静默，属于代码↔配置契约。
 //! 面向人的 runbook / dashboard checklist / proof report / adoption 模板不在此对账——
-//! 要求散文包含某句话不增加任何 enforcement 强度（见 `docs/rules/README.md` §红线一）。
+//! 要求散文包含某句话不增加任何 enforcement 强度。
 
 use observ::{LocalTxMetricPurpose, localtx_operations_descriptor};
 

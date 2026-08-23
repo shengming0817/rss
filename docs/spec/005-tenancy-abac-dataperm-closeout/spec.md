@@ -99,7 +99,7 @@ The feature is complete only when documentation, ADR links, xtask/governance che
 **Acceptance Scenarios**:
 
 1. **Given** the feature is implemented, **When** `cargo xtask verify` runs, **Then** all tenancy/AuthZ/RLS governance checks pass.
-2. **Given** a reviewer reads `docs/rules/tenancy.md`, **When** they follow the implementation references, **Then** no completed item remains described as follow-up.
+2. **Given** a reviewer reads `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL, **When** they follow the implementation references, **Then** no completed item remains described as follow-up.
 
 ## Edge Cases
 

@@ -192,7 +192,7 @@ pub enum EventWireProjectionError {
     Version,
 }
 
-/// 登录失败。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射，error-handling.md）。
+/// 登录失败。库错误枚举使用 const-literal message；HTTP 状态码由 handler 层映射。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoginError {
@@ -407,7 +407,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     /// `skip_all`：不记 password / username（zero-trust：username 可能 email/UPN，按 PII 处理）；
     /// 失败经 WARN 级 `err(level = "warn")` 记 [`LoginError`] Display（const literal，无 PII）。低基数定位字段
     /// `domain` / `operation` / `tenant_id`（tenant id 是 audit/tracing 合法可观测字段、非凭据，
-    /// observability.md §日志）显式记入，便于跨租定位；password/subject/session_id 仍 skip（F5）。
+    /// `crates/observ`、`secure::redact_error` 与 typed metric enums）显式记入，便于跨租定位；password/subject/session_id 仍 skip（F5）。
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "login", tenant_id = %tenant),
@@ -976,7 +976,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     /// 顺序同 `rotate` 的「mint 先于持久副作用」：先 mint access（失败 ⇒ 无 refresh 记录残留、客户端重登即可），
     /// 成功后 `issue` 落库 refresh token。Only an active account receipt can reach this method.
     ///
-    /// `skip_all`：subject 不入 span（零信任；可含 PII，observability.md §redaction）。
+    /// `skip_all`：subject 不入 span（零信任；可含 PII，`crates/observ`、`secure::redact_error` 与 typed metric enums）。
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "refresh_prepare_initial", tenant_id = %grant.tenant()),
@@ -1051,7 +1051,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     /// 6. sealed command 进入 producer transaction；CAS loser 在同一事务内 containment
     /// 7. 仅 `Applied(PersistedRefreshRotationReceipt)` 可释放 pending bearer 并返回 `RefreshBundle`
     ///
-    /// `skip_all`：presented bearer secret 不入 span（PII，observability.md §redaction）。
+    /// `skip_all`：presented bearer secret 不入 span（PII，`crates/observ`、`secure::redact_error` 与 typed metric enums）。
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "refresh_rotate", tenant_id = %tenant),
@@ -5147,7 +5147,7 @@ mod tests {
         }
     }
 
-    // 域单测不依赖 adapter crate（rust-standards.md §命名）：AuthGrantLifecycle / Clock 替身在此手写。
+    // 域单测不依赖 adapter crate：AuthGrantLifecycle / Clock 替身在此手写。
     // CapturingAuthGrantLifecycle 捕获原子 login mutation，并将 grant/refresh 一起委托给共享
     // `InMemAuthGrantStore`；同一 store 也注入 RefreshService，避免测试出现双存储漂移。
     #[derive(Clone, Default)]
@@ -10396,7 +10396,7 @@ mod tests {
     // ── RefreshService 集成测试 ────────────────────────────────────────────────
     //
     // TestSigner：`diport::Signer` 的最小替身（固定字节签名；shutdown Ok）。
-    // 不依赖 adapter crate（rust-standards.md §命名：域 crate 单测不依赖平台 adapter）。
+    // 不依赖 adapter crate。
 
     #[derive(Clone)]
     struct TestSigner;

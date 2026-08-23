@@ -1,6 +1,6 @@
 # Outbox relay 可观测性告警规则（#1209，归属 Feature #1208）。
 #
-# Prometheus rule_files 格式。metric/label 契约单源见 docs/rules/observability.md §Outbox Relay Metrics
+# Prometheus rule_files 格式。metric/label 契约单源见 `crates/observ`、`secure::redact_error` 与 typed metric enums
 # 与 docs/ops/202606250430-002-outbox-relay-observability.md。改 metric 名/label 须同步 eventexec emit site
 # （relay / consumer metrics）+ 本文件 + 上述文档。
 #

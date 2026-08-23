@@ -20,7 +20,7 @@ ADR-003 把可替换 provider 的 DI port trait 收敛进 DI-infra 层 crate `di
 - `docs/spec/001-crate-signature-freeze/contracts/layer-diport.md`（冻结接缝表「域」行）：域 repo port **收敛进 `diport`**（dynosaur，`pub`）。
 - `docs/spec/001-crate-signature-freeze/data-model.md` 待决项#1：`diport` 是 DI-infra 层 crate，按分层规则 **MUST NOT 依赖域 crate**（`deny.toml` + `xtask layer-deps` 编译期/CI 强制，`allows(DiPort, Domain) = false`），故其 port 签名只能引用基础（`ids`/`vocab`）/`generated`（wire）类型，**不得**引用域内实体。
 
-**矛盾本质**：`SessionRepo::find(..) -> Option<Session>` 必然引用域内实体 `Session`（域 crate `pub(crate)` 类型）。放 `diport` 即要求 `diport → 域` 反向依赖、层序倒置、deny 红；而 `domain-patterns.md` 又把「DI port 一律收敛 diport」写成例外、**禁止**域 crate 自定义 DI port。结果：域 repo port **既不能放 diport、也不能放域 crate**。PR-diport(#1049) 因此未交付任何 repo port，PR-4(#1051) 据此只冻 Scope A（域内值对象 + 非 DI 纯域逻辑）。W 阶段行为 PR 需要 repo port 接线持久化，本待决是其前置。
+**矛盾本质**：`SessionRepo::find(..) -> Option<Session>` 必然引用域内实体 `Session`（域 crate `pub(crate)` 类型）。放 `diport` 即要求 `diport → 域` 反向依赖、层序倒置、deny 红；而原 DI port 集中约束又**禁止**域 crate 自定义 DI port。结果：域 repo port **既不能放 diport、也不能放域 crate**。PR-diport(#1049) 因此未交付任何 repo port，PR-4(#1051) 据此只冻 Scope A（域内值对象 + 非 DI 纯域逻辑）。W 阶段行为 PR 需要 repo port 接线持久化，本待决是其前置。
 
 根因：ADR-003 的「**所有** DI port 收敛 diport」对 provider-agnostic 基建 port 成立、但对**域形 port over-reach**。`diport` 现有 7 个 port（`Clock`/`Signer`/`Publisher`/`Subscriber`/`AuditSink`/`ManagedResource`/`SubscribeInitializer`）**全部只引用基础/wire/自定义类型**——`AuditSink::record(AuditEvent)` 中 `AuditEvent` 是 diport 自定义的扁平类型（`principal_id: String`），刻意不引域内 `audit::AuditEntry` 聚合。这条「不引域实体」的线已隐式存在，只是没被显式表述为归属判据。
 

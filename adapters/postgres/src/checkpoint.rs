@@ -14,7 +14,7 @@
 //! **时间戳**：`updated_at` 用 DB DEFAULT `now()`（不注入 Clock，时间源保持 DB 端单一）。
 //!
 //! **错误 PII 边界**：sqlx 错误不进 Display——经 [`diport::CheckpointStoreError::new`] 包成
-//! source（error-handling.md §Message 与 PII）。
+//! source。
 
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -270,7 +270,7 @@ mod integration_tests {
     /// 4. update expected=2 但 offset 回退 → StaleVersion。
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
-    // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 集成测试 happy-path，已知合法值构造；item-level carve-out。
     async fn checkpoint_cas_rejects_stale_version() -> TestResult {
         let (_pg, store) = crate::test_pg::connect_pg().await?;
         store.run_migrations().await?;

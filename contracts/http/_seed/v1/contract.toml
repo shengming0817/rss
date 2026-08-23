@@ -1,5 +1,5 @@
 # Seed HTTP 契约（draft）——仅证明 codegen 管道 + 锁 golden，不接 assembly/serving。
-# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 格式冻结见 contracts/README.md；格式由 `assembly_schema::ContractManifest` 解析；语义由 contract validation 与 codegen 持有。
 id = "seed.echo"
 kind = "http"
 domain = "_seed"

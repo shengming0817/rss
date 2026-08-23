@@ -7,10 +7,10 @@
 //! `AuthPlan` 是 listener 级认证计划，语义上必须由组合根（assembly / bin）装配后通过 bootstrap option
 //! 注入；域 crate 直接 mint AuthPlan 绕过组合根注入语义，可能导致认证方案错配。
 //!
-//! `runtime-api.md` 明文：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」——当前仅 Soft
+//! httpserve typed builders、`finalize_auth` 与 `RuntimePlan` 明文：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」——当前仅 Soft
 //! 文档约束，本 lint 升为 Medium callsite-allowlist 守卫。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（构造守卫）：`AuthPlan` 字段均私有，外部 crate 可通过 `new` / `none` 合法构造——类型层无
 //!   私有字段封闭，必须经 callsite lint 约束；故此 lint 同时承载上游与下游（callsite-allowlist，Medium）。
 //! - 下游（使用守卫）：`AuthPlan` 本身可 Copy 传递，使用侧无需 mint——mint 点即是唯一约束面。
@@ -60,7 +60,7 @@ dylint_linting::declare_late_lint! {
     /// ### Why is this bad?
     /// `AuthPlan` 是 listener 级认证计划，必须由组合根（assembly / bin crate）装配后经 bootstrap option 注入。
     /// 域 crate 直接 mint AuthPlan 绕过组合根注入语义，可能导致认证方案错配。
-    /// runtime-api.md：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」。
+    /// httpserve typed builders、`finalize_auth` 与 `RuntimePlan`：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」。
     /// INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems

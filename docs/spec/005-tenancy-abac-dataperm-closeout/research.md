@@ -4,7 +4,7 @@
 
 **Decision**: Tenant isolation remains typed repo/service parameter + PG RLS. ABAC is an additional route/resource decision layer and cannot be the sole tenant boundary.
 
-**Rationale**: GoCell #1337 explicitly separates L1 tenant boundary from L2 ABAC and L3 row scope. RSS already encodes this in `docs/rules/tenancy.md`.
+**Rationale**: GoCell #1337 explicitly separates L1 tenant boundary from L2 ABAC and L3 row scope. RSS already encodes this in `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL.
 
 **Alternatives considered**:
 

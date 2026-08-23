@@ -1,6 +1,6 @@
 # Contract: 基础层 + 引擎层接缝（PR-1 / PR-2）
 
-> 范式见 conventions.md（单源 ADR-004）。形态为骨架示意（todo!()），具体字段以实现 PR 为准；清单源自 `docs/rules/architecture.md` §扁平 workspace 结构。
+> 范式见 conventions.md（单源 ADR-004）。形态为骨架示意（todo!()），具体字段以实现 PR 为准；清单源自 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
 
 ## PR-1 基础层（vocab / ids / secure / support / runctx）
 

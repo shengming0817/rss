@@ -686,7 +686,7 @@ mod collect {
     use httpserve::Primary;
     use primitives::ListenerKind;
 
-    // 测试断言用 expect：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
+    // 测试断言用 expect：item-level carve-out。
     #[test]
     #[allow(clippy::expect_used)]
     fn registry_collects_and_exposes_declarations() {
@@ -883,7 +883,7 @@ mod finalize {
     use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
     use std::sync::{Arc, Mutex};
 
-    // expect/unwrap 仅测试断言用：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
+    // expect/unwrap 仅测试断言用：item-level carve-out。
 
     fn probe_name(s: &str) -> ProbeName {
         #[allow(clippy::expect_used)]
@@ -1247,7 +1247,7 @@ mod finalize {
     /// ROUTE-LISTENER-TYPED-01 的**行为**补充测试（类型层已守误声明，本测试守 fold/nest 运行期机制）：
     /// 经 typed `route_group::<L>` + generated endpoint `mount` 声明的路由，finalize 后必须只出现在 `L::KIND`
     /// listener 的 Router 上，不串台。用 sanctioned 的 tower::ServiceExt::oneshot 实发请求断言
-    /// （rust-standards.md §覆盖率）。Primary/Internal 隔离 + 裸路径 404 守 prefix 参与挂载；Health
+    /// Primary/Internal 隔离 + 裸路径 404 守 prefix 参与挂载；Health
     /// 路由只由 `httpserve::health::routes` 固定构造，不进入 domain registry。
     ///
     /// 裸 Router 经 `UnfinalizedRoutes::into_router_for_test`（`#[doc(hidden)]` 测试入口）取回做 oneshot——

@@ -17,7 +17,7 @@ entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
   不可造 hasher**，且**短于 32B 即 fail-closed 拒绝构造**（`AuditChainHasher::new -> Option`，弱 key 不可造
   hasher；公开入口 `AuditDomain::new` 映射为 `AuditDomainError::WeakKey`，组合根 fail-fast）。key 强度
   收口在构造器（任何构造路径均校验，非仅 callsite）。真实 `sha2`/`hmac` 的 [`primitives::MacVerifier`]
-  实现是 follow-up adapter；域逻辑泛型于 `MacVerifier`。
+  provider 实现不得改变该协议；域逻辑泛型于 `MacVerifier`。
 - `prev_hash`：前一条目的 `entry_hash`；链首（`seq=0`，genesis）为全零 `[0u8;32]`。
 - 比较一律走 [`primitives::constant_time_eq`]（防时序侧信道；`Mac`/`EntryHash` 禁裸 `==`）。
 

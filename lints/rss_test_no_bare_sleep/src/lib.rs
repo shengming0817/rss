@@ -8,7 +8,7 @@
 //! ready-signal + `await_delay` 固定延时），不得直接 sleep；也**禁止**永不返回
 //! `Some` 的 probe 伪装延时。
 //!
-//! Funnel 上下游（ai-robust.md §审查要求 funnel）：
+//! Funnel 上下游（cargo xtask archrules verify）：
 //! - **上游 Hard**：`testkit` 不导出公开 `sleep` 名字——固定延时只经 `await_delay`；ready-signal
 //!   经 `await_map*` / `await_try*` / `await_notified`。
 //! - **下游 Medium**：本 lint——在测试上下文（`#[test]` 函数 / 显式 `#[cfg(test)] mod` /

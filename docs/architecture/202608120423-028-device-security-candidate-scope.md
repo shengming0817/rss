@@ -49,7 +49,7 @@ carrier 全部真实存在前继续保留 `deviceidentity = compile-only`；本 
 ### 六契约公共窄腰
 
 `rss-device-security-contracts`（名称映射消费
-[`architecture.md` §公开发布命名](../rules/architecture.md#公开发布命名)）只允许从现有 contract/schema 单源派生以下 exact set：
+`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）只允许从现有 contract/schema 单源派生以下 exact set：
 
 1. `identity.device-certificate-policy-put`
 2. `identity.device-certificate-status-get`
@@ -112,7 +112,7 @@ profile，也不能成为 RSS production acceptance owner。
    `active`、把唯一 designated artifact 提升为 canonical，并发布协调 package/image。
 
 任何前置缺失都保持 candidate/draft/compile-only。不得部分激活 contract、先登记 selector、用 static artifact metadata
-伪造运行回执，或以 L4/security-critical 名称自动获得 T3。未来 T3 只能使用 `project-scope.md` 的闭值 owner，且仍须独立
+伪造运行回执，或以 L4/security-critical 名称自动获得 T3。未来 T3 只能使用 `ADR-024` 的闭值 owner，且仍须独立
 证明 production-only join hazard；本 ADR 不预留 Evidence ID、selector、fixture 或 CI lane。
 
 ### Supersession

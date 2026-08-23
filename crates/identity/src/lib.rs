@@ -4,7 +4,7 @@
 //! 以及**域形** repo/service DI port。本 crate 承载身份域核心值类型、错误枚举与端口；
 //! provider-agnostic 基建 DI port（`Clock`/`Signer`/`Publisher`/`AuditSink`…）归 `diport`（ADR-003）；
 //! **域形** repo port（签名引用域内实体 `Role`/`RoleId`，无法收敛 diport）归本 crate `ports` 模块
-//! （ADR-005 Option 2，category line 见 ADR-005 / domain-patterns.md）。
+//! （ADR-005 Option 2，category line 见 ADR-005，并由 Rust visibility 限定）。
 //! 所有域类型字段私有，只经显式构造 funnel 创建——外部不可伪造，fail-closed（ADR-001）。
 //!
 //! # 实现状态
@@ -32,7 +32,7 @@
 #![forbid(unsafe_code)]
 
 /// 应用层：登录生命周期编排（验签 / lockout / co-tx / 密码变更 / logout）+ bootstrap 生命周期。私有——
-/// 只经 facade re-export 暴露，不外泄内部实现（domain-patterns.md §序列化边界 / 封装）。
+/// 只经 facade re-export 暴露，不外泄内部实现（由 Rust visibility 限定）。
 mod application;
 mod cert_artifact;
 mod device_certificate;

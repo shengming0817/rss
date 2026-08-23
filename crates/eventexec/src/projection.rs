@@ -5,7 +5,7 @@
 //! `projection_runner_once` / `projection_runner_loop` 把 durable `ProjectionEventSource` 接到 harness，
 //! worker 重启只依赖持久 checkpoint，不保存内存游标。
 //!
-//! ref: oxidecomputer/steno（saga 进度 checkpoint）+ docs/rules/eventbus.md §Projection。
+//! ref: oxidecomputer/steno（saga 进度 checkpoint）+ `contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
 //!
 //! INVARIANT 备注：apply 幂等由 `Projector` impl 保证（trait doc 已声明）；
 //! CAS 由 `diport::OwnerCheckpointStore::save_checkpoint` 的 `expected` 版本参数保证（infra 层）。
@@ -1778,7 +1778,7 @@ where
                 Advance::Unsaved
             }
             Err(err) => {
-                // reason: projection checkpoint 是主要进度记录，持久化写失败 = error 级（observability.md
+                // reason: projection checkpoint 是主要进度记录，持久化写失败 = error 级（`crates/observ`、`secure::redact_error` 与 typed metric enums
                 // 持久化失败分级）；区别于 saga（checkpoint 仅快进游标非权威），projection 进度持久化失败
                 // 需更高级别告警。
                 self.error("projection: checkpoint save failed, replay is safe", &err);

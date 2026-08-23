@@ -113,7 +113,7 @@ closure；只有 completed owner 能把统一 provider module 交给 Launch。
 ```
 
 载体 = `cargo xtask defer-gate`（接 verify / ci no-compile meta 步），评级 **Medium**，INVARIANT `DEFER-GATE-01`，实现 / 盲区
-单源见 `xtask/src/defergate.rs` + `docs/rules/architecture.md` §二档。该门只锁 config 中的**结构化标签完整性 + 经典注解**
+单源见 `xtask/src/defergate.rs` + `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。该门只锁 config 中的**结构化标签完整性 + 经典注解**
 （`TODO`/`FIXME`/`XXX`/`HACK` 注解位）；Markdown、`CLAUDE.md` 与自由词散文不进入阻塞门，只由周期、非阻塞 advisory grep 提示。
 
 ### 2.6 实施顺序（自底向上）

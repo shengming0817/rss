@@ -573,7 +573,7 @@ impl RelayPublishFailure {
 /// 安全边界从「调用方注释自律」上移到类型层：raw `serde_json::Value` 入口已删，外部无法绕过；
 /// reserved key（[`RESERVED_METADATA_KEYS`]）被 [`OutboxMetadata::try_insert`] fail-closed 拒；
 /// principal 仅允许 opaque subject id（[`OutboxMetadata::with_subject_id`]，不容完整 Principal / PII，
-/// `observability.md` §outbox envelope）。
+/// `crates/observ`、`secure::redact_error` 与 typed metric enums）。
 ///
 /// # INVARIANT: OUTBOX-METADATA-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
@@ -777,7 +777,7 @@ pub(crate) fn epoch_secs_to_time(secs: i64) -> std::time::SystemTime {
 /// Outbox 行 envelope（adapter 本地，`pub(crate)`；由域写路径在 `append_outbox` 调用前构造）。
 ///
 /// `metadata` 经 [`OutboxMetadata`] sealed funnel 收口（拒 reserved key + 仅 opaque subject id，
-/// PII 边界；`observability.md` §outbox envelope）。
+/// PII 边界；`crates/observ`、`secure::redact_error` 与 typed metric enums）。
 /// `partition_key` 来自 [`diport::OutboxEnvelopeParts::partition_key`]，`None` = 无序并行（DB NULL）、
 /// `Some(s)` = 串行有序（head-of-partition gating，#1211）。
 #[derive(Clone)]
@@ -3152,7 +3152,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     // reason: 测试解析编译期 include_str! 的已知 migration 文本，CHECK 子句缺失即应 fail（测试本身的断言），
-    // item-level carve-out（error-handling.md §Carve-out）。
+    // item-level carve-out。
     fn status_consts_match_migration_check() {
         const MIGRATION: &str =
             include_str!("../migrations/0060_bound_same_id_delivery_window.sql");

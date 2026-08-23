@@ -1,6 +1,6 @@
 //! Reconcile 控制环接缝（L4）—— desired↔actual 收敛，函数式接缝（对标 kube-rs）。
 //!
-//! `Reconciler` 是 L4 引擎策略 trait（native AFIT；reconcile.md §Reconciler 实现要点冻结此方法集）。
+//! `Reconciler` 是 L4 引擎策略 trait（native AFIT；`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
 //! `Request::default()` = resync pulse（re-observe 你拥有的全部，level-triggered）；
 //! transient error → Loop 退避重试（per-entity 指数退避）。
 //! ref: kube-rs kube-runtime/src/controller/mod.rs@main（`Action::requeue`/`await_change`、`reconcile`；
@@ -51,7 +51,7 @@ impl EntityId {
 ///
 /// 兑现 lease epoch 接缝（#1123 行为 PR）：harness 取得 leadership 后把当前单调 [`vocab::Epoch`] 注入 ctx，
 /// reconciler 经 [`Context::epoch`] 读出、传给自己的 `FencedWriter` 做写路径 CAS（跨副本 fencing）。
-/// `None` = 单进程 / 无 `LeaderElector` 模式（reconcile.md：always leader、无 fencing）。
+/// `None` = 单进程 / 无 `LeaderElector` 模式（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance：always leader、无 fencing）。
 ///
 /// **不是安全封闭面**：私有字段仅为让构造收口到 `for_harness`（字段类型可演进），**不**阻止域 crate 经
 /// `for_harness` 构造任意 epoch 的 ctx。即便域 crate 误传错误 epoch，**fencing 正确性仍由
@@ -62,7 +62,7 @@ impl EntityId {
 /// reconcile future 会在**任意 await 点被 drop**（协作取消）。reconciler 须保证写经 `FencedWriter` CAS、
 /// 不依赖跨 cancel/panic 的中间可变共享态。
 ///
-/// reason: reconciler 在 tenantless system 身份下跑，ctx 由 harness 注入而非业务构造（reconcile.md §Builder 强制）。
+/// reason: reconciler 在 tenantless system 身份下跑，ctx 由 harness 注入而非业务构造（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
 #[derive(Debug, Clone)]
 pub struct Context {
     epoch: Option<vocab::Epoch>,
@@ -71,13 +71,13 @@ pub struct Context {
 impl Context {
     /// harness 注入构造：传入当前 lease [`vocab::Epoch`]（`None` = 无 leader / 单进程）。
     ///
-    /// 命名 `for_harness` 标注调用方应是 Loop harness（reconcile.md §Builder 强制：ctx 非业务构造）；
+    /// 命名 `for_harness` 标注调用方应是 Loop harness（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）；
     /// 非安全封闭（见类型 rustdoc），fencing 承重在 `FencedWriter` CAS。
     pub fn for_harness(epoch: Option<vocab::Epoch>) -> Self {
         Self { epoch }
     }
 
-    /// 当前 lease epoch；`None` ⇒ 单进程 / 无 fencing（reconcile.md §Leader-elect）。
+    /// 当前 lease epoch；`None` ⇒ 单进程 / 无 fencing（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
     pub fn epoch(&self) -> Option<vocab::Epoch> {
         self.epoch
     }
@@ -292,7 +292,7 @@ impl<T> ReconcileDiff<T> {
     }
 }
 
-/// reconcile 成功结果（私有字段；`requeue_after` 表达健康态稍后复检 —— reconcile.md / kube `Action`）。
+/// reconcile 成功结果（私有字段；`requeue_after` 表达健康态稍后复检 —— `consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance / kube `Action`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outcome {
     requeue_after: Option<Duration>,
@@ -327,7 +327,7 @@ impl Outcome {
     }
 }
 
-/// reconcile 失败（私有字段；`is_permanent` 仅不可重试分类，**不**自动改放弃下一步 —— reconcile.md）。
+/// reconcile 失败（私有字段；`is_permanent` 仅不可重试分类，**不**自动改放弃下一步 —— `consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
 #[derive(Debug, thiserror::Error)]
 #[error("{}", .kind.message())]
 pub struct ReconcileError {
@@ -340,7 +340,7 @@ impl ReconcileError {
         Self { kind }
     }
 
-    /// 是否不可重试（permanent 分类；不触发自动放弃，reconcile.md）。
+    /// 是否不可重试（permanent 分类；不触发自动放弃，`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
     ///
     /// **消费者须知**：`permanent` ≠「该实体永不再被处理」。harness 据此**不做退避重投**（区别于 transient），
     /// 但**下个 resync pulse 仍会重驱动该实体**（level-triggered）。若需真正抑制重驱动，域 reconciler 须在
@@ -349,7 +349,7 @@ impl ReconcileError {
         self.kind == crate::error::EngineErrorKind::Permanent
     }
 
-    /// 是否可重试（`Transient`）。Loop harness 据此决定指数退避重试（reconcile.md）。
+    /// 是否可重试（`Transient`）。Loop harness 据此决定指数退避重试（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
     pub fn is_transient(&self) -> bool {
         self.kind == crate::error::EngineErrorKind::Transient
     }
@@ -410,7 +410,7 @@ impl ReconcileResultLabel {
 
 /// 域 reconciler 策略（L4 引擎策略 trait，native AFIT）。
 ///
-/// 签名冻结对齐 `docs/rules/reconcile.md`：`reconcile(&self, ctx: &Context, req: Request)`。
+/// 签名冻结对齐 `consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance：`reconcile(&self, ctx: &Context, req: Request)`。
 /// native AFIT ⇒ 非 object-safe，Loop harness 泛型 `<R: Reconciler>` 消费，禁 `Box<dyn>`。
 /// 退避分类由 [`ReconcileError::is_transient`]/`is_permanent` 驱动（Loop 读，不走 trait 方法）。
 #[allow(async_fn_in_trait)]
@@ -436,7 +436,7 @@ mod tests {
         // 有 leader：注入的 epoch 原样读出。
         let ctx = Context::for_harness(Some(vocab::Epoch::new(7)));
         assert_eq!(ctx.epoch(), Some(vocab::Epoch::new(7)));
-        // 无 leader / 单进程：None（reconcile.md：always leader、无 fencing）。
+        // 无 leader / 单进程：None（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance：always leader、无 fencing）。
         let none_ctx = Context::for_harness(None);
         assert_eq!(none_ctx.epoch(), None);
         // Clone 保留 epoch。
@@ -446,7 +446,7 @@ mod tests {
     // EntityId 接受非空 canonical key（uuid / 路径形 `tenant/cert` 等 opaque 形态；内部空格仍 opaque）+ as_str 往返。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn entity_id_parse_accepts_canonical_and_round_trips() {
         let cases: &[&str] = &[
             "device-1",
@@ -480,7 +480,7 @@ mod tests {
     // Request::default() = resync pulse（entity None）；for_entity = 定向单实体（entity Some）。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn request_default_is_resync_for_entity_is_targeted() {
         let resync = Request::default();
         assert_eq!(resync.entity(), None);

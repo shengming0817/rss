@@ -1,4 +1,4 @@
-//! vault adapter —— RSS workspace（Transit 与 caller-owned CSR PKI transport）。See docs/rules/architecture.md.
+//! vault adapter —— RSS workspace（Transit 与 caller-owned CSR PKI transport）。See `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
 //!
 //! `VaultSigner` / `VaultKeyProvider`（sealed-marker）：
 //! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-12）。
@@ -610,8 +610,8 @@ mod backend_tests {
     const MOUNT: &str = "transit";
     const TIMEOUT: Duration = Duration::from_secs(30);
 
-    // 构造 helper：合法配置的 VaultSigner。item-level expect carve-out 集中此一处
-    // （error-handling.md §Carve-out 要求 item-level），测试体不散落 `expect`。
+    // 构造 helper：合法配置的 VaultSigner。item-level expect carve-out 集中于此处，
+    // 测试体不散落 `expect`。
     #[allow(clippy::expect_used)]
     fn valid_signer() -> VaultSigner {
         VaultSigner::new_rss_access(

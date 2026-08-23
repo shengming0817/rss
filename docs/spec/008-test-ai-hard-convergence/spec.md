@@ -44,7 +44,7 @@ ambiguous outcome、provider outage 等特有失效模式。
 在决策落地前，不得修改现有 T3 canonical owner 或 artifact journey。
 
 独立验收：任何 carrier activation、redeclaration 或 replacement 都在对应 PBI 中按
-`docs/rules/project-scope.md` 提供逐项 evidence plan；静态 registry 不存放 same-head 运行回执或历史切换证明。
+ADR-024 提供逐项 evidence plan；静态 registry 不存放 same-head 运行回执或历史切换证明。
 
 ### US5 — 外部 companion 只由真实 consumer 激活（P3）
 

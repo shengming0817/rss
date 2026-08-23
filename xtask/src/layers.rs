@@ -1,6 +1,6 @@
 //! 分层分类单源 —— workspace 成员 crate → `Layer` 映射 + 允许依赖矩阵。
 //!
-//! 规则单源 = `docs/rules/architecture.md §分层`。被 `layerdeps`（source-centric 分层依赖 lint）
+//! 规则单源 = `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。被 `layerdeps`（source-centric 分层依赖 lint）
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain），另将精确路径
@@ -9,7 +9,7 @@
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
-//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "check", source = "code" }—— 五层 const 表、RuntimeExec / Tooling（`crates/workspacefacts`）精确路径与 architecture.md §分层 同源；矩阵 `allows`
+//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "check", source = "code" }—— 五层 const 表、RuntimeExec / Tooling（`crates/workspacefacts`）精确路径与 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；矩阵 `allows`
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
@@ -112,7 +112,7 @@ pub(crate) fn is_proc_macro(name: &str) -> bool {
 }
 
 /// test-support 库（HTTP 契约测试 harness 与可编程外部设备 actor）：保持各自既有分层供 classify，但
-/// **只准经 `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（architecture.md §分层）。机器守由 layerdeps
+/// **只准经 `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。机器守由 layerdeps
 /// [`check_test_support_confinement`](crate::layerdeps::check_test_support_confinement)（INVARIANT:
 /// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区。该规则只消费 `shipped_edges`，故任一指向本集成员的
 /// shipped 内部边即误用；独立 dev bucket 仅应用 LAYER-DEPS-02/03。`iotdevice` 仍是 Example 层外部
@@ -208,7 +208,7 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 }
 
 /// 分层依赖矩阵：`from` 是否允许直接依赖 `to`（仅工作区内部边；外部 crate 不经此函数）。
-/// 规则单源 = architecture.md §分层（**逐字编码，不放宽**）：基础仅 std+外部、引擎依赖基础、
+/// 规则单源 = `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`，不放宽**）：基础仅 std+外部、引擎依赖基础、
 /// DI-infra 依赖基础+引擎、服务依赖基础+引擎+DI-infra、域依赖基础+引擎+DI-infra+服务+generated
 /// （兄弟域互不依赖）、adapter 实现基础/引擎/DI-infra/服务/**域** trait（adapter→域 = DIP 内向边，impl 域
 /// repo/service port，Option 2/ADR-005；反向 域→adapter 仍禁）。**同层横向依赖一律禁**（§分层

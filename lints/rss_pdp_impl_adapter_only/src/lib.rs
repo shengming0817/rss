@@ -20,7 +20,7 @@
 //!   ② 被编译 package 的 `CARGO_MANIFEST_DIR` 父目录名 == `adapters`（provider 实现唯一合法位）。**故意不**放行
 //!   `bins` / `assemblies`（≠ `rss_diport_impl_allowlist`）——组合根内联 Pdp 即信任根被旁路，正是本 lint 所拦。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（定义面）：`Pdp` 只定义在 `diport`（`deny.toml` 宏依赖 wrapper，DIPORT-MACRO-CONFINE-01）。
 //! - 下游（impl 面）：`Pdp` 只能在 `adapters` 实现——本 lint（Medium，AST 级，最强可用载体）。
 //!
@@ -36,7 +36,7 @@
 //! 真 `impl diport::Pdp` 0 诊断）——是 verify 机器门（非一次性人工）。adapter 绿分支无法在 UI harness 内单测
 //! （harness 控制 example 源路径，无法置于 `adapters/`），故由工作区门承载（同 `rss_diport_impl_allowlist` 范式）。
 //!
-//! Hard 化评估（ai-robust.md §审查要求）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
+//! Hard 化评估（cargo xtask archrules verify）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
 //! 「源码位置 / cfg(test) 区分 impl」类型系统 / crate 图无法表达，AST lint 是最强可用载体（Medium）。
 
 extern crate rustc_hir;

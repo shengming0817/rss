@@ -18,7 +18,7 @@
 //! **真正的 Hard 锚点在 emit 层**：域只经 `OutboxEmitter::emit`（入参 `OutboxEnvelopeParts` 无 reserved
 //! 槽）发事件，永不构造 wire envelope 的 reserved 面——本 lint 是纵深防御（Medium，callsite allowlist）。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（reserved 写保护）：`try_insert` 类型层拒 reserved key（Hard，`RESERVED_METADATA_KEYS` fail-closed）；
 //!   `insert_wire_pair` bypass reserved 检查，是 adapter 专用透传口——调用站点须限制（本 lint，Medium）。
 //! - 下游（relay / subscriber rehydrate）：relay 从 DB outbox 列读取、subscriber 从 broker header 读取，
@@ -41,7 +41,7 @@
 //! 误伤 adapter）由 `cargo xtask verify` 的 `cargo dylint --all` 工作区跑锁（adapter 真实调用 0 诊断）——
 //! 是 verify 机器门。
 //!
-//! Hard 化评估（ai-robust.md §审查要求）：无低成本 Hard 路径。写面必须 `pub`（跨 crate 须调），
+//! Hard 化评估（cargo xtask archrules verify）：无低成本 Hard 路径。写面必须 `pub`（跨 crate 须调），
 //! 无法用可见性封闭；sealed-trait 无法跨 crate 限制调用者；AST lint 是最强可用载体。
 //! 真正 Hard 锚点已在 emit 层（`OutboxEnvelopeParts` 无 reserved 槽，域经 `emit` 永不接触 reserved 写）；
 //! 本 lint 是该 Hard 锚点上的 Medium 纵深防御，无需另立 Hard 化 Issue。

@@ -7,7 +7,7 @@
 //! 数据无 PII（仅 owner 标识 + 偏移 + 版本，均为路由 / 版本元数据），故无 payload Debug 脱敏；
 //! 错误 source 仍经 [`RedactedSource`] 脱敏（adapter 原始错误可能携连接串）。
 //!
-//! ref: oxidecomputer/steno（saga 进度 checkpoint）+ eventbus.md §Projection（断点续投 offset CAS）。
+//! ref: oxidecomputer/steno（saga 进度 checkpoint）+ `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 
 use dynosaur::dynosaur;
 

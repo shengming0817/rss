@@ -254,7 +254,7 @@ mod smoke {
     /// Fix 4：RevStore reference impl——expected=Some + 键不存在 → Conflict{current:None}（None 路径边界）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path assert，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path assert，item-level carve-out。
     async fn rev_store_expected_some_on_absent_key_returns_conflict_none() {
         let store: Box<DynCasStore> = DynCasStore::new_box(RevStore::default());
         let outcome = store

@@ -188,7 +188,7 @@ pub mod __catalog {
 /// # Capability tokens
 ///
 /// Macro enrollment keys are **snake_case Rust idents**. Stable diagnostic labels remain
-/// **kebab-case** (`CapabilityId::as_str`). Keep this table next to `docs/rules/eventbus.md` when
+/// **kebab-case** (`CapabilityId::as_str`). Keep this table next to `contracts/**/contract.toml`、`generated` 与 `crates/consistency` when
 /// adding a capability:
 ///
 /// | macro token (`snake`) | diagnostic label (`kebab`) |

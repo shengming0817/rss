@@ -3,7 +3,7 @@
 - **状态**：Accepted（裁决 #1113 auth-finalize-before-bind + #1103 typed per-listener route-group 的类型层落地形态；2026-06-25）
 - **日期**：2026-06-25
 - **关联**：issue **#1113**（finalize_routes 裸 Router 可绕 auth bind）· **#1103**（route-group listener 隔离 Medium→Hard）· epic #991 · 两 issue body 均注「应合并设计」
-- **依赖 / 修订 ADR / 规则**：修订 **PR #137 review F1**（bootstrap「不依赖兄弟服务」）为带受控例外；对齐 **ADR-005 §2.4** sanctioned `adapter → 域` DIP 内向边范式；修订 `docs/spec/001-crate-signature-freeze/contracts/layer-services.md` 的 httpserve `finalize_auth`/`RouteGroup`/`Route` 冻结签名；`ai-robust.md` §载体选择（上移编译期）
+- **依赖 / 修订 ADR**：修订 **PR #137 review F1**（bootstrap「不依赖兄弟服务」）为带受控例外；对齐 **ADR-005 §2.4** sanctioned `adapter → 域` DIP 内向边范式；修订 `docs/spec/001-crate-signature-freeze/contracts/layer-services.md` 的 httpserve `finalize_auth`/`RouteGroup`/`Route` 冻结签名；由 `cargo xtask archrules verify` 验证。
 - **归属**：framework（路由生命周期类型词汇，provider-agnostic）
 - **AI-robust 评级**：见 §6
 
@@ -112,4 +112,4 @@ auth-before-bind 结论，只在同一 generated endpoint funnel 上新增 consi
 `crates/bootstrap/src/registry.rs` + `Cargo.toml`（httpserve 边 + test-util dev-dep）、域 callers（identity/settings/audit
 + 各 test-util dev-dep）、`bins/{rss,server}/src/{lib.rs,auth_bridge.rs}` + `tests/auth_e2e.rs` + `Cargo.toml`（字节级同步 +
 test-util dev-dep）、`xtask/src/{layers.rs,layerdeps.rs}`、`crates/httpserve/tests/{runtime.rs,funnel_trybuild.rs,ui/*}`（compile-fail
-负向证据）、本 ADR + signature-freeze spec + `runtime-api.md` §RouteGroup + 上述注释修订。
+负向证据）、本 ADR + signature-freeze spec + httpserve typed builders、`finalize_auth` 与 `RuntimePlan`。

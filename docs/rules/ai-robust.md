@@ -47,8 +47,7 @@ Hard admission 是 fail-closed 的语义判定：必须能从 Cargo production t
 
 ## 证据层
 
-Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度。层级定义和 production carrier transition
-以 [`project-scope.md`](project-scope.md) 为单一事实源。
+Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度，两轴不得互相推导。
 
 - **T1**：Cargo、类型、schema/codegen、compile-fail、组件属性和状态机。
 - **T2**：consumer/provider conformance、真实 DB/Broker/identity seam、事务与接缝故障。
@@ -65,7 +64,7 @@ Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度。层级
 3. truth owner、risk owner、canonical target 与诊断对象。
 4. 最低充分的 Hard/Medium 和 T1/T2/T3。
 5. carrier replacement、合并或独立 production hazard。
-6. [`project-scope.md`](project-scope.md)、[`dependency-policy.md`](dependency-policy.md) 与门预算的一致性。
+6. 能力范围、依赖准入与门预算的一致性。
 
 ## 载体选择
 

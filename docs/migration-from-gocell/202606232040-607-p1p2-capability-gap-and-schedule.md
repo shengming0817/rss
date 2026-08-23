@@ -2,7 +2,7 @@
 
 > 生成日期：2026-06-23 · 输入：83 个 P1/P2 work item + `deep-research-report.md`（Rust 企业级平台内核愿景）
 > 对照现状。配套：[gocell-rewrite-sequence.md](./gocell-rewrite-sequence.md)（G0→G1→W→Join 阶段模型）·
-> [架构单源 docs/rules/architecture.md](../rules/architecture.md) · epic #991 `pm:epic-wave` 评论（滚动 wave 单源）。
+> `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` · epic #991 `pm:epic-wave` 评论（滚动 wave 单源）。
 > 本文件是本轮缺口识别 + 排期的溯源快照。
 
 ## 0. 定位

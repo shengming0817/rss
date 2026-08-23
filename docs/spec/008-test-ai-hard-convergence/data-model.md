@@ -29,7 +29,7 @@
 - `ProfileLifecycleJoin`：官方 profile 的真实 artifact lifecycle/critical path join。
 - `AcceptedValueStreamJoin`：已接纳 value stream、真实 adopter 与 production artifact 的跨进程 join。
 
-每个 carrier 变更继续使用 `docs/rules/project-scope.md` 定义的 evidence item：稳定 Evidence ID、canonical owner、
+每个 carrier 变更继续使用 ADR-024 定义的 evidence item：稳定 Evidence ID、canonical owner、
 精确 assertion、T1/T2 prerequisites 与 candidate receipt、T3 incremental proof、复现入口、成本、change kind 和
 完整 transition。运行 receipt 不落入静态 registry。
 

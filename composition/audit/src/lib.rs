@@ -69,7 +69,9 @@ where
 }
 
 fn weak_key_error() -> anyhow::Error {
-    anyhow::anyhow!("audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)")
+    anyhow::anyhow!(
+        "audit chain key must be at least 32 bytes (weak key; INVARIANT: AUDIT-LEDGER-BYTES-01)"
+    )
 }
 
 /// Hermetic binding factory for assembly tests.

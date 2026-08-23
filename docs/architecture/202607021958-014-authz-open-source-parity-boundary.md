@@ -2,7 +2,7 @@
 
 - **状态**：Accepted（#1587：TENANCY-10 open-source authz parity matrix and boundary ADR）
 - **日期**：2026-07-02
-- **关联**：Feature #1576 · PBI #1587 · ADR-006（内置 typed authplan / OPA 取舍）· `docs/rules/tenancy.md` · `docs/guides/202607090202-1596-tenancy-consumer-migration.md`
+- **关联**：Feature #1576 · PBI #1587 · ADR-006（内置 typed authplan / OPA 取舍）· `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL · `docs/guides/202607090202-1596-tenancy-consumer-migration.md`
 - **归属**：framework / tenancy / authorization governance
 - **AI-robust 评级**：Medium（`cargo xtask tenancy-closeout` 锁本 ADR、规则引用、矩阵维度与误导表述）
 
@@ -45,7 +45,7 @@ RowVisibility / FieldMask 经 sealed obligation 和 `ResourceProjection` 消费�
 - **Tenant isolation**：tenant boundary remains typed tenant + PG RLS + serving-role gates. Route policy failure or policy-store failure must not widen tenant data access.
 - **Row / field obligation**：`RowScope::All` is audited and target-tenant scoped; `ResourceProjection` masks sensitive fields by default.
 - **Auditability**：cross-tenant reads require durable audit before capability issuance. Decision logs from OPA-style systems are an observability comparison, not a replacement for durable audit.
-- **Governance gate**：`cargo xtask tenancy-closeout` keeps this ADR, `docs/rules/tenancy.md`, and ADR-006 linked and checks matrix coverage.
+- **Governance gate**：`cargo xtask tenancy-closeout` keeps this ADR, `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL, and ADR-006 linked and checks matrix coverage.
 - **Operational tradeoff**：RSS accepts redeploy-based typed policy evolution in exchange for fewer moving parts and stronger local boundaries in the current pre-GA architecture.
 
 ## 4. Gap mapping
@@ -58,7 +58,7 @@ Known gaps remain tracked outside #1587. This ADR only records their boundary so
 - Credential/session hard revocation: #1317 and #1353.
 - Audit HMAC chain / tamper-evidence: capability gap P0-8 in the same gap document.
 - Field protection at rest: #1465 / #1466 / #1467 and ADR-011.
-- gRPC parity caveat: `docs/rules/tenancy.md` defines the target rule; any implementation claim must cite the contract/codegen/runtime evidence in its own PBI.
+- gRPC parity caveat: `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL defines the target rule; any implementation claim must cite the contract/codegen/runtime evidence in its own PBI.
 
 ## 5. Enforcement
 
@@ -66,7 +66,7 @@ This ADR is a documentation boundary, so true type-system Hard enforcement is no
 carrier is Medium:
 
 - `cargo xtask tenancy-closeout` requires this ADR file, the matrix frameworks, the matrix dimensions, and the explicit boundary claims.
-- The same gate requires `docs/rules/tenancy.md`, ADR-006, and `docs/guides/202607090202-1596-tenancy-consumer-migration.md` to stay linked.
+- The same gate requires `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL, ADR-006, and `docs/guides/202607090202-1596-tenancy-consumer-migration.md` to stay linked.
 - The same gate rejects selected misleading compatibility phrases in governed #1587 docs.
 
 ## 6. 对标证据（ref）

@@ -22,7 +22,7 @@
 ### D4. topology-gated resolver fail-closed
 - **Decision**: resolver 在 demo(in-mem)/durable 间选型；eventtransport durable 使用 broker+PG inbox/DLX，Redis 只随需要它的 runtime 原语启用。durable 缺对应配置 → 启动期 `Err`，绝不回落 in-mem。in-mem 原语 sealed（`pub(crate)` + resolver 私有构造），生产代码类型层不可达。
 - **Rationale**: 生产误用 in-mem = 跨进程/重启丢事件，必须编译期/启动期堵死。
-- **ref**: docs/rules/eventbus.md §topology-gated；spec FR-007/FR-008。
+- **ref**: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`；spec FR-007/FR-008。
 
 ### D5. 对标源码（已冻进接缝 rustdoc）
 - watermill `message/router.go`@master：Disposition Ack/Requeue/Reject + handleMessage 决策（eventexec dispatch / ConsumerBase）。
@@ -54,7 +54,7 @@
 | L2 outbox 原子性 + consumer 幂等 | xtask/集成 governance #[test] | Medium | OUTBOX-ATOMIC-IDEM-01 |
 | kind:saga 契约合规 | xtask governance #[test] | Medium | SAGA-CONTRACT-01 |
 | command 双侧对称 + 无裸 emit | codegen + xtask 完整性 #[test] | Medium | COMMAND-SYMMETRY-01 |
-| projection_events append-only | DB 引擎 `REVOKE UPDATE, DELETE`（serving role，migration 内 GRANT 收紧）| Hard | PROJECTION-APPEND-ONLY-01（主守卫，refs: eventbus.md §append-only） |
+| projection_events append-only | DB 引擎 `REVOKE UPDATE, DELETE`（serving role，migration 内 GRANT 收紧）| Hard | PROJECTION-APPEND-ONLY-01（主守卫，refs: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`） |
 | projection_events append-only | dylint `rss_projection_append_only`（AST） | Medium | PROJECTION-APPEND-ONLY-01（辅助早拦，与上行 Hard 主守卫并列） |
 | fencing epoch 单调 | FencedWriter CAS（运行期）+ 测试 | Medium | RECONCILE-FENCE-MONO-01 |
 | broker 凭据 redaction | mock tracing subscriber synthetic 负向测试：amqp URI 的 `://<user>:<pass>@` userinfo 不出现在任何 span field | Medium | EVENTTRANSPORT-CRED-REDACT-01 |
@@ -63,5 +63,5 @@
 
 ## 未决（留实施期，不阻塞拆解）
 - 各 postgres 表的精确索引列与 retention/清理策略（pre-GA 普通 CREATE INDEX；data-model.md 给初版）。
-- amqp per-domain vhost/credential 的环境变量命名最终形态（遵 eventbus.md §命名）。
+- amqp per-domain vhost/credential 的环境变量命名最终形态（遵 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 - saga subsaga / projection schema 演化的细节（本 feature 只交付主干，演化按 api-versioning pre-GA 窗口）。

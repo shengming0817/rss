@@ -144,7 +144,7 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true, features = ["util"] }
-# 组合根边界错误聚合（error-handling.md：应用边界可 anyhow）。
+# 组合根边界错误聚合（：应用边界可 anyhow）。
 anyhow = { workspace = true }
 # adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。
 tracing = { workspace = true }

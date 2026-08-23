@@ -38,7 +38,7 @@ diport = { path = "../diport" }
 serde_json = { workspace = true }
 # 跨租户 admin 读 HTTP handler（GET /api/v1/audit/entries）：axum Query/Json + route_group 挂载。
 axum = { workspace = true }
-# 审计 handler 失败路径（decode / tenant / append）结构化日志——审计管道失败不可静默（observability.md §日志）。
+# 审计 handler 失败路径（decode / tenant / append）结构化日志——审计管道失败不可静默（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
 tracing = { workspace = true }
 # 跨租户 admin 读分页游标（PageCursor 是 base64url 不透明 token；in-mem 编码子链下标）。
 base64 = { workspace = true }

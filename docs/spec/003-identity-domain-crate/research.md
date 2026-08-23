@@ -27,7 +27,7 @@ RSS 侧 `authorize_rbac` 不用 casbin 的字符串策略矩阵，而是 typed `
 
 RSS 侧 `CredentialRepo::authenticate` 在单一 tenant writer transaction 中跑 argon2（或 bcrypt）KDF +
 constant-time 比对，并返回 `AuthOutcome::{Authenticated, RejectedKnown, RejectedUnknown}`；密码明文永不存 /
-不进日志 / Debug 脱敏 login 与 hash（observability.md §日志）。底层哈希复用 `secure` crate（`secure::verify_password`），
+不进日志 / Debug 脱敏 login 与 hash（`crates/observ`、`secure::redact_error` 与 typed metric enums）。底层哈希复用 `secure` crate（`secure::verify_password`），
 不在 identity 重复封装。凭据 version pin 支持密码变更 CAS。登录查找键是 `LoginIdentifier`；canonical actor 是
 `ids::UserId`——二者类型不相交（#1277）。
 

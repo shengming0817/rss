@@ -21,7 +21,7 @@ diport 的 DI port 契约 DTO 中，**字节 payload 字段**（`Vec<u8>` ——
 
 **问题（#1155，源 PR #209 review F6）**：「未来新增 diport DTO 含字节 payload 必须脱敏」对**将来**类型**无前向机器守卫**——
 开发者新增一个 `pub struct { f: Vec<u8> }` + `#[derive(Debug)]` 不会被任何 lint / 治理测试拦住。既有 `rss_redact_debug_required`
-（REDACT-DEBUG-REQUIRED-01）只按**硬编码类型名单**触发，其 Known problems 自承「新增敏感 DTO 需同步名单」。ai-robust.md：新机制
+（REDACT-DEBUG-REQUIRED-01）只按**硬编码类型名单**触发，其 Known problems 自承「新增敏感 DTO 需同步名单」。cargo xtask archrules verify：新机制
 最低 Medium，且「能上移到类型系统则**必须**上移」。
 
 error 侧此问题已由 `RedactedSource` newtype（Hard）+ `rss_diport_error_debug_redacted` lint（Medium）的 **funnel** 解决；
@@ -57,7 +57,7 @@ structural carve-out。
 脱敏只作用于 `Debug` / `Display`（防日志 / tracing 泄漏），不阻断字节本身程序化访问。对标 `secrecy::SecretBox`
 （redacted `Debug` `[REDACTED]` + `ExposeSecret::expose_secret` 受控访问）。ref: secrecy secrecy/src/lib.rs@main。
 
-## 3. 上下游强度（funnel 两端，ai-robust.md §审查要求）
+## 3. 上下游强度（funnel 两端，cargo xtask archrules verify）
 
 - **上游（Hard，类型系统）**：两个 carrier 的私有字段和唯一 `Debug` / `Display` 实现固定脱敏，随值走；
   `RedactedFixedBytes<N>` 额外由 const generic 锁定长度并保持 `Copy`。任何持有 carrier 的新类型
@@ -88,7 +88,7 @@ lint 拦下、强制采纳上游 Hard 类型。
 | `CertSerial`（`revocation_store.rs`） | RFC5280 证书序列号是公开 CRL 字段，`derive(Debug)` **有意可见原值**（非机密，与密码学物料相反） |
 | `SecretMaterial`（`secret_resolver.rs`） | 已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载（`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>` |
 
-**为何用 in-lint 名单而非生产 `#[allow]`**（error-handling.md §Carve-out）：dylint lint 未加载时（普通 `cargo clippy`），
+**为何用 in-lint 名单而非生产 `#[allow]`**：dylint lint 未加载时（普通 `cargo clippy`），
 生产 `#[allow(rss_diport_dto_debug_redacted)]` 触发 `unknown_lints`，工作区无 `unknown_lints=allow` ⇒ `cargo clippy -D warnings` 红。
 故 carve-out 收口进 lint 源（`is_structural_carve_out`）+ 本 registry。**新增 carve-out 须同步**：lint 函数名单 + 本表 + UI 绿例
 （`ui/diport.rs` G6/G7）。重命名这些类型会使豁免失配 → lint 误报红（UI golden 漂移）即自救。
@@ -106,7 +106,7 @@ lint/UI golden 立即失败，实现路径漂移自救。
   `OutboxEnvelopeParts`）不在本字节 funnel，手写 / derive(Redact) Debug 不动（无 Vec<u8> 字段 → lint 不命中）。
 - 守护范围限 `diport` crate（其它 crate 的字节字段如 HTTP body 缓冲合法、不误报）。
 
-## 6. 威胁矩阵重评（ai-robust.md：ADR 落地须重评安全模型）
+## 6. 威胁矩阵重评（cargo xtask archrules verify：ADR 落地须重评安全模型）
 
 | 威胁 | 处置前 | 处置后 |
 |------|--------|--------|

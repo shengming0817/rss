@@ -15,7 +15,7 @@
 | PostgreSQL carrier | `adapters/postgres/src/integration_tests.rs` 为 49,934 行，且已有一个子模块 | 重新按 seam 设计拆分，不照搬 44K 基线 |
 | Provider conformance | PostgreSQL 与 AMQP 已有 catalog enrollment | 把“接入 suite”改为“差量去重与特有失效模式保留” |
 | Vault live tests | `adapters/vault/tests/live_vault` 是唯一 `VaultLive` carrier：`autotests=false` + `required-features=["integration"]`，由 testkit 固定 HashiCorp Vault TLS container 自 provision Transit 与 PKI，覆盖 caller-owned CSR sign、本地链验证、最小 ACL、warm outage/recovery；不接受环境变量或外部 Vault fallback。`runtime-http-auth` 的 integration catalog 精确映射 `SecurityProvider::Vault → {VaultLive}`。composition readiness、production authorization/T3 仍有独立 owner。本文档只记录事实，不是 enforcement。 | Cargo eligibility、hermetic T2 与 CI affected selection 共用单一 carrier |
-| T3 scope | 当前 `project-scope.md` 仍由 production assembly + join hazard 拥有 | product-surface 先走 ADR amendment |
+| T3 scope | 当前 ADR-024 仍由 production assembly + join hazard 拥有 | product-surface 先走 ADR amendment |
 | Official profiles | ADR-024 已声明 core/eventing；ADR-028 接纳 device-security candidate scope，但未授权 hardening、T3 或 active | 不再把 conditional 或 issue closed 误读为激活 |
 | runtime baseline | baseline 已包含 fixture/builder carrier 缩减（关联 #1886） | 后续新建 rule-to-carrier 语义删除 PBI，不复用旧 issue |
 | testkit external PG | baseline 仍含 external PG role provisioning 与 container/fixture lifecycle 耦合（关联 #1769） | 工作纳入新的 testkit closeout PBI，旧 issue 以 superseded 关闭 |

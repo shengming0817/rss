@@ -1,6 +1,6 @@
 # Contracts — identity 域 crate
 
-> 契约真源在 `contracts/{http,event}/identity/v1/`（声明）→ `generated/src/{http,event}/identity_v1.rs`（派生）。HTTP identity 契约采用 nested v1 形态（`contracts/http/identity/v1/<slug>/`），不再使用旧 `identity/v2` refresh workaround。本文件只是 spec 阶段的契约范围说明，不复制 schema；实际 schema 走 contract-fanout.md 闭环。
+> 契约真源在 `contracts/{http,event}/identity/v1/`（声明）→ `generated/src/{http,event}/identity_v1.rs`（派生）。HTTP identity 契约采用 nested v1 形态（`contracts/http/identity/v1/<slug>/`），不再使用旧 `identity/v2` refresh workaround。本文件只是 spec 阶段的契约范围说明，不复制 schema；实际 schema 走 `contract.toml`、schema codegen 与 contract validation 闭环。
 
 > #1842 amendment：`identity.password-change` 与 `identity.account-status-set` 均为 active L2
 > OutboxFact producer，精确产生 `identity.security-event`；password-change 不再属于 LocalTx inventory。
@@ -29,7 +29,7 @@
 
 PR5b 同步补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`：assign/revoke 的 binding 行和 role event outbox 行同事务落库；role event audit consumer 已接线；session invalidation 为未交付业务缺口。
 
-## 扇出闭环（每个新契约，contract-fanout.md）
+## 扇出闭环（每个新契约，`contract.toml`、schema codegen 与 contract validation）
 
 schema（`*.schema.json`）→ contract.toml（id/kind/consistencyLevel/owner/endpoints/auth）→ `generated`（codegen，diff 一等审查）→ 域 crate metadata（`Cargo.toml [dependencies]` + contractUsages）→ tests（contract-level）→ docs。`cargo xtask contract validate` 守闭环 + id 唯一 + schema title PascalCase。
 
@@ -51,5 +51,5 @@ schema（`*.schema.json`）→ contract.toml（id/kind/consistencyLevel/owner/en
 ## 字段约定
 
 - wire 字段 camelCase（serde rename）；DB snake_case。
-- payload 类型经 generated，**不**手写共享 crate（domain-patterns.md §DTO 作用域）。
+- payload 类型经 generated，**不**手写共享 crate；编译边界由 Rust visibility 与 generated 类型限定。
 - 错误响应 shared error schema（`{error:{code,message,retryable,details,requestId}}`）；handler 用 typed response envelope。

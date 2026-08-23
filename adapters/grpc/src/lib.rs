@@ -57,7 +57,7 @@ type ServeHandle = tokio::task::JoinHandle<Result<(), tonic::transport::Error>>;
 
 /// gRPC server 启动失败（构造期 fail-fast，不静默 noop）。
 ///
-/// message 为 `&'static str` const literal，无 runtime 数据、无 PII（error-handling.md）。
+/// message 为 `&'static str` const literal，无 runtime 数据、无 PII。
 #[cfg(feature = "backend")]
 #[derive(Debug, thiserror::Error)]
 pub enum GrpcServeError {

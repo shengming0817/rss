@@ -14,7 +14,7 @@
 //! - `CARGO_MANIFEST_DIR` 父目录名 == `adapters`；或
 //! - `CARGO_PKG_NAME == "rss_adapter_no_business_fsm"`（本 lint 的 UI fixture example）。
 //!
-//! 上下游强度（ai-robust.md §审查要求 funnel）：
+//! 上下游强度（cargo xtask archrules verify）：
 //! - 上游 Medium：`deny.toml` `{ crate = "statig" }`——依赖图禁 FSM 框架（ADAPTER-THIN-FSM-01；cargo-deny = Medium）。
 //! - 下游 Medium：本 lint——禁 path 引用 + 过渡表形态（ADAPTER-NO-BUSINESS-FSM-01）。
 //!

@@ -25,7 +25,7 @@
 //!   ② 可观测结果等价（Require + 坏凭据仍 401，由 enforce 发）；③ 本桥是 blanket 外层、包住含 Public 路由
 //!   的整个 listener，不短路即不误伤 Public；④ 统一 envelope 由 enforce 生成、requestId 完整（`request_id`
 //!   中间件经唯一 bindable 出口封在本桥**外层**，ROUTE-REQUESTID-OUTERMOST-01，本桥运行时 RequestId 已就位）。
-//! - **凭据方案按 listener 静态绑定**（runtime-api.md「单 listener 单 scheme」）：本桥在 finalize_auth 外层，
+//! - **凭据方案按 listener 静态绑定**（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`「单 listener 单 scheme」）：本桥在 finalize_auth 外层，
 //!   `AuthPlan` extension 是内层、本桥运行时尚不可读，故由组合根按 listener 注入对应 [`RequiredScheme`]。
 //! - **真异步 + Send 安全**：`Pdp` / `DynPdp` 是 `Send + Sync`（#1828），本桥直接 await verifier；合法
 //!   `Poll::Pending` 由 serving runtime 正常恢复，不转换为认证结果。唯一 bindable HTTP funnel 的必填
@@ -413,7 +413,7 @@ async fn validate_current_grant(
 /// allow 分支：埋点（脱敏：仅 decision + principal.kind 枚举，无 subject/token）+ 铸 [`Authenticated`] 证据
 /// + （scoped 主体）经 [`authn::app_ctx`] 派生 ambient [`runctx::AppCtx`]（#1105，ADR-002 §D5）。
 ///
-/// `debug` 级（非 info）：成功鉴权是 per-request 热路径操作数据，非生命周期事件（observability.md 日志分级）。
+/// `debug` 级（非 info）：成功鉴权是 per-request 热路径操作数据，非生命周期事件（`crates/observ`、`secure::redact_error` 与 typed metric enums 日志分级）。
 ///
 /// 返回的 `Option<AppCtx>` 由 [`verify`] 经 `httpserve::PendingScopeCtx` 传给内层 enforce——**scope 不在桥
 /// 建立**，由 enforce 在 `Require`-Allow 后绑定（#1105 F2：scope 与 route auth 决策对齐）。tenant 从 Principal
@@ -519,7 +519,7 @@ fn log_deny_verify(err: &authn::AuthnError) {
     );
 }
 
-// deny 告警分级闭值集（observability.md「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
+// deny 告警分级闭值集（`crates/observ`、`secure::redact_error` 与 typed metric enums「告警 / metrics label 闭值集」：低基数、无 PII）——bridge deny 路
 // `authz.deny_reason` 仅取此 9 值（#1275，spec SC-006/FR-009）：
 //   `SIGNATURE_INVALID` ← `TokenInvalid` = verifier 报告的**凭据签名/MAC/结构失败**（疑似攻击）；
 //   `UNTRUSTED`         ← `TokenUntrusted` = iss/aud/key-path 不受信（疑似配置错）；

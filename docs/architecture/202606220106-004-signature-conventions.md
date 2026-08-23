@@ -129,7 +129,7 @@ PR body 标 `ref: {framework} {path}@{ref}`（见 research.md），或「无需�
 
 - **正**：30+ crate 签名风格统一、review 机判化；DI 派发零静态开销（dynosaur）；unsafe 收敛单 crate；ctx/关闭/serde/错误边界全部以类型或 const 表达（多为 Hard）。
 - **负 / 风险**：依赖 dynosaur pre-1.0（C12 pin + ADR-003 §8 风险）；`ManagedResource` 暂存 inter-ADR 不一致（C4，PR-diport 收口）；mockall×dynosaur 形态待实测（C2）。
-- **下游**：本 ADR 是 conventions 单源；PR-diport 落地时回填 C2（mock 形态）、统一 C4（ManagedResource），并在 architecture.md/rust-standards/domain-patterns 回写 diport 例外（ADR-003 §8 follow-up）。
+- **下游**：本 ADR 是 conventions 单源；PR-diport 落地时回填 C2（mock 形态）、统一 C4（ManagedResource），并在 `Cargo.toml`、`xtask/src/layers.rs` 与 `deny.toml` 回写 diport 例外（ADR-003 §8 follow-up）。
 
 ---
 

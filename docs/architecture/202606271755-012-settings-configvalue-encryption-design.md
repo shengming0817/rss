@@ -259,7 +259,7 @@ FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY vers
   **审计要求**（该 job 在授权维护上下文下解密全租户全版本明文，blast radius 最大，须强可见性）：① job 启动/完成/中断写
   audit sink（用 `crates/audit` 结构化 audit event，记 operator/service-token subject + tenant 范围 + job 参数）；② 每提交
   一批 emit metric `configenc.backfill.rows_processed{status}`——**label 仅闭值集**（`status` 经 typed `as_label()`；可加
-  `job_type`/`phase` 等有界维），**tenant 不进 label**（开放基数，违反 observability.md §Metrics Label「高 cardinality 输入
+  `job_type`/`phase` 等有界维），**tenant 不进 label**（开放基数，违反 `crates/observ`、`secure::redact_error` 与 typed metric enums
   不进 label」）；**tenant 范围 / 逐行定位走 ① 的 audit event + 结构化日志 / span 字段**；③ 见 §3 `CONFIGENC-BACKFILL-AUDIT-01`。
   此要求与继承的 `FIELDPROT-KEYPROV-AUDIT-01`（守每次解密调用）互补：本条守 **job 生命周期**高层可见性。
 
@@ -296,8 +296,8 @@ F5 走 security incident 告警（见 §3 `CONFIGENC-ERR-SPLIT-01`）。
 ### D11 — KeyProvider readiness 能力门（启动 fail-fast / readiness probe）
 
 KeyProvider/KMS 不可用**不能只停在读时 `ProtectionUnavailable`**（D6 F1）——否则实例可能 `ready` 后才在真实请求里暴露 KMS
-不可达。须在实例就绪前设**能力门**（对齐 observability.md §Readyz「依赖可用性 probe 用 `_ready` 后缀」+ runtime-api「强依赖
-fail-fast」）：
+不可达。须在实例就绪前设**能力门**（对齐 `crates/observ`、`secure::redact_error` 与 runtime typed finalizer 的强依赖
+fail-fast）：
 
 - **readiness probe `keyprovider_ready`**（或等价 `ManagedResource` readiness）：探测注入的 KeyProvider 可达性；不可达 →
   实例 not-ready、不进流量轮转（只影响 readiness，不影响 liveness）。

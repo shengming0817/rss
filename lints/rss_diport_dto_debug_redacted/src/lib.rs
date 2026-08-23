@@ -5,7 +5,7 @@
 //!
 //! INVARIANT: DIPORT-DTO-RAWBYTES-BAN-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（Hard，`diport` 内）：`RedactedBytes` / `RedactedFixedBytes<N>` 的 `Debug`/`Display`
 //!   实现**强制脱敏**——
 //!   类型系统保证，不可绕过（INVARIANT: DIPORT-DTO-BYTES-REDACT-01，载体为
@@ -114,7 +114,7 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportDtoDebugRedacted {
         }
         // 结构性 carve-out（公开 / secure-governed 字节，刻意保留裸 `Vec<u8>`）。用 in-lint 名单而非生产
         // `#[allow]`——dylint 未加载时（`cargo clippy`）`#[allow(rss_*)]` 触发 `unknown_lints`、`-D warnings` 红
-        // （工作区无 `unknown_lints=allow`）。carve-out 须同步 ADR-013 registry（error-handling.md §Carve-out）。
+        // （工作区无 `unknown_lints=allow`）。carve-out 须同步 ADR-013 registry。
         if is_structural_carve_out(cx, parent_did) {
             return;
         }
@@ -214,8 +214,8 @@ fn is_canonical_redacted_carrier(cx: &LateContext<'_>, did: DefId) -> bool {
 /// - `SecretMaterial`：已 `#[derive(secure::Redact)]` `#[redact(sensitivity = secret)]`——完整 Wire + 日志策略由 `secure` 承载
 ///   （`RedactedBytes` 仅覆盖 `Debug`/`Display`、不含 Wire 范围），故保留 derive(Redact) + 裸 `Vec<u8>`。
 ///
-/// 刻意窄名单（非启发式）。新增 carve-out 须同步本函数 + ADR-013 §4 carve-out registry + `ui/diport.rs` 绿例
-/// （error-handling.md §Carve-out）；重命名这些类型会使豁免失配 → lint 对其内层裸字节误报红（UI golden 漂移）即自救。
+/// 刻意窄名单（非启发式）。新增 carve-out 须同步本函数、ADR-013 §4 registry 与 `ui/diport.rs` 绿例；
+/// 重命名这些类型会使豁免失配 → lint 对其内层裸字节误报红（UI golden 漂移）即自救。
 ///
 const STRUCTURAL_CARVE_OUT_PATHS: [&[&str]; 2] = [
     &["diport", "revocation_store", "CertSerial"],

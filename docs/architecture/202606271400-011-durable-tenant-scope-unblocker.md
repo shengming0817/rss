@@ -12,7 +12,7 @@
 > `cargo xtask schema-rls`（`TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`）保留为**合入前无 PG
 > 终态 Medium meta**，与启动期 live catalog/behavior 互补（`has-ci=false` 时不以 required CI 虚标）。
 >
-> **现行单源**见 `docs/rules/tenancy.md` §RLS 与 PG scope：
+> **现行单源**见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL
 >
 > - Hard：`PG-TX-CAPABILITY-SEAL-01`（exact sealed lane / private mint 构造边界）
 > - Medium meta（合入前）：`schema-rls`
@@ -20,14 +20,14 @@
 > - CI：migration diff 经 typed CI impact 选 `integration-critical:postgres-lib`（仅激活 forge CI 时）
 >
 > `pg_tenant_tx_guard` #1988 收缩已落地：精确列 `tenant_id` 与 `schema-rls` 共享；
-> 已删除 refresh-legacy / LocalTx exact-shape / 本门 DLX 副本；residual 见 `docs/rules/tenancy.md`。
+> 已删除 refresh-legacy / LocalTx exact-shape / 本门 DLX 副本；residual 见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL。
 
 - **状态**：Accepted（#1437 落地；#2003 上抬 live catalog/behavior，并保留 `schema-rls` 合入前无 PG meta；`setlocal-funnel` 删除）
 - **日期**：2026-06-27（amendment 2026-08-05）
 - **关联**：issue #1437 [PERSIST-016] · Parent Feature #1418 [PERSIST-EPIC] · 同批 #1405（outbox tenant 注入）· #1426（repo conformance testkit）· #1436（PG tx funnel / raw-pool guard）· amendment #2003（tenant proof lift）
 - **依赖 ADR**：**ADR-002**（tenant 只来自已认证通道；现行 `TenantId` owner 见 ADR-029）· **ADR-005**（域形 repo port 归属，`cotx` funnel 是 adapter 层实现）· **ADR-010**（`PgRuntimeDeps::setup` 能力门控是持久化能力分层的自底向上第一步）
 - **归属**：framework（tenant 隔离接缝是 provider-agnostic 持久化治理，非单一域逻辑）
-- **AI-robust 评级**：见 §6；现行规则真源见 `docs/rules/tenancy.md` 与
+- **AI-robust 评级**：见 §6；现行规则真源见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL 与
   [ArchRules typed catalog](../../xtask/src/archrules.rs) 的 `rls` funnel；派生展示可运行
   `cargo xtask archrules matrix` 按需生成
 
@@ -114,7 +114,7 @@ synthetic red（嵌套路径 / 空白变体 / 裸 SET LOCAL / 散文不误报）
 
 0. **连接角色不绕过 RLS**（#310 review F2，最先）：`SELECT rolsuper OR rolbypassrls FROM pg_roles
    WHERE rolname = current_user`——superuser / `BYPASSRLS` 角色永远绕过含 FORCE 的 RLS，使后续 schema
-   校验形同虚设；命中即 `Err(RlsBypassRole)`。这是 tenancy.md「生产 owner 须为非 superuser」的运行期强制
+   校验形同虚设；命中即 `Err(RlsBypassRole)`。这是 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL「生产 owner 须为非 superuser」的运行期强制
    （serving 连接须直连 `rss_app` 且该角色为非 superuser、NOBYPASSRLS）。
 1. **动态派生 tenant 表集合**：用 `pg_catalog`（`pg_class` + `pg_attribute`，**非** `information_schema`——
    后者按当前角色权限过滤，非 superuser serving 角色会漏看未授权 tenant 表致门控盲区）得含 `tenant_id` 列的表。
@@ -141,7 +141,7 @@ synthetic red（嵌套路径 / 空白变体 / 裸 SET LOCAL / 散文不误报）
 - 验证通过 → probe 返回 `Healthy`（→ readyz 200）。
 - 验证未通过或未运行 → probe 返回 `Unhealthy`（→ readyz 503）。
 
-probe 接入 `httpserve::HealthListener`，遵循 `docs/rules/observability.md` §readyz probe
+probe 接入 `httpserve::HealthListener`，遵循 `crates/observ`、`secure::redact_error` 与 typed metric enums
 约定。其语义是对 2.3 启动期断言的 **backstop**（避免启动期 setup 因某路径被跳过而静默
 通过），不是首次验证路径。
 
@@ -284,14 +284,14 @@ behavior 仍由启动期 live proof 封闭。
 ## 7. 备选（为何不取）
 
 - **保留 `&str` 参数 + 仅靠命名约定**：Soft，不可机器验证，被 ai-robust 章程拒绝（新增机制最低
-  Medium 门，见 `docs/rules/ai-robust.md`）。
+  Medium 门，见 `cargo xtask archrules verify`）。
 - **同时为 `outbox` / `inbox_dedup` 加 `tenant_id` 列（在本 PR 一起落）**：范围蔓延——`outbox`
   加列需 L2 原子性测试、consumer 幂等验证、partition_key 语义变更，单独 #1405 更干净；
   `InboxStore` 加 tenant 维度会把 L0 引擎语义与业务租户混入基础设施层（分层违规）。
 - **仅靠 `schema-rls` xtask 静态扫描，不做 startup 动态验证**：缺失运行期确认——迁移可能
   未被应用、GUC 可能未正确配置，静态扫描无法感知。~~两者纵深互补，均保留。~~
   **#2003 后**：静态 scanner 已删除；live catalog + behavior proof 为现行 Medium 单源。
-- **用 `BYPASSRLS` 临时角色做开发便利**：与 `rss_app NOBYPASSRLS` 约定直接冲突（`tenancy.md`
+- **用 `BYPASSRLS` 临时角色做开发便利**：与 `rss_app NOBYPASSRLS` 约定直接冲突（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL
   §RLS 与 PG scope），被架构约束拒绝。
 
 ---
@@ -300,14 +300,14 @@ behavior 仍由启动期 live proof 封闭。
 
 - dual-pool bootstrap 已接线：durable serving pool 使用非 superuser、`NOBYPASSRLS` 的 `rss_app`
   角色，启动期 `verify_rls_capability()` 会拒绝 owner/superuser、`BYPASSRLS` 角色和非 `rss_app`
-  serving role。最终规则见 `docs/rules/tenancy.md` §RLS 与 PG scope。
+  serving role。最终规则见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL。
 - outbox tenant scope 已落地：`outbox.tenant_id` + RLS 三件套 + 固定 `SECURITY DEFINER`
   维护函数已成为最终边界；ordered delivery head-of-partition gating 按
   `(tenant_id, domain, partition_key)` 判队头。`inbox_dedup` 仍保持既有去重维度，不属于本
   ADR 的 closeout 变更面。
 - PG tx funnel / raw-pool guard 已落地：`PgTenantPool` 是 tenant 表生产路径的 typed funnel，
   ~~`cargo xtask setlocal-funnel` 与~~ `cargo xtask pg-tenant-tx-guard` 接入 verify/ci，防
-  `TxManager` / raw-pool bypass（`setlocal-funnel` 已由 #2003 删除；`pg_tenant_tx_guard` #1988 收缩已落地，见 `docs/rules/tenancy.md`）。
+  `TxManager` / raw-pool bypass（`setlocal-funnel` 已由 #2003 删除；`pg_tenant_tx_guard` #1988 收缩已落地，见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）。
 - repo tenant isolation conformance 已纳入真实 postgres repos（config seed + role / audit /
   dead_letter 等），完整 CAS / rollback / co-tx 扩展按后续 conformance 范围推进，不改变本 ADR 的
   tenant-scope 合约。

@@ -1,5 +1,5 @@
 # identity role-revoked event 契约（active）——RBAC 角色撤销 outbox 闭环（#1190/T021，US5）。
-# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
+# 格式冻结见 contracts/README.md；格式由 `assembly_schema::ContractManifest` 解析；语义由 contract validation 与 codegen 持有。
 # 角色撤销 emit 的 outbox fact ⇒ consistencyLevel = OutboxFact（L2，binding 删 + outbox 同事务）。
 # payload 含 subject（US5 场景 2：撤销目标 binding 的主体，供下游会话失效编排）。
 # active：RBAC 角色撤销 → durable outbox → relay → audit append 闭环，audit 即其 subscriber（R14/R22）。

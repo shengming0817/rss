@@ -22,7 +22,7 @@
 //! 下需要单一、无跨进程偏移的时间源（TTL 比较在 DB 端一致求值，同 `outbox.rs:274` 既定理由）。
 //!
 //! 后端暂不可用（sqlx 错误）映射为 [`consistency::EngineErrorKind::Transient`]（可重试），
-//! 原始 sqlx 错误不进 Display（PII 边界，error-handling.md §Message 与 PII）。
+//! 原始 sqlx 错误不进 Display，守住 PII 边界。
 //!
 //! ref: serverlesstechnology/cqrs（postgres persistence 幂等消费，INSERT ON CONFLICT 范式）。
 
@@ -546,7 +546,7 @@ mod tests {
         }
 
         #[allow(clippy::unwrap_used)]
-        // reason: 测试 setup — 已知非空 raw，item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 测试 setup — 已知非空 raw，item-level carve-out。
         fn k(raw: &str) -> IdemKey {
             IdemKey::parse(raw).unwrap()
         }
@@ -659,7 +659,7 @@ mod tests {
         /// claim → commit → try_claim = Duplicate（done 在 receipt 保留窗口内去重，PG 往返）。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
         async fn commit_makes_key_duplicate_while_receipt_is_retained() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -686,7 +686,7 @@ mod tests {
         /// active claim 返回 InProgress、done 返回 Duplicate，且两条冲突路径均不得改写 receipt。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn duplicate_paths_preserve_receipt_row() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -739,7 +739,7 @@ mod tests {
         /// anti-vacuity: receipt 快照必须看见 identity 与租约时间锚变化，否则“不改写”断言会真空通过。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn receipt_snapshot_detects_receipt_semantic_columns() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -838,7 +838,7 @@ mod tests {
         /// 同一 stale receipt 并发重捞：只能一个新 lease 接管，旧 lease commit 必须 Lost。
         #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn concurrent_stale_reclaim_single_fresh_winner() -> TestResult {
             const CLAIMERS: usize = 8;
 
@@ -928,7 +928,7 @@ mod tests {
         /// 同 PK 但 receipt identity 不一致时，不能静默 Duplicate；必须暴露 Invariant。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn try_claim_identity_mismatch_returns_invariant() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -970,7 +970,7 @@ mod tests {
         /// claim → release(CAS) → 再 try_claim = Fresh（释放后可重领，PG 往返）。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
         async fn release_allows_reclaim() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -1022,7 +1022,7 @@ mod tests {
         /// claim → extend Held；模拟他人接管（覆盖 lease_token）→ extend Lost。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn extend_held_then_lost_on_takeover() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -1068,7 +1068,7 @@ mod tests {
         /// token A commit = Lost（hard-fence）→ token B commit = Held。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn ttl_reclaim_and_commit_hard_fence() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;
@@ -1123,7 +1123,7 @@ mod tests {
         /// 错误 token commit → Lost；错误 token release → no-op（行不被误删，仍 Duplicate）。
         #[tokio::test(flavor = "multi_thread")]
         #[allow(clippy::unwrap_used)]
-        // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
+        // reason: 集成测试断言 fail-loud；item-level carve-out。
         async fn commit_and_release_wrong_token_cas_fence() -> TestResult {
             let (_pg, store) = crate::test_pg::connect_pg().await?;
             store.run_migrations().await?;

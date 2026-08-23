@@ -1090,7 +1090,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 /// **当前方法集 = 只读接缝（find / tenant-scoped list）；mutation 仅由独立 [`RoleDefinitionLifecycle`] 暴露。**
 /// 安全 scope 由签名承载：`Role` 按租户内角色建模，repo 方法必须接收 [`TenantRepoScope`] 做 store scope
 /// （pre-GA：显式 `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨
-/// roles/sessions/config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立
+/// roles/sessions/config 统一落地，见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）；若后续需要全局角色定义，须拆独立
 /// `GlobalRoleRepo`，不得复用本租户内 repo 签名。
 /// **生产 postgres impl 已由 postgres `PgRoleRepo` 承载**（roles 表 + tenant scope + `Role::hydrate` 受控重建，
 /// #1250；PR5b 补齐 `list` 分页查询）——签名实体 accessor（`RoleId::as_str` / `Role::id|name|permission_ids`

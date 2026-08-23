@@ -53,7 +53,7 @@
 - [ ] T004.2 [US2] migration 建 outbox 表（data-model §outbox：status 值集/lease_token/retry_after + 索引）
 - [ ] T004.3 [US2] `OutboxStore.append`（事务内双写）+ `impl OutboxRelay`（consistency trait）
 - [ ] T004.4 [US2] `eventexec/relay.rs`：relay CAS 循环（按 domain/status/retry_after 扫）+ sweeper worker。worker 实现 `ManagedResource`、经组合根 `ShutdownStack::register_with_token(|token| …)` 注入 root `CancellationToken`（token funnel），两阶段逆序关闭（`shutdown_within` budget，在途写不丢、先于 pool 关闭）——不裸用 JoinSet/CancellationToken（ADR-001 shutdown 逆序编排）
-- [ ] T004.5 [US2] relay/sweeper 注册运行时操作 health probe `outbox_relay` / `outbox_sweeper`（**无 `_ready` 后缀**，遵 observability.md §Readyz Probe 命名），worker 异常退出经该 probe 反映 health（refs: FR-004/FR-005）
+- [ ] T004.5 [US2] relay/sweeper 注册运行时操作 health probe `outbox_relay` / `outbox_sweeper`（**无 `_ready` 后缀**，遵 `crates/observ`、`secure::redact_error` 与 typed metric enums），worker 异常退出经该 probe 反映 health（refs: FR-004/FR-005）
 - [ ] T004.6 [US2] L1/L2 原子性治理 #[test]（OUTBOX-ATOMIC-IDEM-01，Medium）+ relay/sweeper 两阶段逆序 shutdown budget 测试（在途写不丢）；clippy/fmt/覆盖率绿
 
 ### T005 [P] [US3] P5 · idempotency/inbox 去重 + replaydeps resolver
@@ -120,7 +120,7 @@
 - [ ] T010.2 [US8] postgres projection_events 表（append-only，migration REVOKE UPDATE/DELETE）
 - [ ] T010.3 [US8] `eventexec/projection.rs`：投影 harness（apply<E: ProjectionEvent> + 复用 T009 checkpoint 续投 + TxRunner 同事务 CAS）
 - [ ] T010.4 [US8] dylint `rss_projection_append_only`（AST 拒 DELETE/TRUNCATE projection_events，PROJECTION-APPEND-ONLY-01，Medium）+ 接入 `cargo dylint --all`
-- [ ] T010.5 [US8] projection_events migration 在 up 内用 `REVOKE UPDATE, DELETE` 强制 append-only；forward-only 不写 down，逆转（不预期）须新前向迁移 `GRANT`；对齐 `migrations/README.md` append-only / forward-only 约定（refs: docs/rules/eventbus.md §append-only，DB 引擎 REVOKE = Hard 主守卫）
+- [ ] T010.5 [US8] projection_events migration 在 up 内用 `REVOKE UPDATE, DELETE` 强制 append-only；forward-only 不写 down，逆转（不预期）须新前向迁移 `GRANT`；对齐 `migrations/README.md` append-only / forward-only 约定（refs: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`，DB 引擎 REVOKE = Hard 主守卫）
 - [ ] T010.6 [US8] L3 replay+投影重建 #[test]；clippy/fmt 绿
 
 ### T011 [P] [US9] P11 · reconcile 环 + leader-elect + fencing

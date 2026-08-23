@@ -38,7 +38,7 @@ base64 = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 # 结构化日志（仅 backend）：只记 reason 闭值标签 + keys_tried 计数，**绝不**记原始 token / 签名 / claim / key 材料
-# （observability.md PII 边界；验签 / JWKS 刷新错误是静态 message 枚举、无 PII source 链）。
+# （`crates/observ`、`secure::redact_error` 与 typed metric enums PII 边界；验签 / JWKS 刷新错误是静态 message 枚举、无 PII source 链）。
 tracing = { workspace = true, optional = true }
 # 构造期 fail-fast 配置校验错误（空 issuer/audience/key/claim 名 + key 格式非法 + 空 HS256 密钥 + JWKS 源不可读/畸形/无可用 key），非运行期静默。
 thiserror = { workspace = true, optional = true }

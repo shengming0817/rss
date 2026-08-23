@@ -146,7 +146,7 @@ fn decode_segment(segment: &str) -> Result<Vec<u8>, JwsError> {
 
 #[cfg(test)]
 mod tests {
-    // 测试 expect carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow(clippy::expect_used)]`
+    // 测试 expect carve-out
     // 逐 fn 标注（非 module-level）——与 s3/redis adapter 测试同范式（workspace clippy expect_used = deny）。
     use super::*;
 

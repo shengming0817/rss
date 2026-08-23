@@ -27,7 +27,7 @@
 | workflow DAG、result binding、artifact 条件 | Medium | parsed YAML 结构守卫 + synthetic red |
 | compiler/container/artifact partition | Medium | 闭合 shell policy + selftest + workflow 守卫 |
 
-GitHub Actions 是外部运行时状态，按 `docs/rules/ai-robust.md` 不建设 workflow codegen 来伪装 Hard。
+GitHub Actions 是外部运行时状态，按 cargo xtask archrules verify 不建设 workflow codegen 来伪装 Hard。
 
 ## 基线与验收记录
 

@@ -109,4 +109,4 @@ docs/architecture/
 
 - Each PR includes tests or governance selftests that fail without its implementation.
 - Database/security PRs include both positive and negative tests.
-- Final PR updates `docs/rules/tenancy.md` to remove stale follow-up statements and adds a reverse checklist.
+- Final PR updates `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL to remove stale follow-up statements and adds a reverse checklist.

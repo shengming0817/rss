@@ -1894,7 +1894,7 @@ fn observation_policy_from_plan(plan: AuthPlan) -> crate::ServerObservationPolic
 /// [`RouteAuthorizer`]，避免 permission route 误装配成缺 authorizer 的请求期 403。
 ///
 /// #1113 funnel transform：消费 [`UnfinalizedRoutes`] 产 [`AuthenticatedRoutes`]——本 fn 是后者**唯一**
-/// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
+/// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
 /// （request-aware panic → 500 envelope）。listener 派生 observation policy 作为非可选 capability 随封印类型传递，
@@ -2086,7 +2086,7 @@ mod tests {
     use axum::routing::get;
     use tower::ServiceExt as _;
 
-    // 测试断言用 expect/unwrap：item-level carve-out（error-handling.md §Carve-out）。
+    // 测试断言用 expect/unwrap：item-level carve-out。
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     async fn oneshot_status(router: axum::Router, uri: &str) -> StatusCode {
         let req = Request::builder()

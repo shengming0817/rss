@@ -1320,7 +1320,7 @@ fn terminal_scope_for_action(
 
 // ── SagaExecutorImpl ──────────────────────────────────────────────────────────
 
-/// saga 执行器实现：必填依赖走构造器**位置参**（saga.md §构造器，缺失即编译错误）。泛型静态分发 +
+/// saga 执行器实现：必填依赖走构造器**位置参**（generated / diport::SagaDurableStore / saga conformance，缺失即编译错误）。泛型静态分发 +
 /// `Arc<R>`（`run`/`resume` 返回 `'static` future，须 clone 句柄进 future；对齐 diport 注入形态表
 /// spawn/Send-'static 行）。
 ///

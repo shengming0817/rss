@@ -9,7 +9,7 @@
 //! [`crate::relay_config::RelayConfig`] 构造期数量/格式校验 515 住基数（#1076 对齐），tenant/contract
 //! 由 `consistency::OutboxMetricSubject` typed scope 收口。
 //!
-//! metric 名（bare，对齐 `observability.md` §Metrics Label 的 `reconcile_total` / `idempotency_requests_total`）：
+//! metric 名（bare，对齐 `crates/observ`、`secure::redact_error` 与 typed metric enums）：
 //! - `outbox_publish_total{domain,contract_id,tenant_id,status}`（Counter）—— relay 单条结算处置。
 //! - `outbox_dlx_total{domain,contract_id,tenant_id}`（Counter）—— `Reject`（永久失败进 DLX）。
 //! - `outbox_pending_depth{domain,contract_id,tenant_id}` /
@@ -206,7 +206,7 @@ mod tests {
 
     /// 解析测试 domain（合法 DomainName）。
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 已知合法 domain，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 已知合法 domain，item-level carve-out。
     fn dn(s: &str) -> DomainName {
         DomainName::parse(s).expect("valid test domain")
     }

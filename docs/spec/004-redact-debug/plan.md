@@ -40,7 +40,7 @@ Issue #1359 要求把敏感类型的 `Debug` 脱敏从手写实现提升为字�
 4. 核心类型迁移：迁移 `AuditEvent`、`RoleBinding`、`Session`/`SessionId`、`RequestCtx`/`PrincipalSlot`、
    `SecretMaterial`/`SecretCoordinate` 到 `#[derive(secure::Redact)]`。
 5. dylint 守卫：新增裸敏感 DTO `derive(Debug)` 回退守卫，并注册到 `cargo dylint --all`。
-6. 文档：同步 `docs/rules/observability.md`、`docs/rules/architecture.md`、`lints/README.md`。
+6. 文档：同步 `crates/observ`、`secure::redact_error` 与 typed metric enums、`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`、`lints/README.md`。
 
 批次 2 依赖批次 1；批次 3 依赖批次 2；批次 4 依赖批次 3；批次 5 可在批次 4 后独立开发；批次 6 收尾。
 

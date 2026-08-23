@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out。
     fn lk(s: &str) -> LockKey {
         LockKey::parse(s).expect("canonical test lock key")
     }

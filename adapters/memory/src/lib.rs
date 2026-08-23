@@ -2617,7 +2617,7 @@ type CheckpointMap = HashMap<(String, String), (Lsn, CheckpointVersion)>;
 /// in-mem owner checkpoint store（impl [`diport::OwnerCheckpointStore`]）：
 /// `(owner, id)` 主键 + `(offset, version)` CAS——`expected` 版本不符即 [`SaveOutcome::StaleVersion`]。
 ///
-/// 对标 oxidecomputer/steno saga checkpoint + eventbus.md §Projection 断点续投 offset CAS。
+/// 对标 oxidecomputer/steno saga checkpoint + `contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
 /// 生产替身走 postgres adapter；本 crate 仅测试/demo 用。
 #[derive(Clone, Default)]
 pub struct MemCheckpointStore {
@@ -3108,7 +3108,7 @@ mod tests {
         }
     }
 
-    // 测试构造 / 断言用 expect：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
+    // 测试构造 / 断言用 expect：item-level carve-out。
     #[allow(clippy::expect_used)]
     fn sample_event() -> AuditEvent {
         AuditEvent {
@@ -3643,7 +3643,7 @@ mod tests {
     /// 同一 key 连续 try_claim：第 1 次 Fresh，active claim 必须返回 InProgress，不能伪装成 done Duplicate。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out。
     async fn claimer_active_claim_is_in_progress_not_duplicate() {
         use crate::InMemClaimer;
         use consistency::IdemKey;
@@ -3676,7 +3676,7 @@ mod tests {
     /// 同一个 claimer 内，同一 key 在不同 tenant/group scope 各自 Fresh。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果及 try_claim，item-level carve-out。
     async fn claimer_scopes_by_tenant_and_consumer_group() {
         use crate::InMemClaimer;
         use consistency::IdemKey;
@@ -3857,7 +3857,7 @@ mod tests {
     // ── MemLeaderElector：leader 互斥 + 接管 epoch 单调 ───────────────────────
 
     #[allow(clippy::expect_used)]
-    // reason: 测试用 canonical literal 构造 LeaderId，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试用 canonical literal 构造 LeaderId，item-level carve-out。
     fn lid(s: &str) -> LeaderId {
         LeaderId::parse(s).expect("canonical leader id")
     }
@@ -4359,7 +4359,7 @@ mod tests {
     /// 空闲 key acquire → Acquired{token=Epoch(1)}（首授 token=1）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path assert，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path assert，item-level carve-out。
     async fn mem_lock_absent_acquires() {
         let store = MemLockStore::new();
         let outcome = store
@@ -5425,7 +5425,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path，item-level carve-out。
     async fn mem_checkpoint_cas_rejects_stale_version() {
         use diport::{CheckpointId, CheckpointOwner, CheckpointVersion, SaveOutcome};
 
@@ -5471,7 +5471,7 @@ mod tests {
     /// new→is_empty；write_dead_letter 一条→len==1，断言 domain/topic/num_attempts/error_summary。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言，item-level carve-out。
     async fn dead_letter_store_records_entry() {
         use diport::{DeadLetterProvenance, DeadLetterSummary, EnvelopeMetadata};
 

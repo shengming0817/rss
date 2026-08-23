@@ -6,7 +6,7 @@
 //! 在一个任期内**稳定不变**，同任期对同一/不同 key 的多次写都合法；同 epoch 重放的幂等由消费方
 //! idempotency 负责，**不**由 fencing 拒（fencing 只挡跨任期 stale，不挡同任期重写）。
 //! 「leader ≠ fencing」：仅靠 lease 选举不保正确性——跨副本一致性靠此 per-key CAS + 消费方幂等
-//! （reconcile.md §Leader-elect）。
+//! （`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
 //!
 //! ref: Martin Kleppmann《DDIA》§8.3 fencing token（storage 拒绝 token 低于已见高水位的写，**按被保护资源**）；
 //! kube-rs/controller-runtime `Request` 以 `ObjectRef`/`NamespacedName` 识别对象（非全局单 token）；

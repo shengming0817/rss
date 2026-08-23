@@ -21,7 +21,7 @@ The repository already has the durable reconcile substrate; the DeviceLatent PBI
 - `crates/eventexec/src/reconcile.rs` owns `ReconcileScheduleStore`, `ReconcileSchedulerBuilder`, and `ReconcileWorker`; `adapters/postgres/src/reconcile.rs` supplies the existing `PgReconcileStore` implementation, and `adapters/postgres/src/integration_tests.rs` exercises it against PostgreSQL.
 - The current worker and store already claim due targets, support worker/target pause and resume, drain or release claimed work on pause/cancellation, and retain target-local leases with monotonically increasing epochs.
 - Attempt append, terminal-result recording, action-plus-outbox recording, lease extension, and lease release are guarded by `target_id + lease_token + epoch` CAS. A zero-row update is treated as a lost lease rather than permission for a stale holder to write.
-- `docs/rules/reconcile.md` is the current behavior guide for this substrate. It records the same five-table boundary and the existing claim/pause/drain/release and lease/epoch semantics.
+- `consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance is the current behavior guide for this substrate. It records the same five-table boundary and the existing claim/pause/drain/release and lease/epoch semantics.
 
 Consequently, #1898 is limited to durable wake-version and failure-streak extensions plus the atomic join between a DeviceLatent desired update and the existing target-due state. #1899 is limited to the missing bounded concurrent execution and fairness increment. Neither PBI re-creates next-run scheduling, due claiming, lease/epoch fencing, pause, drain, or release.
 

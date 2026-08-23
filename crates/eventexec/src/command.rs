@@ -798,7 +798,7 @@ fn map_journal_store_error(error: CommandStoreError) -> CommandJournalError {
 /// `<cmd>::register_handler` wrapper 锁 typed `R` + baked CONTRACT_ID/TOPIC。
 #[allow(clippy::too_many_arguments)]
 // reason: 8 参数是命令消费注册的最小必要集（stream/idempotency/dlx/domain/contract_id/topic/handler/lease_cfg
-// 各自语义独立）；聚合 struct 增间接层且无复用，item-level carve-out（error-handling.md §Carve-out）。
+// 各自语义独立）；聚合 struct 增间接层且无复用，item-level carve-out。
 pub async fn register_command_handler<S, R, H, Fut>(
     stream: MessageStream,
     idempotency: Arc<S>,

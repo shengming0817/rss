@@ -1,6 +1,5 @@
 //! testkit harness 自测：在**合成 axum router**（handler 完全受控）上验证四个断言 helper 的语义，
-//! 即 `domain-patterns.md §Contract test` 的四维模板——正常响应 schema / 参数错误 + 错误码 /
-//! 鉴权边界 / path 参数 newtype 校验。
+//! 即请求形状 / 鉴权边界 / path 参数 newtype 校验。
 //!
 //! 合成 router 不依赖 httpserve / primitives（合成 401 + envelope 即可验证 helper 行为）——本文件
 //! 证明 harness 工具本身正确；真实契约样板见 `crates/identity/src/login_contract.rs`，运行期 auth 闸

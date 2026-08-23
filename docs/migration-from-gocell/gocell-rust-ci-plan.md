@@ -1,7 +1,7 @@
 # GoCell 以 Rust 为主：CI 适配方案（参考 gocell 现有 CI）
 
 > **归档·冻结** · 2026-06-21 GoCell→Rust 迁移评估快照（target 命名已对齐 RSS）· **非现行规则**。
-> 现行架构单源见 `docs/rules/architecture.md`；本批只读冻结，仅供迁移评估溯源。
+> 现行架构单源见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；本批只读冻结，仅供迁移评估溯源。
 >
 > 生成日期：2026-06-21 · 接三档 Cargo 适配，逐项映射 gocell 现有 CI 在 Rust 版的去向
 > 配套文档：[gocell-package-overview.md](./gocell-package-overview.md) · [gocell-rust-tradeoff.md](./gocell-rust-tradeoff.md) · [gocell-rewrite-sequence.md](./gocell-rewrite-sequence.md) · [gocell-rust-crate-mapping.md](./gocell-rust-crate-mapping.md) · [gocell-rust-directory-structure.md](./gocell-rust-directory-structure.md) · [gocell-rust-eval-checklist.md](./gocell-rust-eval-checklist.md)
@@ -86,5 +86,5 @@ gocell 那 11 个 workflow 在 Rust 下大致收敛成：
 ## 六、待核实 / 决策点
 
 1. **CodeQL Rust 成熟度**：截至 2026-01 为 preview，弱于 Go SAST；若要强 SAST 需评估当时状态，或更依赖 clippy 安全 lint + `cargo-deny` advisories。
-2. **覆盖率阈值口径**（**已定**）：沿用 gocell 覆盖率纪律——引擎与基础 crate（`consistency`/`primitives`/`vocab`/`ids`）≥90%、新增 ≥80%（见 `docs/rules/rust-standards.md`）。
+2. **覆盖率阈值口径**（**已定**）：沿用 gocell 覆盖率纪律——引擎与基础 crate（`consistency`/`primitives`/`vocab`/`ids`）≥90%、新增 ≥80%；阈值由 `CLAUDE.md` 与 coverage gate 同步锁定。
 3. **runner/forge**：CI 落 GitHub Actions vs Azure Pipelines vs 纯本地 `cargo xtask verify`（与当前 azure `no-ci` 现实对齐）——决定 workflow 文件形态，但闸门集合不变。

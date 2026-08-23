@@ -1,7 +1,7 @@
 # GoCell 包能力全景图
 
 > **归档·冻结** · 2026-06-21 GoCell→Rust 迁移评估快照（target 命名已对齐 RSS）· **非现行规则**。
-> 现行架构单源见 `docs/rules/architecture.md`；本批只读冻结，仅供迁移评估溯源。
+> 现行架构单源见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；本批只读冻结，仅供迁移评估溯源。
 >
 > 生成日期：2026-06-21 · 由分层探索子 agent 扫描代码库后汇总
 > 配套文档：[gocell-rust-tradeoff.md](./gocell-rust-tradeoff.md) · [gocell-rewrite-sequence.md](./gocell-rewrite-sequence.md) · [gocell-rust-crate-mapping.md](./gocell-rust-crate-mapping.md) · [gocell-rust-directory-structure.md](./gocell-rust-directory-structure.md) · [gocell-rust-ci-plan.md](./gocell-rust-ci-plan.md) · [gocell-rust-eval-checklist.md](./gocell-rust-eval-checklist.md)

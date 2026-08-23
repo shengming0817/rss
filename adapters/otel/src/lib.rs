@@ -180,7 +180,7 @@ mod backend_tests {
     use rstest::rstest;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    // unwrap/expect 的 item-level carve-out 集中于 helper（error-handling.md §Carve-out），测试体不散落。
+    // unwrap/expect 的 item-level carve-out 集中于 helper，测试体不散落。
     #[allow(clippy::unwrap_used)]
     fn finished_spans(exporter: &InMemorySpanExporter) -> Vec<SpanData> {
         exporter.get_finished_spans().unwrap()

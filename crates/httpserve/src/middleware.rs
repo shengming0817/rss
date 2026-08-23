@@ -29,7 +29,7 @@ const CORRELATION_HEADER: &str = "x-correlation-id";
 /// UUID v4 字符集 `[0-9a-f-]` ⊆ `CorrelationId` 白名单 `[A-Za-z0-9._-]`、长度 36 ≤ 128、非空 ⇒
 /// `CorrelationId::parse` 在此入口**不可失败**（编译期可知的结构事实）。
 ///
-/// item-level `expect_used` carve-out（error-handling.md §Carve-out）：
+/// item-level `expect_used` carve-out：
 /// reason: UUID v4 满足 `CorrelationId` 的全部约束，parse 不可失败，`expect` 在此等价于不可达断言。
 #[allow(clippy::expect_used)]
 fn new_uuid_correlation_id() -> diagctx::CorrelationId {
@@ -406,8 +406,8 @@ where
 
 /// 中间件：request-aware panic recovery → 500 envelope（requestId 来自请求 extension）。
 ///
-/// 须在 trace 内侧挂载（panic_recovery 的 500 Response 对 trace 可见），在 request_id 外侧（
-/// request_id 最外层，确保 panic 路径响应也回填 x-request-id header）。
+/// 须挂载在 trace 内侧，使 panic recovery 的 500 response 对 trace 可见；同时位于 request_id 内侧，
+/// 由最外层 request_id 确保 panic 路径响应也回填 x-request-id header。
 ///
 /// panic payload 不解析、不泄漏：`_panic` 直接丢弃，仅用静态错误码生成 envelope。
 pub(crate) async fn panic_recovery(req: Request, next: Next) -> Response {

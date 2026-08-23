@@ -2,7 +2,7 @@
 
 > 范式见 conventions.md（单源 ADR-004）；决策单源 = **ADR-003**（`docs/architecture/202606212047-003-di-trait-async-dyn-dispatch-strategy.md`）。
 >
-> ADR-003 把可替换 provider 的 **DI 注入 port trait** 收敛进 **DI-infra 层** crate `diport`（基础/引擎之上、服务/域/adapter 之下，见 `docs/rules/architecture.md` §分层）。`dynosaur`/`trait-variant` 宏依赖经 `deny.toml` wrapper + `layer-deps` 收敛（DIPORT-MACRO-CONFINE-01**′**，Medium）。
+> ADR-003 把可替换 provider 的 **DI 注入 port trait** 收敛进 **DI-infra 层** crate `diport`（基础/引擎之上、服务/域/adapter 之下，见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。`dynosaur`/`trait-variant` 宏依赖经 `deny.toml` wrapper + `layer-deps` 收敛（DIPORT-MACRO-CONFINE-01**′**，Medium）。
 >
 > **ADR-005 修订（#1083）——归属二分**：本表只收 **provider-agnostic infra port**（签名只引基础/wire/自定义类型）。**域形 repo/service port**（`SessionRepo`/`ConfigRepo`/…，签名引用域内实体）**不归 diport**（否则 diport→域 反向依赖、层序倒置、deny 红），改归**所属域 crate `pub mod ports`**（Option 2）。dynosaur 宏收敛白名单随之扩到「diport + 定义自身 repo port 的域 crate」（-01′）。归属 category line 见 ADR-005 §2.1。
 >
@@ -41,7 +41,7 @@ pub trait MyPortLocal {                            // 非 Send 基 trait，crate
 2. 跨 crate sealing 不可行（§4.2）→ 采**方案 ②**：`deny.toml` wrapper 收敛 `dynosaur`/`trait-variant` **依赖**（只准 diport 依赖 ⇒ DI port 只在 diport 定义）。注意 cargo-deny 限「依赖」非「impl」——port-trait **impl-allowlist（限谁可 impl）当前未机器强制**，待 #1060 / PR-5。本 crate trait **不带** sealed supertrait。
 3. dynosaur v0.3 API（`new_box`/`new_arc`）→ 已 pin `=0.3.0`；升级须复测 unsafe-hygiene 不变式 + 审 changelog。
 
-**结构单源回写（PR-diport 已完成）**：`docs/rules/architecture.md` §扁平 workspace 结构树 + §分层、`Cargo.toml [workspace] members`（`crates/diport`）、`deny.toml` wrappers、`domain-patterns.md`（DI port 集中 + sealing 改 cargo-deny）。
+**结构单源回写（PR-diport 已完成）**：`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml`、`cargo xtask layer-deps` 与 Rust visibility（DI port 集中 + sealing 改 cargo-deny）。
 
 **前置 follow-up**：`bootstrap` shutdown 框架（按注册逆序执行 `shutdown()`，把 ADR-003 §7 末条 Soft→Medium）须先于 port trait 大规模落地。
 

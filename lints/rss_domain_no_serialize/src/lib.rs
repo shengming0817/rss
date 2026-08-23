@@ -5,7 +5,7 @@
 //! INVARIANT: SERDE-DOMAIN-FREEZE-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
 //! 「domain 类型不 derive Serialize——只有 contract/DTO/generated 类型可序列化到 wire」
-//! （rust-standards.md §DDD 分层、ai-robust.md serde derive 冻结）。serde 的 derive 对任何
+//! 该边界由本 dylint 守卫。serde 的 derive 对任何
 //! crate 自由可用、类型系统无法封闭，故以 dylint AST lint 承载（Medium-class 载体）。
 //!
 //! 强度现状（勿过度宣称）：v1 守的是 **`domain` 模块命名约定**（非完整域 crate 安全边界——实体放
@@ -30,15 +30,15 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Why is this bad?
     /// RSS 约束「domain 类型不 derive Serialize——只有 contract/DTO/generated 类型可序列化到 wire」
-    /// （rust-standards.md §DDD 分层、ai-robust.md serde derive 冻结）。直接序列化 entity 会把领域内部
+    /// 该边界由本 dylint 守卫。直接序列化 entity 会把领域内部
     /// 表示泄漏成 wire 契约。serde 的 derive 对任何 crate 自由可用、类型系统无法封闭，故以 dylint
     /// AST lint 承载（Medium，最强可用载体）。INVARIANT: SERDE-DOMAIN-FREEZE-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
     /// v1 只盯 `#[derive(..)]` 产生的 impl（`#[automatically_derived]`），放行手写 `impl Serialize`
     /// （自定义 wire adapter 合法、罕见）。仅 module 级类型——排除 serde derive 在 fn/const 内生成的
-    /// `__Field`/`__Visitor` 等辅助类型。归属靠 `domain` 模块名约定（正向匹配，对齐 rust-standards.md
-    /// §DDD 分层「实体/值对象/领域服务落 `domain` 模块」）——故只覆盖放在 `domain` 模块的实体；
+    /// `__Field`/`__Visitor` 等辅助类型。归属靠 `domain` 模块名约定（正向匹配）——故只覆盖
+    /// 放在 `domain` 模块的实体；
     /// `dto`/`wire` 出口、xtask/config 解析 DTO、`generated` 等不在 `domain` 模块的类型不报。
     /// **覆盖边界**：`domain` 按 def-path **段精确匹配**（非子串，`cross_domain` 等不误命中），覆盖嵌套
     /// `*::domain::*`；但实体若放在**非 `domain` 命名**的模块（`entities`/`aggregate`/`models` 等）**不被守护**
@@ -102,8 +102,8 @@ impl<'tcx> LateLintPass<'tcx> for RssDomainNoSerialize {
         if !matches!(cx.tcx.def_kind(cx.tcx.parent(self_did)), DefKind::Mod) {
             return;
         }
-        // 3c. 仅域实体：def-path 含 `domain` 模块段（rust-standards.md §DDD 分层：实体/值对象/
-        //     领域服务落 `domain` 模块）。dto/wire 出口、xtask/config 解析 DTO、generated 等放行。
+        // 3c. 仅域实体：def-path 含 `domain` 模块段；领域服务落 `domain` 模块。
+        //     dto/wire 出口、xtask/config 解析 DTO、generated 等放行。
         if !in_domain_module(cx, self_did) {
             return;
         }
@@ -139,7 +139,7 @@ fn is_serde_serde_trait(cx: &LateContext<'_>, trait_did: DefId) -> bool {
     )
 }
 
-/// Self 类型的 def-path 含 `domain` 模块段——即 DDD 域层实体（rust-standards.md §DDD 分层）。
+/// Self 类型的 def-path 含 `domain` 模块段——即 DDD 域层实体。
 /// 正向匹配：避免对 `dto`/`wire` 出口、xtask/config 解析 DTO、`generated` 等非域类型误报。
 fn in_domain_module(cx: &LateContext<'_>, self_did: DefId) -> bool {
     cx.tcx.def_path(self_did).data.iter().any(|seg| {

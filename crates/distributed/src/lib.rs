@@ -328,7 +328,7 @@ mod smoke {
     /// 证明 FencingToken / CasKey 往返正确 + LockKey fail-closed parse（接受 canonical、拒空/空白/控制字符）。
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out。
     fn fencing_token_and_keys_round_trip() {
         // FencingToken 真实调用。
         let t = FencingToken::new(42);
@@ -417,7 +417,7 @@ mod smoke {
     /// 证明 LockGrant crate 内 mint（`new`）+ getter 读回（字段私有，外部不可伪造）。
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试用 canonical literal 解析 LockKey，item-level carve-out。
     fn lock_grant_mint_and_getters() {
         let grant = LockGrant::new(
             LockKey::parse("tenant-3/lock").expect("canonical"),

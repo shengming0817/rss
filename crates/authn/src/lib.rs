@@ -433,7 +433,7 @@ impl Principal {
     ///
     /// scoped 主体（user/device/admin）的行级隔离以**已认证 ctx tenant** 为准，且 fail-closed 要求
     /// principal 自带 tenant claim 与 `*ctx.tenant()` **一致**——不一致（如 tenant-A 令牌在 ctx-B 下）
-    /// 返回 `Err`，杜绝越租户派生可见域（tenancy.md §Principal claim source）。
+    /// 返回 `Err`，杜绝越租户派生可见域（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）。
     ///
     /// `SuperAdmin`（跨租户读须经 [`Principal::cross_tenant_audit_grant`] + audit durable receipt）、
     /// `Service` / `Anonymous` 及未来未知 kind 的 `_` 分支返回 `Err(runctx::MissingCtx)`：经此 sync 路径
@@ -538,7 +538,7 @@ mod crosstenant {
     #[derive(Debug, thiserror::Error)]
     #[non_exhaustive]
     pub enum CrossTenantAuditError {
-        /// 审计字段为空——跨租户 All-scope 派生要求字段完整（tenancy.md §RowScope：
+        /// 审计字段为空——跨租户 All-scope 派生要求字段完整（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL
         /// tenant/principal/resource/action/request/correlation）。
         #[error("cross-tenant audit context field must be non-empty")]
         EmptyField,
@@ -548,7 +548,7 @@ mod crosstenant {
     ///
     /// `request_id` / `correlation_id` 是诊断信号、**不**在 `AppCtx`（runctx 边界约定），由 httpserve W
     /// middleware 注入。私有字段 + [`Self::new`] **fail-closed** 构造 funnel（input-struct-field-exclusion +
-    /// 非空校验）：持有一个 `CrossTenantAuditContext` ⇒ 全字段非空（tenancy.md §RowScope 完整性，bundle 级
+    /// 非空校验）：持有一个 `CrossTenantAuditContext` ⇒ 全字段非空（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL，bundle 级
     /// Hard），funnel 据此签发 All-scope 时审计字段不缺。不 derive `Serialize`；Debug 脱敏
     /// `resource_id` / `request_id` / `correlation_id`（零信任，对齐 `diport::AuditEvent`，
     /// DIPORT-DTO-PII-DEBUG-REDACT-01 同范式）。
@@ -562,7 +562,7 @@ mod crosstenant {
 
     impl CrossTenantAuditContext {
         /// 构造审计上下文（**fail-closed**：任一字段空 → `Err(CrossTenantAuditError::EmptyField)`，杜绝
-        /// 不完整 ledger 签发 All-scope，tenancy.md §RowScope）。
+        /// 不完整 ledger 签发 All-scope，`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）。
         ///
         /// # Arguments
         /// - `resource_kind`：资源类别 const literal（如 `"cross_tenant_visibility"`）——与 `action` **同为
@@ -570,7 +570,7 @@ mod crosstenant {
         /// - `resource_id`：资源标识（非空；裸 `String`，typed-id 待 diport W 阶段，对齐 `AuditEvent.resource_id`）。
         /// - `action`：操作动作 const literal（如 `"derive_all_scope"`）；非空。
         /// - `request_id` / `correlation_id`：**必填非空**——httpserve W middleware 注入；跨租户审计要求完整
-        ///   请求 / 关联上下文（tenancy.md §RowScope），空即拒绝构造（不再接受缺失）。
+        ///   请求 / 关联上下文（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL），空即拒绝构造（不再接受缺失）。
         pub fn new(
             resource_kind: &'static str,
             resource_id: impl Into<String>,
@@ -581,7 +581,7 @@ mod crosstenant {
             let resource_id = resource_id.into();
             let request_id = request_id.into();
             let correlation_id = correlation_id.into();
-            // fail-closed：跨租户 All-scope 审计字段须完整（tenancy.md §RowScope），任一空即拒绝。
+            // fail-closed：跨租户 All-scope 审计字段须完整（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL），任一空即拒绝。
             if resource_kind.is_empty()
                 || resource_id.is_empty()
                 || action.is_empty()
@@ -663,7 +663,7 @@ mod crosstenant {
                 resource_id: audit.resource_id.clone(),
                 action: audit.action,
                 outcome: diport::AuditOutcome::Success,
-                // CrossTenantAuditContext 已 fail-closed 保证非空（tenancy.md §RowScope 完整性）。
+                // CrossTenantAuditContext 已 fail-closed 保证非空（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）。
                 request_id: Some(audit.request_id.clone()),
                 correlation_id: Some(audit.correlation_id.clone()),
             };
@@ -1478,7 +1478,7 @@ mod projection_maintenance_receipt_tests {
 
 #[cfg(test)]
 mod row_visibility_tests {
-    //! 核心：`Principal::row_visibility` 身份→行级可见域派生（tenancy.md §Principal claim source）。
+    //! 核心：`Principal::row_visibility` 身份→行级可见域派生（`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）。
     //! user→self / device→device / admin→tenant / super-admin→**fail-closed**（All 须经 audited funnel，
     //! 见 `cross_tenant_audit_grant_tests`）/ service·anonymous→fail-closed。
     use super::{CANON_TENANT, Principal, PrincipalKind};
@@ -1657,7 +1657,7 @@ mod cross_tenant_audit_grant_tests {
     }
 
     /// fail-closed 构造：任一审计字段空 → `Err(EmptyField)`，杜绝不完整 ledger 签发 All-scope
-    /// （tenancy.md §RowScope 完整性，codex review F1）。表驱动覆盖每个字段。
+    /// （`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL，codex review F1）。表驱动覆盖每个字段。
     #[test]
     fn audit_context_rejects_empty_fields() {
         // (resource_kind, resource_id, action, request_id, correlation_id)

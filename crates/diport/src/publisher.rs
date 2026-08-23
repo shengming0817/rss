@@ -168,7 +168,7 @@ impl PublishRequest {
 
     /// 事件去重锚点（= outbox `event_id` / `Entry::idem_key`）。relay 据此盖章 broker `message_id`，
     /// 经订阅侧 `Message::id()` 流回消费幂等键（`run_consumer` 的 `IdemKey`），实现「至少一次 + 幂等 =
-    /// 有效一次」端到端去重（`docs/rules/eventbus.md` §DLX 与幂等）。路由元数据，非 PII。
+    /// 有效一次」端到端去重（`contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。路由元数据，非 PII。
     pub fn event_id(&self) -> &MessageId {
         &self.event_id
     }

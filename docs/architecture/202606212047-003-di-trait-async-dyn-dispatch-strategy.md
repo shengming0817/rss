@@ -167,7 +167,7 @@ ack/requeue/reject 接到消费侧。
   `Delivery { message: Message, acker: Box<DynAcker<'static>> }`（acker 与 message **并置**，不挂 `Message`）。
 
 `AckAction` 是 provider-agnostic 的 broker 词汇，**不复用** `consistency::outbox::Disposition`——「引擎 disposition + DLX
-写结果 → `AckAction`」的映射在 `eventexec::run_consumer_ackable` 完成（终态映射表见 `docs/rules/eventbus.md`
+写结果 → `AckAction`」的映射在 `eventexec::run_consumer_ackable` 完成（终态映射表见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`
 §Acker / 投递结算 seam）。
 
 ### 威胁矩阵 / 安全模型重评（ai-robust：amendment 须同步重评）
@@ -175,7 +175,7 @@ ack/requeue/reject 接到消费侧。
 - **新增攻击面**：无。新端口是既有 dyn-port 范式的实例，攻击面与 `Subscriber` / `DeadLetterStore` 同构。
 - **`Message` 冻结值类型不变式保持（关键）**：acker 落**独立 seam**（`Delivery` 并置 `Box<DynAcker>`），**不**给
   `Message` 加 Ack/Nack 字段或方法——`Message` 的 ADR-003 冻结（无 metadata setter、payload Debug 脱敏，
-  DIPORT-DTO-PII-DEBUG-REDACT-01）与 eventbus.md「subscriber 层扩展信息放 `DeliveryOutcome`，不污染业务结果」
+  DIPORT-DTO-PII-DEBUG-REDACT-01）与 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`「subscriber 层扩展信息放 `DeliveryOutcome`，不污染业务结果」
   规约**不退化**。本 amendment 正是该 `DeliveryOutcome` 规约的落地。
 - **PII 边界**：`AckError` 经 `RedactedSource`（DIPORT-ERR-SOURCE-REDACT-01，与 `SubscriberError` 同范式），
   broker 原始错误不经 `Error` 接口暴露。
@@ -482,9 +482,8 @@ cargo-deny wrappers 守（只准 `diport` 定义 port），impl 面由 dylint li
 Medium，DIPORT-IMPL-ALLOWLIST-01）限定实现方到 adapter / 组合根。即「外部无法 impl」从类型系统 Hard 降为
 dylint Medium（#1060 闭环）。
 
-> 三条偏离须在 `diport` crate 实落时**同步回写** `docs/rules/architecture.md`（§扁平 workspace 结构树 + §分层，
-> **架构单一事实源**，登记 `diport` 服务层 crate）、`rust-standards.md §工程护栏` 与 `domain-patterns.md`
-> （见 §8 follow-up）——本 doc-only PR 不改规则文件（规则提前引用尚不存在的 crate 反而制造漂移）。
+> 三条偏离须在 `diport` crate 实落时**同步回写** `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与
+> workspace lint 配置，登记 `diport` 服务层 crate（见 §8 follow-up）。本 doc-only PR 不提前声明尚不存在的 crate。
 
 ---
 
@@ -509,10 +508,10 @@ dylint Medium（#1060 闭环）。
 **开放风险（`diport` crate 实落前必须验证，dynosaur pre-1.0 的不确定面）**：
 
 1. **目标 `#[allow]` 可达性 + carve-out 登记**：dynosaur 是否自带 `#[allow(unsafe_code)]` 于生成点？若否，
-   需 item-level 包裹机制把 allow 局限到生成项——**不得**用 module/crate-level carve-out（与 error-handling.md
-   §Carve-out「carve-out 只能 item-level」冲突）。须实测 `cargo expand` 确认。**无论自带或手写**，只要 unsafe
-   出现在 `diport`，即构成一次 carve-out 事件——须按 error-handling.md §Carve-out 同步更新 ADR registry +
-   lint 配置映射，并在展开点提供 `// SAFETY:`（或 `diport` rustdoc INVARIANT 集中登记）阐明 transmute 的
+   需 item-level 包裹机制把 allow 局限到生成项——**不得**用 module/crate-level carve-out，否则与
+   §Carve-out「carve-out 只能 item-level」冲突。须实测 `cargo expand` 确认。**无论自带或手写**，只要 unsafe
+   出现在 `diport`，即构成一次 carve-out 事件——必须映射到 lint 配置，
+   并在展开点提供 `// SAFETY:`（或 `diport` rustdoc INVARIANT 集中登记）阐明 transmute 的
    lifetime-擦除安全假设（rust-standards §工程护栏「unsafe 必须带 `// SAFETY:`」）。
 2. **跨 crate sealing 不可行（见 §4.2）**：sealed-trait 只能在定义 crate `diport` 内封闭，adapter 是独立
    crate → DI port trait 无法对其 adapter 实现方 sealing。落地选 §4.2 ②（放弃跨 crate sealing）：定义面由
@@ -523,14 +522,14 @@ dylint Medium（#1060 闭环）。
 
 **follow-up（本 doc-only PR 不做；归属下游 `diport` 落地单元——epic #991 的 G1/W/Join 子项跟踪，不在此重复建 issue）**：
 
-- **结构单源回写（`diport` 落地同 PR，三处一并改防漂移）**：`docs/rules/architecture.md` §扁平 workspace 结构树
+- **结构单源回写（`diport` 落地同 PR，三处一并改防漂移）**：`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`
   + §分层（登记 `diport` 服务层 crate）、`Cargo.toml [workspace] members`（加 `crates/diport`）、`deny.toml` wrappers。
 - `deny.toml` wrappers（Medium）：「可依赖 `dynosaur`」限定到 `diport`（定义面）；impl 面（「谁可 impl port
   trait」限定到 adapter / 组合根）由 dylint lint `rss_diport_impl_allowlist`（DIPORT-IMPL-ALLOWLIST-01，#1060）守。
 - 首个 port trait 落地：加 `trybuild` dyn-compatible compile-pass / compile-fail 用例（Medium 回归锁）。
 - `bootstrap` shutdown 框架：按注册逆序执行 `shutdown()`（把 §7 末条从 Soft 升 Medium）——**前置项**，先于
   port trait 大规模落地。
-- 回写 `rust-standards.md §工程护栏`（`diport` forbid 例外）+ `domain-patterns.md`（DI port 集中例外 + port trait sealing 由 sealed-trait 改 cargo-deny wrappers）。
+- 回写 Cargo workspace 分层与 `deny.toml` wrappers（DI port 集中例外 + port trait sealing 由 sealed-trait 改 cargo-deny wrappers）。
 - **复评触发**：dynosaur 发 1.0 时复评（破坏式 API / unsafe 收口 / forbid 兼容）；若 1.0 前实测三项开放
   风险任一不可接受，按 §5 以 async-trait 为对照重评。
 

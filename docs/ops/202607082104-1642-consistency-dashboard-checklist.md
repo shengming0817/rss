@@ -11,7 +11,7 @@ activation label / emitter 由 sealed bind 支持，但只有将来 assembly 真
 shadow series。本清单不因此新增 shadow lifecycle、dashboard panel、alert 或 SLO。
 
 Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界和 tenant scope 以
-`docs/rules/observability.md`、`docs/rules/eventbus.md`、对应 Rust newtype / enum / constructor funnel
+`crates/observ`、`secure::redact_error` 与 typed metric enums、`contracts/**/contract.toml`、`generated` 与 `crates/consistency`、对应 Rust newtype / enum / constructor funnel
 和 alert rule 文件为准。
 
 ## Global Rules

@@ -56,7 +56,7 @@ mod tests {
     // 同 label ⇒ 同 id），使租户隔离 / 相等断言可辨。`DefaultHasher` 在**同次运行内**确定即够本测试
     // （每次运行内构造并比对，不跨运行复现；不依赖 std 未保证的跨版本 hash 稳定性）。
     // reason: `| 1` 保证非 nil、`from_u64_pair → hyphenated` 必为 canonical lowercase，故 parse 在此恒 Ok；
-    // item-level carve-out 仅作用本 helper（error-handling.md §Carve-out / workspace 测试模块 #[allow] 约定）。
+    // item-level carve-out 仅作用本 helper。
     #[allow(clippy::unwrap_used)]
     fn tid(label: &str) -> TenantId {
         use std::hash::{Hash, Hasher};

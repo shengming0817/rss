@@ -19,7 +19,7 @@
 <!--
 仅当 PR 新增、扩展、替换或重新声明 T3 production acceptance carrier，或切换 production assembly artifact
 journey 时保留本节；其余 PR 删除整节。逐项对应 issue 中的 evidence plan，语义见
-`docs/rules/project-scope.md` §Production acceptance evidence plan 与 carrier replacement。
+Production acceptance evidence 必须记录唯一 profile/artifact/hazard、same-head T1/T2/T3 receipt 与原子 carrier transition。
 -->
 
 - Evidence plan: `<issue / Evidence ID 列表>`

@@ -465,7 +465,7 @@ pub struct ReconcileBlock {
     pub late_message_policy: DeviceLatentLateMessagePolicy,
 }
 
-/// 契约生命周期。`active` 才需 assembly 接线（见 contract-fanout.md §契约归属）。
+/// 契约生命周期。`active` 才需 assembly 接线（见 `contract.toml`、schema codegen 与 contract validation）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Lifecycle {
@@ -826,13 +826,13 @@ impl HttpProjectionFieldName {
 
 /// 事件投递语义（event 契约 per-kind 字段）。三标准投递保证；非法值解析即 `Err`（Hard，类型层）。
 ///
-/// **当前实现路径**：RSS outbox + 幂等消费者 = `at-least-once`（见 docs/rules/eventbus.md）。
+/// **当前实现路径**：RSS outbox + 幂等消费者 = `at-least-once`（见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 /// `AtMostOnce` / `ExactlyOnce` 为前瞻保留值——当前 broker 链路无对应运行时保证。三值保留供 draft/deprecated
 /// 表达前瞻设计，但 **active event 经 validate R11 机器拒**（仅放行 `at-least-once`），不虚开语义承诺。
 /// README §字段表 同步此说明。
 // reason: 三标准投递保证的规范命名天然共享后缀 "Once"（at-least/most/exactly-once），enum_variant_names
 // 在此为误报；保留全描述式命名（同 ConsistencyLevel）优先于改名（改名须连带改 serde wire 值，得不偿失）。
-// stock 风格 lint、非 RSS 自定义治理的 item-level carve-out（error-handling.md §Carve-out）。carve-out 登记：
+// stock 风格 lint、非 RSS 自定义治理的 item-level carve-out。carve-out 登记：
 // 项目 ADR registry 尚未建立（同 crates/bootstrap/src/shutdown.rs 既有先例），暂记于此，待 registry 落地迁入。
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -854,7 +854,7 @@ impl Delivery {
     }
 }
 
-/// saga 补偿顺序——仅 `reverse`（saga.md governance）。单 variant ⇒ 取值类型层固定（Hard）。
+/// saga 补偿顺序——仅 `reverse`（`generated`、`diport::SagaDurableStore` 与 saga conformance governance）。单 variant ⇒ 取值类型层固定（Hard）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CompensationOrder {

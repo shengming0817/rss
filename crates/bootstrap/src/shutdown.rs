@@ -259,7 +259,7 @@ impl ShutdownStack {
     /// 两阶段逆序驱动核心。`budget` = 整体预算上界（`None` = 仅 per-resource 超时）。
     // reason: 两阶段关闭驱动（broadcast + LIFO await）+ select + 预算 deadline 多路组合，
     // 认知复杂度略超 15；逻辑单元紧密耦合（顺序/错误聚合/预算/日志），强行拆分会引入
-    // 额外参数传递并损失可读性——item-level carve-out（error-handling.md §Carve-out）。
+    // 额外参数传递并损失可读性——item-level carve-out。
     #[allow(clippy::cognitive_complexity)]
     async fn run(self, budget: Option<Duration>) -> Vec<ResourceShutdownError> {
         let total = self.resources.len();
@@ -447,7 +447,7 @@ where
                 ShutdownStep::Exhausted(name)
             }
             // timeout → JoinError → shutdown 三层 Result：超时 / task 异常终止 / 业务错误。
-            // 日志级别按 observability.md：业务 Err 降级（warn）；超时 / panic 资源状态未知（error）。
+            // 日志级别按 `crates/observ`、`secure::redact_error` 与 typed metric enums：业务 Err 降级（warn）；超时 / panic 资源状态未知（error）。
             Some(out) => {
                 let kind = match out {
                     Ok(Ok(Ok(()))) => {
@@ -581,7 +581,7 @@ mod tests {
         }
 
         // reason: Behavior::Panic 刻意 panic，验证驱动器对下游 adapter panic 的隔离；
-        // 此 carve-out 仅作用于本 mock（item-level，见 error-handling.md §Carve-out）。
+        // 此 carve-out 仅作用于本 mock item。
         #[allow(clippy::expect_used, clippy::panic)]
         async fn shutdown(&self) -> Result<(), ShutdownError> {
             record(&self.log, &self.name);

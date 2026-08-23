@@ -25,8 +25,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Stdio;
 
-/// 增量覆盖率下限（%，整数——判定走整数比较避免浮点边界误差）= CLAUDE.md / rust-standards.md
-/// 「新增/修改代码覆盖率 ≥ 80%」逐字值。单一事实源；与文档一致性由 `diff_min_percent_is_doc_verbatim` 测试守。
+/// 增量覆盖率下限（%，整数——判定走整数比较避免浮点边界误差）= CLAUDE.md
+/// “新增/修改代码覆盖率 ≥ 80%”的逐字值。单一事实源；与文档一致性由 `diff_min_percent_is_doc_verbatim` 测试守。
 const DIFF_MIN_PERCENT: u64 = 80;
 
 /// 默认 diff base ref。azure checkout 远端恒 `origin`（fetchDepth:0 ⇒ origin/develop 可见）；本地 forge

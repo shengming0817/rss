@@ -1,4 +1,4 @@
-//! xtask — RSS 治理 / codegen 入口。见 docs/rules/architecture.md §xtask、§Rust 原生强制（三档载体）。
+//! xtask — RSS 治理 / codegen 入口。见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。
 //!
 //! 命令目录以 clap `--help` / [`cli`] 为单源；此处不维护长命令清单。
 

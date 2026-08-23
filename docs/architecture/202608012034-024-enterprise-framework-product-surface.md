@@ -3,7 +3,7 @@
 - **Status**：Accepted
 - **Date**：2026-08-01
 - **Last updated**：2026-08-20
-- **Scope**：[`project-scope.md`](../rules/project-scope.md) 的项目目标与目标验收边界
+- **Scope**：ADR-024 与 production acceptance 边界
 
 ## Context
 
@@ -127,7 +127,7 @@ canonical receipt schema 或 artifact rollback owner。
 
 四原则复核结论：**彻底**，一次切断重复 ID、Platform crypto/lifecycle 与伪 inventory owner；
 **不向后兼容**，旧 API 与 baseline 同步删除；**优雅简洁**，只引入两个必要 Foundation package 并复用既有
-Release Surface/package-proof；**AI-HARD**，永久约束交给 Cargo/rustc visibility、私有 mint、分层依赖、Release API
+Release Surface/package-proof；**AI-HARD**，永久约束交给 Cargo/rustc 公开面、私有 mint、分层依赖、Release API
 与确定性 T1/T2 proof，Markdown 只记录决策和尚未激活的 carrier handoff。
 
 ### 2026-08-09 amendment：Platform Public v0.2 历史实现（已被 vNext 取代）
@@ -223,7 +223,7 @@ item 候选，其 owner 只能是 `AcceptedValueStreamJoin`，不得创建独立
 每个官方 profile 最多有一个 canonical production artifact 和一个 canonical journey carrier。多个 join hazard
 可共享 target、fixture、image 与基础设施，但每个 hazard 必须保持稳定 Evidence ID 和精确可选 selector。
 T3 的新增、扩展、替换、重新声明或退役必须使用独立 issue 和独立 PR，并先完成
-[`project-scope.md`](../rules/project-scope.md#production-acceptance-evidence-plan-与-carrier-replacement) 要求的必要性证明；
+production acceptance 所要求的必要性证明；
 不得与 profile/assembly、domain 功能或 provider 实现混在同一 issue/PR。
 
 ### GA maturity 阶段
@@ -235,7 +235,7 @@ T3 的新增、扩展、替换、重新声明或退役必须使用独立 issue �
 3. **GA 后**：只基于真实流量调优 RSS 自有指标、error budget、paging threshold、容量与运行参数；autoscaling、多区域
    delivery、商业 tenant 分级和托管监控继续属于 External，不因 GA 完成自动进入 RSS。
 
-Hardening trigger、例外字段与 no-new-work closeout 统一遵循 `project-scope.md`，复用现有 `flag-cond`/`Trigger`，不建立
+Hardening trigger、例外字段与 no-new-work closeout 统一复用现有 `flag-cond`/`Trigger`，不建立
 新的 maturity registry、evidence database、selector 或 gate。candidate revision 的 same-head receipt 只保留在 issue/PR
 review evidence，不写入 artifact catalog、generated inventory 或其它 committed static registry。
 
@@ -253,7 +253,7 @@ consumer 确需第三方 Provider 扩展，还必须先接纳相应 capability-s
 
 迁出时必须由单独弃用/迁移决策记录目标仓库、版本边界、consumer build、release ownership 和回退方式。
 Identity、Settings、Audit 的 domain/contract 能力不因 assembly 迁出而自动删除或迁仓；它们仍按
-[`project-scope.md`](../rules/project-scope.md) 的 `Complete`/`Freeze` 边界处置，后续迁移需另行决策。
+`Complete`/`Freeze` 边界处置，后续迁移需另行决策。
 
 第一方外部 consumer 孵化仓的 ownership 与 standalone consumer proof cutover 已由
 [`ADR-026`](202608111253-026-rss-incubator-ownership-migration.md) 接纳。该决策只建立仓库与消费证据边界；上述
@@ -283,8 +283,8 @@ target、case、fixture、service 或 image。
 
 每个实施 PBI 在编码前完成：
 
-- `ai-robust.md` 的 enforcement 判定；
-- `dependency-policy.md` 的依赖与自研判定；
+- cargo xtask archrules verify 的 enforcement 判定；
+- Cargo.toml / xtask/src/layers.rs / cargo xtask layer-deps 的依赖与自研判定；
 - primary capability owner、真实 consumer、公开面影响和最低充分 T1/T2/T3；
 - production acceptance carrier 变更时的 evidence plan。
 
@@ -307,10 +307,10 @@ PR；不将多个 profile 的 T3 收敛成一个无法独立审批、执行和�
 
 ## Scope alignment
 
-- `project-scope.md` 继续拥有能力矩阵、范围状态和 External owner 边界。
-- 本 ADR 拥有产品面、官方 profile 闭包和实施顺序。
-- `architecture.md` 继续拥有 workspace 分层与 crate dependency 规则。
-- `dependency-policy.md` 继续拥有上游组合、wrapper、port 与自研判定。
+- 当前能力矩阵、范围状态和 External owner 边界由 project-scope planning owner 持有。
+- 本 ADR 只拥有产品面、官方 profile、历史决策与 transition。
+- `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 继续拥有 workspace 分层与 crate dependency 事实。
+- dependency admission gate 继续拥有上游组合、wrapper、port 与自研判定。
 - production delivery 环境事实继续由
   [`Runtime 与 delivery 仓库边界`](202607280820-1873-runtime-delivery-boundary.md) 的外部系统持有。
 

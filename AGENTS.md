@@ -1,7 +1,7 @@
 
 See [CLAUDE.md](./CLAUDE.md)
 
-项目能力处置与范围边界见 [docs/rules/project-scope.md](./docs/rules/project-scope.md)。
+规则 owner 与项目能力边界只从 [docs/rules/README.md](./docs/rules/README.md) 入口发现。
 
 使用系统自带git /usr/bin/git
 

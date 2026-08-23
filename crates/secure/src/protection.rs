@@ -397,7 +397,7 @@ mod tests {
     }
 
     // 测试 helper：构造/派生失败即测试设置错误，应 panic 暴露——expect 收敛在 helper（item-level carve-out，
-    // 对齐 cookie/password 测试范式 + error-handling.md §Carve-out）。
+    // 对齐 cookie/password 测试范式）。
     #[allow(clippy::expect_used)]
     fn aad(tenant: &str, key: &str, field: &str, ver: u32) -> ProtectionAad {
         ProtectionAad::new(self::tenant(tenant), key, field, ver).expect("valid aad")

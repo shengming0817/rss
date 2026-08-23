@@ -16,7 +16,7 @@ Runtime maintainers, AI implementers, and reviewers can open `docs/spec/001-runt
 
 **Why this priority**: The planned work spans runtime wiring, assembly manifests, generated modules, provider bundles, graph visibility, and CI gates. Without a single planning entry, later PRs can accidentally bypass RSS domain-native rules or mix behavior changes into move-only PRs.
 
-**Independent Test**: Read `spec.md`, `plan.md`, `tasks.md`, and `docs/rules/runtime-assembly-plan.md`; the reader can determine which PR owns a change, what must remain behavior-preserving, and which validation command applies.
+**Independent Test**: Read `spec.md`, `plan.md`, `tasks.md`, and `assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate`; the reader can determine which PR owns a change, what must remain behavior-preserving, and which validation command applies.
 
 **Acceptance Scenarios**:
 
@@ -32,7 +32,7 @@ Architecture reviewers can use this entry to prevent runtime assembly optimizati
 
 **Why this priority**: Runtime assembly is the highest-power composition layer. It can name adapters, domains, generated contracts, and service crates, so this series needs explicit boundaries before code movement begins.
 
-**Independent Test**: For any planned task, map it to the crate graph rules in `docs/rules/architecture.md` and to a validation carrier such as Cargo, deny wrappers, `cargo xtask layer-deps`, `cargo xtask assembly validate`, or a future xtask gate.
+**Independent Test**: For any planned task, map it to the crate graph rules in `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` and to a validation carrier such as Cargo, deny wrappers, `cargo xtask layer-deps`, `cargo xtask assembly validate`, or a future xtask gate.
 
 **Acceptance Scenarios**:
 
@@ -92,7 +92,7 @@ Project maintainers can split runtime assembly optimization into small PRs with 
 
 - **SC-001**: `docs/spec/001-runtime-assembly-plan/spec.md`, `plan.md`, and `tasks.md` exist and contain no template placeholders.
 - **SC-002**: `.specify/feature.json` points to `docs/spec/001-runtime-assembly-plan`.
-- **SC-003**: `docs/rules/runtime-assembly-plan.md` exists and records Phase 0/1/2 boundaries, PR budget rules, and AI-HARD policy.
+- **SC-003**: `assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate` exists and records Phase 0/1/2 boundaries, PR budget rules, and AI-HARD policy.
 - **SC-004**: `tasks.md` lists PR-001 through PR-026 and makes #1656 dependent on #1655.
 - **SC-005**: The final diff contains no runtime source, adapter source, migration, generated contract, or assembly schema changes.
 - **SC-006**: `cargo xtask verify --fast` succeeds in the worktree.

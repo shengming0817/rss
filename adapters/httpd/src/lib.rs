@@ -75,7 +75,7 @@ pub struct HttpServer {
 
 /// HTTP server 启动失败（构造期 fail-fast，不静默 noop）。
 ///
-/// message 为 `&'static str` const literal，无 runtime 数据、无 PII（error-handling.md）。
+/// message 为 `&'static str` const literal，无 runtime 数据、无 PII。
 #[derive(Debug, thiserror::Error)]
 pub enum HttpServeError {
     /// TCP bind 失败（端口占用 / 权限不足 / 非法地址）。
@@ -1766,7 +1766,7 @@ mod tests {
     }
 
     /// 绑 `127.0.0.1:0` ephemeral → 真 socket 上发 HTTP/1.1 GET，读回完整响应（raw，无 reqwest dep）。
-    // 测试断言用 expect：item-level carve-out（error-handling.md §Carve-out）。
+    // 测试断言用 expect：item-level carve-out。
     #[allow(clippy::expect_used)]
     async fn raw_get_response(addr: SocketAddr, path: &str) -> String {
         raw_get_response_with_headers(addr, path, "").await

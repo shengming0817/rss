@@ -8,7 +8,7 @@
 //! 单测 `require_with_rss_access_token_non_user_evidence_is_401`（`crates/httpserve/src/auth.rs`）；
 //! 本文件继续覆盖缺证据 / scheme mismatch / allow 路径，**不**再复制 non-User reject-matrix。
 //!
-//! 测试断言用 unwrap/expect：item-level carve-out（error-handling.md §Carve-out）。
+//! 测试断言用 unwrap/expect：item-level carve-out。
 //!
 //! 注：本 contract 测试**不** feature-gate——rust-standards §命名的 `#[cfg(feature="integration")]`
 //! 隔离针对需外部资源（DB/broker/网络）的集成测试；本测试全程 in-process（axum oneshot、

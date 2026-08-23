@@ -1,5 +1,5 @@
 # RSS cargo-deny：supply-chain 策略 + 分层强制（Medium 载体）。
-# 分层强制分级（见 plan / docs/rules/architecture.md §Rust 原生强制）：
+# 分层强制分级（见 plan / `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）：
 #   Hard① crate 依赖图：未声明就 import 不到。
 #   Hard② cargo 无环：下层依赖上层会闭环 → cargo 拒绝。
 #   Medium 本文件 wrappers：按 all-features resolved graph 精确列出受管 target 的真实 direct parents；
@@ -10,7 +10,7 @@
 #     不复制 cargo-deny 的 resolved parent 集合证明。免疫裸名×crates.io 命名冲突。
 #   下列 wrappers 是分层 defense-in-depth（与 layer-deps 并存）。adapter package 名须与其依赖的同名
 #     crates.io crate **不同**（如 redis adapter 的 package = `redis-adapter`，`[lib] name = "redis"` 保留裸导入），
-#     否则 bare-name ban 会误伤传递引入的同名外部 crate。详见 architecture.md §扁平 workspace 结构 命名约定。
+#     否则 bare-name ban 会误伤传递引入的同名外部 crate。详见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
 [graph]
 all-features = true
 

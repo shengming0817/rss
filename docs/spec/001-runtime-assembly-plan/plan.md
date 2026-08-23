@@ -14,7 +14,7 @@ Create the SpecKit planning foundation for the runtime assembly optimization ser
 
 **Primary Dependencies**: Cargo workspace, `xtask`, `deny.toml`, dylint registry, SpecKit templates, and RSS rule documents.
 
-**Storage**: Documentation under `docs/spec/001-runtime-assembly-plan/` and `docs/rules/runtime-assembly-plan.md`.
+**Storage**: Documentation under `docs/spec/001-runtime-assembly-plan/` and `assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate`.
 
 **Testing**: `cargo xtask verify --fast`.
 
@@ -55,7 +55,7 @@ docs/spec/001-runtime-assembly-plan/
 └── tasks.md
 
 docs/rules/
-└── runtime-assembly-plan.md
+└── assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate
 ```
 
 `specs/001-runtime-assembly-plan/**` resolves to the same files through the existing `specs -> docs/spec` symlink.

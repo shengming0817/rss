@@ -12,7 +12,7 @@
 //! `Authenticated` 是 enforce 层放行 `Require` 路由的认证证据（INVARIANT AUTH-EVIDENCE-REQUIRE-01）：
 //! 请求携该 extension 即放行。生产构造须持 Hard token；本 Medium lint 再守「仅精确验签桥 + 消费 proof」。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游 Hard：`authmint` token + deny.toml wrappers——域 / journeys 不可依赖 authmint，无法命名 capability。
 //! - 下游 Medium（本 lint）：即便 assembly 持有 token，仍只能在列明 exact wrapper 内 mint，且须消费
 //!   已验证 proof（防 assembly 内旁路铸证）。

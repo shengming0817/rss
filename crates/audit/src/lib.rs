@@ -21,7 +21,7 @@
 #![forbid(unsafe_code)]
 
 /// 应用层：session→链 append 订阅 handler + 跨租户 admin 读 handler + bootstrap 生命周期。私有——只经
-/// facade re-export 暴露（domain-patterns.md §封装）。
+/// facade re-export 暴露（由 Rust visibility 限定）。
 mod application;
 pub(crate) mod domain;
 /// 域内 in-mem 仓储 provider（仅测试 feature 编译；read/write ports 已升 `pub mod ports`）。

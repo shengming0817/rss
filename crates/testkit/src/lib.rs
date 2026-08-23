@@ -1,9 +1,9 @@
 //! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）+ L2 provider
 //! conformance catalog 宏入口。
 //!
-//! 给 per-contract 契约测试（`domain-patterns.md §Contract test`）提供可复用 harness：声明式构造请求、
+//! 给 per-contract 契约测试提供可复用 harness：声明式构造请求、
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
-//! generated wire 类型（schema 对齐）/ 解析统一 wire error envelope（`error-handling.md §Wire 格式`）。
+//! generated wire 类型（schema 对齐）/ 解析统一 wire error envelope。
 //!
 //! ## 有界等待（[`wait`]）
 //!
@@ -17,11 +17,11 @@
 //! (`eventing_conformance` 模块)。Macro token 为 snake_case，稳定 label 为 kebab-case；compile-fail
 //! 负例见 `tests/ui/provider_catalog_*.rs`（经 `tests/provider_catalog_trybuild.rs`）。语义门入口为
 //! `./hack/cargo.sh xtask provider-capabilities --check`；裸命令只生成 ignored target 诊断报告
-//! （语义见 `docs/rules/eventbus.md`）。
+//! （语义见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉
-//!   adapter（`rust-standards.md §命名`）。本 crate 唯一内部 shipped 出边为 `rss-conformance`，其余
+//!   adapter。本 crate 唯一内部 shipped 出边为 `rss-conformance`，其余
 //!   出边为外部 crate（axum/tower/serde…）。
 //! - **不构造 `AuthPlan` / 不挂 `finalize_auth`**——auth 装配是组合根关注点；harness 只驱动调用方已
 //!   组装好的 `Router`。运行期鉴权闸（401/403）的端到端断言见 `httpserve/tests/runtime.rs`。
@@ -139,10 +139,11 @@ pub async fn call(
 /// 返回 [`TestkitError::Body`] 而非 `usize::MAX` 下的 OOM——与 harness「不 panic、全走 Result」一致。
 const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 
-/// 构造统一 wire error envelope 响应（`{"error":{"code","message","retryable","details","requestId"}}`，
-/// `error-handling.md §Wire 格式`）——**test fixture**：供契约测试的样板 handler 产出错误响应，单源化
+/// 构造统一 wire error envelope 响应
+/// （`{"error":{"code","message","retryable","details","requestId"}}`）——**test fixture**：
+/// 供契约测试的样板 handler 产出错误响应，单源化
 /// envelope 形状（与 [`WireError`] 解析侧对称，防 drift）。生产 handler 用 generated typed response
-/// envelope（`domain-patterns.md §Typed response envelope`），非本 helper。`requestId` 用固定哨兵
+/// envelope，非本 helper。`requestId` 用固定哨兵
 /// `"test-rid"`（真实 requestId 由框架注入，见 `httpserve/tests/runtime.rs`）。
 pub fn wire_error_response(
     status: axum::http::StatusCode,

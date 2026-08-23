@@ -20,13 +20,13 @@
 ## D2. mock 范式 + 签名冻结期测试策略
 
 - **Decision**：
-  - mock 在**同 crate `#[cfg(test)]`** 生成消费，不跨 crate 共享（合 `rust-standards.md`）。外部 trait 用 `mock!`。
+  - mock 在**同 crate `#[cfg(test)]`** 生成消费，不跨 crate 共享。外部 trait 用 `mock!`。
   - **dynosaur/native-AFIT 下 mockall 的具体形态（automock 是否直接支持 native `async fn` in trait、mock 是装入 native trait 还是 `DynX` wrapper）ADR-003 未覆盖 → 列为 diport 落地 spike 待验证项（data-model 待决项#6）**。L0 静态依赖单测用 `#[cfg(test)]` 内直接 impl 替身，不引入 dynosaur wrapper。
   - 签名冻结期三件测试：**PORT-SHAPE-01**（`Box/Arc<DynX>` 装得下 mock = dyn-compatible）、**PORT-SHAPE-02**（mock 可作构造器必填位置参注入）、**PORT-SHAPE-03**（async mock `.await` 且 Future `Send`）。
   - 基础/引擎 crate 额外产 `cargo public-api` baseline。
 - **Rationale**：body=`todo!()` 无行为可测；测试唯一目标是证明**签名编译 + mock 可构造 + DI 接线成立 + dyn-compatible**。覆盖率门对 todo!() 不可达不适用 → 显式豁免到行为 PR。
 - **Alternatives considered**：跨 crate `test-utils` 共享 mock（破坏域单测隔离，拒）；签名 PR 写真实现凑覆盖率（破坏并行冻结价值，拒）。
-- **ref**: `mockall` docs.rs；`rust-standards.md` §命名/覆盖率。
+- **ref**: `mockall` docs.rs；。
 
 ## D3. bootstrap 生命周期 / init / 关闭逆序接缝（gate: #996 / **ADR-001**）
 

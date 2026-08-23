@@ -43,7 +43,7 @@ struct InvalidAddr;
 /// Transit `sign` 非 2xx 响应（auth / policy / key 不存在 / Vault 不可用等）。携带 HTTP status code 作
 /// **内部诊断字段**（`#[derive(Debug)]` 读它供 vault 内日志 / 诊断）：经 [`SignerError`] 包装后 source 在 port
 /// 边界仍 redacted（`DIPORT-ERR-SOURCE-REDACT-01` 不破），status code 不外泄给调用方。状态码不进 `Display`
-/// （const literal，error-handling.md §Message——runtime 数据只走 tracing 字段）。
+/// （const literal）。
 #[derive(Debug, thiserror::Error)]
 #[error("vault transit sign returned non-success status")]
 struct NonSuccessStatus(u16);
@@ -396,8 +396,8 @@ pub(crate) async fn sign_impl(
             .push("sign")
             .push(request.key.as_str());
     }
-    // reason: serde_json::Value 序列化理论上不失败（无非序列化字段）；用 map_err 而非 expect 符合库错误规范
-    // （error-handling.md），无需 item-level #[allow]。
+    // reason: serde_json::Value 序列化理论上不失败（无非序列化字段）；用 map_err 而非 expect，
+    // 无需 item-level `#[allow]`。
     let payload = serde_json::to_vec(&build_sign_body(request.message.as_bytes()))
         .map_err(SignerError::new)?;
 
@@ -1019,7 +1019,7 @@ mod sign_impl_tests {
     const TOKEN: &str = "test-token";
     const OK_BODY: &str = r#"{"data":{"signature":"vault:v1:cmF3c2ln"}}"#; // base64("rawsig")=="cmF3c2ln"
 
-    // base Url = mock server 地址。expect 的 item-level carve-out 集中此处（error-handling.md §Carve-out）。
+    // base Url = mock server 地址。expect 的 item-level carve-out 集中此处。
     #[allow(clippy::expect_used)]
     fn base_url(server: &MockServer) -> reqwest::Url {
         reqwest::Url::parse(&server.uri()).expect("mock server uri is a valid base url")

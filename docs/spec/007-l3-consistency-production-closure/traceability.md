@@ -2,7 +2,7 @@
 
 本表保留外部 requirement ID，但每行只指定一个 canonical Azure PBI 和一个最低充分验证 owner。依赖 PBI 可以协作
 实施，却不成为第二 owner。T1/T2/T3 的定义、去重和执行边界只引用
-[`project-scope.md` 的验证范围矩阵](../../rules/project-scope.md#验证范围矩阵)；本表不复制测试、provider、assembly
+ADR-024；本表不复制测试、provider、assembly
 或 CI job inventory。
 
 | Requirement | 归一化意图 | Canonical PBI | 最低充分验证 owner |

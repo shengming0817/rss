@@ -29,11 +29,11 @@ develop 历史上有 **4 对重复序号**：`0002`（inbox_dedup + outbox）、
 把 18 个迁移整体重编为唯一连续 `0001`–`0018`，**保持原有应用顺序**（重号对内按依赖安全的字母序定序：
 outbox 在其 ALTER 之前、被建表在 `enable_tenant_rls` 之前等），仅破开重号、不改任一迁移的 SQL 语义。
 
-这是 `rust-standards.md` / 迁移 README「已提交 migration 只增不改」的**显式例外**，依据：
+这是  / 迁移 README「已提交 migration 只增不改」的**显式例外**，依据：
 
 - **pre-GA、无外部消费方、无已部署 DB** ⇒ 不存在持有旧 checksum 的 `_sqlx_migrations`，重编无破坏对象。
 - 「只增不改」保护的是**可独立演进的已部署 schema 历史**；重号迁移在任何 DB 上本就无法应用，重编是
-  **bug 修复**而非演进破坏——保护对象不存在，仪式无意义（同 `api-versioning.md` pre-GA wire 窗口的推理）。
+  **bug 修复**而非演进破坏——保护对象不存在，仪式无意义（同 cargo xtask contract breaking / cargo public-api pre-GA wire 窗口的推理）。
 - 不考虑向后兼容（`CLAUDE.md`：当前只有 rss 自身）。
 
 窗口边界：GA 或出现已部署 DB 后，本例外即失效，迁移恢复严格 append-only。

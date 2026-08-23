@@ -209,8 +209,8 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-001**: `consistency` 的全部冻结类型（newtype/enum/struct funnel）与引擎策略 trait 关联的访问器 MUST 兑现真实 body，非法构造输入 MUST fail-closed 拒绝，不得 `todo!()` panic。
 - **FR-002**: 引擎错误 message MUST 为 `&'static str` const literal（无 `format!` 拼 runtime 数据）；engine 类型 MUST NOT derive serde（ADR-004 C6）。
 - **FR-003**: 系统 MUST 支持业务数据与 outbox entry 在同一本地事务内原子写入；业务回滚 MUST 连带 outbox 回滚（无孤立 entry）。
-- **FR-004**: relay MUST 以 at-least-once 中继已持久化 entry，发布成功后经 CAS 标记 published；瞬态失败延后重试、永久失败进 DLX；MUST 不丢事件（崩溃重启后复投）。relay 后台 worker MUST 注册运行时操作 health probe `outbox_relay`（**无 `_ready` 后缀**——`_ready` 专属依赖可用性 probe，运行时操作 probe 不带，见 observability.md §Readyz Probe）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
-- **FR-005**: sweeper MUST 周期兜底扫描未发 entry 触发重投，防中断导致 entry 永不发。sweeper 后台 worker MUST 注册运行时操作 health probe `outbox_sweeper`（**无 `_ready` 后缀**，同 observability.md §Readyz Probe 命名约定）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
+- **FR-004**: relay MUST 以 at-least-once 中继已持久化 entry，发布成功后经 CAS 标记 published；瞬态失败延后重试、永久失败进 DLX；MUST 不丢事件（崩溃重启后复投）。relay 后台 worker MUST 注册运行时操作 health probe `outbox_relay`（**无 `_ready` 后缀**——`_ready` 专属依赖可用性 probe，运行时操作 probe 不带，见 `crates/observ`、`secure::redact_error` 与 typed metric enums）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
+- **FR-005**: sweeper MUST 周期兜底扫描未发 entry 触发重投，防中断导致 entry 永不发。sweeper 后台 worker MUST 注册运行时操作 health probe `outbox_sweeper`（**无 `_ready` 后缀**，同 `crates/observ`、`secure::redact_error` 与 typed metric enums）；worker 异常退出 MUST 经该 probe 反映到 health（不静默假绿）。
 - **FR-006**: 消费方 MUST 在副作用前以稳定 key claim-or-skip 幂等去重；重复投递 MUST 不产生重复副作用。
 - **FR-007**: topology-gated resolver（eventtransport / replaydeps / sagaprojectiondeps）MUST 在 demo（in-mem）与 durable 拓扑间单源选型；eventtransport durable = AMQP + PostgreSQL inbox/DLX，saga durable = PostgreSQL tenant-scoped instance/journal + checkpoint/DLX + Redis runtime lock provider。durable 拓扑缺对应生产配置 MUST 启动期 fail-closed，MUST NOT 静默降级回 in-mem。
 - **FR-008**: in-mem 原语（claimer / bus / saga instance+journal / checkpoint）MUST sealed，仅 resolver 的 demo 分支可达，生产代码 MUST 不可直接构造（类型层 Hard）。

@@ -325,7 +325,7 @@ impl OutboxEnvelopeParts {
     ///
     /// `partition_key` 是不透明聚合根路由键；tenant scope 由必填的 [`rss_request_context::TenantId`] 落入 outbox
     /// `tenant_id` 列承载，跨租同 business key 不共享 gate。推荐直接使用稳定 aggregate id；
-    /// 语义见 `docs/rules/tenancy.md` + `eventbus.md §投递顺序保证`。
+    /// 语义见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL + `contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
     ///
     /// **⚠ DLX 警示**：队头行一旦进入 DLX（永久错误或重试预算耗尽），会**阻塞该
     /// `(tenant_id, domain, partition_key)` 的所有后继行**，直到运维经 DLQ redrive 解冻队头。

@@ -274,7 +274,7 @@ async fn eventing_conformance_consumer_enrolls_postgres() -> TestResult {
 // sweep 是**全表** DELETE（无 group 过滤），故全局只断言「≥1」+ per-row event_id-scoped 精确断言（跨轮/并发稳健，同 t8）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
 async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult {
     use consistency::LeaseOutcome;
     let (_pg, store) = connect_pg().await?;
@@ -385,7 +385,7 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
 /// 批量 inbox backlog：跨 tenant 聚合，仅返回选中 generated group 的 stale claimed。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
 async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -571,7 +571,7 @@ async fn t_inbox_backlog_reader_role_is_function_only() -> TestResult {
 /// Inbox sweeper 是全局维护端口：按表清理所有 consumer groups 的超期 done，而不是绑定单个 group。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
 async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -668,7 +668,7 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
 /// 非法 retain_seconds 必须 fail-closed，且不触发删除。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
 async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -724,7 +724,7 @@ async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
 /// `rss_app` 只能直调读取冻结策略的无参数 SECURITY DEFINER 函数；旧自由 retain 签名不存在。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out。
 async fn t_inbox_sweeper_rss_app_uses_frozen_policy_without_free_retain_argument() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;

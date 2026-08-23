@@ -13,8 +13,8 @@
 //! - **RECONCILE-TENANCY-REQ-01**（Hard，类型系统）：[`Builder::new`] 第二、三参 [`Tenancy`] / [`Trigger`]
 //!   是必填位置参——漏传即编译错（E0061），非运行期校验。回归见 `tests/ui/reconcile_missing_{tenancy,trigger}_fail.rs`
 //!   （trybuild compile_fail）。`Tenancy` 仿 `Clock` 位置参约定：reconciler 在 tenantless system 身份下跑，
-//!   须显式声明命名空间（reconcile.md §Builder 强制）。
-//! - **panic→transient**（reconcile.md §Reconciler 实现要点）：捕获的 `reconcile()` panic（`catch_unwind`）
+//!   须显式声明命名空间（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
+//! - **panic→transient**（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）：捕获的 `reconcile()` panic（`catch_unwind`）
 //!   映射 transient 退避，不挂环。
 //! - fencing 正确性（RECONCILE-FENCE-MONO-01）落 `diport::FencedWriter` 单调 CAS（域 reconciler 写路径消费），
 //!   **不在 harness**：harness 仅经 `Context::for_harness(epoch)` 把当前任期 epoch 注入 reconciler。
@@ -3407,7 +3407,7 @@ fn emit_lease_churn(operation: LeaseOperation, state: LeaseState, reason: LeaseR
 ///
 /// reconciler 在 tenantless system 身份下发射命令（Claimer key 落 `_notenant`），故 [`Builder::new`] 强制
 /// 显式声明该命名空间是否正确（必填位置参，漏传 = 编译错）。`TenantScoped` reconciler 须自行在 command-id
-/// 编码 tenant 维度（框架不验证 body，残留盲区——reconcile.md §Builder 强制）。
+/// 编码 tenant 维度（框架不验证 body，残留盲区——`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tenancy(TenancyKind);
 
@@ -3610,7 +3610,7 @@ impl<R: Reconciler> ReconcileLoop<R> {
         Arc::clone(&self.health)
     }
 
-    /// 单进程驱动：always leader、epoch `None`、无 fencing（reconcile.md §Leader-elect）。直到 `token` 取消。
+    /// 单进程驱动：always leader、epoch `None`、无 fencing（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。直到 `token` 取消。
     ///
     /// **生产多副本部署禁止用 `run`**（无 fencing）；多副本必须 `run_with_leader`。
     /// 单进程 = 确认单副本。
@@ -3723,7 +3723,7 @@ impl<R: Reconciler> ReconcileLoop<R> {
     /// 单个 leadership 任期：dispatch 环与 lease 续租**并发**（无 spawn，`select!` 内同任务）。
     ///
     /// 丢 lease（[`Self::renew_until_lost`] 先完成）⇒ `select!` 丢弃 dispatch future ⇒ **取消在途 reconcile**
-    /// （reconcile.md §Leader-elect「丢 lease 取消 lease-scoped CancellationToken 中断在途 reconcile」）。
+    /// （由 `consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance 承载）。
     async fn lead_term<L: LeaderElector + Send + Sync + 'static>(
         &self,
         leader: &L,
@@ -4066,7 +4066,7 @@ mod tests {
     impl Reconciler for ScriptedReconciler {
         #[allow(clippy::panic)]
         // reason: 测试桩刻意 panic 以验证 harness 的 panic→transient 捕获（dispatch_panic_maps_to_transient_backoff）；
-        // item-level carve-out（error-handling.md §Carve-out）。
+        // item-level carve-out。
         async fn reconcile(&self, ctx: &Context, _req: Request) -> Result<Outcome, ReconcileError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.seen_epoch
@@ -4258,7 +4258,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    // reason: 测试桩用 canonical literal 构造，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试桩用 canonical literal 构造，item-level carve-out。
     fn tlid() -> LeaderId {
         LeaderId::parse("test-leader").expect("canonical")
     }
@@ -7553,7 +7553,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试断言已 is_ok 的 parse（canonical key），item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试断言已 is_ok 的 parse（canonical key），item-level carve-out。
     async fn dispatch_transient_backs_off_per_entity() {
         let reconciler = ScriptedReconciler::new(Behavior::Transient);
         let mut attempts = HashMap::new();
@@ -7738,7 +7738,7 @@ mod tests {
 
     // ── leader 任期：丢 lease → select-drop 取消在途 dispatch ──────────────────
 
-    /// 验证 reconcile.md §Leader-elect「丢 lease 取消在途 reconcile」承诺：
+    /// 验证 `consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance 承诺：
     /// RenewOnceLeader 第 2 次续租返 Ok(None)，renew_until_lost 取消 scope，
     /// dispatch_loop 被 select! drop，calls 停止增长。
     #[tokio::test(start_paused = true)]

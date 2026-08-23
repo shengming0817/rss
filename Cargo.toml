@@ -1,5 +1,5 @@
 # RSS 扁平 Cargo workspace（骨架）。
-# 结构树 / 分层 / 命名单一事实源：docs/rules/architecture.md §扁平 workspace 结构 + §分层。
+# 结构树 / 分层 / 命名单一事实源：`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
 # 分层强制：crate 依赖图（Hard，编译期）+ deny.toml wrappers（Medium，CI）。见 deny.toml。
 [workspace]
 resolver = "2"
@@ -13,7 +13,7 @@ members = [
   "crates/conformance",
   # Transport-neutral DTO/schema projection for the six device-security Draft candidates.
   "crates/devicesecuritycontracts",
-  # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 architecture.md）
+  # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）
   "crates/vocab",
   "crates/ids",
   # secure 的字段级脱敏 derive（#[derive(Redact)]）proc-macro；intra-base DAG 低于 secure（secure → securederive 前向边）
@@ -338,7 +338,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # 字段支持消费。两者均 MIT OR Apache-2.0（deny.toml allow-list 内），统一在 workspace 钉版本。
 semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
-# 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）
+# 契约 codegen（xtask 专用；generated crate 不引入这些——见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）
 typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
 prettyplease = "0.2"
@@ -381,6 +381,6 @@ cognitive_complexity = "warn"   # CLAUDE.md ≤15（阈值在 clippy.toml）
 disallowed_methods = "warn"     # 具体列表在 clippy.toml（clock 注入纪律）
 disallowed_types = "warn"
 disallowed_macros = "warn"
-panic = "deny"                  # panic 纪律（rust-standards.md/error-handling.md 要求 deny）；测试模块 item-level #[allow] carve-out
+panic = "deny"                  # panic 纪律由 workspace lint policy 与 clippy.toml 强制；测试模块只允许 item-level #[allow] carve-out
 unwrap_used = "deny"
 expect_used = "deny"

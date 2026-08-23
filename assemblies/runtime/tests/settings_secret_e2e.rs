@@ -233,7 +233,7 @@ fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretServ
 /// e2e-s1：publish_secret → find_secret_ref roundtrip（typed UoW 写入 + PgSecretRepo 读取闭合）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试 happy-path；item-level carve-out。
 async fn e2e_s1_publish_find_roundtrip() -> TestResult {
     let (_pg, deps) = connect_pg_and_setup().await?;
     let resolver = InlineMemResolver::new();

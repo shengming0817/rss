@@ -139,7 +139,7 @@ where
         let tenant = scope.tenant();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let chain = state.chains.get(&tenant).map(Vec::as_slice).unwrap_or(&[]);
-        // 读时校验整链完整（tamper-evident，docs/rules/audit-ledger.md）：篡改即 fail-closed，不返回脏数据。
+        // 读时校验整链完整（tamper-evident，INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests）：篡改即 fail-closed，不返回脏数据。
         // in-mem 进程内存不可被外部篡改，此调用是契约一致性 + 链完整回归守卫；真实 defense 在 postgres provider。
         self.hasher.verify(chain)?;
         // 续页游标语义无效即 fail-closed（不静默回退首页，防重复页，F4）。

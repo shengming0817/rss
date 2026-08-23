@@ -1,4 +1,4 @@
-//! 引擎层错误词汇 —— ADR-004 C10 + `docs/rules/error-handling.md`。
+//! 引擎层错误词汇（ADR-004 C10）。
 //!
 //! 引擎策略 trait（`InboxStore`/`OutboxRelay`/`Reconciler`/`Projector`）以及
 //! `eventexec::SagaStep<GeneratedStepMarker>` authoring seam 共用的失败通道。
@@ -31,7 +31,7 @@ impl EngineErrorKind {
 /// 引擎策略 trait 的统一错误（私有字段；kind + 可选 source 链经 typed 通道）。
 ///
 /// `Display` 只输出 `kind` 的 const message——不拼 runtime 数据，避免 PII 误入日志（同 `vocab::CoreError`）。
-/// `is_transient` / `is_permanent` 是重试分类查询；**不**自动改写控制流（reconcile.md：分类 ≠ 放弃）。
+/// `is_transient` / `is_permanent` 是重试分类查询；**不**自动改写控制流（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance：分类 ≠ 放弃）。
 #[derive(Debug, thiserror::Error)]
 #[error("{}", .kind.message())]
 pub struct EngineError {
@@ -54,7 +54,7 @@ impl EngineError {
         self.kind == EngineErrorKind::Transient
     }
 
-    /// 是否永久失败（`Permanent`）。仅分类，不自动把重试改放弃（reconcile.md）。
+    /// 是否永久失败（`Permanent`）。仅分类，不自动把重试改放弃（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
     pub fn is_permanent(&self) -> bool {
         self.kind == EngineErrorKind::Permanent
     }

@@ -14,7 +14,7 @@ workspace = true
 # [dev-dependencies] 显式启用。
 test-support = []
 
-# bootstrap 属服务层，按 architecture.md §分层「服务依赖基础+引擎+DI-infra」连基础+引擎+diport。
+# bootstrap 属服务层，按 `Cargo.toml`、`xtask/src/layers.rs` 与 `deny.toml` 连接基础+引擎+diport。
 # 一般不依赖兄弟服务（resolver 等由组合根 bins/server / assembly 注入，不在此预连，PR #137 review F1）；
 # **受控例外**：依赖 httpserve 的**编译期路由类型词汇**（ListenerRouter<L> / UnfinalizedRoutes，typed
 # route funnel #1113/#1103），经 ADR-009 sanction 的 `bootstrap → httpserve` 边（layers.rs route_funnel_allows，
@@ -49,7 +49,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt", "time"] }
 # finalize_routes 的 listener 隔离行为测试（ROUTE-LISTENER-TYPED-01 类型层守的运行期补充）：
 # tower::ServiceExt::oneshot 对 per-listener Router（经 UnfinalizedRoutes::into_router_for_test 取回）发请求，
-# 断言路由不串台（sanctioned handler 测试 idiom，rust-standards.md §覆盖率）。axum 仅测试构建请求/handler 用。
+# 断言路由不串台；axum 仅用于测试构建请求与 handler。
 tower = { workspace = true, features = ["util"] }
 axum = { workspace = true }
 # 隔离测试经 httpserve 的 test-util feature 取回裸 Router（`UnfinalizedRoutes::into_router_for_test`）做 oneshot；

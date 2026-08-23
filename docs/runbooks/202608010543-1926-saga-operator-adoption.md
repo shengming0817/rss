@@ -1,6 +1,6 @@
 # Saga Production Adoption and Operator Runbook
 
-本 runbook 是 #1926 的 production adoption 与值班入口。行为约束见 `docs/rules/saga.md`；本页不定义新的
+本 runbook 是 #1926 的 production adoption 与值班入口。行为约束见 `generated / diport::SagaDurableStore / saga conformance`；本页不定义新的
 capability 或状态。机器 truth 由下列 carrier 提供：
 
 - `assembly_schema::SagaActivation::Active.requirements()`：active Saga 的 capability exact set；

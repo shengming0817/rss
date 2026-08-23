@@ -12,7 +12,7 @@
 //! 无法选择性放行下游 authn（ADR-003 §4.2 / ADR-006 / ADR-005 §6 已确立：跨 crate sealed-trait 不可行，
 //! dylint 为最强可用载体 Medium）。故 `PrincipalFacet` 是 open `pub trait`，impl 面由本 lint 承载。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（定义面）：`PrincipalFacet` 只在 `runctx` 定义——crate 依赖图（runctx 是基础层、无人能在别处
 //!   重定义同名 trait 并让 `AppCtx` 接受）天然成立。
 //! - 下游（impl 面）：只有 `authn`（+ `runctx` test facet）可 impl——本 lint（Medium）。
@@ -41,7 +41,7 @@
 //! golden 字节随**钉版 nightly**（`lints/rust-toolchain.toml`）；toolchain bump 后须重跑本 crate UI 测试
 //! 校验（必要时重 bless `ui/main.stderr`，与其它 dylint UI golden 同纪律）。
 //!
-//! Hard 化评估（ai-robust.md §审查要求）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
+//! Hard 化评估（cargo xtask archrules verify）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
 //! AST lint 是最强可用载体。与 `rss_crosstenant_callsite`（authn-only callsite）/ `rss_diport_impl_allowlist`
 //! （impl-site allowlist）同源评级（Medium）。
 

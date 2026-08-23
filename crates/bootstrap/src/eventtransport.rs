@@ -3,9 +3,9 @@
 //! 组合根（`bins/server` / `journeys` / 未来 `examples`）经 [`resolve`] 按 [`Topology`] 单源选型
 //! 事件传输：demo 拓扑用进程内 in-mem bus，durable 拓扑用 per-domain amqp broker。
 //!
-//! # 为什么 resolver 返回**决策**而非**构造好的 adapter**（ADR / eventbus.md 偏离）
+//! # 为什么 resolver 返回**决策**而非**构造好的 adapter**（ADR / `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 偏离）
 //!
-//! `eventbus.md` 早期措辞设想在本模块的 `BrokerKind` match 里直接构造 `MemBus` / `AmqpPublisher`，
+//! `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 早期措辞设想在本模块的 `BrokerKind` match 里直接构造 `MemBus` / `AmqpPublisher`，
 //! 并把「in-mem bus 仅 demo 可达」的 sealing 落在 bootstrap（Hard）。但 **bootstrap 是服务层 crate**，
 //! `deny.toml`（`amqp` wrappers=[server,rss,xtask,journeys]；`memory` wrappers=[journeys,xtask]）+
 //! `cargo xtask layer-deps` + cargo 依赖图三道门**禁止 bootstrap 依赖 adapters**。故本 resolver 是
@@ -31,7 +31,7 @@
 //! 受控可达。错误 message 不含凭据 / PII（[`TransportResolveError::MissingBrokerUrl`] 仅含大写 domain 名，
 //! 安全可诊断，review F6）。
 //!
-//! ref: docs/rules/eventbus.md §事件传输选型 / §per-domain AMQP vhost/credential 隔离
+//! ref: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`
 
 use std::collections::BTreeMap;
 
@@ -89,7 +89,7 @@ impl std::fmt::Display for AmqpUrl {
 pub struct TransportConfig {
     /// per-domain AMQP URL（key = 大写 DOMAIN，如 `"IDENTITY"`）。
     per_domain_urls: BTreeMap<String, AmqpUrl>,
-    /// 共享回退 URL（**非隔离**拓扑用；未来隔离拓扑禁回退，见 eventbus.md §per-domain 隔离）。
+    /// 共享回退 URL（**非隔离**拓扑用；未来隔离拓扑禁回退，见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
     shared_url: Option<AmqpUrl>,
 }
 
@@ -174,7 +174,7 @@ pub fn resolve(
     match topo {
         // reason: demo 拓扑无 broker 依赖，恒成立。
         Topology::Demo => Ok(ResolvedTransport::Demo),
-        // 非隔离：per-domain 缺则回退共享 URL（eventbus.md §per-domain：隔离拓扑才禁回退）。
+        // 非隔离：per-domain 缺则回退共享 URL（`contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
         Topology::DurableShared => resolve_durable(&cfg, required_domains, cfg.shared_url.as_ref()),
         // 隔离：禁回退共享凭据——配置含 shared URL 即矛盾，fail-closed；per-domain 缺即 fail-closed。
         Topology::DurableIsolated => {

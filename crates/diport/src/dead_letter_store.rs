@@ -6,7 +6,7 @@
 //! [`DeadLetterRecord::original_payload`] 返回 `&RedactedBytes`（Hard，#1259），不直接借出 `&[u8]`。
 //! port 语义是 raw bytes 交接，不做 at-rest 加密。
 //! 持久化机密性由实现负责：生产 `PgDeadLetterStore` 必须经 `KeyProvider` 将 payload 与
-//! persisted metadata 封为 encrypted `replay_capsule`（见 `docs/rules/eventbus.md` §DLX 与幂等）；
+//! persisted metadata 封为 encrypted `replay_capsule`（见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）；
 //! 明文仅允许 test / memory 替身。
 //! Debug 输出一律隐藏（INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 
@@ -21,8 +21,8 @@ use crate::redacted_bytes::RedactedBytes;
 /// DLX 安全摘要（类型层 PII 边界，Hard）。
 ///
 /// 内层固定为 `&'static str` const literal——从类型层**杜绝**任意 runtime `String` / handler 错误原文 /
-/// payload 片段流入死信摘要字段（对标 `vocab` 错误 message 的 `&'static str` const-literal 约束，
-/// error-handling.md §Message 与 PII）。[`DeadLetterRecord::new`] 只经本 newtype 接收摘要，故摘要只能是
+/// payload 片段流入死信摘要字段；该约束与 `vocab` 错误 message 的 `&'static str` const literal 一致。
+/// [`DeadLetterRecord::new`] 只经本 newtype 接收摘要，故摘要只能是
 /// 编译期作者控制的常量、不可由运行期数据伪造（input struct field exclusion + newtype funnel）——
 /// 不再靠「调用方记得脱敏」的 rustdoc 纪律（review #216 F7）。
 /// INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "summary-type" }（回归见 `summary` 单测；「不可传 `String`」由类型层编译期保证）。

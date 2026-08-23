@@ -480,7 +480,7 @@ mod tests {
         ids.iter().map(|s| (*s).to_string()).collect()
     }
 
-    // 测试 helper：已知合法 / 损坏输入断言——expect item-level carve-out（error-handling.md §Carve-out；
+    // 测试 helper：已知合法 / 损坏输入断言——expect item-level carve-out；
     // expect 收口于 helper、rstest 用例体不直接 expect，与 settings/rbac 既有 helper 范式一致）。
     #[allow(clippy::expect_used)]
     fn hydrate_ok(id: &str, name: &str, perms: &[&str]) -> Role {

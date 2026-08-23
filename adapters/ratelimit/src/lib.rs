@@ -114,7 +114,7 @@ mod tests {
     use diport::DynRateLimiter;
     use governor::clock::FakeRelativeClock;
 
-    // 测试构造用 expect：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
+    // 测试构造用 expect：item-level carve-out。
     #[allow(clippy::expect_used)]
     fn quota(per_second: u32, burst: u32) -> RateLimitQuota {
         RateLimitQuota::try_new(per_second, burst).expect("valid test quota")
@@ -128,8 +128,8 @@ mod tests {
         GovernorLimiter::with_clock(quota(per_second, burst), clock)
     }
 
-    // 断言判定为 Limited 并取出 retry_after。panic 的 item-level carve-out 集中于此一 helper
-    // （error-handling.md §Carve-out 要求 item-level），测试体不再散落 `panic!`。
+    // 断言判定为 Limited 并取出 retry_after。panic 的 item-level carve-out 集中于此 helper，
+    // 测试体不再散落 `panic!`。
     #[allow(clippy::panic)]
     fn expect_retry_after(decision: RateLimitDecision) -> Duration {
         match decision {
@@ -139,8 +139,8 @@ mod tests {
         }
     }
 
-    // 取 `key` 判定。in-mem 实现 `check` 永不 `Err`，故 `unwrap` 的 item-level carve-out 集中于此一 helper
-    // （error-handling.md §Carve-out），测试体不再散落 `#[allow(clippy::unwrap_used)]`。同一 `&str` →
+    // 取 `key` 判定。in-mem 实现 `check` 永不 `Err`，故 `unwrap` 的 item-level carve-out 集中于此 helper，
+    // 测试体不再散落 `#[allow(clippy::unwrap_used)]`。同一 `&str` →
     // 同一 `RateLimitKey`（Hash/Eq），重复调用命中同一配额桶。
     #[allow(clippy::unwrap_used)]
     async fn decide(rl: &GovernorLimiter<FakeRelativeClock>, key: &str) -> RateLimitDecision {

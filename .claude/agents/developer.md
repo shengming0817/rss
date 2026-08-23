@@ -83,9 +83,9 @@ tools:
 - clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
 - 同义字符串 ≥ 3 次使用需抽 `const`
 - HTTP 错误响应格式 `{"error": {"code","message","details"}}`
-- EventBus consumer 订阅声明来自 `Cargo.toml [dependencies]` + `contract.toml`、派生到 `generated`（非注释式合规；见 `docs/rules/eventbus.md`）
+- EventBus consumer 订阅声明来自 `Cargo.toml [dependencies]` + `contract.toml`、派生到 `generated`，不得靠注释合规
 
-> RSS 扁平 workspace 结构树 / 分层 / crate 列表 / concat 命名 / `deny.toml` 编译期强制 —— **单一事实源** `docs/rules/architecture.md` §扁平 workspace 结构、§分层。本文件不复制结构表。
+> RSS workspace 成员与分层以 Cargo metadata、`xtask/src/layers.rs` 和 `deny.toml` 为事实源；本文件不复制结构表。
 
 升级判据：单条任务若实际影响超出 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API / 需改 `deny.toml` 分层） → 立即停止，回报调用方升级处理。
 

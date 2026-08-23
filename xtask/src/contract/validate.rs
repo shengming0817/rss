@@ -9,13 +9,13 @@
 //! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）、
 //! per-kind 字段（#1035）的 active 发布接线必填（R8）/ 跨 kind 卫生（R9）/ saga block 结构语义（R10）/
 //! active event 投递语义可兑现性（R11）。
-//! INVARIANT: SAGA-CONTRACT-01 { level = "Medium", exec = "check", source = "code" }— kind:saga 契约治理（docs/rules/saga.md §Governance）= R1（saga ⇒
+//! INVARIANT: SAGA-CONTRACT-01 { level = "Medium", exec = "check", source = "code" }— kind:saga 契约治理（generated / diport::SagaDurableStore / saga conformance）= R1（saga ⇒
 //! consistencyLevel WorkflowEventual/L3）+ R10（非空 `[saga]` block：≥1 step、step name 合法非关键字 Rust
 //! 标识符且唯一、每步 receiptSchema/effect scope 非空；retry budget/backoff 由 manifest.rs + R10
 //! 类型层 Hard 守）。负用例见 R1/R10 synthetic reds；正用例 = `contracts/saga/billing` 经 validate 全过
 //! （Medium，CI 门，#1121）。
 //! INVARIANT: CONTRACT-IDUNIQ-01 { level = "Medium", exec = "check", source = "code" }— contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
-//! 依据 api-versioning.md：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
+//! 依据 cargo xtask contract breaking / cargo public-api：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
 //! INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "check", source = "code" }— declared schema（喂 codegen TypeSpace 的 request/response/payload；saga 另含 step receiptSchema）的
 //! root 须有 string `title`（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部
 //! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
@@ -1869,7 +1869,7 @@ fn rule_command_consistency(m: &ContractManifest, label: &str) -> Option<Finding
             Rule::CommandConsistency,
             label,
             format!(
-                "kind=command 须 consistencyLevel=OutboxFact（docs/rules/eventbus.md §command dispatch），实为 {:?}",
+                "kind=command 须 consistencyLevel=OutboxFact，实为 {:?}",
                 m.consistency_level
             ),
         ));
@@ -1903,7 +1903,7 @@ fn rule_command_policy(m: &ContractManifest, label: &str) -> Option<Finding> {
 ///
 /// command 是 framework-neutral 分发机制（provider-agnostic：claimer / outbox provider 可互换），与设备
 /// 身份 / 证书签发同列对齐 cert-manager/SPIFFE 的 `_framework` 归属语义（#1124）。saga 仍排除——saga 是
-/// 跨域编排，天然绑定某域 owner（R1 + saga.md）。
+/// 跨域编排，天然绑定某域 owner（R1 + generated / diport::SagaDurableStore / saga conformance）。
 fn rule_framework_kind(c: &RepositoryContract, label: &str) -> Option<Finding> {
     let m = c.manifest();
     let framework = c.owner().is_framework_owned();
@@ -2118,7 +2118,7 @@ fn is_safe_http_path(s: &str) -> bool {
 /// 无 topic ⇒ 无路由出口 = 死分发，故必填（与 active event 要求 topic 同理；command 无 `delivery`——OutboxFact
 /// 经 outbox relay 投递，delivery 语义由 outbox 引擎固定，不在契约面声明）。request schema 仍由 R4 守。
 ///
-/// **saga 不在此**：`[saga]` block 是 saga 契约的**结构语义**（saga.md governance），非「仅 active 生效的
+/// **saga 不在此**：`[saga]` block 是 saga 契约的**结构语义**（`generated`、`diport::SagaDurableStore` 与 saga conformance governance），非「仅 active 生效的
 /// 发布接线字段」，故 `kind=saga` 无条件必填（不论 lifecycle）由 R10 守——不混进本 active-only 集。
 fn rule_perkind_active_fields(m: &ContractManifest, label: &str) -> Vec<Finding> {
     if m.lifecycle != Lifecycle::Active {
@@ -2785,7 +2785,7 @@ fn response_path_exists(schema: &serde_json::Value, path: &str) -> bool {
     true
 }
 
-/// R10：saga 契约的 `[saga]` block 结构语义（saga.md governance，**无条件、不论 lifecycle**）：
+/// R10：saga 契约的 `[saga]` block 结构语义（`generated`、`diport::SagaDurableStore` 与 saga conformance governance，**无条件、不论 lifecycle**）：
 /// `kind=saga` ⇒ 须有非空 block；block 存在即查良构——≥1 step、step name 经 canonical
 /// [`vocab::StepName`] grammar 校验且唯一，receiptSchema/effect scope 非空；retry budget 不为零且
 /// backoff 不倒置。
@@ -2793,12 +2793,12 @@ fn response_path_exists(schema: &serde_json::Value, path: &str) -> bool {
 /// `declared_schema_files()` 覆盖。非-saga kind 误带 `[saga]` 由 R9 拒（本规则只校验 block 内部）。
 fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let Some(saga) = &m.saga else {
-        // saga 契约缺 block：saga.md 要求 kind:saga 必有非空 saga block（无条件、不论 lifecycle）。
+        // saga 契约缺 block：generated / diport::SagaDurableStore / saga conformance 要求 kind:saga 必有非空 saga block（无条件、不论 lifecycle）。
         if m.kind == ContractKind::Saga {
             return vec![finding(
                 Rule::SagaBlock,
                 label,
-                "kind=saga 须声明非空 [saga] block（saga.md governance，无条件、不论 lifecycle）"
+                "kind=saga 须声明非空 [saga] block（`generated`、`diport::SagaDurableStore` 与 saga conformance governance，无条件、不论 lifecycle）"
                     .to_string(),
             )];
         }
@@ -2870,7 +2870,7 @@ fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
 }
 
 /// R11：`lifecycle=active` 的 event 契约只能声明当前**可兑现**的投递语义。RSS outbox + 幂等消费者
-/// 当前仅兑现 `at-least-once`（见 docs/rules/eventbus.md）；`at-most-once`/`exactly-once` broker 链路
+/// 当前仅兑现 `at-least-once`（见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）；`at-most-once`/`exactly-once` broker 链路
 /// 无运行时保证——active 契约声明它们会虚开语义承诺，故拒（能力落地前限 draft/deprecated 表达前瞻设计）。
 /// 把 manifest.rs / README 的「不建议」升级为机器强制（对齐 cert-manager/k8s：active 资源不得声明系统不能兑现的能力）。
 fn rule_active_delivery_supported(m: &ContractManifest, label: &str) -> Option<Finding> {
@@ -5953,7 +5953,7 @@ lifecycle = "draft"
 
     #[test]
     fn r10_saga_kind_requires_block_even_draft() {
-        // F1：kind=saga 无条件须有 block（saga.md，不论 lifecycle）——draft saga 缺 block 也拒。
+        // F1：kind=saga 无条件须有 block（generated / diport::SagaDurableStore / saga conformance，不论 lifecycle）——draft saga 缺 block 也拒。
         let m = saga_manifest(None); // saga_manifest 默认 lifecycle=draft
         assert_eq!(m.lifecycle, Lifecycle::Draft);
         let findings = rule_saga_block(&m, "x");

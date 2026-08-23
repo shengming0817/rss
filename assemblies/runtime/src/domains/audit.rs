@@ -61,7 +61,9 @@ fn build_audit_key(encoded: Option<&str>) -> anyhow::Result<MacKey> {
         .decode(encoded)
         .with_context(|| format!("{AUDIT_CHAIN_KEY_ENV} not valid base64url"))?;
     if key_bytes.len() < 32 {
-        anyhow::bail!("audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)");
+        anyhow::bail!(
+            "audit chain key must be at least 32 bytes (weak key; INVARIANT: AUDIT-LEDGER-BYTES-01)"
+        );
     }
     Ok(MacKey::from_bytes(key_bytes))
 }
@@ -80,7 +82,9 @@ pub(crate) fn build_audit_hasher_from_snapshot(
 ) -> anyhow::Result<AuditChainHasher<RustCryptoMacVerifier>> {
     let key = build_audit_key(config.value(AUDIT_CHAIN_KEY_ENV))?;
     AuditChainHasher::new(RustCryptoMacVerifier, key).ok_or_else(|| {
-        anyhow::anyhow!("audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)")
+        anyhow::anyhow!(
+            "audit chain key must be at least 32 bytes (weak key; INVARIANT: AUDIT-LEDGER-BYTES-01)"
+        )
     })
 }
 

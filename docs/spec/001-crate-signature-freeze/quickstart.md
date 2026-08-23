@@ -35,7 +35,7 @@ cargo xtask public-api release --check                 # 校验正向选择的 R
 | **PR-0** | ADR-004 conventions 合并 + conventions.md 薄引用；typed `public-api internal\|release` 工具入口就绪 |
 | **PR-1** 基础 | `cargo build -p vocab -p ids -p secure -p support -p runctx` 绿；`cargo xtask public-api internal --layer basis` baseline 已 commit；无内部分组依赖（deny 绿） |
 | **PR-2** 引擎 | `cargo build -p consistency -p primitives` 绿；L0 引擎 trait 泛型静态分发编译过；`cargo xtask public-api internal --layer engine` baseline 已 commit；不依赖服务/域/adapters |
-| **PR-diport** | `cargo build -p diport` 绿；DI port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（PR-diport 当时仅 infra port；ADR-005 后白名单扩为 `diport` + 定义域形 repo port 的域 crate，见 DIPORT-MACRO-CONFINE-01′）；ADR-003 §8 三风险已验证；architecture.md/deny.toml/rust-standards/domain-patterns 已回写 |
+| **PR-diport** | `cargo build -p diport` 绿；DI port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（PR-diport 当时仅 infra port；ADR-005 后白名单扩为 `diport` + 定义域形 repo port 的域 crate，见 DIPORT-MACRO-CONFINE-01′）；ADR-003 §8 三风险已验证；`Cargo.toml`、`xtask/src/layers.rs` 与 `deny.toml` 已回写 |
 | **PR-3** 服务 | 7 服务 crate `cargo build` 绿；`Domain::init` 返回 Result（不 panic）；非 DI 接缝（RouteGroup/Disposition/HandlerFn）冻结；DI port 已在 diport；不依赖域/adapters |
 | **PR-4** 域 | 5 域 crate `cargo build` 绿；域间无 import（deny 绿）；domain 类型未 derive Serialize（编译/grep 核）；**域形 repo/service port 在域 crate `pub mod ports`**（ADR-005 Option 2；provider-agnostic infra port 在 diport） |
 | **PR-5** adapters | 12 adapter `cargo build` 绿；unit sealed-marker，native AFIT impl 已冻 diport trait（ManagedResource + Signer/Publisher）；raw client 字段延迟 W（届时 `pub(crate)` 不泄漏）；adapter 保持 forbid(unsafe_code)；不被任何域 crate 依赖（deny 绿） |

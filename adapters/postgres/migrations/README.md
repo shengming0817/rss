@@ -10,7 +10,7 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 
 ## 命名
 
-`{序号}_{动词}_{对象}.sql`（`rust-standards.md` §数据库迁移）。
+`{序号}_{动词}_{对象}.sql`；文件名由 sqlx migration resolver 解析。
 
 - `序号`：正 `i64` 前缀（团队习惯四位零填充，如 `0001`、`0002`；**非**正确性门）。sqlx 解析
   `{version}_{description}`，`version` 须能 parse 为正整数。**全局唯一**由
@@ -73,7 +73,7 @@ bootstrap 无表权限，UPDATE/DELETE/TRUNCATE 均不可执行。随后用 tena
 
 ## 只增不改
 
-已提交的迁移文件**只增不改**（`rust-standards.md`）。例外须 ADR 说明。
+已提交的迁移文件**只增不改**；sqlx migration ledger checksum 在运行期拒绝改写。例外须 ADR 说明。
 
 机器守卫：sqlx 在 `_sqlx_migrations` 表记每个已应用迁移的 `checksum`；改动已应用文件的内容会在下次
 `rss postgres migrate-all` 触发 `VersionMismatch` 报错（Medium，运行期 fail-fast）。改顺序 / 删文件触发 `VersionMissing`。

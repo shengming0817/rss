@@ -1,9 +1,9 @@
 # 架构概念 → Rust/Cargo 映射
 
-> **归档** · GoCell→RSS 迁移指南(含 GoCell 对照),**非现行规则**。现行架构规则(纯 Rust-native)见 `docs/rules/architecture.md`。
+> **归档** · GoCell→RSS 迁移指南(含 GoCell 对照),**非现行规则**。现行架构规则(纯 Rust-native)见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
 
 > 本文件是 GoCell → RSS 迁移期的架构映射**历史快照**（含 GoCell↔Rust 对照），**非现行单源**。
-> 现行架构单源（目录 / crate / 层 / contract / 一致性等级 / 命名）见 `docs/rules/architecture.md`；本文件仅供迁移溯源。
+> 现行架构单源（目录 / crate / 层 / contract / 一致性等级 / 命名）见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；本文件仅供迁移溯源。
 
 ## 概念框架（保留什么、退场什么）
 
@@ -173,7 +173,7 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
 
 **残留运行期/CI 检查**（类型系统 / crate 图管不到）显式为 **Medium（xtask/CI 门），严禁 Soft**：active subscriber
 存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由。AI-robust 规则集因此收缩，重心从
-"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 `docs/rules/ai-robust.md`）。
+"archtest" 迁到 "crate-graph lint + clippy + 类型系统"（见 cargo xtask archrules verify）。
 
 ## 关键模式的 Rust 形态
 

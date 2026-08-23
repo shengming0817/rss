@@ -82,7 +82,7 @@ MtlsRouteAuthorizer { allow_set };    // assembly-private exact SPIFFE RouteAuth
 // VerifiedMtlsPeer alone leaves scope_probe at the existing missing-scope sentinel.
 ```
 
-listener auth chain 必须显式声明（runtime-api.md）：单 listener 单 scheme；无认证用 `AuthScheme::NoAuth`
+listener auth chain 必须显式声明（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）：单 listener 单 scheme；无认证用 `AuthScheme::NoAuth`
 （显式 `AuthNone`，非 `Option::None`）；Internal/Admin 上 `NoAuth` 被构造器 fail-closed 拒。
 
 ## 4. 后果

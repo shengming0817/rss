@@ -29,8 +29,7 @@ bash hack/automation/forge.sh issue-create "[<ID>] ..." <填好的 backlog.md> "
 
 **Production acceptance issue**：任何新增、扩展、替换或重新声明 T3 carrier，或切换 production assembly
 artifact journey 的 backlog，必须保留并填完 `backlog.md` 的 evidence-plan 段。字段、最低充分层和
-carrier transition 语义只引用
-[`project-scope.md`](../../docs/rules/project-scope.md#production-acceptance-evidence-plan-与-carrier-replacement)，不在流程中复制。
+carrier transition 必须记录唯一 profile/artifact/hazard、same-head T1/T2/T3 receipt 与原子切换，不建立文档路径依赖。
 
 **新建 epic / feature**（容器层）：见 §1.1 三层映射。Epic / Feature 按当前流程在 Azure Boards UI 手工建（脚本化时 `issue-create` 第 4 参传 Work Item Type，body 读 `epic.md` / `feature.md`）；子任务经 `forge.sh subissue-link` 关联原生父子关系。容器不贴 `cx` / `type`（跨多 PR、无单一 diff）。
 
@@ -206,8 +205,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
 > 本地 canonical `make ci` 只承担 10 分钟有界 affected preflight；unknown 本地忽略并留痕，workspace/feature/integration/coverage/public-api/dylint/audit/container 等重型全量门由 develop/release 或显式 full 承接。`make ci-full` 仅人工诊断，任何 skill/template 不得把它追加为 PR 默认完成条件。
-> **Production acceptance evidence review gate**：相关 PR 从 `in-progress` 切到 `needs-review-again` 前，必须在 PR body 按
-> [`project-scope.md`](../../docs/rules/project-scope.md#production-acceptance-evidence-plan-与-carrier-replacement)
+> **Production acceptance evidence review gate**：相关 PR 从 `in-progress` 切到 `needs-review-again` 前，必须在 PR body
 > 完整留下 final-HEAD lower-layer receipts、每个 T3 assertion 的唯一 production join hazard 和独立复现入口、
 > candidate 在 activation、owner/assertion 更新或 replacement cutover 前先绿的回执，以及所选 change kind 的
 > final-HEAD transition。replacement 还必须证明实际 canonical selector 已切换、旧 carrier 已同交付删除且无

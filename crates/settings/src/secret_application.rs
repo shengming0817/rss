@@ -46,7 +46,7 @@ use crate::ports::{
 #[cfg(test)]
 use crate::internal::mem::{InMemSecretRepo, new_secret_store};
 
-/// 错误消息常量（`&'static str` const literal，不拼 runtime 数据，符合 error-handling.md §Message 与 PII）。
+/// 错误消息是 `&'static str` const literal，不拼接 runtime 数据。
 const MSG_STORAGE: &str = "secret storage failed";
 const MSG_NOT_FOUND: &str = "secret entry not found";
 const MSG_VERSION_NOT_FOUND: &str = "secret version not found";

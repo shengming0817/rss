@@ -1153,7 +1153,7 @@ async fn begin_tenant_repeatable_read<L: ReadLane>(
     })
 }
 
-/// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；tenancy.md §RLS 与 PG scope）。
+/// 在事务内注入 tenant scope（SET LOCAL `rss.tenant_id`，参数化绑定防注入；`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL）。
 /// producer 写（serving-write `TenantDb::producer_tx`）与 plain tenant-scoped 写
 /// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///

@@ -75,7 +75,7 @@ impl ReviewedEventWriter for PgEmitter {
         // routing 列经 `domain()`/`contract_id()` 取，标准 header 经 `version()`/`schema_hash()` 盖章。
         // reserved key occurred_at 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：漏接
         // 编译期不可表达）；trace / correlation 经 sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
-        // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（observability.md §Outbox Envelope）。
+        // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let env = OutboxEnvelope::new(

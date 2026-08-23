@@ -1,7 +1,7 @@
 # GoCell 以 Rust 为主：crate 映射与结构性调整
 
 > **归档·冻结** · 2026-06-21 GoCell→Rust 迁移评估快照（target 命名已对齐 RSS）· **非现行规则**。
-> 现行架构单源见 `docs/rules/architecture.md`；本批只读冻结，仅供迁移评估溯源。
+> 现行架构单源见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；本批只读冻结，仅供迁移评估溯源。
 >
 > 生成日期：2026-06-21 · 假设已选定 Rust 为主语言，给落地调整指南
 > 配套文档：[gocell-package-overview.md](./gocell-package-overview.md) · [gocell-rust-tradeoff.md](./gocell-rust-tradeoff.md) · [gocell-rewrite-sequence.md](./gocell-rewrite-sequence.md) · [gocell-rust-directory-structure.md](./gocell-rust-directory-structure.md) · [gocell-rust-ci-plan.md](./gocell-rust-ci-plan.md) · [gocell-rust-eval-checklist.md](./gocell-rust-eval-checklist.md)
@@ -58,7 +58,7 @@ Go 的 `ContextCloser`/`ManagedResource` LIFO 停止，在 Rust 里 **Drop 不�
 ### 7. archtest 大规模蒸发，残留改 dylint
 
 现行持久化边界的强度与 carrier 不在本归档快照复制；请以
-[`docs/rules/architecture.md`](../rules/architecture.md)、[`docs/rules/ai-robust.md`](../rules/ai-robust.md)
+`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`、cargo xtask archrules verify
 与 [ArchRules typed catalog](../../xtask/src/archrules.rs) 为准；需要派生展示时运行
 `cargo xtask archrules matrix`。
 分层 → **crate 边界 + Cargo.toml 依赖图 + `cargo-deny`**（禁依赖）硬性保证；sealed 构造/newtype funnel → 私有字段 + `nutype`；少数真要 AST 级的（如某调用点 funnel）→ **`dylint`**（自写 clippy lint，Rust 版 archtest）。治理 YAML 校验是语言无关的，**保留**。净效：~200 archtest 砍到个位数。

@@ -1,4 +1,4 @@
-//! softca — RSS workspace（W 阶段真身，#1010 dev-CA 签名 + #1260 撤销 store 切片）。See docs/rules/architecture.md.
+//! softca — RSS workspace（W 阶段真身，#1010 dev-CA 签名 + #1260 撤销 store 切片）。See `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
 //!
 //! 两个 provider（impl 真身均 `backend` feature 门控）：
 //! - `SoftCaSigner`（sealed-marker）：始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-11）；
@@ -481,7 +481,7 @@ mod backend_tests {
         vec![SigningPurpose::new(PURPOSE)]
     }
 
-    // 构造 helper：合法 ephemeral dev CA。item-level expect carve-out 集中此处（error-handling.md §Carve-out）。
+    // 构造 helper：合法 ephemeral dev CA。item-level expect carve-out 集中此处。
     #[allow(clippy::expect_used)]
     fn dev_signer() -> SoftCaSigner {
         SoftCaSigner::generate(KEY_ID, allowlist()).expect("generate dev ca")

@@ -1,7 +1,7 @@
 # Outbox relay 可观测性：metric / label / SLO 契约
 
 > #1209（归属 Feature #1208）。本文档是 outbox relay/sampler metric 名、label 闭值集、SLO 阈值与
-> dashboard 面板的运维契约。label 闭值集纪律单源见 `docs/rules/observability.md` §Outbox Relay Metrics；
+> dashboard 面板的运维契约。label 闭值集纪律单源见 `crates/observ`、`secure::redact_error` 与 typed metric enums；
 > 告警规则见 `docs/ops/outbox-relay-alerts.rules.yaml`。
 
 ## 背景

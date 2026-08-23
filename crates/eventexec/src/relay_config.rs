@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out。
     fn relay_config_accessors_round_trip() {
         let cfg = RelayConfig::new(Duration::from_millis(250), 32).expect("valid config");
         assert_eq!(cfg.poll_interval(), Duration::from_millis(250));
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out。
     fn sampler_config_accessors_round_trip() {
         let cfg = SamplerConfig::new(
             vec!["identity".into(), "settings".into()],
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out。
     fn sweeper_config_accessors_round_trip() {
         let cfg = SweeperConfig::new(86_400, Duration::from_secs(120)).expect("valid");
         assert_eq!(cfg.retain_seconds(), 86_400);

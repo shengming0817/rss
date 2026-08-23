@@ -7,7 +7,7 @@
 //!
 //! 1. **绝对地板门**（本模块）：Workspace 始终评 STRICT；Packages 仅评 `StrictTouched`（空则
 //!    `floor=skipped`）。export JSON → basis/engine 严格 crate（`vocab`/`ids`/`consistency`/
-//!    `primitives`，CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集）per-crate 行覆盖率下限。
+//!    `primitives`，即 CLAUDE.md 的引擎与基础 crate 集合）per-crate 行覆盖率下限。
 //! 2. **per-diff 增量门**（[`crate::diffcov`]）：复用同一 profdata 经 `cargo llvm-cov report --lcov` 出 lcov
 //!    （[`lcov_report`]，不重跑测试）→ 本 PR diff（相对 base，默认 `origin/develop`）新增/修改可执行行聚合
 //!    覆盖率 ≥80%（CLAUDE.md「新增/修改代码 ≥80%」）。补地板门测不到的「新代码自身被测」洞——全在
@@ -35,7 +35,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// 强制行覆盖率下限的 basis/engine crate —— CLAUDE.md / rust-standards.md「引擎与基础 crate
+/// 强制行覆盖率下限的 basis/engine crate —— CLAUDE.md 的引擎与基础 crate
 /// （`consistency` / `primitives` / `vocab` / `ids`）≥90%」**逐字集**（非 `BASIS_CRATES ∪ ENGINE_CRATES`
 /// 全集：`secure`/`support`/`runctx` 不在 90 档）。单一事实源；与文档集一致性由 `strict_set_is_doc_verbatim`
 /// 测试守（改文档不改这里即测试红）。
@@ -401,7 +401,7 @@ mod tests {
         );
     }
 
-    /// STRICT 集 = CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集（anti-drift）。
+    /// STRICT 集 = CLAUDE.md 的引擎与基础 crate ≥90% 集合（anti-drift）。
     #[test]
     fn strict_set_is_doc_verbatim() {
         assert_eq!(

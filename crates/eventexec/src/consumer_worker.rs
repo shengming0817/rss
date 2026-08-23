@@ -152,7 +152,7 @@ fn health_reporting_dlx(
 /// 组合根先 `subscribe(topic, token)` 得 `stream`、再调本函数；worker 持同一 `token`，`shutdown` 取消即流终止。
 #[allow(clippy::too_many_arguments)]
 // reason: 9 参数是消费 worker spawn 的最小必要集（name/stream/idem/dlx/meta/handler/lease_cfg/token/health
-// 各自语义独立）；聚合 struct 增间接层且无复用，item-level carve-out（error-handling.md §Carve-out）。
+// 各自语义独立）；聚合 struct 增间接层且无复用，item-level carve-out。
 pub fn spawn_consumer<S, H>(
     name: String,
     stream: MessageStream,
@@ -208,7 +208,7 @@ where
 /// 线程退出 → completion → Ok（健康态翻 Unhealthy）。
 #[allow(clippy::too_many_arguments)]
 // reason: relay spawn 参数是唯一 production relay 所需的完整 dependency set；admission 必填，
-// 同 spawn_consumer_ackable item-level carve-out（error-handling.md §Carve-out）。
+// 同 spawn_consumer_ackable item-level carve-out。
 pub fn spawn_relay<A>(
     name: String,
     store: A,

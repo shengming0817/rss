@@ -3909,7 +3909,7 @@ async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> T
 // Revision lifecycle：首次 mutation 追加 v1；同 id 内容变化追加 v2；canonical 相同则 no-op；查无 → None。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::expect_used)]
-// reason: 已追加 revision 的 role 必定可查到；集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 已追加 revision 的 role 必定可查到；集成测试 happy-path；item-level carve-out。
 async fn role_definition_revision_roundtrip_and_canonical_noop() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -5985,7 +5985,7 @@ async fn policy_route_gate_conformance_denies_nonempty_obligations() -> TestResu
 // 并发：同 (tenant,id) 由 stable identity 行锁串行 append，revision 唯一连续且不覆盖；不同 id 互不干扰。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-// reason: tokio::spawn join 必定成功（task 正常 Ok）；converged role 必定可查到；item-level carve-out（error-handling.md §Carve-out）。
+// reason: tokio::spawn join 必定成功（task 正常 Ok）；converged role 必定可查到；item-level carve-out。
 async fn role_definition_concurrent_revisions_are_contiguous() -> TestResult {
     use std::sync::Arc;
 

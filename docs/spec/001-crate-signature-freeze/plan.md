@@ -32,7 +32,7 @@
 **Performance Goals**: N/A（无行为）。冻结期唯一"性能"是 `cargo build --workspace` 可在合理时间编译通过。
 
 **Constraints**:
-- 接缝**清单**由 `docs/rules/architecture.md` §扁平 workspace 结构 为底；spike 改签名**写法语法**，**ADR-003 额外把 DI 注入 port 收敛进新 `diport` crate**（改归属位置，architecture.md 回写由 PR-diport 落地）。
+- 接缝**清单**由 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；spike 改签名**写法语法**，**ADR-003 额外把 DI 注入 port 收敛进新 `diport` crate**（改归属位置，`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 回写由 PR-diport 落地）。
 - spike 依赖门是**实施**前置，非规划前置（本规划现在即可定稿）；DI port 实质冻结门于 PR-diport（dynosaur 可行性验证，ADR-003 §8）。
 - 不实现业务行为；domain 类型不 derive `Serialize`/`Deserialize`；必填依赖走构造器必填位置参（`Box<DynX>`）；`Clock` 为构造器位置参。
 
@@ -93,7 +93,7 @@ adapters/
 generated/                                         # 不手写：契约派生（#998）
 ```
 
-**Structure Decision**: 惯用扁平 Rust workspace。除 **PR-diport 新建 `crates/diport`**（ADR-003 §3：DI port + dynosaur wrapper + unsafe 收敛集中）外不新增目录结构——签名冻结在既有 34 member（+ diport）的 `src/` 内写公开 trait/type + `#[cfg(test)]` mock/shape 测试。每 crate 内部模块按 `domain-patterns.md`：`internal/ports`（域内非 DI 服务/值）、`internal/mem`（in-mem，本阶段仅签名占位）、`handler`/`application`/`domain`（域 crate DDD 分层）。DI 注入 port trait 集中 diport。**PR 粒度 = 层**（同层可再按 crate 子分组并行），跨层严格串行。
+**Structure Decision**: 惯用扁平 Rust workspace。除 **PR-diport 新建 `crates/diport`**（ADR-003 §3：DI port + dynosaur wrapper + unsafe 收敛集中）外不新增目录结构——签名冻结在既有 34 member（+ diport）的 `src/` 内写公开 trait/type + `#[cfg(test)]` mock/shape 测试。每 crate 内部模块按 Cargo dependency graph 与 Rust visibility 分层：`internal/ports`（域内非 DI 服务/值）、`internal/mem`（in-mem，本阶段仅签名占位）、`handler`/`application`/`domain`（域 crate DDD 分层）。DI 注入 port trait 集中 diport。**PR 粒度 = 层**（同层可再按 crate 子分组并行），跨层严格串行。
 
 ## 实施顺序与依赖门（计划核心）
 
@@ -109,7 +109,7 @@ PR-0  conventions 地基(ADR-004)  [门: ADR-002 + ADR-003 + ADR-001 三 ADR 已
 ```
 
 - **横切硬门**：ADR-002(context)+ADR-003(dynosaur) gate 全部签名实施——决定每个 trait 方法签名与声明语法，先写后改=全量返工。均已落地。
-- **DI port 门**：**PR-diport** 集中 DI 注入 port（dynosaur）+ 验证 ADR-003 §8 三开放风险 + 回写 architecture.md/deny.toml/rust-standards/domain-patterns，gate PR-3/4/5。
+- **DI port 门**：**PR-diport** 集中 DI 注入 port（dynosaur）+ 验证 ADR-003 §8 三开放风险 + 回写 `Cargo.toml`、`xtask/src/layers.rs` 与 `deny.toml`，gate PR-3/4/5。
 - **局部门**：ADR-001 gate `ManagedResource`（PR-2/PR-diport 待拍板）+ `bootstrap::shutdown`（PR-3）；#998 软 gate 域层 wire 引用（PR-4）。
 - **同层并行**：PR-1 内 5 个基础 crate、PR-3 内 7 个服务 crate 互不依赖→可拆子 PR 并行；PR-4(域) 与 PR-5(adapters) 触不同 crate→可并行。
 - **规划 vs 实施分离**：本计划现在产出（不阻塞），DI port 实施待 PR-diport 验证 dynosaur 可行性；若不可接受按 ADR-003 §5 回退 async-trait（spec 再 reconcile）。

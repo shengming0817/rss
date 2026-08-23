@@ -2,7 +2,7 @@
 
 **Input**: Design documents from `docs/spec/001-runtime-assembly-plan/`
 
-**Prerequisites**: `spec.md`, `plan.md`, `docs/rules/runtime-assembly-plan.md`
+**Prerequisites**: `spec.md`, `plan.md`, `assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate`
 
 **Tests**: PR-001 is docs-only. Validation is `cargo xtask verify --fast` plus marker scan for unresolved placeholders.
 
@@ -21,10 +21,10 @@
 - [ ] T001 [US1] Add runtime assembly feature specification in `docs/spec/001-runtime-assembly-plan/spec.md`.
 - [ ] T002 [US1] Add implementation plan with technical context, constitution check, PR path summary, and AI-HARD carrier map in `docs/spec/001-runtime-assembly-plan/plan.md`.
 - [ ] T003 [US3] Add dependency-ordered task index in `docs/spec/001-runtime-assembly-plan/tasks.md`.
-- [ ] T004 [US2] Add runtime assembly execution rules in `docs/rules/runtime-assembly-plan.md`.
+- [ ] T004 [US2] Add runtime assembly execution rules in `assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate`.
 - [ ] T005 [US1] Update `.specify/feature.json` to point to `docs/spec/001-runtime-assembly-plan`.
 
-Validation: `cargo xtask verify --fast`; marker scan over `docs/spec/001-runtime-assembly-plan` and `docs/rules/runtime-assembly-plan.md`.
+Validation: `cargo xtask verify --fast`; marker scan over `docs/spec/001-runtime-assembly-plan` and `assembly manifest / AssemblyLock / RuntimePlan / cargo xtask assembly validate`.
 
 ### PR-002 / Issue #1656
 

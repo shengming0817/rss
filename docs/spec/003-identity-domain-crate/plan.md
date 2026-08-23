@@ -41,7 +41,7 @@
 | 一致性等级在 contract.toml | ✅ session-created/role-* event 的 consistencyLevel 在 `contract.toml`，非 manifest |
 | 必填依赖构造器位置参（非 Option）+ Clock 位参 | ✅ `CredentialRepo`/`AccountSecurityReadRepo`/`SessionRepo`/`Publisher`/`Clock` 均位置参 |
 | public 降级仅 generated Public evidence + GeneratedPrimaryEndpoint（AUTH-OPTOUT-PRIMARYONLY-01） | ✅ 仅 login/refresh 为 Public；其余端点默认鉴权 |
-| 契约扇出闭环（contract-fanout.md） | ✅ 新角色事件走 schema→generated→metadata→test→docs |
+| 契约扇出闭环（`contract.toml`、schema codegen 与 contract validation） | ✅ 新角色事件走 schema→generated→metadata→test→docs |
 | AI-robust 新机制 ≥ Medium | ✅ 不新增 Soft；保留既有 Hard/Medium 守卫，新增覆盖率/契约 governance 为 Medium |
 
 **无违规需 Complexity Tracking。** 模块拆分（PR1）不是新抽象层，而是把单文件按既有子域（rbac/abac/account/session）切开，服务于并行 + 内聚，符合「优雅简洁」。
@@ -93,7 +93,7 @@ contracts/http/identity/v1/       # +roles/profile/password/logout endpoint；lo
 generated/src/{event,http}/identity_v1.rs   # 扇出派生 [PR5]
 ```
 
-**Structure Decision**: 沿用 `docs/rules/architecture.md` 域 crate 标准分层（domain/application/handler/ports/internal）+ ADR-005 域形 repo port（`pub mod ports`）。把现有单文件 `domain/mod.rs`/`application.rs` 按子域拆成多文件，使每个 PR 独占其文件（降并行写冲突），唯一共享面是 `lib.rs`/`domain/mod.rs`/`application/mod.rs` 的 `mod` 声明 + re-export（≤5 行 additive，低冲突）。参考已实现域 crate `crates/audit/src/`（handler/application/domain 分层 + 订阅范式）。
+**Structure Decision**: 沿用 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 域 crate 标准分层（domain/application/handler/ports/internal）+ ADR-005 域形 repo port（`pub mod ports`）。把现有单文件 `domain/mod.rs`/`application.rs` 按子域拆成多文件，使每个 PR 独占其文件（降并行写冲突），唯一共享面是 `lib.rs`/`domain/mod.rs`/`application/mod.rs` 的 `mod` 声明 + re-export（≤5 行 additive，低冲突）。参考已实现域 crate `crates/audit/src/`（handler/application/domain 分层 + 订阅范式）。
 
 ## PR 拆分（5 个；≤2000 行净增删，含 ≥80% 覆盖率测试）
 

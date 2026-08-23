@@ -6,7 +6,7 @@
 //! 达成 **at-least-once**——在途消息在消费者崩溃窗口由 broker 自动重投（lapin/RabbitMQ channel close → requeue）。
 //!
 //! 设计要点：acker 是**独立 seam**，**不**挂到 [`crate::Message`]（ADR-003 冻结值类型；`Message` rustdoc
-//! 显式「不暴露 Ack/Nack——由框架据 Disposition 驱动」，eventbus.md「subscriber 层扩展信息放 DeliveryOutcome，
+//! 显式「不暴露 Ack/Nack——由框架据 Disposition 驱动」，`contracts/**/contract.toml`、`generated` 与 `crates/consistency`「subscriber 层扩展信息放 DeliveryOutcome，
 //! 不污染业务结果」）。[`AckAction`] 是 provider-agnostic 的 broker 词汇（非 `consistency::Disposition`）——
 //! 引擎 disposition + DLX 结果 → `AckAction` 的映射在 `eventexec` 完成。
 //!

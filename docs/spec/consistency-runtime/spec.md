@@ -32,7 +32,7 @@ AI 实施者、reviewer 和维护者可以从 `docs/spec/consistency-runtime/` �
 
 **Why this priority**: 分层倒置会破坏 RSS 的 domain-native 架构，特别是 `consistency` 依赖 service/provider、`generated` 依赖 runtime、或 domain 直接依赖 adapter 这几类错误。
 
-**Independent Test**: 对任一计划任务做 layer mapping，必须能落到 `docs/rules/architecture.md` 的现有 crate 图规则，并给出 `cargo xtask layer-deps` 或类型系统载体。
+**Independent Test**: 对任一计划任务做 layer mapping，必须能落到 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 的现有 crate 图规则，并给出 `cargo xtask layer-deps` 或类型系统载体。
 
 **Acceptance Scenarios**:
 
@@ -84,7 +84,7 @@ AI 实施者、reviewer 和维护者可以从 `docs/spec/consistency-runtime/` �
 
 ## Consistency Levels
 
-RSS declares consistency level in `contract.toml` as `consistencyLevel`; `docs/rules/architecture.md` owns the architectural source, and `contracts/README.md` owns the manifest value set.
+RSS declares consistency level in `contract.toml` as `consistencyLevel`; `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` owns the architectural source, and `contracts/README.md` owns the manifest value set.
 
 | Level | Manifest Value | Runtime Meaning | Primary Mechanisms |
 |-------|----------------|-----------------|--------------------|
@@ -100,7 +100,7 @@ RSS declares consistency level in `contract.toml` as `consistencyLevel`; `docs/r
 
 - **FR-001**: System MUST provide a SpecKit feature directory at `docs/spec/consistency-runtime/` with `spec.md`, `plan.md`, `tasks.md`, and `checklists/requirements.md`.
 - **FR-002**: System MUST update `.specify/feature.json` so SpecKit follow-up commands resolve this feature directory.
-- **FR-003**: The specification MUST define L0 LocalOnly, L1 LocalTx, L2 OutboxFact, L3 WorkflowEventual, and L4 DeviceLatent / desired-state consistency in terms compatible with `docs/rules/architecture.md`.
+- **FR-003**: The specification MUST define L0 LocalOnly, L1 LocalTx, L2 OutboxFact, L3 WorkflowEventual, and L4 DeviceLatent / desired-state consistency in terms compatible with `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
 - **FR-004**: The specification MUST cover outbox, inbox/idempotency, saga, projection/CQRS, reconcile, command dispatch, DLX, lease/fencing, and tenant-aware consistency boundaries.
 - **FR-005**: The plan MUST state layer ownership for `consistency`, `eventexec`, `diport`, `adapters/*`, `bootstrap`/assembly, domain crates, `contracts/**`, and `generated`.
 - **FR-006**: The plan MUST identify Hard or Medium carriers for constraints where the repo already has one, and MUST avoid introducing Soft-only rules.

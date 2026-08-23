@@ -4,7 +4,7 @@
 - **Date**：2026-07-30
 - **关联**：issue **#1494**（`[RW-W-hardening] adapter 厚薄纪律 ADR + dylint rss_adapter_no_business_fsm`）
 - **出处**：`docs/analysis/202606271729-001-rss-implementation-resequence-six-role.md` §1 D3 / D11 · §4 未冻结边界
-- **AI-robust 评级**：Medium（`deny.toml` ban）+ Medium（dylint）——**无 Soft**（cargo-deny / dylint 均为 Medium 载体，见 `docs/rules/ai-robust.md`）
+- **AI-robust 评级**：Medium（`deny.toml` ban）+ Medium（dylint）——**无 Soft**（cargo-deny / dylint 均为 Medium 载体，见 cargo xtask archrules verify）
 
 ---
 
@@ -38,7 +38,7 @@ RSS 现有多个 thin adapter stub 待填 body。若不先立机器守卫，AI /
 
 | 约束 | 级别 | 载体 | INVARIANT |
 |------|------|------|-----------|
-| adapters（及全仓）不得依赖 `statig` FSM 框架 | **Medium** | `deny.toml` `[bans].deny` `{ crate = "statig" }`（图外 no-op；一旦引入即 `deny check bans` 失败；cargo-deny = Medium，见 ai-robust.md） | ADAPTER-THIN-FSM-01 |
+| adapters（及全仓）不得依赖 `statig` FSM 框架 | **Medium** | `deny.toml` `[bans].deny` `{ crate = "statig" }`（图外 no-op；一旦引入即 `deny check bans` 失败；cargo-deny = Medium，见 cargo xtask archrules verify） | ADAPTER-THIN-FSM-01 |
 | `adapters/*` 不得 `use`/`path` 引用 `statig`；不得定义「`*State`/`*Phase`/`*Lifecycle` + `next`/`transition`/`advance`/`step`」过渡表形态 | **Medium** | dylint `rss_adapter_no_business_fsm`（`cargo dylint --all`，`DYLINT_RUSTFLAGS=-D warnings` fail-closed） | ADAPTER-NO-BUSINESS-FSM-01 |
 | 协议薄委托（OIDC/S3/TLS）：禁回流 `jsonwebtoken` / native-tls 族；OIDC 走 RustCrypto；S3 走 `aws-sdk-s3` pin | **Medium** | 既有 `deny.toml` JWT/OIDC/TLS bans + [`framework-comparison.md`](../references/framework-comparison.md) pins（不新增 Soft commit 公约） | （既有 OIDC-ALG-KEYPATH-01 等；本 ADR 不重挂 Soft） |
 

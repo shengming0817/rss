@@ -10,7 +10,7 @@
 # 两层过滤：settings.json 的 hook `if: Bash(bash *fix-self-audit.sh*)` 粗筛——只在 bash 调用本脚本时
 #   spawn（cargo test/ls/cat/chmod 等不触发、无误导 statusMessage）；下面的 case 精筛 emit 实参。
 # AI-robust：与 exitplan-self-audit.sh 同类的「自检提醒」hook，本质 Soft（按命令名锚定 + deny 回喂），
-#   非约束 enforcement（不 enforce 不变式），不落 ai-robust.md「Soft 严禁立项」范围；属对既有先例的复制。
+#   非约束 enforcement（不 enforce 不变式），不建立 Soft 治理；属对既有先例的复制。
 set -euo pipefail
 
 # 占位命令直跑形态（技能实际执行的就是它）：无副作用、不读 stdin、成功返回

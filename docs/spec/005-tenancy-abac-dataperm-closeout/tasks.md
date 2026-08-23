@@ -44,7 +44,7 @@
 - [x] T010 [US1] Finish serving pool bootstrap wiring for tenant-scoped repositories in adapters/postgres/src/pool.rs
 - [x] T011 [US1] Enforce startup failure on skipped RLS setup path through PgRuntimeDeps setup in adapters/postgres and runtime composition
 - [x] T012 [P] [US1] ~~Add anti-vacuity tests for TENANCY-SETLOCAL-FUNNEL-01 in xtask/src/setlocal_funnel.rs~~ — **superseded by #2003**：`setlocal-funnel` 已物理删除；本任务不再实施。现行 proof 为 `PG-TX-CAPABILITY-SEAL-01` → `TENANCY-PG-CATALOG-PROOF-01` + `TENANCY-PG-BEHAVIOR-PROOF-01`。
-- [x] T013 [US1] Update docs/rules/tenancy.md to remove stale dual-pool follow-up text after PR2 lands
+- [x] T013 [US1] Update `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL to remove stale dual-pool follow-up text after PR2 lands
 
 ---
 
@@ -58,7 +58,7 @@
 - [x] T015 [US2] Add tenant_id outbox storage + RLS in adapters/postgres, including fail-closed migration and rss_app direct-DML denial tests
 - [x] T016 [US2] Keep diport::OutboxEnvelopeParts tenant as the ordered-delivery input and persist it to outbox.tenant_id; tenant-aware PartitionKey constructor not needed for the chosen storage boundary
 - [x] T017 [US2] Add doc-contract drift checks for tenant-aware outbox documentation in xtask
-- [x] T018 [US2] Update docs/rules/eventbus.md and docs/rules/tenancy.md with final outbox tenant-scope invariant
+- [x] T018 [US2] Update `contracts/**/contract.toml`、`generated` 与 `crates/consistency` and `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL with final outbox tenant-scope invariant
 
 ---
 
@@ -72,7 +72,7 @@
 - [x] T020 [US3] Wire durable audit sink into audited cross-tenant visibility issuance in crates/authn and adapters/postgres
 - [x] T021 [US3] Add failure-path tests proving audit append failure denies RowScopeAll in crates/authn
 - [x] T022 [P] [US3] Add governance guard for cross-tenant visibility call sites in lints/rss_crosstenant_callsite or xtask
-- [x] T023 [US3] Update docs/rules/tenancy.md with live audited issuance references
+- [x] T023 [US3] Update `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL with live audited issuance references
 
 ---
 
@@ -99,7 +99,7 @@
 - [x] T029 [P] [US5] Define sealed FieldMask/ResourceProjection model in crates/vocab or the selected domain read-model module
 - [x] T030 [US5] Apply ResourceProjection to audit/query read responses in crates/audit
 - [x] T031 [US5] Add default-mask and explicit-unmask tests for sensitive fields in crates/audit
-- [x] T032 [P] [US5] Add projection obligation consumption documentation in docs/rules/tenancy.md
+- [x] T032 [P] [US5] Add projection obligation consumption documentation in `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL
 
 ---
 
@@ -120,10 +120,10 @@
 
 **Goal**: Make #1587's open-source parity boundary auditable without adding an external PDP process or policy-language runtime.
 
-**Independent Test**: `cargo xtask tenancy-closeout` fails if ADR-014, the required comparison targets/dimensions, the `tenancy.md` link, or the ADR-006 link disappear.
+**Independent Test**: `cargo xtask tenancy-closeout` fails if ADR-014, the required comparison targets/dimensions, the `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL link, or the ADR-006 link disappear.
 
 - [x] T037 [US6] Add ADR-014 open-source AuthZ parity matrix under `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md`
-- [x] T038 [US6] Link ADR-014 from `docs/rules/tenancy.md` and ADR-006, locking `diport::Pdp` vs `RouteAuthorizer` terminology
+- [x] T038 [US6] Link ADR-014 from `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL and ADR-006, locking `diport::Pdp` vs `RouteAuthorizer` terminology
 - [x] T039 [US6] Extend `xtask/src/tenancy_closeout.rs` with required ADR/matrix anchors and misleading-claim checks
 - [x] T040 [US6] Record the #1587 research/verification path in this spec artifact
 

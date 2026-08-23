@@ -27,7 +27,7 @@ pub(crate) enum ContractKind {
     Event,
     /// 命令下发契约。
     Command,
-    /// Saga 编排契约（对标 saga.md `kind:saga`）。
+    /// Saga 编排契约（对标 generated / diport::SagaDurableStore / saga conformance `kind:saga`）。
     Saga,
 }
 

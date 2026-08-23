@@ -33,7 +33,7 @@
 //! `DurableIsolated` 两个 durable 变体都收敛为「需 redis url」——隔离语义留给 Redis key namespace
 //! 设计，不在 claimer 选型层分叉。
 //!
-//! ref: docs/rules/eventbus.md §复用层选型（幂等 claimer，topology-gated）
+//! ref: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`，topology-gated）
 
 use crate::topology::Topology;
 

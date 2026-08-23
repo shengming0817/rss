@@ -594,7 +594,7 @@ fn spawn_poll(
 /// `ready=true`；失败保留 last-good + `ready=false`（degraded），**绝不** swap 空集或宽放（fail-closed）。
 // incidental: 预存阻塞（PR-254 #1197）。认知复杂度 16/15 由 `tracing::{debug,warn}!` 宏展开的条件分支撑高——
 // 非业务逻辑复杂（函数体仅一个 match + 两臂原子写）；这是 tracing 宏对 clippy::cognitive_complexity 的已知
-// false-positive，拆 helper 只搬走 tracing 调用、不增可读性。item-level carve-out（error-handling.md §Carve-out）。
+// false-positive，拆 helper 只搬走 tracing 调用、不增可读性。item-level carve-out。
 // 本 PR（#1274/#1272）随 workspace 门绿顺带收口此预存阻塞，不改 refresh 行为。
 #[allow(clippy::cognitive_complexity)]
 fn refresh(
@@ -778,7 +778,7 @@ fn decode_b64(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     //! JWKS 解析矩阵 + 文件源加载 / 轮转 / fail-closed / degraded / shutdown。
-    //! 测试 expect/unwrap carve-out 按 error-handling.md §Carve-out 用 **item-level** `#[allow]` 逐 fn 标注。
+    //! expect/unwrap carve-out 仅标注到需要的 test item。
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

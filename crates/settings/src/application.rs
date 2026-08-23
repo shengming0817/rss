@@ -1300,7 +1300,7 @@ mod tests {
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
-    // 测试 helper：解析已知合法常量 —— expect item-level carve-out（error-handling.md §Carve-out）。
+    // 测试 helper：解析已知合法常量 —— expect item-level carve-out。
     #[allow(clippy::expect_used, clippy::panic)]
     fn tenant() -> TenantId {
         TenantId::parse(TENANT).expect("canonical uuid")
@@ -1328,7 +1328,7 @@ mod tests {
         ProducerMarker::for_test(CONFIG_ROLLBACK_PRODUCER).into_receipt()
     }
 
-    // 域单测不依赖 adapter crate（rust-standards.md §命名）：OutboxEmitter / Clock 替身在此手写。
+    // 域单测不依赖 adapter crate：OutboxEmitter / Clock 替身在此手写。
     #[derive(Clone, Default)]
     struct CapturingEmitter {
         emitted: Arc<Mutex<Vec<(EventEntry, OutboxEnvelopeParts)>>>,

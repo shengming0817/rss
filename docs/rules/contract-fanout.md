@@ -27,7 +27,7 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
   `ComponentId` + 纯 `ComponentGraph` 唯一拥有 ID/path/ref 语法与传递引用；working filesystem 和 Git base
   reader 只负责提供文档 bytes。CI impact 必须沿 base/working 引用图的并集扇出，删除或改名不得丢失旧 consumer。
 - `active` 破坏式 wire 变更默认走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新 contract ID +
-  新一份 `contract.toml` + `*.schema.json`），并完整保留旧 contract identity。#1696 仅将
+  新一份 `contract.toml` + `*.schema.json`），并完整保留旧 contract identity。breaking review 只将
   `LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定为 pre-ratchet review finding；
   它们须有命令生成、绑定 base + rule/subject/detail 的精确 `Contract-Review-Ack` commit trailer 才能通过。
   `deprecated` warn / `draft` skip 不得通过 lifecycle 降级绕过其它 active deny。
@@ -95,7 +95,9 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 - **中立、provider-agnostic** 契约（正确性要求 provider 可互换，如设备身份/证书签发）由**框架**归属：
   `owner: _framework`（保留 sentinel）。不绑单一 consumer 域——对齐 provider-agnostic identity 范式。
 - owner→域 crate 解析**只经 `c.owner().domain()`**（框架 owner 返回 `None`）；禁止直接索引 `project.domains[c.owner]`。
-- 框架归属今适用于 http/event/command（command 是 provider-agnostic 分发机制，#1124 扩展 R2）；`lifecycle: active` 须在某 `assembly.toml` 的 `frameworkContracts` 声明且经 `bootstrap::validate_framework_serving` 验证 route group 已挂载；否则须为 draft|deprecated。
+- 框架归属适用于 http/event/command；`lifecycle: active` 须在某 `assembly.toml` 的
+  `frameworkContracts` 声明且经 `bootstrap::validate_framework_serving` 验证 route group 已挂载；否则须为
+  draft/deprecated。
 
 `frameworkContracts` 是必填闭合 mount 列表（无默认/兼容路径），每项必须同时显式声明
 `{ id = "<contract>", listener = "<listener-id>" }`；旧字符串项和隐式 listener 均拒绝。每个 active framework
@@ -105,11 +107,3 @@ contract 在 workspace 中至少有一个声明者；同一 assembly 内 contrac
 `FrameworkRoutes::register(&mut Registry)` 注册。auth finalize 前，`validate_framework_serving` 按
 `(listener, contract)` 对 framework-owned actual mount 做 exact-set 校验，拒绝 missing、duplicate、mismatch、
 extra 和挂错 listener；不得以全局静态 route 实例或仅比较 contract ID 绕过 listener 归属。
-
-## Implementation matrix
-
-PR body 或实施计划中列：
-
-| 变更 | contract | generated | 域 crate | tests | docs |
-|------|----------|-----------|----------|-------|------|
-| ... | ... | ... | ... | ... | ... |

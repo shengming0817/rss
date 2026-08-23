@@ -1119,7 +1119,7 @@ mod backend_tests {
 
     // ── KV happy path ───────────────────────────────────────────────────────────────────
 
-    // expect carve-out 集中此处（error-handling.md §Carve-out，item-level）：happy path 断言 Ok 后
+    // expect carve-out 集中在此 item：happy path 断言 Ok 后
     // 再 .expect("ok") 取值；构造器期望合法配置成功。测试体不散落 `unwrap`。
     #[allow(clippy::expect_used)]
     #[tokio::test]

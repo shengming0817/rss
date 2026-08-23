@@ -1,7 +1,7 @@
 # GoCell 以 Rust 为主：Cargo 适配与精简 workspace 结构
 
 > **归档·冻结** · 2026-06-21 GoCell→Rust 迁移评估快照（target 命名已对齐 RSS）· **非现行规则**。
-> 现行架构单源见 `docs/rules/architecture.md`；本批只读冻结，仅供迁移评估溯源。
+> 现行架构单源见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；本批只读冻结，仅供迁移评估溯源。
 >
 > 生成日期：2026-06-21 · 以 Rust 社区规范为主、去除 cell/slice 外壳概念，按"能否被 Cargo 原生替代"适配（非 1:1 迁移）
 > 配套文档：[gocell-package-overview.md](./gocell-package-overview.md) · [gocell-rust-tradeoff.md](./gocell-rust-tradeoff.md) · [gocell-rewrite-sequence.md](./gocell-rewrite-sequence.md) · [gocell-rust-crate-mapping.md](./gocell-rust-crate-mapping.md) · [gocell-rust-ci-plan.md](./gocell-rust-ci-plan.md) · [gocell-rust-eval-checklist.md](./gocell-rust-eval-checklist.md)
@@ -65,7 +65,7 @@
 
 ## 二、精简 workspace 结构
 
-> 下方为 2026-06-21 评估期结构快照；**现行权威结构树的唯一持有者 = `docs/rules/architecture.md` §扁平 workspace 结构**，以其为准（本文已冻结，不随之演进）。
+> 下方为 2026-06-21 评估期结构快照；**现行权威结构树的唯一持有者 = `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`，以其为准（本文已冻结，不随之演进）。
 
 ```
 rss/

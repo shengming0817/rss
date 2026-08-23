@@ -5,7 +5,7 @@
 //!
 //! INVARIANT: DIPORT-ERR-RAWSOURCE-BAN-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（Hard，`diport` 内）：`RedactedSource` 的 `Debug`/`Display` 实现**强制脱敏**——
 //!   类型系统保证，不可绕过（INVARIANT: DIPORT-ERR-SOURCE-REDACT-01， { level = "Medium", exec = "check", source = "dylint" }`crates/diport/src/redacted.rs`）。
 //! - 下游（本 lint，Medium）：守「受守护 crate error struct 的 source 字段必须使用 RedactedSource，
@@ -69,7 +69,7 @@ dylint_linting::declare_late_lint! {
     /// **误报红**（且 UI golden 漂移），即「路径漂移即被发现」的自救机制。
     /// 选路径豁免而非 `#[allow]`/cfg：避免在生产代码引入 dylint cfg（`unexpected_cfgs`）/ `unknown_lints` 噪声。
     /// 其它确需保留裸 Box 的极少数情形仍可用 item-level `#[allow(rss_diport_error_debug_redacted)] // reason: ...`
-    /// 逃生门——生产 carve-out 须遵 `error-handling.md §Carve-out`（item-level + reason，必要时同步 ADR registry）；
+    /// 逃生门——生产 carve-out 必须保持 item-level、附 reason，必要时同步 ADR registry；
     /// UI fixture 内的 `#[allow]`（`ui/diport.rs` G3）仅演示逃生门、属 test-only，不入 carve-out ADR registry。
     ///
     /// anti-vacuity（守卫非恒真 / 恒假，两向 UI golden 锁）：红向由 `ui/diport.rs` / `ui/bootstrap.rs` /

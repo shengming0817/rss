@@ -5,7 +5,7 @@
 //! 落角色绑定，并在同一本地事务发布 `identity.role-{assigned,revoked}`（L2，事件已 active，audit consumer 已接线）。
 //!
 //! 必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）；`Clock` 位置参注入（禁系统时钟）。
-//! 错误为库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射，error-handling.md）。
+//! 错误为库错误枚举，使用 const-literal message；HTTP 状态码由 handler 层映射。
 //!
 //! ref: casbin/casbin-rs src/rbac/default_role_manager.rs@master（RBAC-with-domains：binding = subject+role+tenant
 //! 三元组，对齐 `g(r.sub,p.sub,r.dom)` 多租隔离）
@@ -266,7 +266,7 @@ mod tests {
         }
     }
 
-    // reason: 测试断言用 expect 暴露失败因（item-level carve-out，error-handling.md §Carve-out 禁 module-level）。
+    // reason: 测试断言用 expect 暴露失败因；carve-out 仅作用于此 item。
     #[allow(clippy::expect_used)]
     fn tid(raw: &str) -> TenantId {
         TenantId::parse(raw).expect("canonical tenant parses")

@@ -94,9 +94,9 @@ The accepted closeout resolves the `flume` chains to `spin 0.9.9` and the `crc-f
 
 ## Source Material
 
-- [L0 LocalOnly rule](../../rules/consistency-l0.md)
-- [L1 LocalTx rule](../../rules/localtx.md)
-- [Architecture verification ladder](../../rules/architecture.md)
+- ExecutionProfile / effectProfile / consistency gates
+- LocalTxObservation / transaction outcome types / provider conformance
+- `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`
 - [Current CI status](../../ops/202607130824-1765-diff-adaptive-ci.md)
 
 External benchmark:

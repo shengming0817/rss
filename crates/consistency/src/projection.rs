@@ -2,7 +2,7 @@
 //!
 //! `ProjectionEvent` 是投影事件载体 **sync trait**（outbox entry 与 saga journal event 都实现它）；
 //! `Projector` 是 L3 引擎策略 trait（native AFIT，apply 单事件到读模型）。
-//! ref: oxidecomputer/steno（saga journal 事件源对标）+ eventbus.md §Projection（双写 journal 接缝）。
+//! ref: oxidecomputer/steno（saga journal 事件源对标）+ `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 
 use crate::error::EngineError;
 use crate::outbox::EventTopic;
@@ -280,7 +280,7 @@ impl std::fmt::Debug for ProjectionEventMetadata {
     }
 }
 
-/// 投影事件载体（sync trait；outbox entry / saga journal event 共同实现 —— eventbus.md §Projection）。
+/// 投影事件载体（sync trait；outbox entry / saga journal event 共同实现 —— `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 ///
 /// 投影器据 `topic` 路由、`lsn` 断点续投、`payload` 解码。纯查询 trait（无 async / 无 dyn 注入）——
 /// 泛型 `<E: ProjectionEvent>` 消费，非 trait object。

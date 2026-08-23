@@ -9,7 +9,7 @@
 //! funnel（type-layer Hard，上游）；但「funnel 只许 audit 在 durable append receipt 后调用」无法跨 crate
 //! 真 seal。本 lint 承载该 **下游** 约束（精确函数 allowlist，Medium）：其它函数调用即报。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（mint）：私有 `_seal` 字段 ⇒ struct-literal 不可表达，编译错误（Hard，在 vocab）。
 //! - 下游（callsite）：哪个 crate 可调 ⇒ 本 lint（Medium）。
 //!

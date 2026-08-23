@@ -116,7 +116,7 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 
 - workspace 骨架（#993，Cargo.toml + 34 member + deny/clippy/toolchain）已就绪并合并（已 close）。
 - 工具链 edition 2024 / rust 1.96，native AFIT 已稳定（1.75）但 `dyn` 仍不可用 → DI port 经 dynosaur wrapper。`dynosaur`(=0.3.x，diport 落地 PR pin) + `mockall` 在 `[workspace.dependencies]`；`async-trait` 仅作 ADR-003 §5 复评对照，非现行范式。
-- 接缝**清单**（哪个 crate 暴露哪类 trait）以 `docs/rules/architecture.md` §扁平 workspace 结构 为底；spike 改签名**写法语法**，**ADR-003 额外把 DI 注入 port 收敛进新 `diport` crate（改归属位置）**——故本拆解在计划层重排出 PR-diport 单元（建 diport + 回写 architecture.md 由 PR-diport 落地）。
+- 接缝**清单**（哪个 crate 暴露哪类 trait）以 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；spike 改签名**写法语法**，**ADR-003 额外把 DI 注入 port 收敛进新 `diport` crate（改归属位置）**——故本拆解在计划层重排出 PR-diport 单元（建 diport + 回写 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 由 PR-diport 落地）。
 - "用户"是下游实现者（人/AI），非终端业务用户；本 feature 不产出运行时业务行为。
 - 域层 wire 类型来自 #998 的 `generated`；若 #998 滞后，域层 PR 可先冻非 wire 接缝。
 - spec 规划文档在 `specs/` 下产出；**本次 ship（PR-0）随同提交整理后的 spec + ADR-004 conventions + public-api 工具入口**；PR-1..PR-5 + PR-diport 为后续实现 PR（已建 backlog issue 跟踪）。

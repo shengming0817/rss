@@ -12,7 +12,7 @@
 //! `ManagedResource` / `ManagedResourceLocal` 同置于 `diport` 以复用 dyn 派发，但语义是 lifecycle seam：
 //! adapter resource、服务 worker 与 runtime wrapper 均可实现，不属于 provider impl-site 限制。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（定义面）：DI port trait 只能**定义**在 diport——`deny.toml` wrapper 限定 dynosaur/trait-variant
 //!   宏依赖只准 `diport`（cargo-deny Medium，INVARIANT DIPORT-MACRO-CONFINE-01）。
 //! - 下游（impl 面）：provider port trait 只能在 adapter / 组合根**实现**——本 lint（Medium）。cargo-deny 限「依赖」
@@ -45,7 +45,7 @@
 //! `ManagedResourceLocal` **0 诊断**锁；adapter-path 绿向由 `cargo xtask verify` 的 `cargo dylint --all`
 //! 工作区真实 impl **0 诊断**锁。adapter-path 无法在 UI harness 内模拟（harness 控制 example 源路径）。
 //!
-//! Hard 化评估（ai-robust.md §审查要求）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
+//! Hard 化评估（cargo xtask archrules verify）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
 //! AST lint 是最强可用载体；唯一 Hard 路径是「adapter impl 收回 diport + sealed-trait」（§4.2 方案 ①），代价
 //! 是 adapter 逻辑耦合进 diport，ADR-003 已权衡否决。拆 lifecycle crate 只改变分类位置，不能 Hard 化
 //! 独立 adapter 的 provider impl-site 限制，故不增加该抽象。

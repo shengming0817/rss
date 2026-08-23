@@ -1,7 +1,7 @@
 # Billing checkout saga 契约（draft）——证明 kind:saga 扇出闭环：codegen（generated/src/saga/billing_v1）
 # + governance（SAGA-CONTRACT-01：R1 saga⇒L3 + R10 saga block 结构语义）+ golden。不接 assembly（draft），
 # 但 retry/timeout 会派生为 generated POLICY，组合根转 SagaPolicy 后驱动 eventexec runtime。形态冻结见
-# contracts/README.md §[saga]；治理见 docs/rules/saga.md §Governance。
+# contracts/README.md §[saga]；治理见 generated / diport::SagaDurableStore / saga conformance。
 id = "billing.checkout"
 kind = "saga"
 domain = "billing"

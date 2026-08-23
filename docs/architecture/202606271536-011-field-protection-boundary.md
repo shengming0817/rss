@@ -20,7 +20,7 @@
 ## 1. 背景
 
 #1359/#1360 把字段级 **redaction** 引入 RSS：任意 struct 经 `#[derive(secure::Redact)]` + 字段属性显式声明敏感度与 mode，
-派生 fail-closed 的安全 `Debug`（`crates/securederive/src/lib.rs`、`crates/secure/src/redaction.rs`、`docs/rules/observability.md`
+派生 fail-closed 的安全 `Debug`（`crates/securederive/src/lib.rs`、`crates/secure/src/redaction.rs`、`crates/observ`、`secure::redact_error` 与 typed metric enums
 §Redaction）。这条能力只作用于**可观测面**（Debug / 日志 / trace / `last_error`）——它把明文挡在「输出到人能看见的地方」之外。
 
 但**静态存储面（at-rest）的加密**至今无统一设计单源。P1-9 capability gap 仍指出四项缺口：`diport` 无 `KeyProvider` port；
@@ -52,7 +52,7 @@ Debug 脱敏 + 敏感 key 拒写，材料不落库但无加密）。
 保护语义分两层落地，framework 底座只立**声明层**，不接真实加解密：
 
 - **authoring / 声明面**：contract `*.schema.json` 经 `x-protection` 声明字段需加密保护，`cargo xtask contract validate` /
-  `breaking` 守门（与既有 `x-pii` / `x-redaction` 同源范式，observability.md §Redaction「contract → generated 字段策略」）。
+  `breaking` 守门（与既有 `x-pii` / `x-redaction`、`crates/observ`、`secure::redact_error` 同源）。
 - **generated 携带保护元数据**，但**不触发真实加解密**——生成类型只标「此字段受保护 + AAD 维度」，加解密在消费侧经注入的
   `KeyProvider` 完成。
 - framework 底座（#1465）在 `secure` 立 **AAD / ciphertext envelope / AEAD v2** 基础类型 + `x-protection` validate/breaking gate，
@@ -167,7 +167,7 @@ impl，不被域依赖。本 ADR 即修正 `primitives/crypto.rs` / `secure/aead
 能力拆为三个 feature 自底向上长出，本 ADR 是其**共同设计单源 + 单源验收清单**（逐条对齐各 feature body 的验收标准 + INVARIANT ID）：
 
 **#1465 framework 底座**（声明层，不接 Vault / 不改持久化）
-- [ ] redaction↔encryption 职责边界有 ADR / rules 单源（**=本 ADR-011 + observability.md 同步**）。
+- [ ] redaction↔encryption 职责边界有 ADR / rules 单源（**=本 ADR-011 + `crates/observ`、`secure::redact_error` 与 typed metric enums 同步**）。
 - [ ] `secure` 具备 AAD / ciphertext envelope / **AEAD v2** 基础类型（`seal`/`open` 带 `aad`，`FIELDPROT-AAD-MANDATORY-01`）。
 - [ ] `open(aad)` 的 AAD 经 `ProtectionContext`（已鉴权请求 + 经授权维护/迁移两类受信源）派生、不可裸拼 stored bytes（`FIELDPROT-AAD-DERIVE-FROM-CTX-01`）。
 - [x] contract authoring 支持 `x-protection` + `validate` / `breaking` gate。（delivered by #1468——单独立项的 authoring+gate 切片：contract validate R17 `SchemaProtection` + breaking `PROTECTION_POLICY_CHANGED` + `x-at-rest` 强制覆盖 + 文档）
@@ -217,7 +217,7 @@ DETERMINISTIC / NODBG 类型）/ #1466（DIPORT-* + KEYPROV-AUDIT 守卫）/ #14
   AAD 必填 + deterministic opt-in + no-decrypt-in-debug 在落地时由类型系统免费成立（Hard）；**零新增 crate / 零新增分层**
   （沿用 `secure` + `diport` + 域持久化路径，envelope / AEAD v2 是 `secure` 内类型演进）。
 - **负 / 代价**：① `secure::Aead` 从 v1（无 aad）演进到 v2（带 aad）是破坏式签名变更，但 pre-GA 窗口内 in-repo 调用方随同一
-  feature 原子更新（api-versioning.md §兼容窗口），无 wire 影响；② deterministic opt-in 字段需逐个评估 pattern-leak 风险，认知成本
+  feature 原子更新（cargo xtask contract breaking / cargo public-api），无 wire 影响；② deterministic opt-in 字段需逐个评估 pattern-leak 风险，认知成本
   落在字段 owner（由 D4 文档化权衡 + review 兜）；③ AAD schema-version 维度要求 schema 演进时显式纳入 rewrap 计划（#1467 runbook）。
 - **下游**：#1465 → #1466 → #1467 按 §D7 顺序落地，每步勾对应验收 checklist + INVARIANT。
 

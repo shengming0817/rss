@@ -972,7 +972,7 @@ mod tests {
 
     /// 合法测试 RelayConfig（max_in_flight=10）。
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out。
     fn relay_config(poll: Duration) -> RelayConfig {
         RelayConfig::new(poll, 10).expect("valid test relay config")
     }
@@ -1025,7 +1025,7 @@ mod tests {
 
     /// 解析测试 domain（合法 DomainName，crate-name 形）。
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 已知合法 domain，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 已知合法 domain，item-level carve-out。
     fn dn(s: &str) -> vocab::DomainName {
         vocab::DomainName::parse(s).expect("valid test domain")
     }

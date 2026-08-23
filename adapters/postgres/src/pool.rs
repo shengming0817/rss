@@ -57,7 +57,7 @@ const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
 ///
-/// Display 仅 `&'static str` const literal（`error-handling.md` §Message 与 PII）；sqlx 原始错误作
+/// Display 仅 `&'static str` const literal；sqlx 原始错误作
 /// `#[source]` 内部保留、不进 Display（PII 边界，与 `diport::SignerError` 同范式）。adapter-内部错误不
 /// mint 新 `ERR_` wire 前缀（adapter 不返 wire errcode）。
 #[derive(Debug, thiserror::Error)]
@@ -3210,7 +3210,8 @@ fn log_serving_role_bypass(role: &WriterRole) {
         superuser = role.superuser,
         bypass_rls = role.bypass_rls,
         "rls capability gate: connection role is superuser or BYPASSRLS — RLS not enforceable; \
-         serving connection must use rss_app as a non-superuser NOBYPASSRLS role (tenancy.md §RLS 与 PG scope)"
+         serving connection must use rss_app as a non-superuser NOBYPASSRLS role \
+         (TENANCY-PG-TX-FUNNEL-01)"
     );
 }
 
@@ -3898,7 +3899,7 @@ impl PgStore {
             .connect_with(config.connect_options_for(application_name))
             .await
             .inspect_err(|err| {
-                // reason: 连接（持久化）失败在 adapter 边界记 error!，避免仅 `?` 冒泡时日志链断点（observability.md §日志级别）；
+                // reason: 连接（持久化）失败在 adapter 边界记 error!，避免仅 `?` 冒泡时日志链断点（`crates/observ`、`secure::redact_error` 与 typed metric enums）；
                 // 第三方 sqlx::Error 经 secure::redact_error 统一脱敏 funnel，杜绝连接串 / 凭据泄漏。
                 tracing::error!(
                     target: "postgres",

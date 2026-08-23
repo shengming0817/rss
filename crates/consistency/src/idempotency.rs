@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
-    // reason: 测试用 parse — 已知非空 key，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试用 parse — 已知非空 key，item-level carve-out。
     fn k(raw: &str) -> IdemKey {
         IdemKey::parse(raw).unwrap()
     }
@@ -660,7 +660,7 @@ mod tests {
     /// mint() 产出合法 uuid v4（version == Random）——uuid v4 从「协议约定」上移为「构造保证」。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 断言已知由 mint 铸出的 uuid 文本可解析，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 断言已知由 mint 铸出的 uuid 文本可解析，item-level carve-out。
     fn mint_produces_valid_uuid_v4() {
         let token = LeaseToken::mint();
         let parsed = uuid::Uuid::parse_str(token.as_str()).unwrap();
@@ -682,7 +682,7 @@ mod tests {
     // 任意非空 key 接受（opaque，不限字符集、不 trim）；as_str 往返。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn idem_key_parse_accepts_non_empty_and_round_trips() {
         let cases: &[&str] = &[
             "a",
@@ -706,7 +706,7 @@ mod tests {
     // 纯空白是合法 opaque key（只拒空、不 trim——caller 负责构造稳定 key，漂移在边界即暴露而非被掩盖）。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn idem_key_parse_accepts_whitespace_only_opaque() {
         for &raw in &[" ", "\t", "  x  "] {
             assert!(IdemKey::parse(raw).is_ok(), "expected Ok for raw={raw:?}");
@@ -717,7 +717,7 @@ mod tests {
     // 任意非空组名接受（opaque）；as_str 往返。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn consumer_group_parse_accepts_non_empty_and_round_trips() {
         for &raw in &["audit", "audit.session-created", "grp-1", " "] {
             assert!(

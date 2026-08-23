@@ -432,7 +432,7 @@ pub(in super::super) async fn set_outbox_terminal_for_test(
 
 /// 产生唯一 event_id（防并发测试冲突）。
 #[allow(clippy::disallowed_methods)]
-// reason: SystemTime::now() 仅用于测试隔离产生唯一 id，非时钟注入场景；item-level carve-out（error-handling.md §Carve-out）。
+// reason: SystemTime::now() 仅用于测试隔离产生唯一 id，非时钟注入场景；item-level carve-out。
 pub(in super::super) fn unique_event_id(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -462,7 +462,7 @@ pub(in super::super) fn unique_domain(prefix: &str) -> String {
 /// 构造测试用 EventEntry + Envelope。
 pub(in super::super) fn make_entry(event_id: &str) -> EventEntry {
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 构造已知合法值，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 构造已知合法值，item-level carve-out。
     EventEntry::new(
         EventTopic::parse("test.event").unwrap(),
         IdemKey::parse(event_id).unwrap(),

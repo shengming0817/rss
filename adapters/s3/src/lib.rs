@@ -214,8 +214,8 @@ mod backend_tests {
         aws_sdk_s3::Client::from_conf(config)
     }
 
-    // 构造 helper：mock_client + S3Store::new。expect 的 item-level carve-out 集中于此一处
-    // （error-handling.md §Carve-out 要求 item-level），测试体不再散落 `expect`。
+    // 构造 helper：mock_client + S3Store::new。expect 的 item-level carve-out 集中于此处，
+    // 测试体不再散落 `expect`。
     #[allow(clippy::expect_used)]
     fn store_with(client: aws_sdk_s3::Client) -> S3Store {
         S3Store::new(client, BUCKET).expect("non-empty bucket")

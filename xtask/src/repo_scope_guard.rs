@@ -211,6 +211,18 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ),
     ("adapters/postgres/src/consumer_tx.rs", "mark_done_only"),
     (
+        "adapters/postgres/src/consumer_tx.rs",
+        "consumer_tx_settlement_for_test",
+    ),
+    (
+        "adapters/postgres/src/consumer_tx.rs",
+        "consumer_tx_stale_lease_for_test",
+    ),
+    (
+        "adapters/postgres/src/consumer_tx.rs",
+        "consumer_tx_confirmed_rollback_for_test",
+    ),
+    (
         "adapters/postgres/src/command_journal.rs",
         "record_command_with_business_write",
     ),
@@ -926,6 +938,13 @@ mod tests {
             (
                 "adapters/postgres/src/device_outbox.rs".to_string(),
                 "async fn settle_accepted() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/consumer_tx.rs".to_string(),
+                "async fn consumer_tx_settlement_for_test() { infra_tenant_scope(tenant); }\n\
+                 async fn consumer_tx_stale_lease_for_test() { infra_tenant_scope(tenant); }\n\
+                 async fn consumer_tx_confirmed_rollback_for_test() { infra_tenant_scope(tenant); }"
+                    .to_string(),
             ),
             (
                 "adapters/postgres/src/command_journal.rs".to_string(),

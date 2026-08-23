@@ -2,11 +2,9 @@
 
 > 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
 > workspace。
-> 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
-> `docs/rules/architecture.md`；其余规则单源见 `docs/rules/`（入口 [`docs/rules/README.md`](docs/rules/README.md)）。
-
-项目能力处置与范围边界的单一事实源见 [`docs/rules/project-scope.md`](docs/rules/project-scope.md)；需求判断、
-方案设计和 review 不得越过其中的 `Freeze` / `External` 边界。
+> 本文件是项目最高协作规范（无独立宪法文件）；规则 owner 只从
+> [`docs/rules/README.md`](docs/rules/README.md) 入口发现。需求判断、方案设计和 review 不得越过其中索引的
+> `Freeze` / `External` 边界。
 
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
@@ -24,9 +22,6 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 
 ### 分层结构（扁平 Cargo workspace）
 
-> 完整扁平布局（全部库 crate + adapters/contracts/bins/xtask/generated）是单一事实源，只在
-> `docs/rules/architecture.md` §扁平 workspace 结构 维护一份；此处不复制，避免漂移。
-
 根级治理载体：
 
 - `Cargo.toml` — `[workspace] members` + `[workspace.dependencies]` 统一版本
@@ -34,23 +29,16 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 - `clippy.toml` — `disallowed-methods`/`disallowed-types`（clock / panic / import 纪律）
 - `rust-toolchain.toml` / `.config/nextest.toml` — 工具链固定 / 进程隔离测试
 
-要点：库 crate 全部扁平在 `crates/`；域逻辑是普通 crate（identity / settings / audit / contractreg / syshealth），
-feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/`、`xtask/`、`generated/` 在根级。分层不靠
-目录嵌套，靠 `deny.toml` + Cargo 依赖图编译期强制（不声明就 import 不到）。
+要点：库 crate 扁平放在 `crates/`；feature 是域 crate 内的子单元。精确 member、package kind 与层级只从
+Cargo metadata 和 `xtask/src/layers.rs` 派生，不在协作文档复制。
 
-### 依赖规则（crate 图 + deny.toml 编译期强制）
+### 依赖规则（crate 图 + typed policy）
 
-- **基础**（`vocab`/`assembly-schema`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`/`authmint`）依赖更低位 FoundationPublic + std + 外部 crate，不依赖引擎 / 服务 / 域 / adapters；基础层内部按 enumerated intra-base DAG 单向依赖（`diagctx（独立根）◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，右可依赖左 = 前向边均 sanctioned、反向禁止；`diagctx` 与 `authmint` 为独立根、不依赖其它基础 crate；`cargo xtask layer-deps` 机器守 BASE-INTRADAG-01），现有有语义 owner 的前向边包括 `assembly-schema → vocab`（contract authoring 的 `StepName` / `DomainName` 类型边界）、`runctx → rss-request-context`（`AppCtx` tenant payload = canonical `rss_request_context::TenantId`，ADR-029）与 `secure → securederive`（字段级脱敏 `#[derive(Redact)]` proc-macro，#1359/#1360）。
-- **引擎/原语**（`consistency`/`primitives`）依赖基础；不依赖服务 / 域 / adapters。
-- **服务**（`httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`）依赖基础 + 引擎；不依赖域 / adapters。
-- **域**（`identity`/`settings`/…）依赖基础 + 引擎 + 服务 + `generated`；**互不依赖**（跨域只经 contract）；不依赖 adapters。
-- **adapters/** 实现上层 trait，不被域依赖（经组合根注入）；**bins/** / **xtask/** / **assemblies/** 是组合根，可依赖所有库 crate。
-- `SharedRuntimeDeps` 只能放共享基础设施 / provider value object；不得放 domain service / repo。允许根由 `xtask/runtime-deps-guard.toml` 单源配置，并由 `cargo xtask runtime-deps guard` 强制，规则细节见 `docs/rules/runtime-wiring.md`。
-- cargo 拒绝循环依赖 → 分层无环天然成立；`cargo-deny`(deny.toml) 表达禁依赖、`cargo-udeps` 抓多余/未声明、`cargo public-api` 守封装面。
-
-> 关键：跨域只经 contract 通信，由 crate 依赖图**自动守住**——域 crate
-> 没在 Cargo.toml 声明就 import 不到，且 `deny.toml` 禁止声明对兄弟域 crate 的依赖。详见
-> `docs/rules/architecture.md` §分层 / §Rust 原生强制（三档载体）。
+- 稳定方向为 Foundation → Engine → DI-infra → Service → Domain → Adapter/Composition。
+- 兄弟域互不依赖，跨域只经 contract；domain 不依赖 adapter。
+- `SharedRuntimeDeps` 只含共享基础设施/provider value object，具体允许根由
+  `xtask/runtime-deps-guard.toml` 与 `cargo xtask runtime-deps guard` 强制。
+- Cargo/rustc、`deny.toml`、`cargo xtask layer-deps`、`cargo-udeps` 与 `cargo public-api` 是真实 carrier。
 
 ### 域 crate 开发规则
 
@@ -62,19 +50,12 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 
 ### 一致性等级（L0-L4）
 
-| 级别 | 含义 | 场景 |
-|------|------|------|
-| L0 LocalOnly | 无业务持久化、outbox、publish；允许 provider-owned read-path transaction | 读取、校验、投影、鉴权 |
-| L1 LocalTx | 单域 crate 本地事务 | session 创建、审计写入 |
-| L2 OutboxFact | 本地事务 + outbox 发布 | session.created 事件、config.entry-upserted 事件 |
-| L3 WorkflowEventual | 跨域最终一致 | 查询投影、CQRS、Saga |
-| L4 DeviceLatent | 设备长延迟闭环 | 命令回执、证书续期、状态收敛 |
-
-等级声明在 `contract.toml` 的 `consistencyLevel` 字段（与 wire 语义同源，决策 #1），由 `cargo xtask` 校验；不放域 crate manifest。
+等级由 `contract.toml` 的 closed `consistencyLevel`、generated types 与 contract validation 持有；本文不复制
+枚举或行为矩阵。
 
 ## Rust 编码规范
 
-- 错误用 `vocab`(error) + `thiserror`（库错误枚举），应用边界可 `anyhow`；新错误码命名空间须注册所有权并更新 golden，见 `docs/rules/error-handling.md`
+- 错误用 `vocab` + `thiserror`，应用边界可 `anyhow`；新错误码命名空间须注册所有权并更新 golden
 - 日志 / 追踪用 `tracing`（结构化字段 + span）
 - DB 字段 `snake_case`，JSON/Query/Path `camelCase`（serde rename）
 - clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
@@ -91,7 +72,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 
 主要实施者是 AI。新增/修改约束 enforcement 机制按 AI-robust 三档（Hard / Medium / Soft）评级；Soft 严禁立项。
 Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静态强制的约束，不要退化成运行期治理测试**。
-载体决策原则、review checklist 详见 `docs/rules/ai-robust.md`，静态强制清单见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
+载体选择直接以 Cargo/rustc、类型、schema/codegen、lint/gate 与真实 conformance 为证据，不引用规则文案。
 
 ## 参考框架
 

@@ -1900,7 +1900,7 @@ CREATE POLICY p ON sessions
     // ---- #332 F6：建模 ALTER POLICY 最终态 + 要求 NULLIF 目标谓词 ----
 
     /// red（核心）：CREATE POLICY 用旧裸谓词且未经 ALTER 升级 → 最终态非 NULLIF → PolicyWeak。
-    /// 只新增旧谓词不 harden 即门红，对齐 `docs/rules/tenancy.md` 目标态。
+    /// 只新增旧谓词不 harden 即门红，对齐 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL 目标态。
     #[test]
     fn red_bare_predicate_without_alter_is_weak() {
         let sql = r#"

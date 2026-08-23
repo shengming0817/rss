@@ -2,7 +2,7 @@
 //!
 //! 只锁可执行 carrier：SQL migration、provisioning、capacity-gate 脚本，以及 runbook 中可复制执行的
 //! SQL probe。面向人的说明散文不做 `contains` 断言——要求散文包含某句话不增加 enforcement 强度，
-//! 见 `docs/rules/README.md` §红线一。
+//! Markdown 文案不是生产证据。
 
 #[path = "support/migration_contract.rs"]
 mod migration_contract;

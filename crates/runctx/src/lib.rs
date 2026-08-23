@@ -6,7 +6,7 @@
 //! request / cell 等**可观测 ID 是诊断信号**，必须由 consumer（httpserve middleware /
 //! observ）写成 `tracing` span 字段，**不**进 [`RequestCtx`]。runctx 刻意**不依赖 `tracing`**，
 //! 让「把 tenant/principal 塞进 span」在依赖图上不可表达——诊断载体可被采样丢弃 / 任意层
-//! 改写，不配做 row-scope 授权闸门（见 `docs/rules/tenancy.md`「tracing span 仅作关联信号、
+//! 改写，不配做 row-scope 授权闸门（见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL「tracing span 仅作关联信号、
 //! 不替代持久审计」）。
 //!
 //! # 范式（ADR-002 §D2）

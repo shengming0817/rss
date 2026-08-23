@@ -38,7 +38,7 @@
 //!
 //! resolver 仍无组合根消费方；login/refresh 现经 AuthGrant 路径，不经本 resolver。
 //!
-//! ref: docs/rules/eventbus.md §复用层选型（topology-gated）
+//! ref: `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）
 //! ref: crate::replaydeps（同范式 topology-gated resolver）
 
 use crate::sagaprojectiondeps::PostgresUrl;

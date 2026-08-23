@@ -1,7 +1,7 @@
 # Tenancy / ABAC consumer migration guide
 
 本指南面向下游 HTTP/gRPC route、domain service、read-model 和 operator consumer。规则单源仍是
-`docs/rules/tenancy.md`；本文件只把当前可消费模式和反例收敛到一个迁移入口。可编译示例见
+`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL；本文件只把当前可消费模式和反例收敛到一个迁移入口。可编译示例见
 `examples/tenancy-consumer`。
 
 ## AuthZ mode
@@ -117,7 +117,7 @@ audit append，再由 audit-owned sealed receipt 铸造 read scope。
 
 ## gRPC target pattern
 
-gRPC 当前以 `docs/rules/tenancy.md` 为目标规则：非 public RPC 要通过契约 overlay 声明 permission；
+gRPC 当前以 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL 为目标规则：非 public RPC 要通过契约 overlay 声明 permission；
 owner-scoped RPC 要声明 resource extraction；deny response 使用 sealed ErrorInfo，metadata 不带 subject、
 token 或 resource value。#1596 不新增 `contracts/grpc` 或 runtime gRPC implementation。
 

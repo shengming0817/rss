@@ -1,4 +1,4 @@
-//! Auth plan 纯值类型 / scheme 闭值集（`runtime-api.md` §Listener / §Auth plan 优先级）。
+//! Auth plan 纯值类型 / scheme 闭值集（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
 //!
 //! 仅纯数据 + 纯决策计算。PDP / 会话 / Principal / jwt 在 `authn`（service 层）。
 //! 下游 `authn`（PR-3）引 `primitives::authplan`。域 crate 禁构造 `AuthPlan`——组合根经 bootstrap option 注入。
@@ -6,7 +6,7 @@
 /// listener 认证方案（闭值集；Copy）。
 ///
 /// `NoAuth` variant = 显式无认证（`AuthNone`）；与「未配置」从类型层区分——listener 构造器必填 plan，
-/// 缺省（Rust `Option::None`）是配置错误（runtime-api.md §Listener）。
+/// 缺省（Rust `Option::None`）是配置错误（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthScheme {
@@ -20,7 +20,7 @@ pub enum AuthScheme {
     FederatedAccessToken,
 }
 
-/// 标准 listener 种类（闭值集；决定 route-level opt-out 是否可降级）。runtime-api.md §Listener。
+/// 标准 listener 种类（闭值集；决定 route-level opt-out 是否可降级）。httpserve typed builders、`finalize_auth` 与 `RuntimePlan`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ListenerKind {
@@ -30,7 +30,7 @@ pub enum ListenerKind {
     Admin,
 }
 
-/// route-level 认证 opt-out（优先级 1；仅对外面 listener 生效，runtime-api.md §Auth plan 优先级）。
+/// route-level 认证 opt-out（优先级 1；仅对外面 listener 生效，httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RouteAuthOptOut {
@@ -48,11 +48,11 @@ pub enum AuthPlanError {
     NoAuthOnControlPlane,
 }
 
-/// listener 的 auth plan（纯值；单 listener 单 scheme，runtime-api.md §Listener）。
+/// listener 的 auth plan（纯值；单 listener 单 scheme，httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
 ///
 /// invariant：plan 必有显式 scheme（`AuthScheme::NoAuth` 表「显式无认证」，非缺省）。
-/// 构造经 funnel——域 crate 不应直接 mint（runtime-api.md：组合根注入）。
-/// Internal / Admin listener 上禁用 NoAuth（fail-closed，runtime-api.md §Auth plan 优先级）。
+/// 构造经 funnel——域 crate 不应直接 mint（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`：组合根注入）。
+/// Internal / Admin listener 上禁用 NoAuth（fail-closed，httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthPlan {
     listener: ListenerKind,
@@ -76,7 +76,7 @@ fn require_scheme(scheme: AuthScheme) -> Option<RequiredScheme> {
 }
 
 impl AuthPlan {
-    /// 由 listener 种类 + 显式 scheme 构造；拒 Internal/Admin 上的 NoAuth（fail-closed，runtime-api.md）。
+    /// 由 listener 种类 + 显式 scheme 构造；拒 Internal/Admin 上的 NoAuth（fail-closed，httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）。
     pub fn new(listener: ListenerKind, scheme: AuthScheme) -> Result<Self, AuthPlanError> {
         if is_control_plane(listener) && scheme == AuthScheme::NoAuth {
             return Err(AuthPlanError::NoAuthOnControlPlane);
@@ -110,7 +110,7 @@ pub enum RequiredScheme {
     FederatedAccessToken,
 }
 
-/// 最终认证裁决（纯值；优先级求值结果）。runtime-api.md §Auth plan 优先级。
+/// 最终认证裁决（纯值；优先级求值结果）。httpserve typed builders、`finalize_auth` 与 `RuntimePlan`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthRequirement {
@@ -124,7 +124,7 @@ pub enum AuthRequirement {
 
 /// 纯决策：按优先级（route opt-out → listener plan → fail-fast deny）算最终认证要求。
 ///
-/// fail-closed（runtime-api.md）：`Internal` / `Admin` listener 上的 route opt-out 必须被拒
+/// fail-closed（httpserve typed builders、`finalize_auth` 与 `RuntimePlan`）：`Internal` / `Admin` listener 上的 route opt-out 必须被拒
 /// ——返回 [`AuthRequirement::Deny`]（非法配置，直接拒整条路由，绝不 Allow 或 Require 降级）；
 /// opt-out 仅对 `Primary` 等对外 listener 生效，产生 [`AuthRequirement::Allow`]。
 /// 无 opt-out 时：`NoAuth` scheme → `Allow`；其余 scheme → `Require`。纯函数、无 I/O。

@@ -8674,7 +8674,7 @@ mod tests {
         }
     }
 
-    /// `allow_derivable_default_impls` 守卫 anti-vacuity 测试（ai-robust.md §运行期 governance 测试要求）：
+    /// `allow_derivable_default_impls` 守卫 anti-vacuity 测试：
     /// - 正向：`impl Default for Foo {}` 块经 `allow_derivable_default_impls` 后携带
     ///   `#[allow(clippy::derivable_impls)]`。
     /// - 负向控制：`impl SomethingElse for Foo {}` 不被注入该 allow 属性。

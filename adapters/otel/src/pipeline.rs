@@ -61,7 +61,7 @@ impl OtelError {
 ///
 /// 生产只接受 [`OtelEndpoint::tls`]（`https://`）；明文导出（`http://`）必须经
 /// [`OtelEndpoint::insecure_localhost`] 显式 opt-in 且 host 限 loopback——把「非 TLS endpoint」从
-/// 「裸字符串约定 + warn 的隐式成功路径」收成**类型层显式选择**（零信任，`docs/rules/observability.md`
+/// 「裸字符串约定 + warn 的隐式成功路径」收成**类型层显式选择**（零信任，`crates/observ`、`secure::redact_error` 与 typed metric enums
 /// 「生产禁 localhost fallback / 明文」；plaintext-prod-endpoint 不可表达）。
 #[derive(Debug, Clone)]
 pub enum OtelEndpoint {
@@ -142,7 +142,7 @@ fn is_loopback_http(endpoint: &str) -> bool {
 ///
 /// [`secure::redact_observation_field`] 单源 funnel 清洗 span/event/link 属性中已知敏感 key
 /// （`authorization`/`access_token`/`session`/`cookie`/`jwt`… → `<redacted>`），防凭据经 tracing→OTLP
-/// 裸传（`observability.md` §redaction；脱敏落在导出最外边界，fail-closed）。
+/// 裸传（`crates/observ`、`secure::redact_error` 与 typed metric enums；脱敏落在导出最外边界，fail-closed）。
 #[derive(Debug)]
 pub(crate) struct RedactingSpanExporter<E> {
     inner: E,
@@ -382,7 +382,7 @@ mod tests {
     use rstest::rstest;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    // unwrap/expect item-level carve-out 集中于 helper（error-handling.md §Carve-out）。
+    // unwrap/expect item-level carve-out 集中于 helper。
     #[allow(clippy::unwrap_used)]
     fn finished(mem: &InMemorySpanExporter) -> Vec<SpanData> {
         mem.get_finished_spans().unwrap()
@@ -577,7 +577,7 @@ mod tests {
             "email 非 URL 非敏感 key → 透传（盲区文档化）",
         );
         assert_eq!(attrs[3].value.as_str(), "sub-123", "subject 同上透传");
-        // F1：dsn 非敏感 key，但内联凭据经 free-form URL-scrub 剥（observability.md §redaction）。
+        // F1：dsn 非敏感 key，但内联凭据经 free-form URL-scrub 剥（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
         assert_eq!(
             attrs[4].value.as_str(),
             "postgres://<redacted>@h/db",

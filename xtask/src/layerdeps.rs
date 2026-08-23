@@ -1,7 +1,7 @@
 //! `cargo xtask layer-deps` —— source-centric 分层依赖治理 lint。
 //!
 //! 读各 workspace 成员 `Cargo.toml` 的 shipped 与 dev 依赖表（含每个 `[target.<cfg>]` 条件表），
-//! 解析工作区**内部边**。shipped 边按 `docs/rules/architecture.md §分层` 的完整矩阵与精确收敛规则校验；
+//! 解析工作区**内部边**。shipped 边按 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；
 //! dev 边只守域测试的两条稳定边界：禁止兄弟域依赖、禁止非组合根依赖 adapter。
 //! source-centric：只解析含 `path`（或经根 `[workspace.dependencies]` 解析出 path 的 `workspace = true`）
 //! 的本地依赖到工作区成员再判层，外部 crates.io 依赖（纯 version / 无 path）一律忽略——**免疫裸名×crates.io
@@ -741,7 +741,7 @@ fn check_dev_layer_boundaries(members: &[Member], edges: &[Edge]) -> Vec<Finding
 ///   DI port 的 dyn-dispatch 宏（dynosaur）+ Send 变体生成（trait-variant）只能被 **DI port 定义点 crate**
 ///   依赖：provider-agnostic infra port 定义点 `diport`（DiPort 层），及**定义自身 repo/service DI port 的
 ///   域 crate**（Domain 层，Option 2）。provider-agnostic vs 域形 port 的归属 category line 见 ADR-005 /
-///   domain-patterns.md。原 `-01`「单一 dyn-dispatch 依赖点」前提随 Option 2（repo port 必然多点定义）失效；
+///   Cargo 依赖图与 Rust visibility。原 `-01`「单一 dyn-dispatch 依赖点」前提随 Option 2（repo port 必然多点定义）失效；
 ///   其 unsafe 论据更早已被 def-site hygiene 中和（ADR-003 落地结论 1），故放宽零安全代价。
 ///
 /// **不变量（防漂移）**：① 左元素必须是**外部** crate（不在 workspace 成员集）——若误把内部 crate 放左元素，
@@ -1669,7 +1669,7 @@ pub(crate) fn check_workspacefacts_confinement(
 ///
 /// 本规则只接收 `shipped_edges`，dev-dependency 边位于独立桶；故**任一**指向 test-support
 /// 成员的内部边都是 shipped 误用——应改放 `[dev-dependencies]`。补 `allows` 矩阵盲区：`allows(Domain,
-/// Service)=true` 不阻止域 crate 把 `testkit` 误放 `[dependencies]`（把 architecture.md「testkit 不进
+/// Service)=true` 不阻止域 crate 把 `testkit` 误放 `[dependencies]`（把 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`「testkit 不进
 /// 生产 shipped 图」从注释 Soft 升为 Medium 机器门）。anti-vacuity：真实工作区 testkit 仅 dev-dep，0 finding；
 /// 红 case 见 `check_test_support_confinement_red_shipped_dep`。
 pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
@@ -2437,7 +2437,7 @@ struct PackageSection {
 enum DepSpec {
     /// 纯 version 字符串（外部 crate）。
     // reason: String 仅供 untagged 区分「字符串 version 依赖」与 detailed 表；version 值本身不消费。
-    // dead_code 为 rustc 内置 lint（非 clippy carve-out），不入 error-handling.md §Carve-out 的 ADR registry。
+    // dead_code 为 rustc 内置 lint（非 clippy carve-out），不进入 workspace clippy carve-out catalog。
     #[allow(dead_code)]
     Version(String),
     Detailed(DetailedDep),

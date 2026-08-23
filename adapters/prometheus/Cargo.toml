@@ -1,5 +1,5 @@
 # package 名 `prometheus-adapter`：crates.io 存在同名 `prometheus` crate，若 package 也叫 `prometheus` 则
-# `cargo -p prometheus` 与该 package-id 歧义（architecture.md §扁平 workspace 结构 明列 `redis`/`prometheus`
+# `cargo -p prometheus` 与该 package-id 歧义（`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`
 # 同名 adapter 须加 `-adapter` 后缀）。`[lib] name = "prometheus"` 保留裸导入面（`use prometheus::…` 不污染），
 # deny.toml ban 按 package 名（`prometheus-adapter`）照常守。与 `redis-adapter` 同范式。
 [package]
@@ -17,7 +17,7 @@ workspace = true
 
 # adapter 实现 DI-infra port（diport：ManagedResource 始终 + MetricsExporter 于 backend）。W 阶段真身只用
 # diport（必填）+ backend 门控的 Prometheus 后端；G0 stub 预连的基础/引擎 crate（vocab/ids/secure/…）本切片
-# 不用，已裁（否则 cargo-udeps 红）——按 architecture.md §分层「adapters 按需连，不预连全层」。
+# 不用，已裁（否则 cargo-udeps 红）——按 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`，不预连全层」。
 # lib 只引 metrics-exporter-prometheus（持 PrometheusHandle 渲染）；`metrics` facade 仅测试用（发射点），入
 # dev-dependencies——lib 不直接引用 `metrics::`，避免 cargo-udeps 多余依赖。
 [dependencies]

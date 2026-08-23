@@ -6,7 +6,7 @@
 //! broker）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
 //! inbox_receipts / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
 //! adapters，consistency 只冻类型 + 策略接缝。
-//! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
+//! 语义见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
 //!
 //! # INVARIANT: OUTBOX-ENGINE-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
@@ -318,7 +318,7 @@ pub enum OutboxAppendOutcome {
 #[error("outbox fact conflict")]
 pub struct OutboxFactConflict;
 
-/// 消费处置（穷尽闭值集，Hard 冻结；漏 case 编不过）。eventbus.md §Disposition 表。
+/// 消费处置（穷尽闭值集，Hard 冻结；漏 case 编不过）。`contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Disposition {
@@ -360,7 +360,7 @@ impl PermanentErrorKind {
     }
 }
 
-/// 永久错误标记（私有字段；只是分类，不自动把 Requeue 改 Reject —— eventbus.md）。
+/// 永久错误标记（私有字段；只是分类，不自动把 Requeue 改 Reject —— `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 ///
 /// 持 [`PermanentErrorKind`]（排除 `Transient`），类型层杜绝把瞬态误标永久（codex F5）。
 #[derive(Debug, thiserror::Error)]
@@ -394,7 +394,7 @@ enum HandleInner {
 /// Requeue 摘要恒为 `&'static str` const（来自构造器内 `EngineErrorKind::message()`）。
 ///
 /// **闭合值集**（非 `#[non_exhaustive]`）：结算协议三态固定；下游必须穷尽 match，新增变体强制编译失败
-/// （对齐 `architecture.md` 值集冻结 Hard / `std::ops::ControlFlow`）。
+/// （对齐 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 值集冻结 Hard / `std::ops::ControlFlow`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
     /// 成功：无错误摘要。
@@ -405,7 +405,7 @@ pub enum Settled {
     Reject { kind: PermanentErrorKind },
 }
 
-/// 业务 handler 结果（私有字段；禁裸 struct literal，经 `ack`/`requeue`/`reject` 构造器 —— eventbus.md）。
+/// 业务 handler 结果（私有字段；禁裸 struct literal，经 `ack`/`requeue`/`reject` 构造器 —— `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 ///
 /// 写路径经构造器把 `requeue` 的静态摘要与 `reject` 的 typed kind 嵌入 [`HandleInner`]；读路径经
 /// [`HandleResult::as_settled`] 保留同一分类。ConsumerBase 只在 DLX funnel 将 reject kind 映射为
@@ -802,7 +802,7 @@ impl OutboxMetricSubject {
 ///
 /// Provider 构造时绑定唯一 domain；调用方只能从该 domain claim **待发** entry 批次（status=pending 且到期，
 /// 含 lease 过期可回收的 in-flight），不能在每次调用时注入 raw domain；已 claim entry 随后由同一
-/// capability 按值中继到 broker（demo=进程内 bus / postgres=真实 broker，eventbus.md topology-gated）。
+/// capability 按值中继到 broker（demo=进程内 bus / postgres=真实 broker，`contracts/**/contract.toml`、`generated` 与 `crates/consistency` topology-gated）。
 /// SQL 在 adapter，本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，消费方泛型 `<R: OutboxRelay>`，
 /// 禁 `Box<dyn>`。
 ///
@@ -1109,7 +1109,7 @@ mod tests {
     // canonical dotted 接受（文法单源，xtask is_dotted_id 反向 delegate 此处；含单段 foo）+ as_str 往返。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn topic_parse_accepts_canonical_dotted_and_round_trips() {
         let cases: &[&str] = &[
             "seed.thing-happened",
@@ -1251,7 +1251,7 @@ mod tests {
     // EventEntry::new funnel + 三访问器借出。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn entry_new_exposes_fields() {
         let topic = EventTopic::parse("session.created").unwrap();
         let key = IdemKey::parse("evt-1").unwrap();
@@ -1284,7 +1284,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn entry_debug_redacts_payload_marker() {
         let topic = EventTopic::parse("session.created").unwrap();
         let key = IdemKey::parse("evt-redact").unwrap();
@@ -1326,7 +1326,7 @@ mod tests {
     // PartitionKey::parse 接受非空键并 as_str 往返（多值表驱动）。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 断言已知非空输入的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 happy-path 断言已知非空输入的 parse 结果，item-level carve-out。
     fn partition_key_parse_accepts_nonempty_and_round_trips() {
         let cases = ["session-42", "device:abc-123", "聚合根", "a"];
         for raw in cases {
@@ -1347,7 +1347,7 @@ mod tests {
     // PartitionKey::parse 拒超过 256 字节的 key（防索引膨胀；256 字节边界：257 拒、256 接受）。
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 256 字节边界值的 happy-path，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试 256 字节边界值的 happy-path，item-level carve-out。
     fn partition_key_parse_rejects_overlong() {
         // 257 字节 → TooLong。
         let overlong = "a".repeat(257);

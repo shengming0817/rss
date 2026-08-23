@@ -228,7 +228,7 @@ mod smoke {
         );
     }
 
-    // unwrap carve-out 集中此 helper（item-level，error-handling.md §Carve-out）：canonical 常量保证 parse 成功。
+    // unwrap carve-out 集中在此 helper item：canonical 常量保证 parse 成功。
     #[allow(clippy::unwrap_used)]
     fn sample_tenant_device() -> (TenantId, DeviceId) {
         (

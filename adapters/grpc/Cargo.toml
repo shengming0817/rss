@@ -10,7 +10,7 @@ workspace = true
 
 # adapter 实现 DI-infra port（diport：ManagedResource 始终）。W 阶段真身只用 diport（必填）+
 # backend 门控的 tonic 后端；G0 stub 预连的基础/引擎 crate（vocab/ids/secure/…）本切片不用，
-# 已裁——按 architecture.md §分层「adapters 按需连，不预连全层」（cargo-udeps 守）。
+# 已裁——按 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`，不预连全层」（cargo-udeps 守）。
 [dependencies]
 diport = { path = "../../crates/diport" }
 # gRPC server scaffold（plaintext，无 TLS——TLS 三模式 deferred P2-6；
@@ -21,8 +21,8 @@ diport = { path = "../../crates/diport" }
 #   tokio-stream = TcpListenerStream（serve_with_incoming_shutdown 需 incoming stream）
 #   tokio-util = CancellationToken——graceful shutdown 经 bootstrap ShutdownStack token funnel
 #                （register_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
-#   tracing    = 结构化日志（observability.md 规范，禁 println!）
-#   thiserror  = 构造期 / shutdown 错误枚举（error-handling.md：&'static str message，无 PII）
+#   tracing    = 结构化日志（`crates/observ`、`secure::redact_error` 与 typed metric enums 规范，禁 println!）
+#   thiserror  = 构造期 / shutdown 错误枚举（：&'static str message，无 PII）
 tonic        = { workspace = true, optional = true, features = ["server", "router"] }
 tonic-health = { workspace = true, optional = true }
 tokio        = { workspace = true, optional = true, features = ["rt", "net", "sync"] }

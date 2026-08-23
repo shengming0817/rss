@@ -15,9 +15,9 @@
 [`traceability.md`](traceability.md)，logical data identities 见 [`data-model.md`](data-model.md)。
 
 项目范围、分层、现有 contract 生命周期、投递语义、assembly 和 CI inventory 不在本文复制，分别以
-[`project-scope.md`](../../rules/project-scope.md)、[`architecture.md`](../../rules/architecture.md)、
-[`contracts/README.md`](../../../contracts/README.md)、[`eventbus.md`](../../rules/eventbus.md)、
-[`saga.md`](../../rules/saga.md) 与机器 registry 为准。本文不是 enforcement carrier；后续 PBI 必须把约束落到
+ADR-024、`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`、
+[`contracts/README.md`](../../../contracts/README.md)、`contracts/**/contract.toml`、`generated` 与 `crates/consistency`、
+generated / diport::SagaDurableStore / saga conformance 与机器 registry 为准。本文不是 enforcement carrier；后续 PBI 必须把约束落到
 类型、schema/codegen、provider conformance、真实 adapter 或 production journey 中。
 
 ## 目标

@@ -25,7 +25,7 @@ tracing-subscriber = { workspace = true, optional = true }
 # observ::MetricLabel 闭值集 → otel KeyValue 映射（observ #1006 W 阶段委派给本 adapter，本 crate 闭环其契约）。
 observ = { path = "../../crates/observ", optional = true }
 # 导出边界脱敏：RedactingSpanExporter 经 secure::redact_field（敏感 key 单源 funnel）清洗 span 属性，
-# 避免 authorization/access_token/session 等经 tracing→OTLP 裸传到 collector（observability.md §redaction）。
+# 避免 authorization/access_token/session 等经 tracing→OTLP 裸传到 collector（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
 secure = { path = "../../crates/secure", optional = true }
 # OtelEndpoint::insecure_localhost 的 loopback 校验用 canonical URL parser（防 userinfo 伪装 host 绕过）。
 url = { workspace = true, optional = true }

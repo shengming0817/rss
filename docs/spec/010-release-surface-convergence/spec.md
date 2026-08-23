@@ -7,8 +7,8 @@
 ## 背景
 
 [`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md) 已定义 RSS 的产品面，
-[`project-scope.md`](../../rules/project-scope.md) 已定义公共消费边界，
-[`api-versioning.md`](../../rules/api-versioning.md) 已区分 Release API 与仓内 Rust `pub`。当前缺口不是为每个
+ADR-024 已定义公共消费边界，
+cargo xtask contract breaking / cargo public-api 已区分 Release API 与仓内 Rust `pub`。当前缺口不是为每个
 workspace package 追加产品声明，而是建立一个最小、正向且可派生的 Release Surface，使发布承诺只覆盖明确进入
 发布闭包的 artifact 与 API。
 

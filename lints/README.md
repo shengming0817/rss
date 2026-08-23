@@ -1,6 +1,6 @@
 # RSS 自写 dylint lint
 
-RSS 治理三档载体里「残留真要 AST 级的少数 funnel」那一档（见 `docs/rules/architecture.md`
+RSS 治理三档载体里「残留真要 AST 级的少数 funnel」那一档（见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`
 §Rust 原生强制 二档表）。clippy `disallowed-*` / `cargo-deny` / 类型系统表达不了的 AST 级约束，
 落到这里的自写 [dylint](https://github.com/trailofbits/dylint) lint。
 

@@ -1,6 +1,6 @@
 # HTTP LocalTx and generic UoW transaction settlement alerts (#1705, #1703).
 #
-# Metric and closed-label contract: docs/rules/observability.md §Transaction Retry Metrics and
+# Metric and closed-label contract: `crates/observ`、`secure::redact_error` 与 typed metric enums
 # §LocalTx Settlement Metrics.
 # Operator procedure: docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md.
 #

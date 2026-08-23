@@ -2,9 +2,9 @@
 
 本文只保留后续 PBI 需要共同遵守的 logical identity、状态关系和安全不变量。所有实体均是 proposal，直到对应 PBI
 把它落到 current contract schema、Rust type、migration 或 generated artifact；本文不规定 SQL 表/列名，也不是
-enforcement carrier。当前 workspace、contract 与一致性语义仍以 [`architecture.md`](../../rules/architecture.md)、
-[`contracts/README.md`](../../../contracts/README.md)、[`eventbus.md`](../../rules/eventbus.md) 和
-[`saga.md`](../../rules/saga.md) 为准。
+enforcement carrier。当前 workspace、contract 与一致性语义仍以 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`、
+[`contracts/README.md`](../../../contracts/README.md)、`contracts/**/contract.toml`、`generated` 与 `crates/consistency` 和
+generated / diport::SagaDurableStore / saga conformance 为准。
 
 ## Identity inventory
 

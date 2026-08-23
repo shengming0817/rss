@@ -24,7 +24,7 @@ rss-request-context.workspace = true
 tokio = { workspace = true }
 thiserror = { workspace = true }
 # intra-base sanctioned 边（ADR-002 §D3）：AppCtx 的 tenant payload 收敛为具体 vocab::tenant::TenantId。
-# base 层 DAG：vocab ◁ ids ◁ secure ◁ support ◁ runctx（docs/rules/architecture.md §分层）。
+# base 层 DAG：vocab ◁ ids ◁ secure ◁ support ◁ runctx（`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。
 vocab = { path = "../vocab" }
 # RequestCtx 的字段级 Debug 脱敏 derive（tenant + Arc<dyn PrincipalFacet> payload 均 `#[redact(sensitivity = internal)]`）。
 secure = { path = "../secure" }

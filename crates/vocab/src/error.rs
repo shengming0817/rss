@@ -1,4 +1,4 @@
-//! 跨域错误词汇 —— ADR-004 C10 + `docs/rules/error-handling.md` §Message 与 PII。
+//! 跨域错误词汇（ADR-004 C10）。
 //!
 //! `kind` 的 message 是 `&'static str` const literal（禁 `format!` 拼 runtime 数据）；
 //! runtime 数据只经两条 typed 通道：[`CoreError::with_details`]（4xx 可下发、5xx 由 wire mapper
@@ -51,7 +51,7 @@ impl CoreErrorKind {
     }
 
     /// 稳定错误码（`&'static str` const literal）；统一 wire 错误响应 `error.code` 的单源
-    /// （error-handling.md §Wire 格式）。`ERR_CORE_*` 前缀由 `vocab` 持有，golden 测试锁全集防漂移。
+    /// `ERR_CORE_*` 前缀由 `vocab` 持有，golden 测试锁全集防漂移。
     ///
     /// 注：跨 crate `ERR_<SEG>_` 前缀所有权注册表（多 crate mint 时）是独立治理子系统（见 #1099）；
     /// 本 PR `vocab` 是 `ERR_CORE_` 唯一 minter，golden 即所有权锁。

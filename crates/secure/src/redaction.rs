@@ -3,7 +3,8 @@
 //! 两层能力：
 //! - **sink/key funnel**：[`redact_error`]（顶层 `Display`-only）/ [`redact_field`]（按 key 判敏感）/
 //!   [`redact_url_credentials`]（剥 URL userinfo）——span error / tracing sink / last_error 一律经此收口
-//!   （`docs/rules/observability.md` §redaction），敏感 key 判定与 free-form scrub 不散落各 consumer。
+//!   （由 `crates/observ`、`secure::redact_error` 与 typed metric enums 承载），敏感 key 判定与
+//!   free-form scrub 不散落各 consumer。
 //! - **字段级策略模型**（#1360）：[`rss_contract::DataClass`] / [`PiiKind`] / [`RedactionMode`] / `RedactionCtx` /
 //!   [`Redact`] + 公开 funnel [`redact_struct`]。配 `#[derive(Redact)]`（securederive）让任意 struct
 //!   字段**显式声明** public / internal / pii / secret 与脱敏模式，派生安全 `Debug`——替换各 crate 手写 `Debug`。
@@ -678,7 +679,7 @@ pub fn redact_struct(
 // ===== sink / key / url funnel =====
 
 /// 统一脱敏 funnel：把 error 的**顶层** `Display` 作为可记录的安全摘要。
-/// span error / tracing sink / last_error 一律经此（observability.md §redaction），不裸打印 error。
+/// span error / tracing sink / last_error 一律经此（`crates/observ`、`secure::redact_error` 与 typed metric enums），不裸打印 error。
 ///
 /// # 安全性（fail-closed）
 ///
@@ -778,7 +779,7 @@ pub fn redact_url_credentials(url: &str) -> Redacted {
 /// 输出已脱敏内容（安全可记录）。
 ///
 /// 持久化列 / 域字段 / writer 待落地（本轮仅交付安全载体——落地时列写入取 `LastError`，redaction 由构造口
-/// 强制；见 `docs/rules/observability.md` §Redaction）。
+/// 强制；见 `crates/observ`、`secure::redact_error` 与 typed metric enums）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct LastError(String);
 

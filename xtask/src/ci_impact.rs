@@ -104,7 +104,7 @@ impl LocalClock for SystemLocalClock {
 /// carrier，以及 assembly-schema 的公开 schema 与跨实现 fingerprint fixture。
 ///
 /// 面向人的 runbook / checklist / 报告说明不在此列——测试不得断言散文包含某句话
-/// （`docs/rules/README.md` §红线一），因此它们改动时只走 docs-only 快路径。
+/// 规则目录属于治理元数据，因此它们改动时只走 docs-only 快路径。
 const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/ops/0069-account-security-capacity-gate.selftest.sh",
     "docs/ops/0069-account-security-capacity-gate.sh",
@@ -5614,7 +5614,7 @@ mod tests {
                 "{path} must not trigger local full CI"
             );
         }
-        for path in ["docs/rules/architecture.md", "docs/rules/README.md"] {
+        for path in ["docs/rules/example.md", "docs/rules/nested/example.md"] {
             let impact = impact_entries(
                 &[DiffEntry::modified(path)],
                 None,
@@ -5792,7 +5792,7 @@ mod tests {
                 BTreeSet::from([Domain::AssemblyGeneration, Domain::ContractBinding]),
             ),
             (
-                "docs/rules/eventbus.md",
+                "docs/rules/example.md",
                 BTreeSet::from([Domain::RuntimeEventing]),
             ),
             (

@@ -1,4 +1,4 @@
-//! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See docs/rules/architecture.md.
+//! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
 //!
 //! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）与只读
 //! schema ledger 验证；迁移执行只存在于 operator-only `postgres-migration` crate。外部经
@@ -256,7 +256,7 @@ pub(crate) use settings_projection::PgSettingsProjectionApplyStore;
 #[cfg(feature = "domain-settings")]
 pub use settings_projection::{PgActiveProjectionResolver, PgSettingsProjectionReadRepo};
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
-// DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
+// DB SECURITY DEFINER function 收口（`contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
 #[cfg(feature = "domain-audit")]
 pub use audit_repo::AuditChainKeyIdentity;

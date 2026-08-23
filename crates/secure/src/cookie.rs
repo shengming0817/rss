@@ -46,7 +46,7 @@ mod tests {
     use super::{CookieValue, CookieValueError};
 
     // item-level carve-out：测试辅助断言结果，expect/unwrap_err 在此是意图清晰的 programmer-error
-    // 信号（error-handling.md §Carve-out / workspace 测试模块 #[allow] 约定）。
+    // 信号。
     #[allow(clippy::expect_used)]
     #[test]
     fn accepts_valid_value() {

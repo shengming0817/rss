@@ -1,7 +1,7 @@
 # contracts/ — 跨边界契约声明源（格式冻结）
 
-> 单一事实源：`docs/rules/architecture.md` §核心载体。本文件只**冻结目录布局 + 文件名 + 字段集**，
-> 语义规则（鉴权 / 扇出）不在此复制，见 `docs/rules/contract-fanout.md`。
+> 声明源是各 `contract.toml` 与 schema；格式由 `assembly_schema::ContractManifest` 严格解析。
+> validation、breaking 与 codegen 消费解析后的 catalog；本文件只说明 authoring shape，不是运行时证据。
 > 由后续 G1/W/Join 单元在此格式上增量加真实域契约；本单元（RW-G0.3）冻结格式并搭起 codegen 管道。
 
 ## 布局（冻结）
@@ -30,10 +30,10 @@ contracts/{kind}/{domain}/{version}/
 | `version` | `v{N}` | 是 |
 | `owner` | 域名 或 `_framework`（provider-agnostic 中立契约归框架） | 是 |
 | `consistencyLevel` | `LocalOnly`/`LocalTx`/`OutboxFact`/`WorkflowEventual`/`DeviceLatent`（L0–L4）；active HTTP codegen 同源派生为 `HttpSpec::consistency_level` | 是 |
-| `lifecycle` | `draft`/`active`/`deprecated`（`active` 才需 assembly 接线，见 contract-fanout.md） | 是 |
+| `lifecycle` | `draft`/`active`/`deprecated`；active assembly closure 由 contract 与 assembly validation 强制 | 是 |
 | `[effectProfile]` | HTTP effect 声明 carrier：`effects = [...]`，闭值集为 `read`/`auth`/`projection`/`business-write`/`business-transaction`/`outbox`/`publish`/`workflow`/`saga`/`reconcile`/`worker`/`cross-tenant-audit`；未知字段、未知 effect 解析即拒。LocalOnly 仍只允许 `auth`/`read`/`projection`；business-qualified 名称只描述业务副作用，不排除 provider-owned read-path transaction | `kind=http` 必填（R22，不按 lifecycle 豁免）；非 HTTP 禁止；`effects` 必须非空且无重复 |
 | `[capabilities.localTx]` | L1 本地事务证据：`boundary = "single-domain"`、`txModel` 为 `tenant-scoped-uow` 或 `repo-atomic-cas`、`retry = "bounded-transient"`、`commitUnknown = "not-retryable"` | `consistencyLevel=LocalTx` 必填（R22）；其它等级禁止 stray block；旧 boundary-only 形态不再接受。UoW 模型承载显式事务生命周期；repo CAS 模型由单次 repository mutation 原子比较并写入 |
-| `[capabilities.outbox]` | L2 outbox 证据：`role = "fact"`（event）/`"command"`（command）/`"producer"`（http）。producer 还必须声明 `atomicity = "same-transaction"` 与非空 `emits = ["<event-contract-id>"]`；fact/command 禁止 producer-only `atomicity`/`emits` | `consistencyLevel=OutboxFact` 必填（R22）；HTTP producer 的每个 `emits` 在 **draft/active/deprecated 全 lifecycle** 都必须指向存在的同 domain L2 event，lifecycle 不构成跨域豁免；active HTTP producer 另要求目标 event 为 active 且声明 subscriber readiness。权威语义见 [`eventbus.md` §L2 producer-fact domain closure](../docs/rules/eventbus.md#l2-producer-fact-domain-closure) |
+| `[capabilities.outbox]` | L2 outbox 证据：`role = "fact"`（event）/`"command"`（command）/`"producer"`（http）。producer 还必须声明 `atomicity = "same-transaction"` 与非空 `emits = ["<event-contract-id>"]`；fact/command 禁止 producer-only `atomicity`/`emits` | `consistencyLevel=OutboxFact` 必填（R22）；HTTP producer 的每个 `emits` 在 **draft/active/deprecated 全 lifecycle** 都必须指向存在的同 domain L2 event，lifecycle 不构成跨域豁免；active HTTP producer 另要求目标 event 为 active 且声明 subscriber readiness。解析后的 manifest catalog、validation 与 codegen 共同强制该闭包 |
 | `[capabilities.workflow]` | L3 workflow 证据：`mode = "saga"` 或 `"projection"`。`saga` 需 `kind=saga` 且有 `[saga]`，并禁止 projection-only 字段；`projection` 只能由 `kind=projection` 承载，须声明 `inputs`、`ordering`、`checkpoint`、`replay`，且 `inputs` 指向存在的 L2 event | `consistencyLevel=WorkflowEventual` 必填（R22）；`kind=projection` 与 `mode=projection` 双向绑定 |
 | `[capabilities.deviceLatent]` | L4 通用 envelope：`loop = "reconcile"`；resource-specific metadata 进入 tagged `[capabilities.deviceLatent.profile]`，由 `resourceKind` 选择 profile。`device-certificate` profile 的四个 links 位于 `[capabilities.deviceLatent.profile.links]` | `consistencyLevel=DeviceLatent` 必填（R22）；其它等级禁止 stray block；typed profile parse 拒缺字段、未知字段和未知 resource kind，设备证书契约的精确 linked ID/lifecycle 闭包由 R25 强制 |
 | `[reconcile]` | L4 reconcile block：`tenancy = "single-tenant"|"tenant-scoped"`、`trigger = "interval"`、`fencing = "required"|"single-process"`、`lateMessagePolicy = "idempotent"` | `consistencyLevel=DeviceLatent` 必填（R22）；非 L4 禁止声明 |
@@ -41,7 +41,7 @@ contracts/{kind}/{domain}/{version}/
 | `path` | http 业务路径（`/api/v{N}/{domain}/…` 约定，如 `/api/v1/_seed/echo`；形态安全由 R7 守：绝对、非 `//`、无 `..`/空白） | 按 kind（active http 必填，R8） |
 | `method` | http 方法 `GET`/`POST`/`PUT`/`PATCH`/`DELETE`（闭值集，非法即解析 `Err`） | 按 kind（active http 必填，R8） |
 | `[endpoints.http]` | HTTP wire 语义 carrier：`successStatus = <200..299>` 与 `idempotency = "idempotent" \| "non-idempotent"`；状态码由 typed `HttpSuccessStatus` 在 codegen/binding 漏斗中再校验，幂等性是闭枚举 | 所有 `kind=http` 必填，无默认值或兼容路径 |
-| `[endpoints.http.auth]` | active http serving 鉴权声明：`mode = "permission"`（`permission` 必须精确匹配 `vocab::RoutePermissionId` 闭值集成员，禁止前后空白，且禁止 `reason`）或显式 opt-out `public`/`bootstrap`/`clientsOnly`/`serviceOwned`（需非空 `reason`，禁止 `permission`）。未知子键解析即拒 | active http 必填（R18；validate 与 codegen 均 fail-closed；catalog 规则见 `docs/rules/tenancy.md`） |
+| `[endpoints.http.auth]` | active http serving 鉴权声明：`mode = "permission"`（`permission` 必须精确匹配 `vocab::RoutePermissionId` 闭值集成员，禁止前后空白，且禁止 `reason`）或显式 opt-out `public`/`bootstrap`/`clientsOnly`/`serviceOwned`（需非空 `reason`，禁止 `permission`）。未知子键解析即拒 | active http 必填（R18）；typed manifest parser、validation 与 codegen 均 fail-closed |
 | `[endpoints.http.resourceSharing]` | HTTP resource sharing 声明：未声明等同 `mode = "tenantScoped"`；显式 `mode = "global"` 必须带非空 `reason` 且 endpoint 必须声明 `endpoints.http.resource`。`tenantScoped` 禁止 `reason`。未知子键解析即拒。global route 是 shared/global resource opt-out，不读全局 resource attribute 表，也不允许 dynamic `resource.*` policy 条件 | 按 endpoint（默认 tenant-scoped；global opt-out 由 R18 校验并进入 codegen） |
 | `[endpoints.http.headers]` | HTTP header 声明；当前最小闭值集仅接受 `"X-Tenant-ID" = "populate-only"`（public/pre-auth 填充）或 `"service-token-tenant-bound"`（serviceOwned：exact-one challenger header；ambient tenant 来自 signed canonical `tenant_id` claim，名称保留但不再表示 MAC extension） | 按 endpoint（`identity.login` public serving 必填，serviceOwned 必填 tenant-bound，R18） |
 | `[endpoints.http.projection]` | HTTP field projection 声明；`fields = [{ field = "auditActor", permission = "...", obligationKey = "...", responsePath = "data[].actor" }]`。`field` 是闭值集（当前 audit read + identity profile projection fields），`permission` 必须精确匹配 `vocab::RoutePermissionId` 闭值集成员、禁止前后空白；`permission` / `obligationKey` / `responsePath` 必须非空且不重复。active GET response 中的 `x-pii` 字段与 `tenantId` 字段必须由 `responsePath` 精确覆盖；codegen 派生 typed `HttpProjectionFieldSpec`，handler/authorizer 只消费 `vocab::ProjectionField` / `vocab::RoutePermissionId` | 按 endpoint（R23：protected read response field 必须 enrollment） |
@@ -95,7 +95,7 @@ contracts/{kind}/{domain}/{version}/
 - 跨契约共享 schema 只允许放在 `contracts/components/<domain>/<version>/<slug>.schema.json`，并声明与路径精确对应的 `$id = rss://component/<domain>/<version>/<slug>`。契约 schema 只能用该绝对本地 URI 引用；relative、network、`file:`、traversal、symlink、missing、孤儿、冲突与引用环均 fail-closed。component 无手工 catalog，引用图、snapshot、hash、validation、breaking、codegen 与 CI impact 共用同一 resolver；它不是远程 registry。
 - component 的 root `title` 是稳定派生类型名；同一契约的多个 schema 引用同一 component 时，codegen 在该契约 `TypeSpace` 中只注册一次共享 definitions。派生 Rust 类型仍保留在各 contract module，禁止另建共享 DTO crate。
 - 标准 Draft-07 `maxLength` 仍表示 Unicode 字符数。仅当 RSS runtime 必须按 UTF-8 bytes 闭合安全边界时，string schema 可在唯一 `maxLength` 旁声明 `"x-rss-length-unit": "utf8-bytes"`；不存在其他单位、alias 或 fallback。marker 缺少 `maxLength`、挂到非 string schema、值非法，或 marker / generated tuple / constructor rewrite 数量不一致时 codegen 直接失败。标记类型只把 maximum 改为 `str::len()`，不改变 `minLength`、`pattern` 等标准约束。
-- **HTTP 响应 envelope**：成功响应顶层包一层 `data`（seed `response.schema.json` 即 `{"data": {...}}`，派生 `SeedEchoResponse { data: SeedEchoData }`）；列表响应顶层为 `data` / `nextCursor` / `hasMore`（见 `docs/rules/rust-standards.md` §API）。错误响应走统一 error schema（见 `docs/rules/error-handling.md`），不在此 envelope 内。
+- **HTTP 响应 envelope**：成功响应顶层包一层 `data`（seed `response.schema.json` 即 `{"data": {...}}`，派生 `SeedEchoResponse { data: SeedEchoData }`）；列表响应顶层为 `data` / `nextCursor` / `hasMore`。错误响应由声明的 error schema 与 generated wire type 承载，不在成功 envelope 内。
 - camelCase 属性名（如 `thingId`）由 typify 生成为 snake_case Rust 字段 + `#[serde(rename)]`（wire camelCase / Rust snake，符合 RSS 命名）。
 - `format: int64`/`format: int32` → typify 生成原生整数类型（`i64`/`i32`），无外部依赖，可用。
 - 种子契约避免 `format: uuid`（引入 `uuid` crate）和 `format: date-time`（引入 `chrono` crate）——防 `generated/` 引入超出 `serde` 的额外依赖。其他 `format` 按 typify 映射处理。

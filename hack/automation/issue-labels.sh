@@ -10,7 +10,7 @@
 # INVARIANT: non-epic backlog ⇒ exactly-one {area,type,pri,cx}; epic ⇒
 # exactly-one {area,pri} ∧ zero cx. Callers must run `validate --labels`
 # successfully before invoking `forge.sh issue-create`.
-# Funnel strength (honest, per docs/rules/ai-robust.md): overall Medium.
+# Funnel strength (honest, per cargo xtask archrules verify): overall Medium.
 # Downstream logic Medium (single decision point; run the golden selftest directly
 # with `bash hack/automation/issue-labels.sh selftest`). Upstream
 # callsite weak-Medium (skill-routed; a raw forge CLI / web-UI create bypasses it).

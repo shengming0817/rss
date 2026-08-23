@@ -2,7 +2,7 @@
 //!
 //! 单进程模式不注入本 port（harness `ReconcileLoop::run`，always leader、`Context::epoch()` 为 `None`、无 fencing）；
 //! 多副本模式经 `ReconcileLoop::run_with_leader(Arc<L>, ..)` 注入（泛型静态分发，非 `Box<DynLeaderElector>`——
-//! dyn 变体 Send 非 Sync，DIPORT-ASYNC-ARC-SEND-01），整环 leader-gated：仅 lease holder dispatch（reconcile.md §Leader-elect）。
+//! dyn 变体 Send 非 Sync，DIPORT-ASYNC-ARC-SEND-01），整环 leader-gated：仅 lease holder dispatch（`consistency::Reconciler`、`diport::FencedWriter` 与 provider conformance）。
 //!
 //! ref: kubernetes/client-go tools/leaderelection/leaderelection.go@master（`tryAcquireOrRenew` 单一争夺/续租
 //! 入口 + holder identity + 单调 `LeaderTransitions`）；RSS 把 `LeaderElectionRecord` 收敛成 typed [`LeaseToken`]，
@@ -125,7 +125,7 @@ mod smoke {
     use std::time::Duration;
 
     #[allow(clippy::expect_used)]
-    // reason: 测试桩用 canonical literal 构造 LeaderId，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试桩用 canonical literal 构造 LeaderId，item-level carve-out。
     fn test_leader_id() -> LeaderId {
         LeaderId::parse("noop").expect("canonical literal")
     }

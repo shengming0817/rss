@@ -8,7 +8,7 @@
 //! `NotFound` / `InvalidCredentials` 等）会被打进 ERROR 告警面。须显式
 //! `err(level = "warn")`（或 `"error"` 等）声明级别。
 //!
-//! ## Gate budget（`docs/rules/README.md` 红线二）
+//! ## Gate budget
 //!
 //! **只加不减，理由（现有 owner 不可表达本失效模式）**：
 //! - **不替换**任何既有 Medium/Hard 门：此前无机器门守「`instrument` 的 `err` 缺 `level`」；
@@ -165,7 +165,7 @@ fn delimited_contains_level_ident<'a>(
 #[test]
 fn gate_budget_declared_in_module_docs() {
     // GATE-BUDGET-01 anti-vacuity：carrier rustdoc 必须可审查声明「只加不减」与不可并入理由
-    // （docs/rules/README.md 红线二）；缺声明则本测失败。
+    // 缺声明则本测失败。
     let src = include_str!("lib.rs");
     assert!(
         src.contains("## Gate budget"),

@@ -2,7 +2,7 @@
 
 This table assigns every requirement in [spec.md](./spec.md) either to one implemented PBI and canonical primary proof or to one explicit ADR-028 future handoff. A future-handoff row is an acknowledged proof gap, not evidence of implementation or permission to claim candidate, T3, or active status. Higher-level tests may cover a join hazard, but they do not become duplicate primary proofs for requirements already closed below.
 
-Proof tiers follow the repository [verification scope matrix](../../rules/project-scope.md#验证范围矩阵): T1 is design/component proof, T2 is capability/seam proof, and T3 is production assembly/acceptance proof. Carrier strength and concrete mechanisms are owned by [ADR-022](../../architecture/202607291724-022-l4-device-latent-production-loop.md).
+Proof tiers follow the repository ADR-024: T1 is design/component proof, T2 is capability/seam proof, and T3 is production assembly/acceptance proof. Carrier strength and concrete mechanisms are owned by [ADR-022](../../architecture/202607291724-022-l4-device-latent-production-loop.md).
 
 #2110 supplies the T1 authorization-lineage prerequisite for the draft desired-policy path: private opaque
 provenance, explicit authorizer basis, canonical contributing policy/obligation/time metadata, and move-only

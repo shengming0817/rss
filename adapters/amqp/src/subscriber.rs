@@ -861,7 +861,7 @@ impl AckableSubscriber for AmqpSubscriber {
     ) -> Result<DeliveryStream, SubscriberError> {
         let topic_name = topic.as_str();
         // 稳定 consumer tag（按 name+topic 派生）：重连/重订阅复用同一 tag，不变成新消费者
-        // （eventbus.md §DLX「consumer group 命名稳定」）。
+        // （由 `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 承载）。
         let consumer_tag = format!("{}-ack-{}", self.name, topic_name);
         // 每订阅独立 channel（review #274 F4/C4）：token cancel 只停止本 channel 的 consumer，
         // 不连带停掉同 subscriber 其它 topic 的 consumer。

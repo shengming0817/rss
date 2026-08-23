@@ -246,7 +246,7 @@ mut 状态（drain sender / take oneshot），用 `Mutex<Option<Inner>>` 包装�
 | 关闭时延 metric / 耗时测量（注入 `Clock`） | 待 `primitives::Clock` 落地后接入 | `primitives` 当前为空骨架；超时强制已用 `tokio::time`（运行时时钟，测试经 `start_paused` 控制），不裸调 `Instant`（clippy 禁） |
 | 整体预算的 **grace-period 值注入**（机制已落地为 `shutdown_within`） | P2（与信号 grace period 一并） | 机制（cancel-safe 单一共享 deadline + `BudgetExhausted` 聚合）本 spike 已冻结于驱动器；仅「`total_budget = grace − buffer`」值来自进程级接线层 |
 | 整体预算的 **per-resource 余额精化**（`min(per_resource, 全局剩余)`，替代单一共享 deadline） | 待 `primitives::Clock` 落地（可选优化） | 需测 per-resource elapsed，`Instant` 被 clippy 禁；当前单一共享 deadline 已满足「总耗时封顶」语义，余额分配是后续可选精度提升 |
-| 关闭错误日志经 `secure::redact_error` 清洗（observability.md §redaction） | 随 P3+ 真实 adapter 接入 + `secure` redaction 模块落地 | typed `ShutdownError` 已落地（`anyhow` 移出公共 port、Display 安全摘要、原始 source 仅内部保留**当前不打印**）；`secure` 当前为空骨架，redaction **调用**待其落地后接入，届时业务错误分支改为 `warn!(error = %secure::redact_error(&source))` |
+| 关闭错误日志经 `secure::redact_error` 清洗（`crates/observ`、`secure::redact_error` 与 typed metric enums） | 随 P3+ 真实 adapter 接入 + `secure` redaction 模块落地 | typed `ShutdownError` 已落地（`anyhow` 移出公共 port、Display 安全摘要、原始 source 仅内部保留**当前不打印**）；`secure` 当前为空骨架，redaction **调用**待其落地后接入，届时业务错误分支改为 `warn!(error = %secure::redact_error(&source))` |
 | `ManagedResource` 资源构造时**强制使用**注入 token（sealed resource handle，把 `SHUTDOWN-TOKEN-FUNNEL-01` Medium→ 升 Hard） | 可选 follow-up（GitHub Issue） | 当前 funnel 收口 token *发放*（无裸 `child_token`），但资源仍可在构造中忽略注入 token；sealed handle 才能编译期锁死「后台 task 必用本 stack token」，成本高于本 spike 收益 |
 
 > Clock 边界：超时**强制**由 `tokio::time::timeout`（runtime 时钟）承担，可经 `tokio::time::pause`

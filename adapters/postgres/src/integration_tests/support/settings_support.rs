@@ -48,7 +48,7 @@ pub(in super::super) const CONFIG_TENANT_B: &str = "00000000-0000-4000-8000-0000
 pub(in super::super) const CONFIG_VERSION_CHANGED_TOPIC: &str = "settings.config-version-changed";
 
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
 pub(in super::super) fn config_tenant() -> TenantId {
     TenantId::parse(CONFIG_TENANT).unwrap()
 }
@@ -560,7 +560,7 @@ pub(in super::super) async fn setup_secret(
 }
 
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
 pub(in super::super) fn secret_tenant_a() -> TenantId {
     TenantId::parse(SECRET_TENANT_A).unwrap()
 }

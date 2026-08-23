@@ -1,7 +1,7 @@
 # GoCell 改用 Rust 开发的好处与缺点分析
 
 > **归档·冻结** · 2026-06-21 GoCell→Rust 迁移评估快照（target 命名已对齐 RSS）· **非现行规则**。
-> 现行架构单源见 `docs/rules/architecture.md`；本批只读冻结，仅供迁移评估溯源。
+> 现行架构单源见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；本批只读冻结，仅供迁移评估溯源。
 >
 > 生成日期：2026-06-21 · 不考虑迁移工作量，纯架构视角
 > 配套文档：[gocell-package-overview.md](./gocell-package-overview.md) · [gocell-rewrite-sequence.md](./gocell-rewrite-sequence.md) · [gocell-rust-crate-mapping.md](./gocell-rust-crate-mapping.md) · [gocell-rust-directory-structure.md](./gocell-rust-directory-structure.md) · [gocell-rust-ci-plan.md](./gocell-rust-ci-plan.md) · [gocell-rust-eval-checklist.md](./gocell-rust-eval-checklist.md)
@@ -21,7 +21,7 @@
 
 ### 1. 治理章程的载体升级 —— 最强、最 GoCell-specific 的论据
 
-gocell 仓历史路径 `.claude/rules/gocell/ai-robust.md`（RSS 对应 `docs/rules/ai-robust.md`） 把约束分 Hard / Medium / Soft，要求「优先用 type system 表达约束」「Soft 严禁立项」。但 Go 表达不了很多约束，所以才有 ~200 个 archtest 兜底。Rust 把其中一大批 Medium 抬成编译期 Hard：
+gocell 的历史治理约束把 enforcement 分为 Hard / Medium / Soft，并要求优先使用类型系统、禁止 Soft 立项。RSS 的对应 carrier 是 Cargo/rustc、schema/codegen 与 `cargo xtask archrules verify`。Go 无法表达的约束曾由大量 archtest 兜底，Rust 可把其中一批 Medium 抬成编译期 Hard：
 
 | GoCell 现在的做法（Go） | Rust 原生等价 | 评级变化 |
 |---|---|---|

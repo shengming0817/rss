@@ -156,7 +156,7 @@
 
 `LoginService` 兑现真实登录路径（超越 seed-login）：经 `CredentialRepo` 原子完成密码与 Active 状态门控（消费 US3）→ refresh pre-mint 重读 Active 状态并核对 epoch → 创建授权根 → 在同事务发布 `identity.session-created` outbox fact（L2，已存契约）。密码变更不再由 repo 暴露独立 CAS：`PasswordChangeCommand` 把 credential/account expected snapshot、typed 新密码与 PasswordChanged event 封闭在一起，由唯一 producer transaction 原子更新、撤销既有 grant/family 并写 outbox。logout 同样进入该统一安全 lifecycle。
 
-**Tenant 来源**：login 请求的 tenant 来源为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard），**request body 不得含 `tenantId` 字段**——body 含 tenantId 是 tenancy Hard 违规。
+**Tenant 来源**：login 请求的 tenant 来源为 `X-Tenant-ID` header（pre-auth 路径，`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL Hard），**request body 不得含 `tenantId` 字段**——body 含 tenantId 是 tenancy Hard 违规。
 
 **凭据安全边界**：current 由认证 grant evidence 精确撤销当前 grant/family；all 与 password change 通过 account
 epoch CAS 撤销主体全部既存 grant/family。account-status-set 接受四值 desired state，并同样
@@ -241,10 +241,10 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 - **FR-013**: 系统 MUST 经构造器必填位置参注入 `CredentialRepo` / `AccountSecurityReadRepo` / `SessionRepo` / `Publisher` / `Clock`（缺失即编译错误），不用 `Option` 静默 noop。
 - **FR-014**: public 端点降级只经 generated `HttpRouteEvidence::auth() == HttpRouteAuth::Public` +
   `GeneratedPrimaryEndpoint`（login 端点），新增受保护端点默认鉴权（AUTH-OPTOUT-PRIMARYONLY-01）。
-- **FR-015**: 列表端点（如 roles 列表）MUST 分页，`limit` 上限 500（rust-standards.md §安全检查点）。
-- **FR-016**: login tenant 来源 MUST 为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard）；request body 禁止含 `tenantId` 字段。
+- **FR-015**: 列表端点（如 roles 列表）MUST 分页，`limit` 上限 500。
+- **FR-016**: login tenant 来源 MUST 为 `X-Tenant-ID` header（pre-auth 路径，`TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL Hard）；request body 禁止含 `tenantId` 字段。
 - **FR-017**: 每个 active + codegen HTTP 契约 MUST 声明恰一个 AuthZ mode（permission overlay 值 或 显式 opt-out + reason）；缺声明的端点被 codegen fail-closed 拒绝。
-- **FR-018**: 列表响应格式 MUST 为 `{data, nextCursor, hasMore}`（rust-standards.md §API）。
+- **FR-018**: 列表响应格式 MUST 为 `{data, nextCursor, hasMore}`。
 - **FR-019**: password change、account status set 与 current/all logout MUST 经唯一 credential-security producer transaction 原子提交业务投影、撤销目标 grant/family 与 security-event；event payload 携 typed initiator kind + 独立版本密钥生成的 tenant/domain-separated HMAC-SHA256 ref 与 key ID，不写 raw subject/target mapping，旧 access/refresh 必须立即失效。
 - **FR-020**: `CredentialRepo::authenticate` MUST 是 credential + account-security 的唯一事务认证漏斗；不得提供可拆分的 `lockout_status` 或状态预检 port。
 - **FR-021**: 系统 MUST 只允许 Active 账户登录和签发 User refresh；缺失/损坏状态、非 User refresh record 和存储异常均 fail-closed。
@@ -276,7 +276,7 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 
 - authn（#1003）的 `Principal` / `PrincipalKind` / `diport::{Pdp,Publisher,Clock}` 等冻结签名已可消费（#997 已冻结），identity 编译不被 authn body 阻塞。
 - role assign/revoke 的最小生产持久化由 PR5b 的 `role_bindings` + `PgRoleBindingLifecycle` 提供；role event audit consumer 已接线；session invalidation 为未交付业务缺口；全量 journey 归 assemblies/runtime launch。
-- pre-GA wire 破坏窗口（至 2026-12-31）内允许原地改 active 契约版本（api-versioning.md §兼容窗口），仍走扇出闭环。
+- pre-GA wire 破坏窗口（至 2026-12-31）内允许原地改 active 契约版本（cargo xtask contract breaking / cargo public-api），仍走扇出闭环。
 - `vocab::Decision` 现形态足以表达 Allow/Deny；若 ABAC 需 Obligations/FieldMask，则 PR2 内最小扩展（base crate 改动，PR body 标注），否则不引入。
 - argon2/bcrypt 哈希算法选型沿用 `secure` crate 既有能力（若已提供）；否则在 identity 内最小封装并在 research.md 记对标。
 - identity 依赖 authn（服务层）以消费 `authn::Principal`；域可依赖服务层（分层规则允许），`authn` 已在 `deny.toml` 放行，无 deny 违规。

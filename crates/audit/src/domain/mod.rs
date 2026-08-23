@@ -11,7 +11,7 @@
 //! 链节点哈希 = `HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))`，经注入的
 //! [`primitives::MacVerifier`] + [`primitives::MacKey`] 计算（key 是凭据，构造器必填 ⇒ 无 key 不可造
 //! hasher，防篡改属性类型层成立；缺 key 的旧 `link_hash` 自由函数已删）。`canonical_message` 字节布局
-//! **冻结**（单源 `docs/rules/audit-ledger.md`，INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }），golden 字节测试守。
+//! **冻结**（单源 INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests，INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }），golden 字节测试守。
 //! postgres provider 承载每租户子链持久化；本模块泛型于 `MacVerifier`、域单测用确定性
 //! `#[cfg(test)]` verifier（不依赖 adapter crate）。
 
@@ -27,7 +27,7 @@ const GENESIS_PREV: [u8; 32] = [0u8; 32];
 /// 保证 verify 遇 buggy verifier 时 fail-close（与任何合法链 entry_hash 不匹配）。
 const FAIL_HASH: [u8; 32] = [0xFFu8; 32];
 
-/// 审计链 HMAC key 最小长度（字节）。`docs/rules/audit-ledger.md` 声明链 key ≥32B；构造器 fail-closed
+/// 审计链 HMAC key 最小长度（字节）。INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests 声明链 key ≥32B；构造器 fail-closed
 /// 校验，短 key 不可造 hasher（防弱 key 削弱链防篡改属性）。
 const MIN_KEY_LEN: usize = 32;
 
@@ -360,7 +360,7 @@ impl std::fmt::Debug for AuditEntry {
 }
 
 // ---------------------------------------------------------------------------
-// canonical_message — 冻结字节布局（安全关键，单源 docs/rules/audit-ledger.md）
+// canonical_message — 冻结字节布局（安全关键，单源 INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests）
 // ---------------------------------------------------------------------------
 
 /// 追加长度前缀（`u32` BE 长度 + 原始字节）——变长字段消歧（防 `kind="ab",id="c"` 与 `kind="a",id="bc"` 撞）。
@@ -376,7 +376,7 @@ fn push_len_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
 /// `message = prev_hash(32) ‖ DOMAIN_TAG ‖ tenant(16) ‖ seq(u64 BE) ‖ actor(16) ‖ actor_kind(tag) ‖
 ///            lp(action) ‖ lp(resource.kind) ‖ lp(resource.id) ‖ outcome(tag) ‖ secs(u64 BE) ‖ nanos(u32 BE)`
 ///
-/// INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（布局冻结，golden 字节测试守；改布局即破链 ⇒ 须同步 docs/rules/audit-ledger.md + golden）。
+/// INVARIANT: AUDIT-LEDGER-BYTES-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（布局冻结，golden 字节测试守；改布局即破链 ⇒ 须同步 INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests + golden）。
 fn canonical_message(prev: &EntryHash, entry: &AuditEntry) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(prev.as_bytes());
@@ -423,7 +423,7 @@ impl<M: MacVerifier> std::fmt::Debug for AuditChainHasher<M> {
 impl<M: MacVerifier> AuditChainHasher<M> {
     /// 注入 verifier + key 构造（key 托管入口）。
     ///
-    /// fail-closed：key 短于 [`MIN_KEY_LEN`]（链 key ≥32B，`docs/rules/audit-ledger.md`）即返回 `None`
+    /// fail-closed：key 短于 [`MIN_KEY_LEN`]（链 key ≥32B，INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests）即返回 `None`
     /// ——弱 key 不可造 hasher。此处是 key 强度的**单一收口**（任何构造路径均经此校验，非仅 callsite）。
     pub fn new(mac: M, key: MacKey) -> Option<Self> {
         if key.as_bytes().len() < MIN_KEY_LEN {
@@ -558,7 +558,7 @@ impl AuditError {
 }
 
 /// 跨模块共享的确定性测试 verifier（domain / internal / application 单测复用；非加密，仅确定性 + key/msg 敏感）。
-/// 域单测不依赖 adapter crate（rust-standards.md §命名），真实 sha2/hmac 是 follow-up adapter。
+/// 域单测不依赖 adapter crate；真实 sha2/hmac 是 follow-up adapter。
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::AuditChainHasher;
@@ -935,7 +935,7 @@ mod tests {
         let m2 = canonical_message(&genesis, &e);
         assert_eq!(m1, m2, "确定性");
 
-        // 构造期望全字节序列（与 docs/rules/audit-ledger.md §冻结字节布局 单源对齐）。
+        // 构造期望全字节序列（与 INVARIANT: AUDIT-LEDGER-BYTES-01 / golden byte tests）。
         let mut expected: Vec<u8> = Vec::new();
         // prev_hash(32): genesis 全零
         expected.extend_from_slice(&GENESIS_PREV);
@@ -970,7 +970,7 @@ mod tests {
 
         assert_eq!(
             m1, expected,
-            "canonical_message 全字节布局须与 audit-ledger.md 冻结布局一致（INVARIANT: AUDIT-LEDGER-BYTES-01）"
+            "canonical_message 全字节布局须满足 INVARIANT: AUDIT-LEDGER-BYTES-01"
         );
     }
 

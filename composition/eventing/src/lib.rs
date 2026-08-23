@@ -738,7 +738,7 @@ impl<'a> AuditConsumerFactory<'a> {
         let hasher = || {
             AuditChainHasher::new(RustCryptoMacVerifier, self.audit_key.clone()).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)"
+                    "audit chain key must be at least 32 bytes (weak key; INVARIANT: AUDIT-LEDGER-BYTES-01)"
                 )
             })
         };

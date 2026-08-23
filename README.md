@@ -5,7 +5,7 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 ## 结构
 
 扁平 workspace：`crates/`（库 crate，分基础/引擎/服务/域四层）、`adapters/`、`bins/`、`xtask/`、`generated/`。
-完整结构树 / 分层 / 命名的**单一事实源**见 [`docs/rules/architecture.md`](docs/rules/architecture.md)；
+完整结构树 / 分层 / 命名的**单一事实源**见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；
 最高协作规范见 [`CLAUDE.md`](CLAUDE.md)。分层由 crate 依赖图（编译期）+ `deny.toml` wrappers 强制。
 
 ## 项目治理
@@ -77,8 +77,8 @@ build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参�
 gate/stage；构建复用只由 committed snapshot、target pool、Cargo fingerprint 与 compiler cache 负责。
 任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端固定 Job 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
-[`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
-[`docs/rules/localtx.md`](docs/rules/localtx.md)；精确执行成员由 canonical `ExecutionProfile` 与 typed
+ExecutionProfile / effectProfile / consistency gates 与
+LocalTxObservation / transaction outcome types / provider conformance；精确执行成员由 canonical `ExecutionProfile` 与 typed
 stable-ID registry 派生，`xtask/src/verify.rs` 只负责将该集合投影为具体执行计划。
 
 CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。固定 Job、LocalOnly 与供应链诊断接口为：
@@ -200,7 +200,7 @@ receipt 或 gate verdict；不读取旧 schema，不保留 alias、shim、baseli
 4. 通过 typed integration shard 跑该 provider 的 enrollment wrappers；shard 归属由 semantic gate 与
    `xtask` integration lane 共同约束，真实通过状态只来自该 shard 的执行结果。
 
-完整语义与不变式见 `docs/rules/eventbus.md` §L2 provider conformance catalog。
+完整语义与不变式见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
 
 工具链由 `rust-toolchain.toml` 钉定（首次进入目录自动安装）。治理工具的版本、安装 backend 与 CI lane
 映射由 adapter catalog 单源维护；查看完整精确版本：

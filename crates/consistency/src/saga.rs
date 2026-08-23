@@ -3,7 +3,7 @@
 //! 本模块冻结 Saga 的 durable identity 与 journal/replay 纯模型，并消费 `vocab` 的 canonical
 //! step name；业务 authoring 只经
 //! `eventexec::SagaStep<GeneratedStepMarker>`，由 generated receipt 与 definition 专属 typestate
-//! 约束。**compensation order 只能 reverse**（saga.md §Governance）——逆序由 eventexec executor
+//! 约束。**compensation order 只能 reverse**（generated / diport::SagaDurableStore / saga conformance）——逆序由 eventexec executor
 //! 持栈驱动，consistency 不再暴露平行 step authoring trait。
 //! ref: oxidecomputer/steno src/saga_action_generic.rs@main（`Action::do_it`/`undo_it`/`name` 对标；
 //! RSS 拒其 `ActionData: Serialize+DeserializeOwned` bound（ADR-004 C6）、用 native AFIT 替 BoxFuture）。
@@ -1496,7 +1496,7 @@ fn pending_compensations(
 pub enum SagaOutcome {
     /// step 完成，推进下一步。
     Completed,
-    /// step 失败，触发**逆序**补偿（saga.md：order 只能 reverse）。
+    /// step 失败，触发**逆序**补偿（generated / diport::SagaDurableStore / saga conformance：order 只能 reverse）。
     Failed,
 }
 

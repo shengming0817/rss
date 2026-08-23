@@ -22,7 +22,7 @@
 //! 对标 DB-owned journal/changelog timestamp）。
 //!
 //! **错误 PII 边界**：append 路径 sqlx 错误不进 Display——经 [`ProjectionEventsError::new`] 包成
-//! source；read source 路径只返回 [`EngineError`] 分类（error-handling.md §Message 与 PII）。
+//! source；read source 路径只返回 [`EngineError`] 分类。
 //!
 //! ref: adapters/postgres/src/saga.rs（tenant-scoped append-only journal 范式）。
 
@@ -855,7 +855,7 @@ mod smoke {
     #[test]
     #[allow(clippy::expect_used)]
     // reason: 测试解析编译期 include_str! 的已知 migration 文本，缺关键子句应 fail；
-    // item-level carve-out（error-handling.md §Carve-out）。
+    // item-level carve-out。
     fn projection_events_migration_append_only_and_no_rls() {
         const MIGRATION: &str = include_str!("../migrations/0013_create_projection_events.sql");
 

@@ -636,7 +636,7 @@ mod tests {
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
 
-    // 测试 helper：解析已知合法常量 —— expect item-level carve-out（error-handling.md §Carve-out）。
+    // 测试 helper：解析已知合法常量 —— expect item-level carve-out。
     #[allow(clippy::expect_used)]
     fn tenant(raw: &str) -> rss_request_context::TenantId {
         rss_request_context::TenantId::parse(raw).expect("canonical uuid")

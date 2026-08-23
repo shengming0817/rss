@@ -12,10 +12,10 @@
 //! 等 role-name 字面量，会把授权退回到身份展示数据；生产授权必须比较 typed
 //! `GrantPermission` / `RoutePermissionId`。
 //!
-//! `tenancy.md` 明文：primary handler 只能消费 `AuthorizedSubject` 中的已授权主体上下文；
+//! `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL 明文：primary handler 只能消费 `AuthorizedSubject` 中的已授权主体上下文；
 //! `Authenticated` 的 tenant/principal getter 仅允许 httpserve 内部 route gate 与 runtime 组合根审计链路使用。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游：primary 路由统一在 `httpserve` route gate 调 `RouteAuthorizer`，成功后插入 `AuthorizedSubject`。
 //! - 下游：handler/domain 若绕回 `Authenticated` getter 做 principal/subject 分支，即绕开 funnel；
 //!   因 getter 本身是公开 API，必须经 callsite lint 约束。

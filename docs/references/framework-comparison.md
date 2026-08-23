@@ -67,11 +67,11 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 
 ## Rust 标准库参考
 
-> `fix` 技能（标准库 / 核心生态优先）查此表：有既定做法时遵循，不自创。语言层细则见 `docs/rules/rust-standards.md`。
+> `fix` 技能（标准库 / 核心生态优先）查此表：有既定做法时遵循，不自创。
 
 | 场景 | 标准库 / 核心生态做法 |
 |------|----------------------|
-| 错误类型 | `thiserror`（库错误枚举）/ `anyhow`（应用边界），见 `error-handling.md` |
+| 错误类型 | `thiserror`（库错误枚举）/ `anyhow`（应用边界）；RSS wire mapping 消费 `vocab::CoreError` |
 | 时间 | `Clock` trait 注入（构造器位置参），禁止默认系统时钟 |
 | 集合 / 迭代 | 入参优先 `&[T]` / `impl Iterator`，避免无谓 `clone` |
 | 序列化 | 仅 contract / DTO derive `serde`，domain 类型不 derive |

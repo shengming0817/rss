@@ -13,7 +13,7 @@ test-support = []
 rss-contract.workspace = true
 rss-request-context.workspace = true
 # typify 派生码用全限定 ::serde::{Serialize,Deserialize}（derive feature）。所有 codegen 机器
-# （typify/schemars/syn）留在 xtask，见 docs/rules/architecture.md §83/§126。
+# （typify/schemars/syn）留在 xtask，见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
 serde = { workspace = true }
 # typify 把 schema `{"type":"string","format":"uuid"}` 派生为 `::uuid::Uuid`（如 identity.session-created
 # 的 subject，#1277 F1：wire UUID 字段类型层强制，非 UUID 在 decode 即失败）。

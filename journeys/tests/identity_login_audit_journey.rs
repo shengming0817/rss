@@ -126,7 +126,7 @@ fn audit_consumer_handler(
 /// worker 后台线程监听自持 token、于 `ManagedResource::shutdown` 自取消（不依赖 stack 阶段 1 广播）。
 #[allow(clippy::too_many_arguments)]
 // reason: journey 接线 helper 的参数集（bus/claimer/contract_id/topic/dlx/handler/token/stack 各自语义独立）；
-// 聚合 struct 仅此 4 测试复用、收益低，item-level carve-out（error-handling.md §Carve-out）。
+// 聚合 struct 仅此 4 测试复用、收益低，item-level carve-out。
 async fn wire_demo_consumer<H, S>(
     bus: &MemBus,
     claimer: Arc<S>,

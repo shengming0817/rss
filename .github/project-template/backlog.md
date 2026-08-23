@@ -22,7 +22,7 @@ labels（`backlog` + `area-XX` + `type-XX` + `pri-pX` + `cx-X`）与 title `[<ID
 <!--
 仅当 issue 新增、扩展、替换或重新声明 T3 production acceptance carrier，或切换 production assembly artifact
 journey 时保留本节；其余 issue 删除整节，不填 N/A。字段语义以
-`docs/rules/project-scope.md` §Production acceptance evidence plan 与 carrier replacement 为单一事实源。
+Production acceptance evidence 必须记录唯一 profile/artifact/hazard、same-head T1/T2/T3 receipt 与原子 carrier transition。
 每个独立 invariant / join hazard 复制一份下方 item，不得把多个独立 hazard 藏在一个不可选择的 target 后。
 -->
 

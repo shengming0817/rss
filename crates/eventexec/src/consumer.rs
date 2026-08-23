@@ -694,7 +694,7 @@ async fn run_handler_loop<S, H>(
     // Requeue 预算耗尽 → DLX（num_attempts = MAX_REDELIVERY 次全部尝试）。
     // INVARIANT: Settled 闭合 + 仅 Requeue 续循环 ⇒ 此处 `last_requeue_summary` 恒 Some。
     #[allow(clippy::expect_used)]
-    // reason: 穷尽 Settled 下不可达 None；expect 守逻辑 bug，非业务 fallback（error-handling.md §Carve-out）。
+    // reason: 穷尽 Settled 下不可达 None；expect 守逻辑 bug，非业务 fallback。
     let exhausted_summary =
         last_requeue_summary.expect("requeue budget exit implies Settled::Requeue summary");
     dead_letter(

@@ -1,6 +1,6 @@
 # RSS 依赖使用与能力实现规则
 
-能力归属与范围边界以 [`project-scope.md`](project-scope.md) 为单一事实源；依赖版本和 feature 由 workspace
+本文件只拥有依赖与自研准入；能力范围由独立 policy owner 决定。依赖版本和 feature 由 workspace
 `Cargo.toml` 与 `Cargo.lock` 声明。
 
 ## 实现顺序
@@ -58,7 +58,7 @@
 - 机器守卫必须通过 `WorkspaceFacts` owned resolved-package/edge DTO，对每项 advisory 的完整
   受影响 PackageId 集合与唯一允许集合做精确比较，并锁定唯一依赖根；出现第二脆弱版本、第二
   source、额外父依赖或上游已移除该依赖时 fail-closed，暴露扩大或过期的豁免；
-- 独立 follow-up issue 保持 open，上游修复可用后升级依赖并在同一变更中删除两侧豁免。
+- 风险接受必须有独立 owner 与撤销条件；上游修复可用后升级依赖并在同一变更中删除两侧豁免。
 
 该机制仅表示显式风险接受，不得宣称漏洞已修复，也不得扩大到没有独立跟踪项的其它依赖。
 
@@ -109,5 +109,4 @@ RSS port 用于：
 - 升级验证 feature/target、公开行为、schema/wire compatibility 与 production posture。
 - workspace 保持统一 dependency declaration 与 feature closure。
 - candidate 通过后切换唯一调用路径并移除旧路径。
-- production acceptance carrier 遵守
-  [`project-scope.md`](project-scope.md#production-acceptance-evidence-plan-与-carrier-replacement) 的 transition。
+- production acceptance replacement 必须 first-green 后原子切换并删除旧 carrier。

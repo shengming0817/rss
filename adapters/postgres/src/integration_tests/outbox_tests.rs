@@ -4953,7 +4953,7 @@ async fn generated_fingerprint_allows_real_claim_settle_and_redrive() -> TestRes
 /// metadata 含标准 header + opaque subjectId（无完整 PII，FR-020）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；函数级 item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；函数级 item-level carve-out。
 async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestResult {
     use eventexec::event::ReviewedEventWriter as _;
 

@@ -16,7 +16,7 @@
 //! - **Medium 半段**（本 lint）：`PartitionSerialDelivery` 仅 allowlist crate 可 impl ⇒ 非串行
 //!   非 allowlist 类型无法铸造 witness（AST 级 impl-site 管控）。
 //!
-//! 上下游强度（ai-robust.md §审查要求「Funnel 类约束分别说明上游 / 下游」）：
+//! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（witness 使用面）：`ProjectionHarness::new` 必填 `impl SerialInOrderGuarantor` ——sealed
 //!   supertrait，外部无法独立 impl（Hard 类型系统）。
 //! - 下游（witness 铸造面）：`PartitionSerialDelivery` impl-site allowlist——本 lint（Medium）。
@@ -44,7 +44,7 @@
 //! --all`（`cargo xtask verify`）工作区跑锁。adapter-path 绿分支无法在 UI harness 内单测（harness
 //! 控制 example 源路径，无法置于 `adapters/`），由工作区门承载。
 //!
-//! Hard 化评估（ai-robust.md §审查要求）：无低成本 Hard 路径——`PartitionSerialDelivery` 为 open
+//! Hard 化评估（cargo xtask archrules verify）：无低成本 Hard 路径——`PartitionSerialDelivery` 为 open
 //! trait（非 sealed），外部 crate 须能 impl 来铸造 witness（adapters 是合法 impl 站点）。唯一 Hard
 //! 路径是把 `from_source` 改为注册制（macro 或 proc-macro 生成 + golden），代价超出收益，Medium 为
 //! 当前最强可用载体；无需另立 Issue。
