@@ -1,9 +1,23 @@
 # Runtime Production Acceptance
 
-This runbook records the release evidence required for the full `runtime` assembly. Markdown is not
+This runbook records the current release evidence for the full `runtime` assembly. Markdown is not
 an enforcement carrier: the canonical static verdict comes from `cargo xtask assembly validate`,
 the generated artifacts and lock, while runtime evidence comes from strict smoke and the container
 journeys described below.
+
+## Profile transition status
+
+The bare release smoke in this runbook is transition-era legacy runtime evidence, not the Core
+profile carrier. [ADR-024](../architecture/202608012034-024-enterprise-framework-product-surface.md)
+authorizes the stable product-profile evidence ownership, and Azure PBI
+[#2124](https://dev.azure.com/shengming0923/rss/_workitems/edit/2124) is the single source for the
+Core lifecycle evidence plan. This runbook intentionally does not duplicate that plan's selector,
+receipt contract or future carrier details.
+
+Until the authorized Core evidence set is green on one exact closure and the whole profile is
+activated atomically, the bare release smoke remains the canonical legacy runtime evidence. At
+activation it is demoted to a packaging regression covering image build, entrypoint, configuration
+load and process start only; it no longer proves profile readiness, drain or outage behavior.
 
 ## Release identity
 
@@ -17,7 +31,7 @@ providers are not executable alternatives and are forbidden in the production ma
 production provider is persistent; listener rate limiting uses the assembly's existing Redis pool
 and is cluster-global.
 
-## Required evidence
+## Legacy runtime evidence during profile transition
 
 1. Run the assembly validation, generated-file checks, AssemblyLock check and runtime
    baseline verification on the release commit.
@@ -79,7 +93,7 @@ release rather than installing a compatibility reader, alias or fallback.
 An outage never authorizes switching to a draft, memory, noop or fail-open provider. Uncovered
 recovery behavior is a release limitation, not implicit evidence.
 
-## Canonical commands
+## Legacy runtime commands during profile transition
 
 ```bash
 ./hack/cargo.sh xtask assembly validate
