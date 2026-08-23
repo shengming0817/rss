@@ -36,6 +36,15 @@
 - 缺失、未来、过期、错型、重复、tenant/resource 不匹配或 provider failure 必须在 baseline 前 deny；
   不得回退旧 revision、RBAC baseline 或从 payload 猜测 owner。
 
+## Device policy Draft candidate
+
+- Draft candidate authorizer 只接受 generated policy-put contract、typed write permission、User principal、
+  authorized subject tenant 与 canonical path DeviceId；durable-policy basis 必须来自同次 Common ABAC 求值。
+- `resource.owner` / `resource.riskClass` 只经 tenant/device-bound typed PIP 读取。Deny、NoMatch、事实缺失、
+  未来、过期、错型、重复、跨 scope 或 provider failure 均拒绝，且不得回退 RBAC baseline。
+- #2115 只交付未挂载的 typed candidate component 与 T1/T2 证明，不注入现有 runtime/identityaudit root；
+  production 选择、装配、挂载和 T3 证据由 #2117 或后续激活 PBI 闭合。
+
 ## HTTP/gRPC 与审计
 
 - transport adapter 必须把 verified auth context 传入同一 enforcement seam；metadata/header 不能直接铸造 obligation。

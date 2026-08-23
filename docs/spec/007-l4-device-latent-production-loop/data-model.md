@@ -53,7 +53,8 @@ into a server-minted, non-nil durable receipt identifier in the existing operati
 state, idempotency settlement, generation lineage, conditions and durable wake. Identical replay restores the same
 receipt and generation; commit-unknown returns no receipt until an explicit same-key request observes durable state.
 #2114 exposes only the opaque receipt identity and generation through the closed Draft schemas and candidate package;
-#2115 owns the mounted production HTTP consumer.
+#2115 owns the unmounted typed candidate handler and T1/T2 authorization funnel proof. #2117 or a
+later activation PBI owns production assembly selection, route mounting, and T3 evidence.
 
 ### DevicePolicyOperation
 
@@ -61,7 +62,7 @@ Identity: `(tenant_id, device_id, idempotency_key)` where `idempotency_key` is a
 
 The append-once operation is also the authorization receipt ledger. It stores a server-minted receipt id, canonical
 request digest, accepted generation/response, principal, exact contract/permission, obligation fingerprint,
-evaluation time, and a normalized nonempty ordered set of contributing policy id/version references. Reusing the
+evaluation time, transport-verified request/correlation ids, and a normalized nonempty ordered set of contributing policy id/version references. Reusing the
 key with the same canonical digest returns the same receipt and `200` response without another desired, lineage or
 wake write. Different input under the same key and an expected-generation conflict map to `409`; lookup outside
 authenticated tenant/path-device scope uses the same `404` as absence. Authenticated tenant and path device are

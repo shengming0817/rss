@@ -2197,6 +2197,127 @@ async fn migration_0111_missing_generation_lineage_rolls_back_atomically() -> Te
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0112_rejects_populated_operations_without_partial_schema() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(111).run(&store.pool).await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "WITH operation AS ( \
+           INSERT INTO device_certificate_policy_operations \
+             (tenant_id,device_id,idempotency_key,request_digest,accepted_generation, \
+              accepted_condition,authorization_receipt_id,principal_kind,principal_id, \
+              contract_id,permission,obligation_fingerprint,evaluated_at) \
+           VALUES ($1::uuid,$2::uuid,gen_random_uuid(),decode(repeat('11',32),'hex'),1, \
+              'reconciling',gen_random_uuid(),'service','migration-0112-existing', \
+              'identity.device-certificate-policy-put', \
+              'identity:device-certificate-policy:write',decode(repeat('22',32),'hex'),now()) \
+           RETURNING authorization_receipt_id \
+         ) \
+         INSERT INTO device_certificate_policy_authorization_policies \
+           (tenant_id,device_id,authorization_receipt_id,policy_ordinal,policy_id,policy_version) \
+         SELECT $1::uuid,$2::uuid,authorization_receipt_id,1,'migration-0112-policy',1 \
+         FROM operation",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let failure = migrations_through(112)
+        .run(&store.pool)
+        .await
+        .expect_err("0112 must reject existing operation evidence rather than invent IDs");
+    assert!(
+        failure
+            .to_string()
+            .contains("0112 requires empty Draft device-policy operation state"),
+        "unexpected 0112 cutover failure: {failure}"
+    );
+    let rollback: (Option<i64>, bool, bool, bool, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT max(version) FROM _sqlx_migrations), \
+           EXISTS (SELECT 1 FROM pg_attribute \
+                   WHERE attrelid='device_certificate_policy_operations'::regclass \
+                     AND attname='request_id' AND NOT attisdropped), \
+           to_regprocedure('public.rss_accept_device_certificate_desired(uuid,uuid,uuid,bytea,bigint,bigint,integer,integer,boolean,boolean,text[],text,text,text,text,bytea,bigint,text[],bigint[])') IS NOT NULL, \
+           to_regprocedure('public.rss_accept_device_certificate_desired(uuid,uuid,uuid,bytea,bigint,bigint,integer,integer,boolean,boolean,text[],text,text,text,text,bytea,bigint,text[],bigint[],text,text)') IS NOT NULL, \
+           (SELECT count(*) FROM device_certificate_policy_operations)",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(rollback, (Some(111), false, true, false, 1));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0112_installs_and_executes_closed_receipt_guards() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(112).run(&store.pool).await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let mut connection = store.pool.acquire().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,false)")
+        .bind(&tenant)
+        .execute(&mut *connection)
+        .await?;
+
+    for (principal_kind, request_id, correlation_id) in [
+        ("service", "req-2115", "corr-2115"),
+        ("user", "invalid request", "corr-2115"),
+        ("user", "req-2115", "invalid correlation"),
+    ] {
+        let failure = sqlx::query(
+            "SELECT * FROM public.rss_accept_device_certificate_desired( \
+               $1::uuid,$2::uuid,gen_random_uuid(),decode(repeat('11',32),'hex'), \
+               0,1,3600,600,true,false,ARRAY[]::text[], \
+               $3,'migration-0112-user','identity.device-certificate-policy-put', \
+               'identity:device-certificate-policy:write',decode(repeat('22',32),'hex'),0, \
+               ARRAY['migration-0112-policy'],ARRAY[1]::bigint[],$4,$5)",
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .bind(principal_kind)
+        .bind(request_id)
+        .bind(correlation_id)
+        .execute(&mut *connection)
+        .await
+        .expect_err("0112 receipt guard must reject invalid evidence");
+        assert!(
+            failure
+                .to_string()
+                .contains("invalid device-policy receipt projection"),
+            "unexpected 0112 receipt rejection: {failure}"
+        );
+    }
+    let installed: (Option<i64>, bool, bool, bool, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT max(version) FROM _sqlx_migrations), \
+           EXISTS (SELECT 1 FROM pg_attribute \
+                   WHERE attrelid='device_certificate_policy_operations'::regclass \
+                     AND attname='request_id' AND attnotnull AND NOT attisdropped), \
+           to_regprocedure('public.rss_accept_device_certificate_desired(uuid,uuid,uuid,bytea,bigint,bigint,integer,integer,boolean,boolean,text[],text,text,text,text,bytea,bigint,text[],bigint[])') IS NOT NULL, \
+           to_regprocedure('public.rss_accept_device_certificate_desired(uuid,uuid,uuid,bytea,bigint,bigint,integer,integer,boolean,boolean,text[],text,text,text,text,bytea,bigint,text[],bigint[],text,text)') IS NOT NULL, \
+           (SELECT count(*) FROM device_certificate_policy_operations)",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    assert_eq!(installed, (Some(112), true, false, true, 0));
+    drop(connection);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0107_writer_capability_delta_is_exact() -> TestResult {
     use std::collections::BTreeSet;
 

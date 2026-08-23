@@ -2403,6 +2403,8 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
                 ExpectedGeneration::try_new(1)?,
                 DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
                 failed_policy,
+                httpserve::VerifiedRequestId::for_test("req-reaccept-rollback"),
+                diagctx::CorrelationId::parse("corr-reaccept-rollback")?,
             )?)
             .await
             .is_err(),
@@ -2453,6 +2455,8 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
                 ExpectedGeneration::try_new(1)?,
                 DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
                 policy,
+                httpserve::VerifiedRequestId::for_test("req-reaccept-clear"),
+                diagctx::CorrelationId::parse("corr-reaccept-clear")?,
             )?)
             .await?,
         DesiredPolicyAcceptOutcome::Accepted { .. }
@@ -2803,6 +2807,8 @@ async fn delete_finalize_loses_to_new_desired_and_lease_takeover() -> TestResult
                 ExpectedGeneration::try_new(1)?,
                 DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
                 policy,
+                httpserve::VerifiedRequestId::for_test("req-reaccept-reconcile"),
+                diagctx::CorrelationId::parse("corr-reaccept-reconcile")?,
             )?)
             .await?,
         DesiredPolicyAcceptOutcome::Accepted { .. }
@@ -3530,6 +3536,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
                 ExpectedGeneration::try_new(1)?,
                 DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
                 accepted_policy,
+                httpserve::VerifiedRequestId::for_test("req-app-role-accept"),
+                diagctx::CorrelationId::parse("corr-app-role-accept")?,
             )?)
             .await?,
         DesiredPolicyAcceptOutcome::Accepted { .. }

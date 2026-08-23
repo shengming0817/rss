@@ -1214,8 +1214,8 @@ struct ReviewedWriterCapability {
 // head. A migration change cannot compile until its writer authority has been reviewed in the same
 // delivery.
 const REVIEWED_WRITER_CAPABILITY: ReviewedWriterCapability = ReviewedWriterCapability {
-    migration_head: "sha256:64a7748bf5c9452de22305273591b04d099ba7be7c41a2beaf1e2e95d0a4b779",
-    capability_fingerprint: "sha256:7393fd976df3b486623f9f1863a0eb28db484415536b24ca408f291765216277",
+    migration_head: "sha256:9ffe25a1b6e5ff5cfa962984cdd4c868550bdf484d7cf46db4917ea1e7107049",
+    capability_fingerprint: "sha256:cce7e6fb98d5fdfa2b2282e3f8308da76ec9715a22e03ea54932cd796eb9bab7",
 };
 
 const fn const_str_eq(left: &str, right: &str) -> bool {

@@ -31,6 +31,7 @@ runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
+diagctx = { package = "rss-diag-context", path = "../diagctx" }
 authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
 eventexec = { path = "../eventexec" }
@@ -60,6 +61,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+identity = { path = ".", features = ["test-support"] }
 diport = { path = "../diport", features = ["test-support"] }
 eventexec = { path = "../eventexec", features = ["test-support"] }
 # 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写；域单测不依赖 adapter crate。
@@ -76,3 +78,4 @@ secure = { path = "../secure", features = ["test-support"] }
 # testkit 零 adapter 依赖（dev-dep 消费不破「域单测不依赖 adapter crate」）；axum 构建样板 router。
 testkit = { path = "../testkit" }
 trybuild = { workspace = true }
+tracewiretest = { path = "../tracewiretest" }

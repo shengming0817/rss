@@ -88,6 +88,14 @@ mod tests {
         .unwrap()
     }
 
+    fn request_id() -> httpserve::VerifiedRequestId {
+        httpserve::VerifiedRequestId::for_test("req-device-policy-test")
+    }
+
+    fn correlation_id() -> diagctx::CorrelationId {
+        diagctx::CorrelationId::parse("corr-device-policy-test").unwrap()
+    }
+
     fn digest(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
@@ -165,6 +173,8 @@ mod tests {
             ExpectedGeneration::try_new(0).unwrap(),
             key,
             policy(),
+            request_id(),
+            correlation_id(),
         )
         .unwrap();
         assert_eq!(input.next_generation().unwrap().get(), 1);
@@ -181,6 +191,8 @@ mod tests {
             ExpectedGeneration::try_new(0).unwrap(),
             key,
             policy(),
+            request_id(),
+            correlation_id(),
         )
         .unwrap();
         let changed_generation = AcceptDesiredPolicy::for_test(
@@ -188,6 +200,8 @@ mod tests {
             ExpectedGeneration::try_new(1).unwrap(),
             key,
             policy(),
+            request_id(),
+            correlation_id(),
         )
         .unwrap();
         assert_eq!(input.request_digest(), same.request_digest());
@@ -202,12 +216,15 @@ mod tests {
                 ExpectedGeneration::try_new(i64::MAX as u64).unwrap(),
                 key,
                 policy(),
+                request_id(),
+                correlation_id(),
             )
             .is_err()
         );
     }
 
     fn durable_policy_subject(
+        binding: httpserve::DevicePolicyCandidateBindingKey,
         contract_id: &'static str,
         permission: vocab::RoutePermissionId,
         resource: Option<httpserve::RouteResource>,
@@ -217,11 +234,12 @@ mod tests {
             std::num::NonZeroU32::new(7).unwrap(),
         )
         .unwrap();
-        httpserve::AuthorizedSubject::for_test_with_durable_policy(
+        httpserve::AuthorizedSubject::for_test_with_device_policy_candidate(
+            binding,
             contract_id,
             permission,
             scope().tenant(),
-            rss_request_context::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::User,
             "policy-admin-sensitive",
             resource,
             vec![policy],
@@ -231,29 +249,42 @@ mod tests {
         .unwrap()
     }
 
+    fn policy_request_id() -> httpserve::VerifiedRequestId {
+        httpserve::VerifiedRequestId::for_test("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1")
+    }
+
+    fn policy_correlation_id() -> diagctx::CorrelationId {
+        diagctx::CorrelationId::parse("corr-2115").unwrap()
+    }
+
     #[test]
     fn policy_accept_requires_exact_durable_route_and_consumes_shared_provenance_once() {
         let scope = scope();
         let resource =
             || httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string());
+        let binding = httpserve::DevicePolicyCandidateBindingKey::new();
         let exact = durable_policy_subject(
+            binding.clone(),
             generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
             vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
             resource(),
         );
         let duplicate = exact.clone();
-        let input = AcceptDesiredPolicy::from_authorized_subject(
+        let input = AcceptDesiredPolicy::from_authorized_http_subject(
             &exact,
+            &binding,
             scope.device(),
             ExpectedGeneration::try_new(0).unwrap(),
             DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
             policy(),
+            policy_request_id(),
+            policy_correlation_id(),
         )
         .unwrap();
         assert_eq!(input.scope(), scope);
         assert_eq!(
             input.authorization().principal_kind(),
-            rss_request_context::PrincipalKind::Admin
+            rss_request_context::PrincipalKind::User
         );
         assert_eq!(
             input.authorization().principal_id(),
@@ -264,34 +295,79 @@ mod tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(73)
         );
         assert!(
-            AcceptDesiredPolicy::from_authorized_subject(
+            AcceptDesiredPolicy::from_authorized_http_subject(
                 &duplicate,
+                &binding,
                 scope.device(),
                 ExpectedGeneration::try_new(0).unwrap(),
                 DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
                 policy(),
+                policy_request_id(),
+                policy_correlation_id(),
             )
             .is_err()
         );
 
         let other_device = ids::DeviceId::new(uuid::Uuid::new_v4());
+        let generic_durable = httpserve::AuthorizedSubject::for_test_with_durable_policy(
+            generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+            vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+            scope.tenant(),
+            rss_request_context::PrincipalKind::User,
+            "generic-authorizer",
+            resource(),
+            vec![
+                httpserve::AuthorizationPolicyReference::new(
+                    "generic-policy",
+                    std::num::NonZeroU32::MIN,
+                )
+                .unwrap(),
+            ],
+            [0x41; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let non_user_candidate =
+            httpserve::AuthorizedSubject::for_test_with_device_policy_candidate(
+                binding.clone(),
+                generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+                scope.tenant(),
+                rss_request_context::PrincipalKind::Admin,
+                "candidate-admin",
+                resource(),
+                vec![
+                    httpserve::AuthorizationPolicyReference::new(
+                        "candidate-admin-policy",
+                        std::num::NonZeroU32::MIN,
+                    )
+                    .unwrap(),
+                ],
+                [0x42; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+                SystemTime::UNIX_EPOCH,
+            )
+            .unwrap();
         for rejected in [
             durable_policy_subject(
+                binding.clone(),
                 generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID,
                 vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
                 resource(),
             ),
             durable_policy_subject(
+                binding.clone(),
                 generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
                 vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead,
                 resource(),
             ),
             durable_policy_subject(
+                binding.clone(),
                 generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
                 vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
                 None,
             ),
             durable_policy_subject(
+                binding.clone(),
                 generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
                 vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
                 httpserve::RouteResource::new(other_device.as_uuid().hyphenated().to_string()),
@@ -304,14 +380,19 @@ mod tests {
                 "local-authorizer",
                 resource(),
             ),
+            generic_durable,
+            non_user_candidate,
         ] {
             assert!(
-                AcceptDesiredPolicy::from_authorized_subject(
+                AcceptDesiredPolicy::from_authorized_http_subject(
                     &rejected,
+                    &binding,
                     scope.device(),
                     ExpectedGeneration::try_new(0).unwrap(),
                     DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
                     policy(),
+                    policy_request_id(),
+                    policy_correlation_id(),
                 )
                 .is_err()
             );
@@ -450,6 +531,8 @@ mod tests {
                 uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap(),
             ),
             policy(),
+            request_id(),
+            correlation_id(),
         )
         .unwrap();
         assert!(matches!(

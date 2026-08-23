@@ -14,6 +14,7 @@ request = "request.schema.json"
 
 [schemas.responses]
 200 = "response.schema.json"
+400 = "validation.response.schema.json"
 404 = "not-found.response.schema.json"
 409 = "conflict.response.schema.json"
 

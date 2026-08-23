@@ -361,13 +361,15 @@ pub struct DevicePolicyAuthorizationReceipt {
 impl DevicePolicyAuthorizationReceipt {
     fn mint(
         provenance: httpserve::AuthorizationProvenance,
+        binding: &httpserve::DevicePolicyCandidateBindingKey,
         device: DeviceId,
         request_digest: DevicePolicyRequestDigest,
     ) -> Option<Self> {
         let expected_resource = device.as_uuid().hyphenated().to_string();
-        let durable_policy = provenance.durable_policy().cloned()?;
+        let durable_policy = provenance.device_policy_candidate(binding).cloned()?;
         let exact = provenance.contract_id() == POLICY_WRITE_CONTRACT_ID
             && provenance.permission() == POLICY_WRITE_PERMISSION
+            && provenance.principal_kind() == rss_request_context::PrincipalKind::User
             && provenance
                 .resource()
                 .is_some_and(|resource| resource.id() == expected_resource);
@@ -423,6 +425,8 @@ pub struct AcceptDesiredPolicy {
     expected_generation: ExpectedGeneration,
     idempotency_key: DevicePolicyIdempotencyKey,
     policy: CertificatePolicy,
+    request_id: httpserve::VerifiedRequestId,
+    correlation_id: diagctx::CorrelationId,
 }
 
 impl AcceptDesiredPolicy {
@@ -433,12 +437,15 @@ impl AcceptDesiredPolicy {
     /// attempts return [`DevicePolicyAcceptInputError::Unauthorized`], including an attempt that
     /// fails exact receipt binding. Invalid generation input is rejected before consuming that
     /// slot.
-    pub fn from_authorized_subject(
+    pub(crate) fn from_authorized_http_subject(
         subject: &httpserve::AuthorizedSubject,
+        binding: &httpserve::DevicePolicyCandidateBindingKey,
         device: DeviceId,
         expected_generation: ExpectedGeneration,
         idempotency_key: DevicePolicyIdempotencyKey,
         policy: CertificatePolicy,
+        request_id: httpserve::VerifiedRequestId,
+        correlation_id: diagctx::CorrelationId,
     ) -> Result<Self, DevicePolicyAcceptInputError> {
         expected_generation
             .next()
@@ -448,13 +455,15 @@ impl AcceptDesiredPolicy {
             .take_authorization_provenance()
             .map_err(|_| DevicePolicyAcceptInputError::Unauthorized)?;
         let authorization =
-            DevicePolicyAuthorizationReceipt::mint(provenance, device, request_digest)
+            DevicePolicyAuthorizationReceipt::mint(provenance, binding, device, request_digest)
                 .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
         Ok(Self {
             authorization,
             expected_generation,
             idempotency_key,
             policy,
+            request_id,
+            correlation_id,
         })
     }
 
@@ -465,33 +474,69 @@ impl AcceptDesiredPolicy {
         expected_generation: ExpectedGeneration,
         idempotency_key: DevicePolicyIdempotencyKey,
         policy: CertificatePolicy,
+        request_id: httpserve::VerifiedRequestId,
+        correlation_id: diagctx::CorrelationId,
     ) -> Result<Self, DevicePolicyAcceptInputError> {
         use std::num::NonZeroU32;
 
-        let resource =
-            httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string())
-                .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
         let policy_ref =
             httpserve::AuthorizationPolicyReference::new("test-device-policy", NonZeroU32::MIN)
                 .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
-        let subject = httpserve::AuthorizedSubject::for_test_with_durable_policy(
-            POLICY_WRITE_CONTRACT_ID,
-            POLICY_WRITE_PERMISSION,
-            scope.tenant(),
-            rss_request_context::PrincipalKind::Admin,
+        Self::for_test_with_authorization_basis(
+            scope,
+            expected_generation,
+            idempotency_key,
+            policy,
+            request_id,
+            correlation_id,
             "test-device-policy-authorizer",
-            Some(resource),
             vec![policy_ref],
             [0xA5; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
             SystemTime::UNIX_EPOCH,
         )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    /// Test-only constructor that preserves an explicit durable authorization basis.
+    pub fn for_test_with_authorization_basis(
+        scope: DeviceCertificateScope,
+        expected_generation: ExpectedGeneration,
+        idempotency_key: DevicePolicyIdempotencyKey,
+        policy: CertificatePolicy,
+        request_id: httpserve::VerifiedRequestId,
+        correlation_id: diagctx::CorrelationId,
+        principal_id: impl Into<String>,
+        policies: Vec<httpserve::AuthorizationPolicyReference>,
+        obligation_fingerprint: [u8; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+        evaluated_at: SystemTime,
+    ) -> Result<Self, DevicePolicyAcceptInputError> {
+        let resource =
+            httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string())
+                .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
+        let binding = httpserve::DevicePolicyCandidateBindingKey::new();
+        let subject = httpserve::AuthorizedSubject::for_test_with_device_policy_candidate(
+            binding.clone(),
+            POLICY_WRITE_CONTRACT_ID,
+            POLICY_WRITE_PERMISSION,
+            scope.tenant(),
+            rss_request_context::PrincipalKind::User,
+            principal_id,
+            Some(resource),
+            policies,
+            obligation_fingerprint,
+            evaluated_at,
+        )
         .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
-        Self::from_authorized_subject(
+        Self::from_authorized_http_subject(
             &subject,
+            &binding,
             scope.device(),
             expected_generation,
             idempotency_key,
             policy,
+            request_id,
+            correlation_id,
         )
     }
 
@@ -528,6 +573,18 @@ impl AcceptDesiredPolicy {
     #[must_use]
     pub const fn policy(&self) -> &CertificatePolicy {
         &self.policy
+    }
+
+    /// Transport-verified request identity persisted with the accepted operation.
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        self.request_id.as_str()
+    }
+
+    /// Validated diagnostic correlation identity persisted with the accepted operation.
+    #[must_use]
+    pub fn correlation_id(&self) -> &str {
+        self.correlation_id.as_str()
     }
 
     pub const fn authorization(&self) -> &DevicePolicyAuthorizationReceipt {

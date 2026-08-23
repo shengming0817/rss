@@ -182,6 +182,8 @@ async fn accept_generation(
             ExpectedGeneration::try_new(expected)?,
             DevicePolicyIdempotencyKey::new(uuid::Uuid::from_u128(expected as u128 + 1)),
             policy,
+            httpserve::VerifiedRequestId::for_test(format!("req-mqtt-{expected}")),
+            diagctx::CorrelationId::parse(&format!("corr-mqtt-{expected}"))?,
         )?)
         .await?;
     let accepted = match outcome {

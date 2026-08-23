@@ -21,12 +21,12 @@ mod server_observation;
 pub use auth::{
     AUTHORIZATION_FINGERPRINT_BYTES, AuditSinkHandle, Authenticated, AuthenticatedAuditEvent,
     AuthorizationPolicyReference, AuthorizationProvenance, AuthorizationProvenanceAlreadyTaken,
-    AuthorizedSubject, BearerCredentialError, DurablePolicyAuthorization,
-    ExtractedBearerCredential, FieldMask, PendingScopeCtx, ResourceProjection,
-    RouteAuthorizationDecision, RouteAuthorizationGrant, RouteAuthorizationRequest,
-    RouteAuthorizer, RouteMeta, RouteResource, ServiceTokenTenantBindingError, TenantHeaderError,
-    authorize_subject_for_permission, exact_tenant_header, extract_bearer_credential,
-    service_token_tenant_binding,
+    AuthorizedSubject, BearerCredentialError, DevicePolicyCandidateBindingKey,
+    DurablePolicyAuthorization, ExtractedBearerCredential, FieldMask, PendingScopeCtx,
+    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationGrant,
+    RouteAuthorizationRequest, RouteAuthorizer, RouteMeta, RouteResource,
+    ServiceTokenTenantBindingError, TenantHeaderError, authorize_subject_for_permission,
+    exact_tenant_header, extract_bearer_credential, service_token_tenant_binding,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use auth::{NonRssTestScheme, RssAccessRejectMatrixKind};

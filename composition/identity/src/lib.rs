@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use bootstrap::{DomainBinding, DomainModuleResult};
 use diport::{Clock, Signer};
+use identity::ports::device_certificate::{DraftEligibility, DynDeviceCertificateRepository};
 use identity::{
-    AuthGrantServices, CredentialSecurityService, DeviceResourceFactPip, FederatedIdentityDomain,
-    FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginService,
-    PolicyManageService, RbacAdminService,
+    AuthGrantServices, CredentialSecurityService, DevicePolicyCandidateBinding,
+    DeviceResourceFactPip, FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain,
+    IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
     ports::{
         DynAccountSecurityReadRepo, DynAuthGrantValidator, DynCredentialRepo, DynPolicyLifecycle,
         DynPolicyRepo, DynResourceSecurityFactReadRepo, DynRoleBindingLifecycle,
@@ -242,6 +243,41 @@ pub fn device_resource_fact_pip(
         )),
         clock,
     )
+}
+
+/// Mandatory Draft device-policy capabilities constructed from one typed provider bundle.
+pub struct DevicePolicyCandidateComponents {
+    binding: Arc<DevicePolicyCandidateBinding>,
+}
+
+impl DevicePolicyCandidateComponents {
+    /// The inseparable candidate authorizer + handler capability; this does not register a route.
+    #[must_use]
+    pub fn binding(&self) -> Arc<DevicePolicyCandidateBinding> {
+        Arc::clone(&self.binding)
+    }
+}
+
+/// Construct the closed device-policy candidate component without changing existing assemblies.
+#[must_use]
+pub fn device_policy_candidate_components(
+    pg: &PgDomainDeps<caps::Identity>,
+    clock: Arc<dyn Clock>,
+) -> DevicePolicyCandidateComponents {
+    let common = common_identity_services(pg, &clock);
+    let facts = device_resource_fact_pip(pg, Arc::clone(&clock));
+    let repository = Arc::from(DynDeviceCertificateRepository::new_box(
+        pg.device_certificate_repository::<DraftEligibility>(),
+    ));
+    let binding = identity::build_device_policy_candidate_binding(
+        common.roles,
+        common.binding_reads,
+        common.policies,
+        clock,
+        facts,
+        repository,
+    );
+    DevicePolicyCandidateComponents { binding }
 }
 
 /// Build the listener-security root authorizer without mounting the identity domain.

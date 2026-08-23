@@ -433,6 +433,37 @@ impl AuthorizedSubject {
         ))
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_test_with_device_policy_candidate(
+        binding: DevicePolicyCandidateBindingKey,
+        contract_id: &'static str,
+        permission: RoutePermissionId,
+        tenant_id: TenantId,
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        resource: Option<RouteResource>,
+        policies: Vec<AuthorizationPolicyReference>,
+        obligation_fingerprint: [u8; AUTHORIZATION_FINGERPRINT_BYTES],
+        evaluated_at: SystemTime,
+    ) -> Option<Self> {
+        let grant = RouteAuthorizationGrant::device_policy_candidate(
+            binding,
+            policies,
+            obligation_fingerprint,
+            evaluated_at,
+        )?;
+        Some(Self::new(
+            contract_id,
+            permission,
+            tenant_id,
+            principal_kind,
+            principal_id,
+            resource,
+            grant,
+        ))
+    }
+
     /// Exact generated contract identity authorized for this subject.
     #[must_use]
     pub fn contract_id(&self) -> &'static str {
@@ -525,7 +556,27 @@ impl AuthorizationProvenance {
     pub fn durable_policy(&self) -> Option<&DurablePolicyAuthorization> {
         match &self.evidence.grant.basis {
             RouteAuthorizationBasis::AuthorizerLocal => None,
-            RouteAuthorizationBasis::DurablePolicy(policy) => Some(policy),
+            RouteAuthorizationBasis::DurablePolicy(policy)
+            | RouteAuthorizationBasis::DevicePolicyCandidate(
+                DevicePolicyCandidateAuthorization { policy, .. },
+            ) => Some(policy),
+        }
+    }
+
+    /// Durable policy evidence minted specifically by the device-policy candidate authorizer.
+    pub fn device_policy_candidate(
+        &self,
+        binding: &DevicePolicyCandidateBindingKey,
+    ) -> Option<&DurablePolicyAuthorization> {
+        match &self.evidence.grant.basis {
+            RouteAuthorizationBasis::DevicePolicyCandidate(candidate)
+                if candidate.binding == *binding =>
+            {
+                Some(&candidate.policy)
+            }
+            RouteAuthorizationBasis::AuthorizerLocal
+            | RouteAuthorizationBasis::DurablePolicy(_)
+            | RouteAuthorizationBasis::DevicePolicyCandidate(_) => None,
         }
     }
 }
@@ -686,6 +737,58 @@ impl fmt::Debug for DurablePolicyAuthorization {
 enum RouteAuthorizationBasis {
     AuthorizerLocal,
     DurablePolicy(DurablePolicyAuthorization),
+    DevicePolicyCandidate(DevicePolicyCandidateAuthorization),
+}
+
+#[derive(Clone)]
+struct DevicePolicyCandidateAuthorization {
+    binding: DevicePolicyCandidateBindingKey,
+    policy: DurablePolicyAuthorization,
+}
+
+impl fmt::Debug for DevicePolicyCandidateAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DevicePolicyCandidateAuthorization(<redacted>)")
+    }
+}
+
+impl PartialEq for DevicePolicyCandidateAuthorization {
+    fn eq(&self, other: &Self) -> bool {
+        self.binding == other.binding && self.policy == other.policy
+    }
+}
+
+impl Eq for DevicePolicyCandidateAuthorization {}
+
+/// Opaque instance identity shared only by one candidate authorizer/handler assembly.
+#[derive(Clone)]
+pub struct DevicePolicyCandidateBindingKey(Arc<()>);
+
+impl DevicePolicyCandidateBindingKey {
+    #[doc(hidden)]
+    pub fn new() -> Self {
+        Self(Arc::new(()))
+    }
+}
+
+impl Default for DevicePolicyCandidateBindingKey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for DevicePolicyCandidateBindingKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DevicePolicyCandidateBindingKey {}
+
+impl fmt::Debug for DevicePolicyCandidateBindingKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DevicePolicyCandidateBindingKey(<redacted>)")
+    }
 }
 
 /// Explicit authorization grant. Every Allow must name its authorization basis.
@@ -738,6 +841,39 @@ impl RouteAuthorizationGrant {
             }),
         })
     }
+
+    /// Mint a durable grant that proves the closed device-policy PIP + ABAC path ran.
+    ///
+    /// This is intentionally distinct from a generic durable-policy grant so downstream receipt
+    /// construction can reject an incorrectly paired generic authorizer.
+    pub fn device_policy_candidate(
+        binding: DevicePolicyCandidateBindingKey,
+        mut policies: Vec<AuthorizationPolicyReference>,
+        obligation_fingerprint: [u8; AUTHORIZATION_FINGERPRINT_BYTES],
+        evaluated_at: SystemTime,
+    ) -> Option<Self> {
+        policies.sort_unstable();
+        if policies.is_empty()
+            || policies
+                .windows(2)
+                .any(|pair| pair[0].policy_id == pair[1].policy_id)
+        {
+            return None;
+        }
+        Some(Self {
+            projection: ResourceProjection::default_masked(),
+            basis: RouteAuthorizationBasis::DevicePolicyCandidate(
+                DevicePolicyCandidateAuthorization {
+                    binding,
+                    policy: DurablePolicyAuthorization {
+                        policies: policies.into_boxed_slice(),
+                        obligation_fingerprint,
+                        evaluated_at,
+                    },
+                },
+            ),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -769,7 +905,12 @@ impl RouteAuthorizationDecision {
     pub fn durable_policy(&self) -> Option<&DurablePolicyAuthorization> {
         match self {
             Self::Allow(RouteAuthorizationGrant {
-                basis: RouteAuthorizationBasis::DurablePolicy(policy),
+                basis:
+                    RouteAuthorizationBasis::DurablePolicy(policy)
+                    | RouteAuthorizationBasis::DevicePolicyCandidate(DevicePolicyCandidateAuthorization {
+                        policy,
+                        ..
+                    }),
                 ..
             }) => Some(policy),
             Self::Allow(_) | Self::Deny => None,

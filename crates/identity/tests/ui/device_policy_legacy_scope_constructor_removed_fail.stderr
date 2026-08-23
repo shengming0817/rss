@@ -4,14 +4,8 @@ error[E0599]: no associated function or constant named `from_authorized` found f
 4 |     let _ = AcceptDesiredPolicy::from_authorized;
   |                                  ^^^^^^^^^^^^^^^ associated function or constant not found in `AcceptDesiredPolicy`
   |
-help: there is an associated function `from_authorized_subject` with a similar name
- --> src/device_certificate/domain.rs
+help: there is an associated function `from_ref` with a similar name
+ --> $CARGO/axum-core-$VERSION/src/extract/from_ref.rs
   |
-  | /     pub fn from_authorized_subject(
-  | |         subject: &httpserve::AuthorizedSubject,
-  | |         device: DeviceId,
-  | |         expected_generation: ExpectedGeneration,
-  | |         idempotency_key: DevicePolicyIdempotencyKey,
-  | |         policy: CertificatePolicy,
-  | |     ) -> Result<Self, DevicePolicyAcceptInputError> {
-  | |___________________________________________________^
+  |     fn from_ref(input: &T) -> Self;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

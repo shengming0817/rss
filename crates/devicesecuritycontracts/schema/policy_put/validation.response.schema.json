@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCertificatePolicyPutValidationResponse",
+  "description": "A semantically invalid desired policy is rejected before persistence.",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "title": "IdentityDeviceCertificatePolicyPutValidationError",
+      "type": "object",
+      "required": ["code", "message", "retryable", "details", "requestId"],
+      "properties": {
+        "code": { "type": "string", "enum": ["ERR_CORE_VALIDATION"] },
+        "message": { "type": "string", "enum": ["validation failed"] },
+        "retryable": { "type": "boolean", "const": false },
+        "details": { "type": "array", "maxItems": 0, "items": { "type": "object", "additionalProperties": { "type": "string" } } },
+        "requestId": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

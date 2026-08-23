@@ -2407,6 +2407,24 @@ lineage。artifact append funnel 同时核验 held lease、current desired gener
 3. 用 current receipt 验证 append/replay，再分别交换 receipt 与 generation 验证 stale fence 且无 artifact row。
    这是 candidate persistence carrier，不激活 assembly、binary、image 或六个 draft contracts。
 
+### 0112 Device-policy operation request correlation
+
+`0112` 在尚未 serving 的 Draft policy operation ledger 上硬切 `request_id` 与 `correlation_id`：两列均
+非空且受统一 ASCII allowlist/128-byte 上界约束，desired accept funnel 只有包含两项 typed evidence 的
+唯一签名。迁移要求 ledger 精确为 111 且 operation 表为空，不伪造历史关联、不保留旧函数、默认值或双写。
+
+1. 这是 non-rolling hard cut：保持 device-policy Draft route 未挂载，停止并禁止重启所有旧 PG serving 与
+   reconcile 实例，排空会访问 desired/reconcile 表的会话；仅由唯一 migration Job 从 ledger 111 执行。
+   迁移会以 `ACCESS EXCLUSIVE` 锁冻结 operation、desired、condition 与 reconcile authority 表，任何未排空
+   的旧实例都可能使 5 秒 lock timeout 原子失败。
+2. postflight 确认 operation 两列 `NOT NULL`、request/correlation 与 User-only CHECK 生效，并且 accept
+   function 只有 21 参数的新签名；随后只启动携带 0112 ledger/capability receipt 的 binary。旧 binary 因
+   exact ledger mismatch 必须继续保持停止。
+3. accepted operation 可与 auth audit 通过 request/correlation 关联；identical replay 保留首次 operation
+   evidence，本次请求只产生自己的 auth audit attempt。
+4. migration 提交前失败可在确认事务已回滚后继续使用 111-compatible artifact；提交后不得单独回滚函数或列，
+   恢复必须使用迁移前数据库备份与旧 artifact 整体切回。
+
 ### 0105 Settings projection input-generation hard cut
 
 `0105` 将 Settings v3 worker/operator/reader 的固定函数身份推进到当前 generated projection-input

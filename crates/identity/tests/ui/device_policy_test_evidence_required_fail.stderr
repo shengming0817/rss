@@ -1,0 +1,15 @@
+error[E0061]: this function takes 6 arguments but 4 arguments were supplied
+  --> tests/ui/device_policy_test_evidence_required_fail.rs:11:13
+   |
+11 |     let _ = AcceptDesiredPolicy::for_test(scope, generation, key, policy);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-------------------------------- two arguments of type `httpserve::middleware::VerifiedRequestId` and `rss_diag_context::ctx::CorrelationId` are missing
+   |
+note: associated function defined here
+  --> src/device_certificate/domain.rs
+   |
+   |     pub fn for_test(
+   |            ^^^^^^^^
+help: provide the arguments
+   |
+11 |     let _ = AcceptDesiredPolicy::for_test(scope, generation, key, policy, /* httpserve::middleware::VerifiedRequestId */, /* rss_diag_context::ctx::CorrelationId */);
+   |                                                                         ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

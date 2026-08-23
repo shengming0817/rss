@@ -579,7 +579,7 @@ fn rule_device_certificate_policy(c: &RepositoryContract) -> Vec<Finding> {
 
     let _ = r25_read_schema(c, R25_POLICY_ID, SCHEMA_KEY_RESPONSE, &mut out);
 
-    let expected_responses = BTreeSet::from([200, 404, 409]);
+    let expected_responses = BTreeSet::from([200, 400, 404, 409]);
     let actual_responses: BTreeSet<u16> = m
         .schemas
         .responses

@@ -1587,7 +1587,7 @@ impl DevicePolicyTx<'_> {
         let row: PolicyAcceptFunnelRow = sqlx::query_as(
             "SELECT * FROM public.rss_accept_device_certificate_desired( \
              $1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11, \
-             $12,$13,$14,$15,$16,$17,$18,$19)",
+             $12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
         )
         .bind(tenant)
         .bind(device)
@@ -1608,6 +1608,8 @@ impl DevicePolicyTx<'_> {
         .bind(evaluated_at_micros)
         .bind(policy_ids)
         .bind(policy_versions)
+        .bind(input.request_id())
+        .bind(input.correlation_id())
         .fetch_one(&mut *self.conn)
         .await
         .map_err(storage)?;
@@ -2477,11 +2479,26 @@ mod integration_tests {
         key: DevicePolicyIdempotencyKey,
         san: &str,
     ) -> AcceptDesiredPolicy {
+        let request_id = format!("req-{}", uuid::Uuid::new_v4());
+        let correlation_id = format!("corr-{}", uuid::Uuid::new_v4());
+        desired_with_key_and_evidence(scope, expected, key, san, &request_id, &correlation_id)
+    }
+
+    fn desired_with_key_and_evidence(
+        scope: DeviceCertificateScope,
+        expected: u64,
+        key: DevicePolicyIdempotencyKey,
+        san: &str,
+        request_id: &str,
+        correlation_id: &str,
+    ) -> AcceptDesiredPolicy {
         AcceptDesiredPolicy::for_test(
             scope,
             ExpectedGeneration::try_new(expected).unwrap(),
             key,
             policy(san),
+            httpserve::VerifiedRequestId::for_test(request_id),
+            diagctx::CorrelationId::parse(correlation_id).unwrap(),
         )
         .unwrap()
     }
@@ -2502,24 +2519,17 @@ mod integration_tests {
                 .unwrap()
             })
             .collect();
-        let subject = httpserve::AuthorizedSubject::for_test_with_durable_policy(
-            generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
-            vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
-            scope.tenant(),
-            rss_request_context::PrincipalKind::Admin,
-            "policy-admin-roundtrip",
-            httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string()),
-            policies,
-            [0x31; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
-            UNIX_EPOCH + Duration::from_micros(73_123_456),
-        )
-        .unwrap();
-        AcceptDesiredPolicy::from_authorized_subject(
-            &subject,
-            scope.device(),
+        AcceptDesiredPolicy::for_test_with_authorization_basis(
+            scope,
             ExpectedGeneration::try_new(expected).unwrap(),
             key,
             policy(san),
+            httpserve::VerifiedRequestId::for_test("0191f7d4-34d7-7b42-9fcb-9e85b92f42a1"),
+            diagctx::CorrelationId::parse("corr-2115").unwrap(),
+            "policy-user-roundtrip",
+            policies,
+            [0x31; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+            UNIX_EPOCH + Duration::from_micros(73_123_456),
         )
         .unwrap()
     }
@@ -3005,12 +3015,24 @@ mod integration_tests {
         };
         assert_eq!(wake.version().get(), 1);
 
-        let receipt_projection: (String, String, String, String, String, i64, String, String) =
+        let receipt_projection: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+        ) =
             sqlx::query_as(
                 "SELECT operation.authorization_receipt_id::text, operation.principal_kind, \
                         operation.principal_id, operation.contract_id, operation.permission, \
                         (extract(epoch FROM operation.evaluated_at) * 1000000)::bigint, \
                         encode(operation.obligation_fingerprint, 'hex'), \
+                        operation.request_id, operation.correlation_id, \
                         lineage.authorization_receipt_id::text \
                  FROM device_certificate_policy_operations operation \
                  JOIN device_certificate_desired_generation_lineage lineage \
@@ -3026,8 +3048,8 @@ mod integration_tests {
             receipt_projection.0,
             accepted_receipt_id.as_uuid().to_string()
         );
-        assert_eq!(receipt_projection.1, "admin");
-        assert_eq!(receipt_projection.2, "policy-admin-roundtrip");
+        assert_eq!(receipt_projection.1, "user");
+        assert_eq!(receipt_projection.2, "policy-user-roundtrip");
         assert_eq!(
             receipt_projection.3,
             generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID
@@ -3038,7 +3060,9 @@ mod integration_tests {
         );
         assert_eq!(receipt_projection.5, 73_123_456);
         assert_eq!(receipt_projection.6, "31".repeat(32));
-        assert_eq!(receipt_projection.7, receipt_projection.0);
+        assert_eq!(receipt_projection.7, "0191f7d4-34d7-7b42-9fcb-9e85b92f42a1");
+        assert_eq!(receipt_projection.8, "corr-2115");
+        assert_eq!(receipt_projection.9, receipt_projection.0);
         let policy_projection: Vec<(i32, String, i64)> = sqlx::query_as(
             "SELECT policy_ordinal,policy_id,policy_version \
              FROM device_certificate_policy_authorization_policies \
@@ -3079,12 +3103,32 @@ mod integration_tests {
         .await?;
 
         assert!(matches!(
-            repo.accept_desired_policy(desired_with_key(target, 0, key, "replay.example"))
+            repo.accept_desired_policy(desired_with_key_and_evidence(
+                target,
+                0,
+                key,
+                "replay.example",
+                "req-2115-replay",
+                "corr-2115-replay",
+            ))
                 .await?,
             DesiredPolicyAcceptOutcome::Replayed { ref result }
                 if result.accepted_generation().get() == 1
                     && result.authorization_receipt_id() == accepted_receipt_id
         ));
+        let replay_evidence: (String, String, String) = sqlx::query_as(
+            "SELECT authorization_receipt_id::text, request_id, correlation_id \
+             FROM device_certificate_policy_operations \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND idempotency_key=$3::uuid",
+        )
+        .bind(target.tenant().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .bind(key.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(replay_evidence.0, accepted_receipt_id.as_uuid().to_string());
+        assert_eq!(replay_evidence.1, "0191f7d4-34d7-7b42-9fcb-9e85b92f42a1");
+        assert_eq!(replay_evidence.2, "corr-2115");
         assert!(matches!(
             repo.accept_desired_policy(desired_with_key(target, 0, key, "different.example",))
                 .await?,

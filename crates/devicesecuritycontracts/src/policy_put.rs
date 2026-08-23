@@ -35,6 +35,7 @@ pub mod error {
 ///  "title": "IdentityDeviceCertificatePolicyPutConflictError",
 ///  "oneOf": [
 ///    {
+///      "title": "IdentityDeviceCertificatePolicyPutVersionConflictError",
 ///      "type": "object",
 ///      "required": [
 ///        "code",
@@ -61,6 +62,7 @@ pub mod error {
 ///          "maxItems": 0
 ///        },
 ///        "message": {
+///          "title": "IdentityDeviceCertificatePolicyPutVersionConflictMessage",
 ///          "type": "string",
 ///          "enum": [
 ///            "version conflict"
@@ -71,12 +73,13 @@ pub mod error {
 ///        },
 ///        "retryable": {
 ///          "type": "boolean",
-///          "const": false
+///          "const": true
 ///        }
 ///      },
 ///      "additionalProperties": false
 ///    },
 ///    {
+///      "title": "IdentityDeviceCertificatePolicyPutGeneralConflictError",
 ///      "type": "object",
 ///      "required": [
 ///        "code",
@@ -103,6 +106,7 @@ pub mod error {
 ///          "maxItems": 0
 ///        },
 ///        "message": {
+///          "title": "IdentityDeviceCertificatePolicyPutGeneralConflictMessage",
 ///          "type": "string",
 ///          "enum": [
 ///            "conflict"
@@ -125,22 +129,24 @@ pub mod error {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
 #[serde(tag = "code", deny_unknown_fields)]
 pub enum IdentityDeviceCertificatePolicyPutConflictError {
+    ///IdentityDeviceCertificatePolicyPutVersionConflictError
     #[serde(rename = "ERR_CORE_VERSION_CONFLICT")]
     ErrCoreVersionConflict {
         details: ::std::vec::Vec<
             ::std::collections::HashMap<::std::string::String, ::std::string::String>,
         >,
-        message: IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage,
+        message: IdentityDeviceCertificatePolicyPutVersionConflictMessage,
         #[serde(rename = "requestId")]
         request_id: ::std::string::String,
         retryable: bool,
     },
+    ///IdentityDeviceCertificatePolicyPutGeneralConflictError
     #[serde(rename = "ERR_CORE_CONFLICT")]
     ErrCoreConflict {
         details: ::std::vec::Vec<
             ::std::collections::HashMap<::std::string::String, ::std::string::String>,
         >,
-        message: IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage,
+        message: IdentityDeviceCertificatePolicyPutGeneralConflictMessage,
         #[serde(rename = "requestId")]
         request_id: ::std::string::String,
         retryable: bool,
@@ -163,6 +169,7 @@ pub enum IdentityDeviceCertificatePolicyPutConflictError {
 ///      "title": "IdentityDeviceCertificatePolicyPutConflictError",
 ///      "oneOf": [
 ///        {
+///          "title": "IdentityDeviceCertificatePolicyPutVersionConflictError",
 ///          "type": "object",
 ///          "required": [
 ///            "code",
@@ -189,6 +196,7 @@ pub enum IdentityDeviceCertificatePolicyPutConflictError {
 ///              "maxItems": 0
 ///            },
 ///            "message": {
+///              "title": "IdentityDeviceCertificatePolicyPutVersionConflictMessage",
 ///              "type": "string",
 ///              "enum": [
 ///                "version conflict"
@@ -199,12 +207,13 @@ pub enum IdentityDeviceCertificatePolicyPutConflictError {
 ///            },
 ///            "retryable": {
 ///              "type": "boolean",
-///              "const": false
+///              "const": true
 ///            }
 ///          },
 ///          "additionalProperties": false
 ///        },
 ///        {
+///          "title": "IdentityDeviceCertificatePolicyPutGeneralConflictError",
 ///          "type": "object",
 ///          "required": [
 ///            "code",
@@ -231,6 +240,7 @@ pub enum IdentityDeviceCertificatePolicyPutConflictError {
 ///              "maxItems": 0
 ///            },
 ///            "message": {
+///              "title": "IdentityDeviceCertificatePolicyPutGeneralConflictMessage",
 ///              "type": "string",
 ///              "enum": [
 ///                "conflict"
@@ -257,70 +267,6 @@ pub enum IdentityDeviceCertificatePolicyPutConflictError {
 #[serde(deny_unknown_fields)]
 pub struct IdentityDeviceCertificatePolicyPutConflictResponse {
     pub error: IdentityDeviceCertificatePolicyPutConflictError,
-}
-///`IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage`
-///
-/// <details><summary>JSON schema</summary>
-///
-/// ```json
-///{
-///  "type": "string",
-///  "enum": [
-///    "version conflict"
-///  ]
-///}
-/// ```
-/// </details>
-#[derive(
-    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
-)]
-pub enum IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage {
-    #[serde(rename = "version conflict")]
-    VersionConflict,
-}
-impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match *self {
-            Self::VersionConflict => f.write_str("version conflict"),
-        }
-    }
-}
-impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage {
-    type Err = self::error::ConversionError;
-    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        match value {
-            "version conflict" => Ok(Self::VersionConflict),
-            _ => Err("invalid value".into()),
-        }
-    }
-}
-impl ::std::convert::TryFrom<&str>
-    for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
-{
-    type Error = self::error::ConversionError;
-    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<&::std::string::String>
-    for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
-{
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: &::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<::std::string::String>
-    for IdentityDeviceCertificatePolicyPutConflictResponseErrorMessage
-{
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: ::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
 }
 ///`IdentityDeviceCertificatePolicyPutData`
 ///
@@ -423,6 +369,69 @@ impl ::std::convert::TryFrom<&::std::string::String>
 }
 impl ::std::convert::TryFrom<::std::string::String>
     for IdentityDeviceCertificatePolicyPutDataCondition
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///`IdentityDeviceCertificatePolicyPutGeneralConflictMessage`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutGeneralConflictMessage",
+///  "type": "string",
+///  "enum": [
+///    "conflict"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutGeneralConflictMessage {
+    #[serde(rename = "conflict")]
+    Conflict,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutGeneralConflictMessage {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Conflict => f.write_str("conflict"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutGeneralConflictMessage {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "conflict" => Ok(Self::Conflict),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutGeneralConflictMessage {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutGeneralConflictMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutGeneralConflictMessage
 {
     type Error = self::error::ConversionError;
     fn try_from(
@@ -1036,6 +1045,320 @@ pub struct IdentityDeviceCertificatePolicyPutRequest {
 pub struct IdentityDeviceCertificatePolicyPutResponse {
     pub data: IdentityDeviceCertificatePolicyPutData,
 }
+///`IdentityDeviceCertificatePolicyPutValidationError`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutValidationError",
+///  "type": "object",
+///  "required": [
+///    "code",
+///    "details",
+///    "message",
+///    "requestId",
+///    "retryable"
+///  ],
+///  "properties": {
+///    "code": {
+///      "type": "string",
+///      "enum": [
+///        "ERR_CORE_VALIDATION"
+///      ]
+///    },
+///    "details": {
+///      "type": "array",
+///      "items": {
+///        "type": "object",
+///        "additionalProperties": {
+///          "type": "string"
+///        }
+///      },
+///      "maxItems": 0
+///    },
+///    "message": {
+///      "type": "string",
+///      "enum": [
+///        "validation failed"
+///      ]
+///    },
+///    "requestId": {
+///      "type": "string"
+///    },
+///    "retryable": {
+///      "type": "boolean",
+///      "const": false
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityDeviceCertificatePolicyPutValidationError {
+    pub code: IdentityDeviceCertificatePolicyPutValidationErrorCode,
+    pub details:
+        ::std::vec::Vec<::std::collections::HashMap<::std::string::String, ::std::string::String>>,
+    pub message: IdentityDeviceCertificatePolicyPutValidationErrorMessage,
+    #[serde(rename = "requestId")]
+    pub request_id: ::std::string::String,
+    pub retryable: bool,
+}
+///`IdentityDeviceCertificatePolicyPutValidationErrorCode`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "string",
+///  "enum": [
+///    "ERR_CORE_VALIDATION"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutValidationErrorCode {
+    #[serde(rename = "ERR_CORE_VALIDATION")]
+    ErrCoreValidation,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutValidationErrorCode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::ErrCoreValidation => f.write_str("ERR_CORE_VALIDATION"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutValidationErrorCode {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "ERR_CORE_VALIDATION" => Ok(Self::ErrCoreValidation),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutValidationErrorCode {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationErrorCode
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationErrorCode
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///`IdentityDeviceCertificatePolicyPutValidationErrorMessage`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "string",
+///  "enum": [
+///    "validation failed"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutValidationErrorMessage {
+    #[serde(rename = "validation failed")]
+    ValidationFailed,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutValidationErrorMessage {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::ValidationFailed => f.write_str("validation failed"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutValidationErrorMessage {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "validation failed" => Ok(Self::ValidationFailed),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutValidationErrorMessage {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationErrorMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationErrorMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///A semantically invalid desired policy is rejected before persistence.
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutValidationResponse",
+///  "description": "A semantically invalid desired policy is rejected before persistence.",
+///  "type": "object",
+///  "required": [
+///    "error"
+///  ],
+///  "properties": {
+///    "error": {
+///      "title": "IdentityDeviceCertificatePolicyPutValidationError",
+///      "type": "object",
+///      "required": [
+///        "code",
+///        "details",
+///        "message",
+///        "requestId",
+///        "retryable"
+///      ],
+///      "properties": {
+///        "code": {
+///          "type": "string",
+///          "enum": [
+///            "ERR_CORE_VALIDATION"
+///          ]
+///        },
+///        "details": {
+///          "type": "array",
+///          "items": {
+///            "type": "object",
+///            "additionalProperties": {
+///              "type": "string"
+///            }
+///          },
+///          "maxItems": 0
+///        },
+///        "message": {
+///          "type": "string",
+///          "enum": [
+///            "validation failed"
+///          ]
+///        },
+///        "requestId": {
+///          "type": "string"
+///        },
+///        "retryable": {
+///          "type": "boolean",
+///          "const": false
+///        }
+///      },
+///      "additionalProperties": false
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityDeviceCertificatePolicyPutValidationResponse {
+    pub error: IdentityDeviceCertificatePolicyPutValidationError,
+}
+///`IdentityDeviceCertificatePolicyPutVersionConflictMessage`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutVersionConflictMessage",
+///  "type": "string",
+///  "enum": [
+///    "version conflict"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutVersionConflictMessage {
+    #[serde(rename = "version conflict")]
+    VersionConflict,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutVersionConflictMessage {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::VersionConflict => f.write_str("version conflict"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutVersionConflictMessage {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "version conflict" => Ok(Self::VersionConflict),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutVersionConflictMessage {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutVersionConflictMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutVersionConflictMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 
 /// Stable, payload-free policy constraint violation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1185,7 +1508,7 @@ pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
     ::rss_contract::ContractDescriptor::from_static_version(
         "identity.device-certificate-policy-put",
         "v2",
-        "sha256:c6cbd07a3dbdf14d9cb17dcacf4b460e6e7ffcd69800a9d08d3ae2527314b1a2",
+        "sha256:88a5d5145b14ae984c27edae2ad468e9aa6cd29ad955fe0771d7f9eabe5d7084",
     );
 /// Candidate lifecycle; this package does not activate the contract.
 pub const LIFECYCLE: &str = "draft";
@@ -1202,13 +1525,18 @@ pub const SCHEMAS: &[crate::SchemaArtifact] = &[
         include_bytes!("../schema/policy_put/response.schema.json"),
     ),
     crate::SchemaArtifact::new(
+        "response:400",
+        "sha256:6cba221b2769c329c076284832191b0fe9af2a8a89408c64442f299afaa593de",
+        include_bytes!("../schema/policy_put/validation.response.schema.json"),
+    ),
+    crate::SchemaArtifact::new(
         "response:404",
         "sha256:52a92e7586202064a7e60f5aa3c8fbd8caa9d7f9b402ef0d00eebd6fb69b1994",
         include_bytes!("../schema/policy_put/not-found.response.schema.json"),
     ),
     crate::SchemaArtifact::new(
         "response:409",
-        "sha256:739a9f4fdd138e5b684531a913683d06605fbb84fa1f5877cb068a7bc68351d6",
+        "sha256:fa2788866d968ceb9fe67471239c3a9f48321912dec44499f59f40b1b898ffd5",
         include_bytes!("../schema/policy_put/conflict.response.schema.json"),
     ),
 ];

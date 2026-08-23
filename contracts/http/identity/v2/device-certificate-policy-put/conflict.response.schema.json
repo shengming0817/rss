@@ -11,23 +11,25 @@
       "title": "IdentityDeviceCertificatePolicyPutConflictError",
       "oneOf": [
         {
+          "title": "IdentityDeviceCertificatePolicyPutVersionConflictError",
           "type": "object",
           "required": ["code", "message", "retryable", "details", "requestId"],
           "properties": {
             "code": { "type": "string", "enum": ["ERR_CORE_VERSION_CONFLICT"] },
-            "message": { "type": "string", "enum": ["version conflict"] },
-            "retryable": { "type": "boolean", "const": false },
+            "message": { "title": "IdentityDeviceCertificatePolicyPutVersionConflictMessage", "type": "string", "enum": ["version conflict"] },
+            "retryable": { "type": "boolean", "const": true },
             "details": { "type": "array", "maxItems": 0, "items": { "type": "object", "additionalProperties": { "type": "string" } } },
             "requestId": { "type": "string" }
           },
           "additionalProperties": false
         },
         {
+          "title": "IdentityDeviceCertificatePolicyPutGeneralConflictError",
           "type": "object",
           "required": ["code", "message", "retryable", "details", "requestId"],
           "properties": {
             "code": { "type": "string", "enum": ["ERR_CORE_CONFLICT"] },
-            "message": { "type": "string", "enum": ["conflict"] },
+            "message": { "title": "IdentityDeviceCertificatePolicyPutGeneralConflictMessage", "type": "string", "enum": ["conflict"] },
             "retryable": { "type": "boolean", "const": false },
             "details": { "type": "array", "maxItems": 0, "items": { "type": "object", "additionalProperties": { "type": "string" } } },
             "requestId": { "type": "string" }

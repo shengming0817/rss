@@ -10,11 +10,12 @@ device policy/status receipts. It intentionally makes no PostgreSQL, wire-schema
 #2113 now supplies the T2 PostgreSQL handoff: one append-only authorization/idempotency ledger, normalized policy
 basis, atomic desired-generation lineage for policy accept and rotation, deterministic replay, and typed unsafe
 settlement. #2114 closes the Draft public-schema/candidate-package handoff and the internal command/application-receipt
-lineage joins; #2115 remains the mounted production-handler handoff.
+lineage joins; #2115 supplies an unmounted typed candidate component and T1/T2 proof only. Production assembly,
+route mounting, and T3 evidence remain an explicit #2117/activation handoff.
 The #2113 T1 boundary proves that denied or unavailable authorization cannot construct
-`AcceptDesiredPolicy`; #2115 owns the mounted route proof that Deny, NoMatch, resource-fact
+`AcceptDesiredPolicy`; #2115 owns a test-only Primary harness proof that Deny, NoMatch, resource-fact
 Missing/Stale/Future/type-mismatch, and PIP/store errors never invoke the repository. Those cases
-must not be represented by forged database inputs in this persistence PBI.
+must not be represented by forged database inputs in this persistence PBI. This harness is not serving evidence.
 
 | Requirement | Owner | Primary proof |
 |---|---:|---|

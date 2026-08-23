@@ -2523,6 +2523,8 @@ async fn reconcile_wake_supersedes_inflight_result_and_exact_or_periodic_claims_
             ExpectedGeneration::try_new(0)?,
             DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
             policy,
+            httpserve::VerifiedRequestId::for_test("req-reconcile-wake"),
+            diagctx::CorrelationId::parse("corr-reconcile-wake")?,
         )?)
         .await?;
     let wake = match accepted {

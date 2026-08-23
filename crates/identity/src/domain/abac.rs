@@ -989,12 +989,15 @@ impl Policy {
         if effective_until.is_some_and(|until| until <= effective_from) {
             return Err(IdentityError::InvalidPolicy);
         }
+        let device_policy_fact_scope = route_scope.contract_id()
+            == generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID
+            && route_scope.permission() == RoutePermissionId::IdentityDeviceCertificatePolicyWrite;
         for rule in &rules {
             let key = super::ResourceSecurityFactPolicyKey::classify(rule.attribute_key())
                 .map_err(|_| IdentityError::InvalidPolicy)?;
-            // #2111 installs the typed projection only. The sole production consumer is owned by
-            // #2115, so generic durable policies must not mint a device-fact consumption path.
-            if key.into_fact().is_some() {
+            // Resource Security Facts are valid only for the exact typed device-policy scope.
+            // Every other durable policy remains unable to mint a fact-consumption path.
+            if key.into_fact().is_some() && !device_policy_fact_scope {
                 return Err(IdentityError::InvalidPolicy);
             }
         }
@@ -1491,8 +1494,28 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_rejects_resource_security_facts_until_typed_device_handler_exists() {
+    fn hydrate_accepts_resource_security_facts_only_for_exact_device_policy_scope() {
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        for key in ["resource.owner", "resource.riskClass"] {
+            let scope = PolicyRouteScope::parse(
+                generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite.as_str(),
+            )
+            .expect("policy scope");
+            let rules = vec![rule(key, eq(aval("value")), PolicyEffect::Allow)];
+            assert!(
+                Policy::hydrate(
+                    "pol-device-resource",
+                    tid(TENANT_A),
+                    scope,
+                    1,
+                    base,
+                    None,
+                    rules,
+                )
+                .is_ok()
+            );
+        }
         for key in [
             "resource.owner",
             "resource.riskClass",

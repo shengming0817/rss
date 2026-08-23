@@ -165,6 +165,8 @@ pub use grant_validation::{
 mod policy_manage;
 use policy_manage::PolicyQueryService;
 pub use policy_manage::{PolicyManageError, PolicyManageService};
+mod device_policy;
+use device_policy::DeviceCertificatePolicyCandidateHandler;
 
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
 /// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
@@ -2118,6 +2120,34 @@ fn projection_decision_from_policy(
         .ok_or(DurablePolicyFailure::InvalidGrant)
 }
 
+fn device_policy_candidate_decision(
+    binding: httpserve::DevicePolicyCandidateBindingKey,
+    allow: &PolicyAllowEvaluation,
+    evaluated_at: SystemTime,
+) -> Result<RouteAuthorizationDecision, DurablePolicyFailure> {
+    let obligations = allow.obligations();
+    if obligations.row_scope().is_some() {
+        return Err(DurablePolicyFailure::UnsupportedRowScope);
+    }
+    if !obligations.field_mask().is_empty() {
+        return Err(DurablePolicyFailure::UnsupportedFieldMask);
+    }
+    let policies = allow
+        .policies()
+        .iter()
+        .map(|policy| {
+            let version = NonZeroU32::new(policy.version().get())
+                .ok_or(DurablePolicyFailure::InvalidPolicyReference)?;
+            AuthorizationPolicyReference::new(policy.policy_id().as_str(), version)
+                .ok_or(DurablePolicyFailure::InvalidPolicyReference)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fingerprint = obligation_fingerprint(obligations)?;
+    RouteAuthorizationGrant::device_policy_candidate(binding, policies, fingerprint, evaluated_at)
+        .map(RouteAuthorizationDecision::Allow)
+        .ok_or(DurablePolicyFailure::InvalidGrant)
+}
+
 fn obligation_fingerprint(
     obligations: &PolicyObligations,
 ) -> Result<[u8; httpserve::AUTHORIZATION_FINGERPRINT_BYTES], DurablePolicyFailure> {
@@ -2205,6 +2235,181 @@ pub enum DeviceResourceFactPipError {
 pub struct DeviceResourceFactPip {
     reads: Arc<DynResourceSecurityFactReadRepo<'static>>,
     clock: Arc<dyn Clock>,
+}
+
+/// Route authorizer reserved for the Draft device-policy candidate.
+///
+/// The exact device route always evaluates the complete Resource Security Fact set and never
+/// falls back to RBAC. Every other route delegates to the unchanged generic authorizer.
+struct DevicePolicyCandidateAuthorizer {
+    core: ContractAuthorizer,
+    facts: DeviceResourceFactPip,
+    binding: httpserve::DevicePolicyCandidateBindingKey,
+}
+
+impl DevicePolicyCandidateAuthorizer {
+    fn new(
+        core: ContractAuthorizer,
+        facts: DeviceResourceFactPip,
+        binding: httpserve::DevicePolicyCandidateBindingKey,
+    ) -> Self {
+        Self {
+            core,
+            facts,
+            binding,
+        }
+    }
+
+    fn is_candidate(request: &RouteAuthorizationRequest) -> bool {
+        request.contract_id
+            == generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID
+            && request.permission == RoutePermissionId::IdentityDeviceCertificatePolicyWrite
+    }
+
+    async fn authorize_candidate(
+        &self,
+        request: &RouteAuthorizationRequest,
+    ) -> Result<RouteAuthorizationDecision, AuthReject> {
+        if request.principal_kind != rss_request_context::PrincipalKind::User {
+            return Err(AuthReject::Forbidden);
+        }
+        let tenant = request.tenant_id.ok_or(AuthReject::Forbidden)?;
+        let device = request
+            .resource
+            .as_ref()
+            .and_then(|resource| ids::DeviceId::parse(resource.id()).ok())
+            .ok_or(AuthReject::Forbidden)?;
+        let scope =
+            crate::device_certificate::DeviceCertificateScope::from_authorized(tenant, device);
+        let policy_scope =
+            PolicyRouteScope::parse(request.contract_id, request.permission.as_str())
+                .map_err(|_| AuthReject::Forbidden)?;
+        let now = self.core.clock.now();
+        let policies = self
+            .core
+            .policies
+            .list_effective(tenant_repo_scope(tenant), policy_scope.clone(), now)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    error_chain = %secure::redact_error(&error),
+                    tenant_id = %tenant,
+                    contract_id = request.contract_id,
+                    "device-policy candidate policy lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+        let ctx = AuthSubjectContext {
+            tenant,
+            subject: request.principal_id.clone(),
+            kind: request.principal_kind,
+            projection: ResourceProjection::default_masked(),
+        };
+        if let Err(reason) = validate_effective_policies(&policies, tenant, &policy_scope, now) {
+            log_durable_policy_failure(&ctx, request, reason);
+            return Err(AuthReject::Forbidden);
+        }
+        let mut attributes = route_policy_attributes(&ctx, request)?;
+        attributes.extend(
+            self.facts
+                .resolve(
+                    scope,
+                    vec![
+                        ResourceSecurityFactKey::Owner,
+                        ResourceSecurityFactKey::RiskClass,
+                    ],
+                )
+                .await
+                .map_err(|_| AuthReject::Forbidden)?,
+        );
+        match evaluate_policies_for_tenant(Some(tenant), &attributes, &policies) {
+            PolicyEvaluation::Allow(allow) => {
+                { device_policy_candidate_decision(self.binding.clone(), &allow, now) }.map_err(
+                    |reason| {
+                        log_durable_policy_failure(&ctx, request, reason);
+                        AuthReject::Forbidden
+                    },
+                )
+            }
+            PolicyEvaluation::Deny | PolicyEvaluation::NoMatch => Err(AuthReject::Forbidden),
+        }
+    }
+}
+
+impl RouteAuthorizer for DevicePolicyCandidateAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        request: RouteAuthorizationRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RouteAuthorizationDecision> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let decision = if Self::is_candidate(&request) {
+                self.authorize_candidate(&request).await
+            } else {
+                self.core.authorize_request(&request).await
+            };
+            decision.unwrap_or(RouteAuthorizationDecision::Deny)
+        })
+    }
+}
+
+/// Opaque candidate route capability: authorization and handling cannot be assembled separately.
+pub struct DevicePolicyCandidateBinding {
+    authorizer: DevicePolicyCandidateAuthorizer,
+    handler: DeviceCertificatePolicyCandidateHandler,
+}
+
+impl DevicePolicyCandidateBinding {
+    /// Execute the handler only with the candidate-specific authorization provenance.
+    pub async fn handle(
+        &self,
+        subject: &httpserve::AuthorizedSubject,
+        device: ids::DeviceId,
+        request: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutRequest,
+        request_id: httpserve::VerifiedRequestId,
+    ) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutHandlerResult{
+        self.handler
+            .handle(subject, device, request, request_id)
+            .await
+    }
+
+    /// Map transport decode rejection into the candidate's typed validation response.
+    pub fn validation_failure(
+        request_id: httpserve::VerifiedRequestId,
+    ) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutHandlerResult{
+        DeviceCertificatePolicyCandidateHandler::validation_failure(request_id)
+    }
+}
+
+impl RouteAuthorizer for DevicePolicyCandidateBinding {
+    fn authorize<'a>(
+        &'a self,
+        request: RouteAuthorizationRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RouteAuthorizationDecision> + Send + 'a>>
+    {
+        self.authorizer.authorize(request)
+    }
+}
+
+/// Build the mandatory Draft candidate capability without altering generic roots.
+pub fn build_device_policy_candidate_binding(
+    roles: Arc<DynRoleReadRepo<'static>>,
+    binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
+    policies: Arc<DynPolicyRepo<'static>>,
+    clock: Arc<dyn Clock>,
+    facts: DeviceResourceFactPip,
+    repository: Arc<crate::ports::device_certificate::DynDeviceCertificateRepository<'static>>,
+) -> Arc<DevicePolicyCandidateBinding> {
+    let binding = httpserve::DevicePolicyCandidateBindingKey::new();
+    Arc::new(DevicePolicyCandidateBinding {
+        authorizer: DevicePolicyCandidateAuthorizer::new(
+            ContractAuthorizer::new(roles, binding_reads, policies, clock),
+            facts,
+            binding.clone(),
+        ),
+        handler: DeviceCertificatePolicyCandidateHandler::new(repository, binding),
+    })
 }
 
 impl DeviceResourceFactPip {
@@ -6727,6 +6932,591 @@ mod tests {
             .await
             .expect("typed facts resolve");
         assert_eq!(attrs.len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn device_policy_candidate_requires_user_complete_facts_and_never_falls_back() {
+        let contract_id = generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID;
+        let permission = RoutePermissionId::IdentityDeviceCertificatePolicyWrite;
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy_with_condition(
+                "device-owner-allow",
+                contract_id,
+                permission,
+                PolicyCondition::new(
+                    AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID),
+                    Operator::equal(PolicyValue::new(CANON_USER)),
+                ),
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            ),
+        ));
+        let fallback_role = role(
+            "role-device-policy-fallback",
+            "Device Policy Fallback",
+            &[permission.as_str()],
+        );
+        let fallback_role_id = fallback_role.id().clone();
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), fallback_role),
+        ));
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(DynRoleBindingReadRepo::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &fallback_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let risk = resource_security_fact(
+            tid(CANON_TENANT),
+            RESOURCE_ID,
+            crate::domain::ResourceSecurityFactValue::RiskClass(
+                crate::domain::ResourceRiskClass::Restricted,
+            ),
+            0,
+            10_000,
+        );
+        let complete = DeviceResourceFactPip::new(
+            known_resource_security_fact_repo(vec![owner_resource_security_fact(0, 10_000), risk]),
+            make_shared_clock(1_000),
+        );
+        let authorizer = DevicePolicyCandidateAuthorizer::new(
+            ContractAuthorizer::new(
+                Arc::clone(&roles),
+                Arc::clone(&bindings),
+                Arc::clone(&policies),
+                make_shared_clock(1_000),
+            ),
+            complete,
+            httpserve::DevicePolicyCandidateBindingKey::new(),
+        );
+        let request = RouteAuthorizationRequest {
+            contract_id,
+            permission,
+            tenant_id: Some(tid(CANON_TENANT)),
+            principal_kind: rss_request_context::PrincipalKind::User,
+            principal_id: CANON_USER.to_owned(),
+            federated_permissions: None,
+            resource: Some(route_resource()),
+        };
+        assert!(authorizer.authorize(request.clone()).await.is_allow());
+
+        let missing = DevicePolicyCandidateAuthorizer::new(
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000)),
+            DeviceResourceFactPip::new(
+                empty_resource_security_fact_repo(),
+                make_shared_clock(1_000),
+            ),
+            httpserve::DevicePolicyCandidateBindingKey::new(),
+        );
+        assert_eq!(
+            missing.authorize(request.clone()).await,
+            RouteAuthorizationDecision::Deny
+        );
+        let mut admin = request;
+        admin.principal_kind = rss_request_context::PrincipalKind::Admin;
+        assert_eq!(
+            missing.authorize(admin).await,
+            RouteAuthorizationDecision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn device_policy_candidate_denies_every_policy_and_pip_failure_class() {
+        let contract_id = generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID;
+        let permission = RoutePermissionId::IdentityDeviceCertificatePolicyWrite;
+        let request = RouteAuthorizationRequest {
+            contract_id,
+            permission,
+            tenant_id: Some(tid(CANON_TENANT)),
+            principal_kind: rss_request_context::PrincipalKind::User,
+            principal_id: CANON_USER.to_owned(),
+            federated_permissions: None,
+            resource: Some(route_resource()),
+        };
+        let allow_policy = || {
+            route_policy_with_condition(
+                "device-pip-matrix-allow",
+                contract_id,
+                permission,
+                PolicyCondition::new(
+                    AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID),
+                    Operator::equal(PolicyValue::new(CANON_USER)),
+                ),
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            )
+        };
+        let risk = |tenant, device, observed, expires| {
+            resource_security_fact(
+                tenant,
+                device,
+                crate::domain::ResourceSecurityFactValue::RiskClass(
+                    crate::domain::ResourceRiskClass::Restricted,
+                ),
+                observed,
+                expires,
+            )
+        };
+        let authorizer =
+            |policies: crate::internal::mem::InMemPolicyRepo,
+             reads: Arc<DynResourceSecurityFactReadRepo<'static>>| {
+                DevicePolicyCandidateAuthorizer::new(
+                    ContractAuthorizer::new(
+                        Arc::from(DynRoleReadRepo::new_box(
+                            crate::internal::mem::InMemRoleRepo::new(),
+                        )),
+                        Arc::from(DynRoleBindingReadRepo::new_box(
+                            crate::internal::mem::InMemRoleBindingLifecycle::new(),
+                        )),
+                        policy_repo(policies),
+                        make_shared_clock(1_000),
+                    ),
+                    DeviceResourceFactPip::new(reads, make_shared_clock(1_000)),
+                    httpserve::DevicePolicyCandidateBindingKey::new(),
+                )
+            };
+        let complete_facts = || {
+            known_resource_security_fact_repo(vec![
+                owner_resource_security_fact(0, 10_000),
+                risk(tid(CANON_TENANT), RESOURCE_ID, 0, 10_000),
+            ])
+        };
+
+        let deny = route_policy_with_condition(
+            "device-pip-matrix-deny",
+            contract_id,
+            permission,
+            PolicyCondition::new(
+                AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID),
+                Operator::equal(PolicyValue::new(CANON_USER)),
+            ),
+            PolicyEffect::Deny,
+            PolicyObligations::empty(),
+        );
+        for candidate in [
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(deny),
+                complete_facts(),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new(),
+                complete_facts(),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(allow_policy()),
+                empty_resource_security_fact_repo(),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(allow_policy()),
+                known_resource_security_fact_repo(vec![
+                    owner_resource_security_fact(0, 500),
+                    risk(tid(CANON_TENANT), RESOURCE_ID, 0, 500),
+                ]),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(allow_policy()),
+                known_resource_security_fact_repo(vec![
+                    owner_resource_security_fact(0, 10_000),
+                    owner_resource_security_fact(0, 10_000),
+                    risk(tid(CANON_TENANT), RESOURCE_ID, 0, 10_000),
+                ]),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(allow_policy()),
+                known_resource_security_fact_repo(vec![
+                    resource_security_fact(
+                        tid(OTHER_TENANT),
+                        RESOURCE_ID,
+                        crate::domain::ResourceSecurityFactValue::Owner(
+                            crate::domain::ResourceFactPrincipalId::parse(CANON_USER)
+                                .expect("principal"),
+                        ),
+                        0,
+                        10_000,
+                    ),
+                    risk(tid(OTHER_TENANT), RESOURCE_ID, 0, 10_000),
+                ]),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(allow_policy()),
+                known_resource_security_fact_repo(vec![
+                    resource_security_fact(
+                        tid(CANON_TENANT),
+                        "00000000-0000-4000-8000-000000000def",
+                        crate::domain::ResourceSecurityFactValue::Owner(
+                            crate::domain::ResourceFactPrincipalId::parse(CANON_USER)
+                                .expect("principal"),
+                        ),
+                        0,
+                        10_000,
+                    ),
+                    risk(
+                        tid(CANON_TENANT),
+                        "00000000-0000-4000-8000-000000000def",
+                        0,
+                        10_000,
+                    ),
+                ]),
+            ),
+            authorizer(
+                crate::internal::mem::InMemPolicyRepo::new().with_policy(allow_policy()),
+                resource_security_fact_repo(
+                    crate::internal::mem::InMemResourceSecurityFactRepo::failing_reads(),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                candidate.authorize(request.clone()).await,
+                RouteAuthorizationDecision::Deny
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn device_policy_test_primary_harness_links_auth_audit_to_handler_evidence() {
+        use crate::ports::device_certificate::{
+            AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DesiredPolicyAccepted,
+            DeviceCertificateRepository, DeviceCertificateRepositoryError,
+            DynDeviceCertificateRepository,
+        };
+        use axum::Extension;
+        use axum::routing::put;
+
+        struct RecordingDesiredRepository(Arc<Mutex<Vec<(String, String)>>>);
+
+        impl DeviceCertificateRepository for RecordingDesiredRepository {
+            async fn accept_desired_policy(
+                &self,
+                input: AcceptDesiredPolicy,
+            ) -> Result<DesiredPolicyAcceptOutcome, DeviceCertificateRepositoryError> {
+                let mut attempts = self.0.lock().unwrap_or_else(|error| error.into_inner());
+                attempts.push((
+                    input.request_id().to_owned(),
+                    input.correlation_id().to_owned(),
+                ));
+                let result = DesiredPolicyAccepted::fresh(
+                    crate::ports::device_certificate::DevicePolicyAuthorizationReceiptId::restore(
+                        Uuid::parse_str("0191f7d4-34d7-7b42-9fcb-9e85b92f42a2")
+                            .expect("receipt fixture"),
+                    )
+                    .expect("receipt fixture"),
+                    crate::ports::device_certificate::ExpectedGeneration::try_new(0)
+                        .expect("generation fixture")
+                        .next()
+                        .expect("next generation"),
+                );
+                if attempts.len() > 1 {
+                    return Ok(DesiredPolicyAcceptOutcome::Replayed { result });
+                }
+                Ok(DesiredPolicyAcceptOutcome::Accepted {
+                    result,
+                    wake: eventexec::reconcile::ReconcileWake::new(
+                        "target-2115",
+                        eventexec::reconcile::WakeVersion::try_new(1).expect("wake fixture"),
+                    ),
+                })
+            }
+        }
+
+        async fn raw_handler(
+            Path(device): Path<String>,
+            State(binding): State<Arc<DevicePolicyCandidateBinding>>,
+            Extension(subject): Extension<AuthorizedSubject>,
+            Extension(request_id): Extension<httpserve::VerifiedRequestId>,
+            request: Result<Json<
+                generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutRequest,
+            >, axum::extract::rejection::JsonRejection>,
+        ) -> Response {
+            let Ok(device) = ids::DeviceId::parse(&device) else {
+                return httpserve::error::validation_bad_request(request_id.as_str());
+            };
+            let result = match request {
+                Ok(Json(request)) => binding.handle(&subject, device, request, request_id).await,
+                Err(_) => DevicePolicyCandidateBinding::validation_failure(request_id),
+            };
+            match result {
+                Ok(response) => response.into_response(),
+                Err(failure) => failure.into_response(),
+            }
+        }
+
+        let contract_id = generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID;
+        let permission = RoutePermissionId::IdentityDeviceCertificatePolicyWrite;
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy_with_condition(
+                "device-owner-allow-harness",
+                contract_id,
+                permission,
+                PolicyCondition::new(
+                    AttributeKey::new(ResourceSecurityFactKey::Owner.as_str()),
+                    Operator::equal(PolicyValue::new(CANON_USER)),
+                ),
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            ),
+        ));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> = Arc::from(
+            DynRoleBindingReadRepo::new_box(crate::internal::mem::InMemRoleBindingLifecycle::new()),
+        );
+        let risk = resource_security_fact(
+            tid(CANON_TENANT),
+            RESOURCE_ID,
+            crate::domain::ResourceSecurityFactValue::RiskClass(
+                crate::domain::ResourceRiskClass::Restricted,
+            ),
+            0,
+            10_000,
+        );
+        let facts = DeviceResourceFactPip::new(
+            known_resource_security_fact_repo(vec![owner_resource_security_fact(0, 10_000), risk]),
+            make_shared_clock(1_000),
+        );
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let repository = Arc::from(DynDeviceCertificateRepository::new_box(
+            RecordingDesiredRepository(Arc::clone(&recorded)),
+        ));
+        let binding = build_device_policy_candidate_binding(
+            roles,
+            bindings,
+            policies,
+            make_shared_clock(1_000),
+            facts,
+            repository,
+        );
+        let authorizer: Arc<dyn RouteAuthorizer> = binding.clone();
+        let mut registry = bootstrap::Registry::new();
+        registry
+            .route_group::<Primary>("/api/v2/identity", move |router| {
+                Ok(router.mount_primary_raw_for_test(
+                    httpserve::TestPrimaryRoute::permission(
+                        axum::http::Method::PUT,
+                        "/api/v2/identity/devices/{deviceId}/certificate-policy",
+                        contract_id,
+                        httpserve::TestRoutePermission {
+                            permission,
+                            scope: httpserve::TestRouteResourceScope::PathParam("deviceId"),
+                        },
+                    ),
+                    put(raw_handler).with_state(binding),
+                )?)
+            })
+            .expect("test-only Draft route declaration");
+        let (mut routes, authorizer, _admission_control) =
+            IdentityTestProcessRoot::new(registry, authorizer).finalize();
+        let (_, routes) = routes.pop().expect("test-only Primary routes");
+        let audit = RecordingAuthAuditSink::default();
+        let router = httpserve::finalize_primary_auth_with_audit(
+            routes,
+            primitives::AuthPlan::new(
+                ListenerKind::Primary,
+                primitives::AuthScheme::RssAccessToken,
+            )
+            .expect("Primary auth plan"),
+            httpserve::AuditSinkHandle::new(audit.clone()),
+            make_shared_clock(1_000),
+            authorizer,
+        )
+        .expect("finalized test-only Primary route")
+        .into_plaintext_router_for_test();
+        let allowed_router =
+            router
+                .clone()
+                .layer(Extension(httpserve::Authenticated::new_rss_user_for_test(
+                    CANON_USER,
+                    tid(CANON_TENANT),
+                )));
+        let response = testkit::call(
+            allowed_router.clone(),
+            ContractRequest::put(format!(
+                "/api/v2/identity/devices/{RESOURCE_ID}/certificate-policy"
+            ))
+            .header("x-request-id", "req-2115")
+            .header("x-correlation-id", "corr-2115")
+            .raw_json(
+                serde_json::to_vec(&serde_json::json!({
+                    "expectedGeneration": 0,
+                    "idempotencyKey": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a3",
+                    "policy": {
+                        "validitySeconds": 3600,
+                        "renewBeforeSeconds": 300,
+                        "keyUsages": ["clientAuth"]
+                    }
+                }))
+                .expect("request fixture"),
+            ),
+        )
+        .await
+        .expect("test-only candidate call");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let replay_response = testkit::call(
+            allowed_router.clone(),
+            ContractRequest::put(format!(
+                "/api/v2/identity/devices/{RESOURCE_ID}/certificate-policy"
+            ))
+            .header("x-request-id", "req-2115-replay")
+            .header("x-correlation-id", "corr-2115-replay")
+            .raw_json(
+                serde_json::to_vec(&serde_json::json!({
+                    "expectedGeneration": 0,
+                    "idempotencyKey": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a3",
+                    "policy": {
+                        "validitySeconds": 3600,
+                        "renewBeforeSeconds": 300,
+                        "keyUsages": ["clientAuth"]
+                    }
+                }))
+                .expect("replay request fixture"),
+            ),
+        )
+        .await
+        .expect("test-only candidate replay");
+        assert_eq!(replay_response.status(), StatusCode::OK);
+
+        let denied_response = testkit::call(
+            router.layer(Extension(httpserve::Authenticated::new_rss_user_for_test(
+                GHOST_USER,
+                tid(OTHER_TENANT),
+            ))),
+            ContractRequest::put(format!(
+                "/api/v2/identity/devices/{RESOURCE_ID}/certificate-policy"
+            ))
+            .header("x-request-id", "req-2115-denied")
+            .header("x-correlation-id", "corr-2115-denied")
+            .raw_json(
+                serde_json::to_vec(&serde_json::json!({
+                    "expectedGeneration": 0,
+                    "idempotencyKey": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a4",
+                    "policy": {
+                        "validitySeconds": 3600,
+                        "renewBeforeSeconds": 300,
+                        "keyUsages": ["clientAuth"]
+                    }
+                }))
+                .expect("denied request fixture"),
+            ),
+        )
+        .await
+        .expect("test-only denied candidate call");
+        assert_eq!(denied_response.status(), StatusCode::FORBIDDEN);
+
+        let invalid_response = testkit::call(
+            allowed_router.clone(),
+            ContractRequest::put(format!(
+                "/api/v2/identity/devices/{RESOURCE_ID}/certificate-policy"
+            ))
+            .header("x-request-id", "req-2115-invalid")
+            .header("x-correlation-id", "corr-2115-invalid")
+            .raw_json(
+                serde_json::to_vec(&serde_json::json!({
+                    "expectedGeneration": 0,
+                    "idempotencyKey": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a5",
+                    "policy": {
+                        "validitySeconds": 300,
+                        "renewBeforeSeconds": 300,
+                        "keyUsages": ["clientAuth"]
+                    }
+                }))
+                .expect("invalid request fixture"),
+            ),
+        )
+        .await
+        .expect("test-only invalid candidate call");
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            invalid_response
+                .wire_error()
+                .expect("typed validation")
+                .code,
+            "ERR_CORE_VALIDATION"
+        );
+        for (suffix, body) in [
+            (
+                "overflow",
+                format!(
+                    r#"{{"expectedGeneration":999999999999999999999999999999,"idempotencyKey":"0191f7d4-34d7-7b42-9fcb-9e85b92f42a6","policy":{{"validitySeconds":3600,"renewBeforeSeconds":300,"keyUsages":["clientAuth"]}}}}"#
+                ),
+            ),
+            (
+                "uuid",
+                r#"{"expectedGeneration":0,"idempotencyKey":"not-a-uuid","policy":{"validitySeconds":3600,"renewBeforeSeconds":300,"keyUsages":["clientAuth"]}}"#.to_owned(),
+            ),
+            (
+                "enum",
+                r#"{"expectedGeneration":0,"idempotencyKey":"0191f7d4-34d7-7b42-9fcb-9e85b92f42a7","policy":{"validitySeconds":3600,"renewBeforeSeconds":300,"keyUsages":["codeSigning"]}}"#.to_owned(),
+            ),
+        ] {
+            let response = testkit::call(
+                allowed_router.clone(),
+                ContractRequest::put(format!(
+                    "/api/v2/identity/devices/{RESOURCE_ID}/certificate-policy"
+                ))
+                .header("x-request-id", format!("req-2115-{suffix}"))
+                .header("x-correlation-id", format!("corr-2115-{suffix}"))
+                .raw_json(body.into_bytes()),
+            )
+            .await
+            .expect("test-only decode rejection call");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let error = response.wire_error().expect("typed validation rejection");
+            assert_eq!(error.code, "ERR_CORE_VALIDATION");
+            assert_eq!(error.message, "validation failed");
+            assert!(!error.retryable);
+        }
+        assert_eq!(
+            *recorded.lock().unwrap_or_else(|error| error.into_inner()),
+            vec![
+                ("req-2115".to_owned(), "corr-2115".to_owned()),
+                ("req-2115-replay".to_owned(), "corr-2115-replay".to_owned()),
+            ]
+        );
+        let events = audit.events();
+        assert_eq!(events.len(), 7);
+        assert_eq!(events[0].request_id.as_deref(), Some("req-2115"));
+        assert_eq!(events[0].correlation_id.as_deref(), Some("corr-2115"));
+        assert_eq!(events[0].outcome, diport::AuditOutcome::Success);
+        assert_eq!(events[1].request_id.as_deref(), Some("req-2115-replay"));
+        assert_eq!(
+            events[1].correlation_id.as_deref(),
+            Some("corr-2115-replay")
+        );
+        assert_eq!(events[1].outcome, diport::AuditOutcome::Success);
+        assert_eq!(events[2].request_id.as_deref(), Some("req-2115-denied"));
+        assert_eq!(
+            events[2].correlation_id.as_deref(),
+            Some("corr-2115-denied")
+        );
+        assert_eq!(
+            events[2].outcome,
+            diport::AuditOutcome::Failure {
+                reason: "forbidden"
+            }
+        );
+        assert_eq!(events[3].request_id.as_deref(), Some("req-2115-invalid"));
+        assert_eq!(
+            events[3].correlation_id.as_deref(),
+            Some("corr-2115-invalid")
+        );
+        assert_eq!(events[3].outcome, diport::AuditOutcome::Success);
+        for (event, suffix) in events[4..].iter().zip(["overflow", "uuid", "enum"]) {
+            assert_eq!(
+                event.request_id.as_deref(),
+                Some(format!("req-2115-{suffix}").as_str())
+            );
+            assert_eq!(
+                event.correlation_id.as_deref(),
+                Some(format!("corr-2115-{suffix}").as_str())
+            );
+            assert_eq!(event.outcome, diport::AuditOutcome::Success);
+        }
     }
 
     #[tokio::test]

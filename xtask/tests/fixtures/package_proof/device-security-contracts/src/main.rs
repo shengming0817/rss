@@ -95,7 +95,7 @@ fn main() {
             "error": {"code": "ERR_CORE_NOT_FOUND", "message": "not found", "retryable": false, "details": [], "requestId": "req-1"}
         }))
         && accepts::<policy_put::IdentityDeviceCertificatePolicyPutConflictResponse>(json!({
-            "error": {"code": "ERR_CORE_VERSION_CONFLICT", "message": "version conflict", "retryable": false, "details": [], "requestId": "req-2"}
+            "error": {"code": "ERR_CORE_VERSION_CONFLICT", "message": "version conflict", "retryable": true, "details": [], "requestId": "req-2"}
         }))
         && rejects::<policy_put::IdentityDeviceCertificatePolicyPutConflictResponse>(json!({
             "error": {"code": "ExpectedGenerationConflict"}
