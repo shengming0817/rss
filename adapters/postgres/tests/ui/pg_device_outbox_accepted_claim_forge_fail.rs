@@ -1,4 +1,4 @@
-//! INVARIANT: PG-DEVICE-PUBACK-CAPABILITY-01 { level = "Medium", exec = "test", source = "trybuild" }
+//! INVARIANT: PG-DEVICE-PUBACK-CAPABILITY-01 { level = "Medium", exec = "integration-critical", source = "trybuild" }
 
 fn forge(
     raw_claim: postgres::PgClaimedDeviceOutbox,

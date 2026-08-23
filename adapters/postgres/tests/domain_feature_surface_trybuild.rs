@@ -7,13 +7,13 @@ fn domain_feature_surface_tracks_the_selected_graph() {
     let cases = trybuild::TestCases::new();
 
     if cfg!(feature = "domain-settings") {
-        cases.pass("tests/ui/pg_projection_worker_feature_surface.rs");
+        cases.pass("tests/ui/pg_projection_worker_feature_surface_pass.rs");
     } else {
         cases.compile_fail("tests/ui/pg_projection_worker_feature_surface.rs");
     }
 
     if cfg!(feature = "domain-identity") {
-        cases.pass("tests/ui/pg_device_latent_feature_surface.rs");
+        cases.pass("tests/ui/pg_device_latent_feature_surface_pass.rs");
     } else {
         cases.compile_fail("tests/ui/pg_device_latent_feature_surface.rs");
     }

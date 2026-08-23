@@ -447,6 +447,9 @@ pub(crate) struct InfraBuilt<'a> {
 }
 
 #[must_use]
+/// Production truth for the security-root listener finalization boundary.
+///
+/// INVARIANT: RUNTIME-FIXTURE-SECURITY-ROOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private DomainsWired fields plus the sole InfraBuilt::wire_domains construction path install the runtime security-root authorizer before minting this state; finalization consumes the state and its write-admitted registry" }.
 pub(crate) struct DomainsWired<'a> {
     context: PhaseContext<'a>,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
@@ -460,7 +463,7 @@ pub(crate) struct DomainsWired<'a> {
     domain_transport: DomainTransportRuntime,
     command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    registry: bootstrap::WriteAdmittedRegistry,
+    security_root_registry: domains::SecurityRootWiredRegistry,
     provider_build: crate::provider_output::CompletedProviderBuild,
     placement_execution_plan: crate::plan::PlacementExecutionPlan,
 }
@@ -882,6 +885,16 @@ mod tests {
         assert_not_impl_any!(InfraBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(DomainsWired<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(Finalized<'static>: Clone, Copy, std::fmt::Debug, Default);
+    }
+
+    #[allow(dead_code)]
+    fn domains_wired_carries_the_security_root_typestate(state: DomainsWired<'static>) {
+        let DomainsWired {
+            security_root_registry,
+            ..
+        } = state;
+        fn require_security_root_wired(_: domains::SecurityRootWiredRegistry) {}
+        require_security_root_wired(security_root_registry);
     }
 
     #[derive(Clone, Default)]

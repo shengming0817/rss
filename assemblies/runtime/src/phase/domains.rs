@@ -23,19 +23,39 @@ pub(crate) fn register_runtime_security_root_authorizer(
 
 fn wire_runtime_security_root(
     _execution: crate::plan::RuntimeSecurityExecutionPlan,
-    registry: &mut bootstrap::Registry,
+    mut registry: bootstrap::WriteAdmittedRegistry,
     pg: &postgres::PgRuntimeHandle,
     clock: Arc<dyn diport::Clock>,
     auth_grant_sweep_interval: std::time::Duration,
     write_admission: &primitives::WriteAdmission,
-) -> anyhow::Result<bootstrap::DomainModuleResult> {
-    let _authorizer = register_runtime_security_root_authorizer(registry, pg, clock)?;
-    wire_auth_grant_sweeper(pg, auth_grant_sweep_interval, write_admission)
-        .context("wire process-owned AuthGrant security maintenance")
+) -> anyhow::Result<(SecurityRootWiredRegistry, bootstrap::DomainModuleResult)> {
+    let _authorizer = register_runtime_security_root_authorizer(&mut registry, pg, clock)?;
+    let module = wire_auth_grant_sweeper(pg, auth_grant_sweep_interval, write_admission)
+        .context("wire process-owned AuthGrant security maintenance")?;
+    Ok((SecurityRootWiredRegistry { registry }, module))
 }
 
 struct WiredDomains {
+    registry: SecurityRootWiredRegistry,
+}
+
+/// Move-only production proof that the registry has installed the process security root.
+pub(super) struct SecurityRootWiredRegistry {
     registry: bootstrap::WriteAdmittedRegistry,
+}
+
+impl SecurityRootWiredRegistry {
+    fn registry(&self) -> &bootstrap::Registry {
+        &self.registry
+    }
+
+    fn registry_mut(&mut self) -> &mut bootstrap::Registry {
+        &mut self.registry
+    }
+
+    pub(super) fn into_registry(self) -> bootstrap::WriteAdmittedRegistry {
+        self.registry
+    }
 }
 
 /// How domain-listener evidence is projected against RuntimePlan.
@@ -176,11 +196,11 @@ impl<'a> InfraBuilt<'a> {
                     return Err(source).context("compose generated domains");
                 }
             };
-            let mut registry = registry.admit_writes(write_admission.clone());
+            let registry = registry.admit_writes(write_admission.clone());
             provider_build.record_domain(domains_module);
-            let security_root_module = wire_runtime_security_root(
+            let (mut registry, security_root_module) = wire_runtime_security_root(
                 security_execution_plan,
-                &mut registry,
+                registry,
                 &deps.pg,
                 Arc::new(crate::support::SystemClock),
                 auth_grant_sweep_interval,
@@ -189,7 +209,7 @@ impl<'a> InfraBuilt<'a> {
             provider_build.record_domain(security_root_module);
             validate_domain_listener_evidence(
                 &listener_execution_plan,
-                &registry.domain_listener_bindings(),
+                &registry.registry().domain_listener_bindings(),
             )
             .context("validate runtime domain-listener evidence")?;
 
@@ -212,6 +232,7 @@ impl<'a> InfraBuilt<'a> {
             let rls_probe_name =
                 ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
             registry
+                .registry_mut()
                 .probe(
                     rls_probe_name,
                     Box::new(RlsReadyProbe::new(deps.pg.rls_readiness())),
@@ -221,6 +242,7 @@ impl<'a> InfraBuilt<'a> {
                 let name = ProbeName::parse(RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME)
                     .context("parse RSS access signing rotation probe name")?;
                 registry
+                    .registry_mut()
                     .probe(name, Box::new(probe))
                     .context("register RSS access signing rotation probe")?;
             }
@@ -236,7 +258,7 @@ impl<'a> InfraBuilt<'a> {
                         .context("wire distributed")?;
                 let event_subscribers =
                     crate::event_transport::bridge_generated_subscriptions_for_execution(
-                        registry.drain_subscribers(),
+                        registry.registry_mut().drain_subscribers(),
                         &local_event_execution_plan,
                     )
                     .context("bridge generated event subscriptions")?;
@@ -270,7 +292,7 @@ impl<'a> InfraBuilt<'a> {
                     "active local event execution omitted provider permits"
                 );
                 anyhow::ensure!(
-                    registry.drain_subscribers().is_empty(),
+                    registry.registry_mut().drain_subscribers().is_empty(),
                     "inactive local event execution retained subscriber bindings"
                 );
             }
@@ -291,7 +313,8 @@ impl<'a> InfraBuilt<'a> {
             Err(error) => Err(provider_build.abort(error).await),
             Ok(mut wired) => match provider_build.finish() {
                 Err(failure) => Err(failure.abort().await),
-                Ok(mut completed) => match completed.register_probes(&mut wired.registry) {
+                Ok(mut completed) => match completed.register_probes(wired.registry.registry_mut())
+                {
                     Err(error) => Err(completed.abort(error).await),
                     Ok(()) => Ok(DomainsWired {
                         context,
@@ -305,7 +328,7 @@ impl<'a> InfraBuilt<'a> {
                         domain_transport,
                         command_idempotency_keyring,
                         metrics_exporter,
-                        registry: wired.registry,
+                        security_root_registry: wired.registry,
                         provider_build: completed,
                         placement_execution_plan,
                     }),
@@ -373,18 +396,21 @@ mod listener_plan_tests {
     async fn identity_remote_keeps_the_runtime_security_root_fail_closed() {
         let (_listeners, placement, security) = plan_with_remote_identity();
         assert!(!placement.is_local(assembly_schema::AssemblyDomain::Identity));
-        let mut registry = bootstrap::Registry::new();
+        let (_control, _relay, _consumer, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        let registry = bootstrap::Registry::new().admit_writes(write_admission.clone());
         let pg = postgres::PgRuntimeHandle::for_module_test();
-        let security_module = wire_runtime_security_root(
+        let (mut registry, security_module) = wire_runtime_security_root(
             security,
-            &mut registry,
+            registry,
             &pg,
             std::sync::Arc::new(identity_composition::test_support::TestClock),
             std::time::Duration::from_secs(60),
-            &primitives::prepare_dr_admission_controls().into_parts().3,
+            &write_admission,
         )
         .expect("production-shaped process security root");
         let authorizer = registry
+            .registry_mut()
             .take_primary_authorizer()
             .expect("registered security root");
         let decision = authorizer

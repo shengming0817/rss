@@ -8142,6 +8142,7 @@ dependencies = [
  "clap",
  "consistency",
  "generated",
+ "glob",
  "jsonschema",
  "observ",
  "prettyplease",

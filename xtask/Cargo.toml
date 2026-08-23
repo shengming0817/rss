@@ -37,6 +37,7 @@ semver = { workspace = true }
 time = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
+glob = { workspace = true }
 
 [dev-dependencies]
 assembly-schema = { path = "../crates/assembly-schema", features = ["test-support"] }

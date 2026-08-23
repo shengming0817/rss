@@ -1281,7 +1281,26 @@ impl TestCfgContext {
         else {
             return Ok(Self::default());
         };
-        let value = parse_toml(&manifest)?;
+        Self::from_manifest(&manifest, execution, &BTreeSet::new())
+    }
+
+    fn for_target_required_features(
+        manifest: &Path,
+        required_features: &BTreeSet<String>,
+    ) -> Result<Self> {
+        Self::from_manifest(
+            manifest,
+            ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+            required_features,
+        )
+    }
+
+    fn from_manifest(
+        manifest: &Path,
+        execution: ExecutionLevel,
+        required_features: &BTreeSet<String>,
+    ) -> Result<Self> {
+        let value = parse_toml(manifest)?;
         let Some(features) = value.get("features").and_then(toml::Value::as_table) else {
             return Ok(Self::default());
         };
@@ -1291,6 +1310,7 @@ impl TestCfgContext {
             .then(|| "default".to_string())
             .into_iter()
             .collect::<Vec<_>>();
+        pending.extend(required_features.iter().cloned());
         if execution
             == ExecutionLevel::Profile(
                 crate::execution_profiles::ExecutionProfile::IntegrationCritical,
@@ -2136,15 +2156,20 @@ pub(crate) fn cargo_target_inventory(
         if automatic && dir.is_dir() {
             for entry in fs::read_dir(&dir)? {
                 let path = entry?.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let target_path = if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    Some(path)
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    Some(path.join("main.rs"))
+                } else {
+                    None
+                };
+                if let Some(path) = target_path
+                    && !roots
+                        .iter()
+                        .any(|target| target.class == class && target.path == path)
+                {
                     roots.insert(CargoTargetRoot {
                         path,
-                        class,
-                        required_features: BTreeSet::new(),
-                    });
-                } else if path.is_dir() && path.join("main.rs").is_file() {
-                    roots.insert(CargoTargetRoot {
-                        path: path.join("main.rs"),
                         class,
                         required_features: BTreeSet::new(),
                     });
@@ -2159,11 +2184,17 @@ pub(crate) fn cargo_target_inventory(
         .unwrap_or(true)
         && crate_root.join("src/main.rs").is_file()
     {
-        roots.insert(CargoTargetRoot {
-            path: crate_root.join("src/main.rs"),
-            class: CargoTargetClass::Bin,
-            required_features: BTreeSet::new(),
-        });
+        let path = crate_root.join("src/main.rs");
+        if !roots
+            .iter()
+            .any(|target| target.class == CargoTargetClass::Bin && target.path == path)
+        {
+            roots.insert(CargoTargetRoot {
+                path,
+                class: CargoTargetClass::Bin,
+                required_features: BTreeSet::new(),
+            });
+        }
     }
     roots.retain(|target| target.path.is_file());
     Ok(roots)
@@ -3298,9 +3329,9 @@ fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
             continue;
         }
         for path in rust_files_under(&dir)? {
-            if trybuild.compile_fail.contains(&path)
-                || trybuild.pass.contains(&path)
-                || trybuild.harnesses.contains(&path)
+            if trybuild.compile_fail.contains_key(&path)
+                || trybuild.pass.contains_key(&path)
+                || trybuild.harnesses.contains_key(&path)
             {
                 continue;
             }
@@ -3502,15 +3533,35 @@ fn valid_dylint_name(name: &str) -> bool {
 
 fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
     let fixtures = trybuild_fixtures(root)?;
+    let declared_fixtures = fixtures
+        .compile_fail
+        .keys()
+        .chain(fixtures.pass.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for path in declared_fixtures.iter().filter(|path| !path.is_file()) {
+        index.findings.push(finding(
+            Rule::MissingCarrier,
+            rel(root, path),
+            "trybuild 显式声明的 fixture source 不存在",
+        ));
+        if fixtures.compile_fail.contains_key(path) && !path.with_extension("stderr").is_file() {
+            index.findings.push(finding(
+                Rule::MissingUiGolden,
+                rel(root, path),
+                "compile_fail fixture source 与同名 .stderr golden 均缺失",
+            ));
+        }
+    }
     for base in ["crates", "adapters", "assemblies", "bins", "journeys"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
         }
         for path in rust_files_under(&dir)? {
-            let is_trybuild = fixtures.compile_fail.contains(&path)
-                || fixtures.pass.contains(&path)
-                || fixtures.harnesses.contains(&path);
+            let is_trybuild = fixtures.compile_fail.contains_key(&path)
+                || fixtures.pass.contains_key(&path)
+                || fixtures.harnesses.contains_key(&path);
             let is_compile_fail_doc = !is_trybuild && file_contains(&path, "compile_fail")?;
             if !is_trybuild && !is_compile_fail_doc {
                 continue;
@@ -3520,8 +3571,9 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
             } else {
                 "compile_fail doctest".to_string()
             };
+            let trybuild_gate = is_trybuild.then(|| fixtures.gate_for(&path));
             let gate = if is_trybuild {
-                Some("test")
+                trybuild_gate.as_deref()
             } else {
                 Some("native-compile")
             };
@@ -3538,6 +3590,13 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
                 )?;
             }
         }
+    }
+    for conflict in fixtures.kind_conflicts {
+        index.findings.push(finding(
+            Rule::CarrierBindingMismatch,
+            rel(root, &conflict),
+            "同一 trybuild fixture 不能同时声明 pass 与 compile_fail",
+        ));
     }
     for stderr in fixtures.orphan_stderr {
         index.findings.push(finding(
@@ -4598,59 +4657,143 @@ fn xtask_evidence(path: &Path) -> String {
 
 #[derive(Debug, Default)]
 struct TrybuildFixtures {
-    harnesses: BTreeSet<PathBuf>,
-    compile_fail: BTreeSet<PathBuf>,
-    pass: BTreeSet<PathBuf>,
+    harnesses: BTreeMap<PathBuf, BTreeSet<ExecutionLevel>>,
+    compile_fail: BTreeMap<PathBuf, BTreeSet<ExecutionLevel>>,
+    pass: BTreeMap<PathBuf, BTreeSet<ExecutionLevel>>,
+    kind_conflicts: Vec<PathBuf>,
     orphan_stderr: Vec<PathBuf>,
+}
+
+impl TrybuildFixtures {
+    fn gate_for(&self, path: &Path) -> String {
+        let mut executions = BTreeSet::<ExecutionLevel>::new();
+        for membership in [&self.harnesses, &self.compile_fail, &self.pass] {
+            if let Some(found) = membership.get(path) {
+                executions.extend(found.iter().copied());
+            }
+        }
+        [
+            ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+            ExecutionLevel::Profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+            ),
+        ]
+        .into_iter()
+        .filter(|execution| executions.contains(execution))
+        .map(ExecutionLevel::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+    }
 }
 
 fn trybuild_fixtures(root: &Path) -> Result<TrybuildFixtures> {
     let mut fixtures = TrybuildFixtures::default();
+    let mut declared_ui_dirs = BTreeSet::new();
+    let mut declared_compile_fail = BTreeSet::new();
     for base in ["crates", "adapters", "assemblies", "bins", "journeys"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
         }
         for path in rust_files_under(&dir)? {
-            if !file_contains(&path, "trybuild::TestCases")?
-                || !cargo_test_target_roots(root, &path)?.contains(&path)
-            {
-                continue;
-            }
-            let calls = trybuild_calls(&path)?;
-            if calls.is_empty() {
+            if !file_contains(&path, "trybuild::TestCases")? {
                 continue;
             }
             let Some(manifest) = nearest_package_manifest(root, &path) else {
                 continue;
             };
-            fixtures.harnesses.insert(path.clone());
             let crate_root = manifest.parent().unwrap_or(root).to_path_buf();
-            for call in calls {
-                let expanded = expand_trybuild_pattern(&crate_root, &call.pattern)?;
-                match call.kind {
-                    TrybuildKind::CompileFail => fixtures.compile_fail.extend(expanded),
-                    TrybuildKind::Pass => fixtures.pass.extend(expanded),
-                }
-            }
+            let Some(target) = cargo_target_inventory(&crate_root, &manifest)?
+                .into_iter()
+                .find(|target| target.class == CargoTargetClass::Test && target.path == path)
+            else {
+                continue;
+            };
+            index_trybuild_harness(
+                &manifest,
+                &crate_root,
+                &path,
+                &target,
+                &mut fixtures,
+                &mut declared_ui_dirs,
+                &mut declared_compile_fail,
+            )?;
         }
     }
-    let mut ui_dirs = BTreeSet::new();
-    for path in fixtures.compile_fail.iter().chain(fixtures.pass.iter()) {
-        if let Some(parent) = path.parent() {
-            ui_dirs.insert(parent.to_path_buf());
-        }
-    }
-    for dir in ui_dirs {
+    fixtures.kind_conflicts = fixtures
+        .compile_fail
+        .keys()
+        .filter(|path| fixtures.pass.contains_key(*path))
+        .cloned()
+        .collect();
+    for dir in declared_ui_dirs {
         for stderr in list_files_with_ext(&dir, "stderr")? {
             let rs = stderr.with_extension("rs");
-            if !fixtures.compile_fail.contains(&rs) {
+            if !declared_compile_fail.contains(&rs) {
                 fixtures.orphan_stderr.push(stderr);
             }
         }
     }
     fixtures.orphan_stderr.sort();
     Ok(fixtures)
+}
+
+fn index_trybuild_harness(
+    manifest: &Path,
+    crate_root: &Path,
+    path: &Path,
+    target: &CargoTargetRoot,
+    fixtures: &mut TrybuildFixtures,
+    declared_ui_dirs: &mut BTreeSet<PathBuf>,
+    declared_compile_fail: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let declared_context =
+        TestCfgContext::for_target_required_features(manifest, &target.required_features)?;
+    for call in trybuild_calls_with_context(path, &declared_context)? {
+        let declared = lexical_normalize(&crate_root.join(&call.pattern));
+        if let Some(parent) = declared.parent() {
+            declared_ui_dirs.insert(parent.to_path_buf());
+        }
+        if matches!(call.kind, TrybuildKind::CompileFail) {
+            declared_compile_fail.extend(expand_trybuild_pattern(crate_root, &call.pattern)?);
+        }
+    }
+    for execution in [
+        ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+        ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::IntegrationCritical),
+    ] {
+        let context = TestCfgContext::for_source_execution(manifest, execution)?;
+        if !target.required_features.is_subset(&context.features) {
+            continue;
+        }
+        let calls = trybuild_calls_with_context(path, &context)?;
+        if calls.is_empty() {
+            continue;
+        }
+        fixtures
+            .harnesses
+            .entry(path.to_path_buf())
+            .or_default()
+            .insert(execution);
+        for call in calls {
+            let declared = lexical_normalize(&crate_root.join(&call.pattern));
+            if let Some(parent) = declared.parent() {
+                declared_ui_dirs.insert(parent.to_path_buf());
+            }
+            let expanded = expand_trybuild_pattern(crate_root, &call.pattern)?;
+            let membership = match call.kind {
+                TrybuildKind::CompileFail => {
+                    declared_compile_fail.extend(expanded.iter().cloned());
+                    &mut fixtures.compile_fail
+                }
+                TrybuildKind::Pass => &mut fixtures.pass,
+            };
+            for fixture in expanded {
+                membership.entry(fixture).or_default().insert(execution);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4665,13 +4808,18 @@ struct TrybuildCall {
     pattern: String,
 }
 
+#[cfg(test)]
 fn trybuild_calls(path: &Path) -> Result<Vec<TrybuildCall>> {
+    let context = TestCfgContext::for_source(path)?;
+    trybuild_calls_with_context(path, &context)
+}
+
+fn trybuild_calls_with_context(path: &Path, context: &TestCfgContext) -> Result<Vec<TrybuildCall>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("读取 trybuild harness `{}`", path.display()))?;
     let file = syn::parse_file(&text)
         .with_context(|| format!("解析 trybuild harness `{}`", path.display()))?;
-    let context = TestCfgContext::for_source(path)?;
-    if !attrs_prove_test_execution(&file.attrs, &context) {
+    if !attrs_prove_test_execution(&file.attrs, context) {
         return Ok(Vec::new());
     }
     struct HarnessCollector<'a> {
@@ -4708,7 +4856,7 @@ fn trybuild_calls(path: &Path) -> Result<Vec<TrybuildCall>> {
     let mut collector = HarnessCollector {
         disabled: 0,
         calls: Vec::new(),
-        context: &context,
+        context,
     };
     collector.visit_file(&file);
     Ok(collector.calls)
@@ -4815,6 +4963,28 @@ fn collect_trybuild_expr_calls(
             }
             syn::visit::visit_expr_method_call(self, call);
         }
+
+        fn visit_expr_if(&mut self, conditional: &'ast syn::ExprIf) {
+            match cfg_macro_truth_for_test(&conditional.cond, self.context) {
+                Some(CfgTruth::True) => walk_trybuild_block(
+                    &conditional.then_branch,
+                    self.constructors.clone(),
+                    self.calls,
+                    self.context,
+                ),
+                Some(CfgTruth::False) => {
+                    if let Some((_, alternative)) = &conditional.else_branch {
+                        collect_trybuild_expr_calls(
+                            alternative,
+                            self.constructors,
+                            self.calls,
+                            self.context,
+                        );
+                    }
+                }
+                Some(CfgTruth::Unknown) | None => syn::visit::visit_expr_if(self, conditional),
+            }
+        }
     }
     if expr_statically_disabled(expression, context) {
         return;
@@ -4825,6 +4995,18 @@ fn collect_trybuild_expr_calls(
         context,
     };
     visitor.visit_expr(expression);
+}
+
+fn cfg_macro_truth_for_test(expression: &syn::Expr, context: &TestCfgContext) -> Option<CfgTruth> {
+    let syn::Expr::Macro(expression) = expression else {
+        return None;
+    };
+    if !expression.mac.path.is_ident("cfg") {
+        return None;
+    }
+    syn::parse2::<syn::Meta>(expression.mac.tokens.clone())
+        .ok()
+        .map(|meta| cfg_truth_for_test(&meta, context))
 }
 
 fn expr_statically_disabled(expression: &syn::Expr, context: &TestCfgContext) -> bool {
@@ -4894,54 +5076,27 @@ fn is_trybuild_constructor(expression: &syn::Expr) -> bool {
     ])
 }
 
-fn cargo_test_target_roots(root: &Path, path: &Path) -> Result<BTreeSet<PathBuf>> {
-    let Some(manifest) = nearest_package_manifest(root, path) else {
-        return Ok(BTreeSet::new());
-    };
-    let crate_root = manifest.parent().unwrap_or(root);
-    let value = parse_toml(&manifest)?;
-    let mut targets = BTreeSet::new();
-    if let Some(explicit) = value.get("test").and_then(toml::Value::as_array) {
-        for target in explicit {
-            if let Some(target_path) = explicit_target_path(crate_root, "test", target) {
-                targets.insert(target_path);
-            }
-        }
-    }
-    let automatic = value
-        .get("package")
-        .and_then(|package| package.get("autotests"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(true);
-    let tests = crate_root.join("tests");
-    if automatic && tests.is_dir() {
-        for entry in fs::read_dir(tests)? {
-            let candidate = entry?.path();
-            if candidate.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                targets.insert(candidate);
-            } else if candidate.is_dir() && candidate.join("main.rs").is_file() {
-                targets.insert(candidate.join("main.rs"));
-            }
-        }
-    }
-    targets.retain(|target| target.is_file());
-    Ok(targets)
-}
-
 fn expand_trybuild_pattern(crate_root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-    let path = crate_root.join(pattern);
+    let path = lexical_normalize(&crate_root.join(pattern));
     if !pattern.contains('*') {
         return Ok(vec![path]);
     }
-    let Some(parent) = path.parent() else {
-        return Ok(Vec::new());
-    };
-    let Some(file_pattern) = path.file_name().and_then(|s| s.to_str()) else {
-        return Ok(Vec::new());
-    };
     let mut out = Vec::new();
-    if file_pattern == "*.rs" {
-        out.extend(list_files_with_ext(parent, "rs")?);
+    let glob_pattern = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("trybuild pattern is not UTF-8: {}", path.display()))?;
+    for candidate in
+        glob::glob(glob_pattern).with_context(|| format!("invalid trybuild glob `{pattern}`"))?
+    {
+        let candidate = candidate.with_context(|| format!("expand trybuild glob `{pattern}`"))?;
+        let candidate = lexical_normalize(&candidate);
+        anyhow::ensure!(
+            candidate.starts_with(crate_root),
+            "trybuild pattern `{pattern}` escaped crate root"
+        );
+        if candidate.is_file() {
+            out.push(candidate);
+        }
     }
     out.sort();
     Ok(out)
@@ -4953,7 +5108,7 @@ fn trybuild_evidence(
     fixtures: &TrybuildFixtures,
     path: &Path,
 ) -> Result<String> {
-    if fixtures.compile_fail.contains(path) && !path.with_extension("stderr").exists() {
+    if fixtures.compile_fail.contains_key(path) && !path.with_extension("stderr").exists() {
         index.findings.push(finding(
             Rule::MissingUiGolden,
             rel(root, path),
@@ -4961,9 +5116,9 @@ fn trybuild_evidence(
         ));
     }
     let stderr = path.with_extension("stderr");
-    let evidence = if fixtures.compile_fail.contains(path) && stderr.exists() {
+    let evidence = if fixtures.compile_fail.contains_key(path) && stderr.exists() {
         format!("trybuild stderr {}", rel(root, &stderr))
-    } else if fixtures.pass.contains(path) {
+    } else if fixtures.pass.contains_key(path) {
         "trybuild pass".to_string()
     } else {
         "trybuild pass/harness".to_string()
@@ -6145,12 +6300,12 @@ fn ui() {
         assert!(
             fixtures
                 .pass
-                .contains(&root.join("crates/demo/tests/ui/used.rs"))
+                .contains_key(&root.join("crates/demo/tests/ui/used.rs"))
         );
         assert!(
             !fixtures
                 .pass
-                .contains(&root.join("crates/demo/tests/ui/orphan.rs"))
+                .contains_key(&root.join("crates/demo/tests/ui/orphan.rs"))
         );
         let mut index = Index::default();
         scan_source_invariants(&root, &mut index)?;
@@ -6207,17 +6362,349 @@ fn live() {
 "##,
         )?;
         write(&root.join("crates/demo/tests/ui/live.rs"), "fn main() {}\n")?;
-        assert!(cargo_test_target_roots(&root, &harness)?.contains(&harness));
+        let manifest = root.join("crates/demo/Cargo.toml");
+        assert!(
+            cargo_target_inventory(&root.join("crates/demo"), &manifest)?
+                .iter()
+                .any(|target| target.class == CargoTargetClass::Test && target.path == harness)
+        );
         let calls = trybuild_calls(&harness)?;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].pattern, "tests/ui/live.rs");
         let fixtures = trybuild_fixtures(&root)?;
-        assert_eq!(fixtures.harnesses, BTreeSet::from([harness]));
         assert_eq!(
-            fixtures.pass,
+            fixtures.harnesses.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([harness])
+        );
+        assert_eq!(
+            fixtures.pass.keys().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from([root.join("crates/demo/tests/ui/live.rs")])
         );
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_membership_tracks_default_and_integration_profiles() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-profile-membership");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[features]\ndefault = []\nintegration = []\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            r#"
+#[test]
+fn ui() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/default_fail.rs");
+    #[cfg(feature = "integration")]
+    cases.compile_fail("tests/ui/integration_fail.rs");
+}
+"#,
+        )?;
+        for (name, exec) in [
+            ("default_fail", "test"),
+            ("integration_fail", "integration-critical"),
+        ] {
+            write(
+                &root.join(format!("crates/demo/tests/ui/{name}.rs")),
+                &format!(
+                    "//! INVARIANT: TRYBUILD-{}-01 {{ level = \"Medium\", exec = \"{exec}\", source = \"trybuild\" }}\nfn main() {{}}\n",
+                    name.to_ascii_uppercase().replace('_', "-")
+                ),
+            )?;
+            write(
+                &root.join(format!("crates/demo/tests/ui/{name}.stderr")),
+                "compile error\n",
+            )?;
+        }
+
+        let fixtures = trybuild_fixtures(&root)?;
+        assert!(
+            fixtures
+                .compile_fail
+                .contains_key(&root.join("crates/demo/tests/ui/default_fail.rs"))
+        );
+        assert!(
+            fixtures
+                .compile_fail
+                .contains_key(&root.join("crates/demo/tests/ui/integration_fail.rs")),
+            "integration profile fixture was not indexed"
+        );
+
+        let mut index = Index::default();
+        scan_trybuild_and_native(&root, &mut index)?;
+        assert!(
+            index
+                .findings
+                .iter()
+                .all(|finding| finding.rule != Rule::OrphanUiGolden),
+            "{:?}",
+            index.findings
+        );
+        assert!(index.records.iter().any(|record| {
+            record.id == "TRYBUILD-INTEGRATION-FAIL-01" && record.gate == "integration-critical"
+        }));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_declared_glob_directory_reports_orphan_stderr() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-pattern-orphan");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            "#[test] fn ui() { trybuild::TestCases::new().compile_fail(\"tests/ui/*.rs\"); }\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/orphan.stderr"),
+            "compile error\n",
+        )?;
+
+        let fixtures = trybuild_fixtures(&root)?;
+        assert_eq!(
+            fixtures.orphan_stderr,
+            vec![root.join("crates/demo/tests/ui/orphan.stderr")]
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_explicit_missing_fixture_reports_missing_carrier() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-explicit-orphan");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            "#[test] fn ui() { trybuild::TestCases::new().compile_fail(\"tests/ui/missing.rs\"); }\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/missing.stderr"),
+            "compile error\n",
+        )?;
+
+        let mut index = Index::default();
+        scan_trybuild_and_native(&root, &mut index)?;
+        assert!(
+            index.findings.iter().any(|finding| {
+                finding.rule == Rule::MissingCarrier && finding.subject.ends_with("missing.rs")
+            }),
+            "explicit declaration did not retain its missing source: {:?}",
+            index.findings
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_explicit_fixture_double_delete_still_fails_closed() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-explicit-double-delete");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            "#[test] fn ui() { trybuild::TestCases::new().compile_fail(\"tests/ui/missing.rs\"); }\n",
+        )?;
+
+        let mut index = Index::default();
+        scan_trybuild_and_native(&root, &mut index)?;
+        assert!(
+            index.findings.iter().any(|finding| {
+                finding.rule == Rule::MissingCarrier && finding.subject.ends_with("missing.rs")
+            }),
+            "explicit missing fixture escaped the closed declaration set: {:?}",
+            index.findings
+        );
+        assert!(
+            index.findings.iter().any(|finding| {
+                finding.rule == Rule::MissingUiGolden && finding.subject.ends_with("missing.rs")
+            }),
+            "compile-fail declaration without a golden escaped: {:?}",
+            index.findings
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_pattern_supports_multiple_wildcards() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-multiple-wildcards");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            "#[test] fn ui() { trybuild::TestCases::new().compile_fail(\"tests/ui/*_fail_*.rs\"); }\n",
+        )?;
+        for name in ["first_fail_case", "second_fail_case"] {
+            write(
+                &root.join(format!("crates/demo/tests/ui/{name}.rs")),
+                "fn main() {}\n",
+            )?;
+            write(
+                &root.join(format!("crates/demo/tests/ui/{name}.stderr")),
+                "compile error\n",
+            )?;
+        }
+
+        let fixtures = trybuild_fixtures(&root)?;
+        assert_eq!(fixtures.compile_fail.len(), 2);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_test_required_features_override_auto_discovery() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-required-features");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+default = []
+integration = []
+test-support = []
+
+[[test]]
+name = "trybuild"
+path = "tests/trybuild.rs"
+required-features = ["test-support"]
+"#,
+        )?;
+        let harness = root.join("crates/demo/tests/trybuild.rs");
+        write(
+            &harness,
+            "#[test] fn ui() { trybuild::TestCases::new().compile_fail(\"tests/ui/fail.rs\"); }\n",
+        )?;
+        write(&root.join("crates/demo/tests/ui/fail.rs"), "fn main() {}\n")?;
+        write(
+            &root.join("crates/demo/tests/ui/fail.stderr"),
+            "compile error\n",
+        )?;
+
+        let manifest = root.join("crates/demo/Cargo.toml");
+        let targets = cargo_target_inventory(&root.join("crates/demo"), &manifest)?;
+        let matching = targets
+            .iter()
+            .filter(|target| target.class == CargoTargetClass::Test && target.path == harness)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "explicit and auto targets must coalesce");
+        assert_eq!(
+            matching[0].required_features,
+            BTreeSet::from(["test-support".to_string()])
+        );
+        let fixtures = trybuild_fixtures(&root)?;
+        assert!(!fixtures.harnesses.contains_key(&harness));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_fixture_kind_conflict_fails_closed() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-kind-conflict");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            r#"#[test]
+fn ui() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/conflict.rs");
+    cases.pass("tests/ui/conflict.rs");
+}
+"#,
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/conflict.rs"),
+            "fn main() {}\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/conflict.stderr"),
+            "compile error\n",
+        )?;
+
+        let mut index = Index::default();
+        scan_trybuild_and_native(&root, &mut index)?;
+        assert!(index.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch
+                && finding.subject.ends_with("tests/ui/conflict.rs")
+        }));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_cross_profile_kind_conflict_fails_closed() -> Result<()> {
+        let root = unique_tmp("archrules-trybuild-cross-profile-kind-conflict");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[features]\ndefault = []\nintegration = []\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/trybuild.rs"),
+            r#"#[test]
+fn ui() {
+    let cases = trybuild::TestCases::new();
+    if cfg!(feature = "integration") {
+        cases.pass("tests/ui/conflict.rs");
+    } else {
+        cases.compile_fail("tests/ui/conflict.rs");
+    }
+}
+"#,
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/conflict.rs"),
+            "fn main() {}\n",
+        )?;
+        write(
+            &root.join("crates/demo/tests/ui/conflict.stderr"),
+            "compile error\n",
+        )?;
+
+        let mut index = Index::default();
+        scan_trybuild_and_native(&root, &mut index)?;
+        assert!(index.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch
+                && finding.subject.ends_with("tests/ui/conflict.rs")
+        }));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_fixture_security_root_hard_truth_is_production_reachable() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let index = build_index(&root, None)?;
+        let record = index
+            .records
+            .iter()
+            .find(|record| record.id == "RUNTIME-FIXTURE-SECURITY-ROOT-01")
+            .context("runtime security-root invariant is indexed")?;
+        assert_eq!(
+            diagnostic_source_path(&record.source),
+            "assemblies/runtime/src/phase.rs"
+        );
+        assert!(
+            index.hard_admissions.admit(record).is_some(),
+            "runtime security-root Hard truth must have a production consumer"
+        );
         Ok(())
     }
 

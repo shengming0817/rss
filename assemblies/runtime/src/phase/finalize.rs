@@ -19,10 +19,11 @@ impl<'a> DomainsWired<'a> {
             domain_transport,
             command_idempotency_keyring,
             metrics_exporter,
-            mut registry,
+            security_root_registry,
             mut provider_build,
             placement_execution_plan,
         } = self;
+        let mut registry = security_root_registry.into_registry();
         let result = (|| {
             // Auth decision audit is a flat durable sink, not the audit ledger hash-chain actor
             // model. Provider ownership remains in this state while routers receive a capability.

@@ -361,6 +361,8 @@ guppy = { version = "=0.17.26", default-features = false }
 rstest = "0.24"
 static_assertions = "1.1.0"
 trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
+# ref: dtolnay/trybuild src/expand.rs@1.0.117（pattern expansion 同上游使用 glob）
+glob = "0.3"     # xtask trybuild pattern 投影复用 trybuild 自身的匹配语义
 mockall = "0.13"
 insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员）
 # testcontainers 真集成（#1137，crates/testkit `containers` feature）：起真 postgres/redis/rabbitmq 容器。

@@ -5,7 +5,8 @@
 //! composition receive move-only sealed values and cannot name this crate. `deny.toml` closes the
 //! wrapper set and the layer-dependency callsite guard closes those constructor invocations.
 //!
-//! INVARIANT: EXTERNAL-PKI-PROVIDER-MINT-01 { level = "Medium", exec = "check", source = "code", facet = "production-callsite-exact-set" }
+//! The `EXTERNAL-PKI-PROVIDER-MINT-01#production-callsite-exact-set` invariant is owned by the
+//! canonical `layer-deps` check carrier; this marker crate does not duplicate that machine claim.
 
 /// Move-only capability consumed when a validated provider/configuration pair is sealed.
 pub struct ExternalPkiProviderMint(());

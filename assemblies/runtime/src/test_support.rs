@@ -246,7 +246,8 @@ pub use crate::runtime_inventory::test_support as runtime_inventory;
 /// Move-only evidence that a write-admitted integration registry has installed the production
 /// process security-root authorizer.
 ///
-/// INVARIANT: RUNTIME-FIXTURE-SECURITY-ROOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private-field SecurityRootWiredRegistry is minted only by wire_runtime_security_root; access-listener finalizers consume it by value and cannot accept a raw WriteAdmittedRegistry" }.
+/// This integration projection supports `RUNTIME-FIXTURE-SECURITY-ROOT-01`; the production
+/// `DomainsWired` state is that invariant's native-compile truth owner.
 #[must_use = "the security-root-wired registry must be consumed by an access-listener finalizer"]
 pub struct SecurityRootWiredRegistry {
     registry: bootstrap::WriteAdmittedRegistry,
