@@ -32,9 +32,10 @@ use typify::{TypeSpace, TypeSpaceSettings};
 use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::{
     CommandJournalPolicy, CommandReconcileFencing, ConsistencyLevel, ContractKind, EffectKind,
-    ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode,
-    Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole,
-    SagaBackoff, SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution,
+    ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpMethod,
+    HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
+    LocalTxRetry, OutboxRole, SagaBackoff, SagaJitter, SagaRetryClass, SubscriptionEffect,
+    SubscriptionExecution,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -952,10 +953,12 @@ fn render_public_device_security_module(
             "    crate::SchemaArtifact::new({role:?}, {digest:?}, include_bytes!(\"../schema/{module}/{file}\")),",
         ));
     }
+    let operation = render_public_http_operation(contract)?;
     Ok(format!(
         "//! Generated from the canonical `{id}` Draft contract. Do not edit.\n\n{dto}\n\
          /// Canonical contract identity and aggregate schema digest.\n\
          pub const DESCRIPTOR: ::rss_contract::ContractDescriptor = ::rss_contract::ContractDescriptor::from_static_version({id:?}, {version:?}, {digest:?});\n\
+         {operation}\
          /// Candidate lifecycle; this package does not activate the contract.\n\
          pub const LIFECYCLE: &str = \"draft\";\n\
          /// Exact authored schema artifacts embedded in this package.\n\
@@ -964,6 +967,38 @@ fn render_public_device_security_module(
         id = contract.id(),
         version = contract.manifest().version,
         digest = contract.schema_hash(),
+    ))
+}
+
+fn render_public_http_operation(contract: &GovernedContract) -> Result<String> {
+    if contract.manifest().kind != ContractKind::Http {
+        return Ok(String::new());
+    }
+    let path = contract
+        .manifest()
+        .path
+        .as_deref()
+        .context("public HTTP contract is missing path")?;
+    let method = contract
+        .manifest()
+        .method
+        .context("public HTTP contract is missing method")?;
+    if !is_safe_codegen_string(path) {
+        bail!(
+            "public HTTP contract {} has an unsafe path literal: {path:?}",
+            contract.id()
+        );
+    }
+    let method = match method {
+        HttpMethod::Get => "Get",
+        HttpMethod::Post => "Post",
+        HttpMethod::Put => "Put",
+        HttpMethod::Patch => "Patch",
+        HttpMethod::Delete => "Delete",
+    };
+    Ok(format!(
+        "/// Authority-free HTTP operation metadata generated from the canonical contract.\n\
+         pub const OPERATION: crate::HttpOperationDescriptor = crate::HttpOperationDescriptor::new(DESCRIPTOR, crate::HttpMethod::{method}, {path:?});\n"
     ))
 }
 
@@ -1084,6 +1119,65 @@ impl<'de> ::serde::Deserialize<'de> for AuthorizationReceiptId {{
         let value = <::uuid::Uuid as ::serde::Deserialize>::deserialize(deserializer)?;
         Self::try_from_uuid(value).map_err(<D::Error as ::serde::de::Error>::custom)
     }}
+}}
+
+/// Closed HTTP method vocabulary used by generated public operation descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {{
+    /// HTTP GET.
+    Get,
+    /// HTTP POST.
+    Post,
+    /// HTTP PUT.
+    Put,
+    /// HTTP PATCH.
+    Patch,
+    /// HTTP DELETE.
+    Delete,
+}}
+
+impl HttpMethod {{
+    /// Return the canonical uppercase wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {{
+        match self {{
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        }}
+    }}
+}}
+
+/// Authority-free identity of one generated public HTTP operation.
+///
+/// This descriptor does not authorize a caller, activate a route, or prove service availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpOperationDescriptor {{
+    contract: ::rss_contract::ContractDescriptor,
+    method: HttpMethod,
+    path_template: &'static str,
+}}
+
+impl HttpOperationDescriptor {{
+    pub(crate) const fn new(
+        contract: ::rss_contract::ContractDescriptor,
+        method: HttpMethod,
+        path_template: &'static str,
+    ) -> Self {{
+        Self {{ contract, method, path_template }}
+    }}
+
+    /// Return the canonical contract identity bound to this operation.
+    #[must_use]
+    pub const fn contract(self) -> ::rss_contract::ContractDescriptor {{ self.contract }}
+    /// Return the closed HTTP method bound to this operation.
+    #[must_use]
+    pub const fn method(self) -> HttpMethod {{ self.method }}
+    /// Return the unbound origin-relative path template.
+    #[must_use]
+    pub const fn path_template(self) -> &'static str {{ self.path_template }}
 }}
 
 /// One standalone resolved JSON Schema artifact embedded in the candidate package.
@@ -9668,5 +9762,82 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    fn public_device_security_source<'a>(
+        public: &'a PublicDeviceSecurityProjection,
+        module: &str,
+    ) -> anyhow::Result<&'a str> {
+        public
+            .rust
+            .iter()
+            .find_map(|(path, source)| {
+                (path == &PathBuf::from(format!("src/{module}.rs"))).then_some(source.as_str())
+            })
+            .with_context(|| format!("public {module} module exists"))
+    }
+
+    fn assert_public_http_operation(
+        public: &PublicDeviceSecurityProjection,
+        module: &str,
+        method: &str,
+        path: &str,
+    ) -> anyhow::Result<()> {
+        let source = public_device_security_source(public, module)?;
+        assert!(source.contains("pub const OPERATION"));
+        assert!(source.contains(&format!("crate::HttpMethod::{method}")));
+        assert!(source.contains(path));
+        Ok(())
+    }
+
+    fn assert_public_http_operations(contracts: &[GovernedContract]) -> anyhow::Result<()> {
+        let public = render_public_device_security_contracts(contracts)?;
+
+        let root = public_device_security_source(&public, "lib")?;
+        assert!(root.contains("pub enum HttpMethod"));
+        assert!(root.contains("pub struct HttpOperationDescriptor"));
+
+        for (module, method, path) in [
+            (
+                "policy_put",
+                "Put",
+                "/api/v2/identity/devices/{deviceId}/certificate-policy",
+            ),
+            (
+                "status_get",
+                "Get",
+                "/api/v2/identity/devices/{deviceId}/certificate-status",
+            ),
+        ] {
+            assert_public_http_operation(&public, module, method, path)?;
+        }
+
+        for module in [
+            "apply_device_certificate",
+            "device_command_acked",
+            "device_certificate_reported",
+            "device_ingress_receipted",
+        ] {
+            assert!(
+                !public_device_security_source(&public, module)?.contains("pub const OPERATION"),
+                "non-HTTP module {module} exposed an HTTP operation"
+            );
+        }
+        assert_eq!(
+            public
+                .rust
+                .iter()
+                .map(|(_, source)| source.matches("pub const OPERATION").count())
+                .sum::<usize>(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_device_security_http_operations_are_exact() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let governance = ContractGovernanceIr::load_consumer_workspace(&root)?;
+        governance.read(assert_public_http_operations)
     }
 }

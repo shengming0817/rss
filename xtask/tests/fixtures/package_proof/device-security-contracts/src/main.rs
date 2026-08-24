@@ -1,6 +1,6 @@
 use release_package::{
     AuthorizationReceiptId, apply_device_certificate, device_certificate_reported,
-    device_command_acked, device_ingress_receipted, policy_put, status_get,
+    device_command_acked, device_ingress_receipted, policy_put, status_get, HttpMethod,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -51,6 +51,16 @@ fn main() {
                 && serde_json::from_slice::<Value>(schema.json()).is_ok()
         })
     });
+    let http_operations_verified = policy_put::OPERATION.contract() == policy_put::DESCRIPTOR
+        && policy_put::OPERATION.method() == HttpMethod::Put
+        && policy_put::OPERATION.method().as_str() == "PUT"
+        && policy_put::OPERATION.path_template()
+            == "/api/v2/identity/devices/{deviceId}/certificate-policy"
+        && status_get::OPERATION.contract() == status_get::DESCRIPTOR
+        && status_get::OPERATION.method() == HttpMethod::Get
+        && status_get::OPERATION.method().as_str() == "GET"
+        && status_get::OPERATION.path_template()
+            == "/api/v2/identity/devices/{deviceId}/certificate-status";
 
     let policy_lineage_required = accepts::<policy_put::IdentityDeviceCertificatePolicyPutResponse>(json!({
         "data": {"authorizationReceiptId": RECEIPT, "acceptedGeneration": 7, "condition": "Reconciling"}
@@ -161,6 +171,7 @@ fn main() {
         "package": "rss-device-security-contracts",
         "sixModulesConsumed": modules.len() == 6,
         "descriptorsVerified": descriptors_verified,
+        "httpOperationsVerified": http_operations_verified,
         "schemaBytesAndDigestsVerified": schema_bytes_and_digests_verified,
         "draftLifecycleVerified": modules.iter().all(|(_, lifecycle, _)| *lifecycle == "draft"),
         "policyLineageRequired": policy_lineage_required,

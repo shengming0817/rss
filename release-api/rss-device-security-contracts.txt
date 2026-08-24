@@ -1881,6 +1881,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::PolicyConstraintError
 pub const rss_device_security_contracts::policy_put::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const rss_device_security_contracts::policy_put::LIFECYCLE: &str
+pub const rss_device_security_contracts::policy_put::OPERATION: rss_device_security_contracts::HttpOperationDescriptor
 pub const rss_device_security_contracts::policy_put::SCHEMAS: &[rss_device_security_contracts::SchemaArtifact]
 pub mod rss_device_security_contracts::status_get
 pub mod rss_device_security_contracts::status_get::error
@@ -2185,7 +2186,32 @@ impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
 pub const rss_device_security_contracts::status_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const rss_device_security_contracts::status_get::LIFECYCLE: &str
+pub const rss_device_security_contracts::status_get::OPERATION: rss_device_security_contracts::HttpOperationDescriptor
 pub const rss_device_security_contracts::status_get::SCHEMAS: &[rss_device_security_contracts::SchemaArtifact]
+pub enum rss_device_security_contracts::HttpMethod
+pub rss_device_security_contracts::HttpMethod::Delete
+pub rss_device_security_contracts::HttpMethod::Get
+pub rss_device_security_contracts::HttpMethod::Patch
+pub rss_device_security_contracts::HttpMethod::Post
+pub rss_device_security_contracts::HttpMethod::Put
+impl rss_device_security_contracts::HttpMethod
+pub const fn rss_device_security_contracts::HttpMethod::as_str(self) -> &'static str
+impl core::clone::Clone for rss_device_security_contracts::HttpMethod
+pub fn rss_device_security_contracts::HttpMethod::clone(&self) -> rss_device_security_contracts::HttpMethod
+impl core::cmp::Eq for rss_device_security_contracts::HttpMethod
+impl core::cmp::PartialEq for rss_device_security_contracts::HttpMethod
+pub fn rss_device_security_contracts::HttpMethod::eq(&self, &rss_device_security_contracts::HttpMethod) -> bool
+impl core::fmt::Debug for rss_device_security_contracts::HttpMethod
+pub fn rss_device_security_contracts::HttpMethod::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_device_security_contracts::HttpMethod
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::HttpMethod
+impl core::marker::Freeze for rss_device_security_contracts::HttpMethod
+impl core::marker::Send for rss_device_security_contracts::HttpMethod
+impl core::marker::Sync for rss_device_security_contracts::HttpMethod
+impl core::marker::Unpin for rss_device_security_contracts::HttpMethod
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::HttpMethod
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::HttpMethod
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::HttpMethod
 pub struct rss_device_security_contracts::AuthorizationReceiptId(_)
 impl rss_device_security_contracts::AuthorizationReceiptId
 pub const fn rss_device_security_contracts::AuthorizationReceiptId::as_uuid(self) -> uuid::Uuid
@@ -2242,6 +2268,27 @@ impl core::marker::Unpin for rss_device_security_contracts::AuthorizationReceipt
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::AuthorizationReceiptIdError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::AuthorizationReceiptIdError
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::AuthorizationReceiptIdError
+pub struct rss_device_security_contracts::HttpOperationDescriptor
+impl rss_device_security_contracts::HttpOperationDescriptor
+pub const fn rss_device_security_contracts::HttpOperationDescriptor::contract(self) -> rss_contract::ContractDescriptor
+pub const fn rss_device_security_contracts::HttpOperationDescriptor::method(self) -> rss_device_security_contracts::HttpMethod
+pub const fn rss_device_security_contracts::HttpOperationDescriptor::path_template(self) -> &'static str
+impl core::clone::Clone for rss_device_security_contracts::HttpOperationDescriptor
+pub fn rss_device_security_contracts::HttpOperationDescriptor::clone(&self) -> rss_device_security_contracts::HttpOperationDescriptor
+impl core::cmp::Eq for rss_device_security_contracts::HttpOperationDescriptor
+impl core::cmp::PartialEq for rss_device_security_contracts::HttpOperationDescriptor
+pub fn rss_device_security_contracts::HttpOperationDescriptor::eq(&self, &rss_device_security_contracts::HttpOperationDescriptor) -> bool
+impl core::fmt::Debug for rss_device_security_contracts::HttpOperationDescriptor
+pub fn rss_device_security_contracts::HttpOperationDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Freeze for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Send for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Sync for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Unpin for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::HttpOperationDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::HttpOperationDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::HttpOperationDescriptor
 pub struct rss_device_security_contracts::SchemaArtifact
 impl rss_device_security_contracts::SchemaArtifact
 pub const fn rss_device_security_contracts::SchemaArtifact::digest(self) -> &'static str
@@ -4146,6 +4193,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::PolicyConstraintError
 pub const rss_device_security_contracts::policy_put::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const rss_device_security_contracts::policy_put::LIFECYCLE: &str
+pub const rss_device_security_contracts::policy_put::OPERATION: rss_device_security_contracts::HttpOperationDescriptor
 pub const rss_device_security_contracts::policy_put::SCHEMAS: &[rss_device_security_contracts::SchemaArtifact]
 pub mod rss_device_security_contracts::status_get
 pub mod rss_device_security_contracts::status_get::error
@@ -4450,7 +4498,32 @@ impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
 pub const rss_device_security_contracts::status_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const rss_device_security_contracts::status_get::LIFECYCLE: &str
+pub const rss_device_security_contracts::status_get::OPERATION: rss_device_security_contracts::HttpOperationDescriptor
 pub const rss_device_security_contracts::status_get::SCHEMAS: &[rss_device_security_contracts::SchemaArtifact]
+pub enum rss_device_security_contracts::HttpMethod
+pub rss_device_security_contracts::HttpMethod::Delete
+pub rss_device_security_contracts::HttpMethod::Get
+pub rss_device_security_contracts::HttpMethod::Patch
+pub rss_device_security_contracts::HttpMethod::Post
+pub rss_device_security_contracts::HttpMethod::Put
+impl rss_device_security_contracts::HttpMethod
+pub const fn rss_device_security_contracts::HttpMethod::as_str(self) -> &'static str
+impl core::clone::Clone for rss_device_security_contracts::HttpMethod
+pub fn rss_device_security_contracts::HttpMethod::clone(&self) -> rss_device_security_contracts::HttpMethod
+impl core::cmp::Eq for rss_device_security_contracts::HttpMethod
+impl core::cmp::PartialEq for rss_device_security_contracts::HttpMethod
+pub fn rss_device_security_contracts::HttpMethod::eq(&self, &rss_device_security_contracts::HttpMethod) -> bool
+impl core::fmt::Debug for rss_device_security_contracts::HttpMethod
+pub fn rss_device_security_contracts::HttpMethod::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_device_security_contracts::HttpMethod
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::HttpMethod
+impl core::marker::Freeze for rss_device_security_contracts::HttpMethod
+impl core::marker::Send for rss_device_security_contracts::HttpMethod
+impl core::marker::Sync for rss_device_security_contracts::HttpMethod
+impl core::marker::Unpin for rss_device_security_contracts::HttpMethod
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::HttpMethod
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::HttpMethod
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::HttpMethod
 pub struct rss_device_security_contracts::AuthorizationReceiptId(_)
 impl rss_device_security_contracts::AuthorizationReceiptId
 pub const fn rss_device_security_contracts::AuthorizationReceiptId::as_uuid(self) -> uuid::Uuid
@@ -4507,6 +4580,27 @@ impl core::marker::Unpin for rss_device_security_contracts::AuthorizationReceipt
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::AuthorizationReceiptIdError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::AuthorizationReceiptIdError
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::AuthorizationReceiptIdError
+pub struct rss_device_security_contracts::HttpOperationDescriptor
+impl rss_device_security_contracts::HttpOperationDescriptor
+pub const fn rss_device_security_contracts::HttpOperationDescriptor::contract(self) -> rss_contract::ContractDescriptor
+pub const fn rss_device_security_contracts::HttpOperationDescriptor::method(self) -> rss_device_security_contracts::HttpMethod
+pub const fn rss_device_security_contracts::HttpOperationDescriptor::path_template(self) -> &'static str
+impl core::clone::Clone for rss_device_security_contracts::HttpOperationDescriptor
+pub fn rss_device_security_contracts::HttpOperationDescriptor::clone(&self) -> rss_device_security_contracts::HttpOperationDescriptor
+impl core::cmp::Eq for rss_device_security_contracts::HttpOperationDescriptor
+impl core::cmp::PartialEq for rss_device_security_contracts::HttpOperationDescriptor
+pub fn rss_device_security_contracts::HttpOperationDescriptor::eq(&self, &rss_device_security_contracts::HttpOperationDescriptor) -> bool
+impl core::fmt::Debug for rss_device_security_contracts::HttpOperationDescriptor
+pub fn rss_device_security_contracts::HttpOperationDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Freeze for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Send for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Sync for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::Unpin for rss_device_security_contracts::HttpOperationDescriptor
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::HttpOperationDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::HttpOperationDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::HttpOperationDescriptor
 pub struct rss_device_security_contracts::SchemaArtifact
 impl rss_device_security_contracts::SchemaArtifact
 pub const fn rss_device_security_contracts::SchemaArtifact::digest(self) -> &'static str

@@ -1510,6 +1510,12 @@ pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
         "v2",
         "sha256:88a5d5145b14ae984c27edae2ad468e9aa6cd29ad955fe0771d7f9eabe5d7084",
     );
+/// Authority-free HTTP operation metadata generated from the canonical contract.
+pub const OPERATION: crate::HttpOperationDescriptor = crate::HttpOperationDescriptor::new(
+    DESCRIPTOR,
+    crate::HttpMethod::Put,
+    "/api/v2/identity/devices/{deviceId}/certificate-policy",
+);
 /// Candidate lifecycle; this package does not activate the contract.
 pub const LIFECYCLE: &str = "draft";
 /// Exact authored schema artifacts embedded in this package.

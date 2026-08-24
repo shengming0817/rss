@@ -73,6 +73,75 @@ impl<'de> ::serde::Deserialize<'de> for AuthorizationReceiptId {
     }
 }
 
+/// Closed HTTP method vocabulary used by generated public operation descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {
+    /// HTTP GET.
+    Get,
+    /// HTTP POST.
+    Post,
+    /// HTTP PUT.
+    Put,
+    /// HTTP PATCH.
+    Patch,
+    /// HTTP DELETE.
+    Delete,
+}
+
+impl HttpMethod {
+    /// Return the canonical uppercase wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// Authority-free identity of one generated public HTTP operation.
+///
+/// This descriptor does not authorize a caller, activate a route, or prove service availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpOperationDescriptor {
+    contract: ::rss_contract::ContractDescriptor,
+    method: HttpMethod,
+    path_template: &'static str,
+}
+
+impl HttpOperationDescriptor {
+    pub(crate) const fn new(
+        contract: ::rss_contract::ContractDescriptor,
+        method: HttpMethod,
+        path_template: &'static str,
+    ) -> Self {
+        Self {
+            contract,
+            method,
+            path_template,
+        }
+    }
+
+    /// Return the canonical contract identity bound to this operation.
+    #[must_use]
+    pub const fn contract(self) -> ::rss_contract::ContractDescriptor {
+        self.contract
+    }
+    /// Return the closed HTTP method bound to this operation.
+    #[must_use]
+    pub const fn method(self) -> HttpMethod {
+        self.method
+    }
+    /// Return the unbound origin-relative path template.
+    #[must_use]
+    pub const fn path_template(self) -> &'static str {
+        self.path_template
+    }
+}
+
 /// One standalone resolved JSON Schema artifact embedded in the candidate package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaArtifact {

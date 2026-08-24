@@ -473,6 +473,7 @@ fn device_security_contracts_receipt() -> serde_json::Value {
         "package": "rss-device-security-contracts",
         "sixModulesConsumed": true,
         "descriptorsVerified": true,
+        "httpOperationsVerified": true,
         "schemaBytesAndDigestsVerified": true,
         "draftLifecycleVerified": true,
         "policyLineageRequired": true,
@@ -1804,6 +1805,7 @@ mod tests {
             "package",
             "sixModulesConsumed",
             "descriptorsVerified",
+            "httpOperationsVerified",
             "schemaBytesAndDigestsVerified",
             "draftLifecycleVerified",
             "policyLineageRequired",
@@ -1828,6 +1830,17 @@ mod tests {
                 "missing {field} must fail"
             );
         }
+        let mut false_operation_receipt = green;
+        false_operation_receipt
+            .as_object_mut()
+            .expect("receipt object")
+            .insert("httpOperationsVerified".to_owned(), false.into());
+        assert!(
+            ProofBehavior::DeviceSecurityContracts
+                .validate_receipt(&false_operation_receipt)
+                .is_err(),
+            "false HTTP operation verification must fail"
+        );
     }
 
     #[test]

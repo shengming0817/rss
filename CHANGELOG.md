@@ -6,6 +6,12 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-device-security-contracts 0.1.0
+
+- Export generated authority-free HTTP operation descriptors for the policy PUT and status GET
+  Draft contracts, binding canonical contract identity, closed method, and origin-relative path
+  template without adding a client or activating routes.
+
 ### rss-contract 0.1.0
 
 - Establish the sole public owner for canonical contract IDs, versions, SHA-256 schema digests and descriptors.
