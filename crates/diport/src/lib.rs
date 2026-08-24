@@ -108,6 +108,7 @@ pub mod dead_letter_store;
 pub mod dlx_lifecycle;
 mod effect;
 pub mod envelope;
+pub mod external_csr;
 pub mod fenced_writer;
 pub mod key_provider;
 pub mod leader_elector;
@@ -175,6 +176,10 @@ pub use envelope::{
     EnvelopeSchemaVersion, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
     KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
     KEY_TRACE, MessageEnvelope, MetadataError, RESERVED_METADATA_KEYS,
+};
+pub use external_csr::{
+    DynExternalCsrResolver, ExternalCsrError, ExternalCsrEvidence, ExternalCsrRequest,
+    ExternalCsrResolver,
 };
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,

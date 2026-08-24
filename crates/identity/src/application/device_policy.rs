@@ -6,6 +6,9 @@ use std::sync::Arc;
 use generated::http::identity_v2::device_certificate_policy_put as wire;
 use ids::DeviceId;
 
+type ValidationField = wire::IdentityDeviceCertificatePolicyPutValidationDetailField;
+type ValidationReason = wire::IdentityDeviceCertificatePolicyPutValidationDetailReason;
+
 use crate::ports::device_certificate::{
     AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DesiredPolicyAccepted,
     DeviceCertificateRepository, DeviceCertificateRepositoryError, DevicePolicyAcceptInputError,
@@ -60,8 +63,8 @@ impl DeviceCertificatePolicyCandidateHandler {
             correlation_id,
         ) {
             Ok(input) => input,
-            Err(CandidateInputError::Validation) => {
-                return Ok(validation_response(request_id_text));
+            Err(CandidateInputError::Validation { field, reason }) => {
+                return Ok(validation_response(request_id_text, field, reason));
             }
             Err(CandidateInputError::Authorization) => {
                 return Err(
@@ -89,9 +92,11 @@ impl DeviceCertificatePolicyCandidateHandler {
             Err(DeviceCertificateRepositoryError::ReconcileEnrollmentMissing) => {
                 Ok(not_found_response(request_id_text))
             }
-            Err(DeviceCertificateRepositoryError::InvalidMutation) => {
-                Ok(validation_response(request_id_text))
-            }
+            Err(DeviceCertificateRepositoryError::InvalidMutation) => Ok(validation_response(
+                request_id_text,
+                ValidationField::Policy,
+                ValidationReason::InvalidMutation,
+            )),
             Err(DeviceCertificateRepositoryError::StorageUnavailable { .. }) => {
                 log_internal_failure(
                     "storage_unavailable",
@@ -99,9 +104,11 @@ impl DeviceCertificatePolicyCandidateHandler {
                     &correlation_id_text,
                     subject.tenant_id(),
                 );
-                Err(
-                    wire::IdentityDeviceCertificatePolicyPutFrameworkFailure::internal(
-                        response_id.into_wire(),
+                Ok(
+                    wire::IdentityDeviceCertificatePolicyPutResponseEnvelope::Error(
+                        wire::IdentityDeviceCertificatePolicyPutResponseError::status_503(
+                            response_id.into_wire(),
+                        ),
                     ),
                 )
             }
@@ -136,8 +143,14 @@ impl DeviceCertificatePolicyCandidateHandler {
 
     pub(super) fn validation_failure(
         request_id: httpserve::VerifiedRequestId,
+        field: ValidationField,
+        reason: ValidationReason,
     ) -> wire::IdentityDeviceCertificatePolicyPutHandlerResult {
-        Ok(validation_response(request_id.as_str().to_owned()))
+        Ok(validation_response(
+            request_id.as_str().to_owned(),
+            field,
+            reason,
+        ))
     }
 }
 
@@ -159,7 +172,10 @@ fn log_internal_failure(
 }
 
 enum CandidateInputError {
-    Validation,
+    Validation {
+        field: ValidationField,
+        reason: ValidationReason,
+    },
     Authorization,
 }
 
@@ -174,12 +190,23 @@ fn candidate_input(
     let expected_generation = u64::try_from(request.expected_generation)
         .ok()
         .and_then(|value| ExpectedGeneration::try_new(value).ok())
-        .ok_or(CandidateInputError::Validation)?;
+        .ok_or(CandidateInputError::Validation {
+            field: ValidationField::ExpectedGeneration,
+            reason: ValidationReason::OutOfRange,
+        })?;
     let policy = deviceloop::CertificatePolicy::restore(
-        u64::try_from(request.policy.validity_seconds)
-            .map_err(|_| CandidateInputError::Validation)?,
-        u64::try_from(request.policy.renew_before_seconds)
-            .map_err(|_| CandidateInputError::Validation)?,
+        u64::try_from(request.policy.validity_seconds).map_err(|_| {
+            CandidateInputError::Validation {
+                field: ValidationField::Policy,
+                reason: ValidationReason::OutOfRange,
+            }
+        })?,
+        u64::try_from(request.policy.renew_before_seconds).map_err(|_| {
+            CandidateInputError::Validation {
+                field: ValidationField::Policy,
+                reason: ValidationReason::OutOfRange,
+            }
+        })?,
         request
             .policy
             .key_usages
@@ -194,7 +221,10 @@ fn candidate_input(
             .map(String::from)
             .collect(),
     )
-    .map_err(|_| CandidateInputError::Validation)?;
+    .map_err(|_| CandidateInputError::Validation {
+        field: ValidationField::Policy,
+        reason: ValidationReason::InvalidPolicy,
+    })?;
     AcceptDesiredPolicy::from_authorized_http_subject(
         subject,
         binding,
@@ -206,7 +236,10 @@ fn candidate_input(
         correlation_id,
     )
     .map_err(|error| match error {
-        DevicePolicyAcceptInputError::InvalidInput(_) => CandidateInputError::Validation,
+        DevicePolicyAcceptInputError::InvalidInput(_) => CandidateInputError::Validation {
+            field: ValidationField::Policy,
+            reason: ValidationReason::InvalidPolicy,
+        },
         DevicePolicyAcceptInputError::Unauthorized => CandidateInputError::Authorization,
     })
 }
@@ -234,13 +267,18 @@ fn accepted_response(
 
 fn validation_response(
     request_id: String,
+    field: ValidationField,
+    reason: ValidationReason,
 ) -> wire::IdentityDeviceCertificatePolicyPutResponseEnvelope {
     wire::IdentityDeviceCertificatePolicyPutResponseEnvelope::Error(
         wire::IdentityDeviceCertificatePolicyPutResponseError::status_400(
             wire::IdentityDeviceCertificatePolicyPutValidationResponse {
                 error: wire::IdentityDeviceCertificatePolicyPutValidationError {
                     code: wire::IdentityDeviceCertificatePolicyPutValidationErrorCode::ErrCoreValidation,
-                    details: Vec::new(),
+                    details: [wire::IdentityDeviceCertificatePolicyPutValidationDetail {
+                        field,
+                        reason,
+                    }],
                     message: wire::IdentityDeviceCertificatePolicyPutValidationErrorMessage::ValidationFailed,
                     request_id,
                     retryable: false,
@@ -456,7 +494,7 @@ mod tests {
             (Case::IdempotencyConflict, axum::http::StatusCode::CONFLICT),
             (Case::Quarantined, axum::http::StatusCode::CONFLICT),
             (Case::InvalidMutation, axum::http::StatusCode::BAD_REQUEST),
-            (Case::Storage, axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+            (Case::Storage, axum::http::StatusCode::SERVICE_UNAVAILABLE),
             (
                 Case::SettlementUnknown,
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -492,6 +530,12 @@ mod tests {
             Err(failure) => failure.into_response(),
         };
         assert_eq!(invalid.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(invalid.into_body(), usize::MAX)
+            .await
+            .expect("validation body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("validation JSON");
+        assert_eq!(body["error"]["details"][0]["field"], "policy");
+        assert_eq!(body["error"]["details"][0]["reason"], "invalidPolicy");
     }
 
     #[tokio::test]

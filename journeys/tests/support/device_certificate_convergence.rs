@@ -13,10 +13,13 @@ use eventexec::retry::BackoffPolicy;
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
     DeviceCertificateScope, DevicePolicyIdempotencyKey, DraftEligibility, ExpectedGeneration,
+    ProductionEligibility,
 };
 use iotdevice::{DraftAppliedArtifact, DraftCommandCoordinate, DraftDeviceSimulator};
 use testkit::{MqttMtlsFixture, PgAppRoleSpec, PgConnParams};
 
+#[path = "device_candidate_vault.rs"]
+mod device_candidate_vault;
 #[path = "device_mtls_pg_harness.rs"]
 mod device_mtls_pg_harness;
 use device_mtls_pg_harness as harness;
@@ -26,6 +29,7 @@ const DEVICE: &str = "22222222-2222-4222-8222-222222222222";
 const RSS_APP_PASSWORD: &str = "device-convergence-rss-app-test";
 const RSS_READ_PASSWORD: &str = "device-convergence-rss-read-test";
 const WAIT: Duration = Duration::from_secs(20);
+const PRODUCTION_WAIT: Duration = Duration::from_secs(15);
 const ACK_SEQUENCE: u64 = 1;
 const REPORT_SEQUENCE: u64 = 2;
 const OBSERVED_AT_BASE: i64 = 1_700_000_000_000_000;
@@ -221,13 +225,13 @@ fn certificate_scope() -> anyhow::Result<DeviceCertificateScope> {
     Ok(coordinate()?.certificate_scope())
 }
 
-async fn accept_generation(
-    repository: &postgres::PgDeviceCertificateRepository<DraftEligibility>,
+async fn accept_generation<E: identity::ports::device_certificate::ArtifactEligibility>(
+    repository: &postgres::PgDeviceCertificateRepository<E>,
     expected: u64,
     san: &str,
 ) -> anyhow::Result<()> {
     let policy = deviceloop::CertificatePolicy::restore(
-        7_200,
+        3_600,
         900,
         vec!["clientAuth".to_owned()],
         vec![san.to_owned()],
@@ -253,8 +257,8 @@ async fn accept_generation(
     Ok(())
 }
 
-async fn seed_generation_two(
-    repository: &postgres::PgDeviceCertificateRepository<DraftEligibility>,
+async fn seed_generation_two<E: identity::ports::device_certificate::ArtifactEligibility>(
+    repository: &postgres::PgDeviceCertificateRepository<E>,
 ) -> anyhow::Result<()> {
     repository
         .enroll_reconcile_target(certificate_scope()?, SystemTime::now())
@@ -281,8 +285,25 @@ async fn start_pilot(
     let not_after = diport::CertNotAfter::try_from_system_time(
         SystemTime::UNIX_EPOCH + Duration::from_secs(now_seconds + 86_400),
     )?;
+    let config = runtime_config()?;
+    let assembly = deviceidentity::DeviceIdentityAssembly::start_draft_for_test(
+        assembly_postgres,
+        identity_composition::DraftArtifactSimulator::new([0x19; 32], not_after),
+        session,
+        config,
+    )
+    .await?;
+    Ok(RunningPilot {
+        assembly,
+        repository,
+        sampler,
+        resources,
+    })
+}
+
+fn runtime_config() -> anyhow::Result<identity_composition::DeviceIdentityRuntimeConfig> {
     let budget = harness::relay_budget()?;
-    let config = identity_composition::DeviceIdentityPilotConfig::new(
+    Ok(identity_composition::DeviceIdentityRuntimeConfig::new(
         identity_composition::DeviceIdentitySchedulerConfig::new(
             Arc::new(ProcessClock),
             command_keyring()?,
@@ -304,26 +325,13 @@ async fn start_pilot(
             budget,
         ),
         Duration::from_secs(10),
-    );
-    let assembly = deviceidentity::DeviceIdentityAssembly::start(
-        assembly_postgres,
-        identity_composition::DraftArtifactSimulator::new([0x19; 32], not_after),
-        session,
-        config,
-    )
-    .await?;
-    Ok(RunningPilot {
-        assembly,
-        repository,
-        sampler,
-        resources,
-    })
+    ))
 }
 
 async fn wait_pilot_ready(pilot: &RunningPilot) -> anyhow::Result<()> {
     let result = testkit::await_map(Duration::from_secs(10), async || {
         (pilot.assembly.readiness().receipt_relay()
-            == identity_composition::PilotComponentReadiness::Ready)
+            == identity_composition::DeviceIdentityRuntimeComponentReadiness::Ready)
             .then_some(())
     })
     .await;
@@ -703,6 +711,117 @@ async fn assert_exact_receipt_set(
             "receipt outbox identity must be present"
         );
     }
+    Ok(())
+}
+
+pub async fn run_production_candidate_acquisition_and_restart() -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let mqtt_fixture = testkit::mosquitto_mtls().await?;
+    let postgres_fixture = testkit::owned_postgres().await?;
+    let (evidence, app, reader) = migrate_verified_boundary(&postgres_fixture).await?;
+    let runtime = harness::ConnectedPgRuntime::connect(app.params(), reader.params()).await?;
+    // Candidate assembly is deliberately not an activation selector. Migration 0111 therefore
+    // keeps the production append funnel unavailable to the serving role; this T2-only grant is
+    // applied only after the normal capability gate has proved the unchanged serving boundary.
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION public.rss_append_device_certificate_artifact_production(\
+         uuid,uuid,uuid,uuid,bigint,bigint,bigint,uuid,bytea,bytea,bytea,bytea,text,bytea,bigint) \
+         TO rss_app",
+    )
+    .execute(&evidence)
+    .await?;
+    let identity = runtime.handle().for_domain::<postgres::caps::Identity>();
+    let repository = identity.device_certificate_repository::<ProductionEligibility>();
+    seed_generation_two(&repository).await?;
+    let (handle, resources, sampler) = runtime.into_parts();
+    let pki = device_candidate_vault::provision().await?;
+    let vault = pki.provider()?;
+    let resolver = Arc::new(device_candidate_vault::ExistingCsrResolver::new(
+        DEVICE,
+        "device-convergence-two.example",
+    )?);
+
+    let source = identity_composition::ExternalPkiArtifactSource::new(
+        Arc::clone(&resolver),
+        Arc::clone(&vault),
+    );
+    let assembly = deviceidentity::DeviceIdentityAssembly::start(
+        handle.device_identity_production_runtime(),
+        source,
+        harness::mqtt_session(&coordinate()?, &mqtt_fixture).await?,
+        runtime_config()?,
+    )
+    .await?;
+    testkit::await_map(PRODUCTION_WAIT, async || {
+        (assembly.readiness().overall()
+            == identity_composition::DeviceIdentityRuntimeComponentReadiness::Ready)
+            .then_some(())
+    })
+    .await
+    .context("production candidate did not become ready")?;
+    let acquisition = testkit::await_map(PRODUCTION_WAIT, async || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT artifact_eligibility FROM device_certificate_authorized_artifacts \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=2",
+        )
+        .bind(TENANT)
+        .bind(DEVICE)
+        .fetch_optional(&evidence)
+        .await
+        .ok()
+        .flatten()
+        .filter(|eligibility| eligibility == "production")
+        .map(|_| ())
+    })
+    .await;
+    if acquisition.is_err() {
+        let conditions: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT condition_type, status, reason FROM device_certificate_conditions \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+        )
+        .bind(TENANT)
+        .bind(DEVICE)
+        .fetch_all(&evidence)
+        .await?;
+        anyhow::bail!("production artifact was not durably acquired: {conditions:?}");
+    }
+    sqlx::query(
+        "REVOKE EXECUTE ON FUNCTION public.rss_append_device_certificate_artifact_production(\
+         uuid,uuid,uuid,uuid,bigint,bigint,bigint,uuid,bytea,bytea,bytea,bytea,text,bytea,bigint) \
+         FROM rss_app",
+    )
+    .execute(&evidence)
+    .await?;
+    testkit::await_map(PRODUCTION_WAIT, async || {
+        (assembly.readiness().overall()
+            == identity_composition::DeviceIdentityRuntimeComponentReadiness::Ready)
+            .then_some(())
+    })
+    .await
+    .context("candidate did not recover after the T2-only append authority was revoked")?;
+    assembly.shutdown().await?;
+
+    let restarted = deviceidentity::DeviceIdentityAssembly::start(
+        handle.device_identity_production_runtime(),
+        identity_composition::ExternalPkiArtifactSource::new(resolver, vault),
+        harness::mqtt_session(&coordinate()?, &mqtt_fixture).await?,
+        runtime_config()?,
+    )
+    .await?;
+    testkit::await_map(PRODUCTION_WAIT, async || {
+        (restarted.readiness().overall()
+            == identity_composition::DeviceIdentityRuntimeComponentReadiness::Ready)
+            .then_some(())
+    })
+    .await
+    .context("production candidate did not recover from persisted state")?;
+    restarted.shutdown().await?;
+    sampler.shutdown().await?;
+    for resource in resources.into_iter().rev() {
+        resource.shutdown().await?;
+    }
+    evidence.close().await;
+    drop(pki);
     Ok(())
 }
 

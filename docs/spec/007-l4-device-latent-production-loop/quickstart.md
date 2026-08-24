@@ -77,7 +77,7 @@ cargo xtask codegen --check
 # #1902 standalone broker T2: always hermetic Docker, no RSS_MQTT_TEST_URL fallback
 ./hack/cargo.sh test -p mqtt --features broker-tests --test integration
 
-# #1904 library-only draft pilot: exact Demo + Identity + Demo and five-provider closure
+# #2117 production candidate: exact manifest/provider/runtime artifact closure
 ./hack/cargo.sh test -p assembly-schema deviceidentity_pilot_roles_are_active_persistent_and_exact
 ./hack/cargo.sh test -p xtask deviceidentity_pilot_capability_closure_is_exact_and_non_vacuous
 ./hack/cargo.sh test -p deviceidentity --lib
@@ -86,6 +86,11 @@ cargo xtask assembly validate
 cargo xtask assembly artifacts check
 cargo xtask assembly generate-modules --check
 cargo xtask assembly generate-providers --check
+cargo test -p deviceidentity --bin deviceidentity-server
+# Immutable image acceptance (requires a pre-built content address):
+# RSS_DEVICEIDENTITY_ACCEPTANCE_IMAGE='registry/name@sha256:<64-lower-hex>' \
+#   cargo test -p deviceidentity --features artifact-acceptance --test runtime_image_acceptance \
+#   deviceidentity_runtime_image_is_a_content_addressed_candidate
 
 # #1906 T2 programmable simulator convergence journey (production-ineligible draft artifacts)
 ./hack/cargo.sh nextest run -p journeys --features integration --test device_certificate_convergence_journey
@@ -100,8 +105,8 @@ cargo xtask assembly generate-providers --check
 ./hack/cargo.sh nextest run -p journeys --features integration --test mqtt_backpressure_fault_journey
 ```
 
-The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, required production-provider wiring, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly. The #1907 command is a T2 Medium PostgreSQL/worker join proof; it is not T3, does not activate proposal contracts, and does not expand the NFR-012 fault matrix beyond the two owned hazards. The #1908 journey is the unique T2 owner for the two NFR-013 broker/backpressure plus durable-ingress join hazards. Its owner is ReleaseCheck on develop/release or explicit full—not PR, Adaptive CI, or the advisory-only security schedule—and the command above is the manual diagnostic entry point; reuse #1902's broker-tests command above for standalone transport/session/authentication evidence.
+The #2117 target is a production candidate, not a supported artifact or activated profile. Its six proposal contracts remain Draft. The image test proves only a caller-supplied content address, nonroot user, fixed ENTRYPOINT, bundled schema and `--help`; it does not launch the service or prove registry provenance. The #1906 simulator remains test-support-only and production-ineligible. The #1907/#1908 commands retain their existing T2 ownership and do not become T3.
 
 ## No activation command
 
-The current `deviceidentity` target is draft and compile-only. The Vault closure/mint carrier exists, but there is no production candidate binary, image, required provider wiring, activation target, or activation command to run. Future ADR-028 work must document the single checked-in command exposed by its real carrier; this guide does not reserve or invent a compatibility command.
+The current `deviceidentity` artifact is candidate-only. A binary, image target and required provider wiring now exist, but there is deliberately no T3 selector, supported/canonical promotion or activation command. `deviceidentity-server --config <path>` is the candidate runtime entrypoint, not an official-profile activation command.

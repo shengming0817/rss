@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityDeviceCertificatePolicyPutProviderUnavailableResponse",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "title": "IdentityDeviceCertificatePolicyPutProviderUnavailableError",
+      "type": "object",
+      "required": ["code", "message", "retryable", "details", "requestId"],
+      "properties": {
+        "code": { "type": "string", "enum": ["ERR_CORE_PROVIDER_UNAVAILABLE"] },
+        "message": { "type": "string", "enum": ["provider unavailable"] },
+        "retryable": { "type": "boolean", "const": true },
+        "details": { "type": "array", "maxItems": 0, "items": { "type": "object", "additionalProperties": { "type": "string" } } },
+        "requestId": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

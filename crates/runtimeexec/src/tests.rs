@@ -45,6 +45,22 @@ fn listener_probe_detail(reporter: &bootstrap::HealthReporter) -> &'static str {
 }
 
 #[tokio::test]
+async fn required_managed_worker_completion_is_terminal_for_the_executor() {
+    let token = CancellationToken::new();
+    let (start, status) = diport::ManagedTask::prepare("required-worker", Duration::from_secs(1));
+    let task = start.spawn(token, |_| async { Ok(()) });
+    let exit = wait_for_worker_exit(vec![status]).await;
+    assert_eq!(exit.name, "required-worker");
+    assert_eq!(exit.exit, diport::TaskExit::Completed);
+    assert!(
+        unexpected_worker_exit(exit)
+            .to_string()
+            .contains("exited unexpectedly")
+    );
+    drop(task);
+}
+
+#[tokio::test]
 async fn listener_probe_is_installed_sealed_and_terminal_sticky() {
     let mut registry = bootstrap::Registry::default();
     let receipt =

@@ -29,7 +29,7 @@ Freeze 不等于删除、迁仓或停止维护。删除或迁移需要独立弃�
 | Consistency L0–L4 | typed effect/transaction/outbox/workflow/fencing/recovery | 外部 DB/broker backup、PITR 与 delivery control plane External |
 | Security/auth/tenant | verified identity、authorization obligation、RLS、credential/replay/revocation | 企业 IdP/IAM、MDM、组织目录与企业级策略 authoring External；存量 local identity 与 Role/Policy API Freeze |
 | Observability/health/local CI | structured telemetry、redaction、readiness、affected verification | 托管监控、paging/incident 平台、通用 CI service External |
-| Device security | candidate only：draft contract 与 compile-only provider/identity/reconcile proof | activation、binary/image/listener/public route 与 T3 未授权；fleet/firmware/campaign/inventory/CA control plane External |
+| Device security | candidate only：六契约保持 Draft；production-typed provider/runtime、两个 candidate route、binary/image/config 与最低充分 T1/T2 | supported/canonical promotion、profile activation 与 T3 未授权；fleet/firmware/campaign/inventory/CA control plane External |
 
 ## 公共消费边界
 

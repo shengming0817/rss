@@ -1,13 +1,21 @@
-//! Library-only composition root for the DeviceLatent draft pilot.
+//! Production-typed composition root for the deviceidentity candidate.
 //!
-//! The assembly has no listener or binary. Its constructor consumes one single-origin PostgreSQL
-//! receipt plus the draft and MQTT providers, then drains generated domain lifecycle output into
-//! one local shutdown stack.
+//! The production constructor consumes one single-origin PostgreSQL receipt plus the External PKI
+//! and MQTT providers, then drains generated domain lifecycle output into one local shutdown stack.
 
 use tokio_util::sync::CancellationToken;
 
+mod auth_bridge;
+mod config;
+
+mod listeners;
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
+mod plan;
+mod providers;
+mod runtime;
+
+pub use runtime::run;
 #[path = "generated/providers_gen.rs"]
 mod providers_gen;
 const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
@@ -16,7 +24,7 @@ pub use modules_gen::DOMAIN_LISTENER_BINDINGS;
 
 /// Infrastructure passed through generated module glue.
 ///
-/// The generated domain consumes the same verified revocation provider receipt as the pilot. The
+/// The generated domain consumes the same verified revocation provider receipt as the runtime. The
 /// carrier stays infrastructure-only and introduces no second provider construction path.
 pub(crate) struct SharedRuntimeDeps {
     revocations: postgres::PgRevocationStore,
@@ -29,18 +37,65 @@ async fn wire_domains(
     modules_gen::wire_domains(dependencies, inputs).await
 }
 
-/// Library-only owner of the canonical draft runtime bundle.
+/// Library owner of the production candidate runtime bundle.
+///
+/// Draft-only carriers cannot be named in the normal production graph:
+///
+/// ```compile_fail
+/// use identity_composition::DraftArtifactSimulator;
+/// fn production_slot(_: DraftArtifactSimulator) {}
+/// ```
 pub struct DeviceIdentityAssembly {
-    lifecycle: identity_composition::DeviceIdentityPilotHandle,
+    lifecycle: DeviceIdentityLifecycleHandle,
     _registry: bootstrap::Registry,
     shutdown: tokio::sync::Mutex<Option<bootstrap::shutdown::ShutdownStack>>,
 }
 
-/// Fail-fast construction boundary for the generated five-provider pilot closure.
+enum DeviceIdentityLifecycleHandle {
+    Production(identity_composition::DeviceIdentityCandidateHandle),
+    #[cfg(feature = "test-support")]
+    Draft(identity_composition::DeviceIdentityPilotHandle),
+}
+
+impl DeviceIdentityLifecycleHandle {
+    fn readiness(&self) -> identity_composition::DeviceIdentityRuntimeReadiness {
+        match self {
+            Self::Production(handle) => handle.readiness(),
+            #[cfg(feature = "test-support")]
+            Self::Draft(handle) => handle.readiness(),
+        }
+    }
+
+    fn ingress_drained_changes(&self) -> tokio::sync::watch::Receiver<bool> {
+        match self {
+            Self::Production(handle) => handle.ingress_drained_changes(),
+            #[cfg(feature = "test-support")]
+            Self::Draft(handle) => handle.ingress_drained_changes(),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn pause_receipt_relay_for_test(&self) -> identity_composition::PilotLoopPauseGuard {
+        match self {
+            Self::Production(handle) => handle.pause_receipt_relay_for_test().await,
+            Self::Draft(handle) => handle.pause_receipt_relay_for_test().await,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn pause_ingress_for_test(&self) -> identity_composition::PilotLoopPauseGuard {
+        match self {
+            Self::Production(handle) => handle.pause_ingress_for_test().await,
+            Self::Draft(handle) => handle.pause_ingress_for_test().await,
+        }
+    }
+}
+
+/// Fail-fast construction boundary for the generated production candidate closure.
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceIdentityAssemblyStartError {
-    #[error("deviceidentity pilot provider construction failed")]
-    Pilot(#[from] identity_composition::DeviceIdentityPilotStartError),
+    #[error("deviceidentity runtime provider construction failed")]
+    Runtime(#[from] identity_composition::DeviceIdentityRuntimeStartError),
     #[error("deviceidentity generated domain composition failed")]
     Composition(#[source] anyhow::Error),
 }
@@ -53,32 +108,38 @@ pub enum DeviceIdentityAssemblyShutdownError {
 }
 
 impl DeviceIdentityAssembly {
-    /// Consume the exact five generated provider roles and compose the library-only pilot.
+    /// Consume the exact generated provider roles and compose the library-only candidate.
     ///
     /// # Errors
     ///
     /// Returns a typed provider/startup error before any worker is exposed, or a composition error
-    /// after bounded teardown of a successfully started pilot. There is no optional or default
+    /// after bounded teardown of a successfully started candidate. There is no optional or default
     /// provider path.
-    pub async fn start(
-        postgres: postgres::PgDeviceIdentityDraftRuntime,
-        simulator: identity_composition::DraftArtifactSimulator,
+    pub async fn start<R>(
+        postgres: postgres::PgDeviceIdentityProductionRuntime,
+        artifact_source: identity_composition::ExternalPkiArtifactSource<R>,
         mqtt: std::sync::Arc<mqtt::MqttSession>,
-        config: identity_composition::DeviceIdentityPilotConfig,
-    ) -> Result<Self, DeviceIdentityAssemblyStartError> {
+        config: identity_composition::DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityAssemblyStartError>
+    where
+        R: diport::ExternalCsrResolver + Send + Sync + 'static,
+    {
         let dependencies = SharedRuntimeDeps {
             revocations: postgres.revocation_store(),
         };
-        let lifecycle = identity_composition::DeviceIdentityPilotLifecycle::start(
-            postgres, simulator, mqtt, config,
+        let lifecycle = identity_composition::DeviceIdentityCandidateLifecycle::start(
+            postgres,
+            artifact_source,
+            mqtt,
+            config,
         )?;
         let (handle, adoption) = lifecycle.into_parts();
         Self::from_lifecycle(handle, adoption, dependencies).await
     }
 
     async fn from_lifecycle(
-        lifecycle: identity_composition::DeviceIdentityPilotHandle,
-        adoption: identity_composition::DeviceIdentityPilotAdoption,
+        lifecycle: identity_composition::DeviceIdentityCandidateHandle,
+        adoption: identity_composition::DeviceIdentityCandidateAdoption,
         dependencies: SharedRuntimeDeps,
     ) -> Result<Self, DeviceIdentityAssemblyStartError> {
         let (registry, shutdown) = compose_generated_domain(
@@ -88,15 +149,49 @@ impl DeviceIdentityAssembly {
         .await
         .map_err(DeviceIdentityAssemblyStartError::Composition)?;
         Ok(Self {
-            lifecycle,
+            lifecycle: DeviceIdentityLifecycleHandle::Production(lifecycle),
             _registry: registry,
             shutdown: tokio::sync::Mutex::new(Some(shutdown)),
         })
     }
 
-    /// Read the fail-closed worst-of-six pilot readiness snapshot.
+    /// Start the ADR-028 draft carrier for integration tests only.
+    ///
+    /// This entry point is absent from the normal production dependency graph and cannot consume
+    /// the production runtime bundle.
+    #[cfg(feature = "test-support")]
+    pub async fn start_draft_for_test(
+        postgres: postgres::PgDeviceIdentityDraftRuntime,
+        artifact_source: identity_composition::DraftArtifactSimulator,
+        mqtt: std::sync::Arc<mqtt::MqttSession>,
+        config: identity_composition::DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityAssemblyStartError> {
+        let dependencies = SharedRuntimeDeps {
+            revocations: postgres.revocation_store(),
+        };
+        let lifecycle = identity_composition::DeviceIdentityPilotLifecycle::start(
+            postgres,
+            artifact_source,
+            mqtt,
+            config,
+        )?;
+        let (handle, adoption) = lifecycle.into_parts();
+        let binding = domains::identity::draft_test_module(&dependencies, adoption)
+            .await
+            .map_err(DeviceIdentityAssemblyStartError::Composition)?;
+        let (registry, shutdown) = compose_domain_bindings(vec![binding])
+            .await
+            .map_err(DeviceIdentityAssemblyStartError::Composition)?;
+        Ok(Self {
+            lifecycle: DeviceIdentityLifecycleHandle::Draft(handle),
+            _registry: registry,
+            shutdown: tokio::sync::Mutex::new(Some(shutdown)),
+        })
+    }
+
+    /// Read the fail-closed aggregate runtime readiness snapshot.
     #[must_use]
-    pub fn readiness(&self) -> identity_composition::DeviceIdentityPilotReadiness {
+    pub fn readiness(&self) -> identity_composition::DeviceIdentityRuntimeReadiness {
         self.lifecycle.readiness()
     }
 
@@ -141,7 +236,12 @@ async fn compose_generated_domain(
     dependencies: &SharedRuntimeDeps,
     inputs: domains::DomainModuleInputs,
 ) -> anyhow::Result<(bootstrap::Registry, bootstrap::shutdown::ShutdownStack)> {
-    let mut bindings = wire_domains(dependencies, inputs).await?;
+    compose_domain_bindings(wire_domains(dependencies, inputs).await?).await
+}
+
+async fn compose_domain_bindings(
+    mut bindings: Vec<bootstrap::DomainBinding>,
+) -> anyhow::Result<(bootstrap::Registry, bootstrap::shutdown::ShutdownStack)> {
     let (mut registry, mut output) = match bootstrap::compose_bindings(&mut bindings) {
         Ok(composed) => composed,
         Err(composition) => {
@@ -171,7 +271,7 @@ async fn compose_generated_domain(
         shutdown.register_detached(resource);
     }
     for worker in workers {
-        worker.register_into(&mut shutdown);
+        let _status = worker.register_into(&mut shutdown);
     }
     Ok((registry, shutdown))
 }
@@ -191,7 +291,7 @@ async fn shutdown_output(mut output: bootstrap::DomainModuleResult) -> anyhow::R
         shutdown.register_detached(resource);
     }
     for worker in workers {
-        worker.register_into(&mut shutdown);
+        let _status = worker.register_into(&mut shutdown);
     }
     let errors = shutdown.shutdown().await;
     if errors.is_empty() {
@@ -206,7 +306,7 @@ async fn shutdown_output(mut output: bootstrap::DomainModuleResult) -> anyhow::R
 
 mod domains {
     pub(crate) struct DomainModuleInputs {
-        pub(crate) identity: identity_composition::DeviceIdentityPilotAdoption,
+        pub(crate) identity: identity_composition::DeviceIdentityCandidateAdoption,
     }
 
     pub(crate) mod identity {
@@ -221,6 +321,19 @@ mod domains {
         }
 
         pub(crate) async fn module(
+            dependencies: &crate::SharedRuntimeDeps,
+            adoption: identity_composition::DeviceIdentityCandidateAdoption,
+        ) -> anyhow::Result<DomainBinding> {
+            let _revocations = &dependencies.revocations;
+            Ok(DomainBinding::new(
+                "identity",
+                Box::new(DeviceIdentityDomain),
+                adoption.into_domain_output()?,
+            ))
+        }
+
+        #[cfg(feature = "test-support")]
+        pub(crate) async fn draft_test_module(
             dependencies: &crate::SharedRuntimeDeps,
             adoption: identity_composition::DeviceIdentityPilotAdoption,
         ) -> anyhow::Result<DomainBinding> {
@@ -278,45 +391,63 @@ mod tests {
         assert_eq!(output.probe_count(), 0);
         assert_eq!(output.resource_count(), 0);
         assert_eq!(output.worker_count(), 0);
-        assert!(crate::DOMAIN_LISTENER_BINDINGS.is_empty());
+        assert_eq!(crate::DOMAIN_LISTENER_BINDINGS.len(), 1);
     }
 
     #[test]
-    fn provider_catalog_is_the_exact_five_role_closure() {
-        assert_eq!(crate::providers_gen::PROVIDER_CATALOG.len(), 5);
+    fn provider_catalog_is_the_exact_production_closure() {
+        assert_eq!(crate::providers_gen::PROVIDER_CATALOG.len(), 10);
+    }
+
+    #[test]
+    fn rate_limiter_synthetic_red_carrier_joins_the_generated_role() {
+        let plan = crate::plan::DeviceIdentityPlan::bundled().expect("plan");
+        let mut roles = plan.provider_build().expect("roles");
+        let constructor = roles.listener_rate_limiter().expect("rate limiter role");
+        let batch = constructor
+            .finish_for_test(bootstrap::DomainModuleResult::default())
+            .expect("closed empty lifecycle");
+        let mut inventory = bootstrap::DomainModuleResult::default();
+        let _receipt = batch.transfer(&mut inventory);
     }
 
     #[test]
     fn assembly_constructor_consumes_single_origin_postgres_and_exact_external_roles() {
-        fn constructor(
-            postgres: postgres::PgDeviceIdentityDraftRuntime,
-            simulator: identity_composition::DraftArtifactSimulator,
+        fn constructor<R>(
+            postgres: postgres::PgDeviceIdentityProductionRuntime,
+            source: identity_composition::ExternalPkiArtifactSource<R>,
             mqtt: std::sync::Arc<mqtt::MqttSession>,
-            config: identity_composition::DeviceIdentityPilotConfig,
+            config: identity_composition::DeviceIdentityRuntimeConfig,
         ) -> impl std::future::Future<
             Output = Result<crate::DeviceIdentityAssembly, crate::DeviceIdentityAssemblyStartError>,
-        > {
-            crate::DeviceIdentityAssembly::start(postgres, simulator, mqtt, config)
+        >
+        where
+            R: diport::ExternalCsrResolver + Send + Sync + 'static,
+        {
+            crate::DeviceIdentityAssembly::start(postgres, source, mqtt, config)
         }
-        let _ = constructor;
+        let _ = constructor::<httpd::SpiffeMtlsExternalCsrResolver>;
     }
 
     #[test]
     fn runtime_handle_mints_the_closed_deviceidentity_postgres_receipt() {
-        fn draft_runtime(
+        fn production_runtime(
             handle: &postgres::PgRuntimeHandle,
-        ) -> postgres::PgDeviceIdentityDraftRuntime {
-            handle.device_identity_draft_runtime()
+        ) -> postgres::PgDeviceIdentityProductionRuntime {
+            handle.device_identity_production_runtime()
         }
 
-        let _ = draft_runtime;
+        let _ = production_runtime;
     }
 
     #[test]
-    fn generated_domain_owns_the_one_pilot_lifecycle_output() {
+    fn production_and_test_support_each_own_one_typed_lifecycle_output() {
         let source = include_str!("lib.rs");
         let call = concat!("adoption.", "into_domain_output()?");
-        assert_eq!(source.matches(call).count(), 1);
+        assert_eq!(source.matches(call).count(), 2);
+        assert!(source.contains("pub async fn start_draft_for_test("));
+        assert!(source.contains("DeviceIdentityLifecycleHandle::Production(lifecycle)"));
+        assert!(source.contains("DeviceIdentityLifecycleHandle::Draft(handle)"));
         let rejected_legacy_assertion =
             concat!("unexpectedly exported ", "duplicate lifecycle owners");
         assert!(!source.contains(rejected_legacy_assertion));

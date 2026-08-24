@@ -829,7 +829,7 @@ impl<E: ArtifactEligibility> PgDeviceCommandStore<E> {
     }
 }
 
-impl PgDeviceCommandStore<identity::ports::device_certificate::DraftEligibility> {
+impl<E: ArtifactEligibility> PgDeviceCommandStore<E> {
     /// Derive the exact DeviceLatent MQTT outbox from this combined command/outbox provider.
     ///
     /// No independent store/provider input is accepted: both handles retain the same verified

@@ -221,6 +221,7 @@ classify_ports! {
     async_sync DynSecretResolver => AuthEffect;
     async_sync DynServiceTokenReplayStore => AuthEffect;
     async_sync DynSagaDurableStore => WorkflowEffect;
+    async_sync DynExternalCsrResolver => ReadEffect;
 
     async_send DynRateLimiter => AuthEffect;
     async_send DynSigner => AuthEffect;

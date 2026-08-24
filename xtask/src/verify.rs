@@ -1097,6 +1097,8 @@ fn docker_available() -> bool {
 
 const IDENTITYAUDIT_ACCEPTANCE_IMAGE_ENV: &str = "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE";
 const IDENTITYAUDIT_ACCEPTANCE_IMAGE: &str = "rss-identityaudit:artifact-acceptance";
+const DEVICEIDENTITY_ACCEPTANCE_IMAGE_ENV: &str = "RSS_DEVICEIDENTITY_ACCEPTANCE_IMAGE";
+const DEVICEIDENTITY_ACCEPTANCE_IMAGE: &str = "rss-deviceidentity:artifact-acceptance";
 const IDENTITYAUDIT_SERVER_BUILD_ARGS: &[&str] = &[
     "--locked",
     "-p",
@@ -1129,6 +1131,7 @@ const INTEGRATION_ENV: &[(&str, &str)] = &[
 enum IntegrationProvisioning {
     IdentityAuditServerBinary,
     IdentityAuditRuntimeImage,
+    DeviceIdentityRuntimeImage,
 }
 
 fn integration_provisioning(
@@ -1147,10 +1150,20 @@ fn integration_provisioning(
     {
         plan.push(IntegrationProvisioning::IdentityAuditRuntimeImage);
     }
+    if batch
+        .unit_ids
+        .contains(&integration_shards::IntegrationUnitId::DeviceIdentityRuntimeImageAcceptance)
+    {
+        plan.push(IntegrationProvisioning::DeviceIdentityRuntimeImage);
+    }
     plan
 }
 
-fn provision_integration_batch(batch: &integration_shards::ShardBatch, root: &Path) -> Result<()> {
+fn provision_integration_batch(
+    batch: &integration_shards::ShardBatch,
+    root: &Path,
+) -> Result<Option<String>> {
+    let mut deviceidentity_image = None;
     for provisioning in integration_provisioning(batch) {
         let (status, failure) = match provisioning {
             IntegrationProvisioning::IdentityAuditServerBinary => (
@@ -1175,10 +1188,67 @@ fn provision_integration_batch(batch: &integration_shards::ShardBatch, root: &Pa
                 .context("build identityaudit runtime acceptance image")?,
                 "identityaudit runtime acceptance image build failed",
             ),
+            IntegrationProvisioning::DeviceIdentityRuntimeImage => {
+                let revision = crate::cmd::source_revision(root)?;
+                let revision_arg = format!("GIT_SHA={revision}");
+                let args = [
+                    "build",
+                    "--target",
+                    "deviceidentity-runtime",
+                    "--tag",
+                    DEVICEIDENTITY_ACCEPTANCE_IMAGE,
+                    "--build-arg",
+                    revision_arg.as_str(),
+                    "--build-arg",
+                    "BUILD_DATE=1970-01-01T00:00:00Z",
+                    ".",
+                ];
+                let status = crate::cmd::external_cmd(
+                    crate::cmd::ExternalProgram::Docker,
+                    &args,
+                    &[],
+                    Some(root),
+                )
+                .status()
+                .context("build deviceidentity runtime acceptance image")?;
+                if status.success() {
+                    let output = crate::cmd::external_cmd(
+                        crate::cmd::ExternalProgram::Docker,
+                        &[
+                            "image",
+                            "inspect",
+                            DEVICEIDENTITY_ACCEPTANCE_IMAGE,
+                            "--format",
+                            "{{.Id}}",
+                        ],
+                        &[],
+                        Some(root),
+                    )
+                    .output()
+                    .context("resolve deviceidentity acceptance image digest")?;
+                    anyhow::ensure!(output.status.success(), "docker image digest lookup failed");
+                    let image = String::from_utf8(output.stdout)
+                        .context("docker image digest was not UTF-8")?
+                        .trim()
+                        .to_owned();
+                    anyhow::ensure!(
+                        image.strip_prefix("sha256:").is_some_and(|digest| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        }),
+                        "docker returned an invalid content-addressed image ID"
+                    );
+                    deviceidentity_image = Some(image);
+                }
+                (
+                    status,
+                    "deviceidentity runtime acceptance image build failed",
+                )
+            }
         };
         anyhow::ensure!(status.success(), failure);
     }
-    Ok(())
+    Ok(deviceidentity_image)
 }
 
 fn run_integration_batch(
@@ -1187,9 +1257,13 @@ fn run_integration_batch(
     partition: Option<crate::nextest::HashPartition>,
     root: &Path,
 ) -> Result<()> {
-    provision_integration_batch(batch, root)?;
+    let deviceidentity_image = provision_integration_batch(batch, root)?;
+    let mut environment = INTEGRATION_ENV.to_vec();
+    if let Some(image) = deviceidentity_image.as_deref() {
+        environment.push((DEVICEIDENTITY_ACCEPTANCE_IMAGE_ENV, image));
+    }
     crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
-        .run(root, INTEGRATION_ENV)
+        .run(root, &environment)
 }
 
 fn run_integration_batches(
@@ -2475,6 +2549,26 @@ mod tests {
             "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE",
             "rss-identityaudit:artifact-acceptance"
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn deviceidentity_runtime_image_batch_has_runner_owned_provisioning() -> Result<()> {
+        let selection = IntegrationSelection::release_check();
+        let batch = integration_shards::batches(&selection, IntegrationShard::EventTransport)
+            .into_iter()
+            .find(|batch| {
+                batch
+                    .unit_ids
+                    .contains(&IntegrationUnitId::DeviceIdentityRuntimeImageAcceptance)
+            })
+            .context("deviceidentity runtime image batch must remain in release-check")?;
+        assert_eq!(
+            integration_provisioning(&batch),
+            [IntegrationProvisioning::DeviceIdentityRuntimeImage]
+        );
+        assert_eq!(batch.package, "deviceidentity");
+        assert_eq!(batch.targets, ["runtime_image_acceptance"]);
         Ok(())
     }
 

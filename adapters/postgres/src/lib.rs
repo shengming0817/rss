@@ -186,8 +186,10 @@ pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 #[cfg(feature = "domain-identity")]
 pub use account_security_repo::PgAccountSecurityRepo;
-#[cfg(feature = "domain-identity")]
+#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::PgDeviceIdentityDraftRuntime;
+#[cfg(feature = "domain-identity")]
+pub use bundle::PgDeviceIdentityProductionRuntime;
 #[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]

@@ -2425,6 +2425,18 @@ lineage。artifact append funnel 同时核验 held lease、current desired gener
 4. migration 提交前失败可在确认事务已回滚后继续使用 111-compatible artifact；提交后不得单独回滚函数或列，
    恢复必须使用迁移前数据库备份与旧 artifact 整体切回。
 
+### 0113 Receipt-bound certificate Ready proof
+
+`0113` 不改变表结构，只原子替换 `rss_mark_device_certificate_ready`：command proof identity 升至当前
+generated schema hash，并把 desired、artifact 与 command payload 的 `authorizationReceiptId` 纳入同一
+`Ready=True` 事务。旧 payload、swapped receipt 或任一持久化坐标漂移均返回 false，不写 condition。
+
+1. 停止 device-certificate reconcile writer，确认 ledger 精确为 112，再由唯一 migration Job 执行。
+2. postflight 确认函数仍由既有 funnel owner 持有、`SECURITY DEFINER` 与固定 search path 未漂移，且仅
+   `rss_app` 有 EXECUTE；本迁移不新增表、列、角色或兼容 overload。
+3. 新 binary 与迁移必须作为一个 non-rolling artifact 集整体切换；提交后恢复只能使用迁移前备份和旧
+   artifact 整体回切，禁止单独恢复旧函数正文。
+
 ### 0105 Settings projection input-generation hard cut
 
 `0105` 将 Settings v3 worker/operator/reader 的固定函数身份推进到当前 generated projection-input

@@ -219,7 +219,7 @@ pub struct PgRuntimeHandle {
 /// All five projections are minted from one [`PgRuntimeHandle`] invocation. The private fields
 /// prevent an assembly from combining readiness, reconcile, certificate, command, and revocation
 /// capabilities sourced from different PostgreSQL runtimes.
-#[cfg(feature = "domain-identity")]
+#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub struct PgDeviceIdentityDraftRuntime {
     repository:
         PgDeviceCertificateRepository<identity::ports::device_certificate::DraftEligibility>,
@@ -229,7 +229,46 @@ pub struct PgDeviceIdentityDraftRuntime {
     readiness: Arc<PgDbReadiness>,
 }
 
+/// Single-origin PostgreSQL capability receipt for the production deviceidentity candidate.
 #[cfg(feature = "domain-identity")]
+pub struct PgDeviceIdentityProductionRuntime {
+    repository:
+        PgDeviceCertificateRepository<identity::ports::device_certificate::ProductionEligibility>,
+    commands:
+        crate::PgDeviceCommandStore<identity::ports::device_certificate::ProductionEligibility>,
+    revocations: PgRevocationStore,
+    reconcile: PgReconcileStore,
+    readiness: Arc<PgDbReadiness>,
+}
+
+#[cfg(feature = "domain-identity")]
+impl PgDeviceIdentityProductionRuntime {
+    #[must_use]
+    pub fn revocation_store(&self) -> PgRevocationStore {
+        self.revocations.clone()
+    }
+
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        PgDeviceCertificateRepository<identity::ports::device_certificate::ProductionEligibility>,
+        crate::PgDeviceCommandStore<identity::ports::device_certificate::ProductionEligibility>,
+        PgRevocationStore,
+        PgReconcileStore,
+        Arc<PgDbReadiness>,
+    ) {
+        (
+            self.repository,
+            self.commands,
+            self.revocations,
+            self.reconcile,
+            self.readiness,
+        )
+    }
+}
+
+#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 impl PgDeviceIdentityDraftRuntime {
     /// Project the same-origin revocation provider into assembly infrastructure wiring.
     #[must_use]
@@ -1282,12 +1321,27 @@ impl PgRuntimeHandle {
     ///
     /// The projections share this handle's verified stores and readiness state. Callers cannot
     /// supply or replace any member independently after the receipt is created.
-    #[cfg(feature = "domain-identity")]
+    #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
     #[must_use]
     pub fn device_identity_draft_runtime(&self) -> PgDeviceIdentityDraftRuntime {
         let identity = self.for_domain::<caps::Identity>();
         let infra = self.infra();
         PgDeviceIdentityDraftRuntime {
+            repository: identity.device_certificate_repository(),
+            commands: identity.device_command_store(),
+            revocations: infra.revocation_store(),
+            reconcile: infra.reconcile(),
+            readiness: self.readiness_handle(),
+        }
+    }
+
+    /// Mint the only PostgreSQL receipt accepted by the production deviceidentity candidate.
+    #[cfg(feature = "domain-identity")]
+    #[must_use]
+    pub fn device_identity_production_runtime(&self) -> PgDeviceIdentityProductionRuntime {
+        let identity = self.for_domain::<caps::Identity>();
+        let infra = self.infra();
+        PgDeviceIdentityProductionRuntime {
             repository: identity.device_certificate_repository(),
             commands: identity.device_command_store(),
             revocations: infra.revocation_store(),

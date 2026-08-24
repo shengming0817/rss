@@ -685,12 +685,14 @@ where
     let launch_result = match race {
         StartupRace::Shutdown(signal_result) => {
             let batches = transaction.into_lifecycle_batches(true);
-            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches, false);
+            let transfer =
+                register_lifecycle_outputs(owner.stack_mut(), None, batches, false).map(|_| ());
             preserve_startup_result(signal_result, transfer)
         }
         StartupRace::Startup(Err(startup_error)) => {
             let batches = transaction.into_lifecycle_batches(true);
-            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches, false);
+            let transfer =
+                register_lifecycle_outputs(owner.stack_mut(), None, batches, false).map(|_| ());
             preserve_startup_result(Err(startup_error), transfer)
         }
         StartupRace::Startup(Ok(prepared)) => {
@@ -916,7 +918,8 @@ where
     InstallShutdown: FnOnce() -> anyhow::Result<Shutdown>,
     Shutdown: Future<Output = anyhow::Result<()>>,
 {
-    register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches, true)?;
+    let worker_statuses =
+        register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches, true)?;
     // The complete provider/domain lifecycle is accepted by the cancellation-safe owner before a
     // platform signal constructor can fail. Installation still precedes listener preparation and
     // readiness publication, so no ready -> signal race is reintroduced.
@@ -932,13 +935,16 @@ where
     let (inventory, listeners) = activated.into_parts();
     let readiness = on_ready(inventory);
     let listener_exit = wait_for_listener_exit(listeners);
+    let worker_exit = wait_for_worker_exit(worker_statuses);
     tokio::pin!(readiness);
     tokio::pin!(shutdown);
     tokio::pin!(listener_exit);
+    tokio::pin!(worker_exit);
     tokio::select! {
         biased;
         result = &mut shutdown => return result,
         exit = &mut listener_exit => return Err(unexpected_listener_exit(exit)),
+        exit = &mut worker_exit => return Err(unexpected_worker_exit(exit)),
         result = &mut readiness => {
             result?;
             if let Some(host) = platform_host { host.mark_ready(); }
@@ -948,12 +954,63 @@ where
         biased;
         result = &mut shutdown => result,
         exit = &mut listener_exit => Err(unexpected_listener_exit(exit)),
+        exit = &mut worker_exit => Err(unexpected_worker_exit(exit)),
     }
 }
 
 struct ListenerExit {
     name: String,
     exit: diport::TaskExit,
+}
+
+struct WorkerExit {
+    name: String,
+    exit: diport::TaskExit,
+}
+
+async fn wait_for_worker_exit(statuses: Vec<diport::TaskStatus>) -> WorkerExit {
+    if statuses.is_empty() {
+        return std::future::pending().await;
+    }
+    let mut waits = tokio::task::JoinSet::new();
+    for status in statuses {
+        waits.spawn(async move {
+            let name = status.name().to_owned();
+            let exit = status.wait_stopped().await;
+            WorkerExit { name, exit }
+        });
+    }
+    match waits.join_next().await {
+        Some(Ok(exit)) => exit,
+        Some(Err(error)) => WorkerExit {
+            name: "worker-supervisor".to_owned(),
+            exit: diport::TaskExit::Failed(if error.is_cancelled() {
+                diport::ShutdownErrorKind::TaskCancelled
+            } else if error.is_panic() {
+                diport::ShutdownErrorKind::TaskPanicked
+            } else {
+                diport::ShutdownErrorKind::TaskUnknown
+            }),
+        },
+        None => unreachable!("non-empty managed worker set must yield one terminal status"),
+    }
+}
+
+fn unexpected_worker_exit(worker: WorkerExit) -> anyhow::Error {
+    let kind = match worker.exit {
+        diport::TaskExit::Cancelled => "cancelled",
+        diport::TaskExit::Completed => "completed",
+        diport::TaskExit::Failed(kind) => match kind {
+            diport::ShutdownErrorKind::TaskCancelled => "task-cancelled",
+            diport::ShutdownErrorKind::TaskPanicked => "task-panicked",
+            diport::ShutdownErrorKind::TaskUnknown => "task-unknown",
+            _ => "task-failed",
+        },
+    };
+    anyhow::anyhow!(
+        "managed worker `{}` exited unexpectedly ({kind})",
+        worker.name
+    )
 }
 
 async fn wait_for_listener_exit(statuses: Vec<diport::TaskStatus>) -> ListenerExit {
@@ -1010,7 +1067,7 @@ fn register_lifecycle_outputs(
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycleBatches,
     require_exact_inventory: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<diport::TaskStatus>> {
     // Register trace first so LIFO drains it last, after all shutdown-period spans stop.
     if let Some(exporter) = trace_exporter {
         stack.register_detached(exporter);
@@ -1054,9 +1111,9 @@ fn register_lifecycle_outputs(
         register_partitioned_resources(stack, domain.resources);
         anyhow::bail!("launch lifecycle output still contains undrained probes");
     }
-    register_partitioned_module(stack, provider);
-    register_partitioned_module(stack, domain);
-    Ok(())
+    let mut statuses = register_partitioned_module(stack, provider);
+    statuses.extend(register_partitioned_module(stack, domain));
+    Ok(statuses)
 }
 
 fn register_module_resources(stack: &mut ShutdownStack, output: &mut DomainModuleResult) {
@@ -1134,11 +1191,16 @@ fn register_partitioned_resources(
     }
 }
 
-fn register_partitioned_module(stack: &mut ShutdownStack, output: PartitionedModuleOutput) {
+fn register_partitioned_module(
+    stack: &mut ShutdownStack,
+    output: PartitionedModuleOutput,
+) -> Vec<diport::TaskStatus> {
     register_partitioned_resources(stack, output.resources);
-    for worker in output.workers {
-        worker.register_into(stack);
-    }
+    output
+        .workers
+        .into_iter()
+        .filter_map(|worker| worker.register_into(stack))
+        .collect()
 }
 
 fn report_shutdown_failures(

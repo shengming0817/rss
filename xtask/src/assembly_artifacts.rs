@@ -1,6 +1,6 @@
 //! Closed application-artifact inventory for every discovered assembly.
 //!
-//! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v1 lifecycle declaration is an exact bijection with `assemblies/*`; only rows whose Cargo, image, config, health/inventory and journey evidence all validate can become `VerifiedArtifactMatrix` values.
+//! INVARIANT: ASSEMBLY-ARTIFACT-MATRIX-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_incomplete_or_unsafe_rows", anti_vacuity = "tests::real_workspace_matrix_is_exact_and_complete" } -- the schema-v2 lifecycle declaration is an exact bijection with `assemblies/*`; candidate acceptance and supported journey carriers are distinct closed states.
 //! INVARIANT: PRODUCTION-SMOKE-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file", anti_vacuity = "tests::strict_compose_smoke_policy_rejects_synthetic_mutations_and_binds_the_real_file" } -- the executable compose journey requires an explicit closed mode, release never permits skip, and only an explicit developer opt-in can emit the unique non-production receipt before Docker execution.
 //! INVARIANT: COMPOSE-RUNTIME-DELIVERY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation", anti_vacuity = "tests::compose_runtime_delivery_rejects_each_synthetic_mutation" } -- the developer Compose carrier keeps operator and serving images distinct, grants the serving process enough grace for its application-owned drain budget, and the executable smoke witness proves ordered SIGTERM reception, complete drain, and exit zero.
 
@@ -19,17 +19,17 @@ use crate::assembly_governance::ArtifactDeclaration as RawAssembly;
 #[cfg(test)]
 use crate::assembly_governance::parse_artifact_declaration;
 use crate::assembly_governance::{
-    ARTIFACT_MATRIX_PATH, ArtifactBinary as RawBinary, ArtifactConfigSchema as RawConfigSchema,
-    ArtifactHealthInventory as RawHealthInventory, ArtifactImage as RawImage, ArtifactLifecycle,
-    ArtifactMatrixDeclaration as RawMatrix, AssemblyGovernanceIr, Core,
-    DeclaredLifecycle as Lifecycle, HealthListener, HealthOwner, JourneyCarrier as RawJourney,
-    load_artifact_declaration,
+    ARTIFACT_MATRIX_PATH, AcceptanceCarrier as RawAcceptance, ArtifactBinary as RawBinary,
+    ArtifactConfigSchema as RawConfigSchema, ArtifactHealthInventory as RawHealthInventory,
+    ArtifactImage as RawImage, ArtifactLifecycle, ArtifactMatrixDeclaration as RawMatrix,
+    AssemblyGovernanceIr, Core, DeclaredLifecycle as Lifecycle, HealthListener, HealthOwner,
+    JourneyCarrier as RawJourney, load_artifact_declaration,
 };
 use crate::diagnostic::{self, finding};
 
 const MATRIX_PATH: &str = ARTIFACT_MATRIX_PATH;
 #[cfg(test)]
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 const MISSING: &str = "[missing]";
 #[cfg(test)]
@@ -38,10 +38,11 @@ const UNKNOWN: &str = "[unknown]";
 const INVALID: &str = "[invalid]";
 #[cfg(test)]
 const UNPARSEABLE: &str = "[unparseable]";
-const MARKDOWN_HEADER: &str = "# Assembly Artifact Matrix\n\n| Assembly | Declared lifecycle | Binary | Image | Config carrier | Health / inventory | Journey | Reason |\n|---|---|---|---|---|---|---|---|\n";
+const MARKDOWN_HEADER: &str = "# Assembly Artifact Matrix\n\n| Assembly | Declared lifecycle | Binary | Image | Config carrier | Health / inventory | Acceptance | Journey | Reason |\n|---|---|---|---|---|---|---|---|---|\n";
 
 #[derive(Debug)]
 struct VerifiedArtifactMatrix {
+    candidates: BTreeSet<String>,
     supported: BTreeSet<String>,
 }
 
@@ -77,6 +78,7 @@ enum ArtifactRule {
     Config,
     Health,
     Journey,
+    Acceptance,
     PathSafety,
 }
 
@@ -132,7 +134,8 @@ pub(crate) fn run_prepared(
             .verified
             .context("artifact matrix validation succeeded without verified value")?;
         println!(
-            "\n## Verification\n\n**STATIC CARRIERS VERIFIED** — {} supported assembly artifact rows passed closed validation.\n\nThis verdict does not include same-head test or image-build receipts.",
+            "\n## Verification\n\n**STATIC CARRIERS VERIFIED** — {} candidate and {} supported assembly artifact rows passed closed validation.\n\nThis verdict does not include same-head test or image-build receipts.",
+            verified.candidates.len(),
             verified.supported.len()
         );
         Ok(())
@@ -184,6 +187,7 @@ fn validate_matrix(root: &Path, facts: &WorkspaceFacts, raw: RawMatrix) -> Resul
     let mut findings = Vec::new();
     let ir = AssemblyGovernanceIr::<Core>::load(root)?.join_artifacts(raw)?;
     let mut supported = BTreeSet::new();
+    let mut candidates = BTreeSet::new();
     let mut identities: BTreeMap<String, String> = BTreeMap::new();
     for row in ir.artifacts() {
         match &row.lifecycle {
@@ -243,11 +247,60 @@ fn validate_matrix(root: &Path, facts: &WorkspaceFacts, raw: RawMatrix) -> Resul
                 );
                 supported.insert(name.to_owned());
             }
+            ArtifactLifecycle::Candidate(artifacts) => {
+                let name = row.id.as_str();
+                let manifest = ir
+                    .assembly(name)
+                    .with_context(|| format!("assembly `{name}` 缺 governance manifest"))?
+                    .manifest();
+                validate_candidate(
+                    root,
+                    facts,
+                    name,
+                    manifest,
+                    &artifacts.binary,
+                    &artifacts.image,
+                    &artifacts.config_schema,
+                    artifacts.health_inventory,
+                    &artifacts.acceptance,
+                    &mut findings,
+                )?;
+                register_identity(
+                    &mut identities,
+                    "binary",
+                    format!("{}#{}", artifacts.binary.package, artifacts.binary.target),
+                    name,
+                    &mut findings,
+                );
+                register_identity(
+                    &mut identities,
+                    "image",
+                    format!("{}#{}", artifacts.image.dockerfile, artifacts.image.target),
+                    name,
+                    &mut findings,
+                );
+                register_identity(
+                    &mut identities,
+                    "config",
+                    config_identity(&artifacts.config_schema),
+                    name,
+                    &mut findings,
+                );
+                register_identity(
+                    &mut identities,
+                    "acceptance",
+                    acceptance_identity(&artifacts.acceptance),
+                    name,
+                    &mut findings,
+                );
+                candidates.insert(name.to_owned());
+            }
         }
     }
-    let verified = findings
-        .is_empty()
-        .then_some(VerifiedArtifactMatrix { supported });
+    let verified = findings.is_empty().then_some(VerifiedArtifactMatrix {
+        candidates,
+        supported,
+    });
     Ok(Validation { verified, findings })
 }
 
@@ -319,18 +372,18 @@ fn validate_supported_ratchet_for(
             "required supported assembly 不在 discovered universe"
         );
     }
-    let supported = raw
+    let deployable = raw
         .assemblies
         .iter()
-        .filter(|row| matches!(row.lifecycle, Lifecycle::Supported))
+        .filter(|row| matches!(row.lifecycle, Lifecycle::Candidate | Lifecycle::Supported))
         .map(|row| row.name.clone())
         .collect::<BTreeSet<_>>();
-    for name in required.difference(&supported) {
+    for name in required.difference(&deployable) {
         reject!(
             findings,
             SupportedRatchet,
             name.clone(),
-            "production supported assembly 禁止降级为 compile-only"
+            "production assembly 禁止降级为 compile-only"
         );
     }
 }
@@ -356,6 +409,7 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
                 || row.config_schema.is_some()
                 || row.health_inventory.is_some()
                 || row.journey.is_some()
+                || row.acceptance.is_some()
             {
                 reject!(
                     findings,
@@ -366,12 +420,12 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
             }
         }
         Lifecycle::Supported => {
-            if row.reason.is_some() {
+            if row.reason.is_some() || row.acceptance.is_some() {
                 reject!(
                     findings,
                     LifecycleShape,
                     row.name.clone(),
-                    "supported 禁止 reason 字段"
+                    "supported 禁止 reason/acceptance 字段"
                 );
             }
             for (field, present) in [
@@ -387,6 +441,32 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
                         LifecycleShape,
                         row.name.clone(),
                         "supported 缺少 {field}"
+                    );
+                }
+            }
+        }
+        Lifecycle::Candidate => {
+            if row.reason.is_some() || row.journey.is_some() {
+                reject!(
+                    findings,
+                    LifecycleShape,
+                    row.name.clone(),
+                    "candidate 禁止 reason/journey 字段"
+                );
+            }
+            for (field, present) in [
+                ("binary", row.binary.is_some()),
+                ("image", row.image.is_some()),
+                ("configSchema", row.config_schema.is_some()),
+                ("healthInventory", row.health_inventory.is_some()),
+                ("acceptance", row.acceptance.is_some()),
+            ] {
+                if !present {
+                    reject!(
+                        findings,
+                        LifecycleShape,
+                        row.name.clone(),
+                        "candidate 缺少 {field}"
                     );
                 }
             }
@@ -530,6 +610,66 @@ fn validate_supported(
     validate_health_inventory(root, facts, assembly, manifest, findings)?;
     validate_journey(root, facts, assembly, journey, findings)?;
     Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the validator mirrors the closed candidate-artifact schema fields"
+)]
+fn validate_candidate(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    assembly: &str,
+    manifest: &CanonicalAssemblyManifestV2,
+    binary: &RawBinary,
+    image: &RawImage,
+    config: &RawConfigSchema,
+    _health: RawHealthInventory,
+    acceptance: &RawAcceptance,
+    findings: &mut Vec<ArtifactFinding>,
+) -> Result<()> {
+    validate_identifier("binary.package", &binary.package, findings);
+    validate_identifier("binary.target", &binary.target, findings);
+    if !binary_belongs_to_assembly(facts, assembly, &binary.package, &binary.target)? {
+        reject!(
+            findings,
+            Binary,
+            assembly,
+            "exact binary {}#{} 不属于该 assembly",
+            binary.package,
+            binary.target
+        );
+    }
+    validate_image(root, assembly, image, binary, config, findings)?;
+    validate_config(root, assembly, config, findings)?;
+    validate_health_inventory(root, facts, assembly, manifest, findings)?;
+    validate_acceptance(root, facts, assembly, acceptance, findings)?;
+    Ok(())
+}
+
+fn validate_acceptance(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    assembly: &str,
+    acceptance: &RawAcceptance,
+    findings: &mut Vec<ArtifactFinding>,
+) -> Result<()> {
+    let RawAcceptance::CargoTest {
+        package,
+        target,
+        test,
+    } = acceptance;
+    validate_cargo_test_carrier(
+        root,
+        facts,
+        assembly,
+        "acceptance",
+        package,
+        target,
+        test,
+        ArtifactRule::Acceptance,
+        findings,
+    )
 }
 
 fn validate_identifier(label: &str, value: &str, findings: &mut Vec<ArtifactFinding>) {
@@ -802,51 +942,17 @@ fn validate_journey(
             package,
             target,
             test,
-        } => {
-            for (label, value) in [
-                ("journey.package", package.as_str()),
-                ("journey.target", target.as_str()),
-                ("journey.test", test.as_str()),
-            ] {
-                validate_identifier(label, value, findings);
-            }
-            if !target_exists(facts, package, target, TargetKind::Test)? {
-                reject!(
-                    findings,
-                    Journey,
-                    assembly,
-                    "Cargo metadata 不含 exact journey target {package}#{target}"
-                );
-                return Ok(());
-            }
-            let Some(path) = target_path(root, facts, package, target, TargetKind::Test)? else {
-                reject!(
-                    findings,
-                    Journey,
-                    assembly,
-                    "无法解析 journey target {package}#{target} 的 path"
-                );
-                return Ok(());
-            };
-            let label = path
-                .strip_prefix(root)
-                .unwrap_or(path.as_path())
-                .to_string_lossy()
-                .replace('\\', "/");
-            let Some(path) = regular_file(root, &label, assembly, "journey", findings)? else {
-                return Ok(());
-            };
-            let source = read_artifact_utf8(&path, &format!("{assembly} Cargo journey"))
-                .with_context(|| format!("读取 {} 失败", path.display()))?;
-            if !cargo_journey_has_exact_test(&source, test)? {
-                reject!(
-                    findings,
-                    Journey,
-                    assembly,
-                    "journey `{test}` 必须是非 ignored、非 cfg、非空的 exact test"
-                );
-            }
-        }
+        } => validate_cargo_test_carrier(
+            root,
+            facts,
+            assembly,
+            "journey",
+            package,
+            target,
+            test,
+            ArtifactRule::Journey,
+            findings,
+        )?,
         RawJourney::ComposeSmokeV1 { path } => {
             let Some(path) = regular_file(root, path, assembly, "journey", findings)? else {
                 return Ok(());
@@ -901,6 +1007,61 @@ fn validate_journey(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_cargo_test_carrier(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    assembly: &str,
+    label: &str,
+    package: &str,
+    target: &str,
+    test: &str,
+    rule: ArtifactRule,
+    findings: &mut Vec<ArtifactFinding>,
+) -> Result<()> {
+    for (field, value) in [
+        (format!("{label}.package"), package),
+        (format!("{label}.target"), target),
+        (format!("{label}.test"), test),
+    ] {
+        validate_identifier(&field, value, findings);
+    }
+    if !target_exists(facts, package, target, TargetKind::Test)? {
+        findings.push(finding(
+            rule,
+            assembly,
+            format!("Cargo metadata 不含 exact {label} target {package}#{target}"),
+        ));
+        return Ok(());
+    }
+    let Some(path) = target_path(root, facts, package, target, TargetKind::Test)? else {
+        findings.push(finding(
+            rule,
+            assembly,
+            format!("无法解析 {label} target {package}#{target} 的 path"),
+        ));
+        return Ok(());
+    };
+    let path_label = path
+        .strip_prefix(root)
+        .unwrap_or(path.as_path())
+        .to_string_lossy()
+        .replace('\\', "/");
+    let Some(path) = regular_file(root, &path_label, assembly, label, findings)? else {
+        return Ok(());
+    };
+    let source = read_artifact_utf8(&path, &format!("{assembly} Cargo {label}"))
+        .with_context(|| format!("读取 {} 失败", path.display()))?;
+    if !cargo_journey_has_exact_test(&source, test)? {
+        findings.push(finding(
+            rule,
+            assembly,
+            format!("{label} `{test}` 必须是非 ignored、非 cfg、非空的 exact test"),
+        ));
     }
     Ok(())
 }
@@ -1939,8 +2100,17 @@ fn journey_identity(journey: &RawJourney) -> String {
     }
 }
 
+fn acceptance_identity(acceptance: &RawAcceptance) -> String {
+    let RawAcceptance::CargoTest {
+        package,
+        target,
+        test,
+    } = acceptance;
+    format!("cargo-test:{package}#{target}#{test}")
+}
+
 struct ObservedRow {
-    cells: [String; 8],
+    cells: [String; 9],
 }
 
 fn render_rows(mut rows: Vec<ObservedRow>) -> String {
@@ -1950,8 +2120,16 @@ fn render_rows(mut rows: Vec<ObservedRow>) -> String {
         let cells = row.cells.map(|cell| markdown_cell(&cell));
         let _ = writeln!(
             output,
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
-            cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], cells[6], cells[7]
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            cells[0],
+            cells[1],
+            cells[2],
+            cells[3],
+            cells[4],
+            cells[5],
+            cells[6],
+            cells[7],
+            cells[8]
         );
     }
     output
@@ -1962,7 +2140,9 @@ fn render_observed(raw: &RawMatrix) -> String {
         .assemblies
         .iter()
         .map(|row| {
-            let (lifecycle, binary, image, config, health, journey, reason) = match row.lifecycle {
+            let (lifecycle, binary, image, config, health, acceptance, journey, reason) = match row
+                .lifecycle
+            {
                 Lifecycle::CompileOnly => (
                     "compile-only".to_owned(),
                     "—".to_owned(),
@@ -1970,7 +2150,31 @@ fn render_observed(raw: &RawMatrix) -> String {
                     "—".to_owned(),
                     "—".to_owned(),
                     "—".to_owned(),
+                    "—".to_owned(),
                     row.reason.as_deref().unwrap_or(MISSING).to_owned(),
+                ),
+                Lifecycle::Candidate => (
+                    "candidate".to_owned(),
+                    row.binary.as_ref().map_or_else(
+                        || MISSING.to_owned(),
+                        |binary| format!("{}#{}", binary.package, binary.target),
+                    ),
+                    row.image.as_ref().map_or_else(
+                        || MISSING.to_owned(),
+                        |image| format!("{}#{}", image.dockerfile, image.target),
+                    ),
+                    row.config_schema
+                        .as_ref()
+                        .map_or_else(|| MISSING.to_owned(), config_identity),
+                    row.health_inventory.as_ref().map_or_else(
+                        || MISSING.to_owned(),
+                        |health| format!("{}#{}", health.owner.as_str(), health.listener.as_str()),
+                    ),
+                    row.acceptance
+                        .as_ref()
+                        .map_or_else(|| MISSING.to_owned(), acceptance_identity),
+                    "—".to_owned(),
+                    "—".to_owned(),
                 ),
                 Lifecycle::Supported => (
                     "supported".to_owned(),
@@ -1989,6 +2193,7 @@ fn render_observed(raw: &RawMatrix) -> String {
                         || MISSING.to_owned(),
                         |health| format!("{}#{}", health.owner.as_str(), health.listener.as_str()),
                     ),
+                    "—".to_owned(),
                     row.journey
                         .as_ref()
                         .map_or_else(|| MISSING.to_owned(), journey_identity),
@@ -2003,6 +2208,7 @@ fn render_observed(raw: &RawMatrix) -> String {
                     image,
                     config,
                     health,
+                    acceptance,
                     journey,
                     reason,
                 ],
@@ -2016,7 +2222,7 @@ fn render_observed(raw: &RawMatrix) -> String {
 fn render_unverified_source(source: &str) -> String {
     let Ok(value) = source.parse::<toml::Value>() else {
         return format!(
-            "{MARKDOWN_HEADER}| {UNPARSEABLE} | {INVALID} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} |\n"
+            "{MARKDOWN_HEADER}| {UNPARSEABLE} | {INVALID} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} | {UNKNOWN} |\n"
         );
     };
     let rows = value
@@ -2048,21 +2254,52 @@ fn render_unverified_source(source: &str) -> String {
                     }
                 },
             );
-            let (binary, image, config, health, journey, reason) = match lifecycle.as_str() {
-                "compile-only" => (
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    "—".to_owned(),
-                    reason,
-                ),
-                "supported" => (binary, image, config, health, journey, "—".to_owned()),
-                _ => (binary, image, config, health, journey, reason),
-            };
+            let acceptance = row.get("acceptance").map_or_else(
+                || MISSING.to_owned(),
+                |acceptance| {
+                    format!(
+                        "{}:{}#{}#{}",
+                        value_string(acceptance.get("kind")),
+                        value_string(acceptance.get("package")),
+                        value_string(acceptance.get("target")),
+                        value_string(acceptance.get("test"))
+                    )
+                },
+            );
+            let (binary, image, config, health, acceptance, journey, reason) =
+                match lifecycle.as_str() {
+                    "compile-only" => (
+                        "—".to_owned(),
+                        "—".to_owned(),
+                        "—".to_owned(),
+                        "—".to_owned(),
+                        "—".to_owned(),
+                        "—".to_owned(),
+                        reason,
+                    ),
+                    "candidate" => (
+                        binary,
+                        image,
+                        config,
+                        health,
+                        acceptance,
+                        "—".to_owned(),
+                        "—".to_owned(),
+                    ),
+                    "supported" => (
+                        binary,
+                        image,
+                        config,
+                        health,
+                        "—".to_owned(),
+                        journey,
+                        "—".to_owned(),
+                    ),
+                    _ => (binary, image, config, health, acceptance, journey, reason),
+                };
             ObservedRow {
                 cells: [
-                    name, lifecycle, binary, image, config, health, journey, reason,
+                    name, lifecycle, binary, image, config, health, acceptance, journey, reason,
                 ],
             }
         })
@@ -2131,17 +2368,17 @@ mod tests {
     }
 
     #[test]
-    fn schema_v1_and_lifecycle_are_closed() -> Result<()> {
+    fn schema_v2_and_lifecycle_are_closed() -> Result<()> {
         let green = green_matrix()?;
-        assert_eq!(green.schema_version, 1);
+        assert_eq!(green.schema_version, 2);
         assert_eq!(green.assemblies.len(), 2);
         let unknown = include_str!("../fixtures/assembly-artifacts/unknown-field.toml");
         assert!(toml::from_str::<RawMatrix>(unknown).is_err());
         let observed = render_unverified_source(unknown);
         assert!(observed.starts_with(MARKDOWN_HEADER));
         let unknown_with_rows = include_str!("../fixtures/assembly-artifacts/green.toml").replacen(
-            "schemaVersion = 1",
-            "schemaVersion = 1\nunexpected = true",
+            "schemaVersion = 2",
+            "schemaVersion = 2\nunexpected = true",
             1,
         );
         assert!(toml::from_str::<RawMatrix>(&unknown_with_rows).is_err());
@@ -2189,7 +2426,11 @@ mod tests {
     #[allow(clippy::cognitive_complexity)] // one red matrix mutates every closed declaration dimension.
     fn synthetic_red_rejects_incomplete_or_unsafe_rows() -> Result<()> {
         let mut green = green_matrix()?;
-        let supported = &green.assemblies[0];
+        let supported = green
+            .assemblies
+            .iter()
+            .find(|row| matches!(row.lifecycle, Lifecycle::Supported))
+            .context("supported fixture row")?;
         let mut errors = Vec::new();
         validate_lifecycle_shape(supported, &mut errors);
         assert!(errors.is_empty());
@@ -2218,6 +2459,56 @@ mod tests {
                     .any(|error| error.rule == ArtifactRule::LifecycleShape
                         && error.detail.contains(field)),
                 "missing {field} escaped: {errors:?}"
+            );
+        }
+
+        let candidate_matrix: RawMatrix =
+            toml::from_str(include_str!("../../assemblies/artifacts.toml"))?;
+        let candidate = candidate_matrix
+            .assemblies
+            .iter()
+            .find(|row| matches!(row.lifecycle, Lifecycle::Candidate))
+            .context("candidate fixture row")?;
+        for field in [
+            "binary",
+            "image",
+            "configSchema",
+            "healthInventory",
+            "acceptance",
+        ] {
+            let mut row = candidate.clone();
+            match field {
+                "binary" => row.binary = None,
+                "image" => row.image = None,
+                "configSchema" => row.config_schema = None,
+                "healthInventory" => row.health_inventory = None,
+                "acceptance" => row.acceptance = None,
+                _ => bail!("closed candidate field `{field}` escaped validation"),
+            }
+            let mut errors = Vec::new();
+            validate_lifecycle_shape(&row, &mut errors);
+            assert!(
+                errors.iter().any(|error| {
+                    error.rule == ArtifactRule::LifecycleShape && error.detail.contains(field)
+                }),
+                "candidate missing {field} escaped: {errors:?}"
+            );
+        }
+        for forbidden in ["reason", "journey"] {
+            let mut row = candidate.clone();
+            match forbidden {
+                "reason" => row.reason = Some("forbidden compatibility rationale".to_owned()),
+                "journey" => row.journey = supported.journey.clone(),
+                _ => bail!("closed candidate forbidden field escaped"),
+            }
+            let mut errors = Vec::new();
+            validate_lifecycle_shape(&row, &mut errors);
+            assert!(
+                errors.iter().any(|error| {
+                    error.rule == ArtifactRule::LifecycleShape
+                        && error.detail.contains("禁止 reason/journey")
+                }),
+                "candidate {forbidden} escaped: {errors:?}"
             );
         }
 
@@ -2272,7 +2563,7 @@ mod tests {
                 .any(|finding| finding.rule == ArtifactRule::SupportedRatchet)
         );
 
-        green.schema_version = 2;
+        green.schema_version = 1;
         green.assemblies.push(green.assemblies[0].clone());
         green.assemblies[1].name = "ghost".to_owned();
         let mut errors = Vec::new();
@@ -2956,9 +3247,9 @@ services:
                     .find("| sourcecheck |")
                     .context("missing sourcecheck row")?
         );
-        assert!(markdown.contains("| Assembly | Declared lifecycle | Binary | Image | Config carrier | Health / inventory | Journey | Reason |"));
+        assert!(markdown.contains("| Assembly | Declared lifecycle | Binary | Image | Config carrier | Health / inventory | Acceptance | Journey | Reason |"));
         assert!(markdown.contains(
-            "| sourcecheck | compile-only | — | — | — | — | — | no deployable composition root |"
+            "| sourcecheck | compile-only | — | — | — | — | — | — | no deployable composition root |"
         ));
         assert_eq!(markdown, render_observed(&raw));
         assert_eq!(
@@ -3171,7 +3462,7 @@ services:
         for assembly in raw
             .assemblies
             .iter()
-            .filter(|row| matches!(row.lifecycle, Lifecycle::Supported))
+            .filter(|row| matches!(row.lifecycle, Lifecycle::Candidate | Lifecycle::Supported))
             .map(|row| row.name.as_str())
         {
             let row = observed
@@ -3180,7 +3471,7 @@ services:
                 .with_context(|| format!("missing observed row for {assembly}"))?;
             assert_eq!(
                 row.matches('|').count(),
-                9,
+                10,
                 "incomplete Markdown row: {row}"
             );
             assert!(!row.contains(MISSING), "vacuous Markdown row: {row}");
@@ -3191,6 +3482,14 @@ services:
             raw.assemblies
                 .iter()
                 .filter(|row| matches!(row.lifecycle, Lifecycle::Supported))
+                .map(|row| row.name.clone())
+                .collect()
+        );
+        assert_eq!(
+            verified.candidates,
+            raw.assemblies
+                .iter()
+                .filter(|row| matches!(row.lifecycle, Lifecycle::Candidate))
                 .map(|row| row.name.clone())
                 .collect()
         );

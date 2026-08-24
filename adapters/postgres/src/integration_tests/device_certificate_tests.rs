@@ -1365,8 +1365,8 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
             .fetch_one(&store.pool)
             .await?;
     let mut mismatched_payload: serde_json::Value = serde_json::from_slice(&original_payload)?;
-    mismatched_payload["artifactId"] =
-        serde_json::Value::String("artifact-payload-mismatch".to_owned());
+    mismatched_payload["authorizationReceiptId"] =
+        serde_json::Value::String(uuid::Uuid::new_v4().to_string());
     sqlx::query("UPDATE outbox SET payload=$3 WHERE tenant_id=$1::uuid AND event_id=$2")
         .bind(tenant.to_string())
         .bind(&command_id)
@@ -1381,7 +1381,7 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
             )
             .await?,
         FencedMutationOutcome::StaleFence,
-        "durable outbox payload drift must reject an earlier valid proof"
+        "durable command authorization receipt drift must reject an earlier valid proof"
     );
     let after_rejected_proof: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
         "SELECT condition_type,status,reason,observed_generation \

@@ -103,20 +103,30 @@ impl WorkerRegistration {
     pub fn descriptor(&self) -> WorkerDescriptor {
         self.descriptor.clone()
     }
-    fn register_phase_one(self, stack: &mut crate::shutdown::ShutdownStack) {
+    fn register_phase_one(
+        self,
+        stack: &mut crate::shutdown::ShutdownStack,
+    ) -> Option<diport::TaskStatus> {
         match self.make {
-            WorkerFactory::Resource(make) => stack.register_with_token(make),
-            WorkerFactory::ManagedTask(make) => {
-                let _status = stack.register_managed_task_with_token(make);
+            WorkerFactory::Resource(make) => {
+                stack.register_with_token(make);
+                None
             }
+            WorkerFactory::ManagedTask(make) => Some(stack.register_managed_task_with_token(make)),
         }
     }
 
-    fn register_deferred(self, stack: &mut crate::shutdown::ShutdownStack) {
+    fn register_deferred(
+        self,
+        stack: &mut crate::shutdown::ShutdownStack,
+    ) -> Option<diport::TaskStatus> {
         match self.make {
-            WorkerFactory::Resource(make) => stack.register_deferred_with_token(make),
+            WorkerFactory::Resource(make) => {
+                stack.register_deferred_with_token(make);
+                None
+            }
             WorkerFactory::ManagedTask(make) => {
-                let _status = stack.register_deferred_managed_task_with_token(make);
+                Some(stack.register_deferred_managed_task_with_token(make))
             }
         }
     }
@@ -342,7 +352,11 @@ impl WorkerSpec {
     }
 
     /// Consume this closed worker policy into the sole shutdown owner.
-    pub fn register_into(self, stack: &mut crate::shutdown::ShutdownStack) {
+    #[must_use = "managed worker status must be supervised by the runtime executor"]
+    pub fn register_into(
+        self,
+        stack: &mut crate::shutdown::ShutdownStack,
+    ) -> Option<diport::TaskStatus> {
         match self {
             Self::PhaseOne(registration) => registration.register_phase_one(stack),
             Self::Deferred(registration) => registration.register_deferred(stack),
@@ -409,6 +423,29 @@ pub fn validate_worker_inventory_exact<'a>(
                 .filter(mutating)
                 .any(|descriptor| descriptor.identity == candidate.identity)
     }) {
+        return Err(WorkerInventoryError::Missing(missing.clone()));
+    }
+    Ok(inventory)
+}
+
+/// Validate the complete worker set, including observational workers.
+pub fn validate_worker_inventory_closed<'a>(
+    workers: impl IntoIterator<Item = &'a WorkerSpec>,
+    expected: &ExpectedWorkerInventory,
+) -> Result<WorkerInventory, WorkerInventoryError> {
+    let inventory = validate_worker_inventory(workers)?;
+    if let Some(unexpected) = inventory
+        .descriptors
+        .iter()
+        .find(|descriptor| !expected.descriptors.contains(descriptor))
+    {
+        return Err(WorkerInventoryError::Unexpected(unexpected.clone()));
+    }
+    if let Some(missing) = expected
+        .descriptors
+        .iter()
+        .find(|descriptor| !inventory.descriptors.contains(descriptor))
+    {
         return Err(WorkerInventoryError::Missing(missing.clone()));
     }
     Ok(inventory)
@@ -771,6 +808,25 @@ mod result_tests {
     }
 
     #[test]
+    fn closed_worker_inventory_rejects_extra_observational_worker()
+    -> Result<(), WorkerInventoryError> {
+        let worker = WorkerSpec::observational_phase_one("observe", |_| {
+            DynManagedResource::new_box(NoopResource)
+        });
+        let expected = ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
+            "observe",
+            WorkerAdmissionLane::Observational,
+        )])?;
+        assert!(validate_worker_inventory_closed([&worker], &expected).is_ok());
+        let empty = ExpectedWorkerInventory::closed([])?;
+        assert!(matches!(
+            validate_worker_inventory_closed([&worker], &empty),
+            Err(WorkerInventoryError::Unexpected(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn worker_inventory_rejects_missing_extra_and_wrong_lane() -> Result<(), WorkerInventoryError> {
         let (_, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
         let actual = WorkerSpec::relay_deferred("actual", &relay, |_, _| {
@@ -1081,7 +1137,7 @@ mod result_tests {
             .expect("worker must be present");
         let root = CancellationToken::new();
         let mut stack = crate::shutdown::ShutdownStack::new(root);
-        worker.register_into(&mut stack);
+        let _status = worker.register_into(&mut stack);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(output.worker_count(), 0);
     }

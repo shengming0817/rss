@@ -364,6 +364,12 @@ impl VaultExternalPkiProviderClosure {
         self.transport.sign_csr(request).await
     }
 
+    /// Verify that the configured token may read the exact PKI role used by this closure.
+    /// This is side-effect free and exercises DNS, TLS, Vault availability, mount, role, and ACL.
+    pub async fn is_capability_ready(&self) -> bool {
+        self.transport.is_capability_ready().await
+    }
+
     /// Borrow the provider-neutral assembly closure for construction/drift inspection.
     pub const fn provider_closure(&self) -> &ExternalPkiProviderClosure {
         &self.provider_closure
@@ -409,6 +415,26 @@ fn validate_role(role: String) -> Result<String, VaultConfigError> {
 }
 
 impl VaultPkiTransport {
+    async fn is_capability_ready(&self) -> bool {
+        let mut url = self.base.clone();
+        let Ok(mut segments) = url.path_segments_mut() else {
+            return false;
+        };
+        segments
+            .pop_if_empty()
+            .push("v1")
+            .extend(&self.mount_segments)
+            .push("roles")
+            .push(&self.role);
+        drop(segments);
+        self.client
+            .get(url)
+            .header(VAULT_TOKEN_HEADER, self.token.as_str())
+            .send()
+            .await
+            .is_ok_and(|response| response.status() == reqwest::StatusCode::OK)
+    }
+
     /// Signs one caller-owned CSR and returns evidence minted only after local verification.
     #[tracing::instrument(skip_all, fields(target = "vault", operation = "pki-sign"))]
     pub async fn sign_csr(

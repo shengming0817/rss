@@ -56,10 +56,10 @@
 //!   production modules，拒绝 L2→internal、internal root re-export、专用 API 泄漏与测试 feature alias。
 //!   #2159 完成 package/Cargo Hard 边界后删除本 carrier，不演化为永久文件名规则。
 //! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
-//!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
+//!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit/deviceidentity 四个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
 //! INVARIANT: AUTHMINT-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::authmint_wrapper_widened_to_bin_red|tests::authmint_wrapper_missing_consumer_red", anti_vacuity = "tests::authmint_wrapper_exact_green" }——
-//!   `authmint` target wrapper 必须恰为 httpserve + runtime/settingsonly/identityaudit；域 / journeys 不得持有
+//!   `authmint` target wrapper 必须恰为 diport/httpserve + runtime/settingsonly/identityaudit/deviceidentity；域 / journeys 不得持有
 //!   Authenticated production mint capability（AUTH-EVIDENCE-MINT-01 Hard 的 deny.toml 半段）。
 //! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeinventorymint_wrapper_widened_to_assembly_red", anti_vacuity = "tests::runtimeinventorymint_wrapper_exact_green|tests::real_workspace_green" }——
 //!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 铸造完整计划 receipt，以及 runtime
@@ -1744,7 +1744,8 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
 ];
 
 const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
-const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] = &["runtime", "settingsonly", "identityaudit"];
+const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] =
+    &["runtime", "settingsonly", "identityaudit", "deviceidentity"];
 const AUTHMINT_CRATE: &str = "authmint";
 const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
     "diport",
@@ -1752,6 +1753,7 @@ const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
     "runtime",
     "settingsonly",
     "identityaudit",
+    "deviceidentity",
 ];
 const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
 const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
@@ -4838,6 +4840,11 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "assemblies/identityaudit",
                 Some(Layer::Root),
             ),
+            m(
+                "deviceidentity",
+                "assemblies/deviceidentity",
+                Some(Layer::Root),
+            ),
             m("server", "bins/server", Some(Layer::Root)),
         ]
     }
@@ -4853,7 +4860,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn runtimeexec_wrapper_exact_green() {
         let bans = vec![ban(
             "runtimeexec",
-            &["runtime", "settingsonly", "identityaudit"],
+            &["runtime", "settingsonly", "identityaudit", "deviceidentity"],
         )];
         assert!(
             check_runtimeexec_wrapper_coverage(
@@ -4870,7 +4877,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn runtimeexec_wrapper_widened_to_bin_red() {
         let bans = vec![ban(
             "runtimeexec",
-            &["runtime", "settingsonly", "identityaudit", "server"],
+            &[
+                "runtime",
+                "settingsonly",
+                "identityaudit",
+                "deviceidentity",
+                "server",
+            ],
         )];
         let findings = check_runtimeexec_wrapper_coverage(
             &runtimeexec_fixture_members(),
@@ -4885,7 +4898,10 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
 
     #[test]
     fn runtimeexec_wrapper_missing_assembly_red() {
-        let bans = vec![ban("runtimeexec", &["runtime", "settingsonly"])];
+        let bans = vec![ban(
+            "runtimeexec",
+            &["runtime", "settingsonly", "deviceidentity"],
+        )];
         let findings = check_runtimeexec_wrapper_coverage(
             &runtimeexec_fixture_members(),
             &bans,
@@ -4901,7 +4917,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn runtimeexec_actual_bin_consumer_is_rejected_even_with_exact_wrappers() {
         let bans = vec![ban(
             "runtimeexec",
-            &["runtime", "settingsonly", "identityaudit"],
+            &["runtime", "settingsonly", "identityaudit", "deviceidentity"],
         )];
         let findings = check_wrappers(
             &runtimeexec_fixture_members(),
@@ -4929,6 +4945,11 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "assemblies/identityaudit",
                 Some(Layer::Root),
             ),
+            m(
+                "deviceidentity",
+                "assemblies/deviceidentity",
+                Some(Layer::Root),
+            ),
             m("server", "bins/server", Some(Layer::Root)),
             m("identity", "crates/identity", Some(Layer::Domain)),
         ]
@@ -4944,6 +4965,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "runtime",
                 "settingsonly",
                 "identityaudit",
+                "deviceidentity",
             ],
         )];
         assert!(check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans).is_empty());
@@ -4959,6 +4981,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "runtime",
                 "settingsonly",
                 "identityaudit",
+                "deviceidentity",
                 "server",
             ],
         )];
@@ -4972,7 +4995,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn authmint_wrapper_missing_consumer_red() {
         let bans = vec![ban(
             "authmint",
-            &["diport", "httpserve", "runtime", "settingsonly"],
+            &[
+                "diport",
+                "httpserve",
+                "runtime",
+                "settingsonly",
+                "deviceidentity",
+            ],
         )];
         let findings = check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");

@@ -92,12 +92,13 @@ impl<'a> DevicePolicyLineageFixture<'a> {
                    INSERT INTO device_certificate_policy_operations ( \
                      tenant_id,device_id,idempotency_key,request_digest,accepted_generation, \
                      accepted_condition,authorization_receipt_id,principal_kind,principal_id, \
-                     contract_id,permission,obligation_fingerprint,evaluated_at) \
+                     contract_id,permission,obligation_fingerprint,evaluated_at,request_id,correlation_id) \
                    SELECT $1::uuid,$2::uuid,pg_catalog.gen_random_uuid(), \
                      pg_catalog.decode(repeat('11',32),'hex'),1,'reconciling',receipt_id, \
-                     'service','integration-fixture','identity.device-certificate-policy-put', \
+                     'user','integration-fixture','identity.device-certificate-policy-put', \
                      'identity:device-certificate-policy:write', \
-                     pg_catalog.decode(repeat('22',32),'hex'),TIMESTAMPTZ 'epoch' \
+                     pg_catalog.decode(repeat('22',32),'hex'),TIMESTAMPTZ 'epoch', \
+                     'integration-fixture-request','integration-fixture-correlation' \
                    FROM receipt RETURNING authorization_receipt_id \
                  ), policy_basis AS ( \
                    INSERT INTO device_certificate_policy_authorization_policies ( \
@@ -186,12 +187,13 @@ impl<'a> DevicePolicyLineageFixture<'a> {
                    INSERT INTO device_certificate_policy_operations ( \
                      tenant_id,device_id,idempotency_key,request_digest,accepted_generation, \
                      accepted_condition,authorization_receipt_id,principal_kind,principal_id, \
-                     contract_id,permission,obligation_fingerprint,evaluated_at) \
+                     contract_id,permission,obligation_fingerprint,evaluated_at,request_id,correlation_id) \
                    SELECT $1::uuid,$2::uuid,pg_catalog.gen_random_uuid(), \
                      pg_catalog.decode(repeat('33',32),'hex'),$3,'reconciling',receipt_id, \
-                     'service','integration-fixture','identity.device-certificate-policy-put', \
+                     'user','integration-fixture','identity.device-certificate-policy-put', \
                      'identity:device-certificate-policy:write', \
-                     pg_catalog.decode(repeat('44',32),'hex'),TIMESTAMPTZ 'epoch' \
+                     pg_catalog.decode(repeat('44',32),'hex'),TIMESTAMPTZ 'epoch', \
+                     'integration-fixture-request-v2','integration-fixture-correlation-v2' \
                    FROM receipt RETURNING authorization_receipt_id \
                  ), policy_basis AS ( \
                    INSERT INTO device_certificate_policy_authorization_policies ( \

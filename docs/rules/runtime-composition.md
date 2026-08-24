@@ -10,6 +10,8 @@
   fallback、双写或运行期重新解释。
 - AssemblyLock 固定 repository identity；RuntimePlan 固定本次启动的 typed config/provider/lifecycle identity。
 - artifact classification、展示 inventory 和健康报告不得反向修改 manifest、lock 或 plan identity。
+- candidate artifact 必须由 schema v2 的 binary/image/configSchema/healthInventory/exact cargo-test 闭合；可展示静态
+  identity，但 official profile selection 必须拒绝 candidate。晋级只能原子替换同一 artifact 行为 supported + journey。
 
 ## Provider closure
 
@@ -43,6 +45,8 @@
   `ListenerTaskRegistration`；非空 sealed listener receipt 是 readiness 的必填证明，root cancellation 前任一
   listener terminal 都永久 fail-closed。
 - config reload 只能原子切换完整 validated snapshot；candidate 失败保留 last-good。
+- production candidate 的完整 worker/listener/provider 集合必须在启动时与同源计划精确相等；observational worker 也不得
+  逃逸 exact join。Internal 可为空路由，但仍必须消费 mTLS transport 与 opaque listener receipt。
 
 ## 载体
 

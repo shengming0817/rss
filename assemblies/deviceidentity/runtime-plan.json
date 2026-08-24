@@ -1,8 +1,20 @@
 {
   "schemaVersion": 3,
-  "assemblyFingerprint": "sha256:e1990ef411a254580a3bfdfdb434471bf8a9481d21ab4475ebe61053fe5784fa",
-  "runtimePlanFingerprint": "sha256:3edea6ffb7fb3ea0542b031f884abe1b8a5885aa2be4713e8837cc73e8422d6c",
+  "assemblyFingerprint": "sha256:b9040d180a60019171b1d87e3e150de3a7ac0022feccf345026a99900f60d810",
+  "runtimePlanFingerprint": "sha256:5cc0bf9bd95307a980f3153212e60a6d5c59548bf5298c37240ff9a50b080e11",
   "providerPlans": [
+    {
+      "id": "auth-audit-sink",
+      "constructor": "postgres::PgAuthAuditSink",
+      "activation": {
+        "kind": "process"
+      },
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
     {
       "id": "device-certificate-store",
       "constructor": "postgres::PgDeviceCertificateRepository",
@@ -27,15 +39,6 @@
       ]
     },
     {
-      "id": "device-draft-artifact-source",
-      "constructor": "identity_composition::DraftArtifactSimulator",
-      "activation": {
-        "kind": "domainLocal",
-        "domain": "identity"
-      },
-      "outputs": []
-    },
-    {
       "id": "device-mqtt-session",
       "constructor": "mqtt::MqttSession",
       "activation": {
@@ -49,6 +52,15 @@
       ]
     },
     {
+      "id": "device-production-artifact-source",
+      "constructor": "identity_composition::ExternalPkiArtifactSource",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
+      "outputs": []
+    },
+    {
       "id": "device-revocation-store",
       "constructor": "postgres::PgRevocationStore",
       "activation": {
@@ -58,9 +70,73 @@
         "probes",
         "workers"
       ]
+    },
+    {
+      "id": "external-csr-resolver",
+      "constructor": "httpd::SpiffeMtlsExternalCsrResolver",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
+      "outputs": [
+        "probes",
+        "resources"
+      ]
+    },
+    {
+      "id": "listener-pdp",
+      "constructor": "oidc::OidcProvider",
+      "activation": {
+        "kind": "process"
+      },
+      "outputs": [
+        "probes",
+        "resources"
+      ]
+    },
+    {
+      "id": "listener-rate-limiter",
+      "constructor": "redis::RedisRateLimiter",
+      "activation": {
+        "kind": "process"
+      },
+      "outputs": []
+    },
+    {
+      "id": "vault-external-pki",
+      "constructor": "vault::VaultExternalPkiProviderClosure",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
+      "outputs": [
+        "probes",
+        "resources"
+      ]
     }
   ],
-  "listenerPlans": [],
+  "listenerPlans": [
+    {
+      "id": "health-main",
+      "kind": "health",
+      "auth": "noAuth",
+      "domains": []
+    },
+    {
+      "id": "internal-main",
+      "kind": "internal",
+      "auth": "mtls",
+      "domains": []
+    },
+    {
+      "id": "primary-main",
+      "kind": "primary",
+      "auth": "federatedAccessToken",
+      "domains": [
+        "identity"
+      ]
+    }
+  ],
   "domainPlans": [
     {
       "id": "identity",

@@ -7,7 +7,8 @@ mod device_mqtt;
 mod encoding;
 mod external_pki;
 #[cfg(feature = "device-mqtt")]
-mod pilot;
+#[path = "pilot.rs"]
+mod runtime;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,8 +35,8 @@ pub use device_ingress::{
     PostgresDeviceIngressSettlementError, acknowledge_postgres_device_ingress,
 };
 pub use external_pki::{
-    classify_external_pki_artifact_error, mint_external_pki_production_artifact,
-    validate_external_pki_artifact_request,
+    ExternalPkiArtifactSource, classify_external_pki_artifact_error,
+    mint_external_pki_production_artifact, validate_external_pki_artifact_request,
 };
 pub use identity::ports::device_certificate::{
     CertificateArtifactAcquisition, CertificateArtifactError, DeviceCertificateCommandTtl,
@@ -43,13 +44,19 @@ pub use identity::ports::device_certificate::{
     ExpectedGeneration, PolicyHash,
 };
 #[cfg(all(feature = "device-mqtt", feature = "test-support"))]
-pub use pilot::PilotLoopPauseGuard;
+pub use runtime::PilotLoopPauseGuard;
 #[cfg(feature = "device-mqtt")]
-pub use pilot::{
-    DeviceIdentityPilotAdoption, DeviceIdentityPilotConfig, DeviceIdentityPilotHandle,
-    DeviceIdentityPilotLifecycle, DeviceIdentityPilotReadiness, DeviceIdentityPilotShutdownError,
-    DeviceIdentityPilotStartError, DeviceIdentityRelayConfig, DeviceIdentitySchedulerConfig,
-    DeviceIdentitySchedulerTiming, DraftArtifactSimulator, PilotComponentReadiness,
+pub use runtime::{
+    DeviceIdentityCandidateAdoption, DeviceIdentityCandidateHandle,
+    DeviceIdentityCandidateLifecycle, DeviceIdentityRelayConfig,
+    DeviceIdentityRuntimeComponentReadiness, DeviceIdentityRuntimeConfig,
+    DeviceIdentityRuntimeReadiness, DeviceIdentityRuntimeShutdownError,
+    DeviceIdentityRuntimeStartError, DeviceIdentitySchedulerConfig, DeviceIdentitySchedulerTiming,
+};
+#[cfg(all(feature = "device-mqtt", any(test, feature = "test-support")))]
+pub use runtime::{
+    DeviceIdentityPilotAdoption, DeviceIdentityPilotHandle, DeviceIdentityPilotLifecycle,
+    DraftArtifactSimulator,
 };
 
 /// Closed RSS-local token and grant lifetimes captured once by an assembly root.
@@ -248,6 +255,7 @@ pub fn device_resource_fact_pip(
 /// Mandatory Draft device-policy capabilities constructed from one typed provider bundle.
 pub struct DevicePolicyCandidateComponents {
     binding: Arc<DevicePolicyCandidateBinding>,
+    status: identity::DeviceCandidateStatusState,
 }
 
 impl DevicePolicyCandidateComponents {
@@ -255,6 +263,11 @@ impl DevicePolicyCandidateComponents {
     #[must_use]
     pub fn binding(&self) -> Arc<DevicePolicyCandidateBinding> {
         Arc::clone(&self.binding)
+    }
+
+    #[must_use]
+    pub fn status(&self) -> identity::DeviceCandidateStatusState {
+        self.status.clone()
     }
 }
 
@@ -269,6 +282,11 @@ pub fn device_policy_candidate_components(
     let repository = Arc::from(DynDeviceCertificateRepository::new_box(
         pg.device_certificate_repository::<DraftEligibility>(),
     ));
+    let status = identity::DeviceCandidateStatusState::new(Arc::from(
+        identity::ports::device_certificate::DynDeviceCertificateStatusStore::new_box(
+            pg.device_certificate_status_store::<DraftEligibility>(),
+        ),
+    ));
     let binding = identity::build_device_policy_candidate_binding(
         common.roles,
         common.binding_reads,
@@ -277,7 +295,36 @@ pub fn device_policy_candidate_components(
         facts,
         repository,
     );
-    DevicePolicyCandidateComponents { binding }
+    DevicePolicyCandidateComponents { binding, status }
+}
+
+/// Construct the candidate HTTP capabilities over production-eligible persistence.
+#[must_use]
+pub fn device_policy_production_candidate_components(
+    pg: &PgDomainDeps<caps::Identity>,
+    clock: Arc<dyn Clock>,
+) -> DevicePolicyCandidateComponents {
+    use identity::ports::device_certificate::ProductionEligibility;
+
+    let common = common_identity_services(pg, &clock);
+    let facts = device_resource_fact_pip(pg, Arc::clone(&clock));
+    let repository = Arc::from(DynDeviceCertificateRepository::new_box(
+        pg.device_certificate_repository::<ProductionEligibility>(),
+    ));
+    let status = identity::DeviceCandidateStatusState::new(Arc::from(
+        identity::ports::device_certificate::DynDeviceCertificateStatusStore::new_box(
+            pg.device_certificate_status_store::<ProductionEligibility>(),
+        ),
+    ));
+    let binding = identity::build_device_policy_candidate_binding(
+        common.roles,
+        common.binding_reads,
+        common.policies,
+        clock,
+        facts,
+        repository,
+    );
+    DevicePolicyCandidateComponents { binding, status }
 }
 
 /// Build the listener-security root authorizer without mounting the identity domain.

@@ -579,7 +579,7 @@ fn rule_device_certificate_policy(c: &RepositoryContract) -> Vec<Finding> {
 
     let _ = r25_read_schema(c, R25_POLICY_ID, SCHEMA_KEY_RESPONSE, &mut out);
 
-    let expected_responses = BTreeSet::from([200, 400, 404, 409]);
+    let expected_responses = BTreeSet::from([200, 400, 404, 409, 503]);
     let actual_responses: BTreeSet<u16> = m
         .schemas
         .responses
@@ -679,6 +679,23 @@ fn rule_device_certificate_status(c: &RepositoryContract) -> Vec<Finding> {
             c,
             format!(
                 "contract id={R25_STATUS_ID} {schema_file} activeCommand 禁止 payload，仅允许 payload-free summary"
+            ),
+        ));
+    }
+    let expected_responses = BTreeSet::from([200, 400, 503]);
+    let actual_responses = c
+        .manifest()
+        .schemas
+        .responses
+        .keys()
+        .copied()
+        .map(HttpStatusCode::get)
+        .collect::<BTreeSet<_>>();
+    if actual_responses != expected_responses {
+        out.push(r25_finding(
+            c,
+            format!(
+                "contract id={R25_STATUS_ID} typed response status 必须精确等于 {expected_responses:?}，实为 {actual_responses:?}"
             ),
         ));
     }

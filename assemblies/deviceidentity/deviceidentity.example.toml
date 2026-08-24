@@ -1,0 +1,59 @@
+schemaVersion = 2
+
+[listeners]
+primary = "127.0.0.1:8080"
+internal = "127.0.0.1:8081"
+health = "127.0.0.1:8083"
+requestBudgetMs = 30000
+internalClientSpiffeAllowSet = ["spiffe://rss.invalid/internal-client"]
+trustedProxyCidrs = ["127.0.0.1/32", "::1/128"]
+
+[oidc]
+issuer = "https://issuer.example.invalid"
+audience = "rss-deviceidentity"
+jwksPath = "/var/run/rss/oidc/federated-jwks.json"
+refreshSeconds = 60
+
+[identity]
+tenant = "00000000-0000-4000-8000-000000002117"
+holderId = "deviceidentity-candidate"
+
+[postgres]
+host = "postgres.example.invalid"
+port = 5432
+database = "rss"
+verifyMode = "verify-full"
+caPemPath = "/var/run/rss/ca/postgres.pem"
+
+[mqtt]
+url = "mqtts://mqtt.example.invalid:8883"
+caPemPath = "/var/run/rss/ca/mqtt.pem"
+sessionExpirySeconds = 3600
+brokerAssertionPublicKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[[mqtt.scopes]]
+tenant = "00000000-0000-4000-8000-000000002117"
+device = "00000000-0000-4000-8000-000000002117"
+generation = 1
+
+[vault]
+url = "https://vault.example.invalid"
+mount = "device-pki"
+role = "device"
+caPemPath = "/var/run/rss/ca/vault.pem"
+
+[csr]
+url = "https://csr.example.invalid/internal/v1/device-csr:resolve"
+localSpiffeId = "spiffe://rss.invalid/deviceidentity"
+remoteSpiffeAllowSet = ["spiffe://external.invalid/csr-resolver"]
+maxPemBytes = 65536
+
+[redis]
+url = "rediss://redis.example.invalid:6379"
+caPemPath = "/var/run/rss/ca/redis.pem"
+
+[workers]
+reconcileMs = 30000
+commandRelayMs = 30000
+receiptRelayMs = 30000
+shutdownMs = 30000

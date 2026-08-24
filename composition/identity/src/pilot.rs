@@ -1,4 +1,4 @@
-//! Canonical runtime bundle for the DeviceLatent draft pilot.
+//! Canonical runtime bundle for the DeviceLatent candidate and its test-only draft carrier.
 //!
 //! The bundle is deliberately bound to draft artifact eligibility and the exact PostgreSQL/MQTT
 //! providers selected by the `deviceidentity` assembly. It has no signer, SoftCA, in-memory, or
@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
-use diport::{
-    CertNotAfter, CertScope, CertSerial, Clock, DynManagedResource, ManagedResource, ShutdownError,
-};
+#[cfg(any(test, feature = "test-support"))]
+use diport::{CertNotAfter, CertScope, CertSerial};
+use diport::{Clock, ManagedResource, ShutdownError};
 use eventexec::command::CommandIdempotencyKeyring;
 use eventexec::reconcile::{
     DeviceCertificateSystemProducer, ReconcileConfigError, ReconcileMaxInFlight,
@@ -21,28 +21,36 @@ use eventexec::retry::BackoffPolicy;
 use eventexec::{RelayBudget, RelayConfig, WorkerHealth};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use identity::ports::device_certificate::{
-    ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
-    AuthorizedCertificateArtifact, CertificateArtifactAcquisition, CertificateArtifactError,
-    CertificateArtifactId, CertificateArtifactMaterial as ArtifactBindingMaterial,
-    CertificateArtifactRequest, CertificateArtifactSource, CertificateAttemptAuthority,
-    CertificateAttemptFence, CertificateConditionMutation, CertificatePublicKeyDigest,
-    CertificateReconcileRepository, CertificateReconcileRepositoryError, CertificateReconcileView,
-    CurrentCommandExpiryOutcome, DeletionRequestOutcome, DeviceCertificateCommandTtl,
-    DeviceCertificateReconciler, DeviceIngressRepository, DeviceIngressWrite, DraftEligibility,
-    FencedMutationOutcome, PersistedCertificateArtifactSnapshot, ProviderCertificateCandidate,
-    ReportedStateHash, RotationOutcome,
+    ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactEligibility,
+    CertificateArtifactSource, CertificateAttemptAuthority, CertificateAttemptFence,
+    CertificateConditionMutation, CertificateReconcileRepository,
+    CertificateReconcileRepositoryError, CertificateReconcileView, CurrentCommandExpiryOutcome,
+    DeletionRequestOutcome, DeviceCertificateCommandTtl, DeviceCertificateReconciler,
+    DeviceIngressRepository, DeviceIngressWrite, FencedMutationOutcome,
+    PersistedCertificateArtifactSnapshot, ProductionEligibility, RotationOutcome,
+};
+#[cfg(any(test, feature = "test-support"))]
+use identity::ports::device_certificate::{
+    ArtifactDigest, AuthorizedCertificateArtifact, CertificateArtifactAcquisition,
+    CertificateArtifactError, CertificateArtifactId,
+    CertificateArtifactMaterial as ArtifactBindingMaterial, CertificateArtifactRequest,
+    CertificatePublicKeyDigest, DraftEligibility, ProviderCertificateCandidate, ReportedStateHash,
 };
 use mqtt::{MqttReadiness, MqttSession};
+#[cfg(any(test, feature = "test-support"))]
+use postgres::PgDeviceIdentityDraftRuntime;
 use postgres::{
     PgBrokerAcceptedDeviceOutbox, PgClaimedDeviceOutbox, PgDbReadiness,
-    PgDeviceCertificateRepository, PgDeviceCommandStore, PgDeviceIdentityDraftRuntime,
+    PgDeviceCertificateRepository, PgDeviceCommandStore, PgDeviceIdentityProductionRuntime,
     PgDeviceOutbox, PgDeviceOutboxSettlement, PoolReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::device_mqtt::DeviceMqttPublisher;
+#[cfg(any(test, feature = "test-support"))]
 use crate::encoding::lowercase_hex;
 
 const DEVICE_CERTIFICATE_RECONCILER_ID: &str = "identity.device-certificate";
@@ -51,17 +59,20 @@ const DEVICE_CERTIFICATE_RECONCILER_ID: &str = "identity.device-certificate";
 ///
 /// The seed and terminal expiry are mandatory. The seed is never returned or logged, and the
 /// provider can mint only [`DraftEligibility`].
+#[cfg(any(test, feature = "test-support"))]
 pub struct DraftArtifactSimulator {
     seed: [u8; 32],
     not_after: CertNotAfter,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl std::fmt::Debug for DraftArtifactSimulator {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("DraftArtifactSimulator(<redacted-seed>)")
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl DraftArtifactSimulator {
     /// Construct one deterministic draft provider. There is intentionally no default seed or
     /// clock-derived expiry.
@@ -71,11 +82,13 @@ impl DraftArtifactSimulator {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct DraftArtifactMaterial {
     artifact: Vec<u8>,
     binding: ArtifactBindingMaterial,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl DraftArtifactMaterial {
     fn derive(
         simulator: &DraftArtifactSimulator,
@@ -143,6 +156,7 @@ impl DraftArtifactMaterial {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn draft_digest(
     seed: &[u8; 32],
     purpose: &[u8],
@@ -165,6 +179,7 @@ fn draft_digest(
     digest.finalize().into()
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl CertificateArtifactSource for DraftArtifactSimulator {
     type Eligibility = DraftEligibility;
 
@@ -185,9 +200,9 @@ impl CertificateArtifactSource for DraftArtifactSimulator {
     }
 }
 
-/// Closed readiness levels used by the six-component pilot aggregation.
+/// Closed readiness levels used by runtime component aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PilotComponentReadiness {
+pub enum DeviceIdentityRuntimeComponentReadiness {
     /// The component is actively serving.
     Ready,
     /// The component is live but experienced a retryable failure or saturation.
@@ -196,7 +211,9 @@ pub enum PilotComponentReadiness {
     Unready,
 }
 
-impl PilotComponentReadiness {
+type PilotComponentReadiness = DeviceIdentityRuntimeComponentReadiness;
+
+impl DeviceIdentityRuntimeComponentReadiness {
     const fn severity(self) -> u8 {
         match self {
             Self::Ready => 0,
@@ -230,9 +247,9 @@ impl PilotComponentReadiness {
     }
 }
 
-/// One synchronous readiness snapshot over the exact six pilot components.
+/// One synchronous readiness snapshot over the exact runtime components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceIdentityPilotReadiness {
+pub struct DeviceIdentityRuntimeReadiness {
     postgres: PilotComponentReadiness,
     reconcile: PilotComponentReadiness,
     command_relay: PilotComponentReadiness,
@@ -241,7 +258,7 @@ pub struct DeviceIdentityPilotReadiness {
     ingress: PilotComponentReadiness,
 }
 
-impl DeviceIdentityPilotReadiness {
+impl DeviceIdentityRuntimeReadiness {
     const fn aggregate(components: [PilotComponentReadiness; 6]) -> Self {
         Self {
             postgres: components[0],
@@ -256,7 +273,7 @@ impl DeviceIdentityPilotReadiness {
     /// Worst readiness across PostgreSQL, reconcile, command relay, receipt relay, MQTT, and
     /// ingress. A single unready component fails closed.
     #[must_use]
-    pub const fn overall(self) -> PilotComponentReadiness {
+    pub const fn overall(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.postgres
             .worst(self.reconcile)
             .worst(self.command_relay)
@@ -266,32 +283,32 @@ impl DeviceIdentityPilotReadiness {
     }
 
     #[must_use]
-    pub const fn postgres(self) -> PilotComponentReadiness {
+    pub const fn postgres(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.postgres
     }
 
     #[must_use]
-    pub const fn reconcile(self) -> PilotComponentReadiness {
+    pub const fn reconcile(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.reconcile
     }
 
     #[must_use]
-    pub const fn command_relay(self) -> PilotComponentReadiness {
+    pub const fn command_relay(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.command_relay
     }
 
     #[must_use]
-    pub const fn receipt_relay(self) -> PilotComponentReadiness {
+    pub const fn receipt_relay(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.receipt_relay
     }
 
     #[must_use]
-    pub const fn mqtt(self) -> PilotComponentReadiness {
+    pub const fn mqtt(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.mqtt
     }
 
     #[must_use]
-    pub const fn ingress(self) -> PilotComponentReadiness {
+    pub const fn ingress(self) -> DeviceIdentityRuntimeComponentReadiness {
         self.ingress
     }
 }
@@ -380,15 +397,15 @@ impl DeviceIdentityRelayConfig {
     }
 }
 
-/// Complete pilot configuration. PostgreSQL capabilities are carried by one separate
+/// Complete runtime configuration. PostgreSQL capabilities are carried by one separate
 /// single-origin receipt rather than loose fields in this value.
-pub struct DeviceIdentityPilotConfig {
+pub struct DeviceIdentityRuntimeConfig {
     scheduler: DeviceIdentitySchedulerConfig,
     relays: DeviceIdentityRelayConfig,
     shutdown_timeout: Duration,
 }
 
-impl DeviceIdentityPilotConfig {
+impl DeviceIdentityRuntimeConfig {
     #[must_use]
     pub fn new(
         scheduler: DeviceIdentitySchedulerConfig,
@@ -531,10 +548,15 @@ impl PilotLoopControl {
     }
 }
 
-#[derive(Clone)]
-struct SharedDraftCertificateRepository(Arc<PgDeviceCertificateRepository<DraftEligibility>>);
+struct SharedCertificateRepository<E: ArtifactEligibility>(Arc<PgDeviceCertificateRepository<E>>);
 
-impl CertificateReconcileRepository<DraftEligibility> for SharedDraftCertificateRepository {
+impl<E: ArtifactEligibility> Clone for SharedCertificateRepository<E> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<E: ArtifactEligibility> CertificateReconcileRepository<E> for SharedCertificateRepository<E> {
     async fn load_current_view(
         &self,
         authority: &CertificateAttemptAuthority,
@@ -545,10 +567,8 @@ impl CertificateReconcileRepository<DraftEligibility> for SharedDraftCertificate
     async fn load_artifact_receipts(
         &self,
         fence: &CertificateAttemptFence,
-    ) -> Result<
-        Vec<PersistedCertificateArtifactSnapshot<DraftEligibility>>,
-        CertificateReconcileRepositoryError,
-    > {
+    ) -> Result<Vec<PersistedCertificateArtifactSnapshot<E>>, CertificateReconcileRepositoryError>
+    {
         self.0.load_artifact_receipts(fence).await
     }
 
@@ -572,7 +592,7 @@ impl CertificateReconcileRepository<DraftEligibility> for SharedDraftCertificate
     async fn append_artifact_receipt(
         &self,
         fence: &CertificateAttemptFence,
-        authorization: ArtifactAppendAuthorization<DraftEligibility>,
+        authorization: ArtifactAppendAuthorization<E>,
     ) -> Result<ArtifactAppendOutcome, CertificateReconcileRepositoryError> {
         self.0.append_artifact_receipt(fence, authorization).await
     }
@@ -600,9 +620,9 @@ impl CertificateReconcileRepository<DraftEligibility> for SharedDraftCertificate
     }
 }
 
-impl DeviceIngressRepository<DraftEligibility> for SharedDraftCertificateRepository {
+impl<E: ArtifactEligibility> DeviceIngressRepository<E> for SharedCertificateRepository<E> {
     type Error = deviceloop::DeviceCommandStoreError;
-    type Commit = postgres::PgDeviceIngressCommit<DraftEligibility>;
+    type Commit = postgres::PgDeviceIngressCommit<E>;
 
     async fn commit(&self, input: DeviceIngressWrite) -> Result<Self::Commit, Self::Error> {
         self.0.commit(input).await
@@ -617,8 +637,8 @@ impl Drop for LoopStoppedGuard {
     }
 }
 
-async fn run_ingress_loop(
-    repository: SharedDraftCertificateRepository,
+async fn run_ingress_loop<E: ArtifactEligibility>(
+    repository: SharedCertificateRepository<E>,
     mqtt: Arc<MqttSession>,
     settlement_timeout: Duration,
     cancellation: CancellationToken,
@@ -648,8 +668,8 @@ enum LoopStep {
     Stop,
 }
 
-async fn ingress_step(
-    repository: &SharedDraftCertificateRepository,
+async fn ingress_step<E: ArtifactEligibility>(
+    repository: &SharedCertificateRepository<E>,
     mqtt: &MqttSession,
     settlement_timeout: Duration,
     cancellation: &CancellationToken,
@@ -707,8 +727,8 @@ async fn next_ingress_event(
     }
 }
 
-async fn handle_ingress_delivery(
-    repository: &SharedDraftCertificateRepository,
+async fn handle_ingress_delivery<E: ArtifactEligibility>(
+    repository: &SharedCertificateRepository<E>,
     mqtt: &MqttSession,
     settlement_timeout: Duration,
     delivery: Result<mqtt::AuthenticatedDeviceDelivery, mqtt::MqttSessionError>,
@@ -788,8 +808,8 @@ async fn wait_for_admission_change(
     }
 }
 
-async fn process_ingress(
-    repository: &SharedDraftCertificateRepository,
+async fn process_ingress<E: ArtifactEligibility>(
+    repository: &SharedCertificateRepository<E>,
     delivery: mqtt::AuthenticatedDeviceDelivery,
 ) -> Result<(), IngressFailure> {
     let prepared = match identity::ports::device_certificate::prepare_device_ingress(&delivery) {
@@ -1066,11 +1086,11 @@ fn log_relay_failure(reason: &'static str) {
     );
 }
 
-/// Canonical owner of the draft pilot workers, admission controls, readiness, and shutdown.
-struct DeviceIdentityPilot {
+/// Canonical owner of candidate workers, admission controls, readiness, and shutdown.
+struct DeviceIdentityRuntime<E: ArtifactEligibility> {
     postgres_readiness: Arc<PgDbReadiness>,
     mqtt: Arc<MqttSession>,
-    _command_store: Arc<PgDeviceCommandStore<DraftEligibility>>,
+    _command_store: Arc<PgDeviceCommandStore<E>>,
     reconcile_health: Arc<WorkerHealth>,
     reconcile_control: ReconcileWorkerControl,
     ingress_control: PilotLoopControl,
@@ -1082,16 +1102,16 @@ struct DeviceIdentityPilot {
     shutdown_timeout: Duration,
 }
 
-/// One started pilot before its read handle and move-only adoption receipt are separated.
-pub struct DeviceIdentityPilotLifecycle {
-    handle: DeviceIdentityPilotHandle,
-    adoption: DeviceIdentityPilotAdoption,
+/// One started runtime before its read handle and move-only adoption receipt are separated.
+pub struct DeviceIdentityLifecycle<E: ArtifactEligibility> {
+    handle: DeviceIdentityHandle<E>,
+    adoption: DeviceIdentityAdoption<E>,
 }
 
-/// Cloneable, read-only view of one started pilot.
+/// Cloneable, read-only view of one started runtime.
 #[derive(Clone)]
-pub struct DeviceIdentityPilotHandle {
-    pilot: Arc<DeviceIdentityPilot>,
+pub struct DeviceIdentityHandle<E: ArtifactEligibility> {
+    pilot: Arc<DeviceIdentityRuntime<E>>,
 }
 
 /// Test-only move guard proving one pilot loop acknowledged pause with zero in-flight work.
@@ -1136,23 +1156,34 @@ async fn pause_pilot_loop_control_for_test(control: PilotLoopControl) -> PilotLo
     guard
 }
 
-/// Move-only authority to adopt one started pilot into generated domain lifecycle output.
-pub struct DeviceIdentityPilotAdoption {
-    pilot: Option<Arc<DeviceIdentityPilot>>,
+/// Move-only authority to adopt one started runtime into generated domain lifecycle output.
+pub struct DeviceIdentityAdoption<E: ArtifactEligibility> {
+    pilot: Option<Arc<DeviceIdentityRuntime<E>>>,
 }
 
-impl DeviceIdentityPilotLifecycle {
+#[cfg(any(test, feature = "test-support"))]
+pub type DeviceIdentityPilotLifecycle = DeviceIdentityLifecycle<DraftEligibility>;
+#[cfg(any(test, feature = "test-support"))]
+pub type DeviceIdentityPilotHandle = DeviceIdentityHandle<DraftEligibility>;
+#[cfg(any(test, feature = "test-support"))]
+pub type DeviceIdentityPilotAdoption = DeviceIdentityAdoption<DraftEligibility>;
+pub type DeviceIdentityCandidateLifecycle = DeviceIdentityLifecycle<ProductionEligibility>;
+pub type DeviceIdentityCandidateHandle = DeviceIdentityHandle<ProductionEligibility>;
+pub type DeviceIdentityCandidateAdoption = DeviceIdentityAdoption<ProductionEligibility>;
+
+#[cfg(any(test, feature = "test-support"))]
+impl DeviceIdentityLifecycle<DraftEligibility> {
     /// Start the pilot and seal it into the only lifecycle receipt accepted by the assembly.
     ///
     /// Omitting authenticated MQTT is a compile-time error; there is no optional transport path.
     ///
     /// ```compile_fail
-    /// use identity_composition::{DeviceIdentityPilotConfig, DeviceIdentityPilotLifecycle, DraftArtifactSimulator};
+    /// use identity_composition::{DeviceIdentityRuntimeConfig, DeviceIdentityPilotLifecycle, DraftArtifactSimulator};
     ///
     /// fn missing_mqtt(
     ///     postgres: postgres::PgDeviceIdentityDraftRuntime,
     ///     simulator: DraftArtifactSimulator,
-    ///     config: DeviceIdentityPilotConfig,
+    ///     config: DeviceIdentityRuntimeConfig,
     /// ) {
     ///     let _ = DeviceIdentityPilotLifecycle::start(postgres, simulator, config);
     /// }
@@ -1161,55 +1192,134 @@ impl DeviceIdentityPilotLifecycle {
         postgres: PgDeviceIdentityDraftRuntime,
         artifact_source: DraftArtifactSimulator,
         mqtt: Arc<MqttSession>,
-        config: DeviceIdentityPilotConfig,
-    ) -> Result<Self, DeviceIdentityPilotStartError> {
-        let pilot = Arc::new(DeviceIdentityPilot::start(
+        config: DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityRuntimeStartError> {
+        let pilot = Arc::new(DeviceIdentityRuntime::start(
             postgres,
             artifact_source,
             mqtt,
             config,
         )?);
         Ok(Self {
-            handle: DeviceIdentityPilotHandle {
+            handle: DeviceIdentityHandle {
                 pilot: Arc::clone(&pilot),
             },
-            adoption: DeviceIdentityPilotAdoption { pilot: Some(pilot) },
+            adoption: DeviceIdentityAdoption { pilot: Some(pilot) },
         })
     }
+}
 
-    /// Split the started pilot into read-only observation and one adoption authority.
+impl<E: ArtifactEligibility> DeviceIdentityLifecycle<E> {
     #[must_use]
-    pub fn into_parts(self) -> (DeviceIdentityPilotHandle, DeviceIdentityPilotAdoption) {
+    pub fn into_parts(self) -> (DeviceIdentityHandle<E>, DeviceIdentityAdoption<E>) {
         (self.handle, self.adoption)
     }
 }
 
-impl DeviceIdentityPilotAdoption {
+impl DeviceIdentityLifecycle<ProductionEligibility> {
+    pub fn start<R>(
+        postgres: PgDeviceIdentityProductionRuntime,
+        artifact_source: super::ExternalPkiArtifactSource<R>,
+        mqtt: Arc<MqttSession>,
+        config: DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityRuntimeStartError>
+    where
+        R: diport::ExternalCsrResolver + Send + Sync + 'static,
+    {
+        let (repository, command_store, revocations, reconcile_store, readiness) =
+            postgres.into_parts();
+        Self::start_production_parts(
+            repository,
+            command_store,
+            revocations,
+            reconcile_store,
+            readiness,
+            artifact_source,
+            mqtt,
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_production_parts<S>(
+        repository: PgDeviceCertificateRepository<ProductionEligibility>,
+        command_store: PgDeviceCommandStore<ProductionEligibility>,
+        revocations: postgres::PgRevocationStore,
+        reconcile_store: postgres::PgReconcileStore,
+        readiness: Arc<PgDbReadiness>,
+        artifact_source: S,
+        mqtt: Arc<MqttSession>,
+        config: DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityRuntimeStartError>
+    where
+        S: CertificateArtifactSource<Eligibility = ProductionEligibility> + Send + Sync + 'static,
+    {
+        let pilot = Arc::new(DeviceIdentityRuntime::start_from_parts(
+            repository,
+            command_store,
+            revocations,
+            reconcile_store,
+            readiness,
+            artifact_source,
+            mqtt,
+            config,
+        )?);
+        Ok(Self {
+            handle: DeviceIdentityHandle {
+                pilot: Arc::clone(&pilot),
+            },
+            adoption: DeviceIdentityAdoption { pilot: Some(pilot) },
+        })
+    }
+}
+
+impl<E: ArtifactEligibility> DeviceIdentityAdoption<E> {
     /// Consume the only adoption authority into the generated domain's lifecycle output.
     pub fn into_domain_output(mut self) -> anyhow::Result<bootstrap::DomainModuleResult> {
-        let name = primitives::ProbeName::parse("deviceidentity-pilot")?;
+        let name = primitives::ProbeName::parse("deviceidentity-runtime")?;
         let pilot = self.pilot.take().ok_or_else(|| {
             anyhow::anyhow!("deviceidentity adoption authority was already consumed")
         })?;
-        let resource = PilotManagedResource {
+        let resource = DeviceIdentityManagedResource {
             pilot: Arc::clone(&pilot),
             cleanup_armed: AtomicBool::new(true),
         };
         Ok(bootstrap::DomainModuleResult::from_parts(
             [(
                 name.clone(),
-                Box::new(PilotReadinessProbe { name, pilot }) as _,
+                Box::new(DeviceIdentityReadinessProbe { name, pilot }) as _,
             )],
             [],
-            [bootstrap::WorkerSpec::observational_deferred(
-                "composition.identity.src.pilot.01",
-                move |_token| DynManagedResource::new_box(resource),
+            [bootstrap::WorkerSpec::managed_observational_deferred(
+                "composition.identity.src.runtime.01",
+                move |token| {
+                    let shutdown_timeout = resource.pilot.shutdown_timeout;
+                    let pilot = Arc::clone(&resource.pilot);
+                    let (start, _) = diport::ManagedTask::prepare(
+                        "deviceidentity-runtime-supervisor",
+                        shutdown_timeout,
+                    );
+                    start
+                        .spawn(token, move |token| async move {
+                            tokio::select! {
+                                () = token.cancelled() => ManagedResource::shutdown(&resource).await,
+                                exit = pilot.wait_required_worker_exit() => {
+                                    tracing::error!(worker = exit.0, exit = ?exit.1, "required deviceidentity worker exited");
+                                    let _ = ManagedResource::shutdown(&resource).await;
+                                    Err(ShutdownError::new(std::io::Error::other(
+                                        "required deviceidentity worker exited",
+                                    )))
+                                }
+                            }
+                        })
+                        .into_registration()
+                },
             )],
         ))
     }
 
     /// Cleanup-only path used when generated domain composition fails before lifecycle adoption.
-    pub async fn shutdown_unadopted(mut self) -> Result<(), DeviceIdentityPilotShutdownError> {
+    pub async fn shutdown_unadopted(mut self) -> Result<(), DeviceIdentityRuntimeShutdownError> {
         let Some(pilot) = self.pilot.take() else {
             return Ok(());
         };
@@ -1219,7 +1329,7 @@ impl DeviceIdentityPilotAdoption {
     }
 }
 
-impl Drop for DeviceIdentityPilotAdoption {
+impl<E: ArtifactEligibility> Drop for DeviceIdentityAdoption<E> {
     fn drop(&mut self) {
         let Some(pilot) = self.pilot.take() else {
             return;
@@ -1228,9 +1338,9 @@ impl Drop for DeviceIdentityPilotAdoption {
     }
 }
 
-impl DeviceIdentityPilotHandle {
+impl<E: ArtifactEligibility> DeviceIdentityHandle<E> {
     #[must_use]
-    pub fn readiness(&self) -> DeviceIdentityPilotReadiness {
+    pub fn readiness(&self) -> DeviceIdentityRuntimeReadiness {
         self.pilot.readiness()
     }
 
@@ -1259,14 +1369,14 @@ impl DeviceIdentityPilotHandle {
     }
 }
 
-struct PilotManagedResource {
-    pilot: Arc<DeviceIdentityPilot>,
+struct DeviceIdentityManagedResource<E: ArtifactEligibility> {
+    pilot: Arc<DeviceIdentityRuntime<E>>,
     cleanup_armed: AtomicBool,
 }
 
-impl ManagedResource for PilotManagedResource {
+impl<E: ArtifactEligibility> ManagedResource for DeviceIdentityManagedResource<E> {
     fn name(&self) -> &str {
-        "deviceidentity-pilot"
+        "deviceidentity-runtime"
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
@@ -1286,7 +1396,7 @@ impl ManagedResource for PilotManagedResource {
     }
 }
 
-impl Drop for PilotManagedResource {
+impl<E: ArtifactEligibility> Drop for DeviceIdentityManagedResource<E> {
     fn drop(&mut self) {
         if self.cleanup_armed.swap(false, Ordering::AcqRel) {
             spawn_pilot_cleanup(
@@ -1297,7 +1407,10 @@ impl Drop for PilotManagedResource {
     }
 }
 
-fn spawn_pilot_cleanup(pilot: Arc<DeviceIdentityPilot>, message: &'static str) {
+fn spawn_pilot_cleanup<E: ArtifactEligibility>(
+    pilot: Arc<DeviceIdentityRuntime<E>>,
+    message: &'static str,
+) {
     pilot.pause_admission();
     pilot.cancellation.cancel();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -1309,8 +1422,8 @@ fn spawn_pilot_cleanup(pilot: Arc<DeviceIdentityPilot>, message: &'static str) {
     }
 }
 
-async fn shutdown_unadopted_pilot(
-    pilot: &Arc<DeviceIdentityPilot>,
+async fn shutdown_unadopted_pilot<E: ArtifactEligibility>(
+    pilot: &Arc<DeviceIdentityRuntime<E>>,
 ) -> Result<(), PilotShutdownFailure> {
     shutdown_within_pilot_cleanup_budget(pilot.shutdown_timeout, pilot.shutdown()).await
 }
@@ -1334,12 +1447,12 @@ where
 #[error("deviceidentity pilot cleanup deadline exceeded")]
 struct PilotCleanupDeadline;
 
-struct PilotReadinessProbe {
+struct DeviceIdentityReadinessProbe<E: ArtifactEligibility> {
     name: primitives::ProbeName,
-    pilot: Arc<DeviceIdentityPilot>,
+    pilot: Arc<DeviceIdentityRuntime<E>>,
 }
 
-impl bootstrap::HealthProbe for PilotReadinessProbe {
+impl<E: ArtifactEligibility> bootstrap::HealthProbe for DeviceIdentityReadinessProbe<E> {
     fn check(&self) -> primitives::HealthCheck {
         let readiness = self.pilot.readiness().overall();
         primitives::HealthCheck::new(
@@ -1350,36 +1463,36 @@ impl bootstrap::HealthProbe for PilotReadinessProbe {
     }
 }
 
-impl Drop for DeviceIdentityPilot {
+impl<E: ArtifactEligibility> Drop for DeviceIdentityRuntime<E> {
     fn drop(&mut self) {
         self.pause_admission();
         self.cancellation.cancel();
     }
 }
 
-/// Fail-fast pilot construction error.
+/// Fail-fast runtime construction error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum DeviceIdentityPilotStartError {
-    #[error("deviceidentity pilot requires an active Tokio runtime")]
+pub enum DeviceIdentityRuntimeStartError {
+    #[error("deviceidentity runtime requires an active Tokio runtime")]
     MissingRuntime,
     #[error(
-        "deviceidentity pilot holder identity must be non-empty without surrounding whitespace"
+        "deviceidentity runtime holder identity must be non-empty without surrounding whitespace"
     )]
     InvalidHolderIdentity,
-    #[error("deviceidentity pilot shutdown timeout must be non-zero")]
+    #[error("deviceidentity runtime shutdown timeout must be non-zero")]
     InvalidShutdownTimeout,
     #[error("deviceidentity PostgreSQL stores are not ready")]
     PostgresNotReady,
     #[error("deviceidentity MQTT session is not authenticated and ready")]
     MqttNotReady,
-    #[error("deviceidentity pilot reconcile configuration is invalid")]
+    #[error("deviceidentity runtime reconcile configuration is invalid")]
     Reconcile(#[from] ReconcileConfigError),
 }
 
 /// Bounded shutdown failure. Admission remains closed after either outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum DeviceIdentityPilotShutdownError {
-    #[error("deviceidentity pilot worker terminated abnormally")]
+pub enum DeviceIdentityRuntimeShutdownError {
+    #[error("deviceidentity runtime worker terminated abnormally")]
     WorkerFailed,
     #[error("deviceidentity MQTT transport shutdown failed")]
     Transport,
@@ -1387,17 +1500,17 @@ pub enum DeviceIdentityPilotShutdownError {
 
 #[derive(Debug, thiserror::Error)]
 enum PilotShutdownFailure {
-    #[error("deviceidentity pilot worker terminated abnormally")]
+    #[error("deviceidentity runtime worker terminated abnormally")]
     Worker(#[source] ShutdownError),
     #[error("deviceidentity MQTT transport shutdown failed")]
     Transport(#[source] ShutdownError),
 }
 
 impl PilotShutdownFailure {
-    fn into_public(self) -> DeviceIdentityPilotShutdownError {
+    fn into_public(self) -> DeviceIdentityRuntimeShutdownError {
         match self {
-            Self::Worker(_) => DeviceIdentityPilotShutdownError::WorkerFailed,
-            Self::Transport(_) => DeviceIdentityPilotShutdownError::Transport,
+            Self::Worker(_) => DeviceIdentityRuntimeShutdownError::WorkerFailed,
+            Self::Transport(_) => DeviceIdentityRuntimeShutdownError::Transport,
         }
     }
 
@@ -1465,7 +1578,8 @@ fn latched_transport_shutdown_error(kind: diport::ShutdownErrorKind) -> Shutdown
     }
 }
 
-impl DeviceIdentityPilot {
+#[cfg(any(test, feature = "test-support"))]
+impl DeviceIdentityRuntime<DraftEligibility> {
     /// Start the canonical pilot from the single-origin PostgreSQL receipt, deterministic draft
     /// provider, authenticated MQTT provider, and one complete runtime configuration.
     ///
@@ -1473,26 +1587,53 @@ impl DeviceIdentityPilot {
         postgres: PgDeviceIdentityDraftRuntime,
         artifact_source: DraftArtifactSimulator,
         mqtt: Arc<MqttSession>,
-        config: DeviceIdentityPilotConfig,
-    ) -> Result<Self, DeviceIdentityPilotStartError> {
-        tokio::runtime::Handle::try_current()
-            .map_err(|_| DeviceIdentityPilotStartError::MissingRuntime)?;
-        if !valid_holder_identity(&config.scheduler.holder_id) {
-            return Err(DeviceIdentityPilotStartError::InvalidHolderIdentity);
-        }
-        if config.shutdown_timeout.is_zero() {
-            return Err(DeviceIdentityPilotStartError::InvalidShutdownTimeout);
-        }
+        config: DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityRuntimeStartError> {
         let (repository, command_store, revocations, reconcile_store, postgres_readiness) =
             postgres.into_parts();
+        Self::start_from_parts(
+            repository,
+            command_store,
+            revocations,
+            reconcile_store,
+            postgres_readiness,
+            artifact_source,
+            mqtt,
+            config,
+        )
+    }
+}
+
+impl<E: ArtifactEligibility> DeviceIdentityRuntime<E> {
+    #[allow(clippy::too_many_arguments)]
+    fn start_from_parts<S>(
+        repository: PgDeviceCertificateRepository<E>,
+        command_store: PgDeviceCommandStore<E>,
+        revocations: postgres::PgRevocationStore,
+        reconcile_store: postgres::PgReconcileStore,
+        postgres_readiness: Arc<PgDbReadiness>,
+        artifact_source: S,
+        mqtt: Arc<MqttSession>,
+        config: DeviceIdentityRuntimeConfig,
+    ) -> Result<Self, DeviceIdentityRuntimeStartError>
+    where
+        S: CertificateArtifactSource<Eligibility = E> + Send + Sync + 'static,
+    {
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| DeviceIdentityRuntimeStartError::MissingRuntime)?;
+        if !valid_holder_identity(&config.scheduler.holder_id) {
+            return Err(DeviceIdentityRuntimeStartError::InvalidHolderIdentity);
+        }
+        if config.shutdown_timeout.is_zero() {
+            return Err(DeviceIdentityRuntimeStartError::InvalidShutdownTimeout);
+        }
         if !matches!(postgres_readiness.snapshot(), PoolReadiness::Ready) {
-            return Err(DeviceIdentityPilotStartError::PostgresNotReady);
+            return Err(DeviceIdentityRuntimeStartError::PostgresNotReady);
         }
         if !matches!(mqtt.readiness(), MqttReadiness::Ready { .. }) {
-            return Err(DeviceIdentityPilotStartError::MqttNotReady);
+            return Err(DeviceIdentityRuntimeStartError::MqttNotReady);
         }
-
-        let DeviceIdentityPilotConfig {
+        let DeviceIdentityRuntimeConfig {
             scheduler,
             relays,
             shutdown_timeout,
@@ -1518,8 +1659,7 @@ impl DeviceIdentityPilot {
             receipt_relay,
             relay_budget,
         } = relays;
-
-        let repository = SharedDraftCertificateRepository(Arc::new(repository));
+        let repository = SharedCertificateRepository(Arc::new(repository));
         let reconciler = DeviceCertificateReconciler::new(
             repository.clone(),
             Arc::new(artifact_source),
@@ -1637,13 +1777,13 @@ impl DeviceIdentityPilot {
 
     /// Read the exact six component states and return their fail-closed aggregate.
     #[must_use]
-    fn readiness(&self) -> DeviceIdentityPilotReadiness {
+    fn readiness(&self) -> DeviceIdentityRuntimeReadiness {
         let reconcile = if self.reconcile_control.is_paused() {
             PilotComponentReadiness::Unready
         } else {
             worker_readiness(&self.reconcile_health)
         };
-        DeviceIdentityPilotReadiness::aggregate([
+        DeviceIdentityRuntimeReadiness::aggregate([
             postgres_readiness(self.postgres_readiness.snapshot()),
             reconcile,
             self.command_relay_control.readiness(),
@@ -1665,6 +1805,22 @@ impl DeviceIdentityPilot {
         self.reconcile_control.pause();
         self.command_relay_control.pause();
         self.receipt_relay_control.pause();
+    }
+
+    async fn wait_required_worker_exit(&self) -> (String, diport::TaskExit) {
+        let mut waits = FuturesUnordered::new();
+        for task in &self.tasks {
+            let status = task.status();
+            waits.push(async move {
+                let name = status.name().to_owned();
+                let exit = status.wait_stopped().await;
+                (name, exit)
+            });
+        }
+        waits
+            .next()
+            .await
+            .unwrap_or_else(|| unreachable!("deviceidentity runtime has required workers"))
     }
 
     /// Stop admission, drain attempts and publications, then stop workers and MQTT within bounds.
@@ -1699,7 +1855,7 @@ where
     })
 }
 
-async fn wait_pilot_drain(pilot: &DeviceIdentityPilot) {
+async fn wait_pilot_drain<E: ArtifactEligibility>(pilot: &DeviceIdentityRuntime<E>) {
     tokio::join!(
         pilot.ingress_control.wait_drained(),
         pilot.reconcile_control.wait_drained(),
@@ -1871,19 +2027,19 @@ mod tests {
 
     #[test]
     fn readiness_is_the_worst_of_exactly_six_components() {
-        let ready = DeviceIdentityPilotReadiness::aggregate([PilotComponentReadiness::Ready; 6]);
+        let ready = DeviceIdentityRuntimeReadiness::aggregate([PilotComponentReadiness::Ready; 6]);
         assert_eq!(ready.overall(), PilotComponentReadiness::Ready);
 
         for index in 0..6 {
             let mut components = [PilotComponentReadiness::Ready; 6];
             components[index] = PilotComponentReadiness::Degraded;
             assert_eq!(
-                DeviceIdentityPilotReadiness::aggregate(components).overall(),
+                DeviceIdentityRuntimeReadiness::aggregate(components).overall(),
                 PilotComponentReadiness::Degraded
             );
             components[index] = PilotComponentReadiness::Unready;
             assert_eq!(
-                DeviceIdentityPilotReadiness::aggregate(components).overall(),
+                DeviceIdentityRuntimeReadiness::aggregate(components).overall(),
                 PilotComponentReadiness::Unready
             );
         }
@@ -2065,15 +2221,16 @@ mod tests {
     #[test]
     fn canonical_bundle_is_send_sync_and_has_one_exact_start_signature() {
         static_assertions::assert_impl_all!(DraftArtifactSimulator: Send, Sync);
-        static_assertions::assert_impl_all!(DeviceIdentityPilot: Send, Sync);
+        static_assertions::assert_impl_all!(DeviceIdentityRuntime<DraftEligibility>: Send, Sync);
 
         fn start(
             postgres: PgDeviceIdentityDraftRuntime,
             simulator: DraftArtifactSimulator,
             mqtt: Arc<MqttSession>,
-            config: DeviceIdentityPilotConfig,
-        ) -> Result<DeviceIdentityPilot, DeviceIdentityPilotStartError> {
-            DeviceIdentityPilot::start(postgres, simulator, mqtt, config)
+            config: DeviceIdentityRuntimeConfig,
+        ) -> Result<DeviceIdentityRuntime<DraftEligibility>, DeviceIdentityRuntimeStartError>
+        {
+            DeviceIdentityRuntime::start(postgres, simulator, mqtt, config)
         }
         let _ = start;
     }

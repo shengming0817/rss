@@ -754,16 +754,17 @@ impl<E: ArtifactEligibility> PersistedCertificateArtifactSnapshot<E> {
 /// Domain-shaped artifact dependency slot with one statically selected sealed eligibility.
 /// `diport::Signer` cannot be substituted accidentally, and draft/production providers remain
 /// incompatible through the associated marker type.
-#[allow(async_fn_in_trait)]
 pub trait CertificateArtifactSource: Send + Sync {
     /// Eligibility selected by this provider for its entire lifetime.
     type Eligibility: ArtifactEligibility;
 
     /// Acquire an already verified and fully bound artifact.
-    async fn acquire(
+    fn acquire(
         &self,
         request: CertificateArtifactAcquisition,
-    ) -> Result<AuthorizedCertificateArtifact<Self::Eligibility>, CertificateArtifactError>;
+    ) -> impl std::future::Future<
+        Output = Result<AuthorizedCertificateArtifact<Self::Eligibility>, CertificateArtifactError>,
+    > + Send;
 }
 
 #[cfg(test)]

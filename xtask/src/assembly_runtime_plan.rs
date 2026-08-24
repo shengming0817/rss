@@ -145,7 +145,7 @@ fn compiler_input(
 fn listener_auth(assembly: &str, kind: AssemblyListenerKind) -> Result<ListenerAuth> {
     match (assembly, kind) {
         (_, AssemblyListenerKind::Health) => Ok(ListenerAuth::NoAuth),
-        ("runtime", AssemblyListenerKind::Internal) => Ok(ListenerAuth::Mtls),
+        ("runtime" | "deviceidentity", AssemblyListenerKind::Internal) => Ok(ListenerAuth::Mtls),
         (
             "runtime" | "identityaudit",
             AssemblyListenerKind::Primary | AssemblyListenerKind::Admin,
@@ -153,6 +153,7 @@ fn listener_auth(assembly: &str, kind: AssemblyListenerKind) -> Result<ListenerA
         ("settingsonly", AssemblyListenerKind::Primary | AssemblyListenerKind::Admin) => {
             Ok(ListenerAuth::FederatedAccessToken)
         }
+        ("deviceidentity", AssemblyListenerKind::Primary) => Ok(ListenerAuth::FederatedAccessToken),
         _ => bail!(
             "assembly `{assembly}` listener `{}` 没有闭合 RuntimePlan auth policy",
             kind.as_str()

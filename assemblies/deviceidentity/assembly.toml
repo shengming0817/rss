@@ -1,12 +1,23 @@
 schemaVersion = 2
 name = "deviceidentity"
-profile = "demo"
+profile = "production"
 domains = ["identity"]
-topology = "demo"
+topology = "durable-isolated"
 typedDomainInputs = true
 frameworkContracts = []
 workflowActivations = []
-listeners = []
+
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+
+[[listeners]]
+kind = "internal"
+domains = []
+
+[[listeners]]
+kind = "health"
+domains = []
 
 [[diportProviders]]
 id = "device-certificate-store"
@@ -17,7 +28,7 @@ requiredFeatures = ["domain-identity"]
 consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
-purpose = "draft-device-certificate-persistence"
+purpose = "production-device-certificate-persistence"
 outputs = ["probes"]
 
 [[diportProviders]]
@@ -29,19 +40,81 @@ requiredFeatures = ["domain-identity"]
 consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
-purpose = "draft-device-command-and-outbox-persistence"
+purpose = "production-device-command-and-outbox-persistence"
 outputs = ["probes", "workers"]
 
 [[diportProviders]]
-id = "device-draft-artifact-source"
+id = "device-production-artifact-source"
 port = "identity::CertificateArtifactSource"
-provider = "identity_composition::DraftArtifactSimulator"
+provider = "identity_composition::ExternalPkiArtifactSource"
 providerCrate = "identity-composition"
 consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
-purpose = "production-ineligible-deterministic-artifacts"
+purpose = "receipt-bound-external-csr-vault-signing"
 outputs = []
+
+[[diportProviders]]
+id = "external-csr-resolver"
+port = "diport::ExternalCsrResolver"
+provider = "httpd::SpiffeMtlsExternalCsrResolver"
+providerCrate = "httpd"
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "read-only-external-csr-evidence"
+outputs = ["probes", "resources"]
+
+[[diportProviders]]
+id = "vault-external-pki"
+port = "diport::ExternalPkiProviderClosure"
+provider = "vault::VaultExternalPkiProviderClosure"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "production-csr-signing"
+outputs = ["probes", "resources"]
+
+[[diportProviders]]
+id = "listener-pdp"
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "federated-device-policy-authentication"
+outputs = ["probes", "resources"]
+
+[[diportProviders]]
+id = "auth-audit-sink"
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+requiredFeatures = ["auth-audit-sink"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "durable-http-auth-decision-audit"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
+purpose = "pre-auth-gcra-with-startup-self-check"
+outputs = []
+
 
 [[diportProviders]]
 id = "device-mqtt-session"

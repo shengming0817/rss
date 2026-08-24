@@ -46,6 +46,8 @@ tokio-rustls = { workspace = true }
 tower = { workspace = true }
 http-body = { workspace = true }
 metrics = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -58,3 +60,5 @@ tracewiretest = { path = "../../crates/tracewiretest" }
 metrics-exporter-prometheus = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
+ids = { path = "../../crates/ids" }
+rss-request-context = { workspace = true }

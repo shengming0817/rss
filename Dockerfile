@@ -97,6 +97,23 @@ COPY --from=identityaudit-builder /app/target/release/identityaudit-server /usr/
 COPY --from=identityaudit-builder /app/assemblies/identityaudit/config.schema.json /usr/share/rss/identityaudit/config.schema.json
 ENTRYPOINT ["/usr/local/bin/identityaudit-server"]
 
+# deviceidentity candidate: immutable application artifact only; delivery owns registry provenance.
+FROM chef AS deviceidentity-builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json --package deviceidentity --bin deviceidentity-server
+COPY . .
+ARG GIT_SHA
+ARG BUILD_DATE
+RUN test -n "$GIT_SHA" && printf '%s' "$GIT_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+    && test -n "$BUILD_DATE" && printf '%s' "$BUILD_DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+RUN cargo build --release --locked --package deviceidentity --bin deviceidentity-server
+RUN strip target/release/deviceidentity-server
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS deviceidentity-runtime
+COPY --from=deviceidentity-builder /app/target/release/deviceidentity-server /usr/local/bin/deviceidentity-server
+COPY --from=deviceidentity-builder /app/assemblies/deviceidentity/config.schema.json /usr/share/rss/deviceidentity/config.schema.json
+ENTRYPOINT ["/usr/local/bin/deviceidentity-server"]
+
 # ── runtime：distroless/cc 非 root，仅含 server ─────────────────────────────────────────────────
 # 保持最后 stage，确保普通 `docker build .` 的默认镜像语义不变。
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime

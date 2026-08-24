@@ -193,7 +193,7 @@ profile identity、dependency closure、provider capability、typed config 与 r
 |------------------|---------------------|-------------------------|----------|--------------|
 | `core` | `assemblies/runtime` | `server::server` / Docker `runtime` target | hardening-authorized scope；artifact 仍为 candidate，当前 runtime 尚未形成 core-only closure | 2026-08-20 amendment 明列两项 candidate evidence；first-green 前尚无 profile canonical journey，legacy runtime smoke 只作迁移 evidence |
 | `eventing` | `assemblies/runtime` | `server::server` / Docker `runtime` target | hardening-authorized scope；artifact 仍为 candidate | 2026-08-20 amendment 明列两项 candidate evidence；first-green 前尚无 profile canonical journey，SettingsOnly evidence 是迁移来源而非 eventing owner |
-| `device-security` | `assemblies/deviceidentity`（原地演进） | 预留 candidate identity：`deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime`；当前均不存在 | candidate scope；当前 assembly 仍 compile-only draft pilot | 零 T3；无 hardening trigger，不得登记 Evidence ID/selector/journey |
+| `device-security` | `assemblies/deviceidentity`（原地演进） | 已物化 candidate identity：`deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime` | production-typed candidate assembly；六契约仍 Draft，profile selection 仍拒绝 candidate | 零 T3；无 hardening trigger，不得登记 Evidence ID/selector/journey |
 
 `core` 与 `eventing` 可以复用同一 release image，但必须各自通过闭值 profile configuration/plan 证明依赖闭包；不能以同一
 binary/image 存在推导两个 profile 均已激活。`identityaudit` 与 `settingsonly` 不映射为 official profile artifact。
@@ -299,7 +299,7 @@ target、case、fixture、service 或 image。
 | 2 | `core` profile 的 config、composition、lifecycle、diagnostic 与 production join 闭环 | provider conformance、assembly identity、readiness/drain/restart T3 |
 | 3 | `eventing` profile 的 L2 producer/consumer/recovery 闭环 | LocalTx/outbox/inbox T2、broker/process join T3 |
 | 4a | `eventing` 已接纳的真实 L3 value stream | primitive correctness 保持 T2；只有独立接纳的 production join hazard 可进入 `AcceptedValueStreamJoin` T3 |
-| 4b（candidate scope） | `device-security` L4/zero-trust slice | 按 ADR-028 只允许最低充分 T1/T2；当前 compile-only pilot 不构成 reserved binary/image 的实现，任何 T3 仍需 hardening trigger 与独立 issue/PR |
+| 4b（candidate scope） | `device-security` L4/zero-trust slice | #2117 已物化 binary/image/config/provider/runtime 与最低充分 T1/T2；它仍不是 supported artifact、profile activation 或 production T3，任何 T3 仍需 hardening trigger 与独立 issue/PR |
 
 实施跟踪采用一个 Epic 与可独立交付的 PBI；默认不建立 Feature 层。每个 PBI 对应一个 primary capability owner、一个
 可验证 outcome 和一个 PR 级变更闭包。`core` T3、`eventing` T3 与任何后续条件 T3 分别是独立 issue/

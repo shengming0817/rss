@@ -904,6 +904,260 @@ impl<'de> ::serde::Deserialize<'de> for IdentityDeviceCertificatePolicyPutPolicy
             })
     }
 }
+///`IdentityDeviceCertificatePolicyPutProviderUnavailableError`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutProviderUnavailableError",
+///  "type": "object",
+///  "required": [
+///    "code",
+///    "details",
+///    "message",
+///    "requestId",
+///    "retryable"
+///  ],
+///  "properties": {
+///    "code": {
+///      "type": "string",
+///      "enum": [
+///        "ERR_CORE_PROVIDER_UNAVAILABLE"
+///      ]
+///    },
+///    "details": {
+///      "type": "array",
+///      "items": {
+///        "type": "object",
+///        "additionalProperties": {
+///          "type": "string"
+///        }
+///      },
+///      "maxItems": 0
+///    },
+///    "message": {
+///      "type": "string",
+///      "enum": [
+///        "provider unavailable"
+///      ]
+///    },
+///    "requestId": {
+///      "type": "string"
+///    },
+///    "retryable": {
+///      "type": "boolean",
+///      "const": true
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityDeviceCertificatePolicyPutProviderUnavailableError {
+    pub code: IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode,
+    pub details:
+        ::std::vec::Vec<::std::collections::HashMap<::std::string::String, ::std::string::String>>,
+    pub message: IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage,
+    #[serde(rename = "requestId")]
+    pub request_id: ::std::string::String,
+    pub retryable: bool,
+}
+///`IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "string",
+///  "enum": [
+///    "ERR_CORE_PROVIDER_UNAVAILABLE"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode {
+    #[serde(rename = "ERR_CORE_PROVIDER_UNAVAILABLE")]
+    ErrCoreProviderUnavailable,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::ErrCoreProviderUnavailable => f.write_str("ERR_CORE_PROVIDER_UNAVAILABLE"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "ERR_CORE_PROVIDER_UNAVAILABLE" => Ok(Self::ErrCoreProviderUnavailable),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str>
+    for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+{
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///`IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "string",
+///  "enum": [
+///    "provider unavailable"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage {
+    #[serde(rename = "provider unavailable")]
+    ProviderUnavailable,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::ProviderUnavailable => f.write_str("provider unavailable"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "provider unavailable" => Ok(Self::ProviderUnavailable),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str>
+    for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///`IdentityDeviceCertificatePolicyPutProviderUnavailableResponse`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutProviderUnavailableResponse",
+///  "type": "object",
+///  "required": [
+///    "error"
+///  ],
+///  "properties": {
+///    "error": {
+///      "title": "IdentityDeviceCertificatePolicyPutProviderUnavailableError",
+///      "type": "object",
+///      "required": [
+///        "code",
+///        "details",
+///        "message",
+///        "requestId",
+///        "retryable"
+///      ],
+///      "properties": {
+///        "code": {
+///          "type": "string",
+///          "enum": [
+///            "ERR_CORE_PROVIDER_UNAVAILABLE"
+///          ]
+///        },
+///        "details": {
+///          "type": "array",
+///          "items": {
+///            "type": "object",
+///            "additionalProperties": {
+///              "type": "string"
+///            }
+///          },
+///          "maxItems": 0
+///        },
+///        "message": {
+///          "type": "string",
+///          "enum": [
+///            "provider unavailable"
+///          ]
+///        },
+///        "requestId": {
+///          "type": "string"
+///        },
+///        "retryable": {
+///          "type": "boolean",
+///          "const": true
+///        }
+///      },
+///      "additionalProperties": false
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityDeviceCertificatePolicyPutProviderUnavailableResponse {
+    pub error: IdentityDeviceCertificatePolicyPutProviderUnavailableError,
+}
 ///Tenant comes from authenticated scope and device identity comes from the HTTP path.
 ///
 /// <details><summary>JSON schema</summary>
@@ -1045,6 +1299,208 @@ pub struct IdentityDeviceCertificatePolicyPutRequest {
 pub struct IdentityDeviceCertificatePolicyPutResponse {
     pub data: IdentityDeviceCertificatePolicyPutData,
 }
+///`IdentityDeviceCertificatePolicyPutValidationDetail`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "IdentityDeviceCertificatePolicyPutValidationDetail",
+///  "type": "object",
+///  "required": [
+///    "field",
+///    "reason"
+///  ],
+///  "properties": {
+///    "field": {
+///      "type": "string",
+///      "enum": [
+///        "deviceId",
+///        "body",
+///        "expectedGeneration",
+///        "policy"
+///      ]
+///    },
+///    "reason": {
+///      "type": "string",
+///      "enum": [
+///        "invalidFormat",
+///        "invalidJson",
+///        "outOfRange",
+///        "invalidPolicy",
+///        "invalidMutation"
+///      ]
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityDeviceCertificatePolicyPutValidationDetail {
+    pub field: IdentityDeviceCertificatePolicyPutValidationDetailField,
+    pub reason: IdentityDeviceCertificatePolicyPutValidationDetailReason,
+}
+///`IdentityDeviceCertificatePolicyPutValidationDetailField`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "string",
+///  "enum": [
+///    "deviceId",
+///    "body",
+///    "expectedGeneration",
+///    "policy"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutValidationDetailField {
+    #[serde(rename = "deviceId")]
+    DeviceId,
+    #[serde(rename = "body")]
+    Body,
+    #[serde(rename = "expectedGeneration")]
+    ExpectedGeneration,
+    #[serde(rename = "policy")]
+    Policy,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutValidationDetailField {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::DeviceId => f.write_str("deviceId"),
+            Self::Body => f.write_str("body"),
+            Self::ExpectedGeneration => f.write_str("expectedGeneration"),
+            Self::Policy => f.write_str("policy"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutValidationDetailField {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "deviceId" => Ok(Self::DeviceId),
+            "body" => Ok(Self::Body),
+            "expectedGeneration" => Ok(Self::ExpectedGeneration),
+            "policy" => Ok(Self::Policy),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutValidationDetailField {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationDetailField
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationDetailField
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+///`IdentityDeviceCertificatePolicyPutValidationDetailReason`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "type": "string",
+///  "enum": [
+///    "invalidFormat",
+///    "invalidJson",
+///    "outOfRange",
+///    "invalidPolicy",
+///    "invalidMutation"
+///  ]
+///}
+/// ```
+/// </details>
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum IdentityDeviceCertificatePolicyPutValidationDetailReason {
+    #[serde(rename = "invalidFormat")]
+    InvalidFormat,
+    #[serde(rename = "invalidJson")]
+    InvalidJson,
+    #[serde(rename = "outOfRange")]
+    OutOfRange,
+    #[serde(rename = "invalidPolicy")]
+    InvalidPolicy,
+    #[serde(rename = "invalidMutation")]
+    InvalidMutation,
+}
+impl ::std::fmt::Display for IdentityDeviceCertificatePolicyPutValidationDetailReason {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::InvalidFormat => f.write_str("invalidFormat"),
+            Self::InvalidJson => f.write_str("invalidJson"),
+            Self::OutOfRange => f.write_str("outOfRange"),
+            Self::InvalidPolicy => f.write_str("invalidPolicy"),
+            Self::InvalidMutation => f.write_str("invalidMutation"),
+        }
+    }
+}
+impl ::std::str::FromStr for IdentityDeviceCertificatePolicyPutValidationDetailReason {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "invalidFormat" => Ok(Self::InvalidFormat),
+            "invalidJson" => Ok(Self::InvalidJson),
+            "outOfRange" => Ok(Self::OutOfRange),
+            "invalidPolicy" => Ok(Self::InvalidPolicy),
+            "invalidMutation" => Ok(Self::InvalidMutation),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificatePolicyPutValidationDetailReason {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<&::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationDetailReason
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: &::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String>
+    for IdentityDeviceCertificatePolicyPutValidationDetailReason
+{
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 ///`IdentityDeviceCertificatePolicyPutValidationError`
 ///
 /// <details><summary>JSON schema</summary>
@@ -1070,12 +1526,37 @@ pub struct IdentityDeviceCertificatePolicyPutResponse {
 ///    "details": {
 ///      "type": "array",
 ///      "items": {
+///        "title": "IdentityDeviceCertificatePolicyPutValidationDetail",
 ///        "type": "object",
-///        "additionalProperties": {
-///          "type": "string"
-///        }
+///        "required": [
+///          "field",
+///          "reason"
+///        ],
+///        "properties": {
+///          "field": {
+///            "type": "string",
+///            "enum": [
+///              "deviceId",
+///              "body",
+///              "expectedGeneration",
+///              "policy"
+///            ]
+///          },
+///          "reason": {
+///            "type": "string",
+///            "enum": [
+///              "invalidFormat",
+///              "invalidJson",
+///              "outOfRange",
+///              "invalidPolicy",
+///              "invalidMutation"
+///            ]
+///          }
+///        },
+///        "additionalProperties": false
 ///      },
-///      "maxItems": 0
+///      "maxItems": 1,
+///      "minItems": 1
 ///    },
 ///    "message": {
 ///      "type": "string",
@@ -1099,8 +1580,7 @@ pub struct IdentityDeviceCertificatePolicyPutResponse {
 #[serde(deny_unknown_fields)]
 pub struct IdentityDeviceCertificatePolicyPutValidationError {
     pub code: IdentityDeviceCertificatePolicyPutValidationErrorCode,
-    pub details:
-        ::std::vec::Vec<::std::collections::HashMap<::std::string::String, ::std::string::String>>,
+    pub details: [IdentityDeviceCertificatePolicyPutValidationDetail; 1usize],
     pub message: IdentityDeviceCertificatePolicyPutValidationErrorMessage,
     #[serde(rename = "requestId")]
     pub request_id: ::std::string::String,
@@ -1263,12 +1743,37 @@ impl ::std::convert::TryFrom<::std::string::String>
 ///        "details": {
 ///          "type": "array",
 ///          "items": {
+///            "title": "IdentityDeviceCertificatePolicyPutValidationDetail",
 ///            "type": "object",
-///            "additionalProperties": {
-///              "type": "string"
-///            }
+///            "required": [
+///              "field",
+///              "reason"
+///            ],
+///            "properties": {
+///              "field": {
+///                "type": "string",
+///                "enum": [
+///                  "deviceId",
+///                  "body",
+///                  "expectedGeneration",
+///                  "policy"
+///                ]
+///              },
+///              "reason": {
+///                "type": "string",
+///                "enum": [
+///                  "invalidFormat",
+///                  "invalidJson",
+///                  "outOfRange",
+///                  "invalidPolicy",
+///                  "invalidMutation"
+///                ]
+///              }
+///            },
+///            "additionalProperties": false
 ///          },
-///          "maxItems": 0
+///          "maxItems": 1,
+///          "minItems": 1
 ///        },
 ///        "message": {
 ///          "type": "string",
@@ -1508,7 +2013,7 @@ pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
     ::rss_contract::ContractDescriptor::from_static_version(
         "identity.device-certificate-policy-put",
         "v2",
-        "sha256:88a5d5145b14ae984c27edae2ad468e9aa6cd29ad955fe0771d7f9eabe5d7084",
+        "sha256:d764f91336b6c8eecfd8c4ecb1d69e3173a50279243bc7e55b586c7c86ae3e14",
     );
 /// Authority-free HTTP operation metadata generated from the canonical contract.
 pub const OPERATION: crate::HttpOperationDescriptor = crate::HttpOperationDescriptor::new(
@@ -1532,7 +2037,7 @@ pub const SCHEMAS: &[crate::SchemaArtifact] = &[
     ),
     crate::SchemaArtifact::new(
         "response:400",
-        "sha256:6cba221b2769c329c076284832191b0fe9af2a8a89408c64442f299afaa593de",
+        "sha256:a03564317bc7b7f285f7db93e6d91d666a08c5bd8ac29d6215935e1b1af8f2d1",
         include_bytes!("../schema/policy_put/validation.response.schema.json"),
     ),
     crate::SchemaArtifact::new(
@@ -1544,5 +2049,10 @@ pub const SCHEMAS: &[crate::SchemaArtifact] = &[
         "response:409",
         "sha256:fa2788866d968ceb9fe67471239c3a9f48321912dec44499f59f40b1b898ffd5",
         include_bytes!("../schema/policy_put/conflict.response.schema.json"),
+    ),
+    crate::SchemaArtifact::new(
+        "response:503",
+        "sha256:d1ca2514a0580f28129c79fbb5f366ffc3982b58e8c7095c789b786f1b87601a",
+        include_bytes!("../schema/policy_put/provider-unavailable.response.schema.json"),
     ),
 ];

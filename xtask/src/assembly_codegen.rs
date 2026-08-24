@@ -47,6 +47,12 @@ const LISTENER_PDP_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
     bound_value: None,
 };
 
+const DEVICE_PRODUCTION_ARTIFACT_SOURCE_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
+    input_type: "crate::providers::DeviceProductionArtifactSourceCapability",
+    materializer: Some("into_output"),
+    bound_value: None,
+};
+
 const LISTENER_RATE_LIMITER_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
     input_type: "redis::RedisRateLimiterCapability",
     materializer: None,
@@ -55,6 +61,9 @@ const LISTENER_RATE_LIMITER_FINISH_SHAPE: ProviderFinishShape = ProviderFinishSh
 
 const fn provider_finish_shape(role: ProviderRole) -> ProviderFinishShape {
     match role {
+        ProviderRole::DeviceProductionArtifactSource => {
+            DEVICE_PRODUCTION_ARTIFACT_SOURCE_FINISH_SHAPE
+        }
         ProviderRole::ListenerPdp => LISTENER_PDP_FINISH_SHAPE,
         ProviderRole::ListenerRateLimiter => LISTENER_RATE_LIMITER_FINISH_SHAPE,
         _ => DEFAULT_PROVIDER_FINISH_SHAPE,
@@ -825,7 +834,10 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) 
     {
         render_listener_pdp_lifecycle(&mut code);
     }
-    let emits_role_batches = matches!(manifest.name(), "settingsonly" | "identityaudit");
+    let emits_role_batches = matches!(
+        manifest.name(),
+        "settingsonly" | "identityaudit" | "deviceidentity"
+    );
     if emits_role_batches {
         render_provider_role_batches(&mut code, manifest.name(), &providers)?;
     }
@@ -1598,6 +1610,9 @@ const fn provider_role_variant(role: ProviderRole) -> &'static str {
         ProviderRole::DeviceCertificateStore => "DeviceCertificateStore",
         ProviderRole::DeviceCommandStore => "DeviceCommandStore",
         ProviderRole::DeviceDraftArtifactSource => "DeviceDraftArtifactSource",
+        ProviderRole::DeviceProductionArtifactSource => "DeviceProductionArtifactSource",
+        ProviderRole::ExternalCsrResolver => "ExternalCsrResolver",
+        ProviderRole::VaultExternalPki => "VaultExternalPki",
         ProviderRole::DeviceMqttSession => "DeviceMqttSession",
         ProviderRole::DeviceRevocationStore => "DeviceRevocationStore",
         ProviderRole::EventPublisher => "EventPublisher",
@@ -1625,6 +1640,8 @@ const fn port_variant(port: DiportPort) -> &'static str {
         DiportPort::CertificateReconcileRepository => "CertificateReconcileRepository",
         DiportPort::DeviceCommandStore => "DeviceCommandStore",
         DiportPort::CertificateArtifactSource => "CertificateArtifactSource",
+        DiportPort::ExternalCsrResolver => "ExternalCsrResolver",
+        DiportPort::ExternalPkiProviderClosure => "ExternalPkiProviderClosure",
         DiportPort::MqttSession => "MqttSession",
         DiportPort::RevocationStore => "RevocationStore",
         DiportPort::Publisher => "Publisher",
@@ -1651,6 +1668,13 @@ const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
         }
         ProviderConstructor::PostgresDeviceCommandStore => "PostgresDeviceCommandStore",
         ProviderConstructor::IdentityDraftArtifactSimulator => "IdentityDraftArtifactSimulator",
+        ProviderConstructor::IdentityExternalPkiArtifactSource => {
+            "IdentityExternalPkiArtifactSource"
+        }
+        ProviderConstructor::HttpdSpiffeMtlsExternalCsrResolver => {
+            "HttpdSpiffeMtlsExternalCsrResolver"
+        }
+        ProviderConstructor::VaultExternalPkiProviderClosure => "VaultExternalPkiProviderClosure",
         ProviderConstructor::MqttSession => "MqttSession",
         ProviderConstructor::PostgresRevocationStore => "PostgresRevocationStore",
         ProviderConstructor::RedisRateLimiter => "RedisRateLimiter",
@@ -1680,6 +1704,11 @@ const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
             "IdentityPostgresDeviceCommandStore"
         }
         ProviderFactorySymbol::IdentityDraftArtifactSimulator => "IdentityDraftArtifactSimulator",
+        ProviderFactorySymbol::IdentityExternalPkiArtifactSource => {
+            "IdentityExternalPkiArtifactSource"
+        }
+        ProviderFactorySymbol::IdentityExternalCsrResolver => "IdentityExternalCsrResolver",
+        ProviderFactorySymbol::IdentityVaultExternalPki => "IdentityVaultExternalPki",
         ProviderFactorySymbol::IdentityMqttSession => "IdentityMqttSession",
         ProviderFactorySymbol::DeviceloopPostgresRevocationStore => {
             "DeviceloopPostgresRevocationStore"
@@ -3026,6 +3055,9 @@ mod provider_catalog;
             ProviderRole::DeviceCertificateStore,
             ProviderRole::DeviceCommandStore,
             ProviderRole::DeviceDraftArtifactSource,
+            ProviderRole::DeviceProductionArtifactSource,
+            ProviderRole::ExternalCsrResolver,
+            ProviderRole::VaultExternalPki,
             ProviderRole::DeviceMqttSession,
             ProviderRole::DeviceRevocationStore,
             ProviderRole::EventPublisher,
@@ -3047,7 +3079,14 @@ mod provider_catalog;
             ProviderRole::DlxHotKeyProvider,
         ] {
             let shape = provider_finish_shape(role);
-            if role == ProviderRole::ListenerPdp {
+            if role == ProviderRole::DeviceProductionArtifactSource {
+                assert_eq!(shape, DEVICE_PRODUCTION_ARTIFACT_SOURCE_FINISH_SHAPE);
+                assert_eq!(
+                    shape.input_type,
+                    "crate::providers::DeviceProductionArtifactSourceCapability"
+                );
+                assert_eq!(shape.materializer, Some("into_output"));
+            } else if role == ProviderRole::ListenerPdp {
                 assert_eq!(shape, LISTENER_PDP_FINISH_SHAPE);
                 assert_eq!(shape.input_type, "ListenerPdpJwksLifecycle");
                 assert_eq!(shape.materializer, Some("into_output"));

@@ -75,7 +75,7 @@ device_latent_evidence_catalog! {
         T1,
         ExecutionUnitId::Integration(IntegrationUnitId::DeviceIdentityLib),
         "assemblies/deviceidentity/src/lib.rs",
-        "tests::provider_catalog_is_the_exact_five_role_closure"
+        "tests::provider_catalog_is_the_exact_production_closure"
     ),
     MetricClosure => (
         1905,

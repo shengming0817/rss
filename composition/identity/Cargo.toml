@@ -29,8 +29,11 @@ crypto-adapter = { path = "../../adapters/crypto" }
 secure = { path = "../../crates/secure" }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
 primitives = { path = "../../crates/primitives" }
+reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 mqtt = { path = "../../adapters/mqtt", optional = true }
 sha2 = { workspace = true }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+x509-parser = { workspace = true, features = ["verify"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true }

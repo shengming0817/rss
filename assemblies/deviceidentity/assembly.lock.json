@@ -2,12 +2,12 @@
   "schemaVersion": 2,
   "identity": {
     "name": "deviceidentity",
-    "profile": "demo"
+    "profile": "production"
   },
   "digests": {
-    "manifest": "sha256:23faaa65727ccb329303da9f5bd7f7a73cd4fbaf561a078f62da3817a56f8432",
-    "generated": "sha256:2a252b38db7ed1a8ba90662b0299e72b0e2df45a269d9f912bb2afe08ccd0e3f",
-    "contracts": "sha256:126cb0b29ee9fc19bd33980f56651db1b8dcd5728238b7eb498e9d033914ca6a"
+    "manifest": "sha256:e007fbd86bd681286800fc297b9843f957cb8512d048c56cc08b5211010e9049",
+    "generated": "sha256:bebfa2e06281bb060e25b918ea6964451dff2c89c1d79b075ff77c9809a9f617",
+    "contracts": "sha256:9ee6f3fb1d7e92ad25ad36157b1478cc40d9905a83f1ac7be78938b4d613c5fa"
   },
-  "fingerprint": "sha256:e1990ef411a254580a3bfdfdb434471bf8a9481d21ab4475ebe61053fe5784fa"
+  "fingerprint": "sha256:b9040d180a60019171b1d87e3e150de3a7ac0022feccf345026a99900f60d810"
 }

@@ -56,12 +56,14 @@ impl ObservedHttpClient {
     async fn send_once(
         &self,
         url: reqwest::Url,
-        request: &HttpContractRequest,
+        method: HttpContractMethod,
+        body: Vec<u8>,
+        json: bool,
     ) -> HttpAttemptSettlement {
-        let mut builder = self
-            .inner
-            .request(reqwest_method(request.method()), url)
-            .body(request.body().to_vec());
+        let mut builder = self.inner.request(reqwest_method(method), url).body(body);
+        if json {
+            builder = builder.header(reqwest::header::CONTENT_TYPE, "application/json");
+        }
 
         if let Some(context) = tracewire::capture_current() {
             builder = builder.header("traceparent", context.traceparent().as_str());
@@ -89,6 +91,49 @@ impl ObservedHttpClient {
             Err(error) => HttpAttemptSettlement::failed(Some(status), error),
         }
     }
+
+    pub(super) async fn execute_external_csr_json(
+        &self,
+        url: reqwest::Url,
+        body: Vec<u8>,
+    ) -> Result<(u16, Vec<u8>), diport::ExternalCsrError> {
+        let observation = HttpClientObservation::external_csr_resolve();
+        let span = observation.span();
+        let guard = HttpAttemptGuard::new(span.clone());
+        async move {
+            let settlement = self
+                .send_once(url, HttpContractMethod::Post, body, true)
+                .await;
+            let response = guard
+                .complete(settlement)
+                .map_err(|error| match error.kind() {
+                    HttpContractTransportErrorKind::Dispatch
+                    | HttpContractTransportErrorKind::Timeout => {
+                        diport::ExternalCsrError::Unavailable
+                    }
+                    HttpContractTransportErrorKind::ResponseTooLarge
+                    | HttpContractTransportErrorKind::InvalidResponse => {
+                        diport::ExternalCsrError::Rejected
+                    }
+                })?;
+            Ok((response.status_code(), response.body().to_vec()))
+        }
+        .instrument(span)
+        .await
+    }
+
+    pub(super) async fn probe_external_csr(&self, url: reqwest::Url) -> bool {
+        let settlement = self
+            .send_once(url, HttpContractMethod::Get, Vec::new(), false)
+            .await;
+        matches!(
+            settlement,
+            HttpAttemptSettlement::Complete {
+                status: 200 | 400 | 405,
+                ..
+            }
+        )
+    }
 }
 
 /// One resolved endpoint and its only legal HTTP-attempt capability.
@@ -108,11 +153,14 @@ impl DomainHttpTarget {
         request: HttpContractRequest,
     ) -> Result<HttpContractResponse, HttpContractTransportError> {
         let url = request_url(&self.endpoint, request.path(), request.query())?;
-        let observation = HttpClientObservation::new(*request.contract(), request.method());
+        let observation = HttpClientObservation::contract(*request.contract(), request.method());
         let span = observation.span();
         let guard = HttpAttemptGuard::new(span.clone());
         async move {
-            let settlement = self.client.send_once(url, &request).await;
+            let settlement = self
+                .client
+                .send_once(url, request.method(), request.body().to_vec(), false)
+                .await;
             guard.complete(settlement)
         }
         .instrument(span)
@@ -154,12 +202,25 @@ impl Drop for HttpAttemptGuard {
 /// INVARIANT: HTTP-CLIENT-OBSERVATION-SURFACE-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed method plus typed contract binding only" }
 struct HttpClientObservation {
     method: HttpContractMethod,
-    contract: ContractBinding,
+    domain: &'static str,
+    contract_id: &'static str,
 }
 
 impl HttpClientObservation {
-    fn new(contract: ContractBinding, method: HttpContractMethod) -> Self {
-        Self { method, contract }
+    fn contract(contract: ContractBinding, method: HttpContractMethod) -> Self {
+        Self {
+            method,
+            domain: contract.domain(),
+            contract_id: contract.contract_id(),
+        }
+    }
+
+    fn external_csr_resolve() -> Self {
+        Self {
+            method: HttpContractMethod::Post,
+            domain: "external-csr",
+            contract_id: "private.external-csr-resolve",
+        }
     }
 
     fn span(&self) -> tracing::Span {
@@ -168,8 +229,8 @@ impl HttpClientObservation {
             otel.kind = "client",
             otel.name = self.method.as_str(),
             "http.request.method" = self.method.as_str(),
-            domain = self.contract.domain(),
-            contract_id = self.contract.contract_id(),
+            domain = self.domain,
+            contract_id = self.contract_id,
             "http.response.status_code" = tracing::field::Empty,
             outcome = tracing::field::Empty,
             "error.type" = tracing::field::Empty,

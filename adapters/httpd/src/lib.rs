@@ -60,6 +60,160 @@ mod server_observation;
 mod server_observation_tests;
 use domain_client::{DomainHttpTarget, ObservedHttpClient};
 
+/// Private SPIFFE/mTLS resolver for already-existing external CSR evidence.
+pub struct SpiffeMtlsExternalCsrResolver {
+    endpoint: reqwest::Url,
+    client: ObservedHttpClient,
+    source: spiffe::X509Source,
+}
+
+const EXTERNAL_CSR_RESOLVE_PATH: &str = "/internal/v1/device-csr:resolve";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalCsrWireRequest<'a> {
+    schema_version: u8,
+    tenant: String,
+    device: String,
+    generation: u64,
+    policy_digest: String,
+    authorization_receipt: String,
+    #[serde(skip)]
+    _request: &'a diport::ExternalCsrRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExternalCsrWireResponse {
+    schema_version: u8,
+    tenant: String,
+    device: String,
+    generation: u64,
+    policy_digest: String,
+    authorization_receipt: String,
+    csr_pem: String,
+}
+
+impl SpiffeMtlsExternalCsrResolver {
+    /// Construct the sole HTTPS-only resolver client from one explicit SPIFFE identity policy.
+    pub async fn from_spire(
+        endpoint: secure::DomainHttpEndpoint,
+        policy: authn::OutboundMtlsPolicy,
+        workload_api_endpoint: Option<&str>,
+    ) -> Result<Self, DomainHttpTransportBuildError> {
+        let mut endpoint = endpoint.into_url();
+        endpoint.set_path(EXTERNAL_CSR_RESOLVE_PATH);
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        let source = x509_source(workload_api_endpoint, Duration::from_secs(5)).await?;
+        let client = match mtls_reqwest_client(&source, &policy) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = shutdown_uncommitted_x509_source(source).await;
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            endpoint,
+            client,
+            source,
+        })
+    }
+
+    /// Best-effort runtime health of the sole SPIFFE identity source.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.source.is_healthy()
+    }
+
+    /// Side-effect-free authenticated reachability of the exact remote CSR route.
+    pub async fn is_capability_ready(&self) -> bool {
+        self.source.is_healthy() && self.client.probe_external_csr(self.endpoint.clone()).await
+    }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+impl diport::ExternalCsrResolver for SpiffeMtlsExternalCsrResolver {
+    async fn resolve(
+        &self,
+        request: diport::ExternalCsrRequest,
+    ) -> Result<diport::ExternalCsrEvidence, diport::ExternalCsrError> {
+        let tenant = request.tenant().to_string();
+        let device = request.device().as_uuid().to_string();
+        let policy_digest = format!("sha256:{}", lower_hex(request.policy_digest().as_bytes()));
+        let authorization_receipt = lower_hex(request.authorization_receipt().as_bytes());
+        let wire = ExternalCsrWireRequest {
+            schema_version: 1,
+            tenant: tenant.clone(),
+            device: device.clone(),
+            generation: request.generation().get(),
+            policy_digest: policy_digest.clone(),
+            authorization_receipt: authorization_receipt.clone(),
+            _request: &request,
+        };
+        let body =
+            serde_json::to_vec(&wire).map_err(|_| diport::ExternalCsrError::Misconfigured)?;
+        let (status, body) = self
+            .client
+            .execute_external_csr_json(self.endpoint.clone(), body)
+            .await?;
+        match status {
+            200 => {}
+            408 | 425 | 429 | 500..=599 => return Err(diport::ExternalCsrError::Unavailable),
+            _ => return Err(diport::ExternalCsrError::Rejected),
+        }
+        let response: ExternalCsrWireResponse =
+            serde_json::from_slice(&body).map_err(|_| diport::ExternalCsrError::Rejected)?;
+        bind_external_csr_response(
+            request,
+            response,
+            &tenant,
+            &device,
+            &policy_digest,
+            &authorization_receipt,
+        )
+    }
+}
+
+fn bind_external_csr_response(
+    request: diport::ExternalCsrRequest,
+    response: ExternalCsrWireResponse,
+    tenant: &str,
+    device: &str,
+    policy_digest: &str,
+    authorization_receipt: &str,
+) -> Result<diport::ExternalCsrEvidence, diport::ExternalCsrError> {
+    if response.schema_version != 1
+        || response.tenant != tenant
+        || response.device != device
+        || response.generation != request.generation().get()
+        || response.policy_digest != policy_digest
+        || response.authorization_receipt != authorization_receipt
+    {
+        return Err(diport::ExternalCsrError::BindingMismatch);
+    }
+    diport::ExternalCsrEvidence::new(request, response.csr_pem.into_bytes())
+}
+
+impl ManagedResource for SpiffeMtlsExternalCsrResolver {
+    fn name(&self) -> &str {
+        "external-csr-spiffe-source"
+    }
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.source.shutdown().await;
+        Ok(())
+    }
+}
+
 /// Namespace for the fail-fast HTTP bind operation.
 ///
 /// This uninhabited type cannot own a listener task. Runtime listener ownership is minted only by
@@ -1233,6 +1387,92 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsConnector;
     use tracing::Instrument as _;
+
+    fn external_csr_request() -> diport::ExternalCsrRequest {
+        diport::ExternalCsrRequest::new(
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("tenant"),
+            ids::DeviceId::parse("550e8400-e29b-41d4-a716-446655440000").expect("device"),
+            diport::PkiRequestGeneration::try_new(7).expect("generation"),
+            diport::PkiPolicyDigest::new([0x11; 32]),
+            diport::PkiAuthorizationReceipt::try_new([0x22; 16]).expect("receipt"),
+        )
+    }
+
+    #[test]
+    fn external_csr_wire_is_closed_coordinate_bound_and_bounded() {
+        let tenant = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        let device = "550e8400-e29b-41d4-a716-446655440000";
+        let policy = format!("sha256:{}", lower_hex(&[0x11; 32]));
+        let receipt = lower_hex(&[0x22; 16]);
+        let response = ExternalCsrWireResponse {
+            schema_version: 1,
+            tenant: tenant.to_owned(),
+            device: device.to_owned(),
+            generation: 7,
+            policy_digest: policy.clone(),
+            authorization_receipt: receipt.clone(),
+            csr_pem: "pem".to_owned(),
+        };
+        assert!(
+            bind_external_csr_response(
+                external_csr_request(),
+                response,
+                tenant,
+                device,
+                &policy,
+                &receipt
+            )
+            .is_ok()
+        );
+        let mismatch = ExternalCsrWireResponse {
+            schema_version: 1,
+            tenant: tenant.to_owned(),
+            device: device.to_owned(),
+            generation: 8,
+            policy_digest: policy.clone(),
+            authorization_receipt: receipt.clone(),
+            csr_pem: "pem".to_owned(),
+        };
+        assert_eq!(
+            bind_external_csr_response(
+                external_csr_request(),
+                mismatch,
+                tenant,
+                device,
+                &policy,
+                &receipt
+            )
+            .expect_err("coordinate mismatch"),
+            diport::ExternalCsrError::BindingMismatch
+        );
+        let oversized = ExternalCsrWireResponse {
+            schema_version: 1,
+            tenant: tenant.to_owned(),
+            device: device.to_owned(),
+            generation: 7,
+            policy_digest: policy.clone(),
+            authorization_receipt: receipt.clone(),
+            csr_pem: "x".repeat(diport::MAX_PKI_CSR_BYTES + 1),
+        };
+        assert_eq!(
+            bind_external_csr_response(
+                external_csr_request(),
+                oversized,
+                tenant,
+                device,
+                &policy,
+                &receipt
+            )
+            .expect_err("oversized CSR"),
+            diport::ExternalCsrError::Rejected
+        );
+        let unknown = format!(
+            r#"{{"schemaVersion":1,"tenant":"{tenant}","device":"{device}","generation":7,"policyDigest":"{policy}","authorizationReceipt":"{receipt}","csrPem":"pem","generateKey":true}}"#
+        );
+        assert!(serde_json::from_str::<ExternalCsrWireResponse>(&unknown).is_err());
+        assert_eq!(EXTERNAL_CSR_RESOLVE_PATH, "/internal/v1/device-csr:resolve");
+    }
 
     struct TestHttpServer {
         name: &'static str,

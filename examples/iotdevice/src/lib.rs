@@ -301,6 +301,12 @@ impl DraftCommand {
         validate_command_text("correlationData", &command_id, 1, MAX_IDENTIFIER_LEN)?;
         let wire: CommandWire = serde_json::from_slice(payload)?;
         validate_command_text("deviceId", &wire.device_id, 1, MAX_IDENTIFIER_LEN)?;
+        validate_command_text(
+            "authorizationReceiptId",
+            &wire.authorization_receipt_id,
+            1,
+            MAX_IDENTIFIER_LEN,
+        )?;
         validate_command_text("artifactId", &wire.artifact_id, 16, MAX_IDENTIFIER_LEN)?;
         validate_command_digest("intentDigest", &wire.intent_digest)?;
         validate_command_digest("policyHash", &wire.policy_hash)?;
@@ -455,6 +461,7 @@ pub struct AcknowledgedDraftCommand {
 pub struct PendingDraftReport {
     ingress_id: String,
     device_id: String,
+    desired_generation: u64,
 }
 
 impl PendingDraftReport {
@@ -496,6 +503,7 @@ impl DraftApplicationReceipt {
         correlation: &[u8],
         expected_ingress: &str,
         expected_device: &str,
+        expected_generation: u64,
     ) -> Result<Self, DraftSimulatorError> {
         if correlation.is_empty() {
             return Err(DraftSimulatorError::InvalidReceipt {
@@ -510,6 +518,22 @@ impl DraftApplicationReceipt {
         }
         if wire.device_id != expected_device {
             return Err(DraftSimulatorError::InvalidReceipt { field: "deviceId" });
+        }
+        if wire.desired_generation != expected_generation {
+            return Err(DraftSimulatorError::InvalidReceipt {
+                field: "desiredGeneration",
+            });
+        }
+        if wire.authorization_receipt_id.is_empty()
+            || wire.authorization_receipt_id.len() > MAX_IDENTIFIER_LEN
+            || wire
+                .authorization_receipt_id
+                .chars()
+                .any(char::is_whitespace)
+        {
+            return Err(DraftSimulatorError::InvalidReceipt {
+                field: "authorizationReceiptId",
+            });
         }
         if wire.outcome != "committed" {
             return Err(DraftSimulatorError::InvalidReceipt { field: "outcome" });
@@ -702,7 +726,11 @@ impl DraftDeviceSimulator {
         pending: PendingDraftAck,
     ) -> Result<(AcknowledgedDraftCommand, DraftApplicationReceipt), DraftSimulatorError> {
         let receipt = self
-            .wait_receipt(&pending.ingress_id, &pending.command.device_id)
+            .wait_receipt(
+                &pending.ingress_id,
+                &pending.command.device_id,
+                pending.command.coordinate.generation,
+            )
             .await?;
         Ok((
             AcknowledgedDraftCommand {
@@ -732,6 +760,7 @@ impl DraftDeviceSimulator {
         Ok(PendingDraftReport {
             ingress_id,
             device_id: command.device_id,
+            desired_generation: command.coordinate.generation,
         })
     }
 
@@ -740,8 +769,12 @@ impl DraftDeviceSimulator {
         &mut self,
         pending: PendingDraftReport,
     ) -> Result<DraftApplicationReceipt, DraftSimulatorError> {
-        self.wait_receipt(&pending.ingress_id, &pending.device_id)
-            .await
+        self.wait_receipt(
+            &pending.ingress_id,
+            &pending.device_id,
+            pending.desired_generation,
+        )
+        .await
     }
 
     async fn publish_settled(
@@ -791,6 +824,7 @@ impl DraftDeviceSimulator {
         &mut self,
         expected_ingress: &str,
         expected_device: &str,
+        expected_generation: u64,
     ) -> Result<DraftApplicationReceipt, DraftSimulatorError> {
         let wait = self.config.wait_deadline;
         within_deadline(wait, "matching application receipt", async {
@@ -815,6 +849,7 @@ impl DraftDeviceSimulator {
                     correlation,
                     expected_ingress,
                     expected_device,
+                    expected_generation,
                 );
             }
         })
@@ -901,6 +936,7 @@ struct BufferedDownlink {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommandWire {
     device_id: String,
+    authorization_receipt_id: String,
     desired_generation: u64,
     fence_epoch: u64,
     intent_digest: String,
@@ -939,6 +975,8 @@ struct CertificateReportWire<'a> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReceiptWire {
     ingress_envelope_id: String,
+    authorization_receipt_id: String,
+    desired_generation: u64,
     device_id: String,
     outcome: String,
     reason: String,
@@ -1356,6 +1394,8 @@ mod tests {
     {
         let receipt = br#"{
             "ingressEnvelopeId":"draft-ack-g2-e4-s7",
+            "authorizationReceiptId":"0191f7d4-34d7-7b42-9fcb-9e85b92f42a1",
+            "desiredGeneration":2,
             "deviceId":"device-1",
             "outcome":"committed",
             "reason":"None",
@@ -1366,16 +1406,17 @@ mod tests {
             b"receipt-event-1",
             "draft-ack-g2-e4-s7",
             "device-1",
+            2,
         )?;
         assert_eq!(parsed.ingress_id(), "draft-ack-g2-e4-s7");
         assert_eq!(parsed.correlation(), b"receipt-event-1");
         assert_eq!(parsed.committed_at(), 1_700_000_000_000_007);
         assert!(
-            DraftApplicationReceipt::decode(receipt, b"", "draft-ack-g2-e4-s7", "device-1")
+            DraftApplicationReceipt::decode(receipt, b"", "draft-ack-g2-e4-s7", "device-1", 2)
                 .is_err()
         );
         assert!(
-            DraftApplicationReceipt::decode(receipt, b"event", "other-ingress", "device-1")
+            DraftApplicationReceipt::decode(receipt, b"event", "other-ingress", "device-1", 2)
                 .is_err()
         );
         Ok(())
@@ -1434,6 +1475,7 @@ mod tests {
     ) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(&serde_json::json!({
             "deviceId": "device-1",
+            "authorizationReceiptId": "0191f7d4-34d7-7b42-9fcb-9e85b92f42a1",
             "desiredGeneration": generation,
             "fenceEpoch": fence_epoch,
             "intentDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",

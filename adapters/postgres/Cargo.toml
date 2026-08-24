@@ -195,15 +195,20 @@ name = "migration_0109_inbox_backlog_samples_live"
 path = "tests/migration_0109_inbox_backlog_samples_live.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "migration_0113_receipt_bound_ready_upgrade"
+path = "tests/migration_0113_receipt_bound_ready_upgrade.rs"
+required-features = ["integration"]
+
 # Affected（无 live PG 资源；默认可构建，不绑 RemoteOnly 调度身份）。
 [[test]]
 name = "migration_0087_device_command_fencing_contract"
 path = "tests/migration_0087_device_command_fencing_contract.rs"
 
 [dev-dependencies]
+generated = { path = "../../generated" }
 rss_conformance = { package = "rss-conformance", path = "../../crates/conformance", version = "0.1.0" }
 diport = { path = "../../crates/diport", features = ["test-support", "dlq-test-support"] }
-generated = { path = "../../generated" }
 toml = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 authn = { path = "../../crates/authn", features = ["test-support"] }

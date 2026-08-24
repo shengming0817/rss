@@ -36,6 +36,15 @@ Consequently, #1898 is limited to durable wake-version and failure-streak extens
 - #1910 closed without implementing activation; ADR-028 supersedes its direct activation/T3 route. Future candidate integration and any later hardening/T3 activation require independent owners.
 - The exact RSS public waist remains the existing six draft contracts. Resource Security Fact is an External/incubator bootstrap or product fact, not a seventh RSS ingress or a compatibility path.
 
+## 2026-08-23 candidate-assembly implementation baseline
+
+- #2117 upgrades the artifact catalog atomically to schema v2 and registers the existing `deviceidentity` identity as a candidate, not supported/canonical.
+- The candidate uses PostgreSQL, read-only SPIFFE-mTLS External CSR resolution, Vault `/sign`, federated OIDC, authenticated persistent MQTT, PostgreSQL auth audit and Redis cluster-global pre-auth limiting. Resolver/pre-sign unavailable is retryable; post-dispatch signing uncertainty remains outcome-unknown quarantine.
+- `deviceidentity-server` and Docker target `deviceidentity-runtime` now exist. This proves repository-owned content-addressable artifact shape only; delivery owns registry provenance, publication and environment selection.
+- Migration `0113` atomically upgrades the existing certificate `Ready=True` proof function to the receipt-bound command schema. It adds no table, column, role or compatibility overload; desired, artifact and command receipt identity are checked in the same transaction.
+- The two HTTP routes are mounted only inside the candidate while all six public contracts remain Draft. There is no T3 selector, production acceptance evidence or profile activation.
+- Framework comparison references are the official `rust-spiffe` X509 source, `vaultrs` PKI sign request and `kube-rs` controller lifecycle sources recorded in `docs/references/framework-comparison.md`.
+
 ## Accepted contract amendment
 
 PR #629 closes an ambiguity in the original draft proposal before activation: ACK and ingress-receipt outcome/reason pairs are closed sums, not independent enum products. The amended current specification hashes are:

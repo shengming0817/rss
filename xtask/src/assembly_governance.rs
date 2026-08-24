@@ -45,6 +45,7 @@ macro_rules! production_assembly_ids {
 }
 
 production_assembly_ids! {
+    DeviceIdentity => "deviceidentity",
     IdentityAudit => "identityaudit",
     Runtime => "runtime",
     SettingsOnly => "settingsonly",
@@ -598,11 +599,14 @@ pub(crate) struct ArtifactDeclaration {
     pub(crate) health_inventory: Option<ArtifactHealthInventory>,
     #[serde(default)]
     pub(crate) journey: Option<JourneyCarrier>,
+    #[serde(default)]
+    pub(crate) acceptance: Option<AcceptanceCarrier>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DeclaredLifecycle {
+    Candidate,
     Supported,
     CompileOnly,
 }
@@ -660,6 +664,25 @@ pub(crate) enum JourneyCarrier {
     },
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum AcceptanceCarrier {
+    CargoTest {
+        package: String,
+        target: String,
+        test: String,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct CandidateArtifacts {
+    pub(crate) binary: ArtifactBinary,
+    pub(crate) image: ArtifactImage,
+    pub(crate) config_schema: ArtifactConfigSchema,
+    pub(crate) health_inventory: ArtifactHealthInventory,
+    pub(crate) acceptance: AcceptanceCarrier,
+}
+
 #[derive(Debug)]
 pub(crate) struct SupportedArtifacts {
     pub(crate) binary: ArtifactBinary,
@@ -680,6 +703,7 @@ impl CompileOnlyReason {
 
 #[derive(Debug)]
 pub(crate) enum ArtifactLifecycle {
+    Candidate(CandidateArtifacts),
     Supported(SupportedArtifacts),
     CompileOnly(CompileOnlyReason),
 }
@@ -816,8 +840,8 @@ impl AssemblyGovernanceIr<Core> {
         declaration: ArtifactMatrixDeclaration,
     ) -> Result<AssemblyGovernanceIr<ArtifactsJoined>> {
         let mut diagnostics = Vec::new();
-        if declaration.schema_version != 1 {
-            diagnostics.push("artifact matrix schemaVersion 必须严格为 1".to_owned());
+        if declaration.schema_version != 2 {
+            diagnostics.push("artifact matrix schemaVersion 必须严格为 2".to_owned());
         }
         let universe = self
             .targets
@@ -854,7 +878,7 @@ impl AssemblyGovernanceIr<Core> {
                     "production assembly `{}` 禁止降级为 compile-only",
                     id.as_str()
                 )),
-                Some(DeclaredLifecycle::Supported) => {}
+                Some(DeclaredLifecycle::Candidate | DeclaredLifecycle::Supported) => {}
             }
         }
         if !diagnostics.is_empty() {
@@ -877,28 +901,96 @@ fn promote_artifact(
 ) -> Option<GovernedArtifact> {
     let name = row.name;
     let lifecycle = match row.lifecycle {
-        DeclaredLifecycle::Supported => {
+        DeclaredLifecycle::Candidate => {
             if row.reason.is_some() {
-                diagnostics.push(format!("supported `{name}` 禁止 reason 字段"));
+                diagnostics.push(format!("candidate `{name}` 禁止 reason 字段"));
             }
-            let binary = require_supported_field(&name, "binary", row.binary, diagnostics);
-            let image = require_supported_field(&name, "image", row.image, diagnostics);
-            let config_schema =
-                require_supported_field(&name, "configSchema", row.config_schema, diagnostics);
-            let health_inventory = require_supported_field(
+            if row.journey.is_some() {
+                diagnostics.push(format!("candidate `{name}` 禁止 journey 字段"));
+            }
+            let binary =
+                require_artifact_field(&name, "candidate", "binary", row.binary, diagnostics);
+            let image = require_artifact_field(&name, "candidate", "image", row.image, diagnostics);
+            let config_schema = require_artifact_field(
                 &name,
+                "candidate",
+                "configSchema",
+                row.config_schema,
+                diagnostics,
+            );
+            let health_inventory = require_artifact_field(
+                &name,
+                "candidate",
                 "healthInventory",
                 row.health_inventory,
                 diagnostics,
             );
-            let journey = require_supported_field(&name, "journey", row.journey, diagnostics)
-                .and_then(|journey| match validate_journey_carrier(&journey) {
-                    Ok(()) => Some(journey),
+            let acceptance = require_artifact_field(
+                &name,
+                "candidate",
+                "acceptance",
+                row.acceptance,
+                diagnostics,
+            )
+            .and_then(
+                |acceptance| match validate_acceptance_carrier(&acceptance) {
+                    Ok(()) => Some(acceptance),
                     Err(error) => {
-                        diagnostics.push(format!("supported `{name}` {error}"));
+                        diagnostics.push(format!("candidate `{name}` {error}"));
                         None
                     }
-                });
+                },
+            );
+            match (binary, image, config_schema, health_inventory, acceptance) {
+                (
+                    Some(binary),
+                    Some(image),
+                    Some(config_schema),
+                    Some(health_inventory),
+                    Some(acceptance),
+                ) => Some(ArtifactLifecycle::Candidate(CandidateArtifacts {
+                    binary,
+                    image,
+                    config_schema,
+                    health_inventory,
+                    acceptance,
+                })),
+                _ => None,
+            }
+        }
+        DeclaredLifecycle::Supported => {
+            if row.reason.is_some() {
+                diagnostics.push(format!("supported `{name}` 禁止 reason 字段"));
+            }
+            if row.acceptance.is_some() {
+                diagnostics.push(format!("supported `{name}` 禁止 acceptance 字段"));
+            }
+            let binary =
+                require_artifact_field(&name, "supported", "binary", row.binary, diagnostics);
+            let image = require_artifact_field(&name, "supported", "image", row.image, diagnostics);
+            let config_schema = require_artifact_field(
+                &name,
+                "supported",
+                "configSchema",
+                row.config_schema,
+                diagnostics,
+            );
+            let health_inventory = require_artifact_field(
+                &name,
+                "supported",
+                "healthInventory",
+                row.health_inventory,
+                diagnostics,
+            );
+            let journey =
+                require_artifact_field(&name, "supported", "journey", row.journey, diagnostics)
+                    .and_then(|journey| match validate_journey_carrier(&journey) {
+                        Ok(()) => Some(journey),
+                        Err(error) => {
+                            diagnostics.push(format!("supported `{name}` {error}"));
+                            None
+                        }
+                    });
             match (binary, image, config_schema, health_inventory, journey) {
                 (
                     Some(binary),
@@ -922,6 +1014,7 @@ fn promote_artifact(
                 || row.config_schema.is_some()
                 || row.health_inventory.is_some()
                 || row.journey.is_some()
+                || row.acceptance.is_some()
             {
                 diagnostics.push(format!(
                     "compile-only `{name}` 禁止携带 deployable artifact 字段"
@@ -944,16 +1037,32 @@ fn promote_artifact(
     })
 }
 
-fn require_supported_field<T>(
+fn require_artifact_field<T>(
     name: &str,
+    lifecycle: &str,
     field: &str,
     value: Option<T>,
     diagnostics: &mut Vec<String>,
 ) -> Option<T> {
     if value.is_none() {
-        diagnostics.push(format!("supported `{name}` 缺少 {field}"));
+        diagnostics.push(format!("{lifecycle} `{name}` 缺少 {field}"));
     }
     value
+}
+
+fn validate_acceptance_carrier(acceptance: &AcceptanceCarrier) -> Result<()> {
+    let AcceptanceCarrier::CargoTest {
+        package,
+        target,
+        test,
+    } = acceptance;
+    if let Some((field, _)) = [("package", package), ("target", target), ("test", test)]
+        .into_iter()
+        .find(|(_, value)| value.trim().is_empty())
+    {
+        bail!("acceptance `{field}` 必须非空")
+    }
+    Ok(())
 }
 
 fn validate_journey_carrier(journey: &JourneyCarrier) -> Result<()> {
@@ -1646,6 +1755,44 @@ fn relative_label(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn artifact_matrix_accepts_candidate_with_acceptance_but_without_journey() -> Result<()> {
+        let declaration = parse_artifact_declaration(
+            r#"
+schemaVersion = 2
+
+[[assemblies]]
+name = "deviceidentity"
+lifecycle = "candidate"
+
+[assemblies.binary]
+package = "deviceidentity"
+target = "deviceidentity-server"
+
+[assemblies.image]
+dockerfile = "Dockerfile"
+target = "deviceidentity-runtime"
+
+[assemblies.configSchema]
+kind = "json-schema"
+path = "assemblies/deviceidentity/config.schema.json"
+
+[assemblies.healthInventory]
+owner = "runtimeexec"
+listener = "health"
+
+[assemblies.acceptance]
+kind = "cargo-test"
+package = "deviceidentity"
+target = "runtime_image_acceptance"
+test = "deviceidentity_runtime_image_is_a_content_addressed_candidate"
+"#,
+        )?;
+        assert_eq!(declaration.schema_version, 2);
+        assert_eq!(declaration.assemblies.len(), 1);
+        Ok(())
+    }
+
     fn real_matrix() -> Result<ArtifactMatrixDeclaration> {
         let root = crate::workspace_root()?;
         Ok(toml::from_str(&std::fs::read_to_string(
@@ -1673,6 +1820,7 @@ mod tests {
             config_schema: None,
             health_inventory: None,
             journey: None,
+            acceptance: None,
         });
         Ok((repository, matrix))
     }
@@ -1945,6 +2093,7 @@ mod tests {
             config_schema: None,
             health_inventory: None,
             journey: None,
+            acceptance: None,
         });
 
         let diagnostic = AssemblyGovernanceIr::<Core>::load(&root)?

@@ -2515,28 +2515,31 @@ pub const CONTRACT: ::vocab::ContractBinding =
 "#
     );
     out.push_str(&render_http_response_bindings(c, sup)?);
-    if c.manifest().lifecycle != Lifecycle::Active {
+    let is_device_certificate_candidate = DeviceCertificateCandidateId::ALL
+        .into_iter()
+        .any(|candidate| candidate.spec().id == c.manifest().id);
+    if c.manifest().lifecycle != Lifecycle::Active && !is_device_certificate_candidate {
         return Ok(out);
     }
     let path = c
         .manifest()
         .path
         .as_deref()
-        .context("active http 契约缺 path（codegen fail-closed）")?;
+        .context("governed http 契约缺 path（codegen fail-closed）")?;
     let method = c
         .manifest()
         .method
-        .context("active http 契约缺 method（codegen fail-closed）")?;
+        .context("governed http 契约缺 method（codegen fail-closed）")?;
     let http = c
         .manifest()
         .endpoints
         .as_ref()
         .and_then(|e| e.http.as_ref())
-        .context("active http 契约缺 endpoints.http（codegen fail-closed）")?;
+        .context("governed http 契约缺 endpoints.http（codegen fail-closed）")?;
     let auth = http
         .auth
         .as_ref()
-        .context("active http 契约缺 endpoints.http.auth（codegen fail-closed）")?;
+        .context("governed http 契约缺 endpoints.http.auth（codegen fail-closed）")?;
     for (field, value) in [("path", path), ("method", method.as_wire())] {
         if !is_safe_codegen_string(value) {
             bail!(
@@ -2552,7 +2555,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
             let permission = auth
                 .permission
                 .as_deref()
-                .context("active permission http 契约缺 permission（codegen fail-closed）")?;
+                .context("governed permission http 契约缺 permission（codegen fail-closed）")?;
             format!(
                 "::vocab::HttpRouteAuth::Permission({})",
                 render_route_permission_expr(permission, "permission")?
@@ -2680,6 +2683,29 @@ pub const CONTRACT: ::vocab::ContractBinding =
     } else {
         format!("\n{},\n", headers.join(",\n"))
     };
+    // Draft contracts receive a typed route carrier so an explicitly governed candidate assembly
+    // can mount them without reconstructing contract metadata. They intentionally receive no SPEC:
+    // active registries and GeneratedItem::Spec remain lifecycle-gated.
+    let serving_spec = if c.manifest().lifecycle == Lifecycle::Active {
+        format!(
+            r#"
+/// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
+    mount_key: "{mount_key}",
+    route: ROUTE.evidence(),
+    local_tx: {local_tx},
+    resource_sharing: {sup}HttpResourceSharingSpec {{
+        mode: ROUTE.evidence().resource_sharing(),
+        reason: {resource_sharing_reason},
+    }},
+    projection_fields: PROJECTION_FIELDS,
+    headers: &[{headers_body}],
+}};
+"#
+        )
+    } else {
+        String::new()
+    };
     out.push_str(&format!(
         r#"
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -2714,19 +2740,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
 );
 {producer_binding}
 {local_tx_evidence}
-
-/// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
-    mount_key: "{mount_key}",
-    route: ROUTE.evidence(),
-    local_tx: {local_tx},
-    resource_sharing: {sup}HttpResourceSharingSpec {{
-        mode: ROUTE.evidence().resource_sharing(),
-        reason: {resource_sharing_reason},
-    }},
-    projection_fields: PROJECTION_FIELDS,
-    headers: &[{headers_body}],
-}};
+{serving_spec}
 "#,
         method = method.as_wire(),
     ));
@@ -9610,6 +9624,23 @@ mod tests {
                     (path == Path::new("device_certificate.rs")).then_some(source.as_str())
                 })
                 .context("codegen must emit device_certificate.rs")?;
+            let http_routes = rendered
+                .iter()
+                .find_map(|(path, source)| {
+                    (path == Path::new("http/identity_v2.rs")).then_some(source.as_str())
+                })
+                .context("codegen must emit identity v2 candidate routes")?;
+            assert_eq!(
+                http_routes
+                    .matches("pub const ROUTE: ::vocab::HttpRouteBinding")
+                    .count(),
+                2,
+                "the closed candidate HTTP set must own exactly two typed route carriers"
+            );
+            assert!(
+                !http_routes.contains("pub const SPEC:"),
+                "draft candidate routes must not enter the active serving SPEC registry"
+            );
 
             for candidate in DeviceCertificateCandidateId::ALL {
                 let spec = candidate.spec();

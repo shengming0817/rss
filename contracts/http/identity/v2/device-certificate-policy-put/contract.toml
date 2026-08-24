@@ -17,6 +17,7 @@ request = "request.schema.json"
 400 = "validation.response.schema.json"
 404 = "not-found.response.schema.json"
 409 = "conflict.response.schema.json"
+503 = "provider-unavailable.response.schema.json"
 
 [endpoints.http]
 successStatus = 200

@@ -3,7 +3,7 @@
 #[cfg(test)]
 use std::future::Future;
 
-use identity::ports::device_certificate::{DeviceIngressDomainOutcome, DraftEligibility};
+use identity::ports::device_certificate::{ArtifactEligibility, DeviceIngressDomainOutcome};
 
 /// Provider-confirmed domain outcome paired with the provider's move-only commit proof.
 ///
@@ -24,11 +24,11 @@ impl<P> ProviderCommittedDeviceIngress<P> {
 ///
 /// No generic repository result enters this function: the opaque proof's private constructor keeps
 /// the runtime path tied to PostgreSQL's confirmed commit or exact readback.
-fn confirm_postgres_device_ingress(
+fn confirm_postgres_device_ingress<E: ArtifactEligibility>(
     pending: identity::ports::device_certificate::PendingDeviceIngress,
-    committed: postgres::PgDeviceIngressCommit<DraftEligibility>,
+    committed: postgres::PgDeviceIngressCommit<E>,
 ) -> Result<
-    ProviderCommittedDeviceIngress<postgres::PgDeviceIngressCommitProof<DraftEligibility>>,
+    ProviderCommittedDeviceIngress<postgres::PgDeviceIngressCommitProof<E>>,
     identity::ports::device_certificate::DeviceIngressReceiptMismatch,
 > {
     let (receipt, proof) = committed.into_parts();
@@ -51,14 +51,14 @@ pub enum PostgresDeviceIngressSettlementError {
     Transport(mqtt::MqttSessionError),
 }
 
-enum DeviceIngressTerminalProof {
-    Durable(postgres::PgDeviceIngressCommitProof<DraftEligibility>),
+enum DeviceIngressTerminalProof<E: ArtifactEligibility> {
+    Durable(postgres::PgDeviceIngressCommitProof<E>),
     Unaddressable(identity::ports::device_certificate::UnaddressableDeviceIngress),
 }
 
-struct DeviceIngressTerminalAuthority<T> {
+struct DeviceIngressTerminalAuthority<T, E: ArtifactEligibility> {
     outcome: T,
-    proof: DeviceIngressTerminalProof,
+    proof: DeviceIngressTerminalProof<E>,
 }
 
 impl std::fmt::Display for PostgresDeviceIngressSettlementError {
@@ -83,17 +83,17 @@ impl std::error::Error for PostgresDeviceIngressSettlementError {
 ///
 /// A generic repository receipt cannot enter this function. Failed settlement consumes both the
 /// proof and delivery; broker redelivery must obtain a fresh exact-readback proof before retrying.
-pub async fn acknowledge_postgres_device_ingress(
+pub async fn acknowledge_postgres_device_ingress<E: ArtifactEligibility>(
     delivery: mqtt::AuthenticatedDeviceDelivery,
     pending: identity::ports::device_certificate::PendingDeviceIngress,
-    committed: postgres::PgDeviceIngressCommit<DraftEligibility>,
+    committed: postgres::PgDeviceIngressCommit<E>,
 ) -> Result<DeviceIngressDomainOutcome, PostgresDeviceIngressSettlementError> {
     let verified = confirm_postgres_device_ingress(pending, committed)
         .map_err(PostgresDeviceIngressSettlementError::ReceiptMismatch)?;
     let ProviderCommittedDeviceIngress { outcome, proof } = verified;
     settle_terminal_delivery(
         delivery,
-        DeviceIngressTerminalAuthority {
+        DeviceIngressTerminalAuthority::<_, E> {
             outcome,
             proof: DeviceIngressTerminalProof::Durable(proof),
         },
@@ -108,7 +108,7 @@ pub(crate) fn acknowledge_unaddressable_device_ingress(
 ) -> Result<(), mqtt::MqttSessionError> {
     settle_terminal_delivery(
         delivery,
-        DeviceIngressTerminalAuthority {
+        DeviceIngressTerminalAuthority::<_, identity::ports::device_certificate::DraftEligibility> {
             outcome: (),
             proof: DeviceIngressTerminalProof::Unaddressable(poison),
         },
@@ -116,9 +116,9 @@ pub(crate) fn acknowledge_unaddressable_device_ingress(
     .map(|_| ())
 }
 
-fn settle_terminal_delivery<T>(
+fn settle_terminal_delivery<T, E: ArtifactEligibility>(
     delivery: mqtt::AuthenticatedDeviceDelivery,
-    authority: DeviceIngressTerminalAuthority<T>,
+    authority: DeviceIngressTerminalAuthority<T, E>,
 ) -> Result<T, mqtt::MqttSessionError> {
     let DeviceIngressTerminalAuthority { outcome, proof } = authority;
     match proof {

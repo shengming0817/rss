@@ -11,7 +11,11 @@ method = "GET"
 
 [schemas]
 request = "request.schema.json"
-response = "response.schema.json"
+
+[schemas.responses]
+200 = "response.schema.json"
+400 = "validation.response.schema.json"
+503 = "provider-unavailable.response.schema.json"
 
 [endpoints.http]
 successStatus = 200

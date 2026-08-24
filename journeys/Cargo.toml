@@ -148,6 +148,7 @@ tower = { workspace = true, features = ["util"] }
 anyhow = { workspace = true }
 # adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 # durable 拓扑 journey（`integration` feature）：PgStore/PgEmitter/PgOutbox/PgInboxStore 端到端闭环。
 postgres = { path = "../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit", "journey-fault-support", "test-support"] }
 sqlx = { workspace = true }

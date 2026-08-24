@@ -2804,7 +2804,7 @@ mod tests {
         }));
 
         let mut wrong_prefix = DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec);
-        wrong_prefix[0].selector = "bogus::tests::provider_catalog_is_the_exact_five_role_closure";
+        wrong_prefix[0].selector = "bogus::tests::provider_catalog_is_the_exact_production_closure";
         let findings = validate_device_latent_evidence(&root, facts, &wrong_prefix)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::DeviceLatentEvidenceClosure

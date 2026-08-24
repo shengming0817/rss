@@ -60,6 +60,11 @@ const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
         "federated_evidence",
         "auth_bridge::federated_evidence",
     ),
+    (
+        "deviceidentity",
+        "federated_evidence",
+        "auth_bridge::federated_evidence",
+    ),
 ];
 const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str, &str)] = &[
     ("runtime", "allow_evidence", "auth_bridge::allow_evidence"),
@@ -70,6 +75,11 @@ const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "settingsonly",
+        "federated_evidence",
+        "auth_bridge::federated_evidence",
+    ),
+    (
+        "deviceidentity",
         "federated_evidence",
         "auth_bridge::federated_evidence",
     ),
@@ -298,7 +308,7 @@ fn authenticated_mint_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> 
             exact_caller
                 && (*expected_crate != "identityaudit"
                     || caller_consumes_validated_auth_grant(cx, parent, false))
-                && (*expected_crate != "settingsonly"
+                && (!matches!(*expected_crate, "settingsonly" | "deviceidentity")
                     || caller_consumes_verified_federated_access(cx, parent))
         },
     )

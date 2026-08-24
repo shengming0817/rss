@@ -41,12 +41,15 @@ use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 type RepoError = DeviceCertificateRepositoryError;
 type StatusError = DeviceCertificateStatusStoreError;
 
+// Adapter production code cannot depend outward on generated carriers. Unit tests join these
+// literals to both the generated authority and the SQL migration, so drift fails CI without an
+// Adapter -> Generated shipped dependency.
 const DEVICE_CERTIFICATE_COMMAND_DOMAIN: &str = "identity";
 const DEVICE_CERTIFICATE_COMMAND_TOPIC: &str = "identity.commands.apply-device-certificate";
 const DEVICE_CERTIFICATE_COMMAND_CONTRACT_ID: &str = "identity.apply-device-certificate";
 const DEVICE_CERTIFICATE_COMMAND_VERSION: &str = "v1";
 const DEVICE_CERTIFICATE_COMMAND_SCHEMA_HASH: &str =
-    "sha256:b5e4a88a6b3b5c11dc928d5d723fe615a23e9560808164d66c260dc8ff415365";
+    "sha256:a45a6ce5b930e2921919b10d688321bb05f59117fa8b8cb9076a7c455bff213b";
 
 /// Read-only device-certificate authority within one tenant-bound transaction.
 pub(crate) struct DeviceCertificateReadTx<'tx> {
@@ -2379,6 +2382,26 @@ mod tests {
         assert!(!MIGRATION.contains(
             "GRANT SELECT ON public.device_certificate_authorized_artifacts TO rss_device_command_funnel_owner"
         ));
+    }
+
+    #[test]
+    fn ready_proof_migration_joins_generated_schema_and_receipt_lineage() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0113_upgrade_device_certificate_ready_proof.sql");
+
+        assert!(MIGRATION.contains(DEVICE_CERTIFICATE_COMMAND_SCHEMA_HASH));
+        assert!(
+            MIGRATION
+                .contains("artifact.authorization_receipt_id=durable_authorization_receipt_id")
+        );
+        assert!(MIGRATION.contains(
+            "payload_json->>'authorizationReceiptId'=durable_authorization_receipt_id::text"
+        ));
+        assert!(
+            !MIGRATION.contains(
+                "sha256:b5e4a88a6b3b5c11dc928d5d723fe615a23e9560808164d66c260dc8ff415365"
+            )
+        );
     }
 
     #[test]

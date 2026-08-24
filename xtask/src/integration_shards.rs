@@ -385,7 +385,7 @@ impl LocalFeatureScope {
     pub(crate) const fn feature(self) -> &'static str {
         match self {
             Self::Mqtt => "broker-tests",
-            Self::DeviceIdentity => "test-support",
+            Self::DeviceIdentity => "artifact-acceptance",
             Self::IdentityAudit => "artifact-acceptance",
             Self::Postgres
             | Self::PostgresMigration
@@ -924,6 +924,7 @@ integration_shard_catalog! {
             PostgresMigration0109InboxBacklogSamples => ("postgres-migration-0109-inbox-backlog-samples", ReleaseCheck, "postgres", "migration_0109_inbox_backlog_samples", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0109InboxBacklogSamplesLive => ("postgres-migration-0109-inbox-backlog-samples-live", ReleaseCheck, "postgres", "migration_0109_inbox_backlog_samples_live", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0112DevicePolicyCorrelation => ("postgres-migration-0112-device-policy-correlation", ReleaseCheck, "postgres", "migration_0112_device_policy_correlation", Test, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
+            PostgresMigration0113ReceiptBoundReadyUpgrade => ("postgres-migration-0113-receipt-bound-ready-upgrade", ReleaseCheck, "postgres", "migration_0113_receipt_bound_ready_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -942,6 +943,7 @@ integration_shard_catalog! {
             MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
             DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
+            DeviceIdentityRuntimeImageAcceptance => ("deviceidentity-runtime-image-acceptance", ReleaseCheck, "deviceidentity", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [DeviceIdentityPackage, DeviceCertificateCandidate], capabilities: [Docker]),
             DeviceCertificateConvergenceJourney => ("device-certificate-convergence-journey", IntegrationCritical, "journeys", "device_certificate_convergence_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [IotDevicePackage, IdentityCompositionPackage, DeviceIdentityPackage, EventexecPackage, IdentityPackage, MqttPackage, PostgresPackage, DeviceCertificateCandidate], capabilities: [Docker]),
             MqttBackpressureFaultJourney => ("mqtt-backpressure-fault-journey", ReleaseCheck, "journeys", "mqtt_backpressure_fault_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [DeviceCertificateCandidate], capabilities: [Docker]),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -3099,14 +3101,17 @@ mod tests {
             LocalFeatureScope::DeviceIdentity.package(),
             "deviceidentity"
         );
-        assert_eq!(LocalFeatureScope::DeviceIdentity.feature(), "test-support");
+        assert_eq!(
+            LocalFeatureScope::DeviceIdentity.feature(),
+            "artifact-acceptance"
+        );
         assert_eq!(
             LocalFeatureScope::DeviceIdentity.root(),
             "assemblies/deviceidentity"
         );
         assert!(LocalFeatureScope::ALL.into_iter().all(|scope| match scope {
             LocalFeatureScope::Mqtt => scope.feature() == "broker-tests",
-            LocalFeatureScope::DeviceIdentity => scope.feature() == "test-support",
+            LocalFeatureScope::DeviceIdentity => scope.feature() == "artifact-acceptance",
             LocalFeatureScope::IdentityAudit => scope.feature() == "artifact-acceptance",
             _ => scope.feature() == "integration",
         }));
@@ -3359,6 +3364,7 @@ mod tests {
             ),
             ("postgres", "migration_0105_projection_generation_upgrade"),
             ("postgres", "migration_0109_inbox_backlog_samples_live"),
+            ("postgres", "migration_0113_receipt_bound_ready_upgrade"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),
@@ -3369,6 +3375,7 @@ mod tests {
             ("mqtt", "integration"),
             ("journeys", "device_certificate_convergence_journey"),
             ("journeys", "mqtt_backpressure_fault_journey"),
+            ("deviceidentity", "runtime_image_acceptance"),
             ("journeys", "amqp_consumer_at_least_once_journey"),
             ("journeys", "identity_login_audit_durable_journey"),
             ("journeys", "identityaudit_runtime"),

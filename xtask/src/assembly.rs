@@ -9,9 +9,10 @@ use anyhow::{Context, Result};
 #[cfg(test)]
 use assembly_schema::AssemblyManifest;
 use assembly_schema::{
-    AssemblyDomain, AssemblyProfile, AssemblyTopology, CanonicalAssemblyManifestV2, DiportPort,
-    DiportProvider, LifecycleChannel, ProviderConstructor, ProviderConsumer, ProviderDurability,
-    ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
+    AssemblyDomain, AssemblyListenerKind, AssemblyProfile, AssemblyTopology,
+    CanonicalAssemblyManifestV2, DiportPort, DiportProvider, LifecycleChannel, ProviderConstructor,
+    ProviderConsumer, ProviderDurability, ProviderFailurePosture, ProviderLifecycle, ProviderRole,
+    ProviderScope,
 };
 use quote::ToTokens as _;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1152,6 +1153,9 @@ fn production_edge_rate_limit_funnel_source_is_valid(source: &str) -> bool {
         .contains("primary:httpserve::RateLimitedRoutes")
         && compact.contains("admin:httpserve::RateLimitedRoutes")
         && compact.contains("health:httpserve::HealthRoutes"))
+        || (compact.contains("primary:httpserve::RateLimitedRoutes")
+            && compact.contains("internal:httpserve::RateLimitedRoutes")
+            && compact.contains("health:httpserve::HealthRoutes"))
         || (compact.contains("RateLimited(httpserve::RateLimitedRoutes)")
             && compact.contains("Health(httpserve::HealthRoutes)"));
     production_storage_requires_receipt
@@ -1414,9 +1418,23 @@ const DEVICEIDENTITY_PILOT_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
         },
     },
     RequiredCapabilitySpec {
-        capability: "device-draft-artifact-source",
+        capability: "device-production-artifact-source",
         expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
-            provider: ProviderConstructor::IdentityDraftArtifactSimulator,
+            provider: ProviderConstructor::IdentityExternalPkiArtifactSource,
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "external-csr-resolver",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::HttpdSpiffeMtlsExternalCsrResolver,
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "vault-external-pki",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::VaultExternalPkiProviderClosure,
             consumer: "identity",
         },
     },
@@ -1439,9 +1457,14 @@ const DEVICEIDENTITY_PILOT_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
 const DEVICEIDENTITY_PILOT_ROLES: &[ProviderRole] = &[
     ProviderRole::DeviceCertificateStore,
     ProviderRole::DeviceCommandStore,
-    ProviderRole::DeviceDraftArtifactSource,
+    ProviderRole::DeviceProductionArtifactSource,
+    ProviderRole::ExternalCsrResolver,
+    ProviderRole::VaultExternalPki,
     ProviderRole::DeviceMqttSession,
     ProviderRole::DeviceRevocationStore,
+    ProviderRole::ListenerPdp,
+    ProviderRole::AuthAuditSink,
+    ProviderRole::ListenerRateLimiter,
 ];
 
 const REQUIRED_CAPABILITY_DOMAINS: &[DomainCapabilitySpec] = &[
@@ -1516,12 +1539,22 @@ fn is_deviceidentity_pilot_shape(a: &GovernedAssembly) -> bool {
 }
 
 fn is_deviceidentity_pilot_manifest_shape(manifest: &CanonicalAssemblyManifestV2) -> bool {
-    manifest.profile() == AssemblyProfile::Demo
-        && manifest.topology() == AssemblyTopology::Demo
+    manifest.name() == "deviceidentity"
+        && manifest.profile() == AssemblyProfile::Production
+        && manifest.topology() == AssemblyTopology::DurableIsolated
         && manifest.domains() == [AssemblyDomain::Identity]
         && manifest.framework_contracts().is_empty()
         && manifest.workflow_activations().is_empty()
-        && manifest.listeners().is_empty()
+        && manifest
+            .listeners()
+            .iter()
+            .map(|listener| listener.kind)
+            .collect::<BTreeSet<_>>()
+            == BTreeSet::from([
+                AssemblyListenerKind::Primary,
+                AssemblyListenerKind::Internal,
+                AssemblyListenerKind::Health,
+            ])
 }
 
 fn validate_deviceidentity_pilot_exact_roles(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
@@ -1904,6 +1937,7 @@ fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &m
                         .manifest()
                         .domains()
                         .contains(&assembly_schema::AssemblyDomain::Identity)
+                        && assembly.manifest().name() != "deviceidentity"
                 },
             },
             CriticalProviderSpec {
@@ -1987,10 +2021,10 @@ fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &m
         findings.push(finding(
             Rule::ProductionSecuritySpiffeCloseout,
             a.manifest_label(),
-            "source=rust-ast-run-reachable profile=production gate=spiffe-mtls 必须在 run() 可达路径有 MtlsServerConfig::from_spire + DomainHttpTransport::from_spire + domain_transport_ready probe 证据，且不得保留 Internal service-token migration env 常量",
+            "source=rust-ast-run-reachable profile=production gate=spiffe-mtls 必须在 run() 可达路径有 MtlsServerConfig::from_spire +（DomainHttpTransport::from_spire 或私有 SpiffeMtlsExternalCsrResolver::from_spire）+ 对应 ready probe 证据，且不得保留 Internal service-token migration env 常量",
         ));
     }
-    if owns_internal_listener {
+    if owns_internal_listener && a.manifest().name() != "deviceidentity" {
         validate_token_profile_trust_chain(&a, &evidence, findings);
     }
     if a.manifest().name() == "runtime" {
@@ -2608,6 +2642,7 @@ struct SecurityCloseoutEvidence {
     jwks_ready_probe: bool,
     mtls_server_from_spire: bool,
     domain_transport_from_spire: bool,
+    external_csr_resolver_from_spire: bool,
     domain_transport_ready_probe: bool,
     legacy_service_token_migration: bool,
     rss_access_provider_build: bool,
@@ -2657,6 +2692,7 @@ impl SecurityCloseoutEvidence {
         self.jwks_ready_probe |= other.jwks_ready_probe;
         self.mtls_server_from_spire |= other.mtls_server_from_spire;
         self.domain_transport_from_spire |= other.domain_transport_from_spire;
+        self.external_csr_resolver_from_spire |= other.external_csr_resolver_from_spire;
         self.domain_transport_ready_probe |= other.domain_transport_ready_probe;
         self.legacy_service_token_migration |= other.legacy_service_token_migration;
         self.rss_access_provider_build |= other.rss_access_provider_build;
@@ -2737,7 +2773,7 @@ impl SecurityCloseoutEvidence {
 
     fn has_spiffe_closeout(&self) -> bool {
         self.mtls_server_from_spire
-            && self.domain_transport_from_spire
+            && (self.domain_transport_from_spire || self.external_csr_resolver_from_spire)
             && self.domain_transport_ready_probe
             && !self.legacy_service_token_migration
     }
@@ -3012,6 +3048,15 @@ fn type_path_name(
     aliases: &StandardPathAliases,
     self_owner: Option<&str>,
 ) -> Option<String> {
+    if let syn::Type::Reference(reference) = ty {
+        return type_path_name(reference.elem.as_ref(), aliases, self_owner);
+    }
+    if let syn::Type::Paren(paren) = ty {
+        return type_path_name(paren.elem.as_ref(), aliases, self_owner);
+    }
+    if let syn::Type::Group(group) = ty {
+        return type_path_name(group.elem.as_ref(), aliases, self_owner);
+    }
     let syn::Type::Path(path) = ty else {
         return None;
     };
@@ -3158,13 +3203,17 @@ fn is_provider_finish_owner(owner: &str) -> bool {
 }
 
 fn in_provider_role_closer_finish(visitor: &SecurityCloseoutVisitor) -> bool {
+    in_provider_role_closer(visitor)
+        && visitor
+            .current_function()
+            .is_some_and(|function| function.ends_with("::finish"))
+}
+
+fn in_provider_role_closer(visitor: &SecurityCloseoutVisitor) -> bool {
     visitor
         .impl_stack
         .last()
         .is_some_and(|owner| owner == "ProviderRoleCloser")
-        && visitor
-            .current_function()
-            .is_some_and(|function| function.ends_with("::finish"))
 }
 
 fn provider_role_closer_field_has_type(
@@ -3234,6 +3283,9 @@ fn provider_finish_expression(
         )
         .or_else(|| direct_type_receiver_name(finish.receiver.as_ref()))
         .is_some_and(|owner| owner.ends_with("Constructor"))
+            || simple_path_ident(ungroup_profile_expression(finish.receiver.as_ref()))
+                .and_then(|binding| value_types.get(&binding))
+                .is_some_and(|owner| owner.ends_with("Constructor"))
             || provider_role_closer_field_has_type(
                 finish.receiver.as_ref(),
                 targets,
@@ -4729,6 +4781,11 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         {
             self.record_evidence(|e| e.domain_transport_from_spire = true);
         }
+        if call_path_ends_with(node.func.as_ref(), "from_spire")
+            && call_path_contains_segment(node.func.as_ref(), "SpiffeMtlsExternalCsrResolver")
+        {
+            self.record_evidence(|e| e.external_csr_resolver_from_spire = true);
+        }
         if (call_path_ends_with(node.func.as_ref(), "exact_join")
             && call_path_contains_segment(node.func.as_ref(), "ProviderRoleBatches"))
             || (call_path_ends_with(node.func.as_ref(), "from_execution_plan")
@@ -4955,6 +5012,17 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if node.method == "provider" {
             self.record_evidence(|e| e.runtime_oidc_provider_handle = true);
         }
+        if node.method == "transfer"
+            && in_provider_role_closer(self)
+            && provider_finish_expression(
+                node.receiver.as_ref(),
+                &self.path_aliases,
+                &self.diverging_function_names,
+                &value_types,
+            )
+        {
+            self.record_evidence(|e| e.provider_finish_transfer = true);
+        }
         if node.method == "managed_resource" {
             self.record_evidence(|e| {
                 e.runtime_oidc_managed_resource = true;
@@ -5103,7 +5171,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                 self.record_call(&identity);
             }
         }
-        if path_contains_segment(&node.path, "DOMAIN_TRANSPORT_READY_PROBE_NAME") {
+        if path_contains_segment(&node.path, "DOMAIN_TRANSPORT_READY_PROBE_NAME")
+            || path_contains_segment(&node.path, "EXTERNAL_CSR_RESOLVER_READY_PROBE_NAME")
+        {
             self.record_evidence(|e| e.domain_transport_ready_probe = true);
         }
         if path_contains_segment(&node.path, "RSS_ACCESS_TOKEN_RESOURCE_NAME") {
@@ -9022,6 +9092,32 @@ fn run() {
         assert!(
             evidence.has_provider_construction_live_join(),
             "typed generated carrier fixture must close the selected batch: {evidence:?}"
+        );
+
+        let file = syn::parse_file(
+            r#"
+struct ProviderRoleBatches; struct ProviderRoleCloser { roles: ProviderRoleBatches, constructor: EventConstructor }
+struct EventConstructor; struct EventReceipt;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } }
+impl ProviderRoleBatches { fn finish(self, _receipt: EventReceipt) {} }
+impl EventConstructor { fn finish(self) -> EventReceipt { EventReceipt } }
+impl EventReceipt { fn transfer(self) -> EventReceipt { self } }
+impl ProviderRoleCloser {
+    fn stage(&mut self) -> EventReceipt { EventConstructor.finish().transfer() }
+    fn finish(self, receipt: EventReceipt) { self.roles.finish(receipt); }
+}
+fn run() {
+    let roles = ProviderRoleBatches::exact_join();
+    let mut closer: ProviderRoleCloser = ProviderRoleCloser { roles, constructor: EventConstructor };
+    let receipt = closer.stage();
+    closer.finish(receipt);
+}
+"#,
+        )?;
+        let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
+        assert!(
+            evidence.has_provider_construction_live_join(),
+            "reachable staged transfer must close the selected batch: {evidence:?}"
         );
         Ok(())
     }

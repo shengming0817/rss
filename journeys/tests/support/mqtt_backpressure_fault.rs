@@ -208,9 +208,9 @@ async fn seed_generation_two(
     accept_generation(repository, 1, "mqtt-backpressure-two.example").await
 }
 
-fn pilot_config() -> anyhow::Result<identity_composition::DeviceIdentityPilotConfig> {
+fn pilot_config() -> anyhow::Result<identity_composition::DeviceIdentityRuntimeConfig> {
     let budget = harness::relay_budget()?;
-    Ok(identity_composition::DeviceIdentityPilotConfig::new(
+    Ok(identity_composition::DeviceIdentityRuntimeConfig::new(
         identity_composition::DeviceIdentitySchedulerConfig::new(
             Arc::new(ProcessClock),
             command_keyring()?,
@@ -255,7 +255,7 @@ async fn launch_pilot_on_runtime(
     let (handle, resources, sampler) = runtime.into_parts();
     let assembly_postgres = handle.device_identity_draft_runtime();
     let session = harness::mqtt_session(&coordinate()?, mqtt_fixture).await?;
-    let assembly = deviceidentity::DeviceIdentityAssembly::start(
+    let assembly = deviceidentity::DeviceIdentityAssembly::start_draft_for_test(
         assembly_postgres,
         draft_simulator()?,
         Arc::clone(&session),

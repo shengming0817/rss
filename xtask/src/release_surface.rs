@@ -535,6 +535,12 @@ pub(crate) struct ArtifactProjection {
 
 #[derive(Clone, Debug)]
 enum ProjectedArtifactLifecycle {
+    Candidate {
+        binary_package: String,
+        binary_target: String,
+        image_dockerfile: String,
+        image_target: String,
+    },
     Supported {
         binary_package: String,
         binary_target: String,
@@ -571,6 +577,25 @@ impl ArtifactProjection {
             lifecycle: ProjectedArtifactLifecycle::CompileOnly,
         }
     }
+
+    #[cfg(test)]
+    fn candidate(
+        assembly: &str,
+        binary_package: &str,
+        binary_target: &str,
+        image_dockerfile: &str,
+        image_target: &str,
+    ) -> Self {
+        Self {
+            assembly: assembly.to_owned(),
+            lifecycle: ProjectedArtifactLifecycle::Candidate {
+                binary_package: binary_package.to_owned(),
+                binary_target: binary_target.to_owned(),
+                image_dockerfile: image_dockerfile.to_owned(),
+                image_target: image_target.to_owned(),
+            },
+        }
+    }
 }
 
 pub(crate) fn requires_artifact_join(facts: &WorkspaceFacts) -> bool {
@@ -587,6 +612,12 @@ pub(crate) fn project_artifacts(
         .iter()
         .map(|artifact| {
             let lifecycle = match &artifact.lifecycle {
+                ArtifactLifecycle::Candidate(candidate) => ProjectedArtifactLifecycle::Candidate {
+                    binary_package: candidate.binary.package.clone(),
+                    binary_target: candidate.binary.target.clone(),
+                    image_dockerfile: candidate.image.dockerfile.clone(),
+                    image_target: candidate.image.target.clone(),
+                },
                 ArtifactLifecycle::Supported(supported) => ProjectedArtifactLifecycle::Supported {
                     binary_package: supported.binary.package.clone(),
                     binary_target: supported.binary.target.clone(),
@@ -646,6 +677,18 @@ fn validate_profile_artifacts(
             continue;
         };
         match &artifact.lifecycle {
+            ProjectedArtifactLifecycle::Candidate {
+                binary_package,
+                binary_target,
+                image_dockerfile,
+                image_target,
+            } => findings.push(finding(
+                Rule::ReleaseSurfaceProfile,
+                subject,
+                format!(
+                    "candidate assembly cannot be selected as an official release profile artifact (static identity: {binary_package}/{binary_target}, {image_dockerfile}#{image_target})"
+                ),
+            )),
             ProjectedArtifactLifecycle::CompileOnly => findings.push(finding(
                 Rule::ReleaseSurfaceProfile,
                 subject,
@@ -1574,6 +1617,39 @@ mod tests {
                 .iter()
                 .any(|finding| finding.detail.contains("activation facts are unavailable"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_selected_profile_is_rejected_without_inspecting_identity() -> Result<()> {
+        let facts = facts_with_selection(
+            json!({
+                "packages": [],
+                "profile-artifacts": [{"profile": "core", "assembly": "runtime"}]
+            }),
+            json!([]),
+            json!("1.86"),
+            json!([]),
+        )?;
+        let artifact = ArtifactProjection::candidate(
+            "runtime",
+            "missing-package",
+            "missing-target",
+            "Dockerfile",
+            "candidate-runtime",
+        );
+        let (surface, findings) = validate(&facts, &[artifact]);
+        assert!(surface.is_none());
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ReleaseSurfaceProfile
+                && finding
+                    .detail
+                    .contains("candidate assembly cannot be selected")
+        }));
+        assert!(!findings.iter().any(|finding| {
+            finding.rule == Rule::ReleaseSurfaceProfile
+                && finding.detail.contains("binary/image identity")
+        }));
         Ok(())
     }
 

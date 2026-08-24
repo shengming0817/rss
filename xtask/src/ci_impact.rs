@@ -6050,6 +6050,10 @@ mod tests {
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
                 if packages == &["identityaudit"] && name == "runtime_image_acceptance"
         )));
+        assert!(!steps.iter().any(|step| matches!(step,
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
+                if packages == &["deviceidentity"] && name == "runtime_image_acceptance"
+        )));
         for step in &steps {
             if let LocalStep::Packages {
                 packages,

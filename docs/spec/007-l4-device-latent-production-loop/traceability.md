@@ -10,8 +10,8 @@ device policy/status receipts. It intentionally makes no PostgreSQL, wire-schema
 #2113 now supplies the T2 PostgreSQL handoff: one append-only authorization/idempotency ledger, normalized policy
 basis, atomic desired-generation lineage for policy accept and rotation, deterministic replay, and typed unsafe
 settlement. #2114 closes the Draft public-schema/candidate-package handoff and the internal command/application-receipt
-lineage joins; #2115 supplies an unmounted typed candidate component and T1/T2 proof only. Production assembly,
-route mounting, and T3 evidence remain an explicit #2117/activation handoff.
+lineage joins; #2115 supplies an unmounted typed candidate component and T1/T2 proof only. #2117 supplies the
+production candidate assembly and its two Draft route mounts; T3 evidence and activation remain a separate handoff.
 The #2113 T1 boundary proves that denied or unavailable authorization cannot construct
 `AcceptDesiredPolicy`; #2115 owns a test-only Primary harness proof that Deny, NoMatch, resource-fact
 Missing/Stale/Future/type-mismatch, and PIP/store errors never invoke the repository. Those cases
@@ -51,7 +51,7 @@ must not be represented by forged database inputs in this persistence PBI. This 
 | FR-029 | #1909 | T1 — six-contract exact-set and synthetic-red proof rejecting an undeclared operator mutation surface |
 | FR-030 | #1901 | T2 — schema inventory plus deletion transaction proving retained artifact receipts reuse the existing PostgreSQL decision-side revocation projection |
 | FR-031 | #1906 | T2 — programmable simulator journey keeps draft artifacts production-ineligible; #1904 owns compile-only draft pilot assembly |
-| FR-032 | ADR-028 future handoff | T1/T2 required — typed provider construction plus missing-provider seam/component-readiness rejection; no designated-process startup/readiness claim or current carrier |
+| FR-032 | #2117 | T1/T2 — generated provider-role closure, exact runtime inventory, construction/readiness probes and missing-provider rejection; no designated-process T3 claim |
 | FR-033 | #2113 | T2 — `desired_accept_replays_without_writes_and_conflicts_roll_back_the_bundle` proves same-key deterministic receipt replay, digest reuse conflict, 65-policy projection, and both unsafe-settlement recovery outcomes |
 | FR-034 | #1893 | T1 — bounded duration and sealed cross-field policy-constructor boundary/property test |
 | FR-035 | #1909 | T2 — existing typed registry/codegen six-contract exact-set synthetic-red proof |
@@ -69,9 +69,9 @@ must not be represented by forged database inputs in this persistence PBI. This 
 | NFR-005 | #1901 | T2 — private eligibility/receipt/Ready/completion proofs plus generic-command and production-provider substitution rejection |
 | NFR-006 | #1905 | T2 — authorized output, audit, log/trace, and metric redaction test |
 | NFR-007 | #1896 | T2 — authenticated tenant transaction and server-time ordering PostgreSQL test |
-| NFR-008 | ADR-028 future handoff | T2 required — component disable/pause/drain semantics retaining facts; a later authorized T3 owns designated-process lifecycle and rollback proof |
+| NFR-008 | #2117 | T2 — runtimeexec-supervised listeners/workers, admission/unready transition, bounded LIFO drain and library-level durable restart; later T3 owns process/signal/image rollback proof |
 | NFR-009 | #1895 | T1 — generated sealed-coordinate compile/golden proof and caller-forgery synthetic red |
-| NFR-010 | ADR-028 future handoff | T1/T2 required — typed candidate dependencies plus prohibited-provider substitution rejection; no current carrier |
+| NFR-010 | #2117 | T1/T2 — production-typed PostgreSQL/External CSR/Vault/OIDC/MQTT/audit/Redis closure plus draft-provider compile rejection |
 | NFR-011 | #1906 | T2 — canonical offline/reconnect/newest-command/ACK/report/post-commit-receipt journey join proof |
 | NFR-012 | #1907 | T2 — exact PG join-hazard table mapping each cross-boundary failure to one observable assertion |
 | NFR-013 | #1908 | T2 — exact cross-boundary MQTT join-hazard table mapping broker/backpressure plus durable-ingress failures to one observable assertion, reusing rather than duplicating #1902/#1903 component proofs |
@@ -85,6 +85,6 @@ This table contains every FR/NFR declared in [spec.md](./spec.md) exactly once. 
 #1902 closes the standalone MQTTS/mTLS, peer-certificate assertion, exact ACL/topic, persistent-session,
 manual-ACK, readiness and credential-reload behavior. #1903 begins only after an authenticated delivery exists
 and owns durable ingress plus post-commit application receipt. #1908 owns only independent joins that require
-both those capabilities. ADR-028 leaves production candidate integration and required-provider readiness/drain to
-future T1/T2 owners and leaves activation to a separately authorized T3 owner. A broker PUBACK is
+both those capabilities. #2117 closes production candidate integration and required-provider readiness/drain at
+T1/T2 only; ADR-028 still leaves activation to a separately authorized T3 owner. A broker PUBACK is
 `BrokerAccepted`; none of these assignments permits treating it as an application receipt.

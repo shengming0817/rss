@@ -44,11 +44,12 @@ pub mod ports;
 pub use application::{
     AccessGrantValidationError, AccountStatusChangeError, AuthGrantServices,
     AuthGrantValidationService, ChangePasswordError, CredentialSecurityService, CurrentAuthGrant,
-    DevicePolicyCandidateBinding, DeviceResourceFactPip, DeviceResourceFactPipError,
-    FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
-    LoginError, LoginService, PolicyManageError, PolicyManageService, RbacAdminError,
-    RbacAdminService, RefreshBundle, RefreshError, RefreshService, ValidatedAuthGrant,
-    build_contract_authorizer, build_device_policy_candidate_binding,
+    DeviceCandidateStatusState, DevicePolicyCandidateBinding, DeviceResourceFactPip,
+    DeviceResourceFactPipError, FederatedIdentityDomain, FederatedIdentityDomainDeps,
+    IdentityDomain, IdentityDomainDeps, LoginError, LoginService, PolicyManageError,
+    PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle, RefreshError,
+    RefreshService, ValidatedAuthGrant, build_contract_authorizer,
+    build_device_policy_candidate_binding, register_device_candidate_routes,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]

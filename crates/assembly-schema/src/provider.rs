@@ -220,6 +220,9 @@ provider_roles! {
     DeviceCertificateStore => "device-certificate-store",
     DeviceCommandStore => "device-command-store",
     DeviceDraftArtifactSource => "device-draft-artifact-source",
+    DeviceProductionArtifactSource => "device-production-artifact-source",
+    ExternalCsrResolver => "external-csr-resolver",
+    VaultExternalPki => "vault-external-pki",
     DeviceMqttSession => "device-mqtt-session",
     DeviceRevocationStore => "device-revocation-store",
     EventPublisher => "event-publisher",
@@ -316,6 +319,9 @@ provider_factory_symbols! {
     IdentityPostgresDeviceCertificateStore => "identity::postgres-device-certificate-store",
     IdentityPostgresDeviceCommandStore => "identity::postgres-device-command-store",
     IdentityDraftArtifactSimulator => "identity::draft-artifact-simulator",
+    IdentityExternalPkiArtifactSource => "identity::external-pki-artifact-source",
+    IdentityExternalCsrResolver => "identity::external-csr-resolver",
+    IdentityVaultExternalPki => "identity::vault-external-pki",
     IdentityMqttSession => "identity::mqtt-session",
     DeviceloopPostgresRevocationStore => "deviceloop::postgres-revocation-store",
     EventexecAmqpPublisher => "eventexec::amqp-publisher",
@@ -348,6 +354,12 @@ pub enum ProviderConstructor {
     PostgresDeviceCommandStore,
     #[serde(rename = "identity_composition::DraftArtifactSimulator")]
     IdentityDraftArtifactSimulator,
+    #[serde(rename = "identity_composition::ExternalPkiArtifactSource")]
+    IdentityExternalPkiArtifactSource,
+    #[serde(rename = "httpd::SpiffeMtlsExternalCsrResolver")]
+    HttpdSpiffeMtlsExternalCsrResolver,
+    #[serde(rename = "vault::VaultExternalPkiProviderClosure")]
+    VaultExternalPkiProviderClosure,
     #[serde(rename = "mqtt::MqttSession")]
     MqttSession,
     #[serde(rename = "postgres::PgRevocationStore")]
@@ -390,6 +402,11 @@ impl ProviderConstructor {
             Self::PostgresDeviceCertificateRepository => "postgres::PgDeviceCertificateRepository",
             Self::PostgresDeviceCommandStore => "postgres::PgDeviceCommandStore",
             Self::IdentityDraftArtifactSimulator => "identity_composition::DraftArtifactSimulator",
+            Self::IdentityExternalPkiArtifactSource => {
+                "identity_composition::ExternalPkiArtifactSource"
+            }
+            Self::HttpdSpiffeMtlsExternalCsrResolver => "httpd::SpiffeMtlsExternalCsrResolver",
+            Self::VaultExternalPkiProviderClosure => "vault::VaultExternalPkiProviderClosure",
             Self::MqttSession => "mqtt::MqttSession",
             Self::PostgresRevocationStore => "postgres::PgRevocationStore",
             Self::RedisRateLimiter => "redis::RedisRateLimiter",
@@ -417,6 +434,9 @@ impl ProviderConstructor {
             Self::PostgresDeviceCertificateRepository => DiportPort::CertificateReconcileRepository,
             Self::PostgresDeviceCommandStore => DiportPort::DeviceCommandStore,
             Self::IdentityDraftArtifactSimulator => DiportPort::CertificateArtifactSource,
+            Self::IdentityExternalPkiArtifactSource => DiportPort::CertificateArtifactSource,
+            Self::HttpdSpiffeMtlsExternalCsrResolver => DiportPort::ExternalCsrResolver,
+            Self::VaultExternalPkiProviderClosure => DiportPort::ExternalPkiProviderClosure,
             Self::MqttSession => DiportPort::MqttSession,
             Self::PostgresRevocationStore => DiportPort::RevocationStore,
             Self::RedisRateLimiter => DiportPort::RateLimiter,
@@ -447,6 +467,7 @@ impl ProviderConstructor {
             | Self::VaultSigner
             | Self::VaultKeyProvider
             | Self::VaultSecretResolver
+            | Self::VaultExternalPkiProviderClosure
             | Self::OidcProvider
             | Self::S3Store
             | Self::S3VerifiedDlxArchiveStore => &["backend"],
@@ -455,6 +476,8 @@ impl ProviderConstructor {
                 &["domain-identity"]
             }
             Self::IdentityDraftArtifactSimulator
+            | Self::IdentityExternalPkiArtifactSource
+            | Self::HttpdSpiffeMtlsExternalCsrResolver
             | Self::MqttSession
             | Self::PostgresRevocationStore
             | Self::PostgresCasStore
@@ -472,7 +495,11 @@ impl ProviderConstructor {
             Self::PostgresDeviceCertificateRepository
             | Self::PostgresDeviceCommandStore
             | Self::PostgresRevocationStore => "postgres",
-            Self::IdentityDraftArtifactSimulator => "identity-composition",
+            Self::IdentityDraftArtifactSimulator | Self::IdentityExternalPkiArtifactSource => {
+                "identity-composition"
+            }
+            Self::HttpdSpiffeMtlsExternalCsrResolver => "httpd",
+            Self::VaultExternalPkiProviderClosure => "vault",
             Self::MqttSession => "mqtt",
             Self::RedisRateLimiter => "redis",
             Self::AmqpPublisher | Self::AmqpSubscriber => "amqp",
@@ -520,6 +547,10 @@ pub enum DiportPort {
     DeviceCommandStore,
     #[serde(rename = "identity::CertificateArtifactSource")]
     CertificateArtifactSource,
+    #[serde(rename = "diport::ExternalCsrResolver")]
+    ExternalCsrResolver,
+    #[serde(rename = "diport::ExternalPkiProviderClosure")]
+    ExternalPkiProviderClosure,
     #[serde(rename = "mqtt::MqttSession")]
     MqttSession,
     #[serde(rename = "diport::RevocationStore")]
@@ -560,6 +591,8 @@ impl DiportPort {
             Self::CertificateReconcileRepository => "identity::CertificateReconcileRepository",
             Self::DeviceCommandStore => "identity::DeviceCommandStore",
             Self::CertificateArtifactSource => "identity::CertificateArtifactSource",
+            Self::ExternalCsrResolver => "diport::ExternalCsrResolver",
+            Self::ExternalPkiProviderClosure => "diport::ExternalPkiProviderClosure",
             Self::MqttSession => "mqtt::MqttSession",
             Self::RevocationStore => "diport::RevocationStore",
             Self::Publisher => "diport::Publisher",
@@ -749,6 +782,51 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         failure_posture: None,
         outputs: &[],
         factory: Some(ProviderFactorySymbol::IdentityDraftArtifactSimulator),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::DeviceProductionArtifactSource,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::CertificateArtifactSource,
+        constructor: ProviderConstructor::IdentityExternalPkiArtifactSource,
+        provider_crate: "identity-composition",
+        required_features: &[],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[],
+        factory: Some(ProviderFactorySymbol::IdentityExternalPkiArtifactSource),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::ExternalCsrResolver,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::ExternalCsrResolver,
+        constructor: ProviderConstructor::HttpdSpiffeMtlsExternalCsrResolver,
+        provider_crate: "httpd",
+        required_features: &[],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[P, R],
+        factory: Some(ProviderFactorySymbol::IdentityExternalCsrResolver),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::VaultExternalPki,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::ExternalPkiProviderClosure,
+        constructor: ProviderConstructor::VaultExternalPkiProviderClosure,
+        provider_crate: "vault",
+        required_features: &["backend"],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[P, R],
+        factory: Some(ProviderFactorySymbol::IdentityVaultExternalPki),
     },
     ProviderRoleSpec {
         role: ProviderRole::DeviceMqttSession,
@@ -1354,6 +1432,9 @@ mod tests {
             ProviderRole::DeviceCommandStore,
             ProviderRole::DeviceRevocationStore,
             ProviderRole::DeviceDraftArtifactSource,
+            ProviderRole::DeviceProductionArtifactSource,
+            ProviderRole::ExternalCsrResolver,
+            ProviderRole::VaultExternalPki,
             ProviderRole::DeviceMqttSession,
         ];
 

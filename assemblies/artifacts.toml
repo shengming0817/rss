@@ -1,9 +1,30 @@
-schemaVersion = 1
+schemaVersion = 2
 
 [[assemblies]]
 name = "deviceidentity"
-lifecycle = "compile-only"
-reason = "draft DeviceLatent pilot is a library-only composition proof with no deployable listener or binary"
+lifecycle = "candidate"
+
+[assemblies.binary]
+package = "deviceidentity"
+target = "deviceidentity-server"
+
+[assemblies.image]
+dockerfile = "Dockerfile"
+target = "deviceidentity-runtime"
+
+[assemblies.configSchema]
+kind = "json-schema"
+path = "assemblies/deviceidentity/config.schema.json"
+
+[assemblies.healthInventory]
+owner = "runtimeexec"
+listener = "health"
+
+[assemblies.acceptance]
+kind = "cargo-test"
+package = "deviceidentity"
+target = "runtime_image_acceptance"
+test = "deviceidentity_runtime_image_is_a_content_addressed_candidate"
 
 [[assemblies]]
 name = "identityaudit"

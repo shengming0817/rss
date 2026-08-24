@@ -11,6 +11,9 @@
 //!
 //! ref: uber-go/fx lifecycle.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（Domain::init push 声明）
 
+mod device_candidate_routes;
+pub use device_candidate_routes::{DeviceCandidateStatusState, register_device_candidate_routes};
+
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -2377,8 +2380,10 @@ impl DevicePolicyCandidateBinding {
     /// Map transport decode rejection into the candidate's typed validation response.
     pub fn validation_failure(
         request_id: httpserve::VerifiedRequestId,
+        field: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField,
+        reason: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason,
     ) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutHandlerResult{
-        DeviceCertificatePolicyCandidateHandler::validation_failure(request_id)
+        DeviceCertificatePolicyCandidateHandler::validation_failure(request_id, field, reason)
     }
 }
 
@@ -7237,7 +7242,11 @@ mod tests {
             };
             let result = match request {
                 Ok(Json(request)) => binding.handle(&subject, device, request, request_id).await,
-                Err(_) => DevicePolicyCandidateBinding::validation_failure(request_id),
+                Err(_) => DevicePolicyCandidateBinding::validation_failure(
+                    request_id,
+                    generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Body,
+                    generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidJson,
+                ),
             };
             match result {
                 Ok(response) => response.into_response(),

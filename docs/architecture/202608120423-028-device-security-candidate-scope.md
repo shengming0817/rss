@@ -9,10 +9,12 @@
 ## Context
 
 ADR-024 已把 `device-security` 列为 conditional official profile，但没有指定 artifact、真实 consumer 或激活闭包。
-当前仓库事实仍是：`assemblies/deviceidentity` 只是 `demo`、library-only、`compile-only` 的 draft pilot；它使用
-`DraftArtifactSimulator`，没有 binary、image、listener、public route、canonical journey 或 production
-`ProductionEligibility` mint。六个 DeviceLatent contract 已物化为 manifest 与 generated binding，但 lifecycle 全部为
-`draft`，也没有 mounted production path。
+截至 #2117，`assemblies/deviceidentity` 已原地物化为 `production` + `durable-isolated` candidate：具有唯一 binary、
+content-addressable image target、闭合 schemaVersion=2 config、RuntimePlan/AssemblyLock/provider inventory、三 listener
+和 production `ProductionEligibility` mint。Primary 仅挂载 policy PUT 与 status GET 两个 Draft route；六个 DeviceLatent
+contract lifecycle 仍全部为 `draft`。`DraftArtifactSimulator` 与 draft PostgreSQL bundle 只在 `test-support` 图可见。
+既有 Ready proof function 由 forward-only migration `0113` 原地升级到 receipt-bound command schema；不新增表、列、角色或
+兼容 overload。
 
 外部 `rss-main-user-device-abac-speckit-20260811` 与
 `rss-incubator-secure-device-rotation-speckit-20260811` 提议把用户授权、Resource Security Fact、设备凭据轮换和 production
@@ -37,14 +39,16 @@ T3 默认拒绝、独立 issue/PR 规则冲突。
 | 产品事实 | 唯一 identity | 当前状态 |
 |---|---|---|
 | official profile | `device-security` | candidate scope only |
-| assembly owner | `assemblies/deviceidentity` / Cargo package `deviceidentity` | demo、compile-only draft pilot |
-| candidate binary | package `deviceidentity` / target `deviceidentity-server` | 尚不存在，不是当前 artifact |
-| candidate image | `Dockerfile` target `deviceidentity-runtime` | 尚不存在，不是当前 artifact |
+| assembly owner | `assemblies/deviceidentity` / Cargo package `deviceidentity` | production candidate，非 official-profile activation |
+| candidate binary | package `deviceidentity` / target `deviceidentity-server` | 已物化；必须 `--config <path>`，仅 `--help` 可无配置成功 |
+| candidate image | `Dockerfile` target `deviceidentity-runtime` | 已物化；distroless nonroot，固定 ENTRYPOINT，仅含 binary 与 config schema |
 | public contract package | internal owner `crates/devicesecuritycontracts` / `devicesecuritycontracts` → public `rss-device-security-contracts` | 已物化的 experimental candidate Release Surface；六契约仍全部为 Draft，未发布、未激活 profile |
 | real consumer | `rss-incubator` 的 Secure Device Credential Rotation product/agent | 外部产品 owner，尚无消费回执 |
 
-冻结名称不等于注册 artifact。`assemblies/artifacts.toml` 在 binary、image、typed config、Health inventory 和非空 acceptance
-carrier 全部真实存在前继续保留 `deviceidentity = compile-only`；本 ADR 不写入不存在的 binary/image、selector 或 receipt。
+`assemblies/artifacts.toml` 已破坏式升级至 schema v2，并将 `deviceidentity` 的同一行登记为 `candidate`。candidate 必须携带
+binary/image/configSchema/healthInventory/exact cargo-test acceptance，且类型层禁止 `reason`/`journey`。Release Surface 可读取
+其静态 identity，但 official profile artifact selection 必须拒绝 candidate；未来只能原子把同一行晋级为 `supported` 并补
+journey，不能增加第二条激活入口。
 
 ### 六契约公共窄腰
 
@@ -111,7 +115,7 @@ profile，也不能成为 RSS production acceptance owner。
    production join 必须在同一 candidate revision first-green；随后才可在一个原子 transition 中把六契约从 `draft` 切为
    `active`、把唯一 designated artifact 提升为 canonical，并发布协调 package/image。
 
-任何前置缺失都保持 candidate/draft/compile-only。不得部分激活 contract、先登记 selector、用 static artifact metadata
+任何前置缺失都保持 candidate/draft。不得部分激活 contract、先登记 selector、用 static artifact metadata
 伪造运行回执，或以 L4/security-critical 名称自动获得 T3。未来 T3 只能使用 `ADR-024` 的闭值 owner，且仍须独立
 证明 production-only join hazard；本 ADR 不预留 Evidence ID、selector、fixture 或 CI lane。
 
@@ -136,10 +140,11 @@ profile，也不能成为 RSS production acceptance owner。
 |---|---|---|
 | 六个 Draft contract identity/kind/consistency 漂移 | typed contract catalog、schema/codegen exact-set、contract validation | 已有 Hard/Medium；不加第七清单或新 gate |
 | simulator artifact 进入 production slot | sealed `DraftEligibility`/`ProductionEligibility`、closure + move-only evidence 的消费式 production authorize、compile-fail tests；`pkiauthmint` wrapper/callsite exact-set 仅作 Medium 纵深门 | 已有 Hard/T1；正式 mint 仅由 provider config identity 一致的 Vault verified evidence + current receipt-bound acquisition 进入 |
-| draft pilot 被误报为 deployable artifact | assembly manifest/lock/RuntimePlan、`assemblies/artifacts.toml` 与 artifact validation | 已有 Hard/Medium；当前结论为 compile-only |
+| candidate 被误报为 supported/profile artifact | schema v2 candidate shape、assembly manifest/lock/RuntimePlan、Release Surface selection rejection | Hard/Medium；当前仅 immutable candidate artifact |
 | incubator 反向依赖 RSS internals | ADR-026 的独立 repository/Cargo source policy/candidate proof | 已有物理/Cargo/T2 owner |
 | public candidate/package drift | contract lifecycle/codegen、Release Surface、release API 与 locked/offline package proof | experimental Draft package 已物化；仍不构成 activation 或 production eligibility |
-| future assembly/activation partial cutover | assembly manifest/lock/RuntimePlan 与 profile artifact chain | future implementation handoff；未落地前不得声明 production invariant 已闭合 |
+| assembly/provider/listener/worker 漂移 | 同一 manifest 生成 RuntimePlan、AssemblyLock、provider catalog 与 module glue；启动期 exact join | 已落地 T1/T2；不等于 T3/activation |
+| future activation partial cutover | profile artifact chain、六契约 lifecycle 与同一 artifact 行原子晋级 | future activation handoff；不得声明 T3 已闭合 |
 
 不新增 Markdown scanner、当前数量 gate、device-security 专用 registry、Evidence database 或 shape-only temporary guard。未来 PBI
 必须优先使用 schema/codegen、sealed type、必填构造器和既有 assembly/Release Surface gate，并配置与真实风险对应的
@@ -158,6 +163,9 @@ synthetic red/anti-vacuity；没有 carrier 就缩窄或延后 claim。
 
 ## Consequences
 
-`device-security` 有了可实施的 candidate product identity，但当前 runtime 与 contract 行为不变。后续实现者无需再决定
-parallel assembly、package、binary/image、consumer 或 six/seven contract；仍必须通过独立 PBI 交付真实载体。
+`device-security` 已有可构建的 production candidate assembly，但 contract lifecycle、official profile selection 与 T3 状态不变。
+该 candidate 证明本仓拥有的静态 artifact 与 library/component T1/T2；registry provenance、发布、环境选择、真实进程/OCI
+secret-config-image join 和 consumer value stream 仍由后续 delivery/T3 owner 证明。
+真实 PostgreSQL T2 只在 fixture 中短暂授予 production append funnel，且在 restart proof 前撤销；这证明 candidate library
+closure，不修改 serving-role capability baseline，也不构成数据库迁移、activation selector 或 production acceptance。
 Resource Security Fact 的缺失生产 authority 会阻塞产品集成，而不会扩张 RSS 为 MDM/fleet/PKI/control-plane 产品。

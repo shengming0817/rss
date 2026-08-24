@@ -1459,6 +1459,105 @@ pub const diport::envelope::KEY_TENANT_AUTHORITY: &str
 pub const diport::envelope::KEY_TENANT_ID: &str
 pub const diport::envelope::KEY_TRACE: &str
 pub const diport::envelope::RESERVED_METADATA_KEYS: [&str; 10]
+pub mod diport::external_csr
+pub enum diport::external_csr::ExternalCsrError
+pub diport::external_csr::ExternalCsrError::BindingMismatch
+pub diport::external_csr::ExternalCsrError::Misconfigured
+pub diport::external_csr::ExternalCsrError::Rejected
+pub diport::external_csr::ExternalCsrError::Unavailable
+impl core::clone::Clone for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::clone(&self) -> diport::external_csr::ExternalCsrError
+impl core::cmp::Eq for diport::external_csr::ExternalCsrError
+impl core::cmp::PartialEq for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::eq(&self, &diport::external_csr::ExternalCsrError) -> bool
+impl core::error::Error for diport::external_csr::ExternalCsrError
+impl core::fmt::Debug for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::external_csr::ExternalCsrError
+impl core::marker::StructuralPartialEq for diport::external_csr::ExternalCsrError
+impl core::marker::Freeze for diport::external_csr::ExternalCsrError
+impl core::marker::Send for diport::external_csr::ExternalCsrError
+impl core::marker::Sync for diport::external_csr::ExternalCsrError
+impl core::marker::Unpin for diport::external_csr::ExternalCsrError
+impl core::marker::UnsafeUnpin for diport::external_csr::ExternalCsrError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::external_csr::ExternalCsrError
+impl core::panic::unwind_safe::UnwindSafe for diport::external_csr::ExternalCsrError
+#[repr(transparent)] pub struct diport::external_csr::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> diport::DynExternalCsrResolver<'dynosaur_struct>
+pub const fn diport::DynExternalCsrResolver<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>
+pub const fn diport::DynExternalCsrResolver<'dynosaur_struct>::from_mut(&mut impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> &mut diport::DynExternalCsrResolver<'dynosaur_struct>
+pub const fn diport::DynExternalCsrResolver<'dynosaur_struct>::from_ref(&impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> &diport::DynExternalCsrResolver<'dynosaur_struct>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::new_arc(impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynExternalCsrResolver<'dynosaur_struct>>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::new_box(impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::new_rc(impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynExternalCsrResolver<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynExternalCsrResolver<'_>
+pub type diport::DynExternalCsrResolver<'_>::Bucket = diport::AsyncSync
+impl diport::DiPortEffect for diport::DynExternalCsrResolver<'_>
+pub type diport::DynExternalCsrResolver<'_>::Effect = diport::ReadEffect
+pub type diport::DynExternalCsrResolver<'_>::Privilege = diport::LocalPrivilege
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &mut diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for diport::DynExternalCsrResolver<'dynosaur_struct>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> !core::marker::Freeze for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Send for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sized for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Unpin for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynExternalCsrResolver<'dynosaur_struct>
+pub struct diport::external_csr::ExternalCsrEvidence
+impl diport::external_csr::ExternalCsrEvidence
+pub fn diport::external_csr::ExternalCsrEvidence::csr_pem(&self) -> &[u8]
+pub fn diport::external_csr::ExternalCsrEvidence::new(diport::external_csr::ExternalCsrRequest, alloc::vec::Vec<u8>) -> core::result::Result<Self, diport::external_csr::ExternalCsrError>
+pub const fn diport::external_csr::ExternalCsrEvidence::request(&self) -> &diport::external_csr::ExternalCsrRequest
+impl core::fmt::Debug for diport::external_csr::ExternalCsrEvidence
+pub fn diport::external_csr::ExternalCsrEvidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::external_csr::ExternalCsrEvidence
+impl core::marker::Send for diport::external_csr::ExternalCsrEvidence
+impl core::marker::Sync for diport::external_csr::ExternalCsrEvidence
+impl core::marker::Unpin for diport::external_csr::ExternalCsrEvidence
+impl core::marker::UnsafeUnpin for diport::external_csr::ExternalCsrEvidence
+impl core::panic::unwind_safe::RefUnwindSafe for diport::external_csr::ExternalCsrEvidence
+impl core::panic::unwind_safe::UnwindSafe for diport::external_csr::ExternalCsrEvidence
+pub struct diport::external_csr::ExternalCsrRequest
+impl diport::external_csr::ExternalCsrRequest
+pub const fn diport::external_csr::ExternalCsrRequest::authorization_receipt(&self) -> &diport::pki_artifact::PkiAuthorizationReceipt
+pub const fn diport::external_csr::ExternalCsrRequest::device(&self) -> ids::DeviceId
+pub const fn diport::external_csr::ExternalCsrRequest::generation(&self) -> diport::pki_artifact::PkiRequestGeneration
+pub const fn diport::external_csr::ExternalCsrRequest::new(rss_request_context::TenantId, ids::DeviceId, diport::pki_artifact::PkiRequestGeneration, diport::pki_artifact::PkiPolicyDigest, diport::pki_artifact::PkiAuthorizationReceipt) -> Self
+pub const fn diport::external_csr::ExternalCsrRequest::policy_digest(&self) -> &diport::pki_artifact::PkiPolicyDigest
+pub const fn diport::external_csr::ExternalCsrRequest::tenant(&self) -> rss_request_context::TenantId
+impl core::fmt::Debug for diport::external_csr::ExternalCsrRequest
+pub fn diport::external_csr::ExternalCsrRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::external_csr::ExternalCsrRequest
+impl core::marker::Send for diport::external_csr::ExternalCsrRequest
+impl core::marker::Sync for diport::external_csr::ExternalCsrRequest
+impl core::marker::Unpin for diport::external_csr::ExternalCsrRequest
+impl core::marker::UnsafeUnpin for diport::external_csr::ExternalCsrRequest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::external_csr::ExternalCsrRequest
+impl core::panic::unwind_safe::UnwindSafe for diport::external_csr::ExternalCsrRequest
+pub trait diport::external_csr::ExternalCsrResolver: core::marker::Send + core::marker::Sync
+pub fn diport::external_csr::ExternalCsrResolver::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &mut diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for diport::DynExternalCsrResolver<'dynosaur_struct>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+pub trait diport::external_csr::ExternalCsrResolverLocal
+pub async fn diport::external_csr::ExternalCsrResolverLocal::resolve(&self, diport::external_csr::ExternalCsrRequest) -> core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>
+impl<TraitVariantBlanketType: diport::external_csr::ExternalCsrResolver> diport::external_csr::ExternalCsrResolverLocal for TraitVariantBlanketType
+pub async fn TraitVariantBlanketType::resolve(&self, diport::external_csr::ExternalCsrRequest) -> core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>
 pub mod diport::fenced_writer
 #[non_exhaustive] pub enum diport::fenced_writer::WriteOutcome
 pub diport::fenced_writer::WriteOutcome::Committed
@@ -6361,6 +6460,30 @@ impl core::marker::Unpin for diport::outbox_emitter::EnvelopeIdentityError
 impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeIdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+pub enum diport::ExternalCsrError
+pub diport::ExternalCsrError::BindingMismatch
+pub diport::ExternalCsrError::Misconfigured
+pub diport::ExternalCsrError::Rejected
+pub diport::ExternalCsrError::Unavailable
+impl core::clone::Clone for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::clone(&self) -> diport::external_csr::ExternalCsrError
+impl core::cmp::Eq for diport::external_csr::ExternalCsrError
+impl core::cmp::PartialEq for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::eq(&self, &diport::external_csr::ExternalCsrError) -> bool
+impl core::error::Error for diport::external_csr::ExternalCsrError
+impl core::fmt::Debug for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::external_csr::ExternalCsrError
+pub fn diport::external_csr::ExternalCsrError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::external_csr::ExternalCsrError
+impl core::marker::StructuralPartialEq for diport::external_csr::ExternalCsrError
+impl core::marker::Freeze for diport::external_csr::ExternalCsrError
+impl core::marker::Send for diport::external_csr::ExternalCsrError
+impl core::marker::Sync for diport::external_csr::ExternalCsrError
+impl core::marker::Unpin for diport::external_csr::ExternalCsrError
+impl core::marker::UnsafeUnpin for diport::external_csr::ExternalCsrError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::external_csr::ExternalCsrError
+impl core::panic::unwind_safe::UnwindSafe for diport::external_csr::ExternalCsrError
 pub enum diport::FederatedAccessProfile
 impl core::clone::Clone for diport::pdp::FederatedAccessProfile
 pub fn diport::pdp::FederatedAccessProfile::clone(&self) -> diport::pdp::FederatedAccessProfile
@@ -8354,6 +8477,35 @@ impl<'dynosaur_struct> !core::marker::Unpin for diport::DynDeadLetterStore<'dyno
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynDeadLetterStore<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynDeadLetterStore<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynDeadLetterStore<'dynosaur_struct>
+#[repr(transparent)] pub struct diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> diport::DynExternalCsrResolver<'dynosaur_struct>
+pub const fn diport::DynExternalCsrResolver<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>
+pub const fn diport::DynExternalCsrResolver<'dynosaur_struct>::from_mut(&mut impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> &mut diport::DynExternalCsrResolver<'dynosaur_struct>
+pub const fn diport::DynExternalCsrResolver<'dynosaur_struct>::from_ref(&impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> &diport::DynExternalCsrResolver<'dynosaur_struct>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::new_arc(impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> alloc::sync::Arc<diport::DynExternalCsrResolver<'dynosaur_struct>>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::new_box(impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::new_rc(impl diport::external_csr::ExternalCsrResolver + 'dynosaur_struct) -> alloc::rc::Rc<diport::DynExternalCsrResolver<'dynosaur_struct>>
+impl diport::DiPortConcurrency for diport::DynExternalCsrResolver<'_>
+pub type diport::DynExternalCsrResolver<'_>::Bucket = diport::AsyncSync
+impl diport::DiPortEffect for diport::DynExternalCsrResolver<'_>
+pub type diport::DynExternalCsrResolver<'_>::Effect = diport::ReadEffect
+pub type diport::DynExternalCsrResolver<'_>::Privilege = diport::LocalPrivilege
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &mut diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for diport::DynExternalCsrResolver<'dynosaur_struct>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> !core::marker::Freeze for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Send for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Sized for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> core::marker::Sync for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::Unpin for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynExternalCsrResolver<'dynosaur_struct>
+impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynExternalCsrResolver<'dynosaur_struct>
 #[repr(transparent)] pub struct diport::DynFencedWriter<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynFencedWriter<'dynosaur_struct>
 pub const fn diport::DynFencedWriter<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::fenced_writer::FencedWriter + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynFencedWriter<'dynosaur_struct>>
@@ -9164,6 +9316,37 @@ impl core::marker::Unpin for diport::outbox_emitter::EnvelopeSubjectId
 impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeSubjectId
 impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeSubjectId
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeSubjectId
+pub struct diport::ExternalCsrEvidence
+impl diport::external_csr::ExternalCsrEvidence
+pub fn diport::external_csr::ExternalCsrEvidence::csr_pem(&self) -> &[u8]
+pub fn diport::external_csr::ExternalCsrEvidence::new(diport::external_csr::ExternalCsrRequest, alloc::vec::Vec<u8>) -> core::result::Result<Self, diport::external_csr::ExternalCsrError>
+pub const fn diport::external_csr::ExternalCsrEvidence::request(&self) -> &diport::external_csr::ExternalCsrRequest
+impl core::fmt::Debug for diport::external_csr::ExternalCsrEvidence
+pub fn diport::external_csr::ExternalCsrEvidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::external_csr::ExternalCsrEvidence
+impl core::marker::Send for diport::external_csr::ExternalCsrEvidence
+impl core::marker::Sync for diport::external_csr::ExternalCsrEvidence
+impl core::marker::Unpin for diport::external_csr::ExternalCsrEvidence
+impl core::marker::UnsafeUnpin for diport::external_csr::ExternalCsrEvidence
+impl core::panic::unwind_safe::RefUnwindSafe for diport::external_csr::ExternalCsrEvidence
+impl core::panic::unwind_safe::UnwindSafe for diport::external_csr::ExternalCsrEvidence
+pub struct diport::ExternalCsrRequest
+impl diport::external_csr::ExternalCsrRequest
+pub const fn diport::external_csr::ExternalCsrRequest::authorization_receipt(&self) -> &diport::pki_artifact::PkiAuthorizationReceipt
+pub const fn diport::external_csr::ExternalCsrRequest::device(&self) -> ids::DeviceId
+pub const fn diport::external_csr::ExternalCsrRequest::generation(&self) -> diport::pki_artifact::PkiRequestGeneration
+pub const fn diport::external_csr::ExternalCsrRequest::new(rss_request_context::TenantId, ids::DeviceId, diport::pki_artifact::PkiRequestGeneration, diport::pki_artifact::PkiPolicyDigest, diport::pki_artifact::PkiAuthorizationReceipt) -> Self
+pub const fn diport::external_csr::ExternalCsrRequest::policy_digest(&self) -> &diport::pki_artifact::PkiPolicyDigest
+pub const fn diport::external_csr::ExternalCsrRequest::tenant(&self) -> rss_request_context::TenantId
+impl core::fmt::Debug for diport::external_csr::ExternalCsrRequest
+pub fn diport::external_csr::ExternalCsrRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::external_csr::ExternalCsrRequest
+impl core::marker::Send for diport::external_csr::ExternalCsrRequest
+impl core::marker::Sync for diport::external_csr::ExternalCsrRequest
+impl core::marker::Unpin for diport::external_csr::ExternalCsrRequest
+impl core::marker::UnsafeUnpin for diport::external_csr::ExternalCsrRequest
+impl core::panic::unwind_safe::RefUnwindSafe for diport::external_csr::ExternalCsrRequest
+impl core::panic::unwind_safe::UnwindSafe for diport::external_csr::ExternalCsrRequest
 pub struct diport::ExternalPkiProviderClosure
 impl diport::pki_artifact::ExternalPkiProviderClosure
 pub const fn diport::pki_artifact::ExternalPkiProviderClosure::config_digest(&self) -> &diport::pki_artifact::PkiProviderConfigDigest
@@ -11299,6 +11482,8 @@ impl diport::DiPortConcurrency for diport::DynCasStore<'_>
 pub type diport::DynCasStore<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortConcurrency for diport::DynDeadLetterStore<'_>
 pub type diport::DynDeadLetterStore<'_>::Bucket = diport::AsyncSend
+impl diport::DiPortConcurrency for diport::DynExternalCsrResolver<'_>
+pub type diport::DynExternalCsrResolver<'_>::Bucket = diport::AsyncSync
 impl diport::DiPortConcurrency for diport::DynFencedWriter<'_>
 pub type diport::DynFencedWriter<'_>::Bucket = diport::AsyncSend
 impl diport::DiPortConcurrency for diport::DynKeyProvider<'_>
@@ -11363,6 +11548,9 @@ pub type diport::DynCasStore<'_>::Privilege = diport::LocalPrivilege
 impl diport::DiPortEffect for diport::DynDeadLetterStore<'_>
 pub type diport::DynDeadLetterStore<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynDeadLetterStore<'_>::Privilege = diport::LocalPrivilege
+impl diport::DiPortEffect for diport::DynExternalCsrResolver<'_>
+pub type diport::DynExternalCsrResolver<'_>::Effect = diport::ReadEffect
+pub type diport::DynExternalCsrResolver<'_>::Privilege = diport::LocalPrivilege
 impl diport::DiPortEffect for diport::DynFencedWriter<'_>
 pub type diport::DynFencedWriter<'_>::Effect = diport::BusinessWriteEffect
 pub type diport::DynFencedWriter<'_>::Privilege = diport::LocalPrivilege
@@ -11468,6 +11656,16 @@ pub fn diport::DlxLifecycleRepository::delete_expired_receipt(&self, Self::Missi
 pub fn diport::DlxLifecycleRepository::purge_verified(&self) -> impl core::future::future::Future<Output = core::result::Result<u64, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
 pub fn diport::DlxLifecycleRepository::record_verified_receipt(&self, &Self::ArchiveClaim, Self::VerifiedReceipt) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ReceiptCasOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
 pub fn diport::DlxLifecycleRepository::settle_archive_failure(&self, Self::ArchiveClaim, diport::dlx_lifecycle::DlxLifecycleError) -> impl core::future::future::Future<Output = core::result::Result<diport::dlx_lifecycle::ArchiveClaimSettleOutcome, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send
+pub trait diport::ExternalCsrResolver: core::marker::Send + core::marker::Sync
+pub fn diport::ExternalCsrResolver::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for &mut diport::DynExternalCsrResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynExternalCsrResolver<'dynosaur_struct>>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
+impl<'dynosaur_struct> diport::external_csr::ExternalCsrResolver for diport::DynExternalCsrResolver<'dynosaur_struct>
+pub fn diport::DynExternalCsrResolver<'dynosaur_struct>::resolve(&self, diport::external_csr::ExternalCsrRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::external_csr::ExternalCsrEvidence, diport::external_csr::ExternalCsrError>> + core::marker::Send + core::marker::Sync
 pub trait diport::FencedWriter: core::marker::Send
 pub fn diport::FencedWriter::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::fenced_writer::FencedWriterError>> + core::marker::Send
 pub fn diport::FencedWriter::write(&self, diport::fenced_writer::FencedWriteRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::fenced_writer::WriteOutcome, diport::fenced_writer::FencedWriterError>> + core::marker::Send
