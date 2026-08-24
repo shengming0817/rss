@@ -1,19 +1,19 @@
 # ADR-012：settings `ConfigValue` 静态加密 — AAD 编码 + migration + 保护策略分层（settings 具体设计单源）
 
 - **状态**：Accepted（**设计单源**；本 ADR 最初不实现任何加解密 / migration 执行体，只把 ADR-011 通用字段保护边界
-  **具体化到 settings `ConfigValue`**：`AADForConfig` 字节编码、存储列 / migration 形态、旧明文读 + 回滚路径、
+  **具体化到 settings `ConfigValue`**：`AADForConfig` 字节编码、存储列 / migration 形态、旧明文维护 + 回滚路径、
   `EncryptedConfigValue`/envelope 归属、保护策略分层。#1477 已落地执行体与 `0029` migration，仍**不跑批量迁移**）
 - **日期**：2026-06-27
 - **关联**：issue **#1473** [settings-encryption — ConfigValue AAD + migration design] · **父 ADR-011**
   [字段级数据保护边界]（本 ADR 是其 §D7「#1467 settings ConfigValue 静态加密」checklist 的 settings 具体化，
   并补齐 ADR-011 对 settings 留下的 under-spec）· #1465 framework 底座 · #1466 KeyProvider/Vault ·
-  #1467 settings ConfigValue 静态加密
+  #1467 settings ConfigValue 静态加密 · #1612 Postgres persistence capability 收口
 - **依赖 ADR**：**ADR-004**（`ConfigValue` 冻结终态 → 加密落持久化边界、不改域类型）· **ADR-005**（域形 vs
   provider-agnostic infra port category line → `KeyProvider` 归 `diport`，本 ADR 复用不重证）· **ADR-011**
   （AAD 必填 / 上下文派生 / envelope / 轮换 / no-decrypt-in-debug 通用语义，本 ADR 继承不重证）
 - **底座依赖（已由 #1477 消耗）**：底座 framework（`secure` AEAD v2 带 `aad` + `Aad` +
   `ProtectionContext` funnel）→ KeyProvider/Vault（`diport::KeyProvider`/`ValueTransformer` + `adapters/vault`
-  加解密 / rewrap）。#1477 复用这些底座，不新增 settings 专属 crypto abstraction。
+  加解密 / rewrap）。#1477 复用这些底座，不新增 settings domain crypto abstraction。
 - **AI-robust 评级**：见 §3 + §6（AAD 组合 / field 常量 / canonical 字节 / envelope 版本 / 边界约束落地时
   **Hard via 类型系统 + golden**；adapter 侧不调用 AEAD 密码原语与 KeyProvider 访问审计为 **Medium**；**无 Soft 新增**）
 
@@ -22,7 +22,16 @@
 > **#1477 implementation note**：落地实现没有引入本文 sketch 中独立的 `AADForConfig` 编码器，而是直接使用现有
 > `secure::ProtectionContext::authenticated_request(tenant, config_key, "settings.config.value", 1).derive()` 作为 AAD
 > 单源。四个维度仍是 tenant / config key / field / scheme；scheme 固定为 `1`，field 固定为
-> `settings.config.value`。Postgres 新写恒为 scheme `1`，legacy scheme `0` 仅为 issue #1477 明确要求的只读兼容。
+> `settings.config.value`。Postgres 新写恒为 scheme `1`；legacy scheme `0` 仅能由已授权 maintenance
+> backfill 处理，serving 读取 fail-closed。部署或解除 legacy plaintext 启动门前必须先完成 backfill。
+
+> **#1612 decision upgrade**：backfill/rewrap 已使读、写、维护共享 provider 身份成为可执行不变式。
+> Postgres 因此拥有单一 move-only `ConfigValueCrypto`持久化能力（一个 provider、一个 key、一个私有
+> canonical AAD policy），而非 settings 域 crypto abstraction。serving AAD 只经 authenticated-request 路径；
+> maintenance AAD 额外必须持有 sealed `ConfigValueMaintenanceCapability`。旧 protection pair 与可交换
+> read/write provider lane 被原子删除，但 field=`settings.config.value`、scheme=`1` 和 canonical AAD 字节保持不变，
+> 以继续解密已持久化密文。该形状参考 CipherSweet 聚合 engine/field/AAD policy 的 `EncryptedRow`：
+> `ref: paragonie/ciphersweet src/EncryptedRow.php`。
 
 ## 1. 背景
 
@@ -38,12 +47,12 @@ ADR-011 已把**字段级数据保护边界**立为架构单源：observe-redact
 **从受信上下文派生、绝不回灌 stored bytes**（D2），envelope `vN:` + DEK/EDK + 轮换（D3），deterministic 默认 off
 （D4），no-decrypt-in-debug（D5），`KeyProvider` 归 `diport`（D6），能力拆三 feature 自底向上长（D7）。但 ADR-011 是
 **通用边界**——它对 settings 这个具体落地点留了若干 under-spec：`ConfigValue` 是**单个 opaque 值、无子字段**，那 AAD 的
-「field」「scheme-version」维度具体取什么？存储列怎么演进才既满足 only-add 迁移又支持轮换/backfill？旧明文怎么透明读？
+「field」「scheme-version」维度具体取什么？存储列怎么演进才既满足 only-add 迁移又支持轮换/backfill？旧明文怎么经授权 maintenance 收敛？
 回滚到底指什么？错误怎么分流？seal 与 DB 事务谁先谁后？
 
 本 ADR 把这些 settings 具体问题钉死，作为 **settings ConfigValue 静态加密的设计单源**，并作为后续实现 PR 的决策输入。
-**本 ADR 不引入任何新 crate / 新分层**——`AADForConfig` 归 settings、通用 `Aad`/envelope 归 `secure`、`KeyProvider` 归
-`diport`、加解密接缝落 `adapters/postgres` 持久化边界，全部沿用既有结构。
+**本 ADR 不引入任何新 crate / 新分层**——通用 AAD/envelope 归 `secure`、`KeyProvider` 归 `diport`，
+`ConfigValueCrypto` 与私有 `ConfigValueAadPolicy` 归 `adapters/postgres` 持久化边界。
 
 ## 2. 决策（settings ConfigValue 静态加密单源）
 
@@ -62,7 +71,7 @@ ADR-011 已把**字段级数据保护边界**立为架构单源：observe-redact
 > 这是本 ADR 最大的 review trap：**任何把 envelope 字段塞进 `ConfigValue`、给 `ConfigValue` 加
 > `encrypted()` 方法、或在域层调 `KeyProvider` 的提案都违反 ADR-004 冻结 + ADR-005 层序，必须驳回。**
 
-### D2 — `AADForConfig` 归 settings，产出 opaque `secure::Aad`；只经受信上下文构造
+### D2 — canonical AAD policy 归 Postgres persistence capability
 
 两级 funnel，无捷径（对应 ADR-011 D2 `FIELDPROT-AAD-DERIVE-FROM-CTX-01`）：
 
@@ -74,7 +83,14 @@ ADR-011 已把**字段级数据保护边界**立为架构单源：observe-redact
   构造强制**落在底座**（`ProtectionContext` 定义处 = `secure`/底座），本 ADR 钉死 settings 维护路径（backfill/rewrap）
   对它的依赖与要求；底座未提供该受控构造前，实现 PR **不得**落地维护路径；见 `CONFIGENC-MAINT-CTX-AUTHZ-01`））
   + length-prefixed `AadBuilder`。
-- **`settings`（本 ADR / #1473）** 持有 `AADForConfig`，把 config 四维喂进 builder：
+- **`adapters/postgres`** 的私有 `ConfigValueAadPolicy` 持有 field/scheme 唯一真源，且分别经
+  serving authenticated-request 与 capability-gated authorized-maintenance typed method 派生 AAD。composition 只组装
+  provider/key，不得读取、覆盖或复制 persistence field/scheme。
+
+#### Historical superseded sketch — settings-owned `AADForConfig`
+
+以下 D2–D4 草图只保留为决策历史，已被 #1477 的 `ProtectionContext` canonical encoder 和 #1612 的
+Postgres-private policy 取代，**不是当前 ownership/API 规范**：
 
 ```rust
 // ---- 草图（非可编译；依赖底座 secure::Aad / ProtectionContext，未落地）----
@@ -119,7 +135,7 @@ impl AADForConfig {
 }
 ```
 
-### D3 — canonical 字节编码（载荷安全契约，**golden 字节冻结**）
+#### Historical D3 — canonical 字节编码草图
 
 `AADForConfig` 产出的字节是承载跨租/跨 entry 重放防御的安全契约，须**域分隔 + 长度前缀**，并 golden 锁死：
 
@@ -141,7 +157,7 @@ canonical = MAGIC(b"rss.aad.v1")                              // 域分隔：与
 - **`MAGIC` 域前缀** 把 config AAD 与未来其它 AAD 用途（feature flag、别的域）隔开，密文连**跨域**重放都不可（不止跨 entry）。
 - 这是 ADR-011 D2 通用「tenant / config-key / field / scheme-version」复合在 settings 的具体实例，四维一一对应。
 
-### D4 — 钉死 ADR-011 对 settings 的两处 under-spec：「field」「scheme-version」
+#### Historical D4 — field/scheme 草图
 
 ADR-011 D2 的复合维度对**多字段结构 + per-field `x-protection`** 描述清晰，但 `ConfigValue` 是单个 schema-less opaque 值，
 两维需明确取值：
@@ -160,9 +176,9 @@ ADR-011 D2 的复合维度对**多字段结构 + per-field `x-protection`** 描�
     → AEAD tag（在 v2 下算的）验证失败 → `open` fail-closed。这正是 ADR-011「改 scheme-version 试探降级 → 认证失败」。
     旧码器保留只读（previous-read），移除的码器直接解析失败。
 
-### D5 — 存储列策略 = **新增列**（dual-read，scheme 驱动检测）
+### D5 — 存储列策略 = **新增列**（scheme 驱动表示 + maintenance backfill）
 
-**推荐 Option (b)：在 `config_entries` 上加列，`value` 保留作 legacy dual-read，检测靠权威的 `protection_scheme` 列、
+**推荐 Option (b)：在 `config_entries` 上加列，`value` 仅保留作 legacy maintenance backfill 输入，表示检测靠权威的 `protection_scheme` 列、
 不靠前缀嗅探。#1477 落地 migration 编号为 `0029_add_config_value_encryption.sql`：
 
 ```sql
@@ -197,7 +213,7 @@ CHECK 只验证既有 legacy 表示不变式和新 encrypted 表示，不重写�
 ④ 未来 blind index（D4 deterministic，settings 实务不需要）也无处落列。**为何不取 Option (c) 新表**：破坏统一读路径/单语句 CAS/co-tx
 单 INSERT 原子性，重交 RLS 三件套 + grant + 第二 PK 同步，且数据与 config 行 1:1 无收益。
 
-### D6 — 旧明文读策略 + 回滚 + 失败模式（全 fail-closed）
+### D6 — 旧明文 serving 门 + 回滚 + 失败模式（全 fail-closed）
 
 **读检测是 scheme 驱动（权威），不靠内容嗅探**——`hydrate_row` 按 `protection_scheme` 分支，`find`/`find_version` SQL 增列：
 
@@ -206,7 +222,8 @@ SELECT config_key, value, value_enc, key_id, protection_scheme, version, deleted
 FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY version DESC LIMIT 1
 ```
 
-- `scheme = 0` → 读 `value` 明文 → `hydrate`。**不调 key、不调 KeyProvider**，对 pre-encryption 行完全透明（dual-read 回退）。
+- `scheme = 0` → serving 立即返回 `ProtectionAuthFailure`，**不调 key、不调 KeyProvider、不 hydrate 明文**；
+  只有持有 `ConfigValueMaintenanceCapability` 的 backfill 路径可以读取并改写该表示。
 - `scheme >= 1` → 读 `value_enc`+`key_id` → 从受信坐标派生 AAD（D2/D7）→ 经注入 open 路径解密 → `hydrate`。
 - **失败绝不回退明文**：`scheme>=1` 解密失败一律返 `ConfigRepoError`，**永不**返回密文、**永不**静默跳过、**永不**降级明文。
 - `latest_version` 不变（只读 `max(version)`，version 永不加密）。
@@ -216,7 +233,7 @@ FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY vers
 1. **schema 回滚** = 一条**新前向迁移**，绝不在代码仍读列时 drop 列。pre-GA 窗口内 drop `value_enc`/`protection_scheme`
    只有在反向 decrypt-and-rewrite（#3）把所有行还原成 `scheme=0` 之后才安全 ⇒ schema 回滚是**最后**一步。
 2. **rollout kill-switch**：#1477 明确不提供 plaintext-write feature flag。运行时代码的 `PgConfigRepo`
-   构造器必填 `ConfigValueProtection`（共享 `KeyProvider` handle + `KeyName`），新写一律 seal 后落
+   构造器必填 move-only `ConfigValueCrypto`（单一共享 `KeyProvider` handle + `KeyName` + 私有 AAD policy），新写一律 seal 后落
    `scheme=1`；回滚不能靠新写降级明文，只能按 #1/#3 的前向迁移 / 授权 rewrite 流程执行。
 3. **全量反向** = 授权维护 decrypt-and-rewrite job（反向 backfill，#3 同 D7 模型）：授权 `ProtectionContext` 下按租户解密
    `scheme>=1` 行、就地 UPDATE 回 `scheme=0` 明文（不 bump version）。完成后才轮到 #1 schema 回滚。
@@ -225,7 +242,7 @@ FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY vers
 
 | # | 失败 | 触发 | 行为 | 恢复 |
 |---|------|------|------|------|
-| F1 | KeyProvider 读时不可用 | 读 `scheme>=1` 行时 Vault/KMS 不可达 | `open` 跑不了 → 读返 `ConfigRepoError::ProtectionUnavailable`（infra），**无明文回退** | 瞬态：provider 恢复后重试；legacy `scheme=0` 读不受影响（不需 key） |
+| F1 | KeyProvider 读时不可用 | 读 `scheme>=1` 行时 Vault/KMS 不可达 | `open` 跑不了 → 读返 `ConfigRepoError::ProtectionUnavailable`（infra），**无明文回退** | 瞬态：provider 恢复后重试；legacy `scheme=0` 在 serving 中始终拒绝，须经授权 backfill |
 | F2 | KeyProvider 写时不可用 | 新写 seal / DEK-wrap 调用失败 | seal 在 DB 事务**打开前**失败（D8）→ 写干净失败、**零持久化**、co-tx 从未打开 | 恢复 KeyProvider 后重试；不提供明文写降级 |
 | F3 | key 已轮换、previous-read 在 | 行用旧 `key_id` 封 | `open` 按 `key_id` 选 previous-read key（常数时间匹配）→ 成功 | 正常；lazy/batch rewrap（D7）顺手迁到 current-primary |
 | F4 | key 丢失/不在 keyring | 行 `key_id` 的 wrapping key 没了（KMS 数据丢失/坏轮换） | `open` 失败 fail-closed；该行**不可恢复** | 超出 rewrap（只重包裹**可恢复**DEK）；属 ADR-011 §5 master-key 丢失 runbook ⇒ KMS 持久性是硬外部依赖 |
@@ -287,7 +304,7 @@ F5 走 security incident 告警（见 §3 `CONFIGENC-ERR-SPLIT-01`）。
 
 | 数据类 | 决策时基线 | 决策目标 | 保护机制 | 存储 | AAD 适用 |
 |--------|----|----------------|----------|------|----------|
-| **普通 config 值** | 明文 `value text` + 脱敏 Debug + 敏感 key 拒写 | 可选 at-rest AEAD envelope；**敏感 key 拒写保留** | 注入 `ValueTransformer`/`KeyProvider` 的 `secure::Envelope`（AES-GCM 随机 nonce）；`AADForConfig` 绑四维 | `config_entries`（D5 新增列） | **是**：tenant / config_key / `settings.config.value` / scheme |
+| **普通 config 值** | 明文 `value text` + 脱敏 Debug + 敏感 key 拒写 | 可选 at-rest AEAD envelope；**敏感 key 拒写保留** | Postgres `ConfigValueCrypto` 经 `KeyProvider` 加解密，私有 policy 绑四维 | `config_entries`（D5 新增列） | **是**：tenant / config_key / `settings.config.value` / scheme |
 | **secret refs** | 坐标-only、材料从不落库（**已正确**） | 不变 | `SecretResolver` 在调用栈把坐标解析成 `SecretMaterial`（ZeroizeOnDrop、无 Clone） | `secret_refs`（仅坐标） | **N/A**：无材料落库，保护委托外部 store + transit auth |
 | **feature-flag 值** | settings 不提供该产品面（#2070 deferred） | 出现真实 consumer/provider 后重新设计 | 未定 | 未定 | **N/A**：`MAGIC` 域分隔仍为未来其它 AAD 用途预留 |
 
@@ -321,13 +338,13 @@ fail-fast）：
 |------|-----------|------|------|-------------------|
 | seal/open AAD 必填 | `FIELDPROT-AAD-MANDATORY-01` | **Hard** | AEAD v2 `seal/open(aad: &Aad)` 必填位置参（非 `Option`） | 继承（底座） |
 | AAD 从受信上下文派生、不取 stored bytes | `FIELDPROT-AAD-DERIVE-FROM-CTX-01` | **Hard** | `Aad` 无 public 字节 ctor；只 `AadBuilder::new(&ProtectionContext)` 可 mint；`ProtectionContext` sealed（私有字段 / 无 Deserialize / capability-gated ctor，仿 runctx） | 继承（底座） |
-| config AAD 恰由四个受信维组合，scheme 来自编译期常量、公开面不收 scheme 参 | `CONFIGENC-AAD-COMPOSE-01` | **Hard** | #1477 实现入口为 `ProtectionContext::authenticated_request(tenant, key, CONFIG_VALUE_FIELD, CONFIG_VALUE_PROTECTION_SCHEME).derive()`；tenant / key 来自受信调用坐标，field / scheme 是 adapter 常量，调用方无法传 stored AAD bytes | **新（#1473）** |
-| field 判别串稳定 | `CONFIGENC-FIELD-CONST-01` | **Hard** | `const CONFIG_VALUE_FIELD: &[u8]` 编译期常量（不可随 call-site 漂移） | **新（#1473）** |
+| config AAD 恰由四个受信维组合，scheme 来自编译期常量、公开面不收 scheme 参 | `CONFIGENC-AAD-COMPOSE-01` | **Hard** | `ConfigValueAadPolicy` 私有 field/scheme；serving/maintenance typed method 内部调用 `ProtectionContext`，外部无 getter/setter/policy 入口 | **新（#1473）** |
+| field 判别串稳定 | `CONFIGENC-FIELD-CONST-01` | **Hard** | `ConfigValueAadPolicy::FIELD` 私有编译期常量（不可随 call-site 漂移） | **新（#1473）** |
 | AAD canonical 字节冻结 | `CONFIGENC-AAD-CANON-01` | **Hard** | length-prefixed 编码器的 golden 字节向量测试（格式漂移=字节 diff，仿 serde golden） | **新（#1473）** |
 | Debug/日志/trace 不解密 | `FIELDPROT-NODBG-DECRYPT-01` | **Hard** | envelope 只持 `secure::Ciphertext`（`#[redact(sensitivity = secret)]`）、无明文字段；`open` 产出经 `secrecy::Secret`/`Zeroizing` 直喂 `ConfigValue::new`；`ConfigValue` Debug 已脱敏 | 继承（底座/#1467）；settings 载体新 |
 | envelope 版本恒在 | `CONFIGENC-ENVELOPE-VERSION-01` | **Hard**（存在）+ **Hard**（格式 golden） | `Envelope.version` 非 `Option` 字段；`decode` 拒未知/缺失前缀 fail-closed；`vN:` 前缀 golden 锁 | **新（#1473）** |
 | key-id 常数时间匹配 | `CRYPTO-CONST-TIME-01` | **Medium** | 复用 `primitives::crypto::constant_time_eq` 做轮换 key-id 匹配（无新 `==` 路径） | 继承（primitives） |
-| 加密限于持久化边界（域 `ConfigValue` 不动、冻结） | `CONFIGENC-BOUNDARY-01` | **Hard**（域侧）+ **Medium**（adapter 侧） | Hard：`ConfigValue` 不改 / `pub(crate)` / 无 envelope 字段，ADR-004 冻结 + `rss_domain_no_serialize` dylint 已守；Medium：governance/dylint 守 settings domain 模块**不调用** `secure::Aead` 密码原语（`seal`/`open`）；`import secure::Aad` / `secure::ProtectionContext` 合法（`AADForConfig` 需要） | **新（#1473）** |
+| 加密限于持久化边界（域 `ConfigValue` 不动、冻结） | `CONFIGENC-BOUNDARY-01` | **Hard**（域侧）+ **Medium**（adapter 侧） | Hard：`ConfigValue` 不改 / `pub(crate)` / 无 envelope 字段，ADR-004 冻结 + `rss_domain_no_serialize` dylint 已守；Medium：governance/dylint 守 settings domain 模块不持有 persistence AAD policy 或调用密码原语 | **新（#1473）** |
 | deterministic 默认 off（ConfigValue v1 不开 blind index） | `FIELDPROT-DETERMINISTIC-OPTIN-01` | **Hard** | 默认随机 nonce AEAD；deterministic 仅经独立 opt-in API（typed function choice）。若未来需等值查询，`AADForConfig` 须提供**稳定子集**变体（去 `scheme`，ADR-011 D4）——独立函数、非 flag | 继承（底座）；settings 注记新 |
 | F1/F5 两路错误可独立告警 | `CONFIGENC-ERR-SPLIT-01` | **Hard**（`#[non_exhaustive]` 枚举穷举 = 编译期）+ **Medium**（ops 告警把 F5 路由到 security incident 的 governance/集成测试） | 两变体类型存在（`ProtectionUnavailable` / `ProtectionAuthFailure`）+ F5 告警路由集成测试 | **新（#1473）** |
 | legacy plaintext 默认阻断 | `CONFIGENC-LEGACY-PLAINTEXT-GATE-01` | **Medium**（启动能力门 + 集成测试） | `PgRuntimeDeps::setup` 在 migration 后扫描 `config_entries.protection_scheme=0`；默认 `Deny` fail-fast，显式临时 env 仅放行启动，不恢复 plaintext write | **新（#1473）** |
@@ -341,7 +358,7 @@ fail-fast）：
 
 ## 4. 后果
 
-- **正**：settings 静态加密有具体设计单源（AAD 编码 / 列形态 / 旧读 / 回滚 / 错误 / 顺序全钉死）；**零新增 crate / 零新增分层**
+- **正**：settings 静态加密有具体设计单源（AAD 编码 / 列形态 / legacy maintenance / 回滚 / 错误 / 顺序全钉死）；**零新增 crate / 零新增分层**
   （沿用 `secure` + `diport` + `adapters/postgres` 持久化边界）；加密是纯 adapter-边界变换，域 `ConfigValue`（冻结）与 secret-ref
   路径不动，唯一域向改动是 adapter 注入 `KeyProvider`/`ValueTransformer`（构造器必填参）+ 每次读写建 `ProtectionContext`；
   AAD 必填 / 派生自上下文 / no-decrypt-in-debug / canonical 字节落地时由类型系统 + golden 免费成立（Hard）。

@@ -1052,7 +1052,7 @@ async fn settings_projection_operator_replay_failure_case(
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
-        fixed_clock_arc(),
+        projection_clock(),
     )
     .await?;
     let binding = *generated::event::PROJECTION_INPUTS
@@ -1538,7 +1538,7 @@ async fn settings_active_generation_swap_requires_exact_precondition_and_support
     let deps = crate::PgProjectionOperatorDeps::connect(
         &operator_config,
         &source_config,
-        fixed_clock_arc(),
+        projection_clock(),
     )
     .await?;
     insert_settings_projection_generation(&owner, &empty, 10).await?;
@@ -3739,7 +3739,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
-        fixed_clock_arc(),
+        projection_clock(),
     )
     .await?;
     let stale = operator
@@ -4603,7 +4603,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
-        fixed_clock_arc(),
+        projection_clock(),
     )
     .await?;
     let selector_c = selector(&generation_c)?;

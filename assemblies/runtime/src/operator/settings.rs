@@ -5,12 +5,12 @@
 
 use anyhow::Context as _;
 use diport::DynKeyProvider;
-#[cfg(feature = "operator-cli")]
-use postgres::{ConfigValueMaintenanceCapability, PgRuntimeDeps};
 use postgres::{
-    ConfigValueMaintenanceOperation, ConfigValueMaintenanceOptions, ConfigValueProtection,
+    ConfigValueCrypto, ConfigValueMaintenanceOperation, ConfigValueMaintenanceOptions,
     MaintenanceAuditOutcome, PgMaintenanceDeps,
 };
+#[cfg(feature = "operator-cli")]
+use postgres::{ConfigValueMaintenanceCapability, PgRuntimeDeps};
 
 use super::build_operator_service_token_provider;
 #[cfg(feature = "operator-cli")]
@@ -353,12 +353,12 @@ pub(super) fn settings_config_value_maintenance_vault_failure(
     }
 }
 
-pub(super) async fn settings_config_value_maintenance_protection(
+pub(super) async fn settings_config_value_maintenance_crypto(
     pg: &PgMaintenanceDeps,
     operator_subject: &str,
     resource_id: &str,
     config: SnapshotConfig<'_>,
-) -> anyhow::Result<ConfigValueProtection> {
+) -> anyhow::Result<ConfigValueCrypto> {
     let vault_config = match crate::infra::vault::VaultKeyProviderConfig::from_snapshot(config) {
         Ok(config) => config,
         Err(err) => {
@@ -387,7 +387,7 @@ pub(super) async fn settings_config_value_maintenance_protection(
             return Err(err).context(context);
         }
     };
-    Ok(ConfigValueProtection::new(
+    Ok(ConfigValueCrypto::new(
         DynKeyProvider::new_box(key_provider),
         key_name,
     ))
@@ -436,7 +436,7 @@ pub async fn run_settings_config_value_maintenance(
     let capability = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(
         &operator_proof,
     );
-    let protection = match settings_config_value_maintenance_protection(
+    let crypto = match settings_config_value_maintenance_crypto(
         &pg,
         &operator_subject,
         &resource_id,
@@ -444,13 +444,13 @@ pub async fn run_settings_config_value_maintenance(
     )
     .await
     {
-        Ok(protection) => protection,
+        Ok(crypto) => crypto,
         Err(err) => {
             pg.shutdown().await.ok();
             return Err(err);
         }
     };
-    let maintenance = pg.config_value_maintenance(protection, capability);
+    let maintenance = pg.config_value_maintenance(crypto, capability);
     let report = match maintenance.run(&options).await {
         Ok(report) => report,
         Err(err) => {

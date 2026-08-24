@@ -178,7 +178,7 @@ impl VaultDomainDeps<caps::Settings> {
     }
 
     /// settings 域字段保护 KeyProvider 句柄。经 delegating handle 共享 bundle 的 `Arc<VaultKeyProvider>`，
-    /// 不泄漏 Arc 本身；可多次调用以给 read/write repo 各一份 owned dyn box。
+    /// 不泄漏 Arc 本身；composition 将单个 owned dyn box 收进 Postgres `ConfigValueCrypto`。
     #[must_use]
     pub fn key_provider(&self) -> Box<DynKeyProvider<'static>> {
         DynKeyProvider::new_box(SharedVaultKeyProvider(Arc::clone(&self.key_provider)))

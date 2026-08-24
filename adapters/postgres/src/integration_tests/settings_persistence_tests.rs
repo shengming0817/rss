@@ -10,7 +10,7 @@ use crate::PgSecretUnitOfWork;
 async fn tc1_config_save_find_roundtrip() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.timeout").unwrap();
 
@@ -68,7 +68,7 @@ async fn tc1a_config_legacy_plaintext_read_fails_closed() -> TestResult {
     .execute(&store.pool)
     .await?;
 
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), rejecting_config_protection());
+    let repo = PgConfigRepo::new(&store, rejecting_config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("legacy.value").unwrap();
     let result = repo.find(settings_scope(tenant), &key).await;
@@ -114,7 +114,7 @@ async fn tc1c_config_plaintext_insert_without_scheme_is_rejected() -> TestResult
 async fn tc1d_config_encrypted_row_cross_tenant_copy_rejected() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.aad").unwrap();
@@ -148,14 +148,86 @@ async fn tc1d_config_encrypted_row_cross_tenant_copy_rejected() -> TestResult {
     Ok(())
 }
 
+/// tc1d2：同租户内把 encrypted row 复制到另一 config key 后，key 维度 AAD mismatch → fail-closed。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1d2_config_encrypted_row_cross_key_copy_rejected() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, config_crypto());
+    let tenant = config_tenant();
+    let source_key = SettingKey::parse("app.source").unwrap();
+    let target_key = SettingKey::parse("app.target").unwrap();
+
+    repo.test_put(
+        settings_scope(tenant),
+        config_entry(source_key.as_str(), "source-value", 1),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO config_entries (
+             tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
+         )
+         SELECT tenant_id, $1, version, value, deleted, protection_scheme, value_enc, key_id
+         FROM config_entries
+         WHERE tenant_id = $2::uuid AND config_key = $3 AND version = 1",
+    )
+    .bind(target_key.as_str())
+    .bind(CONFIG_TENANT)
+    .bind(source_key.as_str())
+    .execute(&store.pool)
+    .await?;
+
+    let result = repo.find(settings_scope(tenant), &target_key).await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
+        "copied ciphertext under another config key must fail AAD authentication"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// tc1d3：重构前固定 scheme=1 密文仍能经新单 capability 路径解密。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc1d3_pre_refactor_scheme_one_ciphertext_remains_decryptable() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    sqlx::query(
+        "INSERT INTO config_entries (
+             tenant_id, config_key, version, value, protection_scheme, value_enc, key_id
+         ) VALUES ($1::uuid, $2, 1, NULL, 1, $3, $4)",
+    )
+    .bind(CONFIG_TENANT)
+    .bind("fixture.compat")
+    .bind(PRE_REFACTOR_CONFIG_CIPHERTEXT)
+    .bind("settings-config:1")
+    .execute(&store.pool)
+    .await?;
+
+    let repo = PgConfigRepo::new(&store, config_crypto());
+    let found = repo
+        .find(
+            settings_scope(config_tenant()),
+            &SettingKey::parse("fixture.compat").unwrap(),
+        )
+        .await?
+        .unwrap();
+    assert_eq!(found.value(), "pre-refactor-value");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc1e：encrypted 行读取时 KeyProvider 不可用 → ProtectionUnavailable，且不回退明文。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 async fn tc1e_config_encrypted_read_provider_unavailable() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
-    let reader = PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
+    let writer = PgConfigRepo::new(&store, config_crypto());
+    let reader = PgConfigRepo::new(&store, unavailable_config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.kms").unwrap();
 
@@ -195,7 +267,7 @@ async fn tc1f_config_corrupt_encrypted_metadata_fails_closed() -> TestResult {
     .execute(&store.pool)
     .await?;
 
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let result = repo
         .find(
             settings_scope(config_tenant()),
@@ -232,7 +304,7 @@ async fn tc1g_config_maintenance_dry_run_counts_legacy_without_provider() -> Tes
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        rejecting_config_protection(),
+        rejecting_config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -283,7 +355,7 @@ async fn tc1h_config_maintenance_backfills_legacy_plaintext() -> TestResult {
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        config_protection(),
+        config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -310,7 +382,7 @@ async fn tc1h_config_maintenance_backfills_legacy_plaintext() -> TestResult {
     assert!(raw.2.is_some());
     assert_eq!(raw.3.as_deref(), Some("settings-config:1"));
 
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let found = repo
         .find(
             settings_scope(config_tenant()),
@@ -332,7 +404,7 @@ async fn tc1i_config_maintenance_rewrap_updates_key_ref() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let writer = PgConfigRepo::new(&store, config_crypto());
     writer
         .test_put(
             settings_scope(config_tenant()),
@@ -343,7 +415,7 @@ async fn tc1i_config_maintenance_rewrap_updates_key_ref() -> TestResult {
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        rewrapping_config_protection(),
+        rewrapping_config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -395,7 +467,7 @@ async fn tc1j_config_maintenance_backfill_failure_preserves_row() -> TestResult 
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        unavailable_config_protection(),
+        unavailable_config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -446,7 +518,7 @@ async fn tc1l_config_maintenance_backfill_stale_row_is_unchanged() -> TestResult
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        mutating_backfill_config_protection(pool),
+        mutating_backfill_config_crypto(pool),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -483,7 +555,7 @@ async fn tc1m_config_maintenance_rewrap_failure_preserves_row() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let writer = PgConfigRepo::new(&store, config_crypto());
     writer
         .test_put(
             settings_scope(config_tenant()),
@@ -499,7 +571,7 @@ async fn tc1m_config_maintenance_rewrap_failure_preserves_row() -> TestResult {
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        unavailable_config_protection(),
+        unavailable_config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -541,7 +613,7 @@ async fn tc1o_config_maintenance_rewrap_invalid_key_ref_counts_as_failed_selecte
     .bind("not-a-key-ref")
     .execute(&store.pool)
     .await?;
-    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let writer = PgConfigRepo::new(&store, config_crypto());
     writer
         .test_put(
             settings_scope(config_tenant()),
@@ -552,7 +624,7 @@ async fn tc1o_config_maintenance_rewrap_invalid_key_ref_counts_as_failed_selecte
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        rewrapping_config_protection(),
+        rewrapping_config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -611,7 +683,7 @@ async fn tc1k_config_maintenance_tenant_and_max_rows_limit_scope() -> TestResult
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        config_protection(),
+        config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -655,7 +727,7 @@ async fn tc1n_config_maintenance_both_max_rows_is_shared() -> TestResult {
     .bind("plain")
     .execute(&store.pool)
     .await?;
-    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let writer = PgConfigRepo::new(&store, config_crypto());
     writer
         .test_put(
             settings_scope(config_tenant()),
@@ -666,7 +738,7 @@ async fn tc1n_config_maintenance_both_max_rows_is_shared() -> TestResult {
     let store = Arc::new(store);
     let maintenance = PgConfigValueMaintenance::new(
         Arc::clone(&store),
-        config_protection(),
+        config_crypto(),
         config_maintenance_capability(),
     );
     let report = maintenance
@@ -698,7 +770,7 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::new(store));
     let (configs, writer, _secrets, _secret_writer) = handle
         .for_domain::<crate::caps::Settings>()
-        .settings_bundle(fixed_clock_arc(), config_protections())
+        .settings_bundle(config_crypto())
         .into_parts();
     let tenant = config_tenant();
     let key = SettingKey::parse("bundle.timeout").unwrap();
@@ -726,7 +798,7 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
 }
 
 /// tc1c：经 `settings_bundle` funnel 解包的 `writer`（`DynConfigUnitOfWork`）在真实 DB 上 `commit`
-/// co-tx 落 config 行 + outbox 行 + 构造期注入 occurred_at——证 bundle write lane 与 direct co-tx（tc5）语义等价
+/// co-tx 落 config 行 + outbox 行 + reviewed event 的 occurred_at——证 bundle write lane 与 direct co-tx（tc5）语义等价
 /// （F2，#1424；补 tc1b 只覆盖 read lane 的缺口）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -738,7 +810,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
     let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::new(store));
     let (_configs, writer, _secrets, _secret_writer) = handle
         .for_domain::<crate::caps::Settings>()
-        .settings_bundle(fixed_clock_arc(), config_protections())
+        .settings_bundle(config_crypto())
         .into_parts();
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc1c-evt");
@@ -773,7 +845,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
         ob_cnt.0, 1,
         "bundle writer：outbox 行应写入（co-tx 两行皆在）"
     );
-    // occurred_at 来自 bundle 构造期注入的 Arc clock（write lane 经 commit 用）。
+    // occurred_at 来自 sealed reviewed event，repository 不自行采样时间。
     let cfg_meta: (String,) =
         sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
             .bind(&event_id)
@@ -784,7 +856,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
             .0
             .replace(' ', "")
             .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
-        "bundle writer co-tx outbox metadata 应含注入 clock 的 occurred_at: {}",
+        "bundle writer co-tx outbox metadata 应含 reviewed event 的 occurred_at: {}",
         cfg_meta.0
     );
     assert_metadata_text_has_standard_schema_header(
@@ -801,7 +873,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
 async fn tc2_config_find_version_returns_history() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -850,7 +922,7 @@ async fn tc2_config_find_version_returns_history() -> TestResult {
 async fn tc3_config_save_cas_conflict() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -892,7 +964,7 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
 async fn tc3b_config_save_provider_unavailable_persists_nothing() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
+    let repo = PgConfigRepo::new(&store, unavailable_config_crypto());
     let tenant = config_tenant();
 
     let result = repo
@@ -922,7 +994,7 @@ async fn tc3b_config_save_provider_unavailable_persists_nothing() -> TestResult 
 async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -988,8 +1060,7 @@ async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestRes
     let missing = SettingKey::parse("app.missing").unwrap();
     let key = SettingKey::parse("app.deleted").unwrap();
 
-    let unavailable_repo =
-        PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
+    let unavailable_repo = PgConfigRepo::new(&store, unavailable_config_crypto());
     unavailable_repo
         .test_delete(settings_scope(tenant), &missing)
         .await?;
@@ -1000,7 +1071,7 @@ async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestRes
             .await?;
     assert_eq!(missing_cnt.0, 0, "missing-key delete no-op writes nothing");
 
-    let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let writer = PgConfigRepo::new(&store, config_crypto());
     writer
         .test_put(settings_scope(tenant), config_entry("app.deleted", "v1", 1))
         .await?;
@@ -1031,11 +1102,7 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = Arc::new(PgConfigRepo::new(
-        &store,
-        fixed_clock_arc(),
-        config_protection(),
-    ));
+    let repo = Arc::new(PgConfigRepo::new(&store, config_crypto()));
     let tenant = config_tenant();
     let key = Arc::new(SettingKey::parse("app.concurrent-delete")?);
 
@@ -1089,7 +1156,7 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
 async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5-evt");
     let plain_value = "settings-value-must-not-leak";
@@ -1149,7 +1216,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
         "config publish metadata 不得包含 ConfigValue plaintext: {}",
         outbox_shape.1
     );
-    // #262 F1：settings config co-tx outbox metadata 含构造期注入的 occurred_at（第三装配点，从注入 Clock）。
+    // settings config co-tx outbox metadata 保留 sealed reviewed event 携带的 occurred_at。
     let cfg_meta: (String,) =
         sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
             .bind(&event_id)
@@ -1160,7 +1227,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
             .0
             .replace(' ', "")
             .contains(&format!(r#""occurredAt":{}"#, expected_occurred_at())),
-        "config co-tx outbox metadata 应含构造期注入的 occurred_at: {}",
+        "config co-tx outbox metadata 应含 reviewed event 的 occurred_at: {}",
         cfg_meta.0
     );
     assert_metadata_text_has_standard_schema_header(
@@ -1189,7 +1256,7 @@ async fn tc5f_config_cotx_persists_only_scoped_ambient_correlation() -> TestResu
 
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let scoped_event_id = unique_event_id("cfg-tc5f-scoped");
     let unscoped_event_id = unique_event_id("cfg-tc5f-unscoped");
@@ -1255,7 +1322,7 @@ async fn tc5f_config_cotx_persists_only_scoped_ambient_correlation() -> TestResu
 async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.delete-cotx").unwrap();
     repo.test_put(
@@ -1511,7 +1578,7 @@ async fn eventing_facade_rejects_embedded_tenant_mismatch_before_sql() -> TestRe
 async fn tc5e_config_rollback_cotx_restores_version_and_appends_exact_fact() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.rollback-cotx").unwrap();
 
@@ -1644,7 +1711,7 @@ async fn tc5e_config_rollback_cotx_restores_version_and_appends_exact_fact() -> 
 async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let event_id = unique_event_id("cfg-tc5b-evt");
     let envelope = OutboxEnvelopeParts::new(
@@ -1693,7 +1760,7 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
 async fn tc5c_config_cotx_rejects_scope_entry_tenant_mismatch() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let scope_tenant = config_tenant();
     let entry_tenant = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let event_id = unique_event_id("cfg-tc5c-evt");
@@ -1878,7 +1945,7 @@ async fn config_fact_conflict_rolls_back_mutation() -> TestResult {
     let event_id = unique_event_id("config-fact-conflict");
     let key = "app.fact-conflict";
     let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
 
     let conflict = repo
         .commit_publish(
@@ -1921,7 +1988,7 @@ async fn config_fact_conflict_rolls_back_mutation() -> TestResult {
 async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
 
     repo.test_put(settings_scope(tenant), config_entry("app.k", "v1", 1))
@@ -1971,7 +2038,7 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
 async fn tc7b_config_cotx_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let ok_event = unique_event_id("cfg-tc7b-ok");
     let rollback_event = unique_event_id("cfg-tc7b-rollback");
@@ -2116,7 +2183,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
 async fn tc7c_config_retry_boundary_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let transient_event = unique_event_id("cfg-tc7c-transient");
     let conflict_event = unique_event_id("cfg-tc7c-conflict");
@@ -2295,7 +2362,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
 async fn tc8_config_find_maps_storage_error() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
@@ -2319,7 +2386,7 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
 async fn tc9_config_cross_tenant_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant_a = config_tenant();
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.k").unwrap();
@@ -2395,7 +2462,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
 async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let repo = PgConfigRepo::new(&store, config_crypto());
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 

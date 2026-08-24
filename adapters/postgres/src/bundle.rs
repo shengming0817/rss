@@ -14,7 +14,7 @@
 //! - [`PgInfraDeps`]：framework/global（provider-agnostic、非单域）基建能力句柄——emitter / inbox /
 //!   dead_letter / checkpoint / saga，不绑 `caps::*` 域；不暴露 Projection raw source/control。
 //! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同一
-//!   verified reader/writer capability pair + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
+//!   verified reader/writer capability pair），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
 //! - Settings metadata projection 只向 serving 组合根暴露 read capability；mutation 只能经 sealed
 //!   `ProjectionTargetStore` target funnel。
@@ -36,7 +36,7 @@
 //! - **PG-BUNDLE-SETTINGS-04**（Hard，可见性 + sealed funnel + typed function choice）：settings 四件套
 //!   （config read/write + secret read/write）只能经 [`PgDomainDeps::settings_bundle`] 单次构造（funnel，
 //!   私有字段 + 唯一公开构造 ⇒ 外部 crate 无法 mint），经 [`PgSettingsBundle::into_parts`] 解包；一次
-//!   `into_parts` 产出的四元同源（同一 verified reader/writer capability pair + 同一注入 clock，clock 经 `Arc` 扇出到两个 `PgConfigRepo`）。
+//!   `into_parts` 产出的四元同源（同一 verified reader/writer capability pair）。
 //!   四件为互不可换的域形 dyn 类型（`DynConfigRepo`/`DynConfigUnitOfWork`/`DynSecretRepo`/
 //!   `DynSecretUnitOfWork`）⇒ 注入 service 时 read/write **角色无法错插**（typed function choice）。
 //!   散装 `config_repo()` / `secret_repo()`
@@ -95,9 +95,8 @@ use crate::revocation::RevocationCapabilityReceipt;
 use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
 #[cfg(feature = "domain-settings")]
 use crate::{
-    ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
-    PgConfigValueMaintenance, PgSecretRepo, PgSecretUnitOfWork, PgSettingsConsumerTx,
-    PgSettingsProjectionReadRepo,
+    ConfigValueCrypto, ConfigValueMaintenanceCapability, PgConfigRepo, PgConfigValueMaintenance,
+    PgSecretRepo, PgSecretUnitOfWork, PgSettingsConsumerTx, PgSettingsProjectionReadRepo,
 };
 use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
@@ -2106,10 +2105,10 @@ impl PgMaintenanceDeps {
     #[cfg(feature = "domain-settings")]
     pub fn config_value_maintenance(
         &self,
-        protection: ConfigValueProtection,
+        crypto: ConfigValueCrypto,
         capability: ConfigValueMaintenanceCapability,
     ) -> PgConfigValueMaintenance {
-        PgConfigValueMaintenance::new(self.store.store_arc(), protection, capability)
+        PgConfigValueMaintenance::new(self.store.store_arc(), crypto, capability)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2353,11 +2352,9 @@ fn bad(d: PgDomainDeps<caps::Settings>) {
 use postgres::{PgDomainDeps, caps};
 fn settings_ok(
     d: PgDomainDeps<caps::Settings>,
-    clock: std::sync::Arc<dyn diport::Clock>,
-    protections: postgres::ConfigValueProtections,
+    crypto: postgres::ConfigValueCrypto,
 ) {
-    // Arc：单一 clock 经 settings_bundle 扇出到 read/write 两个 config 实例（见 settings_bundle）。
-    let _ = d.settings_bundle(clock, protections);
+    let _ = d.settings_bundle(crypto);
 }
 fn identity_ok(
     d: PgDomainDeps<caps::Identity>,
@@ -2433,36 +2430,28 @@ impl PgDomainDeps<caps::Settings> {
         ))
     }
 
-    /// settings 域 durable 接线包：单一 `(store, clock)` → config 与 secret 各自的 read repo + write UoW，
+    /// settings 域 durable 接线包：verified store capability pair → config 与 secret 各自的 read repo + write UoW，
     /// 内部完成域形 DynX 包裹。取代已删除的散装 `config_repo()` / `secret_repo()`（PERSIST-003，不留兼容
     /// 路径，PG-BUNDLE-SETTINGS-04）。
     ///
-    /// `clock`（`Arc<dyn Clock>`，构造器位置参，必填、非 `Option`、不默认系统钟）：单一注入 clock 经
-    /// `Arc::clone` 扇出到 read/write 两个 [`PgConfigRepo`] 实例（envelope `occurred_at` 源；write lane 经
-    /// `commit` 用，read lane 不触）。read/write 各持一个实例——`Box<DynConfigRepo>` 与
+    /// read/write 各持一个 [`PgConfigRepo`] 实例——`Box<DynConfigRepo>` 与
     /// `Box<DynConfigUnitOfWork>` 是不同 dyn 类型、各自 own 其值，一个 Box 无法同时充当两者。
     ///
     /// 返回类型 [`PgSettingsBundle`] 自身 `#[must_use]`（drop 而不 `into_parts` 即 lint），故此处无方法级
     /// `#[must_use]`（避免 `clippy::double_must_use`）。
-    pub fn settings_bundle(
-        &self,
-        clock: Arc<dyn Clock>,
-        protections: ConfigValueProtections,
-    ) -> PgSettingsBundle {
-        let (config_read_protection, config_write_protection) = protections.into_parts();
+    pub fn settings_bundle(&self, crypto: ConfigValueCrypto) -> PgSettingsBundle {
+        let crypto = crypto.into_handle();
         PgSettingsBundle {
             config_repo: DynConfigRepo::new_box(PgConfigRepo::new_with_projection_registry(
                 self.stores.reader_capability(),
                 self.stores.writer_capability(),
-                Arc::clone(&clock),
-                config_read_protection,
+                crypto.clone(),
                 self.projection_registry.clone(),
             )),
             config_uow: DynConfigUnitOfWork::new_box(PgConfigRepo::new_with_projection_registry(
                 self.stores.reader_capability(),
                 self.stores.writer_capability(),
-                clock,
-                config_write_protection,
+                crypto,
                 self.projection_registry.clone(),
             )),
             secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(self.stores.reader_capability())),
@@ -2504,12 +2493,12 @@ impl PgDomainDeps<caps::Settings> {
 }
 
 /// settings 域 durable 接线包（PERSIST-003 / #1424）：config 与 secret 各自的 read repo + write UoW，全部
-/// 源自同一 `(verified reader/writer capability pair, clock)`、预包装为 settings 域 dyn DI port。
+/// 源自同一 verified reader/writer capability pair、预包装为 settings 域 dyn DI port。
 ///
 /// 字段私有 + 唯一构造经 [`PgDomainDeps::settings_bundle`] + 唯一解包经 [`PgSettingsBundle::into_parts`]
 /// （PG-BUNDLE-SETTINGS-04，Hard）。**实际强制**（仅声明类型层真成立的）：
 /// - 外部 crate 无法 mint（私有字段 + 唯一公开构造 funnel）；
-/// - 一次 `into_parts` 产出的四元同源（同一 verified reader/writer capability pair + 同一注入 clock）；
+/// - 一次 `into_parts` 产出的四元同源（同一 verified reader/writer capability pair）；
 /// - 四件为互不可换的域形 dyn 类型 ⇒ config/secret 的 read/write 角色无法错插（typed function choice）。
 ///
 /// **不声称**：`into_parts` 后四件为 owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（funnel 守
@@ -2522,10 +2511,9 @@ impl PgDomainDeps<caps::Settings> {
 /// use postgres::{PgDomainDeps, caps};
 /// fn bad(
 ///     d: PgDomainDeps<caps::Settings>,
-///     clock: std::sync::Arc<dyn diport::Clock>,
-///     protections: postgres::ConfigValueProtections,
+///     crypto: postgres::ConfigValueCrypto,
 /// ) {
-///     let b = d.settings_bundle(clock, protections);
+///     let b = d.settings_bundle(crypto);
 ///     // E0616：字段 `config_repo` 私有——须经 `into_parts` 唯一出口取四元，不可旁路直读单字段（PG-BUNDLE-SETTINGS-04）。
 ///     let _ = b.config_repo;
 /// }
@@ -3237,9 +3225,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn protections() -> ConfigValueProtections {
-        ConfigValueProtections::new(
-            DynKeyProvider::new_box(StubKeyProvider),
+    fn crypto() -> ConfigValueCrypto {
+        ConfigValueCrypto::new(
             DynKeyProvider::new_box(StubKeyProvider),
             KeyName::try_new("settings-config").expect("valid key name"),
         )
@@ -3398,24 +3385,8 @@ mod tests {
     #[tokio::test]
     async fn settings_bundle_constructs_all_parts() {
         let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
-        // 单 clock 经 Arc 扇出到 read/write 两个 config 实例；into_parts 解包四件套（纯 pool clone，无 I/O）。
-        let (_configs, _config_writer, _secrets, _secret_writer) = s
-            .settings_bundle(Arc::new(EpochClock) as Arc<dyn Clock>, protections())
-            .into_parts();
-    }
-
-    #[tokio::test]
-    async fn settings_bundle_fans_out_single_clock() {
-        let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
-        let clock: Arc<dyn Clock> = Arc::new(EpochClock);
-        let before = Arc::strong_count(&clock); // 1（仅本地持有）
-        let _bundle = s.settings_bundle(Arc::clone(&clock), protections());
-        // 单一注入 clock 经 Arc 扇出到 read/write 两个 PgConfigRepo（各持一 clone）⇒ 至少 +2。
-        // 回归到「每 lane 各 mint 一个 clock」则只 +1 → 失败（PG-BUNDLE-SETTINGS-04 anti-vacuity）。
-        assert!(
-            Arc::strong_count(&clock) >= before + 2,
-            "single injected clock must fan out to BOTH config repos"
-        );
+        let (_configs, _config_writer, _secrets, _secret_writer) =
+            s.settings_bundle(crypto()).into_parts();
     }
 
     #[tokio::test]

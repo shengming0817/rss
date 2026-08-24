@@ -35,8 +35,8 @@ use identity::ports::{
 use identity::{CredentialSecurityService, LoginService};
 use memory::{FixedClock, MemBus, MemEmitter};
 use postgres::{
-    ConfigValueProtections, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword,
-    PgRuntimeDeps, PgTenantReadConfig, caps,
+    ConfigValueCrypto, PgAuditAdminRepo, PgConfig, PgCredentialRepo, PgPassword, PgRuntimeDeps,
+    PgTenantReadConfig, caps,
 };
 use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey};
 use rss_request_context::{PrincipalKind, TenantId};
@@ -289,9 +289,8 @@ impl KeyProvider for JourneyKeyProvider {
     }
 }
 
-fn protections() -> Result<ConfigValueProtections> {
-    Ok(ConfigValueProtections::new(
-        DynKeyProvider::new_box(JourneyKeyProvider),
+fn config_value_crypto() -> Result<ConfigValueCrypto> {
+    Ok(ConfigValueCrypto::new(
         DynKeyProvider::new_box(JourneyKeyProvider),
         KeyName::try_new("settings-config")?,
     ))
@@ -1035,11 +1034,11 @@ async fn drive_settings(
 ) -> Result<()> {
     let settings_deps = deps.handle().for_domain::<caps::Settings>();
     let (_config_repo, _config_uow, secret_repo, secret_uow) = settings_deps
-        .settings_bundle(Arc::new(FixedClock::at_unix_secs(NOW_SECS)), protections()?)
+        .settings_bundle(config_value_crypto()?)
         .into_parts();
     let (_observer_config_repo, _observer_config_uow, secret_observer, _observer_secret_uow) =
         settings_deps
-            .settings_bundle(Arc::new(FixedClock::at_unix_secs(NOW_SECS)), protections()?)
+            .settings_bundle(config_value_crypto()?)
             .into_parts();
     let conflict_secret = "conflict.coordinate";
     let secret_route_repo: Arc<DynSecretRepo<'static>> =

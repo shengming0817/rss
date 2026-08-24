@@ -769,8 +769,8 @@ pub(in super::super) fn fixed_clock() -> Box<dyn diport::Clock> {
     Box::new(FixedClock(fixed_clock_time()))
 }
 
-/// 构造注入用 clock（`Arc<dyn Clock>`，`PgConfigRepo` 共享扇出约定，固定 [`fixed_clock_time`]，#1424）。
-pub(in super::super) fn fixed_clock_arc() -> std::sync::Arc<dyn diport::Clock> {
+/// Projection operator 测试时钟（`Arc<dyn Clock>`，固定 [`fixed_clock_time`]）。
+pub(in super::super) fn projection_clock() -> std::sync::Arc<dyn diport::Clock> {
     std::sync::Arc::new(FixedClock(fixed_clock_time()))
 }
 

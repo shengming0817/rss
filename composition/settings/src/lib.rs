@@ -15,7 +15,7 @@ use diport::{
     Clock, DynKeyProvider, DynSecretResolver, KeyName, KeyProvider as _, SecretResolver as _,
     SecretResolverError,
 };
-use postgres::{ConfigValueProtections, PgDbReadiness, PgDomainDeps, PoolReadiness, caps};
+use postgres::{ConfigValueCrypto, PgDbReadiness, PgDomainDeps, PoolReadiness, caps};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use secure::{Plaintext, ProtectionContext};
 use settings::ports::{DynSecretRepo, DynSecretUnitOfWork};
@@ -25,9 +25,9 @@ use vault::{SecretResolverReadinessTarget, VaultDomainDeps, caps as vault_caps};
 const DOMAIN_NAME: &str = "settings";
 const KEYPROVIDER_READINESS_TENANT: &str = "00000000-0000-4000-8000-000000000147";
 const KEYPROVIDER_READINESS_MISMATCH_TENANT: &str = "00000000-0000-4000-8000-000000000148";
-const KEYPROVIDER_READINESS_CONFIG_KEY: &str = "readiness.probe";
-const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
-const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+const KEYPROVIDER_READINESS_COORDINATE: &str = "provider.readiness";
+const KEYPROVIDER_READINESS_FIELD: &str = "settings.key-provider.readiness";
+const KEYPROVIDER_READINESS_FORMAT_VERSION: u32 = 1;
 const KEYPROVIDER_READINESS_VALUE: &[u8] = b"rss-keyprovider-ready";
 /// Stable readiness probe name for the settings database dependency.
 pub const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
@@ -75,16 +75,14 @@ impl Default for KeyProviderReadinessInterval {
 /// Complete, typed inputs for settings assembly wiring.
 ///
 /// Fields are private, and the production constructor accepts one sealed Vault capability. The
-/// three provider roles and their readiness lifecycle are derived internally from that capability,
+/// resolver and singular config-value crypto capability are derived internally from it,
 /// so callers cannot self-report healthy while using a different provider for durable reads or
 /// writes. Consuming `self` prevents the resulting handles from being reused by another wiring
 /// path.
 pub struct SettingsModuleDeps {
     pg: PgDomainDeps<caps::Settings>,
     secret_resolver: Box<DynSecretResolver<'static>>,
-    read_key_provider: Box<DynKeyProvider<'static>>,
-    write_key_provider: Box<DynKeyProvider<'static>>,
-    key_name: KeyName,
+    config_value_crypto: ConfigValueCrypto,
     clock: Arc<dyn Clock>,
     readiness: SettingsReadinessDeps,
     http_surface: SettingsHttpSurface,
@@ -291,9 +289,7 @@ impl SettingsModuleDeps {
         Self {
             pg,
             secret_resolver: vault.secret_resolver(),
-            read_key_provider: vault.key_provider(),
-            write_key_provider: vault.key_provider(),
-            key_name,
+            config_value_crypto: ConfigValueCrypto::new(vault.key_provider(), key_name),
             clock,
             readiness,
             http_surface: SettingsHttpSurface::Full,
@@ -326,8 +322,7 @@ impl SettingsModuleDeps {
     fn for_test(
         pg: PgDomainDeps<caps::Settings>,
         secret_resolver: Box<DynSecretResolver<'static>>,
-        read_key_provider: Box<DynKeyProvider<'static>>,
-        write_key_provider: Box<DynKeyProvider<'static>>,
+        key_provider: Box<DynKeyProvider<'static>>,
         key_name: KeyName,
         clock: Arc<dyn Clock>,
         readiness: SettingsReadinessDeps,
@@ -335,9 +330,7 @@ impl SettingsModuleDeps {
         Self {
             pg,
             secret_resolver,
-            read_key_provider,
-            write_key_provider,
-            key_name,
+            config_value_crypto: ConfigValueCrypto::new(key_provider, key_name),
             clock,
             readiness,
             http_surface: SettingsHttpSurface::Full,
@@ -368,9 +361,7 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
     let SettingsModuleDeps {
         pg,
         secret_resolver,
-        read_key_provider,
-        write_key_provider,
-        key_name,
+        config_value_crypto,
         clock,
         readiness,
         http_surface,
@@ -389,12 +380,8 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
     let output = DomainModuleResult::default();
 
     let service_clock = Arc::clone(&clock);
-    let (configs, writer, secrets, secret_writer) = pg
-        .settings_bundle(
-            clock,
-            ConfigValueProtections::new(read_key_provider, write_key_provider, key_name),
-        )
-        .into_parts();
+    let (configs, writer, secrets, secret_writer) =
+        pg.settings_bundle(config_value_crypto).into_parts();
     let config_svc = SettingsService::with_postgres(
         configs,
         writer,
@@ -613,14 +600,17 @@ fn readiness_to_health(readiness: PoolReadiness) -> (HealthStatus, &'static str)
     }
 }
 
+/// Provider-generic AAD-binding canary. Its namespace is intentionally distinct from the private
+/// Postgres ConfigValue persistence policy; readiness proves provider behavior without copying
+/// persistence field/scheme coordinates into composition.
 fn keyprovider_readiness_aad(tenant: &str) -> anyhow::Result<secure::DerivedAad> {
     let tenant = rss_request_context::TenantId::parse(tenant)
         .context("keyprovider readiness tenant constant is invalid")?;
     ProtectionContext::authenticated_request(
         tenant,
-        KEYPROVIDER_READINESS_CONFIG_KEY,
-        KEYPROVIDER_CONFIG_FIELD,
-        KEYPROVIDER_CONFIG_SCHEME,
+        KEYPROVIDER_READINESS_COORDINATE,
+        KEYPROVIDER_READINESS_FIELD,
+        KEYPROVIDER_READINESS_FORMAT_VERSION,
     )
     .map(|context| context.derive())
     .context("keyprovider readiness aad")
@@ -770,7 +760,6 @@ pub mod test_support {
         wire(SettingsModuleDeps::for_test(
             pg.for_domain(),
             DynSecretResolver::new_box(TestSecretResolver),
-            provider(),
             provider(),
             key_name,
             Arc::new(EpochClock),

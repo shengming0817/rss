@@ -2010,7 +2010,7 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
-        fixed_clock_arc(),
+        projection_clock(),
     )
     .await?;
     let runner_config = eventexec::ProjectionRunnerConfig::new(

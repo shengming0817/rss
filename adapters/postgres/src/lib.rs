@@ -209,9 +209,9 @@ pub use checkpoint::PgCheckpointStore;
 pub use command_journal::PgCommandJournal;
 #[cfg(feature = "domain-settings")]
 pub use config_repo::{
-    ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
-    ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
-    ConfigValueProtections, PgConfigRepo, PgConfigValueMaintenance,
+    ConfigValueCrypto, ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
+    ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, PgConfigRepo,
+    PgConfigValueMaintenance,
 };
 #[cfg(feature = "domain-audit")]
 pub use consumer_tx::PgAuditConsumerTx;

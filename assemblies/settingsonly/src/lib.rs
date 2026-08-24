@@ -208,8 +208,8 @@ mod tests {
 
     use crate::SharedRuntimeDeps;
 
-    const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
-    const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+    const KEYPROVIDER_READINESS_FIELD: &str = "settings.key-provider.readiness";
+    const KEYPROVIDER_READINESS_FORMAT_VERSION: u32 = 1;
 
     struct UnsetProjectionResolver;
 
@@ -287,9 +287,9 @@ mod tests {
             rss_request_context::TenantId::parse(tenant).expect("canonical readiness tenant");
         let aad = secure::ProtectionContext::authenticated_request(
             tenant,
-            "readiness.probe",
-            KEYPROVIDER_CONFIG_FIELD,
-            KEYPROVIDER_CONFIG_SCHEME,
+            "provider.readiness",
+            KEYPROVIDER_READINESS_FIELD,
+            KEYPROVIDER_READINESS_FORMAT_VERSION,
         )
         .expect("valid readiness aad")
         .derive();

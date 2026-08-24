@@ -652,7 +652,8 @@ pub(in super::super) fn active_backlog(
 
 /// 测试用简化 envelope（占位 `occurred_at=0`）：仅供原子性 / relay 路径验证（T1–T2 等直调 `append_outbox`
 /// 的用例，不断言 occurred_at 值）。`occurred_at` 构造期必填（#262 F1），此处取占位 0；envelope occurred_at 的
-/// 生产注入路径（从注入 Clock）由 t10（`PgEmitter`）/ t11（`PgAuthGrantLifecycle`）/ config co-tx 专门覆盖（#1129）。
+/// 生产时间路径由 t10（`PgEmitter`）/ t11（`PgAuthGrantLifecycle`）覆盖注入 Clock，config co-tx 覆盖
+/// sealed `ReviewedEvent` 携带的事件时间（#1129）。
 pub(in super::super) fn make_envelope(domain: &str, event_id: &str) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),

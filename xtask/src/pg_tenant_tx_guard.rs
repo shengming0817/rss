@@ -5093,7 +5093,8 @@ fn allowed_site_exception(
     if rel == "config_repo.rs"
         && tables == ["config_entries"]
         && window.contains("update config_entries")
-        && window.contains("protection_scheme = 1")
+        && window.contains("protection_scheme = $8")
+        && window.contains(".bind(configvalueaadpolicy::scheme)")
         && window.contains("execute(&self.store.pool")
     {
         return Some("config-value-maintenance");
@@ -7649,7 +7650,7 @@ ALTER TABLE public.roles ADD COLUMN tenant_id uuid NOT NULL;
                     "config_repo.rs",
                     "async fn select_maintenance_rows(&self){ sqlx::query(\"SELECT tenant_id::text, config_key, version, value, value_enc, key_id FROM config_entries WHERE protection_scheme = $1 ORDER BY tenant_id::text, config_key, version LIMIT $2\").fetch_all(&self.store.pool).await; }\n\
                      async fn backfill_row(&self){ sqlx::query(\"UPDATE config_entries SET value = NULL, protection_scheme = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 0\").execute(&self.store.pool).await; }\n\
-                     async fn rewrap_row(&self){ sqlx::query(\"UPDATE config_entries SET value_enc = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 1\").execute(&self.store.pool).await; }\n\
+                     async fn rewrap_row(&self){ sqlx::query(\"UPDATE config_entries SET value_enc = $4 WHERE tenant_id = $1::uuid AND protection_scheme = $8\").bind(ConfigValueAadPolicy::SCHEME).execute(&self.store.pool).await; }\n\
                      async fn remaining_plaintext(&self){ sqlx::query_scalar(\"SELECT COUNT(*)::bigint FROM config_entries WHERE protection_scheme = 0\").fetch_one(&self.store.pool).await; }",
                 ),
             ]),
@@ -7685,7 +7686,7 @@ ALTER TABLE public.roles ADD COLUMN tenant_id uuid NOT NULL;
                 ),
                 (
                     "config_repo.rs",
-                    "async fn rewrap_row(&self){ sqlx::query(\"UPDATE config_entries SET value_enc = $4 WHERE tenant_id = $1::uuid AND protection_scheme = 1\").execute(&self.store.pool).await; }",
+                    "async fn rewrap_row(&self){ sqlx::query(\"UPDATE config_entries SET value_enc = $4 WHERE tenant_id = $1::uuid AND protection_scheme = $8\").bind(ConfigValueAadPolicy::SCHEME).execute(&self.store.pool).await; }",
                 ),
                 (
                     "config_repo.rs",

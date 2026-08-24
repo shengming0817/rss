@@ -16,9 +16,8 @@ pub(in super::super) use crate::cotx::{ServingWriteLane, TenantDb};
 pub(in super::super) use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
 
 pub(in super::super) use crate::{
-    ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
-    ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
-    PgConfigValueMaintenance,
+    ConfigValueCrypto, ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
+    ConfigValueMaintenanceOptions, PgConfigRepo, PgConfigValueMaintenance,
 };
 
 pub(in super::super) fn conformance_retry_category(
@@ -92,6 +91,18 @@ pub(in super::super) fn encrypted_config_fixture(
         },
     )
 }
+
+/// pre-refactor 路径产生的固定 scheme=1 密文，锁定持久态向后可解性。
+///
+/// 坐标是 CONFIG_TENANT / `fixture.compat` / `settings.config.value` / scheme 1，
+/// plaintext 是 `pre-refactor-value`；不经当前 encrypt 路径重新生成。
+pub(in super::super) const PRE_REFACTOR_CONFIG_CIPHERTEXT: &[u8] = b"\
+    \x00\x00\x00\x76rss-field-protection-aad-v2\
+    \x00\x00\x00\x24f47ac10b-58cc-4372-a567-0e02b2c3d479\
+    \x00\x00\x00\x0efixture.compat\
+    \x00\x00\x00\x15settings.config.value\
+    \x00\x00\x00\x04\x00\x00\x00\x01\
+    \xd5\xd7\xc0\x88\xd7\xc0\xc3\xc4\xc6\xd1\xca\xd7\x88\xd3\xc4\xc9\xd0\xc0";
 
 pub(in super::super) struct AadBoundKeyProvider;
 
@@ -321,51 +332,40 @@ pub(in super::super) fn config_key_unavailable() -> diport::KeyProviderError {
 }
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn config_protection() -> ConfigValueProtection {
-    ConfigValueProtection::new(
+pub(in super::super) fn config_crypto() -> ConfigValueCrypto {
+    ConfigValueCrypto::new(
         diport::DynKeyProvider::new_box(AadBoundKeyProvider),
         diport::KeyName::try_new("settings-config").unwrap(),
     )
 }
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn config_protections() -> ConfigValueProtections {
-    ConfigValueProtections::new(
-        diport::DynKeyProvider::new_box(AadBoundKeyProvider),
-        diport::DynKeyProvider::new_box(AadBoundKeyProvider),
-        diport::KeyName::try_new("settings-config").unwrap(),
-    )
-}
-
-#[allow(clippy::unwrap_used)]
-pub(in super::super) fn rejecting_config_protection() -> ConfigValueProtection {
-    ConfigValueProtection::new(
+pub(in super::super) fn rejecting_config_crypto() -> ConfigValueCrypto {
+    ConfigValueCrypto::new(
         diport::DynKeyProvider::new_box(RejectingKeyProvider),
         diport::KeyName::try_new("settings-config").unwrap(),
     )
 }
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn unavailable_config_protection() -> ConfigValueProtection {
-    ConfigValueProtection::new(
+pub(in super::super) fn unavailable_config_crypto() -> ConfigValueCrypto {
+    ConfigValueCrypto::new(
         diport::DynKeyProvider::new_box(UnavailableKeyProvider),
         diport::KeyName::try_new("settings-config").unwrap(),
     )
 }
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn rewrapping_config_protection() -> ConfigValueProtection {
-    ConfigValueProtection::new(
+pub(in super::super) fn rewrapping_config_crypto() -> ConfigValueCrypto {
+    ConfigValueCrypto::new(
         diport::DynKeyProvider::new_box(RewrappingKeyProvider),
         diport::KeyName::try_new("settings-config").unwrap(),
     )
 }
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn mutating_backfill_config_protection(
-    pool: sqlx::PgPool,
-) -> ConfigValueProtection {
-    ConfigValueProtection::new(
+pub(in super::super) fn mutating_backfill_config_crypto(pool: sqlx::PgPool) -> ConfigValueCrypto {
+    ConfigValueCrypto::new(
         diport::DynKeyProvider::new_box(MutatingBackfillKeyProvider { pool }),
         diport::KeyName::try_new("settings-config").unwrap(),
     )

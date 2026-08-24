@@ -324,10 +324,9 @@ impl KeyProvider for TestKeyProvider {
     }
 }
 
-fn config_value_protections() -> Result<postgres::ConfigValueProtections> {
+fn config_value_crypto() -> Result<postgres::ConfigValueCrypto> {
     let key = KeyName::try_new("settings-config")?;
-    Ok(postgres::ConfigValueProtections::new(
-        DynKeyProvider::new_box(TestKeyProvider),
+    Ok(postgres::ConfigValueCrypto::new(
         DynKeyProvider::new_box(TestKeyProvider),
         key,
     ))
@@ -875,10 +874,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         clock: Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     });
     let (settings_configs, settings_writer, settings_secrets, settings_secret_writer) = settings_pg
-        .settings_bundle(
-            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-            config_value_protections()?,
-        )
+        .settings_bundle(config_value_crypto()?)
         .into_parts();
     let subscriber_settings_service = Arc::new(SettingsService::with_postgres(
         settings_configs,
@@ -903,10 +899,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         _publisher_settings_secrets,
         _publisher_settings_secret_writer,
     ) = settings_pg
-        .settings_bundle(
-            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-            config_value_protections()?,
-        )
+        .settings_bundle(config_value_crypto()?)
         .into_parts();
     let publisher_settings_service = Arc::new(SettingsService::with_postgres(
         publisher_settings_configs,

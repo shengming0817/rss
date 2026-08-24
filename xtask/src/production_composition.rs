@@ -2462,7 +2462,7 @@ mod tests {
             pub async fn wire(deps: SettingsModuleDeps) {{
                 let SettingsModuleDeps {{ pg, .. }} = deps;
                 let (configs, writer, secrets, secret_writer) = pg
-                    .settings_bundle(clock, protections)
+                    .settings_bundle(protections)
                     .into_parts();
                 let config_svc = SettingsService::with_postgres(
                     configs,

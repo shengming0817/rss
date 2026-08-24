@@ -599,9 +599,8 @@ impl OutboxMetadata {
     ///
     /// occurred_at / tenantId / schemaVersion / schemaHash 注入折叠进构造器 ⇒「缺标准 header 的 outbox
     /// metadata」**类型层不可表达**（Hard），杜绝
-    /// producer 漏接：三条生产路径（`PgEmitter` / `PgAuthGrantLifecycle` / `PgConfigRepo`）各从注入 `Clock`
-    /// 经 `rss_contract::Timepoint::saturating_from_system_time` 编码后传入，新增 producer 也必须提供
-    /// （缺失即编译错误）。reserved key 不经业务可见
+    /// producer 漏接：`PgEmitter` / `PgAuthGrantLifecycle` 从各自注入的 `Clock` 取值，`PgConfigRepo` 使用
+    /// sealed `ReviewedEvent` 携带的事件时间；三条路径均必须提供该构造参数（缺失即编译错误）。reserved key 不经业务可见
     /// 入口写入——[`OutboxMetadata::try_insert`] 对 free-form 路径仍 fail-closed 拒 reserved（业务侧不可伪造）。
     ///
     /// `occurredAt` 仅供**诊断 / 观测**，**不**进入 relay / sweep 的 SQL WHERE 谓词、不建索引。trace 经

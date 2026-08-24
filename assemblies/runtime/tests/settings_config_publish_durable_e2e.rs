@@ -36,8 +36,7 @@ use generated::event::settings_v1::{
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use postgres::caps;
 use postgres::{
-    ConfigValueProtections, DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps,
-    PgTenantReadConfig,
+    ConfigValueCrypto, DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig,
 };
 use primitives::healthz::{HealthCheck, ProbeName};
 use rss_request_context::RowScope;
@@ -379,10 +378,9 @@ fn owner_connect_options(p: &testkit::PgConnParams) -> PgConnectOptions {
         .ssl_mode(SqlxPgSslMode::Prefer)
 }
 
-fn config_value_protections() -> Result<ConfigValueProtections> {
+fn config_value_crypto() -> Result<ConfigValueCrypto> {
     let key = KeyName::try_new("settings-config-durable")?;
-    Ok(ConfigValueProtections::new(
-        DynKeyProvider::new_box(TestKeyProvider),
+    Ok(ConfigValueCrypto::new(
         DynKeyProvider::new_box(TestKeyProvider),
         key,
     ))
@@ -469,10 +467,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
 
     let settings_deps = pg.for_domain::<caps::Settings>();
     let (configs, writer, _secrets, _secret_writer) = settings_deps
-        .settings_bundle(
-            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-            config_value_protections()?,
-        )
+        .settings_bundle(config_value_crypto()?)
         .into_parts();
     let service = SettingsService::with_postgres(
         configs,
@@ -494,14 +489,31 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     assert_eq!(response.data.key, key);
     assert_eq!(response.data.version, 1, "first publish must create v1");
 
-    let cfg_count: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 AND version = 1",
+    let stored: (Option<String>, i32, Option<Vec<u8>>, Option<String>) = sqlx::query_as(
+        "SELECT value, protection_scheme, value_enc, key_id FROM config_entries \
+         WHERE tenant_id = $1::uuid AND config_key = $2 AND version = 1",
     )
     .bind(CANON_TENANT)
     .bind(&key)
     .fetch_one(&assertion_pool)
     .await?;
-    assert_eq!(cfg_count.0, 1, "config v1 row must be committed");
+    assert_eq!(stored.0, None, "config v1 must not persist plaintext");
+    assert_eq!(stored.1, 1, "config v1 must use canonical scheme");
+    let ciphertext = stored.2.context("config v1 ciphertext")?;
+    assert!(
+        !ciphertext.is_empty(),
+        "config v1 ciphertext must be present"
+    );
+    assert!(
+        !ciphertext
+            .windows(value.len())
+            .any(|window| window == value.as_bytes()),
+        "config v1 ciphertext must not contain plaintext"
+    );
+    assert!(
+        stored.3.as_deref().is_some_and(|key_id| !key_id.is_empty()),
+        "config v1 key id must be present"
+    );
 
     let row = find_settings_outbox_row(&assertion_pool, &key)
         .await?

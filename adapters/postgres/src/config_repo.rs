@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use diport::key_provider::KeyProviderErrorKind;
 use diport::{
-    Clock, DynKeyProvider, KeyName, KeyProvider, KeyProviderError, KeyRef, RedactedBytes,
+    DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, RedactedBytes,
 };
 use eventexec::event::ReviewedEvent;
 use httpserve::ProducerAuthorization;
@@ -61,61 +61,150 @@ static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 /// 独立读端口使用 verified reader；co-tx 写使用 verified writer。两者共享同一数据库 schema，但
 /// capability 类型互斥，避免 LocalOnly 读静默落回可写连接。
 ///
-/// `clock` 是注入的 [`Clock`]（必填构造器位置参，`Arc<dyn Clock>`）：co-tx outbox envelope `occurred_at`
-/// 时间源（#1129/#262 F1——settings 的 `settings.config-version-changed` 生产 outbox 路径，本是第三条漏接
-/// occurred_at 的构造点）。用 `Arc`（非 `Box`，区别于 [`crate::PgEmitter`] / [`crate::PgAuthGrantLifecycle`]）：
-/// settings bundle 以**单一**注入 clock 经 `Arc::clone` 扇出到 read/write 两个实例（PERSIST-003，#1424）。
+/// co-tx outbox envelope 的 `occurred_at` 由 sealed reviewed event 携带，repository 不自行采样时间。
 pub struct PgConfigRepo {
     read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
-    protection: ConfigValueProtection,
+    crypto: ConfigValueCryptoHandle,
 }
 
-/// settings `ConfigValue` 字段保护依赖：KeyProvider 句柄 + 写入 keyset 名。
+/// settings `ConfigValue` 持久化加密能力。
 ///
-/// 字段私有，唯一构造经 [`ConfigValueProtection::new`]。`PgConfigRepo` 只持此参数对象，不知道具体 Vault
-/// adapter；组合根 / bundle 负责传入共享 KeyProvider handle。
-pub struct ConfigValueProtection {
-    key_provider: Box<DynKeyProvider<'static>>,
-    key_name: KeyName,
+/// 单一 provider handle 同时承载 encrypt/decrypt/rewrap，符合 Vault bundle 共享同一底层 provider 的真实
+/// 语义。字段私有、类型不实现 `Clone` 且只经 consuming bundle funnel 使用，外部无法拆出或重组 read/write
+/// lane；AAD field/scheme 由 adapter-private policy 固定，调用方不能注入。
+pub struct ConfigValueCrypto {
+    handle: ConfigValueCryptoHandle,
 }
 
-impl ConfigValueProtection {
-    /// 构造 config value 字段保护依赖。两项必填，无 plaintext-write flag。
+impl ConfigValueCrypto {
+    /// 从一个 provider handle 与一个 validated key name 构造完整能力。
     #[must_use]
     pub fn new(key_provider: Box<DynKeyProvider<'static>>, key_name: KeyName) -> Self {
         Self {
-            key_provider,
-            key_name,
+            handle: ConfigValueCryptoHandle {
+                key_provider: Arc::from(key_provider),
+                key_name,
+                aad_policy: ConfigValueAadPolicy,
+            },
         }
+    }
+
+    pub(crate) fn into_handle(self) -> ConfigValueCryptoHandle {
+        self.handle
     }
 }
 
-/// settings bundle 读写两条 config lane 的字段保护依赖。
-///
-/// `settings_bundle` 只接收此聚合类型，不暴露两个同类型 `ConfigValueProtection` 位置参，避免组合根把
-/// read/write lane 误调换（F6）。读写 lane 各持独立 `DynKeyProvider` handle；共享同一 key name。
-pub struct ConfigValueProtections {
-    read: ConfigValueProtection,
-    write: ConfigValueProtection,
+pub(crate) struct ConfigValueCryptoHandle {
+    key_provider: Arc<DynKeyProvider<'static>>,
+    key_name: KeyName,
+    aad_policy: ConfigValueAadPolicy,
 }
 
-impl ConfigValueProtections {
-    /// 构造 settings bundle 的读写字段保护依赖。两条 lane 的 provider handle 与 key name 均显式注入。
-    #[must_use]
-    pub fn new(
-        read_key_provider: Box<DynKeyProvider<'static>>,
-        write_key_provider: Box<DynKeyProvider<'static>>,
-        key_name: KeyName,
-    ) -> Self {
+impl Clone for ConfigValueCryptoHandle {
+    fn clone(&self) -> Self {
         Self {
-            read: ConfigValueProtection::new(read_key_provider, key_name.clone()),
-            write: ConfigValueProtection::new(write_key_provider, key_name),
+            key_provider: Arc::clone(&self.key_provider),
+            key_name: self.key_name.clone(),
+            aad_policy: self.aad_policy,
         }
     }
+}
 
-    pub(crate) fn into_parts(self) -> (ConfigValueProtection, ConfigValueProtection) {
-        (self.read, self.write)
+#[derive(Clone, Copy)]
+struct ConfigValueAadPolicy;
+
+impl ConfigValueAadPolicy {
+    const FIELD: &'static str = "settings.config.value";
+    const SCHEME: i32 = 1;
+
+    fn serving_aad(
+        self,
+        tenant: TenantId,
+        key: &SettingKey,
+    ) -> Result<DerivedAad, ConfigRepoError> {
+        ProtectionContext::authenticated_request(
+            tenant,
+            key.as_str(),
+            Self::FIELD,
+            Self::SCHEME as u32,
+        )
+        .map(|ctx| ctx.derive())
+        .map_err(protection_auth_failure)
+    }
+
+    fn maintenance_aad(
+        self,
+        _capability: &ConfigValueMaintenanceCapability,
+        tenant: TenantId,
+        key: &SettingKey,
+    ) -> Result<DerivedAad, ConfigRepoError> {
+        ProtectionContext::authorized_maintenance(
+            tenant,
+            key.as_str(),
+            Self::FIELD,
+            Self::SCHEME as u32,
+        )
+        .map(|ctx| ctx.derive())
+        .map_err(protection_auth_failure)
+    }
+}
+
+impl ConfigValueCryptoHandle {
+    async fn encrypt_serving(
+        &self,
+        tenant: TenantId,
+        key: &SettingKey,
+        plaintext: Plaintext,
+    ) -> Result<EncryptOutput, ConfigRepoError> {
+        let aad = self.aad_policy.serving_aad(tenant, key)?;
+        self.key_provider
+            .encrypt(self.key_name.clone(), plaintext, aad)
+            .await
+            .map_err(key_provider_error)
+    }
+
+    async fn decrypt_serving(
+        &self,
+        tenant: TenantId,
+        key: &SettingKey,
+        ciphertext: RedactedBytes,
+        key_ref: KeyRef,
+    ) -> Result<Plaintext, ConfigRepoError> {
+        let aad = self.aad_policy.serving_aad(tenant, key)?;
+        self.key_provider
+            .decrypt(ciphertext, key_ref, aad)
+            .await
+            .map_err(key_provider_error)
+    }
+
+    async fn encrypt_maintenance(
+        &self,
+        capability: &ConfigValueMaintenanceCapability,
+        tenant: TenantId,
+        key: &SettingKey,
+        plaintext: Plaintext,
+    ) -> Result<EncryptOutput, ConfigRepoError> {
+        let aad = self.aad_policy.maintenance_aad(capability, tenant, key)?;
+        self.key_provider
+            .encrypt(self.key_name.clone(), plaintext, aad)
+            .await
+            .map_err(key_provider_error)
+    }
+
+    async fn rewrap_maintenance(
+        &self,
+        capability: &ConfigValueMaintenanceCapability,
+        tenant: TenantId,
+        key: &SettingKey,
+        ciphertext: RedactedBytes,
+        key_ref: KeyRef,
+    ) -> Result<EncryptOutput, ConfigRepoError> {
+        let aad = self.aad_policy.maintenance_aad(capability, tenant, key)?;
+        self.key_provider
+            .rewrap(ciphertext, key_ref, aad)
+            .await
+            .map_err(key_provider_error)
     }
 }
 
@@ -296,46 +385,41 @@ impl ConfigValueMaintenanceReport {
 /// settings `ConfigValue` 存量维护执行器。
 pub struct PgConfigValueMaintenance {
     store: Arc<PgStore>,
-    protection: ConfigValueProtection,
+    crypto: ConfigValueCryptoHandle,
     capability: ConfigValueMaintenanceCapability,
 }
 
 impl PgConfigValueMaintenance {
     pub(crate) fn new(
         store: Arc<PgStore>,
-        protection: ConfigValueProtection,
+        crypto: ConfigValueCrypto,
         capability: ConfigValueMaintenanceCapability,
     ) -> Self {
         Self {
             store,
-            protection,
+            crypto: crypto.into_handle(),
             capability,
         }
     }
 }
 
 impl PgConfigRepo {
-    /// integration-only 裸 store 测试 seam + 注入 [`Clock`]（envelope `occurred_at` 时间源）。
+    /// integration-only 裸 store 测试 seam。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Settings>::settings_bundle` 收口。
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn new(
-        store: &PgStore,
-        _clock: Arc<dyn Clock>,
-        protection: ConfigValueProtection,
-    ) -> Self {
+    pub(crate) fn new(store: &PgStore, crypto: ConfigValueCrypto) -> Self {
         Self {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
-            protection,
+            crypto: crypto.into_handle(),
         }
     }
 
     pub(crate) fn new_with_projection_registry(
         reader: &VerifiedPgReadStore,
         writer: &VerifiedPgWriteStore,
-        _clock: Arc<dyn Clock>,
-        protection: ConfigValueProtection,
+        crypto: ConfigValueCryptoHandle,
         projection_registry: ProjectionWriteRegistry,
     ) -> Self {
         Self {
@@ -344,13 +428,10 @@ impl PgConfigRepo {
                 writer,
                 projection_registry,
             ),
-            protection,
+            crypto,
         }
     }
 }
-
-const CONFIG_VALUE_FIELD: &str = "settings.config.value";
-const CONFIG_VALUE_PROTECTION_SCHEME: i32 = 1;
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，故在 adapter 边界收口）。
 fn storage(e: sqlx::Error) -> ConfigRepoError {
@@ -464,17 +545,6 @@ fn tenant_param(tenant: TenantId) -> String {
     tenant.to_string()
 }
 
-fn config_value_aad(tenant: TenantId, key: &SettingKey) -> Result<DerivedAad, ConfigRepoError> {
-    ProtectionContext::authenticated_request(
-        tenant,
-        key.as_str(),
-        CONFIG_VALUE_FIELD,
-        CONFIG_VALUE_PROTECTION_SCHEME as u32,
-    )
-    .map(|ctx| ctx.derive())
-    .map_err(protection_auth_failure)
-}
-
 impl PgConfigRepo {
     async fn encode_value(
         &self,
@@ -491,20 +561,13 @@ impl PgConfigRepo {
         key: &SettingKey,
         value: &[u8],
     ) -> Result<EncodedConfigValue, ConfigRepoError> {
-        let aad = config_value_aad(tenant, key)?;
         let encrypted = self
-            .protection
-            .key_provider
-            .encrypt(
-                self.protection.key_name.clone(),
-                Plaintext::new(value.to_vec()),
-                aad,
-            )
-            .await
-            .map_err(key_provider_error)?;
+            .crypto
+            .encrypt_serving(tenant, key, Plaintext::new(value.to_vec()))
+            .await?;
         Ok(EncodedConfigValue {
             value: None,
-            protection_scheme: CONFIG_VALUE_PROTECTION_SCHEME,
+            protection_scheme: ConfigValueAadPolicy::SCHEME,
             value_enc: Some(encrypted.ciphertext().to_vec()),
             key_id: Some(encrypted.key().to_token()),
         })
@@ -530,7 +593,7 @@ impl PgConfigRepo {
                     "legacy config value requires maintenance backfill",
                 ))
             }
-            CONFIG_VALUE_PROTECTION_SCHEME => {
+            ConfigValueAadPolicy::SCHEME => {
                 if value.is_some() {
                     return Err(protection_auth_message(
                         "encrypted config value has plaintext",
@@ -542,13 +605,10 @@ impl PgConfigRepo {
                 let key_ref = key_id
                     .ok_or_else(|| protection_auth_message("encrypted config value missing key id"))
                     .and_then(|raw| KeyRef::parse(&raw).map_err(protection_auth_failure))?;
-                let aad = config_value_aad(tenant, key)?;
                 let plaintext = self
-                    .protection
-                    .key_provider
-                    .decrypt(RedactedBytes::new(ciphertext), key_ref, aad)
-                    .await
-                    .map_err(key_provider_error)?;
+                    .crypto
+                    .decrypt_serving(tenant, key, RedactedBytes::new(ciphertext), key_ref)
+                    .await?;
                 String::from_utf8(plaintext.expose().to_vec()).map_err(protection_auth_failure)
             }
             _ => Err(protection_auth_message(
@@ -640,21 +700,6 @@ impl ConfigValueMaintenanceRow {
             version: self.version,
         }
     }
-}
-
-fn config_value_maintenance_aad(
-    _capability: &ConfigValueMaintenanceCapability,
-    tenant: TenantId,
-    key: &SettingKey,
-) -> Result<DerivedAad, ConfigRepoError> {
-    ProtectionContext::authorized_maintenance(
-        tenant,
-        key.as_str(),
-        CONFIG_VALUE_FIELD,
-        CONFIG_VALUE_PROTECTION_SCHEME as u32,
-    )
-    .map(|ctx| ctx.derive())
-    .map_err(protection_auth_failure)
 }
 
 fn maintenance_capacity(options: &ConfigValueMaintenanceOptions, selected: u64) -> usize {
@@ -757,7 +802,7 @@ impl PgConfigValueMaintenance {
             }
             let rows = self
                 .select_maintenance_rows(
-                    CONFIG_VALUE_PROTECTION_SCHEME,
+                    ConfigValueAadPolicy::SCHEME,
                     options.tenant,
                     cursor.as_ref(),
                     limit,
@@ -794,7 +839,7 @@ impl PgConfigValueMaintenance {
                     }
                     continue;
                 };
-                if !key_ref.name().ct_eq(&self.protection.key_name) {
+                if !key_ref.name().ct_eq(&self.crypto.key_name) {
                     continue;
                 }
                 report.selected += 1;
@@ -915,17 +960,15 @@ impl PgConfigValueMaintenance {
                 "legacy config value has encrypted columns",
             ));
         }
-        let aad = config_value_maintenance_aad(&self.capability, row.tenant, &row.key)?;
         let encrypted = self
-            .protection
-            .key_provider
-            .encrypt(
-                self.protection.key_name.clone(),
+            .crypto
+            .encrypt_maintenance(
+                &self.capability,
+                row.tenant,
+                &row.key,
                 Plaintext::new(value.as_bytes().to_vec()),
-                aad,
             )
-            .await
-            .map_err(key_provider_error)?;
+            .await?;
         let done = sqlx::query(
             r#"
             UPDATE config_entries
@@ -942,7 +985,7 @@ impl PgConfigValueMaintenance {
         .bind(&row.tenant_id)
         .bind(&row.config_key)
         .bind(row.version)
-        .bind(CONFIG_VALUE_PROTECTION_SCHEME)
+        .bind(ConfigValueAadPolicy::SCHEME)
         .bind(encrypted.ciphertext())
         .bind(encrypted.key().to_token())
         .bind(value)
@@ -967,13 +1010,16 @@ impl PgConfigValueMaintenance {
                 "encrypted config value has plaintext",
             ));
         }
-        let aad = config_value_maintenance_aad(&self.capability, row.tenant, &row.key)?;
         let encrypted = self
-            .protection
-            .key_provider
-            .rewrap(RedactedBytes::new(ciphertext.clone()), key_ref, aad)
-            .await
-            .map_err(key_provider_error)?;
+            .crypto
+            .rewrap_maintenance(
+                &self.capability,
+                row.tenant,
+                &row.key,
+                RedactedBytes::new(ciphertext.clone()),
+                key_ref,
+            )
+            .await?;
         let new_key_ref = encrypted.key().to_token();
         if encrypted.ciphertext() == ciphertext.as_slice() && new_key_ref == raw_key_ref {
             return Ok(RewrapDisposition::Unchanged);
@@ -985,7 +1031,7 @@ impl PgConfigValueMaintenance {
             WHERE tenant_id = $1::uuid
               AND config_key = $2
               AND version = $3
-              AND protection_scheme = 1
+              AND protection_scheme = $8
               AND value_enc = $6
               AND key_id = $7
             "#,
@@ -997,6 +1043,7 @@ impl PgConfigValueMaintenance {
         .bind(new_key_ref)
         .bind(ciphertext)
         .bind(raw_key_ref)
+        .bind(ConfigValueAadPolicy::SCHEME)
         .execute(&self.store.pool)
         .await
         .map_err(storage)?;
@@ -1120,8 +1167,7 @@ impl PgConfigRepo {
         let tenant = scope.tenant();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId；OUTBOX-METADATA-FUNNEL-01，同 PgAuthGrantLifecycle）。
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
-        // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
-        // occurred_at；漏接编译期不可表达）。
+        // 由 sealed `ReviewedEvent` 携带并作为 `OutboxMetadata::new` **构造期必填**参数注入；漏接编译期不可表达。
         let (outbox_entry, envelope, occurred_at, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
@@ -1228,8 +1274,25 @@ impl ConfigUnitOfWork for PgConfigRepo {
 }
 
 #[cfg(test)]
-mod config_value_maintenance_capability_tests {
-    use super::ConfigValueMaintenanceCapability;
+mod config_value_crypto_tests {
+    use super::{ConfigValueAadPolicy, ConfigValueMaintenanceCapability, SettingKey, TenantId};
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn canonical_aad_bytes_remain_compatible_with_existing_ciphertext() {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let key = SettingKey::parse("app.timeout").unwrap();
+        let aad = ConfigValueAadPolicy.serving_aad(tenant, &key).unwrap();
+
+        assert_eq!(
+            aad.as_canonical_bytes(),
+            b"rss-field-protection-aad-v2\
+              \x00\x00\x00\x24f47ac10b-58cc-4372-a567-0e02b2c3d479\
+              \x00\x00\x00\x0bapp.timeout\
+              \x00\x00\x00\x15settings.config.value\
+              \x00\x00\x00\x04\x00\x00\x00\x01"
+        );
+    }
 
     #[test]
     fn from_verified_maintenance_service_operator_mints_from_sealed_proof() {

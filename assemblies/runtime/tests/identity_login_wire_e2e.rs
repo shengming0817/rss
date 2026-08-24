@@ -84,8 +84,8 @@ const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const ADMIN_ROLE: &str = "tenant-admin";
 const OPERATOR_ROLE: &str = "operator";
 const TARGET_SUBJECT: &str = "bob@example.test";
-const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
-const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+const KEYPROVIDER_READINESS_FIELD: &str = "settings.key-provider.readiness";
+const KEYPROVIDER_READINESS_FORMAT_VERSION: u32 = 1;
 
 fn unused_tenant_store_allowlist() -> TestResult<TenantStoreAllowlist> {
     Ok(TenantStoreAllowlist::new([(
@@ -148,9 +148,9 @@ fn readiness_context_b64(tenant: &str) -> String {
     let tenant = rss_request_context::TenantId::parse(tenant).expect("canonical readiness tenant");
     let aad = secure::ProtectionContext::authenticated_request(
         tenant,
-        "readiness.probe",
-        KEYPROVIDER_CONFIG_FIELD,
-        KEYPROVIDER_CONFIG_SCHEME,
+        "provider.readiness",
+        KEYPROVIDER_READINESS_FIELD,
+        KEYPROVIDER_READINESS_FORMAT_VERSION,
     )
     .expect("valid readiness aad")
     .derive();

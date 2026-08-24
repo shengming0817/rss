@@ -40,6 +40,14 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/pg_runtime_capabilities_private_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_lifecycle_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_replay_store_fail.rs");
+    if cfg!(feature = "domain-settings") {
+        t.pass("tests/ui/pg_settings_config_value_crypto_surface_pass.rs");
+        t.compile_fail("tests/ui/pg_settings_bundle_clock_fail.rs");
+        t.compile_fail("tests/ui/pg_settings_config_value_crypto_clone_fail.rs");
+        t.compile_fail("tests/ui/pg_settings_config_value_crypto_fields_private_fail.rs");
+        t.compile_fail("tests/ui/pg_settings_config_value_crypto_split_fail.rs");
+        t.compile_fail("tests/ui/pg_settings_config_value_legacy_pair_fail.rs");
+    }
     t.compile_fail("tests/ui/pg_runtime_monitor_factory_clone_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_monitor_factory_consume_twice_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_monitor_interval_swap_fail.rs");

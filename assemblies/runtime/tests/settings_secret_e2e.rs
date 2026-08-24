@@ -25,9 +25,7 @@ use diport::{
     KeyProviderError, KeyRef, KeyVersion, RedactedBytes, SecretCoordinate, SecretMaterial,
     SecretResolverError,
 };
-use postgres::{
-    ConfigValueProtections, PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig, caps,
-};
+use postgres::{ConfigValueCrypto, PgConfig, PgPassword, PgRuntimeDeps, PgTenantReadConfig, caps};
 use rss_request_context::TenantId;
 use settings::SecretService;
 use settings::ports::{SecretKey, SecretRef, StoreId};
@@ -140,9 +138,8 @@ impl KeyProvider for UnusedKeyProvider {
 }
 
 #[allow(clippy::expect_used)]
-fn unused_config_protections() -> ConfigValueProtections {
-    ConfigValueProtections::new(
-        DynKeyProvider::new_box(UnusedKeyProvider),
+fn unused_config_crypto() -> ConfigValueCrypto {
+    ConfigValueCrypto::new(
         DynKeyProvider::new_box(UnusedKeyProvider),
         KeyName::try_new("settings-config").expect("valid key name"),
     )
@@ -218,7 +215,7 @@ fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretServ
     let (_configs, _writer, secrets, secret_writer) = deps
         .handle()
         .for_domain::<caps::Settings>()
-        .settings_bundle(Arc::new(FixedClock), unused_config_protections())
+        .settings_bundle(unused_config_crypto())
         .into_parts();
     SecretService::with_postgres(
         secrets.into(),
