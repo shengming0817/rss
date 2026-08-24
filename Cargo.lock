@@ -5349,6 +5349,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-eventing"
+version = "0.1.0"
+dependencies = [
+ "rss-conformance",
+]
+
+[[package]]
 name = "rss-platform"
 version = "0.3.0"
 dependencies = [

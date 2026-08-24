@@ -66,6 +66,10 @@ pub(crate) const ENGINE_CRATES: &[&str] = &[
     "rss-device-security-contracts",
     "rss-trace-context",
 ];
+/// Provider-neutral eventing authoring/runtime public seam. The package identity is deliberately
+/// kept out of the generic engine catalog because its outbound production dependency set is
+/// narrower and is checked by `layerdeps` against package identities.
+pub(crate) const EVENTING_PUBLIC_CRATES: &[&str] = &["rss-eventing"];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
 /// DI port trait 单源 + dynosaur 单一 dyn-dispatch 依赖点（ADR-003）。
 pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
@@ -132,6 +136,8 @@ pub(crate) enum Layer {
     FoundationPublic,
     /// 最低位公开应用内核；自身禁止任何 workspace 生产依赖，所有内部层可反向消费其稳定值面。
     PlatformPublic,
+    /// Provider-neutral eventing public seam; exact production out-edges are package-allowlisted.
+    EventingPublic,
     Basis,
     Engine,
     /// DI-infra（diport）：基础 / 引擎 之上、服务 / 域 / adapter 之下。
@@ -162,6 +168,9 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     }
     if member_path == "crates/platform" {
         return (crate_name == "rss-platform").then_some(Layer::PlatformPublic);
+    }
+    if member_path == "crates/eventing" {
+        return (crate_name == "rss-eventing").then_some(Layer::EventingPublic);
     }
     if member_path == "crates/workspacefacts" {
         return (crate_name == "workspacefacts").then_some(Layer::Tooling);
@@ -217,20 +226,23 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
     use Layer::{
-        Adapter, Basis, DiPort, Domain, Engine, Example, FoundationPublic, Generated,
-        PlatformPublic, Root, RuntimeExec, Service, Tooling,
+        Adapter, Basis, DiPort, Domain, Engine, EventingPublic, Example, FoundationPublic,
+        Generated, PlatformPublic, Root, RuntimeExec, Service, Tooling,
     };
     match from {
         // 分层矩阵允许组合根消费所有库 crate；RuntimeExec 再由 deny.toml 精确 target wrapper 收窄。
         Root => true,
         FoundationPublic => false,
         PlatformPublic => to == FoundationPublic,
+        // Exact package allowlist is enforced by layerdeps; this row only declares the maximum
+        // layer directions needed by the four sanctioned public dependencies.
+        EventingPublic => matches!(to, FoundationPublic | Basis | Engine),
         // workspace facts 只消费外部 guppy/thiserror；任何内部出边均属越界。
         Tooling => false,
         // 示例包可演示 provider-agnostic 服务模型；禁止直接装配域/adapters/generated。
         Example => matches!(
             to,
-            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service
+            FoundationPublic | PlatformPublic | EventingPublic | Basis | Engine | DiPort | Service
         ),
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
         Generated => matches!(to, FoundationPublic | PlatformPublic | Basis),
@@ -238,27 +250,44 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
         // generated、组合根及兄弟 RuntimeExec。入边由其它各行保持关闭，仅 Root 行放行。
         RuntimeExec => matches!(
             to,
-            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service
+            FoundationPublic | PlatformPublic | EventingPublic | Basis | Engine | DiPort | Service
         ),
         // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务 + 域（impl 域 repo/service port，
         // DIP 内向边，Option 2/ADR-005）；禁兄弟 adapter / generated（反向 域→adapter 由下方 Domain 行禁）。
         Adapter => matches!(
             to,
-            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service | Domain
+            FoundationPublic
+                | PlatformPublic
+                | EventingPublic
+                | Basis
+                | Engine
+                | DiPort
+                | Service
+                | Domain
         ),
         // 域：基础 + 引擎 + DI-infra + 服务 + generated；禁兄弟域（跨域只经 contract）/ adapter
         //（域不依赖 adapter——依赖反转方向：adapter→域 单向，见上方 Adapter 行）。
         Domain => matches!(
             to,
-            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service | Generated
+            FoundationPublic
+                | PlatformPublic
+                | EventingPublic
+                | Basis
+                | Engine
+                | DiPort
+                | Service
+                | Generated
         ),
         // 服务：基础 + 引擎 + DI-infra（消费 DI port）；禁兄弟服务（§分层 未授予）/ 域 / adapter / generated。
         Service => matches!(
             to,
-            FoundationPublic | PlatformPublic | Basis | Engine | DiPort
+            FoundationPublic | PlatformPublic | EventingPublic | Basis | Engine | DiPort
         ),
         // DI-infra：基础 + 引擎（port 签名引用其类型）；禁服务及以上（无 back-path）/ 兄弟 DI-infra。
-        DiPort => matches!(to, FoundationPublic | PlatformPublic | Basis | Engine),
+        DiPort => matches!(
+            to,
+            FoundationPublic | PlatformPublic | EventingPublic | Basis | Engine
+        ),
         // 引擎：仅基础；禁兄弟引擎（§分层 未授予）/ DI-infra 及以上。
         Engine => matches!(to, FoundationPublic | PlatformPublic | Basis),
         // 基础：不依赖上层 / 跨界；同层（兄弟基础）默认禁——唯一例外是 intra-base DAG 前向边，
@@ -374,6 +403,16 @@ mod tests {
     #[test]
     fn classify_unregistered_crate_is_none() {
         assert_eq!(classify("brandnew", "crates/brandnew"), None);
+    }
+
+    #[test]
+    fn classify_eventing_public_requires_canonical_identity() {
+        assert_eq!(
+            classify("rss-eventing", "crates/eventing"),
+            Some(Layer::EventingPublic)
+        );
+        assert_eq!(classify("rss-eventing", "crates/rss-eventing"), None);
+        assert_eq!(classify("eventing", "crates/eventing"), None);
     }
 
     #[test]
@@ -547,6 +586,30 @@ mod tests {
         #[case] want: bool,
     ) {
         assert_eq!(generated_seam_allows(from, to), want);
+    }
+
+    #[test]
+    fn eventing_public_has_only_the_declared_layer_directions() {
+        for consumer in [
+            Layer::DiPort,
+            Layer::Service,
+            Layer::Domain,
+            Layer::Adapter,
+            Layer::RuntimeExec,
+            Layer::Example,
+            Layer::Root,
+        ] {
+            assert!(allows(consumer, Layer::EventingPublic), "{consumer:?}");
+        }
+        for lower in [
+            Layer::FoundationPublic,
+            Layer::PlatformPublic,
+            Layer::Basis,
+            Layer::Engine,
+            Layer::Generated,
+        ] {
+            assert!(!allows(lower, Layer::EventingPublic), "{lower:?}");
+        }
     }
 
     #[rstest]

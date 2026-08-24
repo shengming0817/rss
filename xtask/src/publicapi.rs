@@ -17,7 +17,7 @@
 //!   `pinned_nightly_single_source_of_truth` 守）+ `verify.rs` public-api install_hint（`verify::tests::
 //!   public_api_install_hint_pins_nightly` 守，绑真实字段值非源码全文）。漂移即 fail。
 
-use crate::layers::{BASIS_CRATES, ENGINE_CRATES};
+use crate::layers::{BASIS_CRATES, ENGINE_CRATES, EVENTING_PUBLIC_CRATES};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -515,6 +515,7 @@ pub(crate) const PINNED_NIGHTLY: &str = "nightly-2026-04-16";
 pub(crate) enum InternalLayer {
     Basis,
     Engine,
+    EventingPublic,
     Curated,
 }
 
@@ -525,10 +526,12 @@ pub(crate) fn target_crates(layer: Option<InternalLayer>) -> Vec<&'static str> {
     let select: Vec<&'static str> = match layer {
         Some(InternalLayer::Basis) => BASIS_CRATES.to_vec(),
         Some(InternalLayer::Engine) => ENGINE_CRATES.to_vec(),
+        Some(InternalLayer::EventingPublic) => EVENTING_PUBLIC_CRATES.to_vec(),
         Some(InternalLayer::Curated) => CURATED_EXTRA_CRATES.to_vec(),
         None => BASIS_CRATES
             .iter()
             .chain(ENGINE_CRATES)
+            .chain(EVENTING_PUBLIC_CRATES)
             .chain(CURATED_EXTRA_CRATES)
             .copied()
             .collect(),
@@ -3767,12 +3770,17 @@ mod tests {
         let expected_all: Vec<_> = expected_basis
             .iter()
             .chain(expected_engine.iter())
+            .chain(EVENTING_PUBLIC_CRATES.iter())
             .chain(expected_curated.iter())
             .copied()
             .collect();
 
         assert_eq!(target_crates(Some(InternalLayer::Basis)), expected_basis);
         assert_eq!(target_crates(Some(InternalLayer::Engine)), expected_engine);
+        assert_eq!(
+            target_crates(Some(InternalLayer::EventingPublic)),
+            vec!["rss-eventing"]
+        );
         assert_eq!(
             target_crates(Some(InternalLayer::Curated)),
             expected_curated
@@ -3794,6 +3802,42 @@ mod tests {
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(InternalLayer::Engine)).contains(&"rss-trace-context"));
+        assert!(target_crates(None).contains(&"rss-eventing"));
+    }
+
+    #[test]
+    fn eventing_public_moves_atomically_between_internal_and_release_owner() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let internal = BaselineCatalog::from_selected_packages(facts, std::iter::empty())?;
+        assert!(
+            internal
+                .internal
+                .iter()
+                .any(|p| p.as_str() == "rss-eventing")
+        );
+        assert!(
+            internal
+                .release
+                .iter()
+                .all(|p| p.as_str() != "rss-eventing")
+        );
+
+        let released = BaselineCatalog::from_selected_packages(facts, ["rss-eventing"])?;
+        assert!(
+            released
+                .release
+                .iter()
+                .any(|p| p.as_str() == "rss-eventing")
+        );
+        assert!(
+            released
+                .internal
+                .iter()
+                .all(|p| p.as_str() != "rss-eventing")
+        );
+        Ok(())
     }
 
     #[test]

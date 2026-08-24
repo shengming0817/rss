@@ -119,6 +119,10 @@ pub(crate) enum Rule {
     PkiMintCallsite,
     /// EVENTING-L2-BOUNDARY-01：Eventing L2 迁移期模块/feature 边界被破坏。
     EventingL2Boundary,
+    /// EVENTING-PUBLIC-IDENTITY-01：公共 package 的 member/path/key/package identity 不唯一。
+    EventingPublicIdentity,
+    /// EVENTING-PUBLIC-DEPS-01：公共 package 出现 allowlist 外 shipped direct dependency。
+    EventingPublicDependencyScope,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -194,6 +198,8 @@ impl GovernanceCheck for LayerDeps {
         let shipped_test_support_features =
             scan_workspace_testsupport_features(&root, &members, &workspace.dependencies)?;
         let mut findings = check_layers(&members, &scan.shipped_edges);
+        findings.extend(check_eventing_public_identity(&workspace, &members));
+        findings.extend(check_eventing_public_dependencies(&shipped_deps));
         findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
         findings.extend(scan_bootstrap_generated_sources(&root)?);
@@ -3229,6 +3235,109 @@ pub(crate) fn check_runtimeexec_direct_dependencies(
     findings
 }
 
+const EVENTING_PUBLIC_CRATE: &str = "rss-eventing";
+const EVENTING_PUBLIC_MEMBER: &str = "crates/eventing";
+const EVENTING_PUBLIC_DEPENDENCY_KEY: &str = "eventing";
+const EVENTING_PUBLIC_SHIPPED_DEPS: &[&str] = &[
+    "rss-contract",
+    "rss-request-context",
+    "rss-diag-context",
+    "rss-trace-context",
+];
+
+/// Fix the eventing public package to one member, one path, one Cargo package identity and one
+/// workspace dependency key. Any alias that resolves to the package or its path is part of the
+/// candidate set and therefore makes the exact-set fail.
+fn check_eventing_public_identity(
+    workspace: &WorkspaceSection,
+    members: &[Member],
+) -> Vec<Finding> {
+    let canonical_members = members
+        .iter()
+        .filter(|member| {
+            member.name == EVENTING_PUBLIC_CRATE || member.path == EVENTING_PUBLIC_MEMBER
+        })
+        .collect::<Vec<_>>();
+    let member_is_exact = canonical_members.len() == 1
+        && canonical_members[0].name == EVENTING_PUBLIC_CRATE
+        && canonical_members[0].path == EVENTING_PUBLIC_MEMBER
+        && workspace
+            .members
+            .iter()
+            .filter(|path| path.as_str() == EVENTING_PUBLIC_MEMBER)
+            .count()
+            == 1;
+
+    let candidates = workspace
+        .dependencies
+        .iter()
+        .filter(|(key, spec)| {
+            let package = dependency_package_name(key, spec, &workspace.dependencies);
+            let path = detailed_dep(spec).and_then(|dependency| dependency.path.as_deref());
+            key.as_str() == EVENTING_PUBLIC_DEPENDENCY_KEY
+                || package == EVENTING_PUBLIC_CRATE
+                || path.and_then(|path| normalize_rel("", path))
+                    == Some(EVENTING_PUBLIC_MEMBER.to_string())
+        })
+        .collect::<Vec<_>>();
+    let dependency_is_exact = candidates.len() == 1
+        && candidates[0].0.as_str() == EVENTING_PUBLIC_DEPENDENCY_KEY
+        && dependency_package_name(candidates[0].0, candidates[0].1, &workspace.dependencies)
+            == EVENTING_PUBLIC_CRATE
+        && detailed_dep(candidates[0].1).and_then(|dependency| dependency.path.as_deref())
+            == Some(EVENTING_PUBLIC_MEMBER)
+        && detailed_dep(candidates[0].1).and_then(|dependency| dependency.version.as_deref())
+            == Some("0.1.0");
+
+    if member_is_exact && dependency_is_exact {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::EventingPublicIdentity,
+            "Cargo.toml",
+            format!(
+                "rss-eventing identity 必须唯一为 member `{EVENTING_PUBLIC_MEMBER}`、package `{EVENTING_PUBLIC_CRATE}`、workspace dependency `{EVENTING_PUBLIC_DEPENDENCY_KEY}`；当前相关 members={:?} keys={:?}",
+                canonical_members
+                    .iter()
+                    .map(|member| format!("{}={}", member.path, member.name))
+                    .collect::<Vec<_>>(),
+                candidates
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        )]
+    }
+}
+
+/// Enforce the production direct-dependency allowlist after Cargo rename and workspace
+/// inheritance have been expanded. Build and target dependency tables are shipped and enter this
+/// same view; dev-dependencies never do.
+fn check_eventing_public_dependencies(deps: &[ShippedDep]) -> Vec<Finding> {
+    deps.iter()
+        .filter(|dependency| {
+            dependency.from == EVENTING_PUBLIC_CRATE
+                && (!dependency.is_workspace_internal
+                    || !EVENTING_PUBLIC_SHIPPED_DEPS
+                        .contains(&dependency.package_name.as_str()))
+        })
+        .map(|dependency| {
+            finding(
+                Rule::EventingPublicDependencyScope,
+                EVENTING_PUBLIC_CRATE,
+                format!(
+                    "{} {}.{} → `{}`：rss-eventing shipped direct dependency 只准 {:?}；rss-conformance 只准 dev-dependency",
+                    dependency.manifest_file,
+                    dependency.section,
+                    dependency.key,
+                    dependency.package_name,
+                    EVENTING_PUBLIC_SHIPPED_DEPS
+                ),
+            )
+        })
+        .collect()
+}
+
 /// 对给定白名单逐 entry 委托 [`check_confinement_entry`]。allowlist 作参数（非直读 const）使**完整路径**
 /// 可被注入合成白名单的红 case 覆盖——含「白名单本身越层」（const 漂移）这条否则无法合成的分支。
 fn check_confinement_against(
@@ -3445,6 +3554,8 @@ struct DetailedDep {
     package: Option<String>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     workspace: bool,
     /// `None` preserves Cargo's default (`true`) and lets workspace inheritance merge fail closed.
@@ -3778,6 +3889,18 @@ mod tests {
         }
     }
 
+    fn shipped_dep(from: &str, key: &str, package_name: &str, section: &str) -> ShippedDep {
+        ShippedDep {
+            from: from.to_string(),
+            manifest_file: format!("crates/{from}/Cargo.toml"),
+            section: section.to_string(),
+            key: key.to_string(),
+            package_name: package_name.to_string(),
+            features: Vec::new(),
+            is_workspace_internal: true,
+        }
+    }
+
     /// 代表性合法图：域→服务 / 服务→引擎 / 引擎→基础 / 域→generated → 0 finding（anti-vacuity 绿）。
     #[test]
     fn check_layers_green_valid_graph() {
@@ -3795,6 +3918,115 @@ mod tests {
             e("consistency", "vocab"),
         ];
         assert!(check_layers(&members, &edges).is_empty());
+    }
+
+    #[test]
+    fn eventing_public_identity_requires_one_member_path_package_and_workspace_key() {
+        let valid: RootManifest = toml::from_str(
+            r#"
+[workspace]
+members = ["crates/eventing"]
+[workspace.dependencies]
+eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
+"#,
+        )
+        .expect("valid synthetic manifest");
+        let members = [m(
+            "rss-eventing",
+            "crates/eventing",
+            Some(Layer::EventingPublic),
+        )];
+        assert!(check_eventing_public_identity(&valid.workspace, &members).is_empty());
+
+        for invalid in [
+            r#"[workspace]
+members = ["crates/rss-eventing"]
+[workspace.dependencies]
+eventing = { package = "rss-eventing", path = "crates/rss-eventing", version = "0.1.0" }
+"#,
+            r#"[workspace]
+members = ["crates/eventing"]
+[workspace.dependencies]
+rss-eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
+"#,
+            r#"[workspace]
+members = ["crates/eventing"]
+[workspace.dependencies]
+eventing = { package = "rss-eventing", path = "./crates/eventing", version = "0.2.0" }
+"#,
+            r#"[workspace]
+members = ["crates/eventing"]
+[workspace.dependencies]
+eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
+eventing_alias = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
+"#,
+        ] {
+            let root: RootManifest = toml::from_str(invalid).expect("invalid synthetic parses");
+            assert!(!check_eventing_public_identity(&root.workspace, &members).is_empty());
+        }
+    }
+
+    #[test]
+    fn eventing_public_shipped_allowlist_rejects_alias_build_and_target_bypasses() {
+        let allowed = [
+            shipped_dep(
+                "rss-eventing",
+                "rss-contract",
+                "rss-contract",
+                "[dependencies]",
+            ),
+            shipped_dep(
+                "rss-eventing",
+                "rss-request-context",
+                "rss-request-context",
+                "[dependencies]",
+            ),
+            shipped_dep(
+                "rss-eventing",
+                "rss-diag-context",
+                "rss-diag-context",
+                "[dependencies]",
+            ),
+            shipped_dep(
+                "rss-eventing",
+                "rss-trace-context",
+                "rss-trace-context",
+                "[dependencies]",
+            ),
+        ];
+        assert!(check_eventing_public_dependencies(&allowed).is_empty());
+
+        for dependency in [
+            shipped_dep(
+                "rss-eventing",
+                "service_alias",
+                "eventexec",
+                "[dependencies]",
+            ),
+            shipped_dep(
+                "rss-eventing",
+                "generated_alias",
+                "generated",
+                "[build-dependencies]",
+            ),
+            shipped_dep(
+                "rss-eventing",
+                "conformance_alias",
+                "rss-conformance",
+                "[target.cfg(unix).dependencies]",
+            ),
+        ] {
+            assert!(!check_eventing_public_dependencies(&[dependency]).is_empty());
+        }
+
+        let mut external_name_collision = shipped_dep(
+            "rss-eventing",
+            "contract_alias",
+            "rss-contract",
+            "[dependencies]",
+        );
+        external_name_collision.is_workspace_internal = false;
+        assert!(!check_eventing_public_dependencies(&[external_name_collision]).is_empty());
     }
 
     #[test]
@@ -5875,6 +6107,8 @@ tracing = { package = "tower", version = "1" }
         );
 
         let mut findings = check_layers(&members, &scan.shipped_edges);
+        findings.extend(check_eventing_public_identity(&workspace, &members));
+        findings.extend(check_eventing_public_dependencies(&shipped_deps));
         findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
         findings.extend(check_wrappers(
@@ -6023,6 +6257,7 @@ dev_external = { package = "axum", version = "1" }
             DepSpec::Detailed(DetailedDep {
                 package: Some("httpserve".to_string()),
                 path: Some("crates/httpserve".to_string()),
+                version: None,
                 workspace: false,
                 default_features: None,
                 optional: false,
@@ -6178,6 +6413,7 @@ missing = { path = "../missing-member" }
         DepSpec::Detailed(DetailedDep {
             package: None,
             path: path.map(str::to_string),
+            version: None,
             workspace,
             default_features: None,
             optional: false,
