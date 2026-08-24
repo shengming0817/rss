@@ -25,6 +25,14 @@
 //! ```compile_fail
 //! use distributed::CasOutcome;
 //! ```
+//!
+//! ```compile_fail
+//! use distributed::GlobalCasKey;
+//! ```
+//!
+//! ```compile_fail
+//! use distributed::MaintenanceLane;
+//! ```
 
 mod cas;
 mod locker;

@@ -5678,6 +5678,53 @@ mod tests {
     }
 
     #[test]
+    fn global_cas_native_hard_invariants_fail_closed_without_native_metadata() -> Result<()> {
+        fn remove_native_metadata(source: &str, id: &str) -> Result<String> {
+            let line = source
+                .lines()
+                .find(|line| line.contains(&format!("INVARIANT: {id} ")))
+                .ok_or_else(|| anyhow::anyhow!("real invariant `{id}` missing"))?;
+            let native_start = line
+                .find(", native = \"")
+                .ok_or_else(|| anyhow::anyhow!("real invariant `{id}` native metadata missing"))?;
+            let value_start = native_start + ", native = \"".len();
+            let value_end = line[value_start..]
+                .find('"')
+                .map(|offset| value_start + offset + 1)
+                .ok_or_else(|| anyhow::anyhow!("real invariant `{id}` native value is unclosed"))?;
+            let mutated_line = format!("{}{}", &line[..native_start], &line[value_end..]);
+            Ok(source.replacen(line, &mutated_line, 1))
+        }
+
+        let workspace = crate::workspace_root()?;
+        let root = unique_tmp("archrules-global-cas-native-source");
+        let cases = [
+            "crates/diport/src/cas_store.rs",
+            "crates/distributed/src/maintenance.rs",
+        ];
+        for relative in cases {
+            let file = root.join(relative);
+            let source = fs::read_to_string(workspace.join(relative))?;
+            write(
+                &file,
+                &remove_native_metadata(&source, "CAS-GLOBAL-KEY-SCOPE-01")?,
+            )?;
+            let mut index = Index::default();
+            scan_source_invariant_file(&root, &mut index, &file, "native-hard", "source")?;
+            assert!(
+                index.findings.iter().any(|finding| {
+                    finding.rule == Rule::MissingNativeHardSource
+                        && finding.detail.contains("CAS-GLOBAL-KEY-SCOPE-01")
+                }),
+                "{relative}: {:?}",
+                index.findings
+            );
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn invariant_parser_ignores_natural_language_after_marker() -> Result<()> {
         let root = unique_tmp("archrules-natural");
         let file = root.join("xtask/src/demo.rs");
@@ -6226,6 +6273,27 @@ members = ["rss_demo", "rss_orphan"]
                 .any(|record| record.id == "PUBLICAPI-DEMO-01"),
             "{:?}",
             index.records
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn public_api_carrier_rejects_check_instead_of_release_check() -> Result<()> {
+        let root = unique_tmp("archrules-public-api-check-binding");
+        write(
+            &root.join("xtask/src/publicapi.rs"),
+            "//! INVARIANT: PUBLICAPI-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"public-api\" }\n",
+        )?;
+        let mut index = Index::default();
+        scan_public_api(&root, &mut index)?;
+        assert!(
+            index.findings.iter().any(|finding| {
+                finding.rule == Rule::CarrierBindingMismatch
+                    && finding.detail.contains("PUBLICAPI-DEMO-01")
+            }),
+            "{:?}",
+            index.findings
         );
         fs::remove_dir_all(root)?;
         Ok(())

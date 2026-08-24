@@ -43,6 +43,12 @@
 //!
 //! let _ = GlobalCasStoreKey::new("tenant/device/session");
 //! ```
+//!
+//! ```compile_fail
+//! use diport::GlobalCasStoreKey;
+//!
+//! let _ = GlobalCasStoreKey("runtime/event/outbox-backlog/raw".to_string());
+//! ```
 
 use dynosaur::dynosaur;
 
@@ -86,7 +92,7 @@ impl GlobalCasResource {
 /// tenant-scoped identity 与自由字符串 namespace 当前不可表达。私有字段阻止裸 `String` 直接进入
 /// [`CasStoreRequest`]。
 ///
-/// INVARIANT: CAS-GLOBAL-KEY-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code" }
+/// INVARIANT: CAS-GLOBAL-KEY-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed GlobalCasResource enum + private GlobalCasStoreKey field + for_resource-only typed mint + CasStoreRequest typed key" }
 /// （具体 global key 类型 + 封闭 port 请求边界）。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GlobalCasStoreKey(String);

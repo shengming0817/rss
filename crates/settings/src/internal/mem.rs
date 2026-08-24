@@ -640,18 +640,18 @@ mod tests {
         let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
             key: "app.test".to_string(),
-            occurred_at: 1,
+            occurred_at: 41,
             source_version: None,
             tenant_id: tenant.to_string(),
             version: 1,
         };
+        let occurred_at =
+            rss_contract::Timepoint::try_from(payload.occurred_at).expect("valid occurred_at");
         generated::event::settings_v1::emit(
             &eventexec::event::GeneratedEventEncoder,
             payload,
             tenant,
-            rss_contract::Timepoint::saturating_from_system_time(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
-            ),
+            occurred_at,
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
                 rss_request_context::PrincipalKind::Admin,
@@ -670,7 +670,7 @@ mod tests {
         let tenant = tenant(TENANT_A);
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
-                occurred_at: 1,
+                occurred_at: 42,
                 session_id: "00000000-0000-0000-0000-000000000001"
                     .parse()
                     .expect("session uuid"),
@@ -679,13 +679,13 @@ mod tests {
                     .expect("uuid"),
                 tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
             };
+        let occurred_at =
+            rss_contract::Timepoint::try_from(payload.occurred_at).expect("valid occurred_at");
         generated::event::identity_v1::session_created::emit(
             &eventexec::event::GeneratedEventEncoder,
             payload,
             tenant,
-            rss_contract::Timepoint::saturating_from_system_time(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
-            ),
+            occurred_at,
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
                 rss_request_context::PrincipalKind::Admin,
@@ -701,6 +701,26 @@ mod tests {
 
     fn publish_receipt() -> ConfigPublishReceipt {
         httpserve::ProducerMarker::for_test(generated::http::settings_v1::PRODUCER).into_receipt()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn test_event_helpers_bind_payload_and_envelope_time() {
+        let settings_event = event("evt-settings-time-binding", TENANT_A).await;
+        let settings_payload: generated::event::settings_v1::SettingsConfigVersionChangedPayload =
+            serde_json::from_slice(settings_event.entry().payload()).expect("settings payload");
+        assert_eq!(
+            settings_event.occurred_at().unix_seconds(),
+            settings_payload.occurred_at
+        );
+
+        let identity_event = wrong_event("evt-identity-time-binding").await;
+        let identity_payload: generated::event::identity_v1::session_created::IdentitySessionCreatedPayload =
+            serde_json::from_slice(identity_event.entry().payload()).expect("identity payload");
+        assert_eq!(
+            identity_event.occurred_at().unix_seconds(),
+            identity_payload.occurred_at
+        );
     }
 
     #[tokio::test]

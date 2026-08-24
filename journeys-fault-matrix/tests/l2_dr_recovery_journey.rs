@@ -10,8 +10,8 @@ use amqp::{AmqpPublisher, AmqpSubscriber};
 use anyhow::{Context, Result, ensure};
 use consistency::IdemKey;
 use diport::{
-    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeMetadata, ManagedResource,
-    MessageId, PublishRequest, Publisher, Topic,
+    AckAction, AckableSubscriber, Acker, DynPublisher, ManagedResource, PublishRequest, Publisher,
+    Topic,
 };
 use eventexec::{
     L2DrRecoveryError, L2DrRecoveryOperatorSubject, L2DrRecoveryOutcome, L2DrRecoveryPlan,
@@ -228,7 +228,7 @@ async fn consume_committed_then_duplicate(
         ensure!(delivery.message.id().as_str() == event_id);
         let observed = harness
             .pg
-            .consume_session_created_delivery(harness.tenant, consumer_group, delivery.message)
+            .consume_session_created_delivery(consumer_group, delivery.message)
             .await?;
         ensure!(
             observed == expected,
@@ -265,30 +265,6 @@ fn assert_published_unchanged(
     Ok(())
 }
 
-async fn publish_duplicate_events(
-    publisher: &AmqpPublisher,
-    topic: &Topic,
-    event_id: &str,
-    payload: &[u8],
-    tenant: rss_request_context::TenantId,
-) -> Result<()> {
-    let contract = generated::event::identity_v1::session_created::CONTRACT;
-    for _ in 0..2 {
-        let mut metadata = EnvelopeMetadata::empty();
-        metadata.insert_wire_pair(diport::KEY_TENANT_ID, tenant.to_string());
-        metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, TEST_OCCURRED_AT.to_string());
-        metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, contract.version());
-        metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, contract.schema_hash());
-        publisher
-            .publish(
-                PublishRequest::new(topic.clone(), MessageId::new(event_id), payload.to_vec())
-                    .with_metadata(metadata),
-            )
-            .await?;
-    }
-    Ok(())
-}
-
 async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
     let event_id = Uuid::new_v4().to_string();
     let group = harness.name("broker-ahead-consumer");
@@ -298,9 +274,17 @@ async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
         connect_subscriber(&harness.rabbit_url, &harness.name("broker-ahead-sub")).await?;
     subscriber.purge_durable_queue_for_test(&topic).await?;
     let publisher =
-        connect_publisher(&harness.rabbit_url, &harness.name("broker-ahead-pub")).await?;
-    let payload = serde_json::to_vec(&session_created_payload(harness.tenant, session_id))?;
-    publish_duplicate_events(&publisher, &topic, &event_id, &payload, harness.tenant).await?;
+        Arc::new(connect_publisher(&harness.rabbit_url, &harness.name("broker-ahead-pub")).await?);
+    harness
+        .pg
+        .publish_session_created_broker_ahead_duplicates(
+            DynPublisher::new_box(SharedAmqpPublisher(Arc::clone(&publisher))),
+            FaultMatrixSessionCreatedInput::new(
+                session_created_payload(harness.tenant, session_id),
+                IdemKey::parse(&event_id)?,
+            )?,
+        )
+        .await?;
 
     let epoch = RecoveryEpochId::new(Uuid::new_v4())?;
     let start_audit_id = Uuid::new_v4();
@@ -344,8 +328,8 @@ async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
 
     token.cancel();
     AckableSubscriber::shutdown(&subscriber).await?;
-    Publisher::shutdown(&publisher).await?;
-    ManagedResource::shutdown(&publisher).await?;
+    Publisher::shutdown(publisher.as_ref()).await?;
+    ManagedResource::shutdown(publisher.as_ref()).await?;
     Ok(())
 }
 

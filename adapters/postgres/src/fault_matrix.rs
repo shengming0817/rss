@@ -53,6 +53,7 @@ const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const RSS_L2_DR_RECOVERY_AUDITOR_ROLE: &str = "rss_l2_dr_recovery_auditor";
 const RSS_L2_DR_RECOVERY_EXECUTOR_ROLE: &str = "rss_l2_dr_recovery_executor";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SESSION_CREATED_CONSUMER_DOMAIN: &str = "audit";
 type FaultMatrixCertificateCommand = ApplyDeviceCertificateReconcileCommand;
 
 /// The shared real-backend relay budget used by fault-matrix journeys.
@@ -1150,13 +1151,11 @@ impl PgFaultMatrixHarness {
     #[cfg(feature = "domain-audit")]
     pub async fn consume_session_created_delivery(
         &self,
-        tenant: rss_request_context::TenantId,
         group: &str,
         message: diport::Message,
     ) -> FaultMatrixResult<FaultMatrixConsumerDelivery> {
         let store = self.deps.handle().infra().inbox();
-        let ctx = session_created_inbox_ctx(tenant, group)?;
-        let key = IdemKey::parse(message.id().as_str())?;
+        let (key, ctx, event) = session_created_delivery_preflight(group, message)?;
         let lease = LeaseToken::mint();
         match store.try_claim(&ctx, &key, &lease).await? {
             SeenState::Duplicate => Ok(FaultMatrixConsumerDelivery::Duplicate),
@@ -1173,7 +1172,6 @@ impl PgFaultMatrixHarness {
                         .for_domain::<crate::caps::Audit>()
                         .session_created_consumer_tx(hasher),
                 );
-                let event = Arc::new(eventexec::consumer::ValidatedEvent::for_test(message)?);
                 match consumer.handle(event, ctx, key, lease).await {
                     eventexec::consumer_tx::ConsumerTxOutcome::Committed(_) => {
                         Ok(FaultMatrixConsumerDelivery::Committed)
@@ -1189,6 +1187,37 @@ impl PgFaultMatrixHarness {
                 }
             }
         }
+    }
+
+    /// Publish the same closed session-created delivery twice without creating a database row.
+    ///
+    /// This is the broker-ahead L2 DR fixture: signing stays adapter-owned while the journey can
+    /// observe duplicate broker deliveries without falsifying the database-earlier topology.
+    pub async fn publish_session_created_broker_ahead_duplicates(
+        &self,
+        publisher: Box<DynPublisher<'static>>,
+        input: FaultMatrixSessionCreatedInput,
+    ) -> FaultMatrixResult<()> {
+        let topic = diport::Topic::new(SESSION_CREATED_FACT.topic());
+        let payload = serde_json::to_vec(&input.payload)?;
+        let metadata = session_created_signed_metadata(
+            input.tenant,
+            input.idem_key.as_str(),
+            input.payload.occurred_at,
+        )?;
+        for _ in 0..2 {
+            publisher
+                .publish(
+                    PublishRequest::new(
+                        topic.clone(),
+                        diport::MessageId::new(input.idem_key.as_str()),
+                        payload.clone(),
+                    )
+                    .with_metadata(metadata.clone()),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     /// Observe the exact audit business effect and Inbox Done row for one delivery identity.
@@ -1215,7 +1244,7 @@ impl PgFaultMatrixHarness {
         .bind(tenant.to_string())
         .bind(event_id)
         .bind(group)
-        .bind(SESSION_CREATED_FACT.contract().domain())
+        .bind(SESSION_CREATED_CONSUMER_DOMAIN)
         .bind(SESSION_CREATED_FACT.contract().contract_id())
         .fetch_one(&self.owner_pool)
         .await?;
@@ -2002,6 +2031,7 @@ async fn seed_session_created(
     let payload = serde_json::to_vec(&input.payload)?;
     let metadata = serde_json::json!({
         "tenantId": input.tenant.to_string(),
+        "occurredAt": input.payload.occurred_at,
         "schemaVersion": SESSION_CREATED_FACT.contract().version(),
         "schemaHash": SESSION_CREATED_FACT.contract().schema_hash(),
     })
@@ -2163,7 +2193,7 @@ fn session_created_inbox_ctx(
     Ok(InboxReceiptContext::new(
         tenant,
         ConsumerGroup::parse(group)?,
-        SESSION_CREATED_FACT.contract().domain(),
+        SESSION_CREATED_CONSUMER_DOMAIN,
         SESSION_CREATED_FACT.topic(),
         SESSION_CREATED_FACT.contract().contract_id(),
         SESSION_CREATED_FACT.contract().version(),
@@ -2171,6 +2201,68 @@ fn session_created_inbox_ctx(
         None,
         None,
     )?)
+}
+
+fn session_created_consumer_meta(
+    group: &str,
+) -> FaultMatrixResult<eventexec::consumer::ConsumerMeta> {
+    let fact = SESSION_CREATED_FACT;
+    Ok(eventexec::consumer::ConsumerMeta::new(
+        SESSION_CREATED_CONSUMER_DOMAIN,
+        fact.contract().domain(),
+        fact.contract().contract_id(),
+        fact.topic(),
+        group,
+        test_tenant_authority()?,
+    )
+    .with_expected_schema(fact.contract().version(), fact.contract().schema_hash()))
+}
+
+fn session_created_signed_metadata(
+    tenant: rss_request_context::TenantId,
+    event_id: &str,
+    occurred_at: i64,
+) -> FaultMatrixResult<diport::EnvelopeMetadata> {
+    let fact = SESSION_CREATED_FACT;
+    let token = test_tenant_authority()?.sign(eventexec::TenantAuthorityBinding::new(
+        tenant,
+        fact.contract().domain(),
+        fact.contract().contract_id(),
+        fact.topic(),
+        event_id,
+    ))?;
+    let mut metadata = diport::EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, tenant.to_string());
+    metadata.insert_wire_pair(diport::KEY_OCCURRED_AT, occurred_at.to_string());
+    metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, fact.contract().version());
+    metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, fact.contract().schema_hash());
+    metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    Ok(metadata)
+}
+
+fn session_created_delivery_preflight(
+    group: &str,
+    message: diport::Message,
+) -> FaultMatrixResult<(
+    IdemKey,
+    InboxReceiptContext,
+    Arc<eventexec::consumer::ValidatedEvent>,
+)> {
+    let key = IdemKey::parse(message.id().as_str())?;
+    let meta = session_created_consumer_meta(group)?;
+    let (header, event) = meta.validate_event(message).map_err(|error| match error {
+        eventexec::consumer::EventValidationError::Header(error) => {
+            anyhow!("session-created envelope header failed: {error}")
+        }
+        eventexec::consumer::EventValidationError::TenantAuthority(error) => anyhow!(
+            "session-created tenant authority failed: {}",
+            error.skip_reason()
+        ),
+    })?;
+    let ctx = meta
+        .receipt_context(event.metadata(), &header)
+        .map_err(|_| anyhow!("session-created receipt context failed"))?;
+    Ok((key, ctx, event))
 }
 
 #[derive(Default)]
@@ -2291,6 +2383,7 @@ fn fault_matrix_projection_event(
 fn metadata_json(tenant: rss_request_context::TenantId) -> String {
     serde_json::json!({
         "tenantId": tenant.to_string(),
+        "occurredAt": 1_700_000_000_i64,
         "schemaVersion": "v1",
         "schemaHash": SCHEMA_HASH
     })
@@ -2374,7 +2467,10 @@ fn test_tenant_authority() -> FaultMatrixResult<Arc<TenantAuthority>> {
         MacKey::from_bytes(vec![0x42; 32]),
         3600,
         60,
-        Arc::new(|| 1_700_000_000),
+        Arc::new(|| {
+            rss_contract::Timepoint::saturating_from_system_time(std::time::SystemTime::now())
+                .unix_seconds()
+        }),
     )?))
 }
 
@@ -2453,6 +2549,11 @@ mod tests {
     use std::time::Duration;
 
     use consistency::IdemKey;
+    use diport::{
+        EnvelopeMetadata, KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message,
+    };
+    use eventexec::TenantAuthorityBinding;
     use identity::ports::FaultMatrixSessionCreatedPayload;
     use sha2::{Digest as _, Sha256};
 
@@ -2463,7 +2564,111 @@ mod tests {
         FaultMatrixSagaObservation, FaultMatrixSameIdDeliveryPhase, FaultMatrixSessionCreatedInput,
         SagaFaultObservationRow, completion_injection_outcome, fault_matrix_relay_budget,
         lease_expiry_outcome, review_certificate_reconcile_commands,
+        session_created_delivery_preflight, test_tenant_authority,
     };
+
+    const SESSION_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    fn session_created_message(
+        id: &str,
+        schema_version: &str,
+        schema_hash: &str,
+        authority_message_id: &str,
+    ) -> FaultMatrixResult<Message> {
+        let tenant = rss_request_context::TenantId::parse(SESSION_TENANT)?;
+        let token = test_tenant_authority()?.sign(TenantAuthorityBinding::new(
+            tenant,
+            generated::event::identity_v1::session_created::CONTRACT.domain(),
+            generated::event::identity_v1::session_created::CONTRACT_ID,
+            generated::event::identity_v1::session_created::TOPIC,
+            authority_message_id,
+        ))?;
+        let mut metadata = EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(KEY_TENANT_ID, SESSION_TENANT);
+        metadata.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        metadata.insert_wire_pair(KEY_SCHEMA_VERSION, schema_version);
+        metadata.insert_wire_pair(KEY_SCHEMA_HASH, schema_hash);
+        metadata.insert_wire_pair(KEY_TENANT_AUTHORITY, token);
+        Ok(Message::new_with_metadata(id, b"{}".to_vec(), metadata))
+    }
+
+    #[test]
+    fn session_created_delivery_preflight_binds_canonical_consumer_coordinates()
+    -> FaultMatrixResult<()> {
+        let contract = generated::event::identity_v1::session_created::CONTRACT;
+        let message = session_created_message(
+            "fault-matrix-preflight-valid",
+            contract.version(),
+            contract.schema_hash(),
+            "fault-matrix-preflight-valid",
+        )?;
+        let (key, ctx, event) =
+            session_created_delivery_preflight("audit.session-created", message)?;
+
+        assert_eq!(key.as_str(), "fault-matrix-preflight-valid");
+        assert_eq!(ctx.tenant_id().to_string(), SESSION_TENANT);
+        assert_eq!(ctx.consumer_group().as_str(), "audit.session-created");
+        assert_eq!(ctx.domain(), "audit");
+        assert_eq!(ctx.contract_id(), contract.contract_id());
+        assert_eq!(
+            ctx.topic(),
+            generated::event::identity_v1::session_created::TOPIC
+        );
+        assert_eq!(ctx.contract_version(), contract.version());
+        assert_eq!(ctx.schema_hash(), contract.schema_hash());
+        assert_eq!(event.metadata().tenant_id(), ctx.tenant_id());
+        Ok(())
+    }
+
+    #[test]
+    fn session_created_delivery_preflight_rejects_tampered_tenant_authority()
+    -> FaultMatrixResult<()> {
+        let contract = generated::event::identity_v1::session_created::CONTRACT;
+        let message = session_created_message(
+            "fault-matrix-preflight-tampered",
+            contract.version(),
+            contract.schema_hash(),
+            "different-message-id",
+        )?;
+        assert!(session_created_delivery_preflight("audit.session-created", message).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn session_created_delivery_preflight_rejects_missing_tenant_authority() -> FaultMatrixResult<()>
+    {
+        let contract = generated::event::identity_v1::session_created::CONTRACT;
+        let mut metadata = EnvelopeMetadata::empty();
+        metadata.insert_wire_pair(KEY_TENANT_ID, SESSION_TENANT);
+        metadata.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
+        metadata.insert_wire_pair(KEY_SCHEMA_VERSION, contract.version());
+        metadata.insert_wire_pair(KEY_SCHEMA_HASH, contract.schema_hash());
+        let message = Message::new_with_metadata(
+            "fault-matrix-preflight-missing-authority",
+            b"{}".to_vec(),
+            metadata,
+        );
+        assert!(session_created_delivery_preflight("audit.session-created", message).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn session_created_delivery_preflight_rejects_schema_drift() -> FaultMatrixResult<()> {
+        let contract = generated::event::identity_v1::session_created::CONTRACT;
+        for (version, hash) in [
+            ("v2", contract.schema_hash()),
+            (contract.version(), super::SCHEMA_HASH),
+        ] {
+            let message = session_created_message(
+                "fault-matrix-preflight-schema-drift",
+                version,
+                hash,
+                "fault-matrix-preflight-schema-drift",
+            )?;
+            assert!(session_created_delivery_preflight("audit.session-created", message).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn fault_matrix_relay_budget_is_the_canonical_real_backend_contract() -> FaultMatrixResult<()> {

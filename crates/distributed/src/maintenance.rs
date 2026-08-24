@@ -60,7 +60,7 @@ impl MaintenanceLane for InboxBacklogMaintenance {
 
 /// Opaque global CAS key minted only by this sealed maintenance module.
 ///
-/// INVARIANT: CAS-GLOBAL-KEY-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code" }
+/// INVARIANT: CAS-GLOBAL-KEY-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed MaintenanceLane + private GlobalCasKey field and for_lane mint + MaintenanceCoordinator-owned typed key" }
 /// （private mint owner + closed maintenance resource constructors）。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GlobalCasKey(diport::GlobalCasStoreKey);

@@ -551,7 +551,6 @@ fn session_created_payload(
 
 async fn next_consumer_tx_delivery(
     pg: &PgHarness,
-    tenant: rss_request_context::TenantId,
     ids: &EventingIds,
     deliveries: &mut diport::DeliveryStream,
     expected: FaultMatrixConsumerDelivery,
@@ -570,7 +569,7 @@ async fn next_consumer_tx_delivery(
     }
     let observed = pg
         .harness
-        .consume_session_created_delivery(tenant, &ids.consumer_group, delivery.message.clone())
+        .consume_session_created_delivery(&ids.consumer_group, delivery.message.clone())
         .await?;
     if observed != expected {
         bail!("session-created ConsumerTx delivery = {observed:?}, expected {expected:?}");
@@ -582,20 +581,20 @@ async fn rabbit_unsettled_redelivers_through_consumer_tx(
     pg: &PgHarness,
     rabbit: &RabbitHarness,
     scope: &RunScope,
-    topic_raw: &str,
     event_id: &str,
     group: &str,
     session_id: Uuid,
 ) -> Result<()> {
     let ids = EventingIds::new(event_id, event_id, group, "redelivery-lease");
-    let topic = Topic::new(topic_raw);
-    let publisher = connect_publisher(&rabbit.url, &scope.name("fault-matrix-pub")).await?;
+    let topic = Topic::new(generated::event::identity_v1::session_created::TOPIC);
+    let publisher =
+        Arc::new(connect_publisher(&rabbit.url, &scope.name("fault-matrix-pub")).await?);
     let mut token = CancellationToken::new();
     let mut subscriber =
         match connect_subscriber(&rabbit.url, &scope.name("fault-matrix-sub1")).await {
             Ok(subscriber) => Some(subscriber),
             Err(error) => {
-                let cleanup = shutdown_amqp(&token, None, &publisher).await;
+                let cleanup = shutdown_amqp(&token, None, publisher.as_ref()).await;
                 return finish_with_cleanup(
                     Err(error),
                     cleanup,
@@ -605,23 +604,37 @@ async fn rabbit_unsettled_redelivers_through_consumer_tx(
         };
 
     let body_result: Result<()> = async {
+        subscriber
+            .as_ref()
+            .ok_or_else(|| anyhow!("first AMQP subscriber missing"))?
+            .purge_durable_queue_for_test(&topic)
+            .await?;
         let mut stream1 = subscriber
             .as_ref()
             .ok_or_else(|| anyhow!("first AMQP subscriber missing"))?
             .subscribe_ackable(topic.clone(), token.clone())
             .await?;
-        publisher
-            .publish(complete_publish_request(
-                topic.clone(),
-                MessageId::new(event_id),
-                serde_json::to_vec(&session_created_payload(scope.tenant, session_id))?,
-                scope.tenant,
-            ))
+        pg.harness
+            .seed_session_created(FaultMatrixSessionCreatedInput::new(
+                session_created_payload(scope.tenant, session_id),
+                IdemKey::parse(event_id)?,
+            )?)
             .await?;
+        let relayed = pg
+            .harness
+            .relay_session_created_once(
+                event_id,
+                DynPublisher::new_box(SharedAmqpPublisher(Arc::clone(&publisher))),
+            )
+            .await?;
+        if relayed.disposition() != Disposition::Ack
+            || relayed.status() != FaultMatrixOutboxStatus::Published
+        {
+            bail!("session-created relay did not publish canonical delivery: {relayed:?}");
+        }
 
         let delivery = next_consumer_tx_delivery(
             pg,
-            scope.tenant,
             &ids,
             &mut stream1,
             FaultMatrixConsumerDelivery::Committed,
@@ -648,7 +661,6 @@ async fn rabbit_unsettled_redelivers_through_consumer_tx(
             .await?;
         let redelivery = next_consumer_tx_delivery(
             pg,
-            scope.tenant,
             &ids,
             &mut stream2,
             FaultMatrixConsumerDelivery::Duplicate,
@@ -671,7 +683,7 @@ async fn rabbit_unsettled_redelivers_through_consumer_tx(
         Ok(())
     }
     .await;
-    let cleanup_result = shutdown_amqp(&token, subscriber.as_ref(), &publisher).await;
+    let cleanup_result = shutdown_amqp(&token, subscriber.as_ref(), publisher.as_ref()).await;
     finish_with_cleanup(
         body_result,
         cleanup_result,
@@ -949,7 +961,7 @@ fn run_outbox_confirm_lost_channel_close<'a>(
                 delivered_ids.push(delivery.message.id().as_str().to_string());
                 let observed = pg
                     .harness
-                    .consume_session_created_delivery(scope.tenant, &group, delivery.message)
+                    .consume_session_created_delivery(&group, delivery.message)
                     .await?;
                 if observed != expected {
                     bail!("confirm-lost ConsumerTx delivery = {observed:?}, expected {expected:?}");
@@ -1130,7 +1142,6 @@ fn run_inbox_commit_before_ack_crash<'a>(
             pg,
             rabbit,
             scope,
-            &scope.rabbit_topic("inbox-commit"),
             &event_id,
             &group,
             Uuid::new_v4(),
