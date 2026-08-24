@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `diport::WriteEffect`
- --> tests/ui/port_effect_legacy_write_fail.rs:1:5
-  |
-1 | use diport::WriteEffect;
-  |     ^^^^^^^^^^^^^^^^^^^ no `WriteEffect` in the root

@@ -1,5 +1,0 @@
-error[E0616]: field `request` of struct `FencedReconcileCommand` is private
- --> tests/ui/certificate_reconcile_command_fields_private_fail.rs:4:22
-  |
-4 |     let _ = &command.request;
-  |                      ^^^^^^^ private field

@@ -1,0 +1,19 @@
+error[E0061]: this function takes 5 arguments but 4 arguments were supplied
+  --> tests/ui/dlq_authorization_requires_runtime_mint_fail.rs:8:13
+   |
+ 8 |     let _ = DlqOperatorAuthorization::<dlq_operator_action::List>::issue(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 9 |         ServiceCallerDomain::MaintenanceOperator,
+   |         ---------------------------------------- argument #1 of type `dlqauthmint::DlqOperatorMint` is missing
+   |
+note: associated function defined here
+  --> $WORKSPACE/crates/diport/src/dlq_operator.rs
+   |
+   |     pub fn issue(
+   |            ^^^^^
+help: provide the argument
+   |
+ 8 |     let _ = DlqOperatorAuthorization::<dlq_operator_action::List>::issue(
+ 9 ~         /* dlqauthmint::DlqOperatorMint */,
+10 ~         ServiceCallerDomain::MaintenanceOperator,
+   |

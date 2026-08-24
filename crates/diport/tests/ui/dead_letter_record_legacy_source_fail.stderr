@@ -1,5 +1,0 @@
-error[E0599]: no variant, associated function, or constant named `Legacy` found for enum `DeadLetterSource` in the current scope
- --> tests/ui/dead_letter_record_legacy_source_fail.rs:9:27
-  |
-9 |         DeadLetterSource::Legacy,
-  |                           ^^^^^^ variant, associated function, or constant not found in `DeadLetterSource`

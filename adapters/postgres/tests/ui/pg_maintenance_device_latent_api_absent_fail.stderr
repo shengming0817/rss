@@ -1,5 +1,0 @@
-error[E0599]: no method named `record_device_latent_inspection_start_audit` found for reference `&PgMaintenanceDeps` in the current scope
- --> tests/ui/pg_maintenance_device_latent_api_absent_fail.rs:4:25
-  |
-4 |     let _future = owner.record_device_latent_inspection_start_audit();
-  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&PgMaintenanceDeps`

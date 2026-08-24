@@ -1,0 +1,5 @@
+error[E0599]: no variant, associated function, or constant named `TenantClass` found for enum `CertLabel` in the current scope
+ --> tests/ui/cert_label_rejects_tenant_dimension.rs:6:24
+  |
+6 |     let _ = CertLabel::TenantClass("enterprise");
+  |                        ^^^^^^^^^^^ variant, associated function, or constant not found in `CertLabel`

@@ -1,0 +1,7 @@
+error[E0433]: cannot find module or crate `dlqauthmint` in this scope
+ --> tests/ui/pg_dlq_mint_not_in_dependency_surface_fail.rs:2:13
+  |
+2 |     let _ = dlqauthmint::DlqOperatorMint::capability();
+  |             ^^^^^^^^^^^ use of unresolved module or unlinked crate `dlqauthmint`
+  |
+  = help: if you wanted to use a crate named `dlqauthmint`, use `cargo add dlqauthmint` to add it to your `Cargo.toml`

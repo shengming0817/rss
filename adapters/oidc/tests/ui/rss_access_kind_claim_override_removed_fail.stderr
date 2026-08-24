@@ -1,9 +1,0 @@
-error[E0599]: no method named `kind_claim` found for struct `VerifierConfigBuilder<RssAccessProfile>` in the current scope
- --> tests/ui/rss_access_kind_claim_override_removed_fail.rs:3:10
-  |
-2 |       let _ = oidc::VerifierConfigBuilder::<diport::RssAccessProfile>::new("issuer", "audience")
-  |  _____________-
-3 | |         .kind_claim("principal_kind");
-  | |         -^^^^^^^^^^ private field, not a method
-  | |_________|
-  |

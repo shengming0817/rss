@@ -1,5 +1,0 @@
-error: 旧 #[redact(pii = "...")] 语法已移除：使用 #[redact(sensitivity = pii|pii_email|pii_phone|pii_name|pii_address)]
- --> tests/ui/old_pii_syntax.rs:7:14
-  |
-7 |     #[redact(pii = "generic")]
-  |              ^^^

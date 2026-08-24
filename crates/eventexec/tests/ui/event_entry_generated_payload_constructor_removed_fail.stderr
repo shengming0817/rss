@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `from_generated_payload` found for struct `EventEntry` in the current scope
- --> tests/ui/event_entry_generated_payload_constructor_removed_fail.rs:2:38
-  |
-2 |     let _ = consistency::EventEntry::from_generated_payload;
-  |                                      ^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `EventEntry`

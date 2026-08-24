@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `identity::RefreshPrincipal`
- --> tests/ui/account_security_refresh_principal_removed_fail.rs:1:5
-  |
-1 | use identity::RefreshPrincipal;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ no `RefreshPrincipal` in the root

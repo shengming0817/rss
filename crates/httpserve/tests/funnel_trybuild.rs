@@ -1,4 +1,4 @@
-//! typed route funnel 编译期 Hard 不变式的 compile-fail 回归锁（#1113/#1103，ADR-009）。
+//! typed route funnel production 类型约束的 Medium compile-fail 回归锁（#1113/#1103，ADR-009）。
 //!
 //! 负向证据（trybuild compile_fail）——锁住「错误不可表达」：
 //! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_server_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
@@ -7,7 +7,7 @@
 //! - `server_service_requires_budget`：最终 rate-limited 状态没有无预算 transport 出口。
 //! - `cannot_construct_server_service`：外部代码不能伪造私有字段封装的 transport capability。
 //! - `cannot_mint_authenticated_evidence`：production `Authenticated::new_*` 需要 `authmint::AuthenticatedMint`，
-//!   缺 mint 首参即 compile_fail（AUTH-EVIDENCE-MINT-01 Hard；本例锁 `new_mtls` arity）。
+//!   缺 mint 首参即 compile_fail（AUTH-EVIDENCE-MINT-01；本例锁 `new_mtls` arity）。
 //! - `cannot_name_authmint_capability`：`AuthenticatedMint` 字段私有，不可 `AuthenticatedMint(())` 伪造
 //!   （trybuild 继承 httpserve 的 authmint dep，故用 sealed 构造面代替 E0433；无 dep 半段由 deny.toml wrappers）。
 //! - `cannot_mint_authenticated_rss_user`：`new_rss_user` 同样缺 mint 首参即 compile_fail。
@@ -15,9 +15,8 @@
 //! - `primary_cannot_mount_nonprimary`：普通 endpoint 不能挂到 Primary（ROUTE-LISTENER-TYPED-01）。
 //! - `cannot_construct_listener_router`：`ListenerRouter::new` 是 `pub(crate)`，外部无法直接构造（无 raw-bypass）。
 //! - `cannot_impl_listener_for_external`：外部 crate 无法实现 sealed `Listener`，不可新增 listener marker（ROUTE-LISTENER-TYPED-01 sealed 面）。
-//! - `old_route_api_is_removed`：旧 Route/PrimaryRoute/字段级 auth scope/mount_primary 均不可用。
 //! - `raw_method_router_cannot_mount`：production `mount` 签名不接受 MethodRouter；默认 feature graph
-//!   完全不含 raw test helpers 的独立 Hard 证明见 `default_feature_surface.rs`。
+//!   完全不含 raw test helpers 的 production feature-surface owner 见 `default_feature_surface.rs`。
 //! - `producer_*`：OutboxFact route 只能经 generated producer binding + matching move-only marker
 //!   mount；跨 route、旧 `new`、重复 emitted facts、receipt 伪造与 handler 选择 same-marker
 //!   binding 均在编译期失败。
@@ -54,24 +53,23 @@ fn ui() {
     t.compile_fail("tests/ui/declared_response_rejects_raw_response.rs");
     t.compile_fail("tests/ui/declared_response_rejects_open_constructor.rs");
     t.compile_fail("tests/ui/open_response_rejects_declared_constructor.rs");
-    t.compile_fail("tests/ui/declared_result_rejects_raw_error.rs");
-    t.compile_fail("tests/ui/declared_fixed_error_rejects_dto_injection.rs");
-    t.compile_fail("tests/ui/declared_fixed_error_rejects_bare_request_id.rs");
     t.compile_fail("tests/ui/primary_declared_response_rejects_raw_response.rs");
     t.compile_fail("tests/ui/primary_declared_response_rejects_open_constructor.rs");
     t.compile_fail("tests/ui/primary_open_response_rejects_declared_constructor.rs");
-    t.compile_fail("tests/ui/old_route_api_is_removed.rs");
+    t.compile_fail("tests/ui/declared_result_rejects_raw_error.rs");
+    t.compile_fail("tests/ui/declared_fixed_error_rejects_dto_injection.rs");
+    t.compile_fail("tests/ui/declared_fixed_error_rejects_bare_request_id.rs");
     t.compile_fail("tests/ui/raw_method_router_cannot_mount.rs");
+    t.compile_fail("tests/ui/local_only_route_state_proof_marker_mismatch.rs");
     t.compile_fail("tests/ui/local_only_cannot_with_state.rs");
     t.compile_fail("tests/ui/local_only_rejects_write_state.rs");
     t.compile_fail("tests/ui/local_only_rejects_cross_tenant_state.rs");
-    t.compile_fail("tests/ui/local_only_route_state_proof_marker_mismatch.rs");
     t.compile_fail("tests/ui/consistency_marker_mismatch.rs");
     t.compile_fail("tests/ui/primary_local_only_cannot_with_state.rs");
     t.compile_fail("tests/ui/primary_local_only_rejects_write_state.rs");
     t.compile_fail("tests/ui/primary_local_only_rejects_cross_tenant_state.rs");
     t.compile_fail("tests/ui/primary_consistency_marker_mismatch.rs");
-    t.compile_fail("tests/ui/producer_old_mount_is_rejected.rs");
+    t.compile_fail("tests/ui/producer_requires_generated_binding.rs");
     t.compile_fail("tests/ui/producer_marker_mismatch.rs");
     t.compile_fail("tests/ui/producer_receipt_cannot_be_forged.rs");
     t.compile_fail("tests/ui/producer_handler_cannot_select_binding.rs");
@@ -81,5 +79,5 @@ fn ui() {
     t.compile_fail("tests/ui/authorization_provenance_private_fields_fail.rs");
     t.compile_fail("tests/ui/authorization_provenance_non_clone_fail.rs");
     t.compile_fail("tests/ui/authorization_provenance_non_serialize_fail.rs");
-    t.compile_fail("tests/ui/legacy_authorization_decision_removed_fail.rs");
+    t.compile_fail("tests/ui/authorization_decision_requires_grant_fail.rs");
 }

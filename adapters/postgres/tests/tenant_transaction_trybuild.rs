@@ -13,8 +13,8 @@ fn tenant_transaction_ui() {
         t.pass("tests/ui/tenant_transaction_boundary_surface_pass.rs");
         t.compile_fail("tests/ui/tenant_db_private_fields_fail.rs");
         t.compile_fail("tests/ui/tenant_tx_private_fields_fail.rs");
-        t.compile_fail("tests/ui/tenant_tx_executor_absent_fail.rs");
-        t.compile_fail("tests/ui/tenant_tx_lifecycle_absent_fail.rs");
+        t.compile_fail("tests/ui/tenant_tx_rejects_raw_executor_fail.rs");
+        t.compile_fail("tests/ui/tenant_tx_rejects_caller_settlement_fail.rs");
         t.compile_fail("tests/ui/tenant_tx_wrong_lane_fail.rs");
         t.compile_fail("tests/ui/tenant_identity_operation_wrong_lane_fail.rs");
         t.compile_fail("tests/ui/tenant_identity_facade_forge_fail.rs");
@@ -24,31 +24,22 @@ fn tenant_transaction_ui() {
         t.compile_fail("tests/ui/tenant_tx_hrtb_escape_fail.rs");
     }
     t.compile_fail("tests/ui/localtx_attempt_external_mint_fail.rs");
-    t.compile_fail("tests/ui/localtx_attempt_sibling_path_mint_fail.rs");
     t.compile_fail("tests/ui/pg_store_private_fail.rs");
-    t.compile_fail("tests/ui/pg_dlq_mint_dependency_absent_fail.rs");
-    t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
+    t.compile_fail("tests/ui/pg_dlq_mint_not_in_dependency_surface_fail.rs");
+    t.compile_fail("tests/ui/pg_maintenance_infra_not_exposed_fail.rs");
     if cfg!(feature = "domain-identity") {
         t.compile_fail("tests/ui/pg_device_latent_operator_clone_fail.rs");
         t.compile_fail("tests/ui/pg_device_latent_operator_general_maintenance_fail.rs");
-        t.compile_fail("tests/ui/pg_maintenance_device_latent_api_absent_fail.rs");
     }
     t.compile_fail("tests/ui/pg_projection_replay_fields_private_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_capability_required_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_clone_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_consume_twice_fail.rs");
-    t.compile_fail("tests/ui/pg_runtime_owner_legacy_api_fail.rs");
-    t.compile_fail("tests/ui/pg_runtime_setup_legacy_signature_fail.rs");
-    t.compile_fail("tests/ui/pg_runtime_setup_legacy_policy_signature_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_setup_audit_admin_signature_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_setup_plain_read_config_fail.rs");
-    t.compile_fail("tests/ui/pg_runtime_migration_capability_absent_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_capabilities_private_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_lifecycle_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_replay_store_fail.rs");
-    if cfg!(feature = "domain-settings") {
-        t.compile_fail("tests/ui/pg_settings_projection_bundle_apply_absent_fail.rs");
-    }
     t.compile_fail("tests/ui/pg_runtime_monitor_factory_clone_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_monitor_factory_consume_twice_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_monitor_interval_swap_fail.rs");

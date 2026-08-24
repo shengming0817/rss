@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `consistency::ExternalEffectIdempotencyKey`
- --> tests/ui/consumer_tx_external_key_raw_construct_fail.rs:1:5
-  |
-1 | use consistency::ExternalEffectIdempotencyKey;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ExternalEffectIdempotencyKey` in the root

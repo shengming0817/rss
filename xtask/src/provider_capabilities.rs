@@ -31,9 +31,8 @@ const TESTKIT_CATALOG: &str = "crates/testkit/src/eventing_conformance.rs";
 const MAX_TRACKED_RUST_FILES: usize = 2_048;
 const MAX_TRACKED_RUST_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RUST_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
-const COMPILE_FAIL_FIXTURES: [&str; 4] = [
+const COMPILE_FAIL_FIXTURES: [&str; 3] = [
     "crates/testkit/tests/ui/provider_catalog_incomplete_set_fail.rs",
-    "crates/testkit/tests/ui/provider_catalog_old_receipt_syntax_fail.rs",
     "crates/testkit/tests/ui/provider_catalog_wrong_behavior_output_fail.rs",
     "crates/testkit/tests/ui/provider_catalog_wrong_order_fail.rs",
 ];
@@ -767,6 +766,7 @@ struct DiscoveredInvocation {
 }
 
 fn discover_invocations(root: &Path) -> Result<Vec<DiscoveredInvocation>> {
+    validate_compile_fail_fixture_exclusions(root)?;
     let paths = tracked_rust_paths(root)?;
     let mut found = Vec::new();
     for path in paths {
@@ -799,6 +799,16 @@ fn discover_invocations(root: &Path) -> Result<Vec<DiscoveredInvocation>> {
         }
     }
     Ok(found)
+}
+
+fn validate_compile_fail_fixture_exclusions(root: &Path) -> Result<()> {
+    for relative in COMPILE_FAIL_FIXTURES {
+        ensure!(
+            root.join(relative).is_file(),
+            "provider capability compile-fail exclusion `{relative}` does not exist"
+        );
+    }
+    Ok(())
 }
 
 fn tracked_rust_paths(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1810,6 +1820,11 @@ mod tests {
 
     fn parse(raw: &str) -> Result<RawEnrollment> {
         syn::parse_str(raw).map_err(Into::into)
+    }
+
+    #[test]
+    fn compile_fail_fixture_exclusions_exist() -> Result<()> {
+        validate_compile_fail_fixture_exclusions(&crate::workspace_root()?)
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! trybuild 回归锁（Hard 类型墙的 synthetic red case，#1469 / ADR-011 §D2）。
+//! production 类型墙的 Medium 外部消费者回归锁（#1469 / ADR-011 §D2）。
 //!
 //! fail（aad-derive-from-ctx）：envelope 存储的标识 AAD（`&ProtectionAad`，经 `env.aad()`）回灌给
 //! `Aead::open`（要 `&DerivedAad`，只能经 `ProtectionContext::derive` 受信派生）必须类型不匹配编译失败——
@@ -29,6 +29,5 @@ fn ui() {
 #[cfg(not(feature = "test-support"))]
 fn production_seams_absent() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/password_test_seam_absent_in_production.rs");
-    t.compile_fail("tests/ui/password_for_test_with_params_absent_in_production.rs");
+    t.compile_fail("tests/ui/password_test_constructors_are_not_production_api.rs");
 }

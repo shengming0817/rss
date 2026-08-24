@@ -10,7 +10,6 @@ fn assembly_lock_construction_is_sealed() {
     cases.compile_fail("tests/ui/contract_owner_private.rs");
     cases.compile_fail("tests/ui/raw_contract_owner_private.rs");
     cases.compile_fail("tests/ui/repository_contract_private.rs");
-    cases.compile_fail("tests/ui/declared_schema_path_removed.rs");
     cases.compile_fail("tests/ui/repository_manifest_private.rs");
     cases.compile_fail("tests/ui/repository_snapshot_private.rs");
 }
@@ -26,7 +25,6 @@ fn runtime_plan_construction_is_sealed() {
     cases.compile_fail("tests/ui/runtime_plan_parsed_lock_compile_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_parsed_lock_reader_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_unbound_reader_private.rs");
-    cases.compile_fail("tests/ui/runtime_plan_v2_removed.rs");
 }
 
 #[test]

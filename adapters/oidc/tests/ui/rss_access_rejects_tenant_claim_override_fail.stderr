@@ -1,0 +1,9 @@
+error[E0599]: no method named `tenant_claim` found for struct `VerifierConfigBuilder<RssAccessProfile>` in the current scope
+ --> tests/ui/rss_access_rejects_tenant_claim_override_fail.rs:3:10
+  |
+2 |       let _ = oidc::VerifierConfigBuilder::<diport::RssAccessProfile>::new("issuer", "audience")
+  |  _____________-
+3 | |         .tenant_claim("tenant");
+  | |         -^^^^^^^^^^^^ private field, not a method
+  | |_________|
+  |

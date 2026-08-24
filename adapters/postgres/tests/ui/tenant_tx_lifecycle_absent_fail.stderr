@@ -1,5 +1,0 @@
-error[E0599]: no method named `commit` found for struct `postgres::tx_boundary_proof::TenantTx<'tx, L>` in the current scope
- --> tests/ui/tenant_tx_lifecycle_absent_fail.rs:4:16
-  |
-4 |     let _ = tx.commit();
-  |                ^^^^^^ method not found in `postgres::tx_boundary_proof::TenantTx<'_, postgres::tx_boundary_proof::ServingWriteLane>`

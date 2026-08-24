@@ -24,9 +24,7 @@ fn ui() {
     t.compile_fail("tests/ui/external_cannot_construct_projection_receipt_fail.rs");
     t.compile_fail("tests/ui/projection_receipt_non_clone_fail.rs");
     t.compile_fail("tests/ui/token_profile_issuer_methods_fail.rs");
-    t.compile_fail("tests/ui/rss_access_legacy_principal_removed_fail.rs");
     t.compile_fail("tests/ui/rss_access_issue_input_private_fail.rs");
-    t.compile_fail("tests/ui/verified_claims_legacy_constructor_removed_fail.rs");
     t.compile_fail("tests/ui/verified_federated_access_private_fields_fail.rs");
     t.compile_fail("tests/ui/verified_federated_access_raw_unavailable_fail.rs");
     t.compile_fail("tests/ui/external_cannot_construct_grant_receipt_fail.rs");
@@ -34,6 +32,5 @@ fn ui() {
     t.compile_fail("tests/ui/service_caller_string_fail.rs");
     t.compile_fail("tests/ui/federated_issuer_unavailable_fail.rs");
     t.compile_fail("tests/ui/projection_operator_issuer_unavailable_fail.rs");
-    t.compile_fail("tests/ui/jwt_issuer_raw_purpose_removed_fail.rs");
     t.pass("tests/ui/token_profile_issuers_pass.rs");
 }

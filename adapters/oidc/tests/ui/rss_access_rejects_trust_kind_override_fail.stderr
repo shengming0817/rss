@@ -1,0 +1,11 @@
+error[E0599]: no method named `trust_kind` found for struct `VerifierConfigBuilder<RssAccessProfile>` in the current scope
+ --> tests/ui/rss_access_rejects_trust_kind_override_fail.rs:3:10
+  |
+2 |       let _ = oidc::VerifierConfigBuilder::<diport::RssAccessProfile>::new("issuer", "audience")
+  |  _____________-
+3 | |         .trust_kind("user");
+  | |         -^^^^^^^^^^ method not found in `VerifierConfigBuilder<RssAccessProfile>`
+  | |_________|
+  |
+  |
+  = note: the method was found for `VerifierConfigBuilder<FederatedAccessProfile>`

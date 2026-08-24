@@ -1,0 +1,23 @@
+error: 旧 #[redact(public)] 语法已移除：使用 #[redact(sensitivity = public)]
+ --> tests/ui/unsupported_redact_shorthand.rs:6:14
+  |
+6 |     #[redact(public)]
+  |              ^^^^^^
+
+error: 旧 #[redact(internal)] 语法已移除：使用 #[redact(sensitivity = internal)]
+  --> tests/ui/unsupported_redact_shorthand.rs:12:14
+   |
+12 |     #[redact(internal)]
+   |              ^^^^^^^^
+
+error: 旧 #[redact(secret)] 语法已移除：使用 #[redact(sensitivity = secret)]
+  --> tests/ui/unsupported_redact_shorthand.rs:18:14
+   |
+18 |     #[redact(secret)]
+   |              ^^^^^^
+
+error: 旧 #[redact(pii = "...")] 语法已移除：使用 #[redact(sensitivity = pii|pii_email|pii_phone|pii_name|pii_address)]
+  --> tests/ui/unsupported_redact_shorthand.rs:24:14
+   |
+24 |     #[redact(pii = "generic")]
+   |              ^^^

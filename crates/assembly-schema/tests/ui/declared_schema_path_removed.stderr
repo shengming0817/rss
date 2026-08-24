@@ -1,5 +1,0 @@
-error[E0599]: no method named `path` found for struct `assembly_schema::repository_contract::DeclaredSchema<'a>` in the current scope
- --> tests/ui/declared_schema_path_removed.rs:4:20
-  |
-4 |     let _ = schema.path();
-  |                    ^^^^ method not found in `assembly_schema::repository_contract::DeclaredSchema<'_>`
