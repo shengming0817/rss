@@ -185,14 +185,6 @@ impl WorkerHealth {
         self.0.store(HEALTH_DEGRADED, Ordering::Release);
     }
 
-    /// Projection adapter retry loops remain live while their provider is transiently unavailable.
-    /// This narrow adapter hook records that state without conflating it with a stopped worker or
-    /// an unavailable subscription transport.
-    #[doc(hidden)]
-    pub fn mark_projection_degraded(&self) {
-        self.mark_degraded();
-    }
-
     /// 订阅失败（broker/subscriber 不可用）→ Unhealthy，detail 固定为 subscriber-unavailable。
     ///
     /// 不覆盖已证实的 `dlx-write-error` / `invariant`（通道故障不得洗掉更高优先级故障态）。

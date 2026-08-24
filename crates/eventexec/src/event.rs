@@ -8,6 +8,16 @@
 use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{EnvelopeCausationId, EnvelopeSubjectId, OutboxActor, OutboxEnvelopeParts};
 
+pub(crate) fn validate_actor_tenant(
+    tenant: rss_request_context::TenantId,
+    actor: &OutboxActor,
+) -> Result<(), ()> {
+    match actor.tenant() {
+        Some(actor_tenant) if actor_tenant != tenant => Err(()),
+        Some(_) | None => Ok(()),
+    }
+}
+
 /// Parent-message provenance minted only after the consumer envelope and tenant authority pass.
 #[derive(Clone)]
 pub(crate) struct VerifiedEventOrigin(EnvelopeCausationId);
@@ -158,8 +168,7 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
     {
         let fact = C::FACT;
         let topic = EventTopic::parse(fact.topic()).map_err(|_| EventEncodeError::Topic)?;
-        crate::command::validate_actor_tenant(tenant, &actor)
-            .map_err(|()| EventEncodeError::ActorTenant)?;
+        validate_actor_tenant(tenant, &actor).map_err(|()| EventEncodeError::ActorTenant)?;
         let partition_key = match C::SPEC.partition_key() {
             generated::event::PartitionKeyStrategy::None => None,
             generated::event::PartitionKeyStrategy::Aggregate => Some(

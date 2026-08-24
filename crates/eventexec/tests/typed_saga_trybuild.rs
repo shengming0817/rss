@@ -1,6 +1,6 @@
 //! Hard typed Saga authoring gates backed by the generated test-only conformance catalog.
 //!
-//! Cargo requires `eventexec/test-support` for this target, so every UI case sees the same sealed
+//! Cargo requires `eventexec/internal-test-support` for this target, so every UI case sees the same sealed
 //! primary/foreign definitions while the feature-free trybuild target remains independently
 //! runnable.
 

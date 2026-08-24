@@ -16,7 +16,9 @@ use super::projection::{
     service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
 use super::service_token::OperatorServiceToken;
-use crate::infra::pg::{PgSagaCommandConfigs, build_pg_saga_command_configs};
+use crate::infra::pg::PgSagaCommandConfigs;
+#[cfg(feature = "operator-cli")]
+use crate::infra::pg::build_pg_saga_command_configs;
 use crate::phase::OperatorRuntimeCapability;
 #[cfg(feature = "operator-cli")]
 use crate::phase::OperatorRuntimeInputs;

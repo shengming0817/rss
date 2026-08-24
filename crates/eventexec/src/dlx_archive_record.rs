@@ -7,7 +7,7 @@ use diport::{
 use secure::Plaintext;
 use zeroize::Zeroizing;
 
-use crate::dlq::DeadLetterId;
+use crate::dead_letter::DeadLetterId;
 
 /// Aggregate bound for the independently persisted safe text columns.
 ///

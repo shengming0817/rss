@@ -11,7 +11,7 @@ use diport::{
     KeyName, KeyParseError, KeyProvider, KeyRef, ObjectLockMode,
 };
 
-use crate::dlq::DeadLetterId;
+use crate::dead_letter::DeadLetterId;
 use crate::dlx_archive_cipher::DlxArchiveCrypto;
 use crate::dlx_archive_record::{ArchiveCanonicalRecord, DlxArchiveCandidate};
 
@@ -26,7 +26,6 @@ pub enum RetentionTarget {
     InboxReceipts,
     DeadLetter,
     CertificateRevocations,
-    SagaTerminal,
 }
 
 impl RetentionTarget {
@@ -36,7 +35,6 @@ impl RetentionTarget {
             Self::InboxReceipts => "inbox_receipts",
             Self::DeadLetter => "dead_letter",
             Self::CertificateRevocations => "certificate_revocations",
-            Self::SagaTerminal => "saga_terminal",
         }
     }
 }

@@ -68,7 +68,7 @@ impl ValidatedEvent {
     }
 
     /// Test-only mint that runs the same typed-header and correlation parsing as preflight.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "l2-test-support"))]
     #[doc(hidden)]
     pub fn for_test(message: Message) -> Result<Self, EnvelopeHeaderError> {
         let header = message.try_header()?;
@@ -115,7 +115,7 @@ impl ManagedDeliveryStream {
 
 /// Test harness that lends a managed delivery stream to one closed async scope without exposing
 /// a constructor or allowing the lifecycle-bound value to escape that scope.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "l2-test-support")]
 #[doc(hidden)]
 pub async fn run_managed_delivery_stream_harness<D>(
     stream: diport::DeliveryStream,

@@ -57,7 +57,7 @@ use consistency::{
     PermanentError, PermanentErrorKind,
 };
 use diport::{
-    DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
+    DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, MessageId, OpaqueActorId,
     OutboxActor, OutboxEmitter, OutboxEnvelopeParts, PublishRequest, Publisher, Subscriber, Topic,
 };
 use eventexec::consumer_worker::spawn_test_consumer;
@@ -94,7 +94,8 @@ fn demo_claimer() -> Result<InMemClaimer> {
 
 fn audit_consumer_handler(
     repo: Arc<DynAuditWriteRepo<'static>>,
-) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
+) -> impl Fn(Arc<eventexec::consumer::ValidatedEvent>) -> BoxFuture<'static, HandleResult> + Send + Sync
+{
     move |message| {
         let repo = Arc::clone(&repo);
         Box::pin(async move {
@@ -140,7 +141,10 @@ async fn wire_demo_consumer<H, S>(
     stack: &mut ShutdownStack,
 ) -> Result<Arc<WorkerHealth>>
 where
-    H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
+    H: Fn(Arc<eventexec::consumer::ValidatedEvent>) -> BoxFuture<'static, HandleResult>
+        + Send
+        + Sync
+        + 'static,
     S: InboxStore + Send + Sync + 'static,
 {
     // 订阅须先于发布（in-mem 无重放）：同步 subscribe 得 stream，再 spawn worker 驱动。
@@ -353,7 +357,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let handler_call_count = Arc::new(AtomicU32::new(0));
     let counter = handler_call_count.clone();
     let inner = Arc::new(audit_consumer_handler(audit_repo));
-    let counted = move |message: Message| -> BoxFuture<'static, HandleResult> {
+    let counted = move |message: Arc<eventexec::consumer::ValidatedEvent>| -> BoxFuture<'static, HandleResult> {
         let inner = inner.clone();
         let counter = counter.clone();
         Box::pin(async move {
@@ -529,11 +533,12 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     ));
 
     // 永久失败 handler（绕过真实 audit handler）：恒 reject → ConsumerBase 写 DLX。
-    let erroring = move |_msg: Message| -> BoxFuture<'static, HandleResult> {
-        Box::pin(
-            async move { HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent)) },
-        )
-    };
+    let erroring =
+        move |_msg: Arc<eventexec::consumer::ValidatedEvent>| -> BoxFuture<'static, HandleResult> {
+            Box::pin(async move {
+                HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
+            })
+        };
 
     let dlx = MemDeadLetterStore::new();
     let token = CancellationToken::new();

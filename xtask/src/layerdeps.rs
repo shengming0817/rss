@@ -37,12 +37,12 @@
 //!   test-support 成员的 shipped 内部边即误用；补 `allows` 矩阵盲区
 //!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
 //!   分类也不会自行阻止 root/其它允许边把 iotdevice 带入 shipped 图）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_testsupport_feature_closure_is_shipped|tests::red_generated_testsupport_direct_alias_and_forwarding_are_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies|tests::red_runtimeexec_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_internal_testsupport_feature_closure_is_shipped|tests::red_generated_testsupport_direct_alias_and_forwarding_are_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies|tests::red_runtimeexec_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
 //!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped feature 闭包
 //!   （成员默认 feature + `[dependencies]`/`[build-dependencies]`/`[target.*]` activation）启用。闭包解析
 //!   Cargo `default`、本地递归/循环、`dep:`、依赖 feature forwarding 与 package alias。覆盖 `runctx/test-support`
 //!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、
-//!   `eventexec/test-support`（构造 Projection conformance source/operator authority）、
+//!   `eventexec/l2-test-support|internal-test-support`（构造 delivery harness 或 internal conformance authority）、
 //!   `generated/test-support`（暴露 sealed test-only contract catalog）、以及
 //!   `bootstrap/test-support`（`forge_topology_for_test`）与 `identity-composition|deviceidentity/test-support`
 //!   （暂停 application-receipt relay 的测试控制）、`runtimeexec/test-support`（绕过 launch lifecycle
@@ -51,6 +51,10 @@
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
 //!   出边默认只能指向外部 crate；唯一内部例外为 `testkit → rss-conformance`，使内部 harness 复用同一
 //!   provider-neutral 分类 owner，其余 workspace 内部出边均失败。与 LAYER-DEPS-08 的 shipped 入边约束正交。
+//! INVARIANT: EVENTING-L2-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::eventing_l2_rejects_internal_reference|tests::eventing_l2_rejects_internal_aliases|tests::eventing_l2_rejects_internal_public_surface|tests::eventing_l2_rejects_associated_const_and_macro_internal_surface|tests::eventing_l2_recurses_external_modules_and_rejects_path_redirect|tests::eventing_l2_rejects_snake_case_internal_public_surface|tests::eventing_l2_rejects_projection_health_hook|tests::eventing_l2_rejects_feature_alias|tests::eventing_l2_requires_exact_feature_capability_closure|tests::eventing_l2_anti_vacuity_ignores_test_only_evidence", anti_vacuity = "tests::eventing_l2_real_workspace_is_green" }——
+//!   #2159 建立真实 `rss-eventing` Cargo 单向边前的迁移 carrier：闭合分类 eventexec 的 L2/internal
+//!   production modules，拒绝 L2→internal、internal root re-export、专用 API 泄漏与测试 feature alias。
+//!   #2159 完成 package/Cargo Hard 边界后删除本 carrier，不演化为永久文件名规则。
 //! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
@@ -113,6 +117,8 @@ pub(crate) enum Rule {
     WorkspaceFactsConfinement,
     /// EXTERNAL-PKI-PROVIDER-MINT-01：production capability 只能在 Vault 两个私有漏斗调用。
     PkiMintCallsite,
+    /// EVENTING-L2-BOUNDARY-01：Eventing L2 迁移期模块/feature 边界被破坏。
+    EventingL2Boundary,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -192,6 +198,7 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(scan.findings);
         findings.extend(scan_bootstrap_generated_sources(&root)?);
         findings.extend(scan_pkiauthmint_callsites(&root, &members)?);
+        findings.extend(scan_eventing_l2_boundary(&root)?);
         findings.extend(check_wrappers(
             &members,
             &bans,
@@ -226,6 +233,985 @@ impl GovernanceCheck for LayerDeps {
         );
         Ok((summary, findings))
     }
+}
+
+const EVENTING_L2_MODULES: &[&str] = &[
+    "consumer",
+    "consumer_tx",
+    "consumer_worker",
+    "dead_letter",
+    "event",
+    "event_metadata",
+    "inbox_backlog",
+    "dlx_archive_cipher",
+    "dlx_archive_record",
+    "dlx_lifecycle",
+    "dlx_lifecycle_metrics",
+    "managed_blocking_worker",
+    "relay",
+    "relay_config",
+    "relay_metrics",
+    "retry",
+    "tenant_authority",
+    "worker_control",
+];
+
+const EVENTING_INTERNAL_MODULES: &[&str] = &[
+    "command",
+    "dlq",
+    "dr_admission_runtime",
+    "dr_recovery",
+    "projection",
+    "projection_metrics",
+    "projection_observation",
+    "reconcile",
+    "saga",
+    "saga_worker",
+    "workflow_runtime",
+];
+
+const EVENTING_INTERNAL_API_TERMS: &[&str] =
+    &["Projection", "Saga", "Reconcile", "Device", "Operator"];
+const EVENTING_TEST_SUPPORT_FEATURES: &[&str] =
+    &["test-support", "l2-test-support", "internal-test-support"];
+
+fn scan_eventing_l2_boundary(root: &Path) -> Result<Vec<Finding>> {
+    let crate_root = root.join("crates/eventexec/src/lib.rs");
+    let crate_source = std::fs::read_to_string(&crate_root)
+        .with_context(|| format!("读 eventexec crate root 失败: {}", crate_root.display()))?;
+    let manifest_path = root.join("crates/eventexec/Cargo.toml");
+    let manifest_source = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读 eventexec manifest 失败: {}", manifest_path.display()))?;
+
+    let mut findings =
+        validate_eventing_module_partition(Path::new("crates/eventexec/src/lib.rs"), &crate_source);
+    findings.extend(validate_eventing_features(
+        Path::new("crates/eventexec/Cargo.toml"),
+        &manifest_source,
+    ));
+
+    let internal_reexports = eventing_internal_root_reexports(&crate_source);
+    for module in EVENTING_L2_MODULES {
+        let relative = Path::new("crates/eventexec/src").join(format!("{module}.rs"));
+        findings.extend(scan_eventing_l2_module(
+            root,
+            &relative,
+            &internal_reexports,
+        )?);
+    }
+
+    let relay_source = std::fs::read_to_string(root.join("crates/eventexec/src/relay.rs"))?;
+    if source_has_method(&relay_source, "mark_projection_degraded") {
+        findings.push(finding(
+            Rule::EventingL2Boundary,
+            "crates/eventexec/src/relay.rs",
+            "L2 WorkerHealth 暴露 Projection 专用 mark_projection_degraded；改用通用 mark_degraded"
+                .to_string(),
+        ));
+    }
+
+    let reconcile_source = std::fs::read_to_string(root.join("crates/eventexec/src/reconcile.rs"))?;
+    if !production_source_references_module(&reconcile_source, "retry") {
+        findings.push(finding(
+            Rule::EventingL2Boundary,
+            "crates/eventexec/src/reconcile.rs",
+            "anti-vacuity 失败：internal reconcile 必须消费 L2 retry owner".to_string(),
+        ));
+    }
+    let projection_runtime =
+        std::fs::read_to_string(root.join("adapters/postgres/src/projection_worker/runtime.rs"))?;
+    if !production_function_calls_method(
+        &projection_runtime,
+        "record_projection_worker_health",
+        "health",
+        "mark_degraded",
+    ) {
+        findings.push(finding(
+            Rule::EventingL2Boundary,
+            "adapters/postgres/src/projection_worker/runtime.rs",
+            "anti-vacuity 失败：Projection worker 必须消费通用 WorkerHealth::mark_degraded"
+                .to_string(),
+        ));
+    }
+    Ok(findings)
+}
+
+fn validate_eventing_module_partition(path: &Path, source: &str) -> Vec<Finding> {
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![eventing_boundary_finding(
+            path,
+            "eventexec crate root AST 无法解析",
+        )];
+    };
+    let declared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if module.content.is_none() => Some(module.ident.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut owner = BTreeMap::new();
+    let mut findings = Vec::new();
+    for (class, modules) in [
+        ("L2", EVENTING_L2_MODULES),
+        ("internal", EVENTING_INTERNAL_MODULES),
+    ] {
+        for module in modules {
+            if let Some(previous) = owner.insert(*module, class) {
+                findings.push(eventing_boundary_finding(
+                    path,
+                    format!("module `{module}` 重复分类为 {previous}/{class}"),
+                ));
+            }
+        }
+    }
+    for module in &declared {
+        if !owner.contains_key(module.as_str()) {
+            findings.push(eventing_boundary_finding(
+                path,
+                format!("production module `{module}` 未分类，边界必须 fail-closed"),
+            ));
+        }
+    }
+    for module in owner.keys() {
+        if !declared.iter().any(|declared| declared == module) {
+            findings.push(eventing_boundary_finding(
+                path,
+                format!("分类 module `{module}` 未在 crate root 声明"),
+            ));
+        }
+    }
+    findings
+}
+
+fn validate_eventing_features(path: &Path, source: &str) -> Vec<Finding> {
+    let Ok(manifest) = toml::from_str::<MemberManifest>(source) else {
+        return vec![eventing_boundary_finding(
+            path,
+            "eventexec manifest 无法解析",
+        )];
+    };
+    let actual = manifest
+        .features
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = ["default", "internal-test-support", "l2-test-support"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut findings = Vec::new();
+    if actual != expected {
+        findings.push(eventing_boundary_finding(
+            path,
+            format!(
+                "eventexec feature 集必须精确为 {expected:?}，实际 {actual:?}；禁止旧名与 alias"
+            ),
+        ));
+    }
+    let expected_closure = BTreeMap::from([
+        ("default", Vec::<&str>::new()),
+        ("l2-test-support", Vec::new()),
+        ("internal-test-support", vec!["generated/test-support"]),
+    ]);
+    for (feature, expected_values) in expected_closure {
+        let actual_values = manifest
+            .features
+            .get(feature)
+            .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+        if actual_values.as_deref() != Some(expected_values.as_slice()) {
+            findings.push(eventing_boundary_finding(
+                path,
+                format!(
+                    "feature `{feature}` 能力闭包必须精确为 {expected_values:?}，实际 {actual_values:?}"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+fn scan_eventing_l2_module(
+    root: &Path,
+    relative: &Path,
+    internal_reexports: &BTreeSet<String>,
+) -> Result<Vec<Finding>> {
+    scan_eventing_l2_module_at_depth(root, relative, internal_reexports, 0)
+}
+
+fn scan_eventing_l2_module_at_depth(
+    root: &Path,
+    relative: &Path,
+    internal_reexports: &BTreeSet<String>,
+    module_depth: usize,
+) -> Result<Vec<Finding>> {
+    let path = root.join(relative);
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) => {
+            return Ok(vec![eventing_boundary_finding(
+                relative,
+                format!("分类 L2 module source 无法读取: {error}"),
+            )]);
+        }
+    };
+    let Ok(file) = syn::parse_file(&source) else {
+        return Ok(vec![eventing_boundary_finding(
+            relative,
+            "L2 source AST 无法解析",
+        )]);
+    };
+
+    let mut findings =
+        scan_eventing_l2_source_at_depth(relative, &source, internal_reexports, module_depth);
+    let mut external_modules = Vec::new();
+    collect_eventing_external_modules(
+        root,
+        relative,
+        &file.items,
+        &eventing_external_module_dir(relative),
+        module_depth,
+        &mut external_modules,
+        &mut findings,
+    );
+    for (child, child_depth) in external_modules {
+        findings.extend(scan_eventing_l2_module_at_depth(
+            root,
+            &child,
+            internal_reexports,
+            child_depth,
+        )?);
+    }
+    Ok(findings)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "module graph traversal keeps filesystem, diagnostic, and depth state explicit"
+)]
+fn collect_eventing_external_modules(
+    root: &Path,
+    diagnostic_path: &Path,
+    items: &[syn::Item],
+    module_dir: &Path,
+    module_depth: usize,
+    external_modules: &mut Vec<(std::path::PathBuf, usize)>,
+    findings: &mut Vec<Finding>,
+) {
+    for module in items.iter().filter_map(|item| {
+        let syn::Item::Mod(module) = item else {
+            return None;
+        };
+        (!attrs_are_test_only(&module.attrs)).then_some(module)
+    }) {
+        if let Some((_, nested_items)) = &module.content {
+            collect_eventing_external_modules(
+                root,
+                diagnostic_path,
+                nested_items,
+                &module_dir.join(module.ident.to_string()),
+                module_depth + 1,
+                external_modules,
+                findings,
+            );
+            continue;
+        }
+        if module.attrs.iter().any(|attr| attr.path().is_ident("path")) {
+            findings.push(eventing_boundary_finding(
+                diagnostic_path,
+                format!(
+                    "L2 external module `{}` 禁止 #[path] 重定向；使用 canonical module path",
+                    module.ident
+                ),
+            ));
+            continue;
+        }
+        let flat = module_dir.join(format!("{}.rs", module.ident));
+        let nested = module_dir.join(module.ident.to_string()).join("mod.rs");
+        let candidates = [flat, nested]
+            .into_iter()
+            .filter(|candidate| root.join(candidate).is_file())
+            .collect::<Vec<_>>();
+        let [child] = candidates.as_slice() else {
+            findings.push(eventing_boundary_finding(
+                diagnostic_path,
+                format!(
+                    "L2 external module `{}` 必须解析到唯一 canonical source，实际候选 {candidates:?}",
+                    module.ident
+                ),
+            ));
+            continue;
+        };
+        external_modules.push((child.clone(), module_depth + 1));
+    }
+}
+
+fn eventing_external_module_dir(relative: &Path) -> std::path::PathBuf {
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    if relative.file_name().is_some_and(|name| name == "mod.rs") {
+        parent.to_path_buf()
+    } else {
+        parent.join(relative.file_stem().unwrap_or_default())
+    }
+}
+
+fn eventing_internal_root_reexports(source: &str) -> BTreeSet<String> {
+    let Ok(file) = syn::parse_file(source) else {
+        return BTreeSet::new();
+    };
+    let internal = EVENTING_INTERNAL_MODULES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut symbols = BTreeSet::new();
+    for item in file.items {
+        let syn::Item::Use(item_use) = item else {
+            continue;
+        };
+        if !matches!(item_use.vis, syn::Visibility::Public(_)) {
+            continue;
+        }
+        collect_eventing_reexport_symbols(&item_use.tree, &mut Vec::new(), &internal, &mut symbols);
+    }
+    symbols
+}
+
+fn collect_eventing_reexport_symbols(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    internal: &BTreeSet<&str>,
+    symbols: &mut BTreeSet<String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_eventing_reexport_symbols(&path.tree, prefix, internal, symbols);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name)
+            if eventing_root_reexport_module(prefix)
+                .is_some_and(|module| internal.contains(module)) =>
+        {
+            symbols.insert(name.ident.to_string());
+        }
+        syn::UseTree::Rename(rename)
+            if eventing_root_reexport_module(prefix)
+                .is_some_and(|module| internal.contains(module)) =>
+        {
+            symbols.insert(rename.rename.to_string());
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_eventing_reexport_symbols(item, prefix, internal, symbols);
+            }
+        }
+        syn::UseTree::Glob(_)
+            if eventing_root_reexport_module(prefix)
+                .is_some_and(|module| internal.contains(module)) =>
+        {
+            symbols.insert("*".to_string());
+        }
+        _ => {}
+    }
+}
+
+fn eventing_root_reexport_module(prefix: &[String]) -> Option<&str> {
+    match prefix {
+        [module, ..] if module != "crate" && module != "self" => Some(module),
+        [root, module, ..] if root == "crate" || root == "self" => Some(module),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn scan_eventing_l2_source(
+    path: &Path,
+    source: &str,
+    internal_reexports: &BTreeSet<String>,
+) -> Vec<Finding> {
+    scan_eventing_l2_source_at_depth(path, source, internal_reexports, 0)
+}
+
+fn scan_eventing_l2_source_at_depth(
+    path: &Path,
+    source: &str,
+    internal_reexports: &BTreeSet<String>,
+    module_depth: usize,
+) -> Vec<Finding> {
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![eventing_boundary_finding(path, "L2 source AST 无法解析")];
+    };
+    let crate_aliases = collect_eventing_crate_aliases(&file);
+    let mut visitor = EventingL2Visitor {
+        internal_reexports,
+        crate_aliases: &crate_aliases,
+        module_depth,
+        violations: BTreeSet::new(),
+    };
+    visitor.visit_file(&file);
+    visitor
+        .violations
+        .into_iter()
+        .map(|message| eventing_boundary_finding(path, message))
+        .collect()
+}
+
+struct EventingL2Visitor<'a> {
+    internal_reexports: &'a BTreeSet<String>,
+    crate_aliases: &'a BTreeSet<String>,
+    module_depth: usize,
+    violations: BTreeSet<String>,
+}
+
+impl EventingL2Visitor<'_> {
+    fn inspect_path(&mut self, path: &syn::Path) {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if let Some(target) =
+            eventing_crate_root_target(&segments, self.module_depth, self.crate_aliases)
+        {
+            if EVENTING_INTERNAL_MODULES.contains(&target) {
+                self.violations
+                    .insert(format!("L2 引用 internal path `{}`", segments.join("::")));
+            }
+            if self.internal_reexports.contains(target) {
+                self.violations.insert(format!(
+                    "L2 经 crate-root internal re-export 引用 `{}`",
+                    segments.join("::")
+                ));
+            }
+        }
+    }
+
+    fn inspect_public_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        inspect_eventing_public_token_tree(tokens, &mut self.violations);
+    }
+
+    fn inspect_macro_tokens(&mut self, tokens: &proc_macro2::TokenStream) {
+        let compact = tokens.to_string().replace(' ', "");
+        for module in EVENTING_INTERNAL_MODULES {
+            let crate_path = format!("crate::{module}");
+            let super_path = format!("{}{module}", "super::".repeat(self.module_depth + 1));
+            if compact.contains(&crate_path) || compact.contains(&super_path) {
+                self.violations
+                    .insert(format!("L2 macro 引用 internal module `{module}`"));
+            }
+            for alias in self.crate_aliases {
+                if compact.contains(&format!("{alias}::{module}")) {
+                    self.violations.insert(format!(
+                        "L2 macro 经 crate alias 引用 internal module `{module}`"
+                    ));
+                }
+            }
+        }
+        if tokens
+            .clone()
+            .into_iter()
+            .any(|token| matches!(token, proc_macro2::TokenTree::Ident(ident) if ident == "pub"))
+        {
+            self.inspect_public_tokens(tokens.clone());
+        }
+    }
+
+    fn inspect_use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                self.inspect_use_tree(&path.tree, prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                prefix.push(name.ident.to_string());
+                self.inspect_segments(prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Rename(rename) => {
+                prefix.push(rename.ident.to_string());
+                self.inspect_segments(prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.inspect_use_tree(item, prefix);
+                }
+            }
+            syn::UseTree::Glob(_) => self.inspect_segments(prefix),
+        }
+    }
+
+    fn inspect_segments(&mut self, segments: &[String]) {
+        if let Some(target) =
+            eventing_crate_root_target(segments, self.module_depth, self.crate_aliases)
+        {
+            if EVENTING_INTERNAL_MODULES.contains(&target) {
+                self.violations
+                    .insert(format!("L2 引用 internal path `{}`", segments.join("::")));
+            }
+            if self.internal_reexports.contains(target) {
+                self.violations.insert(format!(
+                    "L2 经 crate-root internal re-export 引用 `{}`",
+                    segments.join("::")
+                ));
+            }
+        }
+    }
+}
+
+fn eventing_crate_root_target<'a>(
+    segments: &'a [String],
+    module_depth: usize,
+    crate_aliases: &BTreeSet<String>,
+) -> Option<&'a str> {
+    let first = segments.first()?;
+    if first == "crate" || crate_aliases.contains(first) {
+        return segments.get(1).map(String::as_str);
+    }
+    if first != "super" {
+        return None;
+    }
+    let super_count = segments
+        .iter()
+        .take_while(|segment| *segment == "super")
+        .count();
+    (super_count == module_depth + 1)
+        .then(|| segments.get(super_count).map(String::as_str))
+        .flatten()
+}
+
+fn collect_eventing_crate_aliases(file: &syn::File) -> BTreeSet<String> {
+    let mut visitor = EventingCrateAliasVisitor {
+        module_depth: 0,
+        aliases: BTreeSet::new(),
+    };
+    visitor.visit_file(file);
+    visitor.aliases
+}
+
+struct EventingCrateAliasVisitor {
+    module_depth: usize,
+    aliases: BTreeSet<String>,
+}
+
+impl EventingCrateAliasVisitor {
+    fn inspect_use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                self.inspect_use_tree(&path.tree, prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Rename(rename) => {
+                prefix.push(rename.ident.to_string());
+                if eventing_segments_are_crate_root(prefix, self.module_depth) {
+                    self.aliases.insert(rename.rename.to_string());
+                }
+                prefix.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.inspect_use_tree(item, prefix);
+                }
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for EventingCrateAliasVisitor {
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if !attrs_are_test_only(&item.attrs)
+            && item.ident == "self"
+            && let Some((_, alias)) = &item.rename
+        {
+            self.aliases.insert(alias.to_string());
+        }
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if let Some((_, items)) = &item.content {
+            self.module_depth += 1;
+            for item in items {
+                self.visit_item(item);
+            }
+            self.module_depth -= 1;
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        self.inspect_use_tree(&item.tree, &mut Vec::new());
+    }
+}
+
+fn eventing_segments_are_crate_root(segments: &[String], module_depth: usize) -> bool {
+    if segments == ["crate"] {
+        return true;
+    }
+    let super_count = segments
+        .iter()
+        .take_while(|segment| *segment == "super")
+        .count();
+    super_count == module_depth + 1 && super_count == segments.len()
+}
+
+fn inspect_eventing_public_token_tree(
+    tokens: proc_macro2::TokenStream,
+    violations: &mut BTreeSet<String>,
+) {
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                let identifier = ident.to_string();
+                let normalized = identifier.to_ascii_lowercase();
+                for term in EVENTING_INTERNAL_API_TERMS {
+                    let normalized_term = term.to_ascii_lowercase();
+                    if identifier.contains(term)
+                        || normalized
+                            .split('_')
+                            .any(|component| component == normalized_term)
+                    {
+                        violations.insert(format!("L2 public API 泄漏 internal 专用标识 `{term}`"));
+                    }
+                }
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                inspect_eventing_public_token_tree(group.stream(), violations);
+            }
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for EventingL2Visitor<'_> {
+    fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_impl_item_const(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.sig.to_token_stream());
+        }
+        syn::visit::visit_impl_item_fn(self, item);
+    }
+
+    fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_item_const(self, item);
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_item_enum(self, item);
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.ident.to_token_stream());
+        }
+        if let Some((_, items)) = &item.content {
+            self.module_depth += 1;
+            for item in items {
+                self.visit_item(item);
+            }
+            self.module_depth -= 1;
+        }
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        self.inspect_macro_tokens(&item.mac.tokens);
+        syn::visit::visit_item_macro(self, item);
+    }
+
+    fn visit_macro(&mut self, value: &'ast syn::Macro) {
+        self.inspect_macro_tokens(&value.tokens);
+        syn::visit::visit_macro(self, value);
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.sig.to_token_stream());
+        }
+        syn::visit::visit_item_fn(self, item);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_item_static(self, item);
+    }
+
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_item_trait(self, item);
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        syn::visit::visit_item_type(self, item);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if matches!(item.vis, syn::Visibility::Public(_)) {
+            self.inspect_public_tokens(item.to_token_stream());
+        }
+        self.inspect_use_tree(&item.tree, &mut Vec::new());
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.inspect_path(path);
+        syn::visit::visit_path(self, path);
+    }
+}
+
+fn source_has_method(source: &str, method_name: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return true;
+    };
+    file.items.iter().any(|item| {
+        let syn::Item::Impl(implementation) = item else { return false };
+        if attrs_are_test_only(&implementation.attrs) {
+            return false;
+        }
+        implementation.items.iter().any(|item| {
+            matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == method_name && !attrs_are_test_only(&method.attrs))
+        })
+    })
+}
+
+fn production_source_references_module(source: &str, module: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    let crate_aliases = collect_eventing_crate_aliases(&file);
+    let mut visitor = EventingProductionEvidenceVisitor {
+        crate_aliases: &crate_aliases,
+        module_depth: 0,
+        target_module: Some(module),
+        found: false,
+    };
+    visitor.visit_file(&file);
+    visitor.found
+}
+
+fn production_function_calls_method(
+    source: &str,
+    function_name: &str,
+    receiver: &str,
+    method: &str,
+) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    let Some(function) = file.items.iter().find_map(|item| {
+        let syn::Item::Fn(function) = item else {
+            return None;
+        };
+        (function.sig.ident == function_name && !attrs_are_test_only(&function.attrs))
+            .then_some(function)
+    }) else {
+        return false;
+    };
+    let mut visitor = EventingProductionMethodCallVisitor {
+        receiver,
+        method,
+        found: false,
+    };
+    visitor.visit_block(&function.block);
+    visitor.found
+}
+
+struct EventingProductionMethodCallVisitor<'a> {
+    receiver: &'a str,
+    method: &'a str,
+    found: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for EventingProductionMethodCallVisitor<'_> {
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        if expression.method == self.method
+            && matches!(
+                expression.receiver.as_ref(),
+                syn::Expr::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| segment.ident == self.receiver)
+            )
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+}
+
+struct EventingProductionEvidenceVisitor<'a> {
+    crate_aliases: &'a BTreeSet<String>,
+    module_depth: usize,
+    target_module: Option<&'a str>,
+    found: bool,
+}
+
+impl EventingProductionEvidenceVisitor<'_> {
+    fn inspect_use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                self.inspect_use_tree(&path.tree, prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                prefix.push(name.ident.to_string());
+                self.inspect_use_segments(prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Rename(rename) => {
+                prefix.push(rename.ident.to_string());
+                self.inspect_use_segments(prefix);
+                prefix.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.inspect_use_tree(item, prefix);
+                }
+            }
+            syn::UseTree::Glob(_) => self.inspect_use_segments(prefix),
+        }
+    }
+
+    fn inspect_use_segments(&mut self, segments: &[String]) {
+        if self.target_module.is_some_and(|module| {
+            eventing_crate_root_target(segments, self.module_depth, self.crate_aliases)
+                == Some(module)
+        }) {
+            self.found = true;
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for EventingProductionEvidenceVisitor<'_> {
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !attrs_are_test_only(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !attrs_are_test_only(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if !attrs_are_test_only(&item.attrs) {
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_are_test_only(&item.attrs) {
+            return;
+        }
+        if let Some((_, items)) = &item.content {
+            self.module_depth += 1;
+            for item in items {
+                self.visit_item(item);
+            }
+            self.module_depth -= 1;
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if !attrs_are_test_only(&item.attrs) {
+            self.inspect_use_tree(&item.tree, &mut Vec::new());
+        }
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if self.target_module.is_some_and(|module| {
+            eventing_crate_root_target(&segments, self.module_depth, self.crate_aliases)
+                == Some(module)
+        }) {
+            self.found = true;
+        }
+        syn::visit::visit_path(self, path);
+    }
+}
+
+fn eventing_boundary_finding(path: &Path, message: impl Into<String>) -> Finding {
+    finding(
+        Rule::EventingL2Boundary,
+        path.display().to_string(),
+        format!(
+            "{}（INVARIANT EVENTING-L2-BOUNDARY-01；#2159 Cargo 边界建立后删除本迁移 carrier）",
+            message.into()
+        ),
+    )
 }
 
 const BOOTSTRAP_GENERATED_REGISTRAR_SURFACE: &[&str] = &[
@@ -446,7 +1432,7 @@ fn cfg_predicate_is_test_only(predicate: &syn::Meta) -> bool {
                 syn::Expr::Lit(syn::ExprLit {
                     lit: syn::Lit::Str(feature),
                     ..
-                }) if feature.value() == "test-support"
+                }) if EVENTING_TEST_SUPPORT_FEATURES.contains(&feature.value().as_str())
             )
         }
         syn::Meta::List(list) if list.path.is_ident("any") || list.path.is_ident("all") => {
@@ -1755,7 +2741,12 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str, &str)] = &[
     ),
     (
         "eventexec",
-        "test-support",
+        "l2-test-support",
+        "managed delivery harness must stay outside every shipped feature closure",
+    ),
+    (
+        "eventexec",
+        "internal-test-support",
         "Projection conformance fixtures mint source and operator authority outside the generated production registry",
     ),
     (
@@ -3195,8 +4186,9 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge" }
     }
 
     #[test]
-    fn red_eventexec_testsupport_feature_closure_is_shipped() -> Result<()> {
-        let root = crate::testutil::unique_tmp("eventexec-testsupport-feature-closure-red");
+    fn red_eventexec_internal_testsupport_feature_closure_is_shipped() -> Result<()> {
+        let root =
+            crate::testutil::unique_tmp("eventexec-internal-testsupport-feature-closure-red");
         let manifests = [
             (
                 "crates/eventexec/Cargo.toml",
@@ -3206,7 +4198,7 @@ name = "eventexec"
 
 [features]
 default = []
-test-support = []
+internal-test-support = []
 "#,
             ),
             (
@@ -3217,7 +4209,7 @@ name = "postgres"
 
 [features]
 default = []
-integration = ["eventexec/test-support"]
+integration = ["eventexec/internal-test-support"]
 
 [dependencies]
 eventexec = { path = "../../crates/eventexec" }
@@ -3250,7 +4242,7 @@ postgres = { path = "../../adapters/postgres", features = ["integration"] }
         assert_eq!(findings[0].subject, "runtime");
         assert!(
             findings[0].detail.contains(
-                "postgres/integration → postgres/eventexec/test-support → eventexec/test-support",
+                "postgres/integration → postgres/eventexec/internal-test-support → eventexec/internal-test-support",
             ),
             "{findings:#?}"
         );
@@ -5268,5 +6260,242 @@ missing = { path = "../missing-member" }
         // 下溢逃逸 workspace root → None（由 resolve_rel 转 EscapedPath，fail-closed 报错）。
         assert_eq!(normalize_rel("xtask", "../../escape"), None);
         assert_eq!(normalize_rel("", "../escape"), None);
+    }
+
+    #[test]
+    fn eventing_l2_rejects_internal_reference() {
+        let findings = scan_eventing_l2_source(
+            Path::new("crates/eventexec/src/consumer_worker.rs"),
+            "use crate::reconcile::BackoffPolicy; pub fn run() {}",
+            &BTreeSet::new(),
+        );
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].rule, Rule::EventingL2Boundary);
+    }
+
+    #[test]
+    fn eventing_l2_rejects_internal_aliases() {
+        let findings = scan_eventing_l2_source(
+            Path::new("crates/eventexec/src/consumer_worker.rs"),
+            r#"
+                use crate as eventing;
+                use super::reconcile as scheduling;
+                fn run() {
+                    let _ = eventing::projection::ProjectionId::default();
+                    let _ = scheduling::BackoffPolicy::default();
+                }
+            "#,
+            &BTreeSet::new(),
+        );
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        let reexports = eventing_internal_root_reexports(
+            "pub use crate::reconcile::BackoffPolicy as HiddenPolicy;",
+        );
+        assert_eq!(reexports, BTreeSet::from(["HiddenPolicy".to_owned()]));
+    }
+
+    #[test]
+    fn eventing_l2_rejects_internal_public_surface() {
+        let findings = scan_eventing_l2_source(
+            Path::new("crates/eventexec/src/consumer.rs"),
+            "pub struct ProjectionLease; impl ProjectionLease { pub fn handle() -> OperatorHandle { todo!() } }",
+            &BTreeSet::new(),
+        );
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        assert!(findings.iter().all(|finding| {
+            finding.rule == Rule::EventingL2Boundary
+                && finding.detail.contains("public API 泄漏 internal 专用标识")
+        }));
+    }
+
+    #[test]
+    fn eventing_l2_rejects_associated_const_and_macro_internal_surface() {
+        let findings = scan_eventing_l2_source(
+            Path::new("crates/eventexec/src/consumer.rs"),
+            r#"
+                struct PublicApi;
+                impl PublicApi {
+                    pub const PROJECTION_LIMIT: usize = 1;
+                }
+                use crate as eventing;
+                macro_rules! leak_internal {
+                    () => { eventing::reconcile::BackoffPolicy::default() };
+                }
+            "#,
+            &BTreeSet::new(),
+        );
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+    }
+
+    #[test]
+    fn eventing_l2_recurses_external_modules_and_rejects_path_redirect() -> Result<()> {
+        let root = crate::testutil::unique_tmp("eventing-module-graph");
+        let source_dir = root.join("crates/eventexec/src");
+        std::fs::create_dir_all(source_dir.join("consumer/inline"))?;
+        std::fs::write(source_dir.join("consumer.rs"), "mod inline { mod child; }")?;
+        std::fs::write(
+            source_dir.join("consumer/inline/child.rs"),
+            "use super::super::super::reconcile::BackoffPolicy;",
+        )?;
+        let findings = scan_eventing_l2_module(
+            &root,
+            Path::new("crates/eventexec/src/consumer.rs"),
+            &BTreeSet::new(),
+        )?;
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+
+        std::fs::write(
+            source_dir.join("consumer.rs"),
+            "#[path = \"redirect.rs\"] mod child;",
+        )?;
+        let findings = scan_eventing_l2_module(
+            &root,
+            Path::new("crates/eventexec/src/consumer.rs"),
+            &BTreeSet::new(),
+        )?;
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].detail.contains("禁止 #[path]"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn eventing_l2_rejects_snake_case_internal_public_surface() {
+        let findings = scan_eventing_l2_source(
+            Path::new("crates/eventexec/src/relay.rs"),
+            "pub fn projection_health() {} pub const SAGA_RETRY_LIMIT: usize = 3;",
+            &BTreeSet::new(),
+        );
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+    }
+
+    #[test]
+    fn eventing_l2_rejects_projection_health_hook() {
+        assert!(source_has_method(
+            "impl WorkerHealth { pub fn mark_projection_degraded(&self) {} }",
+            "mark_projection_degraded"
+        ));
+    }
+
+    #[test]
+    fn eventing_l2_rejects_feature_alias() {
+        let findings = validate_eventing_features(
+            Path::new("crates/eventexec/Cargo.toml"),
+            r#"
+                [package]
+                name = "eventexec"
+                [features]
+                default = []
+                l2-test-support = []
+                internal-test-support = ["generated/test-support"]
+                test-support = ["l2-test-support", "internal-test-support"]
+            "#,
+        );
+        assert!(
+            !findings.is_empty(),
+            "compatibility feature alias must fail"
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::EventingL2Boundary)
+        );
+    }
+
+    #[test]
+    fn eventing_l2_requires_exact_feature_capability_closure() {
+        let green = r#"
+            [package]
+            name = "eventexec"
+            [features]
+            default = []
+            l2-test-support = []
+            internal-test-support = ["generated/test-support"]
+        "#;
+        assert!(validate_eventing_features(Path::new("Cargo.toml"), green).is_empty());
+
+        for mutant in [
+            green.replace(
+                "l2-test-support = []\n            internal-test-support = [\"generated/test-support\"]",
+                "l2-test-support = [\"generated/test-support\"]\n            internal-test-support = []",
+            ),
+            green.replace(
+                "internal-test-support = [\"generated/test-support\"]",
+                "internal-test-support = []",
+            ),
+            green.replace(
+                "l2-test-support = []",
+                "l2-test-support = [\"generated/test-support\"]",
+            ),
+        ] {
+            assert!(
+                !validate_eventing_features(Path::new("Cargo.toml"), &mutant).is_empty(),
+                "feature capability mutant must fail: {mutant}"
+            );
+        }
+    }
+
+    #[test]
+    fn eventing_l2_anti_vacuity_ignores_test_only_evidence() {
+        let test_only_retry = r#"
+            #[cfg(test)]
+            use crate::retry::BackoffPolicy;
+        "#;
+        assert!(!production_source_references_module(
+            test_only_retry,
+            "retry"
+        ));
+
+        let test_only_health = r#"
+            #[cfg(test)]
+            fn record_projection_worker_health(health: &WorkerHealth) {
+                health.mark_degraded();
+            }
+        "#;
+        assert!(!production_function_calls_method(
+            test_only_health,
+            "record_projection_worker_health",
+            "health",
+            "mark_degraded"
+        ));
+
+        for feature in ["l2-test-support", "internal-test-support"] {
+            let gated_import =
+                format!(r#"#[cfg(feature = "{feature}")] use crate::retry::BackoffPolicy;"#);
+            assert!(!production_source_references_module(&gated_import, "retry"));
+
+            let gated_impl = format!(
+                r#"
+                    #[cfg(feature = "{feature}")]
+                    impl WorkerHealth {{
+                        pub fn mark_projection_degraded(&self) {{}}
+                    }}
+                "#
+            );
+            assert!(!source_has_method(&gated_impl, "mark_projection_degraded"));
+
+            let gated_function = format!(
+                r#"
+                    #[cfg(feature = "{feature}")]
+                    fn record_projection_worker_health(health: &WorkerHealth) {{
+                        health.mark_degraded();
+                    }}
+                "#
+            );
+            assert!(!production_function_calls_method(
+                &gated_function,
+                "record_projection_worker_health",
+                "health",
+                "mark_degraded"
+            ));
+        }
+    }
+
+    #[test]
+    fn eventing_l2_real_workspace_is_green() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let findings = scan_eventing_l2_boundary(&root)?;
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
     }
 }

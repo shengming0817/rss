@@ -9,19 +9,23 @@
 //!      serverlesstechnology/cqrs（背景 relay 解耦 + 取消安全两阶段关闭）
 
 pub mod consumer;
-#[cfg(feature = "test-support")]
+#[cfg(feature = "l2-test-support")]
 #[doc(hidden)]
 pub use consumer::run_managed_delivery_stream_harness;
 pub use consumer::{
     ConsumerMeta, LeaseConfig, ManagedDeliveryStream, run_consumer, run_consumer_ackable,
 };
 pub mod consumer_tx;
+pub mod dead_letter;
+pub use dead_letter::{DeadLetterId, DeadLetterIdError};
 pub mod event_metadata;
 pub mod tenant_authority;
 pub use tenant_authority::{
     TenantAuthority, TenantAuthorityBinding, TenantAuthorityConfigError, TenantAuthorityError,
     TenantAuthoritySignError,
 };
+
+pub mod retry;
 
 pub mod consumer_worker;
 pub use consumer_worker::{
@@ -85,13 +89,12 @@ pub use projection_observation::{
 
 pub mod dlq;
 pub use dlq::{
-    DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest,
-    DlqInspectTarget, DlqListQuery, DlqListResult, DlqMutationKind, DlqMutationMetricOutcome,
-    DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqReplayStoreStage,
-    DlqStore, DurablyAuditedDlqMutation, OutboxExpiredResolutionKind,
-    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket,
-    record_dlq_mutation_error, record_dlq_outbox_redrive, record_dlq_replay,
-    record_outbox_expired_resolution,
+    DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget,
+    DlqListQuery, DlqListResult, DlqMutationKind, DlqMutationMetricOutcome, DlqRedriveOutcome,
+    DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqReplayStoreStage, DlqStore,
+    DurablyAuditedDlqMutation, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
+    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, record_dlq_mutation_error,
+    record_dlq_outbox_redrive, record_dlq_replay, record_outbox_expired_resolution,
 };
 
 pub mod dr_admission_runtime;
@@ -126,15 +129,15 @@ pub use dlx_lifecycle_metrics::{MetricsRetentionMetrics, RetentionMetrics};
 
 pub mod reconcile;
 pub use reconcile::{
-    AttemptErrorKind, AttemptResult, AttemptScope, AttemptTrigger, BackoffError, BackoffPolicy,
-    Builder as ReconcileBuilder, ClaimedTarget, DeviceCommandAuditProofRestoreError,
-    DurableReconciler, FencedCommandReviewError, OperatorReconcileCapability, RECONCILE_PROBE,
-    ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight,
-    ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleError,
-    ReconcileScheduleErrorKind, ReconcileScheduleStore, ReconcileSchedulerBuilder,
-    ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWorker, ReconcileWorkerControl,
-    ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
-    Tenancy, Trigger, TriggerError,
+    AttemptErrorKind, AttemptResult, AttemptScope, AttemptTrigger, Builder as ReconcileBuilder,
+    ClaimedTarget, DeviceCommandAuditProofRestoreError, DurableReconciler,
+    FencedCommandReviewError, OperatorReconcileCapability, RECONCILE_PROBE, ReconcileAttempt,
+    ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight, ReconcileOperatorStore,
+    ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
+    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
+    ReconcileTargetSummary, ReconcileWorker, ReconcileWorkerControl, ReviewedFencedCommand,
+    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
+    TriggerError,
 };
 
 pub mod projection;
@@ -160,8 +163,8 @@ pub use workflow_runtime::{
     ProjectionRuntimeBinding, ProjectionRuntimeCapability, ProjectionServingEvidence,
     ProjectionSourceScope, ProjectionTargetEntry, ProjectionTargetView, SagaActivationPermit,
     SagaRuntimeCapability, SagaRuntimeEntry, SagaRuntimeOperatorTarget, SagaRuntimeSpawner,
-    SagaRuntimeStartTarget, SagaRuntimeView, WorkflowActivationPlan, WorkflowRuntimeError,
-    WorkflowRuntimePlan,
+    SagaRuntimeStartTarget, SagaRuntimeView, SagaTerminalRetentionMetrics, WorkflowActivationPlan,
+    WorkflowRuntimeError, WorkflowRuntimePlan,
 };
 
 pub mod saga;
@@ -178,7 +181,7 @@ pub use saga::{
 pub mod saga_worker;
 
 /// Generated saga fixtures exposed only to non-shipped integration harnesses.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "internal-test-support")]
 pub mod saga_test_support {
     use consistency::{CompensationOutcome, EngineError, EngineErrorKind};
     use generated::saga::test_support::test_v1::primary::{

@@ -16,7 +16,7 @@ amqp = { path = "../adapters/amqp" }
 consistency = { path = "../crates/consistency" }
 deadpool-redis = { workspace = true }
 diport = { path = "../crates/diport", features = ["test-support"] }
-eventexec = { path = "../crates/eventexec", features = ["test-support"] }
+eventexec = { path = "../crates/eventexec", features = ["internal-test-support"] }
 generated = { path = "../generated" }
 postgres = { path = "../adapters/postgres", features = [
     "domain-audit",

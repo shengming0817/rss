@@ -1406,7 +1406,7 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
         eventexec::LeaseConfig::from_ttl(Duration::from_secs(60)),
         token1,
         health,
-        eventexec::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))?,
+        eventexec::retry::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))?,
         admission,
     );
     while subscription_health.status() != primitives::healthz::HealthStatus::Healthy {

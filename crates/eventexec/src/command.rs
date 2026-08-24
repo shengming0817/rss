@@ -29,6 +29,7 @@ use secure::{BlindIndex, BlindIndexKey, FilterBits, IndexScope};
 use sha2::{Digest as _, Sha256};
 
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
+use crate::event::validate_actor_tenant;
 use crate::tenant_authority::TenantAuthority;
 
 /// One independently keyed command-alias generation.
@@ -583,16 +584,6 @@ fn command_request_fingerprint(
     hash_bytes_component(&mut hasher, payload);
     CommandRequestFingerprint::parse(format!("sha256:{}", lower_hex(&hasher.finalize())))
         .map_err(|_| ())
-}
-
-pub(crate) fn validate_actor_tenant(
-    tenant: rss_request_context::TenantId,
-    actor: &OutboxActor,
-) -> Result<(), ()> {
-    match actor.tenant() {
-        Some(actor_tenant) if actor_tenant != tenant => Err(()),
-        Some(_) | None => Ok(()),
-    }
 }
 
 fn hash_component(hasher: &mut Sha256, value: &str) {

@@ -649,6 +649,9 @@ mod tests {
             &eventexec::event::GeneratedEventEncoder,
             payload,
             tenant,
+            rss_contract::Timepoint::saturating_from_system_time(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ),
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
                 rss_request_context::PrincipalKind::Admin,
@@ -680,6 +683,9 @@ mod tests {
             &eventexec::event::GeneratedEventEncoder,
             payload,
             tenant,
+            rss_contract::Timepoint::saturating_from_system_time(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ),
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
                 rss_request_context::PrincipalKind::Admin,

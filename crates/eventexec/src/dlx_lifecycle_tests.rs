@@ -40,7 +40,6 @@ fn closed_labels_cover_every_variant() {
             RetentionTarget::CertificateRevocations,
             "certificate_revocations",
         ),
-        (RetentionTarget::SagaTerminal, "saga_terminal"),
     ];
     for (value, expected) in targets {
         assert_eq!(value.as_label(), expected);

@@ -711,7 +711,7 @@ pub(crate) fn spawn_consumer_ackable_tx_subscriber<S, P, H>(
     lease_cfg: LeaseConfig,
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
-    backoff: eventexec::BackoffPolicy,
+    backoff: eventexec::retry::BackoffPolicy,
     admission: primitives::ConsumerAdmission,
 ) -> eventexec::ManagedBlockingWorker
 where
@@ -1477,8 +1477,8 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     // reason: 测试 tiny backoff 构造失败即参数写错；item-level carve-out。
-    fn tiny_backoff() -> eventexec::BackoffPolicy {
-        eventexec::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))
+    fn tiny_backoff() -> eventexec::retry::BackoffPolicy {
+        eventexec::retry::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))
             .expect("valid tiny backoff")
     }
 

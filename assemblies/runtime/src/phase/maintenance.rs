@@ -5,7 +5,7 @@ use bootstrap::DomainModuleResult;
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use eventexec::{
     MetricsRetentionMetrics, RetentionBacklog, RetentionBacklogObservation, RetentionMetrics,
-    RetentionOutcome, RetentionTarget,
+    RetentionOutcome, RetentionTarget, SagaTerminalRetentionMetrics,
 };
 use postgres::PgRuntimeHandle;
 use primitives::{HealthCheck, HealthStatus, ProbeName};
@@ -440,27 +440,23 @@ impl<R: SagaTerminalSweepRunner> MaintenanceSweepTask for SagaTerminalSweepTask<
     }
 
     fn observe(&self, result: &MaintenanceSweepResult, duration_seconds: f64) {
-        let metrics = MetricsRetentionMetrics;
         match result {
             MaintenanceSweepResult::Success {
                 deleted,
                 backlog: Some(backlog),
             } => {
-                metrics.record_sweep(
-                    RetentionTarget::SagaTerminal,
+                SagaTerminalRetentionMetrics::record_sweep(
                     RetentionOutcome::Success,
                     *deleted,
                     duration_seconds,
                 );
-                metrics.record_retention_backlog(
-                    RetentionTarget::SagaTerminal,
+                SagaTerminalRetentionMetrics::record_backlog(
                     RetentionBacklogObservation::Available(*backlog),
                 );
             }
             MaintenanceSweepResult::Failure { outcome, .. } => {
-                metrics.record_sweep(RetentionTarget::SagaTerminal, *outcome, 0, duration_seconds);
-                metrics.record_retention_backlog(
-                    RetentionTarget::SagaTerminal,
+                SagaTerminalRetentionMetrics::record_sweep(*outcome, 0, duration_seconds);
+                SagaTerminalRetentionMetrics::record_backlog(
                     RetentionBacklogObservation::Unavailable,
                 );
             }

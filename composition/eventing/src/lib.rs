@@ -868,7 +868,7 @@ where
                 lease_cfg,
                 token,
                 health,
-                eventexec::BackoffPolicy::default(),
+                eventexec::retry::BackoffPolicy::default(),
                 _consumer_admission,
             ))
         },

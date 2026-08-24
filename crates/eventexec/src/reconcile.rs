@@ -43,6 +43,7 @@ use crate::WorkerHealth;
 use crate::command::{
     CommandEmitError, CommandIdempotencyKeyring, ReviewedCommandIntent, reviewed_keyed_intent,
 };
+use crate::retry::{BackoffPolicy, wait_or_cancel};
 use crate::worker_control::WorkerDrainObservation;
 
 /// Exact generated fenced carrier for `identity.apply-device-certificate`.
@@ -1551,7 +1552,7 @@ fn canonical_fenced_intent_digest_value(
 }
 
 /// Codegen-owning fixture funnel used by provider conformance graphs.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "internal-test-support")]
 #[doc(hidden)]
 pub fn device_certificate_command_fixture(
     mut value: serde_json::Value,
@@ -1580,7 +1581,7 @@ pub fn device_certificate_command_fixture(
 }
 
 /// Stable semantic view that keeps generated command types inside eventexec.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "internal-test-support")]
 #[doc(hidden)]
 pub struct DeviceCertificateCommandFixtureView<'a> {
     pub device_id: uuid::Uuid,
@@ -1593,7 +1594,7 @@ pub struct DeviceCertificateCommandFixtureView<'a> {
     pub deadline_epoch_seconds: u64,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "internal-test-support")]
 #[doc(hidden)]
 pub fn device_certificate_command_fixture_view(
     command: &ApplyDeviceCertificateReconcileCommand,
@@ -1853,7 +1854,7 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "internal-test-support"))]
     /// Test-only component constructor preserving the production attempt scope.
     pub fn for_test(
         store: &'a S,
@@ -3471,59 +3472,6 @@ impl Trigger {
     }
 }
 
-// ── BackoffPolicy（per-entity 指数退避）─────────────────────────────────────
-
-/// reconcile builder 族配置错误。
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum BackoffError {
-    /// 退避 base 超过 cap（非法策略，fail-fast 非静默钳制）。
-    ///
-    /// `base` / `cap` 是构造时传入的配置值，属公开参数，不含 PII（thiserror 引用字段合法）。
-    #[error("reconcile backoff base ({base:?}) exceeds cap ({cap:?})")]
-    BaseExceedsCap {
-        /// 超出 cap 的 base 值。
-        base: Duration,
-        /// 策略设定的 cap 值。
-        cap: Duration,
-    },
-}
-
-/// per-entity 指数退避策略：第 n 次失败延迟 `base * 2^(n-1)`，封顶 `cap`。
-#[derive(Debug, Clone, Copy)]
-pub struct BackoffPolicy {
-    base: Duration,
-    cap: Duration,
-}
-
-impl BackoffPolicy {
-    /// 构造退避策略；`base > cap` → [`BackoffError::BaseExceedsCap`]（fail-fast）。
-    pub fn new(base: Duration, cap: Duration) -> Result<Self, BackoffError> {
-        if base > cap {
-            return Err(BackoffError::BaseExceedsCap { base, cap });
-        }
-        Ok(Self { base, cap })
-    }
-
-    /// 第 `attempts` 次失败（1-based）的退避延迟：`base * 2^(attempts-1)`，封顶 `cap`（饱和不回绕）。
-    pub(crate) fn delay_for(&self, attempts: u32) -> Duration {
-        // exp ≤ 31：`1u32 << 31` 不溢出；更高次幂经后续 `min(cap)` 收敛，无需精确大数。
-        let exp = attempts.saturating_sub(1).min(31);
-        let factor = 1_u32 << exp;
-        self.base.saturating_mul(factor).min(self.cap)
-    }
-}
-
-impl Default for BackoffPolicy {
-    fn default() -> Self {
-        // 默认 1s 起、60s 封顶（保守起点，避免热重试打爆后端）。
-        Self {
-            base: Duration::from_secs(1),
-            cap: Duration::from_secs(60),
-        }
-    }
-}
-
 // ── Builder（唯一公开构造入口）───────────────────────────────────────────────
 
 /// [`ReconcileLoop`] 唯一公开构造入口。`new(reconciler, tenancy, trigger)` 三参必填——漏 tenancy/trigger
@@ -3901,15 +3849,6 @@ async fn sleep_or_pending(d: Option<Duration>) {
     }
 }
 
-/// 等 `d` 或 token 取消；返回 `true` 表已取消（调用方据此提前退出）。
-pub(crate) async fn wait_or_cancel(d: Duration, token: &CancellationToken) -> bool {
-    tokio::select! {
-        biased;
-        () = token.cancelled() => true,
-        () = tokio::time::sleep(d) => false,
-    }
-}
-
 /// 对 `key` 的失败计数 `+1` 并返回新值（1-based）；饱和不回绕。
 fn bump_attempts(attempts: &mut HashMap<Option<EntityId>, u32>, key: Option<EntityId>) -> u32 {
     let n = attempts.entry(key).or_insert(0);
@@ -3922,10 +3861,10 @@ mod tests {
     use super::DeviceCertificateSystemProducer;
     use super::{
         ActiveLeaseFence, AttemptCompletionOutcome, AttemptErrorKind, AttemptResult,
-        AttemptSchedule, AttemptScope, BackoffError, BackoffPolicy, Builder, ClaimedTarget,
-        ClaimedTargetRestore, DeviceCertificateCommandEvidence, DeviceCertificateCommandTtl,
-        DurableReconcileOutcome, DurableReconciler, FailureStreak, FencedCommandReviewError,
-        LeaseOperation, LeaseReason, LeaseState, MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction,
+        AttemptSchedule, AttemptScope, Builder, ClaimedTarget, ClaimedTargetRestore,
+        DeviceCertificateCommandEvidence, DeviceCertificateCommandTtl, DurableReconcileOutcome,
+        DurableReconciler, FailureStreak, FencedCommandReviewError, LeaseOperation, LeaseReason,
+        LeaseState, MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction,
         PersistableCommandDeadlineEpochSeconds, PersistableDesiredGeneration,
         PersistableFenceEpoch, RECONCILE_PROBE, RENEW_INTERVAL, ReconcileAttempt,
         ReconcileConfigError, ReconcileDriver, ReconcileLoop, ReconcileMaxInFlight,
@@ -3938,6 +3877,7 @@ mod tests {
         WorkerLoopEvent, bump_attempts, canonical_fenced_intent_digest_value, emit_lease_churn,
         execute_worker_job, next_worker_event, same_lease_fence,
     };
+    use crate::retry::BackoffPolicy;
     use std::time::SystemTime;
 
     /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
@@ -7494,32 +7434,6 @@ mod tests {
         )
         .await;
         (action, health)
-    }
-
-    // ── BackoffPolicy ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn backoff_rejects_base_exceeding_cap() {
-        assert!(matches!(
-            BackoffPolicy::new(Duration::from_secs(2), Duration::from_secs(1)),
-            Err(BackoffError::BaseExceedsCap { .. })
-        ));
-        assert!(BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(1)).is_ok());
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    // reason: 测试断言已通过 new() 构造的合法策略，expect 仅为不应 panic 的固定策略构造。
-    fn backoff_grows_exponentially_capped() {
-        let p =
-            BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(10)).expect("policy");
-        assert_eq!(p.delay_for(0), Duration::from_secs(1)); // 0 次失败 = base（边界）
-        assert_eq!(p.delay_for(1), Duration::from_secs(1)); // base
-        assert_eq!(p.delay_for(2), Duration::from_secs(2)); // 2*base
-        assert_eq!(p.delay_for(3), Duration::from_secs(4)); // 4*base
-        assert_eq!(p.delay_for(4), Duration::from_secs(8)); // 8*base
-        assert_eq!(p.delay_for(5), Duration::from_secs(10)); // 16*base 封顶 cap
-        assert_eq!(p.delay_for(99), Duration::from_secs(10)); // 大 n 仍封顶（饱和不回绕）
     }
 
     // ── dispatch_once（核心决策，确定性无时钟）─────────────────────────────────

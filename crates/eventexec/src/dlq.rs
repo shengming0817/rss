@@ -8,6 +8,8 @@
 use consistency::IdemKey;
 use diport::{DeadLetterSource, DlqOperatorAuthorization, dlq_operator_action};
 
+use crate::dead_letter::DeadLetterId;
+
 /// Which backing queue row a summary represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DlqEntryKind {
@@ -166,28 +168,6 @@ impl DlqEntrySummary {
 
     pub fn last_attempt_epoch_secs(&self) -> i64 {
         self.last_attempt_epoch_secs
-    }
-}
-
-/// Parsed `dead_letter.id` UUID.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeadLetterId(String);
-
-impl DeadLetterId {
-    pub fn parse(raw: &str) -> Result<Self, DlqError> {
-        uuid::Uuid::parse_str(raw)
-            .map(|id| Self(id.to_string()))
-            .map_err(|_| DlqError::InvalidId)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for DeadLetterId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -791,8 +771,6 @@ impl DlqMutationMetricOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DlqError {
-    #[error("dlq id is invalid")]
-    InvalidId,
     #[error("dlq cursor is invalid")]
     InvalidCursor,
     #[error("dlq entry not found")]
@@ -820,7 +798,6 @@ pub enum DlqError {
 impl DlqError {
     pub fn as_label(&self) -> &'static str {
         match self {
-            Self::InvalidId => "invalid_id",
             Self::InvalidCursor => "invalid_cursor",
             Self::NotFound => "not_found",
             Self::NotReplayable => "not_replayable",
@@ -1263,7 +1240,7 @@ mod tests {
     fn malformed_dead_letter_id_is_rejected_before_adapter_sql() {
         assert!(matches!(
             DeadLetterId::parse("not-a-uuid"),
-            Err(DlqError::InvalidId)
+            Err(crate::DeadLetterIdError)
         ));
     }
 

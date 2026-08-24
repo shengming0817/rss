@@ -130,7 +130,7 @@ impl ProjectionExecutionContext {
         }
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     const fn conformance_operator_replay(
         tenant: rss_request_context::TenantId,
         target_identity_fingerprint: [u8; 32],
@@ -693,7 +693,7 @@ pub enum ProjectionTargetConfigError {
     #[error("projection target binding is duplicated")]
     DuplicateBinding,
     /// test-support registry identity is not one of the closed canonical fixture tuples.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[error("projection conformance identity is not canonical")]
     NonCanonicalConformanceIdentity,
     /// plan-issued execution tenant differs from the selected target tenant.
@@ -853,7 +853,7 @@ fn projection_target_identity_fingerprint(
     digest.finalize().into()
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "internal-test-support")]
 fn validate_canonical_projection_conformance_identity(
     definition: &ProjectionTargetDefinition,
     bindings: &[ProjectionInputBinding],
@@ -967,7 +967,7 @@ struct PlannedProjection {
     definition_version: Box<str>,
     definition_schema_digest: Box<str>,
     input_generation: Box<str>,
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     execution_target_identity_fingerprint: Option<[u8; 32]>,
 }
 
@@ -997,7 +997,7 @@ impl ProjectionTargetRegistry {
                     definition_version: entry.workflow().definition_version().into(),
                     definition_schema_digest: entry.workflow().definition_schema_digest().into(),
                     input_generation: entry.input_generation().into(),
-                    #[cfg(feature = "test-support")]
+                    #[cfg(feature = "internal-test-support")]
                     execution_target_identity_fingerprint: None,
                 },
             );
@@ -1039,7 +1039,7 @@ impl ProjectionTargetRegistry {
                     definition_version: capability.definition.version().into(),
                     definition_schema_digest: capability.definition.schema_hash().into(),
                     input_generation: capability.input_generation.into(),
-                    #[cfg(feature = "test-support")]
+                    #[cfg(feature = "internal-test-support")]
                     execution_target_identity_fingerprint: None,
                 },
             );
@@ -1053,7 +1053,7 @@ impl ProjectionTargetRegistry {
     /// This entry point is absent from production builds. It accepts neither raw authority fields
     /// nor actor/purpose overrides; source and execution authority remain minted by the existing
     /// registry methods after the exact binding set passes normal target validation.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[doc(hidden)]
     pub fn from_conformance_fixture(
         definition: &ProjectionTargetDefinition,
@@ -1083,7 +1083,7 @@ impl ProjectionTargetRegistry {
     /// Mint a generated source scope for downstream adapter integration tests without inventing a
     /// fake production store. Callers provide only the projection and tenant; definition identity,
     /// bindings, and generation remain atomically selected from the generated catalog here.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     pub(crate) fn capture_source_scope_fixture(
         view: crate::ProjectionCaptureView<'_>,
         projection: &ProjectionId,
@@ -1105,7 +1105,7 @@ impl ProjectionTargetRegistry {
                     definition_version: workflow.definition_version().into(),
                     definition_schema_digest: workflow.definition_schema_digest().into(),
                     input_generation: generation.into(),
-                    #[cfg(feature = "test-support")]
+                    #[cfg(feature = "internal-test-support")]
                     execution_target_identity_fingerprint: None,
                 },
             );
@@ -1141,7 +1141,7 @@ impl ProjectionTargetRegistry {
                     input_generation:
                         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                             .into(),
-                    #[cfg(feature = "test-support")]
+                    #[cfg(feature = "internal-test-support")]
                     execution_target_identity_fingerprint: None,
                 },
             );
@@ -1230,14 +1230,14 @@ impl ProjectionTargetRegistry {
                 projection: projection.clone(),
             }
         })?;
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "internal-test-support")]
         if let Some(fingerprint) = planned.execution_target_identity_fingerprint {
             return Ok(ProjectionExecutionContext::conformance_operator_replay(
                 tenant,
                 fingerprint,
             ));
         }
-        #[cfg(not(feature = "test-support"))]
+        #[cfg(not(feature = "internal-test-support"))]
         let _ = planned;
         Ok(ProjectionExecutionContext::operator_replay(tenant))
     }

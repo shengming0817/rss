@@ -18,9 +18,7 @@ use super::projection::{
 };
 use super::service_token::OperatorServiceToken;
 use crate::infra::pg::build_pg_l2_dr_recovery_configs;
-use crate::phase::OperatorRuntimeCapability;
-#[cfg(feature = "operator-cli")]
-use crate::phase::OperatorRuntimeInputs;
+use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
 
 pub(super) const L2_DR_RECOVERY_OPERATOR_GRANTS_ENV: &str = "RSS_L2_DR_RECOVERY_OPERATOR_GRANTS";
 const COMMAND_NAMESPACE: &str = "l2-dr-recovery";

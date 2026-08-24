@@ -163,3 +163,10 @@ fn managed_delivery_stream_constructor_is_private() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/managed_delivery_stream_constructor_private_fail.rs");
 }
+
+#[test]
+fn retry_surface_has_one_canonical_owner() {
+    let t = trybuild::TestCases::new();
+    t.pass("tests/ui/retry_canonical_path_pass.rs");
+    t.compile_fail("tests/ui/retry_root_reexport_fail.rs");
+}

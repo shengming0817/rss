@@ -19,6 +19,55 @@ use vocab::{ContractBinding, ProjectionInputBinding, SagaContractBinding};
 
 use crate::{ProjectionMetricActivation, ProjectionMetricScope, ProjectionTarget, WorkerHealth};
 
+/// Saga-internal retention telemetry owner. The fixed target label cannot enter the generic L2
+/// [`crate::RetentionTarget`] vocabulary.
+pub struct SagaTerminalRetentionMetrics;
+
+impl SagaTerminalRetentionMetrics {
+    const TARGET_LABEL: &'static str = "saga_terminal";
+
+    /// Record one Saga terminal retention sweep without widening the L2 target vocabulary.
+    pub fn record_sweep(outcome: crate::RetentionOutcome, deleted: u64, duration_seconds: f64) {
+        metrics::counter!(
+            "retention_sweep_deleted_total",
+            "target" => Self::TARGET_LABEL,
+        )
+        .increment(deleted);
+        metrics::counter!(
+            "retention_sweep_ticks_total",
+            "target" => Self::TARGET_LABEL,
+            "outcome" => outcome.as_label(),
+        )
+        .increment(1);
+        metrics::histogram!(
+            "retention_sweep_duration_seconds",
+            "target" => Self::TARGET_LABEL,
+            "outcome" => outcome.as_label(),
+        )
+        .record(duration_seconds);
+    }
+
+    /// Record the Saga terminal expired backlog, preserving unavailable-as-NaN semantics.
+    pub fn record_backlog(observation: crate::RetentionBacklogObservation) {
+        let (depth, oldest_age_seconds) = match observation {
+            crate::RetentionBacklogObservation::Available(backlog) => {
+                (backlog.depth() as f64, backlog.oldest_age_seconds() as f64)
+            }
+            crate::RetentionBacklogObservation::Unavailable => (f64::NAN, f64::NAN),
+        };
+        metrics::gauge!(
+            "retention_expired_backlog_depth",
+            "target" => Self::TARGET_LABEL,
+        )
+        .set(depth);
+        metrics::gauge!(
+            "retention_expired_oldest_age_seconds",
+            "target" => Self::TARGET_LABEL,
+        )
+        .set(oldest_age_seconds);
+    }
+}
+
 mod sealed {
     pub trait SagaRuntimeFactory {}
 }
@@ -676,7 +725,7 @@ where
 #[derive(Clone, Copy)]
 enum SagaDefinitionCatalog {
     Production,
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     Conformance,
 }
 
@@ -684,7 +733,7 @@ impl SagaDefinitionCatalog {
     fn specs(self) -> &'static [generated::saga::SagaSpec] {
         match self {
             Self::Production => generated::saga::SPECS,
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "internal-test-support")]
             Self::Conformance => generated::saga::test_support::SPECS,
         }
     }
@@ -711,7 +760,7 @@ impl WorkflowActivationPlan {
     }
 
     /// Select the one closed, generated Saga conformance catalog for integration tests.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     pub fn select_saga_conformance_for_test(
         runtime: &RuntimePlan,
     ) -> Result<Self, WorkflowRuntimeError> {
@@ -982,7 +1031,7 @@ pub struct WorkflowRuntimePlan {
 impl WorkflowRuntimePlan {
     /// Empty sealed plan for integration fixtures that exercise assemblies with no activated
     /// workflows. Production callers must compile from the assembly RuntimePlan.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "internal-test-support"))]
     pub fn disabled_fixture() -> Self {
         Self {
             source_runtime_plan_fingerprint: String::new(),
@@ -1011,7 +1060,7 @@ impl WorkflowRuntimePlan {
 
     /// Mint an exact generated scope through the production registry path for downstream adapter
     /// integration tests. The fixture accepts no definition fields or generation override.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[doc(hidden)]
     pub fn generated_projection_capture_fixture() -> Self {
         let projection_inputs = generated::event::PROJECTION_INPUTS.to_vec();
@@ -1049,7 +1098,7 @@ impl WorkflowRuntimePlan {
         }
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[doc(hidden)]
     pub fn generated_projection_source_scope_fixture(
         projection: &crate::ProjectionId,
@@ -1067,7 +1116,7 @@ impl WorkflowRuntimePlan {
     /// Mint the fixed replay execution identity for an exact generated projection in adapter
     /// integration tests. The fixture accepts neither actor nor purpose and is absent from
     /// production builds.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[doc(hidden)]
     pub fn generated_projection_operator_execution_fixture(
         projection: &crate::ProjectionId,
@@ -1082,7 +1131,7 @@ impl WorkflowRuntimePlan {
     /// Mint one plan-shaped runtime binding for an exact generated projection and target
     /// generation in adapter integration tests. Accepts no definition override and is absent
     /// from production builds.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[doc(hidden)]
     pub fn generated_projection_runtime_binding_fixture(
         projection: &crate::ProjectionId,
@@ -1465,7 +1514,7 @@ impl ProjectionExecutionObservation {
     }
 
     /// Mint a paired observation only for cross-crate integration tests.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[doc(hidden)]
     pub fn fixture(
         target_generation: crate::ProjectionVersion,
@@ -2717,7 +2766,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "internal-test-support")]
     #[test]
     fn projection_operator_fixture_accepts_only_generated_identity()
     -> Result<(), Box<dyn std::error::Error>> {

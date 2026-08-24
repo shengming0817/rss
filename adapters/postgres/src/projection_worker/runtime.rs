@@ -376,7 +376,7 @@ fn log_projection_worker_retry(error: &PgProjectionWorkerRuntimeError, operation
 #[cfg(feature = "domain-settings")]
 fn record_projection_worker_health(health: &eventexec::WorkerHealth, retryable_failure: bool) {
     if retryable_failure {
-        health.mark_projection_degraded();
+        health.mark_degraded();
     } else {
         health.mark_healthy();
     }

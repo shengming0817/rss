@@ -14,9 +14,10 @@ use diport::{
 };
 use eventexec::command::CommandIdempotencyKeyring;
 use eventexec::reconcile::{
-    BackoffPolicy, DeviceCertificateSystemProducer, ReconcileConfigError, ReconcileMaxInFlight,
+    DeviceCertificateSystemProducer, ReconcileConfigError, ReconcileMaxInFlight,
     ReconcileSchedulerBuilder, ReconcileWorkerControl, Tenancy, Trigger,
 };
+use eventexec::retry::BackoffPolicy;
 use eventexec::{RelayBudget, RelayConfig, WorkerHealth};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use identity::ports::device_certificate::{

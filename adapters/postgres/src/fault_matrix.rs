@@ -1173,7 +1173,8 @@ impl PgFaultMatrixHarness {
                         .for_domain::<crate::caps::Audit>()
                         .session_created_consumer_tx(hasher),
                 );
-                match consumer.handle(message, ctx, key, lease).await {
+                let event = Arc::new(eventexec::consumer::ValidatedEvent::for_test(message)?);
+                match consumer.handle(event, ctx, key, lease).await {
                     eventexec::consumer_tx::ConsumerTxOutcome::Committed(_) => {
                         Ok(FaultMatrixConsumerDelivery::Committed)
                     }

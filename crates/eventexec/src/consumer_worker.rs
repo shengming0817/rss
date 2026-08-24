@@ -75,18 +75,18 @@ use diport::{
     AckableSubscriber, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
     DynAckableSubscriber, DynDeadLetterStore, Topic,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "l2-test-support"))]
 use diport::{DeliveryStream, MessageStream};
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use crate::ManagedBlockingWorker;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "l2-test-support"))]
 use crate::consumer::run_consumer;
 use crate::consumer::{ConsumerMeta, LeaseConfig, ValidatedEvent, run_consumer_ackable};
 use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
-use crate::reconcile::{BackoffPolicy, wait_or_cancel};
 use crate::relay::WorkerHealth;
+use crate::retry::{BackoffPolicy, wait_or_cancel};
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
 /// [`crate::OUTBOX_RELAY_PROBE`]）。组合根据此 + domain/topic 组装 per-worker `primitives::ProbeName`
@@ -156,7 +156,7 @@ fn health_reporting_dlx(
 #[allow(clippy::too_many_arguments)]
 // reason: 9 参数是消费 worker spawn 的最小必要集（name/stream/idem/dlx/meta/handler/lease_cfg/token/health
 // 各自语义独立）；聚合 struct 增间接层且无复用，且只对 test-support 暴露。
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "l2-test-support"))]
 #[doc(hidden)]
 pub fn spawn_test_consumer<S, H>(
     name: String,
@@ -254,7 +254,7 @@ where
 /// at-least-once 不丢。
 #[allow(clippy::too_many_arguments)]
 // reason: 同 spawn_consumer——9 参数语义独立，item-level carve-out。
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "l2-test-support"))]
 #[doc(hidden)]
 pub fn spawn_test_ackable_consumer<S, H>(
     name: String,
@@ -568,8 +568,9 @@ mod tests {
         spawn_consumer_ackable_subscriber, spawn_relay, spawn_test_ackable_consumer,
         spawn_test_consumer,
     };
+    use crate::retry::BackoffPolicy;
     use crate::tenant_authority::TenantAuthorityBinding;
-    use crate::{BackoffPolicy, ManagedBlockingWorker, TenantAuthority};
+    use crate::{ManagedBlockingWorker, TenantAuthority};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const SCHEMA_HASH: &str =

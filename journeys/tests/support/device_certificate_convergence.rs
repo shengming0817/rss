@@ -7,8 +7,9 @@ use diport::{Clock, ManagedResource as _};
 use eventexec::RelayConfig;
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
-    BackoffPolicy, DeviceCertificateSystemProducer, ReconcileMaxInFlight, Tenancy, Trigger,
+    DeviceCertificateSystemProducer, ReconcileMaxInFlight, Tenancy, Trigger,
 };
+use eventexec::retry::BackoffPolicy;
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
     DeviceCertificateScope, DevicePolicyIdempotencyKey, DraftEligibility, ExpectedGeneration,

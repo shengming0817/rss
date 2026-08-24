@@ -101,12 +101,13 @@ integration = [
     "domain-identity",
     "domain-audit",
     "auth-audit-sink",
-    "eventexec/test-support",
+    "eventexec/l2-test-support",
+    "eventexec/internal-test-support",
     "dep:serde_json_canonicalizer",
     "testkit/containers",
 ]
 # 组合根默认单测专用：只开放 lazy pool 的 capability bundle，不连接数据库、不暴露 pool/store。
-test-support = ["eventexec/test-support"]
+test-support = ["eventexec/l2-test-support", "eventexec/internal-test-support"]
 # Composition 单测专用 proof mint；不进入通用 test-support/integration，避免任何 provider
 # conformance/trybuild 图把测试构造器误当成生产能力。
 consumer-tx-composition-test-support = []
@@ -123,7 +124,8 @@ fault-matrix-test-support = [
     "dep:anyhow",
     "dep:serde_json_canonicalizer",
     "diport/test-support",
-    "eventexec/test-support",
+    "eventexec/l2-test-support",
+    "eventexec/internal-test-support",
     "dep:identity",
     "identity/fault-matrix-test-support",
 ]

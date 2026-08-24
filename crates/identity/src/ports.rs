@@ -552,14 +552,14 @@ mod credential_security_fact_tests {
             let repeat = credential_security_fact(&event, &pseudonym_keys)
                 .await
                 .expect("repeat fact");
-            let (repeat_entry, _, _) = repeat.into_event().into_parts();
+            let (repeat_entry, _, _, _) = repeat.into_event().into_parts();
             let repeat_payload: serde_json::Value =
                 serde_json::from_slice(repeat_entry.payload()).expect("repeat payload");
             let fact = credential_security_fact(&event, &pseudonym_keys)
                 .await
                 .expect("fact");
             assert_eq!(fact.event().fact(), SECURITY_EVENT_FACT);
-            let (entry, envelope, _) = fact.into_event().into_parts();
+            let (entry, envelope, _, _) = fact.into_event().into_parts();
             let payload: serde_json::Value =
                 serde_json::from_slice(entry.payload()).expect("payload");
             let target_ref = payload["target"]["ref"]
@@ -669,7 +669,7 @@ mod credential_security_fact_tests {
                 unreachable!("account command")
             };
             let (_, event, _) = command.into_parts();
-            let (entry, envelope, _) = credential_security_fact(&event, &pseudonym_keys)
+            let (entry, envelope, _, _) = credential_security_fact(&event, &pseudonym_keys)
                 .await
                 .expect("security fact")
                 .into_event()
