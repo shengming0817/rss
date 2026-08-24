@@ -14,6 +14,7 @@ internal-test-support = ["generated/test-support"]
 workspace = true
 
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }

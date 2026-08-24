@@ -10,7 +10,7 @@ async fn consumer_tx_real_settlement_maps_without_replay() -> TestResult {
     };
     use consistency::InboxStore as _;
     use consistency::idempotency::{IdemKey, LeaseToken, SeenState};
-    use eventexec::consumer_tx::ConsumerTxOutcome;
+    use eventing::delivery::ConsumerTxOutcome;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let (_pg, store) = connect_pg().await?;

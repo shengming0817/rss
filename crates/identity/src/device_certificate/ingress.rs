@@ -567,8 +567,8 @@ impl DeviceIngressApplicationReceipt {
             scope.tenant(),
             self.occurred_at,
             scope.device(),
-            consistency::IdemKey::parse(&self.outbox_event_id)
-                .map_err(|_| eventexec::event::EventEncodeError::IdempotencyKey)?,
+            eventing::envelope::EventId::parse(&self.outbox_event_id)
+                .map_err(|_| eventexec::event::EventEncodeError::EventId)?,
         )
         .await
     }

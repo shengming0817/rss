@@ -30,6 +30,7 @@ path = "tests/runtime_image_acceptance.rs"
 required-features = ["artifact-acceptance"]
 
 [dependencies]
+eventing.workspace = true
 anyhow = { workspace = true }
 authmint = { path = "../../crates/authmint" }
 axum = { workspace = true }

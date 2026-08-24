@@ -1,18 +1,10 @@
-//! Provider-neutral L2 event metadata candidate.
-//!
-//! This module intentionally exposes one flat value type. Transport bags, provider sources,
-//! payloads, receipts, stores, transaction outcomes, and L3/L4 implementation types stay outside
-//! this surface. The candidate moves atomically to `rss-eventing` in #2159; no compatibility path
-//! is provided from the crate root.
-//!
-//! ref: CloudEvents context attributes are separate from event data; unlike cqrs-es
-//! `EventEnvelope`, this type does not expose an open metadata map or a `Debug` implementation.
+//! Closed provider-neutral metadata carried by an event envelope.
 
 /// Canonical tenant, occurrence time, and optional audit correlation for one L2 event.
 ///
-/// Private representation plus the single typed constructor make additional public metadata
-/// impossible for downstream callers to express. This type deliberately implements neither
-/// `Debug` nor `Display`: event metadata must be accessed explicitly rather than logged wholesale.
+/// The private representation and complete constructor make partial metadata unrepresentable.
+/// This type deliberately implements neither `Debug` nor `Display`; callers must access each
+/// field explicitly instead of logging the complete metadata value.
 pub struct EventMetadata {
     tenant_id: rss_request_context::TenantId,
     occurred_at: rss_contract::Timepoint,
@@ -21,6 +13,7 @@ pub struct EventMetadata {
 
 impl EventMetadata {
     /// Constructs the complete closed metadata set.
+    #[must_use]
     pub fn new(
         tenant_id: rss_request_context::TenantId,
         occurred_at: rss_contract::Timepoint,
@@ -45,7 +38,7 @@ impl EventMetadata {
         self.occurred_at
     }
 
-    /// Borrows the optional canonical audit correlation identifier.
+    /// Borrows the optional audit correlation identifier.
     #[must_use]
     pub fn audit_correlation(&self) -> Option<&rss_diag_context::CorrelationId> {
         self.audit_correlation.as_ref()

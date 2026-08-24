@@ -40,6 +40,7 @@ use diport::{
     DeadLetterStore, DeadLetterSummary, EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
     KEY_TENANT_AUTHORITY, KEY_TENANT_ID, OwnerCheckpointStore, RedactedSource, SaveOutcome,
 };
+use eventing::lifecycle::ShutdownBudget;
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -52,7 +53,6 @@ use crate::relay::WorkerHealth;
 /// readyz probe 名：projection worker（无 `_ready` 后缀，对齐其它后台 worker probe 命名）。
 pub const PROJECTION_WORKER_PROBE: &str = "projection_worker";
 
-const PROJECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const MIN_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROJECTION_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
@@ -2058,6 +2058,7 @@ pub fn spawn_projection_worker<S, P, C, D>(
     config: ProjectionRunnerConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
+    shutdown_budget: ShutdownBudget,
 ) -> ManagedBlockingWorker
 where
     S: ProjectionEventSource + Send + 'static,
@@ -2069,7 +2070,7 @@ where
         name,
         token,
         Arc::clone(&health),
-        PROJECTION_SHUTDOWN_TIMEOUT,
+        shutdown_budget,
         move |token| async move {
             match projection_runner_loop(source, harness, config, token, health).await {
                 ProjectionWorkerExit::CancelledAfterBatch => Ok(()),

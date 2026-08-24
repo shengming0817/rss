@@ -7,7 +7,7 @@
 - 每次 delivery 在 tenant-scoped `ConsumerTx` 内完成 Inbox idempotency、handler effect 与 settlement intent。
 - duplicate 必须返回既有 terminal result；不得再次执行 handler 或外部副作用。
 - handler 只能取得 typed context/ports，不得取得 raw broker acker、connection 或 transaction。
-- 唯一规范 outcome 是 `eventexec::consumer_tx::ConsumerTxOutcome<C>`；Postgres 用私有
+- 唯一规范 outcome 是 `eventing::delivery::ConsumerTxOutcome<C>`；Postgres 用私有
   `PgConsumerTxCommitProof` 绑定成功分支。禁止镜像枚举、转换桥、crate-root re-export 或 `()` proof。
 - commit outcome unknown 不得 success-ack；由同 ID redelivery 与 Inbox state 收敛。
 - subscriber 只能由生产订阅入口铸造字段私有的 `ManagedDeliveryStream`；stream 与派生 lifecycle token
@@ -33,6 +33,10 @@ fenced、rejected。自由字符串或 adapter-specific fallback 禁止。
 - success ACK 只能发生在 durable commit 明确成功之后。
 - 只有 handler transient 进入本地 retry budget；infrastructure transient、commit unknown、rollback failed 与
   fenced 立即重投，不得写 application DLQ 或提交 Inbox done。只有 rejected 可进入 terminal DLQ 流程。
+- 本地 retry loop 必须接收一个 `eventing::lifecycle::RetryPolicy`；尝试上限与指数 backoff 不得拆开传递或
+  单独默认。标准值为三次总尝试、1 秒 base、60 秒 cap。
+- Eventing worker 构造必须显式接收 `eventing::lifecycle::ShutdownBudget`；标准值 45 秒，仅在 internal
+  `ManagedResource` 边界投影为 `Duration`。
 - rollback success 才能按 retry disposition 结算；rollback failed/commit unknown 必须保守重投并保留诊断。
 - settlement transport failure 不改变 durable outcome；以相同 message ID 重投并读取 Inbox result。
 
@@ -54,5 +58,5 @@ fenced、rejected。自由字符串或 adapter-specific fallback 禁止。
 ## Carrier
 
 - Hard：private lease/authorization types、managed delivery stream、closed Disposition、typed `ConsumerTx` 与
-  no-raw-acker boundary。
+  no-raw-acker boundary，以及 typed retry/shutdown budget。
 - Medium：provider conformance、transaction fault tests、DLQ lifecycle/tenant gates 与真实 broker/database integration。

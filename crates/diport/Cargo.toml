@@ -20,6 +20,7 @@ dlq-test-support = []
 workspace = true
 
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 authmint = { path = "../authmint" }

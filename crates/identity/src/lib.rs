@@ -390,8 +390,8 @@ pub mod test_support {
             payload,
             grant.tenant(),
             subject,
-            consistency::IdemKey::parse(event_id)
-                .expect("test event id must satisfy idempotency-key shape"),
+            eventing::envelope::EventId::parse(event_id)
+                .expect("test event id must satisfy event-id shape"),
         )
         .await
         .expect("generated session-created payload must encode")

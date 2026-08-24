@@ -20,9 +20,11 @@
 ## Relay
 
 - publish success 后 settle 前崩溃允许 duplicate；ambiguous outcome 必须用原 event ID 重试。
-- publish error 是 closed permanent/transient/ambiguous decision；只有 permanent 首投进入 terminal DLQ。
+- publish error 由 `eventing::delivery::PublishErrorKind` 闭合为 permanent/transient/ambiguous decision；只有
+  permanent 首投进入 terminal DLQ。
 - claim 在同一数据库语句生成 token/deadline；settle CAS 必须匹配 token 与 deadline，过期租约拒绝。
 - 每次 publish 前按数据库当前时间检查 lease 与 absolute delivery budget；预算不足不得调用 broker。
+  canonical `eventing::delivery::DeliveryBudget` 只公开 `Duration`，PostgreSQL 的整毫秒投影只能在 adapter 内完成。
 - provider 在构造期绑定 typed domain，调用方不得传 raw domain。
 
 ## Same-ID window

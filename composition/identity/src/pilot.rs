@@ -17,8 +17,9 @@ use eventexec::reconcile::{
     DeviceCertificateSystemProducer, ReconcileConfigError, ReconcileMaxInFlight,
     ReconcileSchedulerBuilder, ReconcileWorkerControl, Tenancy, Trigger,
 };
-use eventexec::retry::BackoffPolicy;
-use eventexec::{RelayBudget, RelayConfig, WorkerHealth};
+use eventexec::{RelayConfig, WorkerHealth};
+use eventing::delivery::DeliveryBudget;
+use eventing::lifecycle::RetryPolicy;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use identity::ports::device_certificate::{
     ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactEligibility,
@@ -327,7 +328,7 @@ pub struct DeviceIdentitySchedulerConfig {
 /// Named reconcile cadence, retry, lease, and concurrency policy.
 pub struct DeviceIdentitySchedulerTiming {
     trigger: Trigger,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
     lease_ttl: Duration,
     max_in_flight: ReconcileMaxInFlight,
 }
@@ -336,7 +337,7 @@ impl DeviceIdentitySchedulerTiming {
     #[must_use]
     pub const fn new(
         trigger: Trigger,
-        backoff: BackoffPolicy,
+        backoff: RetryPolicy,
         lease_ttl: Duration,
         max_in_flight: ReconcileMaxInFlight,
     ) -> Self {
@@ -377,7 +378,7 @@ pub struct DeviceIdentityRelayConfig {
     command_ttl: DeviceCertificateCommandTtl,
     command_relay: RelayConfig,
     receipt_relay: RelayConfig,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 }
 
 impl DeviceIdentityRelayConfig {
@@ -386,7 +387,7 @@ impl DeviceIdentityRelayConfig {
         command_ttl: DeviceCertificateCommandTtl,
         command_relay: RelayConfig,
         receipt_relay: RelayConfig,
-        relay_budget: RelayBudget,
+        relay_budget: DeliveryBudget,
     ) -> Self {
         Self {
             command_ttl,
@@ -909,7 +910,7 @@ struct DeviceRelayRuntime {
     outbox: Arc<PgDeviceOutbox>,
     publisher: DeviceMqttPublisher,
     config: RelayConfig,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     cancellation: CancellationToken,
     control: PilotLoopControl,
 }
@@ -995,7 +996,7 @@ async fn run_relay_round(
     outbox: &PgDeviceOutbox,
     publisher: &DeviceMqttPublisher,
     limit: usize,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     control: &PilotLoopControl,
 ) -> bool {
     let claims = match claim_relay_batch(kind, outbox, limit).await {
@@ -1048,7 +1049,7 @@ async fn publish_and_settle(
     outbox: &PgDeviceOutbox,
     publisher: &DeviceMqttPublisher,
     claim: PgClaimedDeviceOutbox,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
 ) -> bool {
     let Some(accepted) = publish_with_budget(publisher, claim, budget).await else {
         log_relay_failure("publish");
@@ -1065,7 +1066,7 @@ async fn publish_and_settle(
 async fn publish_with_budget(
     publisher: &DeviceMqttPublisher,
     claim: PgClaimedDeviceOutbox,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
 ) -> Option<PgBrokerAcceptedDeviceOutbox> {
     match tokio::time::timeout(budget.publish_timeout(), publisher.publish(claim)).await {
         Ok(Ok(accepted)) => Some(accepted),

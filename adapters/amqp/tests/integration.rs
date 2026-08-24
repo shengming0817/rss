@@ -18,8 +18,9 @@ use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
     KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, ManagedResource, MessageId,
-    PublishErrorKind, PublishRequest as DiPublishRequest, Publisher, Topic,
+    PublishRequest as DiPublishRequest, Publisher, Topic,
 };
+use eventing::delivery::PublishErrorKind;
 use futures::StreamExt;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
@@ -1406,8 +1407,13 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
         eventexec::LeaseConfig::from_ttl(Duration::from_secs(60)),
         token1,
         health,
-        eventexec::retry::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))?,
+        eventing::lifecycle::RetryPolicy::new(
+            std::num::NonZeroU32::MIN.saturating_add(2),
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+        )?,
         admission,
+        eventing::lifecycle::ShutdownBudget::STANDARD,
     );
     while subscription_health.status() != primitives::healthz::HealthStatus::Healthy {
         tokio::task::yield_now().await;

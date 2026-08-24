@@ -55,9 +55,7 @@ use axum::routing::{delete, get, post};
 use bootstrap::{KernelError, ReconcileSubscriberOwner, SubscriberCapability};
 #[cfg(test)]
 use consistency::EventEntry;
-use consistency::{
-    EngineError, EngineErrorKind, HandleResult, IdemKey, PermanentError, PermanentErrorKind,
-};
+use consistency::{EngineError, EngineErrorKind, HandleResult, PermanentError, PermanentErrorKind};
 #[cfg(test)]
 use diport::OutboxEnvelopeParts;
 use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor};
@@ -292,7 +290,7 @@ pub enum SettingsServiceError {
     EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
     /// Stable event idempotency identity is invalid.
     #[error("config-version-changed idempotency identity validation failed")]
-    IdempotencyKey(#[source] consistency::IdemKeyError),
+    IdempotencyKey(#[source] eventing::envelope::EventIdError),
     /// 底层存储失败（配置写 / 同事务 outbox append 持久化错误；原始错误进 source，不进 Display/wire）。
     #[error("config storage failed")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -541,7 +539,8 @@ impl SettingsService {
             occurred_at,
             subject_id,
             actor,
-            IdemKey::parse(&event_id).map_err(SettingsServiceError::IdempotencyKey)?,
+            eventing::envelope::EventId::parse(&event_id)
+                .map_err(SettingsServiceError::IdempotencyKey)?,
         )
         .await
         .map_err(SettingsServiceError::PayloadEncode)

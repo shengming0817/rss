@@ -11,10 +11,11 @@ use diport::{AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, Top
 #[cfg(test)]
 use eventexec::ManagedBlockingWorker;
 use eventexec::{
-    EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayBudget,
-    RelayConfig, RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
+    EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayConfig,
+    RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
     spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
 };
+use eventing::delivery::DeliveryBudget;
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 
 const RELAY_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -29,7 +30,8 @@ const OUTBOX_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const OUTBOX_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 const OUTBOX_RETAIN_SECONDS: u64 = 604_800;
 const MAINTENANCE_TTL: Duration = Duration::from_secs(30);
-const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const EVENT_WORKER_SHUTDOWN_BUDGET: eventing::lifecycle::ShutdownBudget =
+    eventing::lifecycle::ShutdownBudget::STANDARD;
 type LifecycleProbe = (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>);
 
 #[allow(clippy::too_many_arguments)]
@@ -132,7 +134,7 @@ async fn wire_connected(
     audit_key: &primitives::MacKey,
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     publisher_resource: Box<DynManagedResource<'static>>,
     subscriber_resource: Box<DynManagedResource<'static>>,
     admission_control: primitives::ProcessAdmissionControl,
@@ -188,8 +190,8 @@ fn assemble_role_outputs(
     }
 }
 
-fn relay_budget() -> anyhow::Result<RelayBudget> {
-    RelayBudget::new(
+fn relay_budget() -> anyhow::Result<DeliveryBudget> {
+    DeliveryBudget::new(
         RELAY_LEASE_TTL,
         RELAY_PUBLISH_TIMEOUT,
         RELAY_SETTLE_TIMEOUT,
@@ -201,7 +203,7 @@ fn relay_budget() -> anyhow::Result<RelayBudget> {
 fn wire_publisher(
     pg: &postgres::PgRuntimeHandle,
     amqp: &amqp::AmqpInfraDeps,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
     resource: Box<DynManagedResource<'static>>,
@@ -229,6 +231,7 @@ fn wire_publisher(
                 worker_health,
                 Arc::new(MetricsOutboxMetrics),
                 relay_admission,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
         },
     );
@@ -354,6 +357,7 @@ fn wire_inbox_sweeper(
                 make,
                 worker_health,
                 token,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
         },
     ));
@@ -403,7 +407,7 @@ fn wire_distributed_maintenance(
                 "identityaudit-outbox-sampler",
                 token,
                 Arc::clone(&sampler_worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     eventing_composition::coordinated_outbox_backlog_sampler_loop(
                         Arc::new(maintenance),
@@ -430,7 +434,7 @@ fn wire_distributed_maintenance(
                 "identityaudit-outbox-sweeper",
                 token,
                 Arc::clone(&sweeper_worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     sweeper_loop(
                         Arc::new(sweeper),
@@ -501,7 +505,7 @@ fn retain_admission_authority(
                 "identityaudit-dr-admission-owner",
                 token,
                 Arc::clone(&health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     eventexec::run_dr_admission_controller(
                         pg,
@@ -680,11 +684,14 @@ mod lifecycle_tests {
             "identityaudit-completed-worker",
             tokio_util::sync::CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             |_token| Ok(()),
         );
         assert_eq!(completed.name(), "identityaudit-completed-worker");
-        assert_eq!(completed.shutdown_timeout(), EVENT_WORKER_SHUTDOWN_TIMEOUT);
+        assert_eq!(
+            completed.shutdown_timeout(),
+            EVENT_WORKER_SHUTDOWN_BUDGET.timeout()
+        );
         assert!(completed.shutdown().await.is_ok());
         assert!(completed.shutdown().await.is_ok());
 
@@ -694,7 +701,7 @@ mod lifecycle_tests {
             "identityaudit-cancelled-worker",
             tokio_util::sync::CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             move |token| {
                 while !token.is_cancelled() {
                     std::thread::yield_now();
@@ -710,7 +717,7 @@ mod lifecycle_tests {
             "identityaudit-failed-worker",
             tokio_util::sync::CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             |_token| Err(ShutdownError::new(std::io::Error::other("runner failed"))),
         );
         assert!(failed.shutdown().await.is_err());
@@ -719,7 +726,7 @@ mod lifecycle_tests {
             "identityaudit-panicked-worker",
             tokio_util::sync::CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             |_token| -> Result<(), ShutdownError> { panic!("intentional worker panic") },
         );
         assert!(panicked.shutdown().await.is_err());
@@ -744,7 +751,7 @@ mod lifecycle_tests {
                     "identityaudit-stalled-sampler",
                     tokio_util::sync::CancellationToken::new(),
                     Arc::new(WorkerHealth::starting()),
-                    EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                    EVENT_WORKER_SHUTDOWN_BUDGET,
                     move |_token| {
                         thread_started.store(true, Ordering::Release);
                         while !thread_release.load(Ordering::Acquire) {

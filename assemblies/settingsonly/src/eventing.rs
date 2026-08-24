@@ -9,10 +9,10 @@ use diport::{AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, Top
 #[cfg(test)]
 use eventexec::EVENT_CONSUMER_PROBE;
 use eventexec::{
-    LeaseConfig, MetricsOutboxMetrics, RelayBudget, RelayConfig, RetentionTarget, SamplerConfig,
-    SweeperConfig, SweeperWorker, WorkerHealth, spawn_on_dedicated_runtime, spawn_relay,
-    sweeper_loop,
+    LeaseConfig, MetricsOutboxMetrics, RelayConfig, RetentionTarget, SamplerConfig, SweeperConfig,
+    SweeperWorker, WorkerHealth, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
 };
+use eventing::delivery::DeliveryBudget;
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 use vocab::ExternalEffectPolicy;
 
@@ -27,7 +27,8 @@ const OUTBOX_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const OUTBOX_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 const OUTBOX_RETAIN_SECONDS: u64 = 604_800;
 const MAINTENANCE_TTL: Duration = Duration::from_secs(30);
-const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const EVENT_WORKER_SHUTDOWN_BUDGET: eventing::lifecycle::ShutdownBudget =
+    eventing::lifecycle::ShutdownBudget::STANDARD;
 const AMQP_READINESS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Complete, non-optional production inputs for the settings event transport.
@@ -345,8 +346,8 @@ fn split_amqp_resources(
     Ok((publisher, subscriber))
 }
 
-fn relay_budget() -> anyhow::Result<RelayBudget> {
-    RelayBudget::new(
+fn relay_budget() -> anyhow::Result<DeliveryBudget> {
+    DeliveryBudget::new(
         RELAY_LEASE_TTL,
         RELAY_PUBLISH_TIMEOUT,
         RELAY_SETTLE_TIMEOUT,
@@ -357,7 +358,7 @@ fn relay_budget() -> anyhow::Result<RelayBudget> {
 
 fn wire_relay(
     inputs: &EventingInputs,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let relay = RelayConfig::new(RELAY_POLL_INTERVAL, RELAY_MAX_IN_FLIGHT)
@@ -384,6 +385,7 @@ fn wire_relay(
                 worker_health,
                 Arc::new(MetricsOutboxMetrics),
                 relay_admission,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
         },
     ));
@@ -485,6 +487,7 @@ fn wire_inbox_sweeper(
                 make,
                 worker_health,
                 token,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
         },
     ));
@@ -531,7 +534,7 @@ fn wire_outbox_maintenance(
                 "settingsonly-outbox-sampler",
                 token,
                 Arc::clone(&sampler_worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     eventing_composition::coordinated_outbox_backlog_sampler_loop(
                         Arc::new(maintenance),
@@ -564,7 +567,7 @@ fn wire_outbox_maintenance(
                 "settingsonly-outbox-sweeper",
                 token,
                 Arc::clone(&sweeper_worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     sweeper_loop(
                         Arc::new(sweeper),
@@ -610,7 +613,7 @@ fn retain_admission_authority(
                 "settingsonly-dr-admission-owner",
                 token,
                 Arc::clone(&health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     eventexec::run_dr_admission_controller(
                         pg,

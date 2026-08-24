@@ -21,6 +21,7 @@ test-support = ["httpserve/test-util"]
 fault-matrix-test-support = []
 
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }

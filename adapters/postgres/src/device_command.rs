@@ -836,7 +836,10 @@ impl<E: ArtifactEligibility> PgDeviceCommandStore<E> {
     /// serving writer lane and the outbox can settle command publication only through its consumed
     /// SQL claim.
     #[must_use]
-    pub fn device_outbox(&self, relay_budget: eventexec::RelayBudget) -> crate::PgDeviceOutbox {
+    pub fn device_outbox(
+        &self,
+        relay_budget: eventing::delivery::DeliveryBudget,
+    ) -> crate::PgDeviceOutbox {
         crate::PgDeviceOutbox::from_command_store(
             self.device_outbox_pool.clone(),
             self.write_pool.clone(),

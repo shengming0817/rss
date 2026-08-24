@@ -1,4 +1,4 @@
-use eventexec::event_metadata::EventMetadata;
+use eventing::metadata::EventMetadata;
 
 fn main() {
     let tenant = rss_request_context::TenantId::parse(

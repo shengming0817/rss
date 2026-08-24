@@ -23,7 +23,7 @@ use crate::cotx::eventing::OutboxTx;
 use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::outbox::{
     AppendFingerprintObservation, CanonicalOutboxFact, OutboxAppendError, OutboxEnvelope,
-    classify_append_fingerprint, metadata_with_ambient,
+    classify_append_fingerprint, metadata_from_reviewed_event,
 };
 use crate::pool::VerifiedPgWriteStore;
 
@@ -52,14 +52,14 @@ impl PgOutboxCdcEmitter {
 
 impl ReviewedEventWriter for PgOutboxCdcEmitter {
     async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
-        let (entry, envelope, occurred_at, _fact) = event.into_parts();
-        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+        let (entry, envelope, metadata, _fact) = event.into_parts();
+        let (contract, _tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let aggregate_id = aggregate_id_for_log(&subject_id);
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+            metadata_from_reviewed_event(&metadata, contract)
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )

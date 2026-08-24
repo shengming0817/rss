@@ -126,7 +126,7 @@ pub(crate) enum Rule {
     ProductionConsumerBundleBypass,
     ProducerTopology,
     OutboxClaimCutover,
-    OutboxRelayBudget,
+    OutboxDeliveryBudget,
     AmqpPublishBypass,
     AmqpRecoveryOwner,
     PostgresOutboxSettlementFunnel,
@@ -2524,12 +2524,13 @@ const OUTBOX_SETTLEMENT_RAW_FUNCTIONS: &[&str] = &[
     "rss_outbox_mark_dlx",
 ];
 const RELAY_BUDGET_SOURCE_PATHS: &[&str] = &[
-    "crates/eventexec/src/relay_config.rs",
+    "crates/eventing/src/delivery.rs",
     "assemblies/runtime/src/event_transport.rs",
     "assemblies/runtime/src/phase/infra.rs",
     "adapters/amqp/src/conn.rs",
     "adapters/amqp/src/publisher.rs",
     "adapters/amqp/src/bundle.rs",
+    "adapters/postgres/src/delivery_policy.rs",
     "adapters/postgres/src/outbox.rs",
     "adapters/postgres/src/outbox/settlement.rs",
     POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH,
@@ -3091,14 +3092,14 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     let mut findings = Vec::new();
     for (path, required) in [
         (
-            "crates/eventexec/src/relay_config.rs",
-            &["pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000"][..],
+            "crates/eventing/src/delivery.rs",
+            &["pub const DELIVERY_BUDGET_MAX: Duration = Duration::from_millis(86_400_000)"][..],
         ),
         (
             "assemblies/runtime/src/event_transport.rs",
             &[
                 "relay: RelayTiming",
-                "budget: RelayBudget",
+                "budget: DeliveryBudget",
                 "const RELAY_LEASE_TTL_ENV: &str = \"RSS_RELAY_LEASE_TTL_MS\"",
                 "const RELAY_PUBLISH_TIMEOUT_ENV: &str = \"RSS_RELAY_PUBLISH_TIMEOUT_MS\"",
                 "const RELAY_SETTLE_TIMEOUT_ENV: &str = \"RSS_RELAY_SETTLE_TIMEOUT_MS\"",
@@ -3118,11 +3119,11 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         ),
         (
             "adapters/postgres/src/outbox.rs",
-            &["relay_budget: RelayBudget"][..],
+            &["relay_budget: DeliveryBudget"][..],
         ),
         (
             "adapters/postgres/src/bundle.rs",
-            &["relay_budget: RelayBudget"][..],
+            &["relay_budget: eventing::delivery::DeliveryBudget"][..],
         ),
         (
             "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
@@ -3150,11 +3151,30 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
                 .collect::<String>();
             if !structural.contains(&normalized) {
                 findings.push(finding(
-                    Rule::OutboxRelayBudget,
+                    Rule::OutboxDeliveryBudget,
                     path.to_string(),
                     format!("OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `{fragment}`"),
                 ));
             }
+        }
+    }
+    let projection_path = Path::new("adapters/postgres/src/delivery_policy.rs");
+    let projection = source_map.get(projection_path).copied().unwrap_or_default();
+    let projection_structure = syn::parse_file(projection)
+        .map(|file| normalized_tokens(&file))
+        .unwrap_or_default();
+    for fragment in [
+        "impl DeliveryBudgetPgProjection for DeliveryBudget",
+        "self.lease_ttl().as_millis() as i64",
+        "self.required_budget().as_millis() as i64",
+    ] {
+        let normalized = fragment.replace(char::is_whitespace, "");
+        if !projection_structure.contains(&normalized) {
+            findings.push(finding(
+                Rule::OutboxDeliveryBudget,
+                projection_path.display().to_string(),
+                format!("OUTBOX-RELAY-BUDGET-01 缺 adapter projection fragment `{fragment}`"),
+            ));
         }
     }
     findings.extend(scan_relay_budget_live_seams(&source_map));
@@ -3168,13 +3188,6 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     // Boundary tests are part of the Medium gate: parse the complete Rust token stream so comments
     // cannot satisfy these anchors, while retaining cfg(test) bodies and SQL macro literals.
     for (path, required) in [
-        (
-            "crates/eventexec/src/relay_config.rs",
-            &[
-                "fn relay_budget_operational_ceiling_is_inclusive_and_public",
-                "RELAY_BUDGET_MAX_MILLIS + 1",
-            ][..],
-        ),
         (
             "assemblies/runtime/src/event_transport.rs",
             &[
@@ -3209,7 +3222,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
                 .collect::<String>();
             if !structure.contains(&normalized) {
                 findings.push(finding(
-                    Rule::OutboxRelayBudget,
+                    Rule::OutboxDeliveryBudget,
                     path.to_string(),
                     format!("OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `{fragment}`"),
                 ));
@@ -3218,7 +3231,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     }
     for (path, content) in sources {
         if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
-            && path != Path::new("crates/eventexec/src/relay_config.rs")
+            && path != Path::new("crates/eventing/src/delivery.rs")
             && path != Path::new(POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH)
         {
             findings.extend(scan_hardcoded_relay_budget(path, content));
@@ -4291,7 +4304,7 @@ fn scan_live_seam_file(
 ) -> Vec<Finding<Rule>> {
     let Ok(file) = syn::parse_file(content) else {
         return vec![finding(
-            Rule::OutboxRelayBudget,
+            Rule::OutboxDeliveryBudget,
             path.to_string(),
             "OUTBOX-RELAY-BUDGET-01 live carrier Rust AST 无法解析".to_string(),
         )];
@@ -4305,7 +4318,7 @@ fn scan_live_seam_file(
         .map(|(owner, function, missing)| {
             let owner = owner.map_or_else(String::new, |owner| format!("{owner}::"));
             finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 path.to_string(),
                 format!(
                     "OUTBOX-RELAY-BUDGET-01 live seam `{owner}{function}` 未消费 canonical typed budget/deadline: {missing:?}"
@@ -4333,7 +4346,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                 (
                     Some("RelayTiming"),
                     "from_snapshot",
-                    &["RelayBudget::new(", "budget,"][..],
+                    &["DeliveryBudget::new(", "budget,"][..],
                 ),
                 (
                     None,
@@ -4539,7 +4552,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
         let connect = facts.iter().position(|fact| fact.contains("wire_durable("));
         if !matches!((gate, connect), (Some(gate), Some(connect)) if gate < connect) {
             findings.push(finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 runtime_path.to_string(),
                 "OUTBOX-RELAY-BUDGET-01 database policy gate 必须先于 AMQP wire_durable"
                     .to_string(),
@@ -4596,7 +4609,7 @@ impl RelayConstructorVisitor<'_> {
         };
         if !allowed {
             self.findings.push(finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 self.path.display().to_string(),
                 format!("OUTBOX-RELAY-BUDGET-01 unregistered constructor `{callee}` in `{owner}`"),
             ));
@@ -4701,13 +4714,13 @@ fn relay_budget_sql_code(content: &str) -> String {
 }
 
 #[derive(Default)]
-struct RelayBudgetAuditVisitor {
+struct DeliveryBudgetAuditVisitor {
     impl_owner: Option<String>,
     function: Option<String>,
     macros: Vec<(Option<String>, String, String)>,
 }
 
-impl<'ast> Visit<'ast> for RelayBudgetAuditVisitor {
+impl<'ast> Visit<'ast> for DeliveryBudgetAuditVisitor {
     fn visit_block(&mut self, node: &'ast syn::Block) {
         for statement in &node.stmts {
             if statement_has_test_attr(statement) {
@@ -4854,7 +4867,7 @@ fn scan_relay_budget_audit(
     let Ok(file) = syn::parse_file(content) else {
         return Vec::new();
     };
-    let mut visitor = RelayBudgetAuditVisitor::default();
+    let mut visitor = DeliveryBudgetAuditVisitor::default();
     visitor.visit_file(&file);
     let expected = expected_function.map(|expected_function| {
         expected_function
@@ -4886,7 +4899,11 @@ fn scan_relay_budget_audit(
                 )
             },
         );
-        return vec![finding(Rule::OutboxRelayBudget, path.to_string(), subject)];
+        return vec![finding(
+            Rule::OutboxDeliveryBudget,
+            path.to_string(),
+            subject,
+        )];
     }
     let tokens = &matches[0].2;
     let compact = tokens
@@ -4898,7 +4915,7 @@ fn scan_relay_budget_audit(
         .filter(|field| !compact.contains(*field))
         .map(|field| {
             finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 path.to_string(),
                 format!("审计事件 `{marker}` 缺安全字段 `{field}`"),
             )
@@ -4917,7 +4934,7 @@ fn scan_relay_budget_audit(
     ] {
         if compact.contains(forbidden) {
             findings.push(finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 path.to_string(),
                 format!("审计事件 `{marker}` 泄漏禁止字段 `{forbidden}`"),
             ));
@@ -4927,11 +4944,11 @@ fn scan_relay_budget_audit(
 }
 
 #[derive(Default)]
-struct HardcodedRelayBudgetVisitor {
+struct HardcodedDeliveryBudgetVisitor {
     occurrences: Vec<(usize, String)>,
 }
 
-impl<'ast> Visit<'ast> for HardcodedRelayBudgetVisitor {
+impl<'ast> Visit<'ast> for HardcodedDeliveryBudgetVisitor {
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         if !has_test_attr(&node.attrs) {
             syn::visit::visit_item_mod(self, node);
@@ -4982,19 +4999,19 @@ impl<'ast> Visit<'ast> for HardcodedRelayBudgetVisitor {
 fn scan_hardcoded_relay_budget(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     let Ok(file) = syn::parse_file(content) else {
         return vec![finding(
-            Rule::OutboxRelayBudget,
+            Rule::OutboxDeliveryBudget,
             path.display().to_string(),
             "OUTBOX-RELAY-BUDGET-01 carrier Rust AST 无法解析".to_string(),
         )];
     };
-    let mut visitor = HardcodedRelayBudgetVisitor::default();
+    let mut visitor = HardcodedDeliveryBudgetVisitor::default();
     visitor.visit_file(&file);
     visitor
         .occurrences
         .into_iter()
         .map(|(line, rendered)| {
             finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 format!("{}:{line}", path.display()),
                 format!("生产 relay carrier 禁止固定 40/50/60 秒预算：`{rendered}`"),
             )
@@ -7993,7 +8010,7 @@ mod tests {
                     red.to_string(),
                 )])
                 .iter()
-                .any(|finding| finding.rule == Rule::OutboxRelayBudget)
+                .any(|finding| finding.rule == Rule::OutboxDeliveryBudget)
             );
         }
     }
@@ -8010,7 +8027,7 @@ mod tests {
             assert!(
                 scan_relay_budget_constructor_callsites(&[(path.clone(), source)])
                     .iter()
-                    .any(|finding| finding.rule == Rule::OutboxRelayBudget)
+                    .any(|finding| finding.rule == Rule::OutboxDeliveryBudget)
             );
         }
         for source in [
@@ -9918,20 +9935,20 @@ $do$;
     }
 
     #[derive(Clone, Copy)]
-    enum RelayBudgetMutation<'a> {
+    enum DeliveryBudgetMutation<'a> {
         ReplaceAll { from: &'a str, to: &'a str },
         InsertAfter { needle: &'a str, addition: &'a str },
     }
 
-    struct RelayBudgetRedCase<'a> {
+    struct DeliveryBudgetRedCase<'a> {
         name: &'a str,
         path: &'a str,
-        mutation: RelayBudgetMutation<'a>,
+        mutation: DeliveryBudgetMutation<'a>,
         expected: &'a [(&'a str, &'a str)],
         hardcode_detail: Option<&'a str>,
     }
 
-    impl<'a> RelayBudgetRedCase<'a> {
+    impl<'a> DeliveryBudgetRedCase<'a> {
         const fn replace(
             name: &'a str,
             path: &'a str,
@@ -9942,7 +9959,7 @@ $do$;
             Self {
                 name,
                 path,
-                mutation: RelayBudgetMutation::ReplaceAll { from, to },
+                mutation: DeliveryBudgetMutation::ReplaceAll { from, to },
                 expected,
                 hardcode_detail: None,
             }
@@ -9958,7 +9975,7 @@ $do$;
             Self {
                 name,
                 path,
-                mutation: RelayBudgetMutation::InsertAfter { needle, addition },
+                mutation: DeliveryBudgetMutation::InsertAfter { needle, addition },
                 expected: &[],
                 hardcode_detail: Some(hardcode_detail),
             }
@@ -9969,7 +9986,7 @@ $do$;
     // reason: test fixture corruption must fail with the exact mutation case/carrier context.
     fn assert_relay_budget_red_case(
         canonical_sources: &[(PathBuf, String)],
-        case: &RelayBudgetRedCase<'_>,
+        case: &DeliveryBudgetRedCase<'_>,
     ) {
         let mut mutated_sources = canonical_sources.to_vec();
         let (_, content) = mutated_sources
@@ -9977,7 +9994,7 @@ $do$;
             .find(|(path, _)| path == Path::new(case.path))
             .unwrap_or_else(|| panic!("{}: missing carrier {}", case.name, case.path));
         match case.mutation {
-            RelayBudgetMutation::ReplaceAll { from, to } => {
+            DeliveryBudgetMutation::ReplaceAll { from, to } => {
                 assert!(
                     content.contains(from),
                     "{}: mutation source fragment missing: {from}",
@@ -9985,7 +10002,7 @@ $do$;
                 );
                 *content = content.replace(from, to);
             }
-            RelayBudgetMutation::InsertAfter { needle, addition } => {
+            DeliveryBudgetMutation::InsertAfter { needle, addition } => {
                 assert!(
                     content.contains(needle),
                     "{}: insertion anchor missing: {needle}",
@@ -10002,14 +10019,14 @@ $do$;
                 .map(|index| index + 1)
                 .unwrap_or_else(|| panic!("{}: hardcode mutation missing", case.name));
             vec![finding(
-                Rule::OutboxRelayBudget,
+                Rule::OutboxDeliveryBudget,
                 format!("{}:{line}", case.path),
                 detail,
             )]
         } else {
             case.expected
                 .iter()
-                .map(|(subject, detail)| finding(Rule::OutboxRelayBudget, *subject, *detail))
+                .map(|(subject, detail)| finding(Rule::OutboxDeliveryBudget, *subject, *detail))
                 .collect()
         };
         let findings = scan_relay_budget_sources(&mutated_sources);
@@ -10023,17 +10040,17 @@ $do$;
         let root = workspace_root().expect("workspace root");
         let sources = load_relay_budget_sources(&root).expect("relay budget sources");
         let cases = [
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "typed budget operational ceiling",
-                "crates/eventexec/src/relay_config.rs",
-                "pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000;",
-                "pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_001;",
+                "crates/eventing/src/delivery.rs",
+                "pub const DELIVERY_BUDGET_MAX: Duration = Duration::from_millis(86_400_000);",
+                "pub const DELIVERY_BUDGET_MAX: Duration = Duration::from_millis(86_400_001);",
                 &[(
-                    "crates/eventexec/src/relay_config.rs",
-                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `pub const RELAY_BUDGET_MAX_MILLIS: u64 = 86_400_000`",
+                    "crates/eventing/src/delivery.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `pub const DELIVERY_BUDGET_MAX: Duration = Duration::from_millis(86_400_000)`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "runtime maximum plus one boundary",
                 "assemblies/runtime/src/event_transport.rs",
                 "(\"RSS_RELAY_LEASE_TTL_MS\", \"86400001\")",
@@ -10043,7 +10060,7 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `(\"RSS_RELAY_LEASE_TTL_MS\", \"86400001\")`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "amqp operational ceiling",
                 "adapters/amqp/src/publisher.rs",
                 "const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;",
@@ -10053,7 +10070,7 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres operational ceiling",
                 "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
                 "p_lease_ttl_ms > 86400000 OR p_required_budget_ms > 86400000",
@@ -10063,7 +10080,17 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `p_lease_ttl_ms > 86400000 OR p_required_budget_ms > 86400000`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
+                "postgres private millisecond projection",
+                "adapters/postgres/src/delivery_policy.rs",
+                "self.lease_ttl().as_millis() as i64",
+                "60_000_i64",
+                &[(
+                    "adapters/postgres/src/delivery_policy.rs",
+                    "OUTBOX-RELAY-BUDGET-01 缺 adapter projection fragment `self.lease_ttl().as_millis() as i64`",
+                )],
+            ),
+            DeliveryBudgetRedCase::replace(
                 "postgres maximum plus one boundary",
                 POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH,
                 "Some(86_400_001)",
@@ -10073,7 +10100,7 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `Some(86_400_001)`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "runtime typed carrier",
                 "assemblies/runtime/src/event_transport.rs",
                 "relay: RelayTiming",
@@ -10083,17 +10110,17 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `relay: RelayTiming`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "runtime infra phase audit carrier",
                 "assemblies/runtime/src/phase/infra.rs",
-                "relay.required_budget_ms = relay_budget.required_budget_millis()",
-                "relay.required_budget = relay_budget.required_budget_millis()",
+                "relay.required_budget_ms = relay_budget.required_budget().as_millis() as i64",
+                "relay.required_budget = relay_budget.required_budget().as_millis() as i64",
                 &[(
                     "assemblies/runtime/src/phase/infra.rs",
                     "审计事件 `runtime event transport budget loaded` 缺安全字段 `relay.required_budget_ms`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "amqp bundle carrier",
                 "adapters/amqp/src/bundle.rs",
                 "publish_timeout,\n                &ca,",
@@ -10103,17 +10130,17 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 live seam `AmqpRuntimeDeps::connect_with_private_ca` 未消费 canonical typed budget/deadline: [\"AmqpPublisher::connect_with_private_ca(&publisher_endpoint.0,format!(\\\"{name}-pub\\\"),publish_timeout,&ca)\"]",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres outbox carrier",
                 "adapters/postgres/src/outbox.rs",
                 "with_publisher_watchdog(deadline, self.relay_budget",
-                "with_publisher_watchdog(deadline, RelayBudget::for_tests()",
+                "with_publisher_watchdog(deadline, DeliveryBudget::for_tests()",
                 &[(
                     "adapters/postgres/src/outbox.rs",
                     "OUTBOX-RELAY-BUDGET-01 live seam `PgOutbox::publish_claimed_before` 未消费 canonical typed budget/deadline: [\"with_publisher_watchdog(deadline,self.relay_budget,self.publisher.publish(request))\"]",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres settlement tenant carrier",
                 "adapters/postgres/src/outbox.rs",
                 "settlement::published(&self.tenant_pool, &claimed, self.relay_budget)",
@@ -10123,7 +10150,7 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 live seam `PgOutbox::relay` 未消费 canonical typed budget/deadline: [\"settlement::published(&self.tenant_pool,&claimed,self.relay_budget)\"]",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres scalar settlement deadline carrier",
                 "adapters/postgres/src/outbox/settlement.rs",
                 "tenant_pool\n            .outbox_deadline_write(",
@@ -10139,7 +10166,7 @@ $do$;
                     ),
                 ],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres DLX settlement deadline carrier",
                 "adapters/postgres/src/outbox/settlement.rs",
                 "tenant_pool\n        .outbox_deadline_write(",
@@ -10149,17 +10176,17 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 live seam `execute_dlx` 未消费 canonical typed budget/deadline: [\"outbox_deadline_write(infra_tenant_scope(tenant),deadline\"]",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres bundle carrier",
                 "adapters/postgres/src/bundle.rs",
-                "relay_budget: RelayBudget",
+                "relay_budget: eventing::delivery::DeliveryBudget",
                 "publish_timeout: Duration",
                 &[(
                     "adapters/postgres/src/bundle.rs",
-                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `relay_budget: RelayBudget`",
+                    "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `relay_budget: eventing::delivery::DeliveryBudget`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "postgres migration carrier",
                 "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
                 "p_required_budget_ms >= p_lease_ttl_ms",
@@ -10169,7 +10196,7 @@ $do$;
                     "OUTBOX-RELAY-BUDGET-01 缺 canonical fragment `p_required_budget_ms >= p_lease_ttl_ms`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "audit required field",
                 "adapters/amqp/src/publisher.rs",
                 "publish_timeout_ms = self.publish_timeout.as_millis() as i64,",
@@ -10179,7 +10206,7 @@ $do$;
                     "审计事件 `amqp publish outcome is ambiguous` 缺安全字段 `publish_timeout_ms`",
                 )],
             ),
-            RelayBudgetRedCase::replace(
+            DeliveryBudgetRedCase::replace(
                 "audit forbidden field",
                 "adapters/amqp/src/publisher.rs",
                 "delivery_outcome = \"unknown\",",
@@ -10189,14 +10216,14 @@ $do$;
                     "审计事件 `amqp publish outcome is ambiguous` 泄漏禁止字段 `payload`",
                 )],
             ),
-            RelayBudgetRedCase::hardcode(
+            DeliveryBudgetRedCase::hardcode(
                 "production hardcode",
                 "assemblies/runtime/src/event_transport.rs",
                 "fn parse_topology(s: &str) -> anyhow::Result<bootstrap::Topology> {",
                 "\n    let _ = Duration::from_secs(40);",
                 "生产 relay carrier 禁止固定 40/50/60 秒预算：`Duration::fromsecs(40)`",
             ),
-            RelayBudgetRedCase::hardcode(
+            DeliveryBudgetRedCase::hardcode(
                 "production relay const hardcode",
                 "assemblies/runtime/src/event_transport.rs",
                 "const RELAY_LEASE_TTL_ENV: &str = \"RSS_RELAY_LEASE_TTL_MS\";",
@@ -10596,8 +10623,8 @@ impl<'a> ProvidersBuilt<'a> {{
         );
 
         let reordered = canonical.replacen(
-            "let event_id = request.event_id().as_str().to_string();\n        let topic = request.topic().as_str().to_string();\n        let properties = build_properties(&event_id, request.metadata());",
-            "let topic = request.topic().as_str().to_string();\n        let event_id = request.event_id().as_str().to_string();\n        let properties = build_properties(&event_id, request.metadata());",
+            "let event_id = request.event_id().as_str().to_string();\n        let topic = request.topic().as_str().to_string();\n        let properties = build_properties(&event_id, &header, request.metadata());",
+            "let topic = request.topic().as_str().to_string();\n        let event_id = request.event_id().as_str().to_string();\n        let properties = build_properties(&event_id, &header, request.metadata());",
             1,
         );
         assert_ne!(reordered, canonical, "local order mutation anchor");

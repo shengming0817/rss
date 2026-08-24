@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-20
+- **Last updated**：2026-08-24
 - **Scope**：ADR-024 与 production acceptance 边界
 
 ## Context
@@ -11,6 +11,17 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 面向 Rust 企业应用的 AI 友好型企业开发框架后，需要统一公共消费面、官方技术栈闭包和分阶段完成条件。
 
 ## Decision
+
+### 2026-08-24 current state：Eventing L2 public waist
+
+#2159 已将 `rss-eventing` 从空 package 原子收敛为四个 provider-neutral canonical module：
+`metadata`、`envelope`、`delivery`、`lifecycle`。真实生产消费者直接依赖这些 owner；`eventexec` 中的旧 metadata、
+transaction outcome、retry/backoff 与 relay budget owner 已删除，不保留 alias、root re-export、转换桥或 feature 双路。
+公共 envelope 不接收 topic；production contract/topic 仍只由 generated `EventFactBinding` 派生并在 internal seal 内汇合。
+数据库毫秒投影、Tokio worker、provider trait、routing 与 commit proof 仍位于 internal/adapters。
+
+本次状态更新不选择 Release Surface、不创建 package proof/profile/T3 carrier，也不激活 observability、fake-clock 或
+external broker consumer；这些状态继续由 #2160–#2163 及后续 T3 owner 独立推进。
 
 ### 2026-08-20 amendment：Foundation / Eventing 公共面与 core / eventing T3 闭集
 

@@ -1327,7 +1327,6 @@ mod tests {
         AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
         GrantSecurityEventKind,
     };
-    use consistency::IdemKey;
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
     use eventexec::event::ReviewedEvent;
     use generated::http::identity_v1::{
@@ -1573,7 +1572,7 @@ mod tests {
                 tenant,
                 rss_request_context::RowScope::SelfOnly,
             ),
-            IdemKey::parse(event_id).expect("idem key parses"),
+            eventing::envelope::EventId::parse(event_id).expect("event id parses"),
         )
         .await
         .expect("test payload encodes")
@@ -1607,7 +1606,7 @@ mod tests {
                 tenant,
                 rss_request_context::RowScope::SelfOnly,
             ),
-            IdemKey::parse("evt-wrong-fact").expect("idem key parses"),
+            eventing::envelope::EventId::parse("evt-wrong-fact").expect("event id parses"),
         )
         .await
         .expect("test payload encodes")
@@ -1641,7 +1640,7 @@ mod tests {
                 tenant,
                 rss_request_context::RowScope::Tenant,
             ),
-            IdemKey::parse("evt-policy").expect("idem key parses"),
+            eventing::envelope::EventId::parse("evt-policy").expect("event id parses"),
         )
         .await
         .expect("test payload encodes")
@@ -1670,7 +1669,7 @@ mod tests {
                 tenant,
                 rss_request_context::RowScope::Tenant,
             ),
-            IdemKey::parse("evt-role-assigned").expect("idem key"),
+            eventing::envelope::EventId::parse("evt-role-assigned").expect("event id"),
         )
         .await
         .expect("role-assigned event")
@@ -1699,7 +1698,7 @@ mod tests {
                 tenant,
                 rss_request_context::RowScope::Tenant,
             ),
-            IdemKey::parse("evt-role-revoked").expect("idem key"),
+            eventing::envelope::EventId::parse("evt-role-revoked").expect("event id"),
         )
         .await
         .expect("role-revoked event")

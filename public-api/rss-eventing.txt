@@ -1,1 +1,287 @@
 pub mod rss_eventing
+pub mod rss_eventing::delivery
+pub enum rss_eventing::delivery::ConsumerTxOutcome<C>
+pub rss_eventing::delivery::ConsumerTxOutcome::CommitUnknown
+pub rss_eventing::delivery::ConsumerTxOutcome::Committed(C)
+pub rss_eventing::delivery::ConsumerTxOutcome::Fenced
+pub rss_eventing::delivery::ConsumerTxOutcome::HandlerTransient
+pub rss_eventing::delivery::ConsumerTxOutcome::InfrastructureTransient
+pub rss_eventing::delivery::ConsumerTxOutcome::Rejected(rss_eventing::delivery::RejectKind)
+pub rss_eventing::delivery::ConsumerTxOutcome::RollbackFailed
+impl<C> rss_eventing::delivery::ConsumerTxOutcome<C>
+pub const fn rss_eventing::delivery::ConsumerTxOutcome<C>::as_label(&self) -> &'static str
+impl<C> core::marker::Freeze for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Freeze
+impl<C> core::marker::Send for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Send
+impl<C> core::marker::Sync for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Sync
+impl<C> core::marker::Unpin for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Unpin
+impl<C> core::marker::UnsafeUnpin for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::UnsafeUnpin
+impl<C> core::panic::unwind_safe::RefUnwindSafe for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::panic::unwind_safe::RefUnwindSafe
+impl<C> core::panic::unwind_safe::UnwindSafe for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::panic::unwind_safe::UnwindSafe
+pub enum rss_eventing::delivery::DeliveryBudgetError
+pub rss_eventing::delivery::DeliveryBudgetError::NonIntegralMilliseconds
+pub rss_eventing::delivery::DeliveryBudgetError::NonIntegralMilliseconds::field: &'static str
+pub rss_eventing::delivery::DeliveryBudgetError::OperationalRangeExceeded
+pub rss_eventing::delivery::DeliveryBudgetError::OperationalRangeExceeded::field: &'static str
+pub rss_eventing::delivery::DeliveryBudgetError::OperationalRangeExceeded::max: core::time::Duration
+pub rss_eventing::delivery::DeliveryBudgetError::RequiredBudgetNotBelowLease
+pub rss_eventing::delivery::DeliveryBudgetError::RequiredBudgetNotBelowLease::lease: core::time::Duration
+pub rss_eventing::delivery::DeliveryBudgetError::RequiredBudgetNotBelowLease::required: core::time::Duration
+pub rss_eventing::delivery::DeliveryBudgetError::RequiredBudgetOverflow
+pub rss_eventing::delivery::DeliveryBudgetError::Zero
+pub rss_eventing::delivery::DeliveryBudgetError::Zero::field: &'static str
+impl core::clone::Clone for rss_eventing::delivery::DeliveryBudgetError
+pub fn rss_eventing::delivery::DeliveryBudgetError::clone(&self) -> rss_eventing::delivery::DeliveryBudgetError
+impl core::cmp::Eq for rss_eventing::delivery::DeliveryBudgetError
+impl core::cmp::PartialEq for rss_eventing::delivery::DeliveryBudgetError
+pub fn rss_eventing::delivery::DeliveryBudgetError::eq(&self, &rss_eventing::delivery::DeliveryBudgetError) -> bool
+impl core::error::Error for rss_eventing::delivery::DeliveryBudgetError
+impl core::fmt::Debug for rss_eventing::delivery::DeliveryBudgetError
+pub fn rss_eventing::delivery::DeliveryBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_eventing::delivery::DeliveryBudgetError
+pub fn rss_eventing::delivery::DeliveryBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::delivery::DeliveryBudgetError
+impl core::marker::StructuralPartialEq for rss_eventing::delivery::DeliveryBudgetError
+impl core::marker::Freeze for rss_eventing::delivery::DeliveryBudgetError
+impl core::marker::Send for rss_eventing::delivery::DeliveryBudgetError
+impl core::marker::Sync for rss_eventing::delivery::DeliveryBudgetError
+impl core::marker::Unpin for rss_eventing::delivery::DeliveryBudgetError
+impl core::marker::UnsafeUnpin for rss_eventing::delivery::DeliveryBudgetError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::delivery::DeliveryBudgetError
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::delivery::DeliveryBudgetError
+pub enum rss_eventing::delivery::PublishErrorKind
+pub rss_eventing::delivery::PublishErrorKind::Ambiguous
+pub rss_eventing::delivery::PublishErrorKind::Permanent
+pub rss_eventing::delivery::PublishErrorKind::Transient
+impl rss_eventing::delivery::PublishErrorKind
+pub const fn rss_eventing::delivery::PublishErrorKind::is_ambiguous(self) -> bool
+pub const fn rss_eventing::delivery::PublishErrorKind::is_permanent(self) -> bool
+pub const fn rss_eventing::delivery::PublishErrorKind::is_retryable(self) -> bool
+impl core::clone::Clone for rss_eventing::delivery::PublishErrorKind
+pub fn rss_eventing::delivery::PublishErrorKind::clone(&self) -> rss_eventing::delivery::PublishErrorKind
+impl core::cmp::Eq for rss_eventing::delivery::PublishErrorKind
+impl core::cmp::PartialEq for rss_eventing::delivery::PublishErrorKind
+pub fn rss_eventing::delivery::PublishErrorKind::eq(&self, &rss_eventing::delivery::PublishErrorKind) -> bool
+impl core::fmt::Debug for rss_eventing::delivery::PublishErrorKind
+pub fn rss_eventing::delivery::PublishErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::delivery::PublishErrorKind
+impl core::marker::StructuralPartialEq for rss_eventing::delivery::PublishErrorKind
+impl core::marker::Freeze for rss_eventing::delivery::PublishErrorKind
+impl core::marker::Send for rss_eventing::delivery::PublishErrorKind
+impl core::marker::Sync for rss_eventing::delivery::PublishErrorKind
+impl core::marker::Unpin for rss_eventing::delivery::PublishErrorKind
+impl core::marker::UnsafeUnpin for rss_eventing::delivery::PublishErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::delivery::PublishErrorKind
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::delivery::PublishErrorKind
+pub enum rss_eventing::delivery::RejectKind
+pub rss_eventing::delivery::RejectKind::Invariant
+pub rss_eventing::delivery::RejectKind::Permanent
+impl rss_eventing::delivery::RejectKind
+pub const fn rss_eventing::delivery::RejectKind::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::delivery::RejectKind
+pub fn rss_eventing::delivery::RejectKind::clone(&self) -> rss_eventing::delivery::RejectKind
+impl core::cmp::Eq for rss_eventing::delivery::RejectKind
+impl core::cmp::PartialEq for rss_eventing::delivery::RejectKind
+pub fn rss_eventing::delivery::RejectKind::eq(&self, &rss_eventing::delivery::RejectKind) -> bool
+impl core::fmt::Debug for rss_eventing::delivery::RejectKind
+pub fn rss_eventing::delivery::RejectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::delivery::RejectKind
+impl core::marker::StructuralPartialEq for rss_eventing::delivery::RejectKind
+impl core::marker::Freeze for rss_eventing::delivery::RejectKind
+impl core::marker::Send for rss_eventing::delivery::RejectKind
+impl core::marker::Sync for rss_eventing::delivery::RejectKind
+impl core::marker::Unpin for rss_eventing::delivery::RejectKind
+impl core::marker::UnsafeUnpin for rss_eventing::delivery::RejectKind
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::delivery::RejectKind
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::delivery::RejectKind
+pub struct rss_eventing::delivery::DeliveryBudget
+impl rss_eventing::delivery::DeliveryBudget
+pub const fn rss_eventing::delivery::DeliveryBudget::lease_ttl(&self) -> core::time::Duration
+pub fn rss_eventing::delivery::DeliveryBudget::new(core::time::Duration, core::time::Duration, core::time::Duration, core::time::Duration) -> core::result::Result<Self, rss_eventing::delivery::DeliveryBudgetError>
+pub const fn rss_eventing::delivery::DeliveryBudget::publish_timeout(&self) -> core::time::Duration
+pub fn rss_eventing::delivery::DeliveryBudget::publisher_watchdog_timeout(&self) -> core::time::Duration
+pub fn rss_eventing::delivery::DeliveryBudget::required_budget(&self) -> core::time::Duration
+pub const fn rss_eventing::delivery::DeliveryBudget::safety_margin(&self) -> core::time::Duration
+pub const fn rss_eventing::delivery::DeliveryBudget::settle_timeout(&self) -> core::time::Duration
+impl core::clone::Clone for rss_eventing::delivery::DeliveryBudget
+pub fn rss_eventing::delivery::DeliveryBudget::clone(&self) -> rss_eventing::delivery::DeliveryBudget
+impl core::cmp::Eq for rss_eventing::delivery::DeliveryBudget
+impl core::cmp::PartialEq for rss_eventing::delivery::DeliveryBudget
+pub fn rss_eventing::delivery::DeliveryBudget::eq(&self, &rss_eventing::delivery::DeliveryBudget) -> bool
+impl core::fmt::Debug for rss_eventing::delivery::DeliveryBudget
+pub fn rss_eventing::delivery::DeliveryBudget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::delivery::DeliveryBudget
+impl core::marker::StructuralPartialEq for rss_eventing::delivery::DeliveryBudget
+impl core::marker::Freeze for rss_eventing::delivery::DeliveryBudget
+impl core::marker::Send for rss_eventing::delivery::DeliveryBudget
+impl core::marker::Sync for rss_eventing::delivery::DeliveryBudget
+impl core::marker::Unpin for rss_eventing::delivery::DeliveryBudget
+impl core::marker::UnsafeUnpin for rss_eventing::delivery::DeliveryBudget
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::delivery::DeliveryBudget
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::delivery::DeliveryBudget
+pub const rss_eventing::delivery::DELIVERY_BUDGET_MAX: core::time::Duration
+pub mod rss_eventing::envelope
+pub enum rss_eventing::envelope::EventIdError
+pub rss_eventing::envelope::EventIdError::Empty
+impl core::clone::Clone for rss_eventing::envelope::EventIdError
+pub fn rss_eventing::envelope::EventIdError::clone(&self) -> rss_eventing::envelope::EventIdError
+impl core::cmp::Eq for rss_eventing::envelope::EventIdError
+impl core::cmp::PartialEq for rss_eventing::envelope::EventIdError
+pub fn rss_eventing::envelope::EventIdError::eq(&self, &rss_eventing::envelope::EventIdError) -> bool
+impl core::error::Error for rss_eventing::envelope::EventIdError
+impl core::fmt::Debug for rss_eventing::envelope::EventIdError
+pub fn rss_eventing::envelope::EventIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_eventing::envelope::EventIdError
+pub fn rss_eventing::envelope::EventIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::envelope::EventIdError
+impl core::marker::StructuralPartialEq for rss_eventing::envelope::EventIdError
+impl core::marker::Freeze for rss_eventing::envelope::EventIdError
+impl core::marker::Send for rss_eventing::envelope::EventIdError
+impl core::marker::Sync for rss_eventing::envelope::EventIdError
+impl core::marker::Unpin for rss_eventing::envelope::EventIdError
+impl core::marker::UnsafeUnpin for rss_eventing::envelope::EventIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::envelope::EventIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::envelope::EventIdError
+pub struct rss_eventing::envelope::EventEnvelope<P>
+impl<P> rss_eventing::envelope::EventEnvelope<P>
+pub const fn rss_eventing::envelope::EventEnvelope<P>::contract(&self) -> rss_contract::ContractDescriptor
+pub const fn rss_eventing::envelope::EventEnvelope<P>::event_id(&self) -> &rss_eventing::envelope::EventId
+pub fn rss_eventing::envelope::EventEnvelope<P>::into_parts(self) -> (rss_contract::ContractDescriptor, rss_eventing::envelope::EventId, rss_eventing::metadata::EventMetadata, P)
+pub fn rss_eventing::envelope::EventEnvelope<P>::map_payload<Q>(self, impl core::ops::function::FnOnce(P) -> Q) -> rss_eventing::envelope::EventEnvelope<Q>
+pub const fn rss_eventing::envelope::EventEnvelope<P>::metadata(&self) -> &rss_eventing::metadata::EventMetadata
+pub fn rss_eventing::envelope::EventEnvelope<P>::new(rss_contract::ContractDescriptor, rss_eventing::envelope::EventId, rss_eventing::metadata::EventMetadata, P) -> Self
+pub const fn rss_eventing::envelope::EventEnvelope<P>::payload(&self) -> &P
+impl<P> core::marker::Freeze for rss_eventing::envelope::EventEnvelope<P> where P: core::marker::Freeze
+impl<P> core::marker::Send for rss_eventing::envelope::EventEnvelope<P> where P: core::marker::Send
+impl<P> core::marker::Sync for rss_eventing::envelope::EventEnvelope<P> where P: core::marker::Sync
+impl<P> core::marker::Unpin for rss_eventing::envelope::EventEnvelope<P> where P: core::marker::Unpin
+impl<P> core::marker::UnsafeUnpin for rss_eventing::envelope::EventEnvelope<P> where P: core::marker::UnsafeUnpin
+impl<P> core::panic::unwind_safe::RefUnwindSafe for rss_eventing::envelope::EventEnvelope<P> where P: core::panic::unwind_safe::RefUnwindSafe
+impl<P> core::panic::unwind_safe::UnwindSafe for rss_eventing::envelope::EventEnvelope<P> where P: core::panic::unwind_safe::UnwindSafe
+pub struct rss_eventing::envelope::EventId(_)
+impl rss_eventing::envelope::EventId
+pub fn rss_eventing::envelope::EventId::as_str(&self) -> &str
+pub fn rss_eventing::envelope::EventId::parse(&str) -> core::result::Result<Self, rss_eventing::envelope::EventIdError>
+impl core::clone::Clone for rss_eventing::envelope::EventId
+pub fn rss_eventing::envelope::EventId::clone(&self) -> rss_eventing::envelope::EventId
+impl core::cmp::Eq for rss_eventing::envelope::EventId
+impl core::cmp::PartialEq for rss_eventing::envelope::EventId
+pub fn rss_eventing::envelope::EventId::eq(&self, &rss_eventing::envelope::EventId) -> bool
+impl core::hash::Hash for rss_eventing::envelope::EventId
+pub fn rss_eventing::envelope::EventId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_eventing::envelope::EventId
+impl core::marker::Freeze for rss_eventing::envelope::EventId
+impl core::marker::Send for rss_eventing::envelope::EventId
+impl core::marker::Sync for rss_eventing::envelope::EventId
+impl core::marker::Unpin for rss_eventing::envelope::EventId
+impl core::marker::UnsafeUnpin for rss_eventing::envelope::EventId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::envelope::EventId
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::envelope::EventId
+pub mod rss_eventing::lifecycle
+pub enum rss_eventing::lifecycle::RetryPolicyError
+pub rss_eventing::lifecycle::RetryPolicyError::AttemptsExceeded
+pub rss_eventing::lifecycle::RetryPolicyError::AttemptsExceeded::max: core::num::nonzero::NonZeroU32
+pub rss_eventing::lifecycle::RetryPolicyError::BaseExceedsCap
+pub rss_eventing::lifecycle::RetryPolicyError::BaseExceedsCap::base: core::time::Duration
+pub rss_eventing::lifecycle::RetryPolicyError::BaseExceedsCap::cap: core::time::Duration
+pub rss_eventing::lifecycle::RetryPolicyError::ZeroBackoff
+impl core::clone::Clone for rss_eventing::lifecycle::RetryPolicyError
+pub fn rss_eventing::lifecycle::RetryPolicyError::clone(&self) -> rss_eventing::lifecycle::RetryPolicyError
+impl core::cmp::Eq for rss_eventing::lifecycle::RetryPolicyError
+impl core::cmp::PartialEq for rss_eventing::lifecycle::RetryPolicyError
+pub fn rss_eventing::lifecycle::RetryPolicyError::eq(&self, &rss_eventing::lifecycle::RetryPolicyError) -> bool
+impl core::error::Error for rss_eventing::lifecycle::RetryPolicyError
+impl core::fmt::Debug for rss_eventing::lifecycle::RetryPolicyError
+pub fn rss_eventing::lifecycle::RetryPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_eventing::lifecycle::RetryPolicyError
+pub fn rss_eventing::lifecycle::RetryPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::lifecycle::RetryPolicyError
+impl core::marker::StructuralPartialEq for rss_eventing::lifecycle::RetryPolicyError
+impl core::marker::Freeze for rss_eventing::lifecycle::RetryPolicyError
+impl core::marker::Send for rss_eventing::lifecycle::RetryPolicyError
+impl core::marker::Sync for rss_eventing::lifecycle::RetryPolicyError
+impl core::marker::Unpin for rss_eventing::lifecycle::RetryPolicyError
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::RetryPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::RetryPolicyError
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::RetryPolicyError
+pub enum rss_eventing::lifecycle::ShutdownBudgetError
+pub rss_eventing::lifecycle::ShutdownBudgetError::OperationalRangeExceeded
+pub rss_eventing::lifecycle::ShutdownBudgetError::Zero
+impl core::clone::Clone for rss_eventing::lifecycle::ShutdownBudgetError
+pub fn rss_eventing::lifecycle::ShutdownBudgetError::clone(&self) -> rss_eventing::lifecycle::ShutdownBudgetError
+impl core::cmp::Eq for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::cmp::PartialEq for rss_eventing::lifecycle::ShutdownBudgetError
+pub fn rss_eventing::lifecycle::ShutdownBudgetError::eq(&self, &rss_eventing::lifecycle::ShutdownBudgetError) -> bool
+impl core::error::Error for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::fmt::Debug for rss_eventing::lifecycle::ShutdownBudgetError
+pub fn rss_eventing::lifecycle::ShutdownBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_eventing::lifecycle::ShutdownBudgetError
+pub fn rss_eventing::lifecycle::ShutdownBudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::marker::StructuralPartialEq for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::marker::Freeze for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::marker::Send for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::marker::Sync for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::marker::Unpin for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::ShutdownBudgetError
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::ShutdownBudgetError
+pub struct rss_eventing::lifecycle::RetryPolicy
+impl rss_eventing::lifecycle::RetryPolicy
+pub const rss_eventing::lifecycle::RetryPolicy::STANDARD: Self
+pub const fn rss_eventing::lifecycle::RetryPolicy::allows_attempt(&self, core::num::nonzero::NonZeroU32) -> bool
+pub fn rss_eventing::lifecycle::RetryPolicy::delay_after(&self, core::num::nonzero::NonZeroU32) -> core::time::Duration
+pub const fn rss_eventing::lifecycle::RetryPolicy::max_attempts(&self) -> core::num::nonzero::NonZeroU32
+pub fn rss_eventing::lifecycle::RetryPolicy::new(core::num::nonzero::NonZeroU32, core::time::Duration, core::time::Duration) -> core::result::Result<Self, rss_eventing::lifecycle::RetryPolicyError>
+impl core::clone::Clone for rss_eventing::lifecycle::RetryPolicy
+pub fn rss_eventing::lifecycle::RetryPolicy::clone(&self) -> rss_eventing::lifecycle::RetryPolicy
+impl core::cmp::Eq for rss_eventing::lifecycle::RetryPolicy
+impl core::cmp::PartialEq for rss_eventing::lifecycle::RetryPolicy
+pub fn rss_eventing::lifecycle::RetryPolicy::eq(&self, &rss_eventing::lifecycle::RetryPolicy) -> bool
+impl core::fmt::Debug for rss_eventing::lifecycle::RetryPolicy
+pub fn rss_eventing::lifecycle::RetryPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::lifecycle::RetryPolicy
+impl core::marker::StructuralPartialEq for rss_eventing::lifecycle::RetryPolicy
+impl core::marker::Freeze for rss_eventing::lifecycle::RetryPolicy
+impl core::marker::Send for rss_eventing::lifecycle::RetryPolicy
+impl core::marker::Sync for rss_eventing::lifecycle::RetryPolicy
+impl core::marker::Unpin for rss_eventing::lifecycle::RetryPolicy
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::RetryPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::RetryPolicy
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::RetryPolicy
+pub struct rss_eventing::lifecycle::ShutdownBudget(_)
+impl rss_eventing::lifecycle::ShutdownBudget
+pub const rss_eventing::lifecycle::ShutdownBudget::STANDARD: Self
+pub const fn rss_eventing::lifecycle::ShutdownBudget::new(core::time::Duration) -> core::result::Result<Self, rss_eventing::lifecycle::ShutdownBudgetError>
+pub const fn rss_eventing::lifecycle::ShutdownBudget::timeout(self) -> core::time::Duration
+impl core::clone::Clone for rss_eventing::lifecycle::ShutdownBudget
+pub fn rss_eventing::lifecycle::ShutdownBudget::clone(&self) -> rss_eventing::lifecycle::ShutdownBudget
+impl core::cmp::Eq for rss_eventing::lifecycle::ShutdownBudget
+impl core::cmp::PartialEq for rss_eventing::lifecycle::ShutdownBudget
+pub fn rss_eventing::lifecycle::ShutdownBudget::eq(&self, &rss_eventing::lifecycle::ShutdownBudget) -> bool
+impl core::fmt::Debug for rss_eventing::lifecycle::ShutdownBudget
+pub fn rss_eventing::lifecycle::ShutdownBudget::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::lifecycle::ShutdownBudget
+impl core::marker::StructuralPartialEq for rss_eventing::lifecycle::ShutdownBudget
+impl core::marker::Freeze for rss_eventing::lifecycle::ShutdownBudget
+impl core::marker::Send for rss_eventing::lifecycle::ShutdownBudget
+impl core::marker::Sync for rss_eventing::lifecycle::ShutdownBudget
+impl core::marker::Unpin for rss_eventing::lifecycle::ShutdownBudget
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::ShutdownBudget
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::ShutdownBudget
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::ShutdownBudget
+pub const rss_eventing::lifecycle::RETRY_ATTEMPTS_MAX: core::num::nonzero::NonZeroU32
+pub const rss_eventing::lifecycle::SHUTDOWN_BUDGET_MAX: core::time::Duration
+pub mod rss_eventing::metadata
+pub struct rss_eventing::metadata::EventMetadata
+impl rss_eventing::metadata::EventMetadata
+pub fn rss_eventing::metadata::EventMetadata::audit_correlation(&self) -> core::option::Option<&rss_diag_context::ctx::CorrelationId>
+pub fn rss_eventing::metadata::EventMetadata::new(rss_request_context::TenantId, rss_contract::Timepoint, core::option::Option<rss_diag_context::ctx::CorrelationId>) -> Self
+pub const fn rss_eventing::metadata::EventMetadata::occurred_at(&self) -> rss_contract::Timepoint
+pub const fn rss_eventing::metadata::EventMetadata::tenant_id(&self) -> rss_request_context::TenantId
+impl core::marker::Freeze for rss_eventing::metadata::EventMetadata
+impl core::marker::Send for rss_eventing::metadata::EventMetadata
+impl core::marker::Sync for rss_eventing::metadata::EventMetadata
+impl core::marker::Unpin for rss_eventing::metadata::EventMetadata
+impl core::marker::UnsafeUnpin for rss_eventing::metadata::EventMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::metadata::EventMetadata
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::metadata::EventMetadata

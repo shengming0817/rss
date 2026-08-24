@@ -13,6 +13,7 @@ default = []
 test-support = ["eventexec/internal-test-support", "tokio/sync"]
 
 [dependencies]
+eventing.workspace = true
 rss-platform.workspace = true
 anyhow = { workspace = true }
 assembly-schema = { path = "../assembly-schema" }

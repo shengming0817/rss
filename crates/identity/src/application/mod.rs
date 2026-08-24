@@ -113,11 +113,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use base64::Engine as _;
 use bootstrap::KernelError;
-use consistency::IdemKey;
 use diport::{Clock, OutboxEmitError, OutboxEmitErrorKind};
 use eventexec::event::EventEncodeError;
 #[cfg(test)]
 use eventexec::event::ReviewedEvent;
+use eventing::envelope::EventId;
 use generated::event::identity_v1::session_created::{
     IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
@@ -209,7 +209,7 @@ pub enum LoginError {
     PayloadEncode(#[source] EventEncodeError),
     /// Stable event idempotency identity is invalid.
     #[error("session-created idempotency identity validation failed")]
-    IdempotencyKey(#[source] consistency::IdemKeyError),
+    IdempotencyKey(#[source] eventing::envelope::EventIdError),
     /// AuthGrant 过期时间计算溢出（组合根 ttl/clock 误配，fail-closed）。
     #[error("authentication grant expiration time overflow")]
     AuthGrantTimeOverflow,
@@ -483,7 +483,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             payload,
             tenant,
             user_id,
-            IdemKey::parse(&event_id).map_err(LoginError::IdempotencyKey)?,
+            EventId::parse(&event_id).map_err(LoginError::IdempotencyKey)?,
         )
         .await
         .map_err(LoginError::PayloadEncode)?;
@@ -5362,7 +5362,15 @@ mod tests {
     // `InMemAuthGrantStore`；同一 store 也注入 RefreshService，避免测试出现双存储漂移。
     #[derive(Clone, Default)]
     struct CapturingAuthGrantLifecycle {
-        writes: Arc<Mutex<Vec<(AuthGrant, ReviewedEvent)>>>,
+        writes: Arc<
+            Mutex<
+                Vec<(
+                    AuthGrant,
+                    consistency::EventEntry,
+                    diport::OutboxEnvelopeParts,
+                )>,
+            >,
+        >,
         inner: crate::internal::mem::InMemAuthGrantStore,
         find_calls: Arc<AtomicUsize>,
     }
@@ -5375,14 +5383,16 @@ mod tests {
             event: ReviewedEvent,
         ) -> Result<PersistedLoginGrantReceipt, OutboxEmitError> {
             let grant = mutation.grant().clone();
+            let entry = event.entry().clone();
+            let envelope = event.envelope().clone();
             let persisted = self
                 .inner
-                .persist_login_grant(receipt, scope, mutation, event.clone())
+                .persist_login_grant(receipt, scope, mutation, event)
                 .await?;
             self.writes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((grant, event));
+                .push((grant, entry, envelope));
             Ok(persisted)
         }
         async fn find_active(
@@ -7809,9 +7819,7 @@ mod tests {
         // UoW 写恰一次。
         assert_eq!(capture.count(), 1, "co-tx 写应恰一次");
         let writes = capture.writes.lock().unwrap_or_else(|e| e.into_inner());
-        let (grant, event) = &writes[0];
-        let entry = event.entry();
-        let envelope = event.envelope();
+        let (grant, entry, envelope) = &writes[0];
 
         // AuthGrant 字段正确。user_id = canonical user id（**非** 登录标识 "alice"）。
         assert_eq!(grant.id().to_wire(), resp.data.session_id);

@@ -868,8 +868,9 @@ where
                 lease_cfg,
                 token,
                 health,
-                eventexec::retry::BackoffPolicy::default(),
+                eventing::lifecycle::RetryPolicy::STANDARD,
                 _consumer_admission,
+                eventing::lifecycle::ShutdownBudget::STANDARD,
             ))
         },
     )

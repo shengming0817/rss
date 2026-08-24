@@ -577,7 +577,7 @@ operational ceiling 以及
    `rss_outbox_publish_preflight(text,uuid,bigint,bigint,bigint)` 存在，两个旧 overload 均不存在。
 4. 验证两函数 owner 为 NOLOGIN `rss_outbox_maintenance`、`search_path=public, pg_temp`、PUBLIC 无 EXECUTE，
    且 `rss_app` 仅获新签名的精确 EXECUTE。
-5. 只有以上验证全部通过，才启动持有同一 typed `RelayBudget` 的新 binary；不得恢复旧函数或在应用侧回退默认值。
+5. 只有以上验证全部通过，才启动持有同一 typed `DeliveryBudget` 的新 binary；不得恢复旧函数或在应用侧回退默认值。
 
 ### 0065 governed relay-budget cutover（forward-only）
 

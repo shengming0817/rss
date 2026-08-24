@@ -14,7 +14,7 @@ help: the type constructed contains `()` due to the type of the argument passed
   |                                                                                      |
   |                                                                                      this argument influences the type of `Committed`
 note: tuple variant defined here
- --> $WORKSPACE/crates/eventexec/src/consumer_tx.rs
+ --> $WORKSPACE/crates/eventing/src/delivery.rs
   |
   |     Committed(C),
   |     ^^^^^^^^^

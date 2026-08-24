@@ -13,6 +13,7 @@ name = "identity_composition"
 path = "src/lib.rs"
 
 [dependencies]
+eventing.workspace = true
 rss-request-context.workspace = true
 anyhow = { workspace = true }
 authn = { path = "../../crates/authn" }

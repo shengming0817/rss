@@ -4,9 +4,9 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use consistency::IdemKey;
 use diport::Clock;
 use eventexec::event::{EventEncodeError, ReviewedEvent};
+use eventing::envelope::EventId;
 use generated::event::identity_v1::policy_updated::{
     IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
     IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
@@ -66,7 +66,7 @@ pub enum PolicyManageError {
     #[error("policy-event authoring failed")]
     EventEncode(#[source] EventEncodeError),
     #[error("policy-event idempotency identity validation failed")]
-    IdempotencyKey(#[source] consistency::IdemKeyError),
+    IdempotencyKey(#[source] eventing::envelope::EventIdError),
     #[error("policy wire projection failed")]
     WireProjection(#[source] EventWireProjectionError),
     #[error("policy store failed")]
@@ -461,7 +461,7 @@ impl PolicyManageService {
             tenant,
             actor,
             actor_kind,
-            IdemKey::parse(&Uuid::new_v4().to_string())
+            EventId::parse(&Uuid::new_v4().to_string())
                 .map_err(PolicyManageError::IdempotencyKey)?,
         )
         .await

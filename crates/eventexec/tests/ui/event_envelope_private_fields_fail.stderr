@@ -1,0 +1,13 @@
+error[E0451]: fields `contract`, `event_id`, `metadata` and `payload` of struct `EventEnvelope` are private
+  --> tests/ui/event_envelope_private_fields_fail.rs:14:9
+   |
+13 |     let _ = EventEnvelope {
+   |             ------------- in this type
+14 |         contract: contract(),
+   |         ^^^^^^^^ private field
+15 |         event_id: EventId::parse("event-1").expect("event id"),
+   |         ^^^^^^^^ private field
+16 |         metadata: metadata(),
+   |         ^^^^^^^^ private field
+17 |         payload: (),
+   |         ^^^^^^^ private field

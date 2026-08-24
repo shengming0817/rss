@@ -37,7 +37,8 @@ use eventexec::reconcile::{
     ApplyDeviceCertificateReconcileCommand, ReconcileAttempt, ReconcileScheduleStore,
     ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
-use eventexec::{ProjectionHarness, ProjectionStop, RelayBudget, TenantAuthority};
+use eventexec::{ProjectionHarness, ProjectionStop, TenantAuthority};
+use eventing::delivery::DeliveryBudget;
 use identity::ports::{FaultMatrixSessionCreatedPayload, SESSION_CREATED_FACT};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
@@ -57,8 +58,8 @@ const SESSION_CREATED_CONSUMER_DOMAIN: &str = "audit";
 type FaultMatrixCertificateCommand = ApplyDeviceCertificateReconcileCommand;
 
 /// The shared real-backend relay budget used by fault-matrix journeys.
-pub fn fault_matrix_relay_budget() -> FaultMatrixResult<RelayBudget> {
-    Ok(RelayBudget::new(
+pub fn fault_matrix_relay_budget() -> FaultMatrixResult<DeliveryBudget> {
+    Ok(DeliveryBudget::new(
         Duration::from_secs(60),
         Duration::from_secs(40),
         Duration::from_secs(5),
@@ -896,7 +897,7 @@ impl FaultMatrixProjectionProbe {
 pub struct PgFaultMatrixHarness {
     deps: PgRuntimeDeps,
     owner_pool: PgPool,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 }
 
 /// Feature-gated L2 DR fixture that keeps the recovery store, plan, and admission epoch bound.
@@ -935,7 +936,7 @@ impl PgFaultMatrixHarness {
     pub async fn setup(
         config: PgFaultMatrixConfig,
         logins: PgFaultMatrixLoginCredentials,
-        relay_budget: RelayBudget,
+        relay_budget: DeliveryBudget,
         projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> FaultMatrixResult<Self> {
         let migrator = pg_config(
@@ -1173,15 +1174,15 @@ impl PgFaultMatrixHarness {
                         .session_created_consumer_tx(hasher),
                 );
                 match consumer.handle(event, ctx, key, lease).await {
-                    eventexec::consumer_tx::ConsumerTxOutcome::Committed(_) => {
+                    eventing::delivery::ConsumerTxOutcome::Committed(_) => {
                         Ok(FaultMatrixConsumerDelivery::Committed)
                     }
-                    eventexec::consumer_tx::ConsumerTxOutcome::HandlerTransient
-                    | eventexec::consumer_tx::ConsumerTxOutcome::InfrastructureTransient
-                    | eventexec::consumer_tx::ConsumerTxOutcome::Rejected(_)
-                    | eventexec::consumer_tx::ConsumerTxOutcome::CommitUnknown
-                    | eventexec::consumer_tx::ConsumerTxOutcome::RollbackFailed
-                    | eventexec::consumer_tx::ConsumerTxOutcome::Fenced => {
+                    eventing::delivery::ConsumerTxOutcome::HandlerTransient
+                    | eventing::delivery::ConsumerTxOutcome::InfrastructureTransient
+                    | eventing::delivery::ConsumerTxOutcome::Rejected(_)
+                    | eventing::delivery::ConsumerTxOutcome::CommitUnknown
+                    | eventing::delivery::ConsumerTxOutcome::RollbackFailed
+                    | eventing::delivery::ConsumerTxOutcome::Fenced => {
                         bail!("session-created ConsumerTx did not commit")
                     }
                 }
@@ -2151,7 +2152,7 @@ async fn age_outbox_publishing(
     pool: &PgPool,
     tenant: rss_request_context::TenantId,
     event_id: &str,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> FaultMatrixResult<()> {
     sqlx::query(
         "UPDATE outbox \
@@ -2162,7 +2163,7 @@ async fn age_outbox_publishing(
     .bind(tenant.to_string())
     .bind(event_id)
     .bind(crate::outbox::STATUS_PUBLISHING)
-    .bind(relay_budget.lease_ttl_millis().saturating_add(10_000))
+    .bind((relay_budget.lease_ttl().as_millis() as i64).saturating_add(10_000))
     .execute(pool)
     .await?;
     Ok(())

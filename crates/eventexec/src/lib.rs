@@ -15,17 +15,15 @@ pub use consumer::run_managed_delivery_stream_harness;
 pub use consumer::{
     ConsumerMeta, LeaseConfig, ManagedDeliveryStream, run_consumer, run_consumer_ackable,
 };
-pub mod consumer_tx;
 pub mod dead_letter;
 pub use dead_letter::{DeadLetterId, DeadLetterIdError};
-pub mod event_metadata;
 pub mod tenant_authority;
 pub use tenant_authority::{
     TenantAuthority, TenantAuthorityBinding, TenantAuthorityConfigError, TenantAuthorityError,
     TenantAuthoritySignError,
 };
 
-pub mod retry;
+mod retry;
 
 pub mod consumer_worker;
 pub use consumer_worker::{
@@ -60,8 +58,8 @@ pub use relay::{
 // #1209 outbox relay 配置护栏（构造期 fail-fast）+ 可观测性发射端口（注入式）。
 pub mod relay_config;
 pub use relay_config::{
-    RELAY_BUDGET_MAX_MILLIS, RelayBudget, RelayBudgetError, RelayConfig, RelayConfigError,
-    SamplerConfig, SamplerConfigError, SweeperConfig, SweeperConfigError,
+    RelayConfig, RelayConfigError, SamplerConfig, SamplerConfigError, SweeperConfig,
+    SweeperConfigError,
 };
 pub mod relay_metrics;
 pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, RelayPhase};
@@ -340,6 +338,7 @@ pub use saga_worker::{
 use std::sync::Arc;
 use std::time::Duration;
 
+use eventing::lifecycle::RetryPolicy;
 use futures::future::BoxFuture;
 
 // 消息原语（Message / MessageId / EnvelopeMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
@@ -392,36 +391,34 @@ impl ConsumerError {
 
 // ── 单消费者分发驱动（RW-G1 追踪弹）────────────────────────────────────────────
 
-/// 单条消息**含首投**在内的最大消费次数（防 `Requeue` 无限重试挂线程）。
-///
-/// 语义：首投 1 次 + 至多 `MAX_REDELIVERY - 1` 次重投 = 总计至多 `MAX_REDELIVERY` 次 handler 调用。
-/// 真实 broker 退避 / DLX 留 W。
-pub const MAX_REDELIVERY: u32 = 3;
-
 /// 单消费者分发驱动：逐条消费订阅流 → [`HandlerFn`] → 按 [`Disposition`] 收口。
 ///
 /// 顺序消费 `stream`（取消即流终止——由 [`diport::Subscriber`] 实现据 `CancellationToken` 收口，
 /// 本驱动不持 token）；每条消息按 handler 返回的 disposition 处理：
 /// - [`Disposition::Ack`]：完成。
 /// - [`Disposition::Nack`]：丢弃（in-mem 无 DLQ；真实 broker DLX 留 W）。
-/// - [`Disposition::Requeue`]：重投，上限 [`MAX_REDELIVERY`] 次（in-mem 不 honor backoff `after`，
+/// - [`Disposition::Requeue`]：重投，上限由传入的 [`RetryPolicy`] 决定（in-mem 不 honor backoff `after`，
 ///   真实 broker 退避留 W）——刻意**不**复制 watermill 无限重试循环（会挂消费线程）。
 ///
 /// 下游事件经 handler 自持的 [`diport::Publisher`] 发布，不经本驱动中转（与 watermill router
 /// 内置 publisher 偏离，对齐 RSS DI port 隔离）。
 /// ref: watermill message/router.go@fbce4d6cd13c8657c668c7e7990fef90d2471b8a（handleMessage Ack/Nack 决策）
-pub async fn run_dispatch(mut stream: diport::MessageStream, handler: HandlerFn) {
+pub async fn run_dispatch(
+    mut stream: diport::MessageStream,
+    handler: HandlerFn,
+    retry_policy: RetryPolicy,
+) {
     use futures::StreamExt;
     while let Some(msg) = stream.next().await {
-        dispatch_one(&handler, msg).await;
+        dispatch_one(&handler, msg, retry_policy).await;
     }
 }
 
 /// 处理单条消息：按 [`Disposition`] 收口（bounded 重投）。从 [`run_dispatch`] 抽出，
 /// 控制各自认知复杂度 ≤15（rust-standards §工程护栏）。
-async fn dispatch_one(handler: &HandlerFn, msg: Message) {
-    // 含首投在内至多 MAX_REDELIVERY 次（bounded，防 Requeue 无限重试）。日志收口到 helper 控制复杂度。
-    for _ in 0..MAX_REDELIVERY {
+async fn dispatch_one(handler: &HandlerFn, msg: Message, retry_policy: RetryPolicy) {
+    // 含首投在内至多 RetryPolicy::STANDARD.max_attempts().get() 次（bounded，防 Requeue 无限重试）。日志收口到 helper 控制复杂度。
+    for _ in 0..retry_policy.max_attempts().get() {
         match handler(msg.clone()).await {
             Disposition::Ack => return,
             Disposition::Nack => {
@@ -431,7 +428,7 @@ async fn dispatch_one(handler: &HandlerFn, msg: Message) {
             Disposition::Requeue { .. } => continue,
         }
     }
-    log_dropped_exhausted(&msg);
+    log_dropped_exhausted(&msg, retry_policy.max_attempts().get());
 }
 
 /// 静默丢失是审计/合规盲点——Nack 丢弃前结构化记录（in-mem 无 DLQ；真实 broker DLX 留 W）。
@@ -443,10 +440,10 @@ fn log_dropped_nack(msg: &Message) {
 }
 
 /// Requeue 达上限仍未 Ack/Nack——丢弃前结构化记录。
-fn log_dropped_exhausted(msg: &Message) {
+fn log_dropped_exhausted(msg: &Message, attempts: u32) {
     tracing::error!(
         message_id = msg.id().as_str(),
-        attempts = MAX_REDELIVERY,
+        attempts,
         "dispatch: requeue budget exhausted, message dropped"
     );
 }
@@ -534,6 +531,7 @@ mod tests {
         run_dispatch(
             stream_of(&[b"a", b"b", b"c"]),
             counting_handler(counter.clone(), Disposition::Ack),
+            RetryPolicy::STANDARD,
         )
         .await;
         assert_eq!(counter.load(Ordering::Relaxed), 3);
@@ -545,6 +543,7 @@ mod tests {
         run_dispatch(
             stream_of(&[b"a"]),
             counting_handler(counter.clone(), Disposition::Nack),
+            RetryPolicy::STANDARD,
         )
         .await;
         // Nack：单次调用即丢弃（无重投）。
@@ -557,10 +556,14 @@ mod tests {
         run_dispatch(
             stream_of(&[b"a"]),
             counting_handler(counter.clone(), Disposition::Requeue { after: None }),
+            RetryPolicy::STANDARD,
         )
         .await;
-        // Requeue：bounded 重投，恰 MAX_REDELIVERY 次（非无限循环）。
-        assert_eq!(counter.load(Ordering::Relaxed), MAX_REDELIVERY);
+        // Requeue：bounded 重投，恰 RetryPolicy::STANDARD.max_attempts().get() 次（非无限循环）。
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            RetryPolicy::STANDARD.max_attempts().get()
+        );
     }
 
     #[tokio::test]
@@ -579,7 +582,7 @@ mod tests {
                 }
             })
         });
-        run_dispatch(stream_of(&[b"a"]), handler).await;
+        run_dispatch(stream_of(&[b"a"]), handler, RetryPolicy::STANDARD).await;
         assert_eq!(counter.load(Ordering::Relaxed), 3);
     }
 

@@ -30,15 +30,15 @@ use workspacefacts::{PackageKey, PublicApiOwner, TargetKind, WorkspaceFacts};
 
 /// INVARIANT: EVENTING-EVENT-METADATA-PUBLIC-SURFACE-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::event_metadata_surface_rejects_extra_field|tests::event_metadata_surface_rejects_wrong_owner_type|tests::event_metadata_surface_rejects_debug_impl|tests::event_metadata_surface_rejects_qualified_debug_impl|tests::event_metadata_surface_rejects_private_owner_alias|tests::event_metadata_surface_rejects_private_use_alias|tests::event_metadata_surface_rejects_extra_method|tests::event_metadata_surface_root_rejects_alias|tests::event_metadata_surface_root_rejects_module_alias", anti_vacuity = "tests::real_event_metadata_surface_is_exact|tests::event_metadata_surface_allows_private_layout_freedom|tests::event_metadata_surface_root_allows_unrelated_identifier" } -- EventMetadata has one canonical owner, exactly three private typed fields and four public methods; compatibility facades and trait bridges are forbidden without constraining private implementation layout.
 fn validate_event_metadata_public_surface(root: &Path) -> Result<()> {
-    let path = root.join("crates/eventexec/src/event_metadata.rs");
+    let path = root.join("crates/eventing/src/metadata.rs");
     let source = fs::read_to_string(&path)
         .with_context(|| format!("读取 EventMetadata 公共面失败: {}", path.display()))?;
     validate_event_metadata_public_source(&source)
         .with_context(|| format!("EventMetadata 公共面不符合 exact-set: {}", path.display()))?;
 
-    let root_path = root.join("crates/eventexec/src/lib.rs");
+    let root_path = root.join("crates/eventing/src/lib.rs");
     let root_source = fs::read_to_string(&root_path)
-        .with_context(|| format!("读取 eventexec crate root 失败: {}", root_path.display()))?;
+        .with_context(|| format!("读取 rss-eventing crate root 失败: {}", root_path.display()))?;
     validate_event_metadata_root_source(&root_source).with_context(|| {
         format!(
             "EventMetadata crate-root facade 被禁止: {}",
@@ -232,7 +232,7 @@ fn validate_event_metadata_root_source(source: &str) -> Result<()> {
         fn contains_reserved_ident(tokens: proc_macro2::TokenStream) -> bool {
             tokens.into_iter().any(|token| match token {
                 proc_macro2::TokenTree::Ident(ident) => {
-                    ident == "EventMetadata" || ident == "event_metadata"
+                    ident == "EventMetadata" || ident == "metadata"
                 }
                 proc_macro2::TokenTree::Group(group) => contains_reserved_ident(group.stream()),
                 _ => false,
@@ -241,9 +241,9 @@ fn validate_event_metadata_root_source(source: &str) -> Result<()> {
         is_public && contains_reserved_ident(item.to_token_stream())
     }
 
-    let file = syn::parse_file(source).context("解析 eventexec crate root 失败")?;
+    let file = syn::parse_file(source).context("解析 rss-eventing crate root 失败")?;
     for item in &file.items {
-        if matches!(item, syn::Item::Mod(module) if module.ident == "event_metadata") {
+        if matches!(item, syn::Item::Mod(module) if module.ident == "metadata") {
             continue;
         }
         anyhow::ensure!(
@@ -257,15 +257,15 @@ fn validate_event_metadata_root_source(source: &str) -> Result<()> {
 
 /// INVARIANT: EVENTING-CONSUMER-TX-PUBLIC-SURFACE-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::consumer_tx_surface_rejects_extra_public_owner|tests::consumer_tx_surface_rejects_trait_bridge|tests::consumer_tx_surface_rejects_associated_item|tests::consumer_tx_root_rejects_alias_facade", anti_vacuity = "tests::real_consumer_tx_surface_is_exact|tests::consumer_tx_surface_allows_private_implementation" } -- the current Eventing transaction seam exposes exactly one flat outcome and one reject kind from its owner module; runtime/provider types and compatibility facades are forbidden.
 fn validate_consumer_tx_public_surface(root: &Path) -> Result<()> {
-    let path = root.join("crates/eventexec/src/consumer_tx.rs");
+    let path = root.join("crates/eventing/src/delivery.rs");
     let source = fs::read_to_string(&path)
         .with_context(|| format!("读取 ConsumerTx 公共面失败: {}", path.display()))?;
     validate_consumer_tx_public_source(&source)
         .with_context(|| format!("ConsumerTx 公共面不符合 exact-set: {}", path.display()))?;
 
-    let root_path = root.join("crates/eventexec/src/lib.rs");
+    let root_path = root.join("crates/eventing/src/lib.rs");
     let root_source = fs::read_to_string(&root_path)
-        .with_context(|| format!("读取 eventexec crate root 失败: {}", root_path.display()))?;
+        .with_context(|| format!("读取 rss-eventing crate root 失败: {}", root_path.display()))?;
     validate_consumer_tx_root_source(&root_source).with_context(|| {
         format!(
             "ConsumerTx crate-root facade 被禁止: {}",
@@ -278,33 +278,70 @@ fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
     use quote::ToTokens as _;
 
     let file = syn::parse_file(source).context("解析 ConsumerTx owner 模块失败")?;
+    const ALLOWED_PUBLIC_ITEMS: &[&str] = &[
+        "ConsumerTxOutcome",
+        "DELIVERY_BUDGET_MAX",
+        "DeliveryBudget",
+        "DeliveryBudgetError",
+        "PublishErrorKind",
+        "RejectKind",
+    ];
+    for item in &file.items {
+        let public_name = match item {
+            syn::Item::Const(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            syn::Item::Enum(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            syn::Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            syn::Item::Type(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            syn::Item::Trait(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            syn::Item::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.sig.ident.to_string())
+            }
+            syn::Item::Mod(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            syn::Item::Use(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some("<public use>".to_owned())
+            }
+            _ => None,
+        };
+        if let Some(public_name) = public_name {
+            anyhow::ensure!(
+                ALLOWED_PUBLIC_ITEMS.contains(&public_name.as_str()),
+                "delivery module exposes unknown public item {public_name}"
+            );
+        }
+    }
     let public_items = file
         .items
         .iter()
-        .filter(|item| match item {
-            syn::Item::Const(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Enum(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Fn(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Mod(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Static(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Struct(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Trait(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::TraitAlias(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Type(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Union(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            syn::Item::Use(item) => matches!(item.vis, syn::Visibility::Public(_)),
-            _ => false,
+        .filter(|item| {
+            matches!(
+                item,
+                syn::Item::Enum(item)
+                    if matches!(item.vis, syn::Visibility::Public(_))
+                        && matches!(item.ident.to_string().as_str(), "ConsumerTxOutcome" | "RejectKind")
+            )
         })
         .collect::<Vec<_>>();
     anyhow::ensure!(
         public_items.len() == 2,
-        "owner module must expose exactly two public items"
+        "delivery module must expose both canonical consumer transaction enums"
     );
 
     let mut enums = BTreeMap::new();
     for item in public_items {
         let syn::Item::Enum(item) = item else {
-            bail!("ConsumerTx owner public surface may contain enums only")
+            unreachable!("filtered to canonical ConsumerTx enums")
         };
         enums.insert(item.ident.to_string(), item);
     }
@@ -433,12 +470,13 @@ fn validate_consumer_tx_root_source(source: &str) -> Result<()> {
         let tokens = item.to_token_stream().to_string().replace(' ', "");
         tokens.contains("ConsumerTxOutcome")
             || tokens.contains("RejectKind")
-            || tokens.contains("consumer_tx::")
+            || tokens.contains("delivery::")
+            || tokens.contains("self::deliveryas")
     }
 
-    let file = syn::parse_file(source).context("解析 eventexec crate root 失败")?;
+    let file = syn::parse_file(source).context("解析 rss-eventing crate root 失败")?;
     for item in &file.items {
-        if matches!(item, syn::Item::Mod(module) if module.ident == "consumer_tx") {
+        if matches!(item, syn::Item::Mod(module) if module.ident == "delivery") {
             continue;
         }
         anyhow::ensure!(
@@ -2933,7 +2971,7 @@ mod tests {
     #[test]
     fn event_metadata_surface_rejects_qualified_debug_impl() {
         let source = format!(
-            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nimpl core::fmt::Debug for crate::event_metadata::EventMetadata {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nimpl core::fmt::Debug for crate::metadata::EventMetadata {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
         );
         assert!(validate_event_metadata_public_source(&source).is_err());
     }
@@ -2949,7 +2987,7 @@ mod tests {
     #[test]
     fn event_metadata_surface_rejects_private_use_alias() {
         let source = format!(
-            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nuse crate::event_metadata::EventMetadata as Owner; impl core::fmt::Debug for Owner {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
+            "{SYNTHETIC_EVENT_METADATA_SURFACE}\nuse crate::metadata::EventMetadata as Owner; impl core::fmt::Debug for Owner {{ fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ Ok(()) }} }}"
         );
         assert!(validate_event_metadata_public_source(&source).is_err());
     }
@@ -2987,7 +3025,7 @@ mod tests {
     fn event_metadata_surface_root_rejects_alias() {
         assert!(
             validate_event_metadata_root_source(
-                "pub mod event_metadata; pub use event_metadata::EventMetadata as Metadata;"
+                "pub mod metadata; pub use metadata::EventMetadata as Metadata;"
             )
             .is_err()
         );
@@ -2997,7 +3035,7 @@ mod tests {
     fn event_metadata_surface_root_rejects_module_alias() {
         assert!(
             validate_event_metadata_root_source(
-                "pub mod event_metadata; pub use self::event_metadata as events;"
+                "pub mod metadata; pub use self::metadata as events;"
             )
             .is_err()
         );
@@ -3005,14 +3043,14 @@ mod tests {
 
     #[test]
     fn event_metadata_surface_root_allows_only_canonical_module_path() {
-        assert!(validate_event_metadata_root_source("pub mod event_metadata;").is_ok());
+        assert!(validate_event_metadata_root_source("pub mod metadata;").is_ok());
     }
 
     #[test]
     fn event_metadata_surface_root_allows_unrelated_identifier() {
         assert!(
             validate_event_metadata_root_source(
-                "pub mod event_metadata; pub fn event_metadata_count() -> usize { 0 }"
+                "pub mod metadata; pub fn event_metadata_count() -> usize { 0 }"
             )
             .is_ok()
         );
@@ -3058,7 +3096,7 @@ mod tests {
     fn consumer_tx_root_rejects_alias_facade() {
         assert!(
             validate_consumer_tx_root_source(
-                "pub mod consumer_tx; pub use consumer_tx::ConsumerTxOutcome as Outcome;"
+                "pub mod delivery; pub use delivery::ConsumerTxOutcome as Outcome;"
             )
             .is_err()
         );
@@ -3068,7 +3106,7 @@ mod tests {
     fn consumer_tx_root_allows_private_implementation_inside_public_module() {
         assert!(
             validate_consumer_tx_root_source(
-                "pub mod consumer_tx; pub mod worker { fn private(_: crate::consumer_tx::RejectKind) {} }"
+                "pub mod delivery; pub mod worker { fn private(_: crate::delivery::RejectKind) {} }"
             )
             .is_ok()
         );

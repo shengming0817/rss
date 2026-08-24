@@ -20,7 +20,7 @@ use eventexec::event::{ReviewedEvent, ReviewedEventWriter};
 use crate::PgStore;
 use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::outbox::{
-    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
+    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_from_reviewed_event,
 };
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
@@ -61,19 +61,19 @@ impl PgEmitter {
 
 impl ReviewedEventWriter for PgEmitter {
     async fn write(&self, event: ReviewedEvent) -> Result<(), OutboxEmitError> {
-        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (entry, envelope, metadata, _fact) = event.into_parts();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id；OUTBOX-METADATA-FUNNEL-01）。`contract` 是契约派生
         // 绑定（#1193/#1618：domain + contract_id + version + schema_hash 同源、business 不可伪造），
         // routing 列经 `domain()`/`contract_id()` 取，标准 header 经 `version()`/`schema_hash()` 盖章。
         // reserved key occurred_at 由 sealed ReviewedEvent **构造期必填**携带；trace / correlation 经
         // sealed setter（源待 #1296）、principal 待 #1296——业务侧均不可
         // 伪造：构造期注入 + free-form `try_insert` fail-closed 拒（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
-        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+        let (contract, _tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+            metadata_from_reviewed_event(&metadata, contract)
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )

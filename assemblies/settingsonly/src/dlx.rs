@@ -15,7 +15,8 @@ const DLX_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(60);
 const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(45);
 const DLX_ARCHIVE_KEY_READINESS_INTERVAL: Duration = Duration::from_secs(30);
 const DLX_ARCHIVE_KEY_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
-const DLX_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const DLX_WORKER_SHUTDOWN_BUDGET: eventing::lifecycle::ShutdownBudget =
+    eventing::lifecycle::ShutdownBudget::STANDARD;
 const DLX_LIFECYCLE_WORKER_NAME: &str = "settingsonly-dlx-lifecycle";
 const DLX_ARCHIVE_READINESS_WORKER_NAME: &str = "settingsonly-dlx-archive-readiness";
 const DLX_ARCHIVE_KEY_READINESS_WORKER_NAME: &str = "settingsonly-dlx-archive-key-readiness";
@@ -182,7 +183,7 @@ fn lifecycle_worker(
                 DLX_LIFECYCLE_WORKER_NAME,
                 token,
                 Arc::clone(&health),
-                DLX_WORKER_SHUTDOWN_TIMEOUT,
+                DLX_WORKER_SHUTDOWN_BUDGET,
                 move |_error| {
                     record_health_transition(
                         &build_failure_health,
@@ -408,7 +409,7 @@ fn key_readiness_worker(
                 spec.worker_name,
                 token,
                 Arc::clone(&health),
-                DLX_WORKER_SHUTDOWN_TIMEOUT,
+                DLX_WORKER_SHUTDOWN_BUDGET,
                 move |_error| {
                     tracing::error!(
                         event = "settingsonly.readiness",
@@ -541,7 +542,7 @@ fn archive_readiness_worker(
             DLX_ARCHIVE_READINESS_WORKER_NAME,
             token,
             Arc::clone(&health),
-            DLX_WORKER_SHUTDOWN_TIMEOUT,
+            DLX_WORKER_SHUTDOWN_BUDGET,
             move |_error| {
                 record_health_transition(
                     &build_failure_health,

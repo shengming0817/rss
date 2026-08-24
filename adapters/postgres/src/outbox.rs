@@ -36,10 +36,10 @@ use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
     EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SCHEMA_HASH,
     KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, OutboxActor,
-    OutboxEmitError, PublishErrorKind, PublishRequest, Publisher, PublisherError,
-    RESERVED_METADATA_KEYS,
+    OutboxEmitError, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
 };
-use eventexec::{RelayBudget, TenantAuthority, TenantAuthorityBinding};
+use eventexec::{TenantAuthority, TenantAuthorityBinding};
+use eventing::delivery::{DeliveryBudget, PublishErrorKind};
 use sqlx::Row;
 
 use crate::PgStore;
@@ -48,6 +48,7 @@ use crate::cotx::{
     ServingWriteLane, TenantDb, deadline_global_transaction, infra_tenant_scope, io_deadline_after,
 };
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
+use crate::delivery_policy::DeliveryBudgetPgProjection as _;
 #[cfg(feature = "fault-matrix-test-support")]
 use crate::pool::PgRuntimeStores;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -312,7 +313,7 @@ impl PgClaimedOutboxEntry {
     pub(crate) fn fault_matrix_expire_persisted_deadline(
         &mut self,
         deadline_epoch_micros: i64,
-        relay_budget: RelayBudget,
+        relay_budget: DeliveryBudget,
     ) {
         let monotonic_remaining = relay_budget
             .settle_timeout()
@@ -757,9 +758,32 @@ pub(crate) fn metadata_with_ambient(
     tenant: rss_request_context::TenantId,
     contract: vocab::ContractBinding,
 ) -> OutboxMetadata {
+    let correlation = diagctx::correlation();
+    metadata_with_correlation(occurred_at_secs, tenant, contract, correlation.as_ref())
+}
+
+/// Projects the correlation captured at event authoring time instead of resampling ambient state.
+pub(crate) fn metadata_from_reviewed_event(
+    metadata: &eventing::metadata::EventMetadata,
+    contract: vocab::ContractBinding,
+) -> OutboxMetadata {
+    metadata_with_correlation(
+        metadata.occurred_at().unix_seconds(),
+        metadata.tenant_id(),
+        contract,
+        metadata.audit_correlation(),
+    )
+}
+
+fn metadata_with_correlation(
+    occurred_at_secs: i64,
+    tenant: rss_request_context::TenantId,
+    contract: vocab::ContractBinding,
+    correlation: Option<&diagctx::CorrelationId>,
+) -> OutboxMetadata {
     let mut m = OutboxMetadata::new(occurred_at_secs, tenant, contract);
-    if let Some(c) = diagctx::correlation() {
-        m = m.with_correlation(c.as_str());
+    if let Some(correlation) = correlation {
+        m = m.with_correlation(correlation.as_str());
     }
     if let Some(context) = tracewire::capture_current() {
         let traceparent = context.into_traceparent();
@@ -1184,7 +1208,7 @@ pub struct PgOutbox {
     tenant_pool: TenantDb<ServingWriteLane>,
     provider: Arc<OutboxProviderIdentity>,
     publisher: Box<DynPublisher<'static>>,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     tenant_authority: Arc<TenantAuthority>,
     payload_protector: DlxPayloadProtector,
 }
@@ -1195,7 +1219,7 @@ impl PgOutbox {
         store: &crate::PgStore,
         domain: vocab::DomainName,
         publisher: Box<DynPublisher<'static>>,
-        relay_budget: RelayBudget,
+        relay_budget: DeliveryBudget,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> Self {
@@ -1221,7 +1245,7 @@ impl PgOutbox {
         store: &VerifiedPgWriteStore,
         domain: vocab::DomainName,
         publisher: Box<DynPublisher<'static>>,
-        relay_budget: RelayBudget,
+        relay_budget: DeliveryBudget,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> Self {
@@ -1395,7 +1419,7 @@ fn publish_request(entry: &StoredOutboxEntry, metadata: EnvelopeMetadata) -> Pub
 pub(crate) async fn fault_matrix_publish_before_settle(
     pool: &sqlx::PgPool,
     publisher: Box<DynPublisher<'static>>,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     tenant_authority: Arc<TenantAuthority>,
     payload_protector: DlxPayloadProtector,
     domain: &str,
@@ -1604,7 +1628,7 @@ impl OutboxRelay for PgOutbox {
 
 fn local_publish_budget_available(
     monotonic_deadline: tokio::time::Instant,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> bool {
     monotonic_deadline.saturating_duration_since(io_deadline_after(std::time::Duration::ZERO))
         > relay_budget.required_budget()
@@ -2139,7 +2163,7 @@ async fn sample_outbox_backlog(
 
 async fn with_publisher_watchdog<F>(
     deadline: tokio::time::Instant,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     future: F,
 ) -> Result<(), PublisherError>
 where
@@ -2170,7 +2194,7 @@ where
 async fn publish_preflight(
     pool: &sqlx::PgPool,
     claimed: &PgClaimedOutboxEntry,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     deadline: tokio::time::Instant,
 ) -> Result<PublishPreflight, EngineError> {
     let event_id = claimed.idem_key().as_str().to_string();
@@ -2409,16 +2433,17 @@ mod tests {
         RelayEnvelopeValidationReason, RelayPublishFailure, STATUS_ABANDONED, STATUS_PENDING,
         STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
         classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
-        hydrate_envelope_metadata, metadata_with_ambient, publish_request,
-        record_relay_envelope_validation_failure, validate_publish_request_envelope,
-        with_publisher_watchdog,
+        hydrate_envelope_metadata, metadata_from_reviewed_event, metadata_with_ambient,
+        publish_request, record_relay_envelope_validation_failure,
+        validate_publish_request_envelope, with_publisher_watchdog,
     };
     use diport::{
         EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION,
         KEY_OCCURRED_AT, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID, KEY_TRACE, MessageId,
-        MetadataError, OpaqueActorId, OutboxActor, PublishErrorKind, PublishRequest,
-        PublisherError, RESERVED_METADATA_KEYS, Topic as PublishTopic,
+        MetadataError, OpaqueActorId, OutboxActor, PublishRequest, PublisherError,
+        RESERVED_METADATA_KEYS, Topic as PublishTopic,
     };
+    use eventing::delivery::PublishErrorKind;
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -2443,8 +2468,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn relay_budget() -> eventexec::RelayBudget {
-        eventexec::RelayBudget::new(
+    fn relay_budget() -> eventing::delivery::DeliveryBudget {
+        eventing::delivery::DeliveryBudget::new(
             Duration::from_millis(20),
             Duration::from_millis(10),
             Duration::from_millis(3),
@@ -2695,6 +2720,7 @@ mod tests {
     fn valid_publish_metadata() -> EnvelopeMetadata {
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
         md
@@ -2799,6 +2825,7 @@ mod tests {
     fn validate_publish_request_envelope_rejects_missing_schema_permanently() {
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_TENANT_ID, TENANT);
+        md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         let request = PublishRequest::new(
             PublishTopic::new("session.created"),
             MessageId::new("evt-missing-schema"),
@@ -3993,6 +4020,30 @@ mod tests {
             json.contains(r#""schemaVersion":"v1""#) && json.contains(HASH),
             "schema header 应存在: {json}"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn reviewed_event_metadata_keeps_authored_correlation_across_ambient_change() {
+        let authored = eventing::metadata::EventMetadata::new(
+            tenant(),
+            rss_contract::Timepoint::try_from(42_i64).unwrap(),
+            Some(diagctx::CorrelationId::parse("corr-authored").unwrap()),
+        );
+        let ambient =
+            diagctx::DiagnosticCtx::new(diagctx::CorrelationId::parse("corr-provider").unwrap());
+        let json = diagctx::scope(ambient, async {
+            OutboxEnvelope::new(
+                "d".to_owned(),
+                "c".to_owned(),
+                metadata_from_reviewed_event(&authored, contract()),
+            )
+            .metadata_json()
+        })
+        .await;
+        assert!(json.contains(r#""correlation":"corr-authored""#));
+        assert!(!json.contains("corr-provider"));
+        assert!(json.contains(r#""occurredAt":42"#));
     }
 
     // 无 scope → correlation 不注入（fail-open 省略），occurredAt 仍在。

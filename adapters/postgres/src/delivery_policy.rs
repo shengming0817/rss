@@ -5,7 +5,46 @@
 //! exact-match the configured typed relay budget through [`crate::PgRuntimeHandle`].
 
 use crate::{PgError, PgStore};
-use eventexec::RelayBudget;
+use eventing::delivery::DeliveryBudget;
+
+/// PostgreSQL's crate-private projection of the provider-neutral delivery budget.
+///
+/// The public eventing API stays duration-based; only the adapter that owns the database schema
+/// may name its millisecond columns.
+pub(crate) trait DeliveryBudgetPgProjection {
+    fn lease_ttl_millis(self) -> i64;
+    fn publish_timeout_millis(self) -> i64;
+    fn settle_timeout_millis(self) -> i64;
+    fn safety_margin_millis(self) -> i64;
+    fn required_budget_millis(self) -> i64;
+    fn publisher_watchdog_timeout_millis(self) -> i64;
+}
+
+impl DeliveryBudgetPgProjection for DeliveryBudget {
+    fn lease_ttl_millis(self) -> i64 {
+        self.lease_ttl().as_millis() as i64
+    }
+
+    fn publish_timeout_millis(self) -> i64 {
+        self.publish_timeout().as_millis() as i64
+    }
+
+    fn settle_timeout_millis(self) -> i64 {
+        self.settle_timeout().as_millis() as i64
+    }
+
+    fn safety_margin_millis(self) -> i64 {
+        self.safety_margin().as_millis() as i64
+    }
+
+    fn required_budget_millis(self) -> i64 {
+        self.required_budget().as_millis() as i64
+    }
+
+    fn publisher_watchdog_timeout_millis(self) -> i64 {
+        self.publisher_watchdog_timeout().as_millis() as i64
+    }
+}
 
 const POLICY_REVISION: &str = "same-id-delivery-v1";
 const AUTOMATIC_RETRY_WINDOW_SECONDS: u64 = 24 * 60 * 60;
@@ -28,7 +67,7 @@ pub(crate) struct EventDeliveryPolicy {
     same_id_redrive_horizon_seconds: u64,
     safety_margin_seconds: u64,
     inbox_receipt_retention_seconds: u64,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 }
 
 #[derive(sqlx::FromRow)]
@@ -54,7 +93,7 @@ impl EventDeliveryPolicy {
             same_id_redrive_horizon_seconds: SAME_ID_REDRIVE_HORIZON_SECONDS,
             safety_margin_seconds: SAFETY_MARGIN_SECONDS,
             inbox_receipt_retention_seconds: INBOX_RECEIPT_RETENTION_SECONDS,
-            relay_budget: RelayBudget::new(
+            relay_budget: DeliveryBudget::new(
                 std::time::Duration::from_millis(RELAY_LEASE_TTL_MS as u64),
                 std::time::Duration::from_millis(RELAY_PUBLISH_TIMEOUT_MS as u64),
                 std::time::Duration::from_millis(RELAY_SETTLE_TIMEOUT_MS as u64),
@@ -95,7 +134,7 @@ impl EventDeliveryPolicy {
         self.inbox_receipt_retention_seconds
     }
 
-    pub(crate) fn validate_relay_budget(self, budget: RelayBudget) -> Result<(), PgError> {
+    pub(crate) fn validate_relay_budget(self, budget: DeliveryBudget) -> Result<(), PgError> {
         if budget == self.relay_budget {
             Ok(())
         } else {
@@ -104,13 +143,13 @@ impl EventDeliveryPolicy {
     }
 }
 
-fn relay_budget_from_row(row: &EventDeliveryPolicyRow) -> Result<RelayBudget, PgError> {
+fn relay_budget_from_row(row: &EventDeliveryPolicyRow) -> Result<DeliveryBudget, PgError> {
     let duration = |value: i64| {
         u64::try_from(value)
             .map(std::time::Duration::from_millis)
             .map_err(|_| PgError::EventDeliveryPolicyMismatch)
     };
-    RelayBudget::new(
+    DeliveryBudget::new(
         duration(row.relay_lease_ttl_ms)?,
         duration(row.relay_publish_timeout_ms)?,
         duration(row.relay_settle_timeout_ms)?,
@@ -205,7 +244,7 @@ mod tests {
     // reason: fixed typed-budget fixtures are deliberately valid and a construction failure must fail the test.
     fn release_policy_accepts_only_the_exact_release_relay_budget() {
         let policy = EventDeliveryPolicy::hydrate(row()).unwrap();
-        let release = eventexec::RelayBudget::new(
+        let release = eventing::delivery::DeliveryBudget::new(
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(40),
             std::time::Duration::from_secs(5),
@@ -214,7 +253,7 @@ mod tests {
         .unwrap();
         assert!(policy.validate_relay_budget(release).is_ok());
 
-        let drift = eventexec::RelayBudget::new(
+        let drift = eventing::delivery::DeliveryBudget::new(
             std::time::Duration::from_secs(61),
             std::time::Duration::from_secs(40),
             std::time::Duration::from_secs(5),
@@ -227,7 +266,7 @@ mod tests {
         ));
 
         for (publish, settle, safety) in [(39, 5, 5), (40, 4, 5), (40, 5, 4)] {
-            let drift = eventexec::RelayBudget::new(
+            let drift = eventing::delivery::DeliveryBudget::new(
                 std::time::Duration::from_secs(60),
                 std::time::Duration::from_secs(publish),
                 std::time::Duration::from_secs(settle),
@@ -249,7 +288,7 @@ mod tests {
         alternate.relay_lease_ttl_ms = 61_000;
         alternate.relay_publish_timeout_ms = 41_000;
         let policy = EventDeliveryPolicy::hydrate(alternate).unwrap();
-        let matching = eventexec::RelayBudget::new(
+        let matching = eventing::delivery::DeliveryBudget::new(
             std::time::Duration::from_secs(61),
             std::time::Duration::from_secs(41),
             std::time::Duration::from_secs(5),

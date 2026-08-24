@@ -455,6 +455,7 @@ fn spawn_test_worker(
         runner_config(),
         CancellationToken::new(),
         Arc::new(WorkerHealth::starting()),
+        eventing::lifecycle::ShutdownBudget::STANDARD,
     )
 }
 

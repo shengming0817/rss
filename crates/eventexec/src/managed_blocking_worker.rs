@@ -11,6 +11,7 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use eventing::lifecycle::ShutdownBudget;
 use tokio_util::sync::CancellationToken;
 
 use crate::WorkerHealth;
@@ -21,7 +22,7 @@ pub struct ManagedBlockingWorker {
     name: String,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    shutdown_timeout: Duration,
+    shutdown_budget: ShutdownBudget,
     completion: Mutex<Option<tokio::sync::oneshot::Receiver<Result<(), diport::ShutdownError>>>>,
 }
 
@@ -48,7 +49,7 @@ impl ManagedBlockingWorker {
         name: N,
         token: CancellationToken,
         health: Arc<WorkerHealth>,
-        shutdown_timeout: Duration,
+        shutdown_budget: ShutdownBudget,
         run: F,
     ) -> Self
     where
@@ -84,7 +85,7 @@ impl ManagedBlockingWorker {
             name,
             token,
             health,
-            shutdown_timeout,
+            shutdown_budget,
             completion: Mutex::new(Some(completion)),
         }
     }
@@ -104,7 +105,7 @@ pub fn spawn_on_dedicated_runtime<N, M, Fut>(
     name: N,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    shutdown_timeout: Duration,
+    shutdown_budget: ShutdownBudget,
     make_body: M,
 ) -> ManagedBlockingWorker
 where
@@ -116,7 +117,7 @@ where
         name,
         token,
         health,
-        shutdown_timeout,
+        shutdown_budget,
         |_| {},
         make_body,
     )
@@ -130,7 +131,7 @@ pub fn spawn_on_dedicated_runtime_with_build_failure<N, O, M, Fut>(
     name: N,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    shutdown_timeout: Duration,
+    shutdown_budget: ShutdownBudget,
     on_build_failure: O,
     make_body: M,
 ) -> ManagedBlockingWorker
@@ -144,7 +145,7 @@ where
         name,
         token,
         health,
-        shutdown_timeout,
+        shutdown_budget,
         on_build_failure,
         || {},
         make_body,
@@ -159,7 +160,7 @@ pub fn spawn_on_dedicated_runtime_with_failure_observers<N, O, P, M, Fut>(
     name: N,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    shutdown_timeout: Duration,
+    shutdown_budget: ShutdownBudget,
     on_build_failure: O,
     on_panic: P,
     make_body: M,
@@ -173,7 +174,7 @@ where
 {
     let name = name.into();
     let runtime_worker_name = name.clone();
-    ManagedBlockingWorker::spawn(name, token, health, shutdown_timeout, move |run_token| {
+    ManagedBlockingWorker::spawn(name, token, health, shutdown_budget, move |run_token| {
         let runtime = observe_runtime_build_result(
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -218,7 +219,7 @@ impl diport::ManagedResource for ManagedBlockingWorker {
     }
 
     fn shutdown_timeout(&self) -> Duration {
-        self.shutdown_timeout
+        self.shutdown_budget.timeout()
     }
 
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
@@ -243,6 +244,7 @@ mod tests {
     use std::time::Duration;
 
     use diport::ManagedResource as _;
+    use eventing::lifecycle::ShutdownBudget;
     use primitives::HealthStatus;
     use tokio_util::sync::CancellationToken;
 
@@ -260,7 +262,7 @@ mod tests {
             "managed-blocking-cancel",
             CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            Duration::from_secs(1),
+            ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
             move |token| {
                 while !token.is_cancelled() {
                     std::thread::yield_now();
@@ -284,7 +286,7 @@ mod tests {
             "managed-blocking-error",
             CancellationToken::new(),
             Arc::clone(&failed_health),
-            Duration::from_secs(1),
+            ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
             |_token| {
                 Err(diport::ShutdownError::new(std::io::Error::other(
                     "runner failed",
@@ -299,7 +301,7 @@ mod tests {
             "managed-blocking-panic",
             CancellationToken::new(),
             Arc::clone(&panic_health),
-            Duration::from_secs(1),
+            ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
             |_token| -> Result<(), diport::ShutdownError> { panic!("secret panic payload") },
         );
         let error = panicked
@@ -318,7 +320,7 @@ mod tests {
             "managed-async-error",
             CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            Duration::from_secs(1),
+            ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
             |_token| async {
                 Err(diport::ShutdownError::new(std::io::Error::other(
                     "async runner failed",
@@ -351,7 +353,7 @@ mod tests {
             "managed-async-panic",
             CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            Duration::from_secs(1),
+            ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
             |_| {},
             move || panic_observed_run.store(true, Ordering::Release),
             |_token| async { panic!("redacted async panic") },
@@ -365,7 +367,7 @@ mod tests {
             "managed-async-cancel",
             CancellationToken::new(),
             Arc::new(WorkerHealth::starting()),
-            Duration::from_secs(1),
+            ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
             |_| {},
             move || cancellation_observed_run.store(true, Ordering::Release),
             |token| async move {
@@ -407,7 +409,7 @@ mod tests {
                     "managed-diagnostics-error",
                     CancellationToken::new(),
                     Arc::new(WorkerHealth::starting()),
-                    Duration::from_secs(1),
+                    ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
                     |_token| {
                         Err(diport::ShutdownError::new(std::io::Error::other(
                             ERROR_SECRET,
@@ -420,7 +422,7 @@ mod tests {
                     "managed-diagnostics-panic",
                     CancellationToken::new(),
                     Arc::new(WorkerHealth::starting()),
-                    Duration::from_secs(1),
+                    ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
                     |_token| -> Result<(), diport::ShutdownError> { panic!("{PANIC_SECRET}") },
                 );
                 assert!(panicked.shutdown().await.is_err());
@@ -475,7 +477,7 @@ mod tests {
                     "managed-blocking-stalled",
                     CancellationToken::new(),
                     Arc::new(WorkerHealth::starting()),
-                    Duration::from_secs(1),
+                    ShutdownBudget::new(Duration::from_secs(1)).expect("positive shutdown budget"),
                     move |_token| {
                         thread_started.store(true, Ordering::Release);
                         while !thread_release.load(Ordering::Acquire) {

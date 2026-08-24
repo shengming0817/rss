@@ -67,7 +67,6 @@
 //! `run_consumer_ackable` 证 broker settlement，覆盖接缝的 at-least-once 终态兑现。
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use consistency::InboxStore;
 use consistency::{HandleResult, OutboxRelay};
@@ -86,15 +85,13 @@ use crate::consumer::run_consumer;
 use crate::consumer::{ConsumerMeta, LeaseConfig, ValidatedEvent, run_consumer_ackable};
 use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
 use crate::relay::WorkerHealth;
-use crate::retry::{BackoffPolicy, wait_or_cancel};
+use crate::retry::{delay_after, wait_or_cancel};
+use eventing::lifecycle::{RetryPolicy, ShutdownBudget};
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
 /// [`crate::OUTBOX_RELAY_PROBE`]）。组合根据此 + domain/topic 组装 per-worker `primitives::ProbeName`
 /// （如 `event_consumer:audit:identity.session-created`）接 readyz 聚合（HTTP endpoint mount 归 #1320 / assemblies/runtime）。
 pub const EVENT_CONSUMER_PROBE: &str = "event_consumer";
-
-/// consumer worker 关闭超时：每条在途消息 handle + commit + settle 有界 drain，对齐 relay 的 45s 预算。
-const CONSUMER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
 // ── spawn（专用线程驱动 !Send 消费 future）─────────────────────────────────────
 
@@ -169,6 +166,7 @@ pub fn spawn_test_consumer<S, H>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     admission: primitives::ConsumerAdmission,
+    shutdown_budget: ShutdownBudget,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
@@ -179,7 +177,7 @@ where
         name,
         token,
         Arc::clone(&health),
-        CONSUMER_SHUTDOWN_TIMEOUT,
+        shutdown_budget,
         move |token| async move {
             health.mark_healthy();
             run_consumer(
@@ -189,6 +187,7 @@ where
                 meta,
                 handler,
                 lease_cfg,
+                RetryPolicy::STANDARD,
                 admission,
                 token,
             )
@@ -223,6 +222,7 @@ pub fn spawn_relay<A>(
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn crate::OutboxMetrics>,
     admission: primitives::RelayAdmission,
+    shutdown_budget: ShutdownBudget,
 ) -> ManagedBlockingWorker
 where
     A: OutboxRelay + Send + 'static,
@@ -231,7 +231,7 @@ where
         name,
         token,
         Arc::clone(&health),
-        CONSUMER_SHUTDOWN_TIMEOUT,
+        shutdown_budget,
         move |token| async move {
             // Arc::new(store) 在线程内构建：Arc<A>(!Send) 不跨线程；store: A (Send) 跨线程移入。
             let store = Arc::new(store);
@@ -267,6 +267,7 @@ pub fn spawn_test_ackable_consumer<S, H>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     admission: primitives::ConsumerAdmission,
+    shutdown_budget: ShutdownBudget,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
@@ -277,7 +278,7 @@ where
         name,
         token,
         Arc::clone(&health),
-        CONSUMER_SHUTDOWN_TIMEOUT,
+        shutdown_budget,
         move |token| async move {
             health.mark_healthy();
             let stream = crate::ManagedDeliveryStream::mint(stream, token.child_token());
@@ -288,6 +289,7 @@ where
                 &meta,
                 &handler,
                 lease_cfg,
+                RetryPolicy::STANDARD,
                 admission,
             )
             .await;
@@ -296,8 +298,9 @@ where
     )
 }
 
-/// Ackable 订阅监督循环：subscribe 失败与 delivery stream 非取消终止均指数退避重入，直到
-/// shutdown token 取消。成功订阅后 [`WorkerHealth::mark_subscription_recovered`]（CAS：仅
+/// Ackable 订阅监督循环：subscribe 失败与 delivery stream 非取消终止均按单调饱和的 recovery
+/// cursor 指数退避重入，达到 cap 后保持 cap，直到 shutdown token 取消。成功订阅后
+/// [`WorkerHealth::mark_subscription_recovered`]（CAS：仅
 /// starting|subscriber-unavailable→healthy）并重置 attempt；失败/断流标
 /// `subscriber-unavailable`（不覆盖 dlx-write-error/invariant）。panic 仍由
 /// [`ManagedBlockingWorker`] 收口，本循环不建模 handler fatal。
@@ -321,7 +324,7 @@ pub async fn run_ackable_subscription_loop<D>(
     domain: String,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
     admission: primitives::ConsumerAdmission,
     mut run_once: D,
 ) where
@@ -425,40 +428,45 @@ fn record_subscribe_retry(domain: &str, outcome: SubscribeRetryOutcome) {
     .increment(1);
 }
 
+fn next_recovery_attempt(attempts: &mut u32) -> u32 {
+    *attempts = attempts.saturating_add(1).max(1);
+    *attempts
+}
+
 /// stream 非取消结束：标 unavailable + 退避；`true` = 已 cancel。
 async fn backoff_after_stream_end(
     health: &WorkerHealth,
-    backoff: &BackoffPolicy,
+    backoff: &RetryPolicy,
     token: &CancellationToken,
     attempts: &mut u32,
     topic: &Topic,
     domain: &str,
 ) -> bool {
-    *attempts = attempts.saturating_add(1);
+    let attempt = next_recovery_attempt(attempts);
     health.mark_subscriber_unavailable();
     record_subscribe_retry(domain, SubscribeRetryOutcome::StreamEnd);
     tracing::warn!(
         domain = %domain,
         component = EVENT_CONSUMER_PROBE,
         topic = %topic.as_str(),
-        attempts = *attempts,
+        attempts = attempt,
         outcome = SubscribeRetryOutcome::StreamEnd.as_label(),
         "consumer: ackable delivery stream ended; resubscribing after backoff"
     );
-    wait_or_cancel(backoff.delay_for(*attempts), token).await
+    wait_or_cancel(delay_after(backoff, attempt), token).await
 }
 
 /// subscribe 失败：标 unavailable + 退避；`true` = 已 cancel。
 async fn backoff_after_subscribe_error(
     health: &WorkerHealth,
-    backoff: &BackoffPolicy,
+    backoff: &RetryPolicy,
     token: &CancellationToken,
     attempts: &mut u32,
     err: &diport::SubscriberError,
     topic: &Topic,
     domain: &str,
 ) -> bool {
-    *attempts = attempts.saturating_add(1);
+    let attempt = next_recovery_attempt(attempts);
     health.mark_subscriber_unavailable();
     record_subscribe_retry(domain, SubscribeRetryOutcome::SubscribeError);
     tracing::warn!(
@@ -466,11 +474,11 @@ async fn backoff_after_subscribe_error(
         component = EVENT_CONSUMER_PROBE,
         topic = %topic.as_str(),
         error = %err,
-        attempts = *attempts,
+        attempts = attempt,
         outcome = SubscribeRetryOutcome::SubscribeError.as_label(),
         "consumer: subscribe_ackable failed; retrying after backoff"
     );
-    wait_or_cancel(backoff.delay_for(*attempts), token).await
+    wait_or_cancel(delay_after(backoff, attempt), token).await
 }
 
 /// spawn at-least-once 消费 worker，并在 worker 线程内用注入的 stack child token 完成订阅。
@@ -480,7 +488,7 @@ async fn backoff_after_subscribe_error(
 /// 监督 subscribe/断流重入，使 `ShutdownStack::register_with_token` 注入的 child token 同时驱动
 /// 订阅取消与 worker shutdown，满足 `SHUTDOWN-TOKEN-FUNNEL-01`。
 ///
-/// `backoff`：生产传 [`BackoffPolicy::default`]；测试可注入 tiny / 自定义策略。
+/// `backoff`：生产显式传 [`RetryPolicy::STANDARD`]；测试可注入 tiny / 自定义策略。
 #[allow(clippy::too_many_arguments)]
 // reason: 与 subscriber-managed consumer 同形；subscriber/topic/backoff 是把 async subscribe 移入 worker
 // 线程并注入退避策略所需的最小新增参数，聚合 struct 只会增加间接层。
@@ -495,8 +503,9 @@ pub fn spawn_consumer_ackable_subscriber<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
     admission: primitives::ConsumerAdmission,
+    shutdown_budget: ShutdownBudget,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
@@ -508,7 +517,7 @@ where
         name,
         token,
         Arc::clone(&health),
-        CONSUMER_SHUTDOWN_TIMEOUT,
+        shutdown_budget,
         move |token| async move {
             run_ackable_subscription_loop(
                 subscriber,
@@ -526,6 +535,7 @@ where
                         &meta,
                         &handler,
                         lease_cfg,
+                        backoff,
                         admission,
                     )
                     .await;
@@ -568,9 +578,9 @@ mod tests {
         spawn_consumer_ackable_subscriber, spawn_relay, spawn_test_ackable_consumer,
         spawn_test_consumer,
     };
-    use crate::retry::BackoffPolicy;
     use crate::tenant_authority::TenantAuthorityBinding;
     use crate::{ManagedBlockingWorker, TenantAuthority};
+    use eventing::lifecycle::{RetryPolicy, ShutdownBudget};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const SCHEMA_HASH: &str =
@@ -697,13 +707,58 @@ mod tests {
         }
     }
 
-    fn tiny_backoff() -> BackoffPolicy {
+    fn tiny_backoff() -> RetryPolicy {
         // 1ms < 8ms：构造失败不可达；避免 clippy::expect_used。
-        BackoffPolicy::new(
+        RetryPolicy::new(
+            std::num::NonZeroU32::MIN.saturating_add(2),
             std::time::Duration::from_millis(1),
             std::time::Duration::from_millis(8),
         )
-        .unwrap_or_default()
+        .unwrap_or(RetryPolicy::STANDARD)
+    }
+
+    #[test]
+    fn subscription_recovery_cursor_saturates_until_success_resets_it() {
+        let policy = RetryPolicy::new(
+            std::num::NonZeroU32::MIN,
+            std::time::Duration::from_secs(8),
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap_or(RetryPolicy::STANDARD);
+        let mut attempts = 0;
+        assert_eq!(super::next_recovery_attempt(&mut attempts), 1);
+        assert_eq!(
+            super::delay_after(&policy, attempts),
+            std::time::Duration::from_secs(8)
+        );
+        assert_eq!(super::next_recovery_attempt(&mut attempts), 2);
+        assert_eq!(
+            super::delay_after(&policy, attempts),
+            std::time::Duration::from_secs(16)
+        );
+        assert_eq!(super::next_recovery_attempt(&mut attempts), 3);
+        assert_eq!(
+            super::delay_after(&policy, attempts),
+            std::time::Duration::from_secs(32)
+        );
+        assert_eq!(super::next_recovery_attempt(&mut attempts), 4);
+        assert_eq!(
+            super::delay_after(&policy, attempts),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(super::next_recovery_attempt(&mut attempts), 5);
+        assert_eq!(
+            super::delay_after(&policy, attempts),
+            std::time::Duration::from_secs(60)
+        );
+
+        attempts = u32::MAX - 1;
+        assert_eq!(super::next_recovery_attempt(&mut attempts), u32::MAX);
+        assert_eq!(super::next_recovery_attempt(&mut attempts), u32::MAX);
+
+        // The successful-subscribe branch owns the only recovery reset.
+        attempts = 0;
+        assert_eq!(super::next_recovery_attempt(&mut attempts), 1);
     }
 
     /// 恒 Fresh 幂等 store（计 commit 次数）。
@@ -974,6 +1029,7 @@ mod tests {
             CancellationToken::new(),
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while counter.load(Ordering::Acquire) != 3 {
@@ -1007,6 +1063,7 @@ mod tests {
             token,
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         // 运行中：health 初始 Healthy，worker 阻塞在 pending stream 未退出。
         assert_eq!(worker.health().status(), HealthStatus::Healthy);
@@ -1030,6 +1087,7 @@ mod tests {
             CancellationToken::new(),
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !polled.load(Ordering::Acquire) {
@@ -1059,10 +1117,11 @@ mod tests {
             CancellationToken::new(),
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         assert_eq!(
             ManagedResource::shutdown_timeout(&worker),
-            super::CONSUMER_SHUTDOWN_TIMEOUT
+            ShutdownBudget::STANDARD.timeout()
         );
         assert!(worker.shutdown().await.is_ok());
         assert!(worker.shutdown().await.is_ok(), "二次 shutdown 幂等");
@@ -1111,6 +1170,7 @@ mod tests {
                     CancellationToken::new(),
                     health(),
                     consumer_admission(),
+                    ShutdownBudget::STANDARD,
                 );
                 tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     while !started.load(Ordering::Acquire) {
@@ -1161,6 +1221,7 @@ mod tests {
             CancellationToken::new(),
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while worker.health().detail() != "stopped" {
@@ -1198,6 +1259,7 @@ mod tests {
             CancellationToken::new(),
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while counter.load(Ordering::Acquire) != 1 {
@@ -1231,6 +1293,7 @@ mod tests {
             CancellationToken::new(),
             health(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !polled.load(Ordering::Acquire) {
@@ -1268,6 +1331,7 @@ mod tests {
             health(),
             tiny_backoff(),
             consumer_admission(),
+            ShutdownBudget::STANDARD,
         );
 
         let subscribed_token = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
@@ -1639,6 +1703,7 @@ mod tests {
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
             relay_admission(),
+            ShutdownBudget::STANDARD,
         );
 
         // 运行中 Healthy（relay_loop 跑在线程内，未退出）。
@@ -1700,6 +1765,7 @@ mod tests {
                     health(),
                     Arc::new(NoopRelayMetrics),
                     relay_admission(),
+                    ShutdownBudget::STANDARD,
                 );
                 tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     while !started.load(Ordering::Acquire) {

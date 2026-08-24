@@ -1,7 +1,0 @@
-error[E0432]: unresolved imports `eventexec::BackoffError`, `eventexec::BackoffPolicy`
- --> tests/ui/retry_root_reexport_fail.rs:1:17
-  |
-1 | use eventexec::{BackoffError, BackoffPolicy};
-  |                 ^^^^^^^^^^^^  ^^^^^^^^^^^^^ no `BackoffPolicy` in the root
-  |                 |
-  |                 no `BackoffError` in the root

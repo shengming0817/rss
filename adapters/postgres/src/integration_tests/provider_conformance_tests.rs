@@ -207,6 +207,7 @@ async fn postgres_consumer_commit_ack_behavior() -> TestResult {
         &(conf_consumer_meta(&group)),
         &(conf_ack_handler(Arc::new(AtomicU32::new(0)))),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -229,6 +230,7 @@ async fn postgres_consumer_commit_ack_behavior() -> TestResult {
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::new(AtomicU32::new(0)))),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -335,7 +337,7 @@ async fn relay_ambiguous_retries_with_original_event_id_behavior() -> TestResult
 async fn insufficient_preflight_budget_never_calls_publisher_behavior() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(2),
         Duration::from_secs(1),
         Duration::from_millis(500),

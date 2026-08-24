@@ -284,11 +284,11 @@ impl<'a> ProvidersBuilt<'a> {
                 let relay_budget = event_worker.relay_budget();
                 tracing::info!(
                     runtime.event_topology = topology_label(event_transport.topology()),
-                    relay.lease_ttl_ms = relay_budget.lease_ttl_millis(),
-                    relay.publish_timeout_ms = relay_budget.publish_timeout_millis(),
-                    relay.settle_timeout_ms = relay_budget.settle_timeout_millis(),
-                    relay.safety_margin_ms = relay_budget.safety_margin_millis(),
-                    relay.required_budget_ms = relay_budget.required_budget_millis(),
+                    relay.lease_ttl_ms = relay_budget.lease_ttl().as_millis() as i64,
+                    relay.publish_timeout_ms = relay_budget.publish_timeout().as_millis() as i64,
+                    relay.settle_timeout_ms = relay_budget.settle_timeout().as_millis() as i64,
+                    relay.safety_margin_ms = relay_budget.safety_margin().as_millis() as i64,
+                    relay.required_budget_ms = relay_budget.required_budget().as_millis() as i64,
                     "runtime event transport budget loaded"
                 );
             }

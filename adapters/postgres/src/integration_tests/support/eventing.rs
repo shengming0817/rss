@@ -21,8 +21,10 @@ pub(in super::super) use diport::{
 };
 
 pub(in super::super) use eventexec::{
-    ConsumerMeta, LeaseConfig, MAX_REDELIVERY, RelayBudget, TenantAuthority, TenantAuthorityBinding,
+    ConsumerMeta, LeaseConfig, TenantAuthority, TenantAuthorityBinding,
 };
+pub(in super::super) use eventing::delivery::DeliveryBudget;
+pub(in super::super) use eventing::lifecycle::RetryPolicy;
 
 pub(in super::super) use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
@@ -67,6 +69,7 @@ pub(in super::super) async fn run_consumer_ackable<S, H>(
                 meta,
                 handler,
                 lease_cfg,
+                eventing::lifecycle::RetryPolicy::STANDARD,
                 admission,
             )
             .await;
@@ -539,7 +542,7 @@ where
     C: generated::event::EventContract,
     C::Payload: serde::de::DeserializeOwned + Send + Sync,
 {
-    if entry.topic().as_str() != C::FACT.topic() || envelope.contract() != &C::SPEC.contract() {
+    if entry.topic().as_str() != C::FACT.topic() || envelope.contract() != C::FACT.contract() {
         return Err("fixture topic or contract does not match its generated event contract".into());
     }
     let payload = serde_json::from_slice::<C::Payload>(entry.payload())?;
@@ -548,7 +551,7 @@ where
         .and_then(serde_json::Value::as_i64)
         .ok_or("fixture payload must carry occurredAt")?;
     let occurred_at = rss_contract::Timepoint::try_from(occurred_at)?;
-    let idempotency_key = entry.idem_key().clone();
+    let event_id = eventing::envelope::EventId::parse(entry.idem_key().as_str())?;
     let (_contract, tenant, subject_id, actor, partition_key, causation_id) = envelope.into_parts();
     if partition_key.is_some() || causation_id.is_some() {
         return Err("fixture cannot override generated transport coordinates after review".into());
@@ -560,7 +563,7 @@ where
         occurred_at,
         subject_id,
         actor,
-        idempotency_key,
+        event_id,
     )
     .await?;
     Ok(reviewed)
@@ -585,7 +588,7 @@ pub(in super::super) async fn reviewed_session_event(
         rss_contract::Timepoint::try_from(expected_occurred_at())?,
         subject_id(envelope_subject),
         actor,
-        IdemKey::parse(event_id)?,
+        eventing::envelope::EventId::parse(event_id)?,
     )
     .await?)
 }
@@ -1323,8 +1326,8 @@ pub(in super::super) fn make_pg_outbox(
 }
 
 #[allow(clippy::expect_used)]
-pub(in super::super) fn test_relay_budget() -> RelayBudget {
-    RelayBudget::new(
+pub(in super::super) fn test_relay_budget() -> DeliveryBudget {
+    DeliveryBudget::new(
         Duration::from_secs(60),
         Duration::from_secs(40),
         Duration::from_secs(5),
@@ -1335,7 +1338,7 @@ pub(in super::super) fn test_relay_budget() -> RelayBudget {
 
 pub(in super::super) async fn set_test_relay_budget_policy(
     store: &PgStore,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
 ) -> TestResult {
     let affected = sqlx::query(
         r#"
@@ -1347,10 +1350,10 @@ pub(in super::super) async fn set_test_relay_budget_policy(
         WHERE singleton
         "#,
     )
-    .bind(budget.lease_ttl_millis())
-    .bind(budget.publish_timeout_millis())
-    .bind(budget.settle_timeout_millis())
-    .bind(budget.safety_margin_millis())
+    .bind(budget.lease_ttl().as_millis() as i64)
+    .bind(budget.publish_timeout().as_millis() as i64)
+    .bind(budget.settle_timeout().as_millis() as i64)
+    .bind(budget.safety_margin().as_millis() as i64)
     .execute(&store.pool)
     .await?
     .rows_affected();
@@ -1386,7 +1389,7 @@ pub(in super::super) fn make_pg_outbox_for_domain_with_budget(
     store: &PgStore,
     domain: &str,
     publisher: impl Publisher + Sync + 'static,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> PgOutbox {
     PgOutbox::from_unverified_for_test(
         store,
@@ -2125,7 +2128,7 @@ pub(in super::super) fn conf_expected_dlx() -> eventconf::DlxFields {
         domain: "eventing-conf-consumer-domain".to_string(),
         contract_id: "eventing-conf-consumer-contract".to_string(),
         topic: "eventing.conf.consumer".to_string(),
-        num_attempts: MAX_REDELIVERY,
+        num_attempts: RetryPolicy::STANDARD.max_attempts().get(),
     }
 }
 
@@ -2306,6 +2309,7 @@ pub(in super::super) async fn conf_duplicate_delivery(
         &(meta),
         &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2340,6 +2344,7 @@ pub(in super::super) async fn conf_poison_delivery(
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2376,6 +2381,7 @@ pub(in super::super) async fn conf_dlx_failure(
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2415,6 +2421,7 @@ pub(in super::super) async fn conf_malformed_delivery(
         &(conf_consumer_meta(&group)),
         &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2822,8 +2829,8 @@ pub(in super::super) async fn seed_timed_out_settle_entry(
 }
 
 #[allow(clippy::expect_used)]
-pub(in super::super) fn claim_clock_test_budget() -> RelayBudget {
-    RelayBudget::new(
+pub(in super::super) fn claim_clock_test_budget() -> DeliveryBudget {
+    DeliveryBudget::new(
         Duration::from_secs(2),
         Duration::from_millis(500),
         Duration::from_millis(250),
@@ -2910,7 +2917,7 @@ pub(in super::super) async fn settlement_pool_wait_fixture(
     let (pg, owner) = connect_pg().await?;
     setup_outbox(&owner).await?;
     let (event_id, domain) = seed_timed_out_settle_entry(&owner, path).await?;
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(10),
         Duration::from_secs(2),
         Duration::from_millis(250),
@@ -3117,7 +3124,7 @@ pub(in super::super) async fn assert_relay_settle_timeout_outcome(
     setup_outbox(&store).await?;
     let (event_id, domain) = seed_timed_out_settle_entry(&store, path).await?;
 
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(10),
         Duration::from_secs(2),
         Duration::from_millis(250),

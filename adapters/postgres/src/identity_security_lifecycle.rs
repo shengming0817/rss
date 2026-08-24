@@ -30,7 +30,7 @@ use crate::account_security_repo::status_to_db;
 use crate::auth_grant_lifecycle::{GrantCloseCas, apply_grant_close_cas};
 use crate::cotx::identity::IdentityTx;
 use crate::cotx::{ProducerFactAuthorization, ProducerTxOutcome, ServingWriteLane, TenantDb};
-use crate::outbox::{OutboxEnvelope, metadata_with_ambient};
+use crate::outbox::{OutboxEnvelope, metadata_from_reviewed_event};
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -216,10 +216,10 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("refresh receipt does not authorize security-event"))?;
         let (command, reviewed) = emission.into_parts();
-        let (entry, envelope_parts, _occurred_at, _fact) = reviewed.into_parts();
+        let (entry, envelope_parts, metadata, _fact) = reviewed.into_parts();
         let (source, rotation, event, pending) = command.into_parts();
         validate_refresh_command(scope, &source, rotation.as_ref(), &event)?;
-        let envelope = security_envelope(scope, &event, envelope_parts)?;
+        let envelope = security_envelope(scope, envelope_parts, &metadata)?;
         #[cfg(all(test, feature = "integration"))]
         let fault = self.fault;
         #[cfg(not(all(test, feature = "integration")))]
@@ -336,12 +336,13 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
             .authorize(SECURITY_EVENT_FACT, SECURITY_EVENT_CONTRACT)
             .ok_or_else(|| corrupt("password-change receipt does not authorize security-event"))?;
         let (command, reviewed) = emission.into_parts();
-        let (entry, envelope_parts, _occurred_at, _fact) = reviewed.into_parts();
+        let (entry, envelope_parts, metadata, _fact) = reviewed.into_parts();
         let (expected, next, security) = command.into_parts();
         let (mutation, event, pending) = security.into_parts();
         let prepared = PreparedSecurityCommand {
             entry,
             envelope_parts,
+            metadata,
             mutation: SecurityMutation::Password {
                 credential: CredentialCasRow::try_from((&expected, &next, &event))?,
                 account: AccountSecurityRow::try_from((mutation, &event))?,
@@ -447,6 +448,7 @@ impl PgIdentitySecurityLifecycle {
         let PreparedSecurityCommand {
             entry,
             envelope_parts,
+            metadata,
             mutation,
             event,
             pending,
@@ -462,14 +464,9 @@ impl PgIdentitySecurityLifecycle {
         let envelope = OutboxEnvelope::new(
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
-            metadata_with_ambient(
-                rss_contract::Timepoint::saturating_from_system_time(event.occurred_at())
-                    .unix_seconds(),
-                event.tenant(),
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata_from_reviewed_event(&metadata, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -612,8 +609,8 @@ fn validate_refresh_command(
 
 fn security_envelope(
     scope: TenantRepoScope,
-    event: &CredentialSecurityEvent,
     envelope_parts: diport::OutboxEnvelopeParts,
+    metadata: &eventing::metadata::EventMetadata,
 ) -> Result<OutboxEnvelope, IdentityError> {
     let (contract, envelope_tenant, subject_id, actor, partition_key, causation_id) =
         envelope_parts.into_parts();
@@ -623,14 +620,9 @@ fn security_envelope(
     Ok(OutboxEnvelope::new(
         contract.domain().to_owned(),
         contract.contract_id().to_owned(),
-        metadata_with_ambient(
-            rss_contract::Timepoint::saturating_from_system_time(event.occurred_at())
-                .unix_seconds(),
-            event.tenant(),
-            contract,
-        )
-        .with_subject_id(subject_id)
-        .with_actor(actor),
+        metadata_from_reviewed_event(metadata, contract)
+            .with_subject_id(subject_id)
+            .with_actor(actor),
     )
     .with_partition_key_opt(partition_key)
     .with_causation_id_opt(causation_id))
@@ -833,6 +825,7 @@ async fn insert_rotated_refresh(
 struct PreparedSecurityCommand {
     entry: consistency::EventEntry,
     envelope_parts: diport::OutboxEnvelopeParts,
+    metadata: eventing::metadata::EventMetadata,
     mutation: SecurityMutation,
     event: CredentialSecurityEvent,
     pending: PendingCredentialSecurityCommit,
@@ -843,13 +836,14 @@ impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
 
     fn try_from(emission: CredentialSecurityEmissionParts) -> Result<Self, Self::Error> {
         let (command, reviewed) = emission.into_parts();
-        let (entry, envelope_parts, _occurred_at, _fact) = reviewed.into_parts();
+        let (entry, envelope_parts, metadata, _fact) = reviewed.into_parts();
         match command {
             CredentialSecurityCommand::Account(command) => {
                 let (mutation, event, pending) = command.into_parts();
                 Ok(Self {
                     entry,
                     envelope_parts,
+                    metadata,
                     mutation: SecurityMutation::Account(AccountSecurityRow::try_from((
                         mutation, &event,
                     ))?),
@@ -862,6 +856,7 @@ impl TryFrom<CredentialSecurityEmissionParts> for PreparedSecurityCommand {
                 Ok(Self {
                     entry,
                     envelope_parts,
+                    metadata,
                     mutation: SecurityMutation::Grant(prepare_grant_security(mutation, &event)?),
                     event,
                     pending,

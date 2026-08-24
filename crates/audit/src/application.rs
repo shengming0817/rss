@@ -46,7 +46,7 @@ use base64::Engine as _;
 use bootstrap::{KernelError, SubscriberCapability};
 use diport::Message;
 use eventexec::consumer::ValidatedEvent;
-use eventexec::event_metadata::EventMetadata;
+use eventing::metadata::EventMetadata;
 #[cfg(test)]
 use generated::event::SubscriptionExecution;
 #[cfg(test)]

@@ -29,7 +29,7 @@ impl CanonicalDeviceIngressFact {
         event: eventexec::event::ReviewedEvent,
         credential_generation: u64,
     ) -> Result<Self, crate::outbox::OutboxAppendError> {
-        let (entry, envelope, occurred_at, fact) = event.into_parts();
+        let (entry, envelope, metadata, fact) = event.into_parts();
         let expected_device = scope.device().as_uuid().to_string();
         let envelope_valid = envelope.tenant() == scope.tenant()
             && envelope.subject_id().as_str() == expected_device
@@ -43,13 +43,12 @@ impl CanonicalDeviceIngressFact {
         {
             return Err(crate::outbox::OutboxAppendError::InvalidIdentity);
         }
-        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+        let (contract, _tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
-        let mut metadata =
-            crate::outbox::OutboxMetadata::new(occurred_at.unix_seconds(), tenant, contract)
-                .with_subject_id(subject_id)
-                .with_actor(actor);
-        metadata
+        let mut outbox_metadata = crate::outbox::metadata_from_reviewed_event(&metadata, contract)
+            .with_subject_id(subject_id)
+            .with_actor(actor);
+        outbox_metadata
             .try_insert(
                 "credentialGeneration",
                 serde_json::Value::from(credential_generation),
@@ -58,7 +57,7 @@ impl CanonicalDeviceIngressFact {
         let envelope = crate::outbox::OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata,
+            outbox_metadata,
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);

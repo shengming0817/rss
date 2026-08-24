@@ -16,6 +16,7 @@ seed-data = []
 test-support = ["httpserve/test-util"]
 
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 thiserror = { workspace = true }

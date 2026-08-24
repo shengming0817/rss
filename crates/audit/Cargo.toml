@@ -12,6 +12,7 @@ workspace = true
 test-support = []
 
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }

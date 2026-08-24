@@ -1,32 +1,12 @@
 //! `Publisher` —— 事件发布 provider DI port（可替换：prod AMQP / test in-mem）。
 
 use dynosaur::dynosaur;
+use eventing::delivery::PublishErrorKind;
 
 use crate::envelope::{EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, MessageEnvelope};
 use crate::redacted::RedactedSource;
 use crate::redacted_bytes::RedactedBytes;
 use crate::subscriber::MessageId;
-
-/// 发布失败的处置类别——决定 relay 是按稳定事件 ID 有界重试，还是首投即 DLX。
-///
-/// 闭合 3 值（非 `#[non_exhaustive]`）：发布失败分为「明确未成功且值得重试」「重试无意义」和
-/// 「broker 是否已接收不可判定」。查询经 [`PublisherError::is_permanent`] / [`PublisherError::is_ambiguous`] /
-/// [`PublisherError::is_retryable`] 全覆盖。`Transient`/`Permanent` 语义对齐引擎层
-/// [`consistency::EngineErrorKind`]，但不引入对 publish disposition 无意义的 `Invariant` 臂。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PublishErrorKind {
-    /// 明确未发送或已明确拒绝的可重试失败（例如 pre-send transport unavailable）
-    /// → relay 退避重试至预算耗尽。
-    ///
-    /// 发送后或等待 confirm 时丢失连接/通道不能归入本变体；该类结果必须使用 [`Self::Ambiguous`]。
-    Transient,
-    /// 永久失败（序列化 / 路由 / 编码非法，重试无意义）→ relay 首投即 DLX（跳过重试预算）。
-    Permanent,
-    /// 发布结果不确定（发送后连接丢失 / confirm 丢失 / deadline）→ relay 使用稳定事件 ID 重试。
-    ///
-    /// broker 可能已经接收并投递消息，因此该类别明确保留 at-least-once duplicate 语义。
-    Ambiguous,
-}
 
 /// 发布失败（携 [`PublishErrorKind`] 决定 relay 按稳定事件 ID 重试 vs 首投 DLX）。
 ///
@@ -92,20 +72,17 @@ impl PublisherError {
 
     /// 发布结果是否不确定（`Ambiguous`）——broker 可能已接收，retry 必须保持事件 ID 不变。
     pub fn is_ambiguous(&self) -> bool {
-        self.kind == PublishErrorKind::Ambiguous
+        self.kind.is_ambiguous()
     }
 
     /// 是否值得重试（`Transient | Ambiguous`）——relay 据此退避重试至预算耗尽。
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.kind,
-            PublishErrorKind::Transient | PublishErrorKind::Ambiguous
-        )
+        self.kind.is_retryable()
     }
 
     /// 是否永久（`Permanent`）——relay 据此首投即 DLX，跳过重试预算。
     pub fn is_permanent(&self) -> bool {
-        self.kind == PublishErrorKind::Permanent
+        self.kind.is_permanent()
     }
 }
 

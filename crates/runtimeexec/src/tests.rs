@@ -182,7 +182,8 @@ fn managed_worker_panic_uses_the_same_structured_dispatcher() {
                 "managed-panic-test",
                 CancellationToken::new(),
                 Arc::new(eventexec::WorkerHealth::starting()),
-                Duration::from_secs(1),
+                eventing::lifecycle::ShutdownBudget::new(Duration::from_secs(1))
+                    .expect("positive shutdown budget"),
                 |_token| -> Result<(), ShutdownError> { panic!("{SECRET}") },
             );
             assert!(worker.shutdown().await.is_err());

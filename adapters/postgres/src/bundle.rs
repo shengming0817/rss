@@ -64,7 +64,7 @@ use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 use diport::DynPublisher;
 use diport::{Clock, DynCasStore, DynManagedResource, ManagedResource};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-use eventexec::{RelayBudget, TenantAuthority};
+use eventexec::TenantAuthority;
 #[cfg(feature = "domain-settings")]
 use settings::ports::{
     DynActiveProjectionResolver, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
@@ -1360,7 +1360,10 @@ impl PgRuntimeHandle {
     /// Fail closed unless the runtime budget exactly matches the policy loaded from the
     /// maintenance-owned database singleton during setup. This synchronous gate is intentionally
     /// callable before any AMQP connection is attempted.
-    pub fn validate_relay_budget(&self, budget: eventexec::RelayBudget) -> Result<(), PgError> {
+    pub fn validate_relay_budget(
+        &self,
+        budget: eventing::delivery::DeliveryBudget,
+    ) -> Result<(), PgError> {
         self.delivery_policy.validate_relay_budget(budget)
     }
 
@@ -2522,7 +2525,7 @@ impl PgDomainDeps<caps::Settings> {
     pub fn outbox(
         &self,
         publisher: Box<DynPublisher<'static>>,
-        relay_budget: RelayBudget,
+        relay_budget: eventing::delivery::DeliveryBudget,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
@@ -2713,7 +2716,7 @@ impl PgDomainDeps<caps::Identity> {
     pub fn outbox(
         &self,
         publisher: Box<DynPublisher<'static>>,
-        relay_budget: RelayBudget,
+        relay_budget: eventing::delivery::DeliveryBudget,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
@@ -3305,8 +3308,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn relay_budget() -> RelayBudget {
-        RelayBudget::new(
+    fn relay_budget() -> eventing::delivery::DeliveryBudget {
+        eventing::delivery::DeliveryBudget::new(
             Duration::from_secs(60),
             Duration::from_secs(40),
             Duration::from_secs(5),
@@ -3623,14 +3626,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn runtime_handle_relay_budget_gate_is_synchronous_and_exact() {
         let handle = PgRuntimeHandle::from_store_for_test(lazy_store());
-        let release = eventexec::RelayBudget::new(
+        let release = eventing::delivery::DeliveryBudget::new(
             Duration::from_secs(60),
             Duration::from_secs(40),
             Duration::from_secs(5),
             Duration::from_secs(5),
         )
         .expect("valid release budget");
-        let mismatch = eventexec::RelayBudget::new(
+        let mismatch = eventing::delivery::DeliveryBudget::new(
             Duration::from_secs(61),
             Duration::from_secs(40),
             Duration::from_secs(5),

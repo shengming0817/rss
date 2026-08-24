@@ -42,14 +42,14 @@ broker-visible header 只含 canonical tenant、schema identity、occurred time�
 - subject、actor、principal、causation 与业务 metadata 只持久化，不进入 broker header。
 - 业务入口不得写 reserved key。
 
-当前 L2 公共候选只有 `eventexec::event_metadata::EventMetadata`，字段闭合为 canonical `TenantId`、
+当前 L2 公共 metadata owner 是 `eventing::metadata::EventMetadata`，字段闭合为 canonical `TenantId`、
 `Timepoint` 与可选 `CorrelationId`。三个字段均私有，只能经完整 typed constructor 构造；不存在开放 bag、
 provider/source、payload、receipt/store/transaction 字段、转换桥、crate-root shortcut 或整体 `Debug`。
 raw `EnvelopeMetadata` 只负责 wire `get / iter / insert`，不拥有 typed convenience accessor；消费 preflight
 一次产生 validated `EnvelopeHeader` 与同一个 `EventMetadata`。correlation 缺失或非法时降为 `None`，且只可
 投影到内部诊断上下文，不得进入 audit record、receipt 或 durable store。audit 解码前先验证 header，随后要求
-payload tenant/time 与 `EventMetadata` 严格相等，不匹配必须在写入前失败。该候选不进入 Release API baseline；
-#2159 将原子移动 owner 并删除当前路径，不提供 alias、re-export 或兼容双路径。
+payload tenant/time 与 `EventMetadata` 严格相等，不匹配必须在写入前失败。#2159 已原子移动 owner 并删除旧路径，
+不提供 alias、re-export 或兼容双路径；是否进入 Release API 仍由后续 release selection 独立决定。
 
 ## Subscription
 

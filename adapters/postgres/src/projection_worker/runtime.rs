@@ -221,7 +221,7 @@ fn spawn_settings_projection_worker(
         "postgres-settings-projection-worker",
         token,
         health,
-        PROJECTION_WORKER_JOIN_TIMEOUT,
+        eventing::lifecycle::ShutdownBudget::STANDARD,
         move |_| {
             build_failure_observation.stop(eventexec::ProjectionStoppedReason::RuntimeBuildFailed);
         },

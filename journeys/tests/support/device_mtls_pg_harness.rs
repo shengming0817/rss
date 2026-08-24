@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use diport::SecretMaterial;
-use eventexec::{RelayBudget, WorkflowRuntimePlan};
+use eventexec::WorkflowRuntimePlan;
+use eventing::delivery::DeliveryBudget;
 use iotdevice::{DraftSimulatorConfig, DraftTlsMaterial, DraftTopics};
 use mqtt::{
     BrokerAssertionVerifier, CredentialGeneration, CredentialRevision, DeviceScope, MqttSession,
@@ -228,8 +229,8 @@ pub(super) fn draft_device_config(
     )?)
 }
 
-pub(super) fn relay_budget() -> anyhow::Result<RelayBudget> {
-    Ok(RelayBudget::new(
+pub(super) fn relay_budget() -> anyhow::Result<DeliveryBudget> {
+    Ok(DeliveryBudget::new(
         Duration::from_secs(60),
         Duration::from_secs(40),
         Duration::from_secs(5),

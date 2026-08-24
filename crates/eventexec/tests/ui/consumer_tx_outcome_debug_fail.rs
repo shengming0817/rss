@@ -1,4 +1,4 @@
-use eventexec::consumer_tx::ConsumerTxOutcome;
+use eventing::delivery::ConsumerTxOutcome;
 
 fn main() {
     println!("{:?}", ConsumerTxOutcome::<()>::CommitUnknown);

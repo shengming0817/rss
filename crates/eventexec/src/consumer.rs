@@ -32,9 +32,9 @@ use tracing::Instrument as _;
 
 use primitives::{AdmissionError, ConsumerAdmission};
 
-use crate::MAX_REDELIVERY;
-use crate::event_metadata::EventMetadata;
 use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
+use eventing::lifecycle::RetryPolicy;
+use eventing::metadata::EventMetadata;
 
 /// One transport message paired with the metadata validated by consumer preflight.
 ///
@@ -338,7 +338,7 @@ pub enum ReceiptContextBuildError {
 /// 已绑 group，try_claim/commit/release 以 `IdemKey` 为维度。
 /// 下游事件经 handler 自持 Publisher 发，不经本驱动中转（对齐 RSS DI port 隔离）。
 ///
-/// **重投次数**：handler 最多被调用 [`MAX_REDELIVERY`] 次（含首投），耗尽后消息进 DLX
+/// **重投次数**：handler 最多被调用 `retry_policy.max_attempts()` 次（含首投），耗尽后消息进 DLX
 /// 而非再次 Requeue，防无限重投。
 ///
 /// **类型形态差异**：
@@ -363,6 +363,7 @@ pub async fn run_consumer<S, H>(
     meta: ConsumerMeta,
     handler: H,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     admission: ConsumerAdmission,
     token: CancellationToken,
 ) where
@@ -387,6 +388,7 @@ pub async fn run_consumer<S, H>(
             msg,
             None,
             lease_cfg,
+            retry_policy,
             delivery_token,
         )
         .await
@@ -425,6 +427,7 @@ pub async fn run_consumer_ackable<S, H>(
     meta: &ConsumerMeta,
     handler: &H,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     admission: ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -441,6 +444,7 @@ pub async fn run_consumer_ackable<S, H>(
             message,
             Some(acker.as_ref()),
             lease_cfg,
+            retry_policy,
             delivery_token,
         )
         .await
@@ -493,6 +497,7 @@ async fn consume_one<S, H>(
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     token: CancellationToken,
 ) -> bool
 where
@@ -513,6 +518,7 @@ where
             msg,
             acker,
             lease_cfg,
+            retry_policy,
             inner_token,
         ) => cancelled,
         () = token.cancelled() => true,
@@ -528,6 +534,7 @@ async fn consume_one_inner<S, H>(
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     token: CancellationToken,
 ) -> bool
 where
@@ -635,6 +642,7 @@ where
                     &lease,
                     acker,
                     lease_cfg,
+                    retry_policy,
                     token,
                 ),
             )
@@ -705,6 +713,7 @@ async fn handle_fresh<S, H>(
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     token: CancellationToken,
 ) -> bool
 where
@@ -724,7 +733,18 @@ where
         biased;
         // handler 先完成：终态已在 loop 内结算；renewal future 被 drop（停止续租）。
         // `.instrument(consume_span)`：handler 全程在消费 span 内，其内部 span 挂回 producer trace（#1224）。
-        () = run_handler_loop(idempotency, dlx, meta, handler, event, ctx, key, lease, acker)
+        () = run_handler_loop(
+            idempotency,
+            dlx,
+            meta,
+            handler,
+            event,
+            ctx,
+            key,
+            lease,
+            acker,
+            retry_policy,
+        )
             .instrument(consume_span) => false,
         // Lifecycle cancellation deliberately leaves the delivery unsettled. Dropping both
         // futures prevents Ack/commit/DLX and channel close delegates redelivery to the broker.
@@ -828,7 +848,7 @@ pub async fn renewal_loop<S>(
 
 /// handler bounded 重投 + 终态结算（原 `handle_fresh` 主体，#1213 抽出为 `select!` 一臂）。
 ///
-/// bounded 重投：handler 至多 [`MAX_REDELIVERY`] 次；`Ack`→commit（CAS）成功才 broker Ack、否则 Requeue
+/// bounded 重投：handler 至多 `retry_policy.max_attempts()` 次；`Ack`→commit（CAS）成功才 broker Ack、否则 Requeue
 /// （守「ack only after durable commit」review #265 F1/C1，且 commit `Lost` 即 leaseLost hard-fence）；
 /// `Reject`→DLX；`Requeue` 耗尽→DLX。
 #[allow(clippy::too_many_arguments)]
@@ -843,6 +863,7 @@ async fn run_handler_loop<S, H>(
     key: &IdemKey,
     lease: &LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
+    retry_policy: RetryPolicy,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
@@ -851,8 +872,8 @@ async fn run_handler_loop<S, H>(
     // requeue 路径记下最近一次 error kind 摘要，耗尽时随 DLX 落日志（#1125/#1285）。
     // Settled 闭合穷尽：仅 `Requeue` 续循环，故耗尽出口恒有摘要（Hard）。
     let mut last_requeue_summary: Option<&'static str> = None;
-    // 含首投在内至多 MAX_REDELIVERY 次（bounded，对齐 watermill retry.go MaxRetries+1 次尝试）。
-    for attempt in 1..=MAX_REDELIVERY {
+    // 含首投在内至多 RetryPolicy::STANDARD.max_attempts().get() 次（bounded，对齐 watermill retry.go MaxRetries+1 次尝试）。
+    for attempt in 1..=retry_policy.max_attempts().get() {
         let result = handler(Arc::clone(&event)).await;
         match result.as_settled() {
             consistency::Settled::Ack => {
@@ -887,10 +908,17 @@ async fn run_handler_loop<S, H>(
             consistency::Settled::Requeue { summary } => {
                 // 记下本轮 requeue 的 error kind 摘要；耗尽时随 DLX 落日志（#1125/#1285）。
                 last_requeue_summary = Some(summary);
+                if attempt < retry_policy.max_attempts().get() {
+                    let failed_attempt =
+                        std::num::NonZeroU32::new(attempt).unwrap_or(std::num::NonZeroU32::MIN);
+                    // `handle_fresh` races this whole future against lifecycle cancellation and
+                    // lease loss, so dropping this sleep cannot delay either terminal signal.
+                    tokio::time::sleep(retry_policy.delay_after(failed_attempt)).await;
+                }
             }
         }
     }
-    // Requeue 预算耗尽 → DLX（num_attempts = MAX_REDELIVERY 次全部尝试）。
+    // Requeue 预算耗尽 → DLX（num_attempts = RetryPolicy::STANDARD.max_attempts().get() 次全部尝试）。
     // INVARIANT: Settled 闭合 + 仅 Requeue 续循环 ⇒ 此处 `last_requeue_summary` 恒 Some。
     #[allow(clippy::expect_used)]
     // reason: 穷尽 Settled 下不可达 None；expect 守逻辑 bug，非业务 fallback。
@@ -904,7 +932,7 @@ async fn run_handler_loop<S, H>(
         lease,
         meta,
         &msg,
-        MAX_REDELIVERY,
+        retry_policy.max_attempts().get(),
         exhausted_summary,
         acker,
         None,
@@ -1464,8 +1492,8 @@ mod tests {
         ConsumerMeta, LeaseConfig, ReceiptContextBuildError, claim_in_progress_delay, consume_one,
         receipt_context_error_reason, record_dead_letter_skip, run_consumer,
     };
-    use crate::MAX_REDELIVERY;
     use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding};
+    use eventing::lifecycle::RetryPolicy;
 
     async fn run_test_consumer_ackable<S, H>(
         stream: diport::DeliveryStream,
@@ -1474,6 +1502,7 @@ mod tests {
         meta: &ConsumerMeta,
         handler: &H,
         lease_cfg: LeaseConfig,
+        retry_policy: RetryPolicy,
         admission: primitives::ConsumerAdmission,
         token: CancellationToken,
     ) where
@@ -1489,6 +1518,7 @@ mod tests {
             meta,
             handler,
             lease_cfg,
+            retry_policy,
             admission,
         )
         .await;
@@ -2296,6 +2326,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2327,14 +2358,21 @@ mod tests {
 
     // ── TC2：handler 恒 Requeue ──────────────────────────────────────────────
 
-    /// TC2：handler 恒 Requeue → handler 调 MAX_REDELIVERY 次、dlx 写 1 次（exhausted）、commit 1 次。
-    #[tokio::test]
+    /// TC2：handler 恒 Requeue → handler 调 RetryPolicy::STANDARD.max_attempts().get() 次、dlx 写 1 次（exhausted）、commit 1 次。
+    #[tokio::test(start_paused = true)]
     async fn tc2_handler_requeue_exhausted_dlx() {
         let idem = FakeInboxStore::fresh();
         let dlx_store = FakeDeadLetterStore::new();
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
 
+        let retry_policy = RetryPolicy::new(
+            std::num::NonZeroU32::new(3).expect("non-zero"),
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+        )
+        .expect("valid test retry policy");
+        let started = tokio::time::Instant::now();
         run_consumer(
             stream_of(&[("msg-requeue", b"payload")]),
             idem.clone(),
@@ -2342,15 +2380,17 @@ mod tests {
             meta(),
             handler_requeue(handler_count.clone()),
             lease_cfg_test(),
+            retry_policy,
             consumer_admission(),
             CancellationToken::new(),
         )
         .await;
 
+        assert!(started.elapsed() >= Duration::from_millis(3));
         assert_eq!(
             handler_count.load(Ordering::Relaxed),
-            MAX_REDELIVERY,
-            "handler 应调 MAX_REDELIVERY 次"
+            RetryPolicy::STANDARD.max_attempts().get(),
+            "handler 应调 RetryPolicy::STANDARD.max_attempts().get() 次"
         );
         assert_eq!(dlx_store.write_count(), 1, "dlx 应写 1 次");
         #[allow(clippy::unwrap_used)]
@@ -2364,8 +2404,9 @@ mod tests {
             record.error_summary
         );
         assert_eq!(
-            record.num_attempts, MAX_REDELIVERY,
-            "num_attempts 应 == MAX_REDELIVERY"
+            record.num_attempts,
+            RetryPolicy::STANDARD.max_attempts().get(),
+            "num_attempts 应 == RetryPolicy::STANDARD.max_attempts().get()"
         );
         assert_eq!(
             record.message_id, "msg-requeue",
@@ -2400,6 +2441,7 @@ mod tests {
             meta(),
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2438,6 +2480,7 @@ mod tests {
             cross_domain_meta(),
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2477,6 +2520,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2583,6 +2627,7 @@ mod tests {
                     &(meta()),
                     &(handler_ack(handler_count.clone())),
                     lease_cfg_test(),
+                    RetryPolicy::STANDARD,
                     consumer_admission(),
                     CancellationToken::new(),
                 ));
@@ -2735,6 +2780,7 @@ mod tests {
                     &(meta()),
                     &(handler_reject(handler_count.clone())),
                     lease_cfg_test(),
+                    RetryPolicy::STANDARD,
                     consumer_admission(),
                     CancellationToken::new(),
                 ));
@@ -2796,6 +2842,7 @@ mod tests {
             meta(),
             handler_reject_invariant(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2829,6 +2876,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2856,6 +2904,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2888,6 +2937,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -2920,6 +2970,7 @@ mod tests {
             meta(),
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3073,6 +3124,7 @@ mod tests {
                     tc5_meta,
                     handler_reject(handler_count),
                     lease_cfg_test(),
+                    RetryPolicy::STANDARD,
                     consumer_admission(),
                     CancellationToken::new(),
                 )
@@ -3137,6 +3189,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3172,6 +3225,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3207,6 +3261,7 @@ mod tests {
             &(meta()),
             &(handler_requeue(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3214,8 +3269,8 @@ mod tests {
 
         assert_eq!(
             handler_count.load(Ordering::Relaxed),
-            MAX_REDELIVERY,
-            "handler 应调 MAX_REDELIVERY 次"
+            RetryPolicy::STANDARD.max_attempts().get(),
+            "handler 应调 RetryPolicy::STANDARD.max_attempts().get() 次"
         );
         assert_eq!(dlx_store.write_count(), 1, "dlx 应 1 次");
         assert_eq!(idem.commit_count(), 1, "commit 应 1 次（dlx 终态收口）");
@@ -3242,6 +3297,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3286,6 +3342,7 @@ mod tests {
                 &(meta()),
                 &(handler_reject(handler_count)),
                 lease_cfg_test(),
+                RetryPolicy::STANDARD,
                 consumer_admission(),
                 CancellationToken::new(),
             ));
@@ -3326,6 +3383,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3358,6 +3416,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3401,6 +3460,7 @@ mod tests {
                     &consumer_meta,
                     &handler,
                     lease_cfg_fast(),
+                    RetryPolicy::STANDARD,
                     consumer_admission(),
                     CancellationToken::new(),
                 ));
@@ -3444,6 +3504,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3475,6 +3536,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3507,6 +3569,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3542,6 +3605,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3583,6 +3647,7 @@ mod tests {
                     &(meta()),
                     &(handler_ack(handler_count)),
                     lease_cfg_test(),
+                    RetryPolicy::STANDARD,
                     consumer_admission(),
                     CancellationToken::new(),
                 )
@@ -3671,6 +3736,7 @@ mod tests {
             &(meta()),
             &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_millis(50))),
             lease_cfg_fast(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3719,6 +3785,7 @@ mod tests {
                 Duration::from_secs(60),
             ),
             lease_cfg_fast(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             token,
         )
@@ -3732,6 +3799,49 @@ mod tests {
             ackers[0].settled_actions().is_empty(),
             "forced lifecycle cancellation must leave the delivery unsettled"
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cancel_during_retry_backoff_stops_before_next_attempt() {
+        let store = FakeInboxStore::fresh();
+        let dlx_store = FakeDeadLetterStore::new();
+        let dlx = fake_dlx(dlx_store.clone());
+        let calls = Arc::new(AtomicU32::new(0));
+        let (stream, ackers) = delivery_stream_of(&[("evt-cancel-backoff", b"payload")]);
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let handler_calls = Arc::clone(&calls);
+        let handler = move |_message| {
+            handler_calls.fetch_add(1, Ordering::AcqRel);
+            cancel.cancel();
+            Box::pin(async {
+                HandleResult::requeue(consistency::error::EngineError::new(
+                    consistency::error::EngineErrorKind::Transient,
+                ))
+            }) as futures::future::BoxFuture<'static, HandleResult>
+        };
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            run_test_consumer_ackable(
+                stream,
+                store.clone(),
+                dlx.as_ref(),
+                &meta(),
+                &handler,
+                lease_cfg_test(),
+                RetryPolicy::STANDARD,
+                consumer_admission(),
+                token,
+            ),
+        )
+        .await
+        .expect("lifecycle cancellation must preempt retry backoff");
+
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(store.commit_count(), 0);
+        assert_eq!(dlx_store.write_count(), 0);
+        assert!(ackers[0].settled_actions().is_empty());
     }
 
     #[tokio::test]
@@ -3760,6 +3870,7 @@ mod tests {
                 Box::pin(async { HandleResult::ack() })
             },
             lease_cfg_fast(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             token,
         )
@@ -3794,6 +3905,7 @@ mod tests {
             delivery.message,
             Some(delivery.acker.as_ref()),
             lease_cfg_fast(),
+            RetryPolicy::STANDARD,
             token,
         )
         .await;
@@ -3825,6 +3937,7 @@ mod tests {
             &(meta()),
             &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_secs(5))),
             lease_cfg_fast(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3866,6 +3979,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3903,6 +4017,7 @@ mod tests {
                 Duration::from_millis(100),
             )),
             lease_cfg_fast(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -3943,6 +4058,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         )
@@ -4136,6 +4252,7 @@ mod tests {
                 meta(),
                 handler,
                 lease_cfg_test(),
+                RetryPolicy::STANDARD,
                 consumer_admission(),
                 CancellationToken::new(),
             ));
@@ -4181,7 +4298,7 @@ mod tests {
                         tenant,
                         rss_request_context::RowScope::Tenant,
                     ),
-                    IdemKey::parse("child-event-1").expect("idempotency key"),
+                    eventing::envelope::EventId::parse("child-event-1").expect("event id"),
                 )
                 .await
                 .expect("generated event");
@@ -4204,6 +4321,7 @@ mod tests {
             meta(),
             handler,
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         ));
@@ -4237,6 +4355,7 @@ mod tests {
             meta(),
             handler,
             lease_cfg_test(),
+            RetryPolicy::STANDARD,
             consumer_admission(),
             CancellationToken::new(),
         ));

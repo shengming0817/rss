@@ -45,11 +45,11 @@ use eventexec::{
     DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, INBOX_SAMPLER_PROBE, InboxBacklogSelection,
     InboxSamplerConfig, LeaseConfig, MetricsInboxMetrics, MetricsOutboxMetrics,
     MetricsRetentionMetrics, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE,
-    RelayBudget, RelayConfig, RetentionMetrics, RetentionOutcome, RetentionTarget,
-    SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
-    WorkerHealth, apply_dlx_lifecycle_health, spawn_on_dedicated_runtime, spawn_relay,
-    sweeper_loop,
+    RelayConfig, RetentionMetrics, RetentionOutcome, RetentionTarget, SWEEPER_WORKER_NAME,
+    SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority, WorkerHealth,
+    apply_dlx_lifecycle_health, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
 };
+use eventing::delivery::DeliveryBudget;
 #[cfg(test)]
 use generated::event::{EventSpec, SubscriptionSpec};
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
@@ -144,7 +144,7 @@ impl EventWorkerConfig {
         self.relay.relay.max_in_flight()
     }
 
-    pub(crate) const fn relay_budget(&self) -> RelayBudget {
+    pub(crate) const fn relay_budget(&self) -> DeliveryBudget {
         self.relay.budget
     }
 
@@ -342,7 +342,7 @@ impl EventTransportTestValues {
 pub struct EventWorkerTestValues {
     poll: Duration,
     max_in_flight: usize,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     sample: Duration,
     inbox_sample: Duration,
     sweep: Duration,
@@ -355,7 +355,7 @@ impl EventWorkerTestValues {
         Ok(Self {
             poll: Duration::from_millis(200),
             max_in_flight: 16,
-            budget: RelayBudget::new(
+            budget: DeliveryBudget::new(
                 Duration::from_millis(DEFAULT_RELAY_LEASE_TTL_MS),
                 Duration::from_millis(DEFAULT_RELAY_PUBLISH_TIMEOUT_MS),
                 Duration::from_millis(DEFAULT_RELAY_SETTLE_TIMEOUT_MS),
@@ -417,7 +417,8 @@ const DLX_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(30);
 const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(25);
 const DLX_ARCHIVE_READINESS_INTERVAL: Duration = Duration::from_secs(60);
 const DLX_ARCHIVE_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
-const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const EVENT_WORKER_SHUTDOWN_BUDGET: eventing::lifecycle::ShutdownBudget =
+    eventing::lifecycle::ShutdownBudget::STANDARD;
 pub(crate) const RUNTIME_INSTANCE_ID_ENV: &str = "RSS_RUNTIME_INSTANCE_ID";
 pub(crate) const REQUIRED_ADMISSION_EPOCH_ENV: &str = "RSS_DR_REQUIRED_ADMISSION_EPOCH_ID";
 
@@ -493,7 +494,7 @@ impl bootstrap::HealthProbe for WorkerHealthProbe {
 /// Relay 时序参数聚合（减少 [`wire_durable`] 参数列表长度）。
 struct RelayTiming {
     relay: RelayConfig,
-    budget: RelayBudget,
+    budget: DeliveryBudget,
     sampler: SamplerConfig,
     inbox_sample_interval: Duration,
     outbox_sweeper: SweeperConfig,
@@ -501,7 +502,7 @@ struct RelayTiming {
 
 impl RelayTiming {
     fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
-        let budget = RelayBudget::new(
+        let budget = DeliveryBudget::new(
             parse_strict_duration_ms_env(
                 config.value(RELAY_LEASE_TTL_ENV).map(str::to_owned),
                 RELAY_LEASE_TTL_ENV,
@@ -570,7 +571,7 @@ impl RelayTiming {
     fn new(
         poll: Duration,
         max_in_flight: usize,
-        budget: RelayBudget,
+        budget: DeliveryBudget,
         sample: Duration,
         inbox_sample_interval: Duration,
         sweep: Duration,
@@ -1098,7 +1099,7 @@ where
             DLX_ARCHIVE_READINESS_WORKER_NAME,
             token,
             Arc::clone(&health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             move |thread_token| async move {
                 dlx_archive_readiness_loop(store, thread_token, Arc::clone(&health), config).await;
                 Ok(())
@@ -1142,7 +1143,7 @@ fn build_dlx_archive_key_readiness_worker(
             DLX_ARCHIVE_KEY_READINESS_WORKER_NAME,
             token,
             Arc::clone(&health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             move |thread_token| async move {
                 dlx_archive_key_readiness_loop(
                     VaultArchiveKeyReadiness { provider, key },
@@ -1322,7 +1323,7 @@ where
                 DLX_LIFECYCLE_WORKER_NAME,
                 token,
                 Arc::clone(&health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     dlx_lifecycle_loop(
                         lifecycle,
@@ -1886,7 +1887,7 @@ pub(crate) fn retain_admission_authority(
                 "runtime-dr-admission-owner",
                 token,
                 Arc::clone(&health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     eventexec::run_dr_admission_controller(
                         pg,
@@ -1935,6 +1936,7 @@ fn wire_domain_relay(
                 worker_health,
                 Arc::new(MetricsOutboxMetrics),
                 relay_admission,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
         },
     );
@@ -1998,7 +2000,7 @@ fn wire_inbox_backlog_sampler(
                 "inbox-backlog-sampler",
                 token,
                 Arc::clone(&worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     coordinated_inbox_backlog_sampler_loop(
                         Arc::new(source),
@@ -2055,7 +2057,7 @@ fn wire_sampler_worker(
                 "outbox-sampler",
                 token,
                 Arc::clone(&worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     coordinated_outbox_backlog_sampler_loop(
                         Arc::new(maintenance),
@@ -2107,7 +2109,7 @@ where
                 worker_name,
                 token,
                 Arc::clone(&worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
                 move |thread_token| async move {
                     sweeper_loop(
                         Arc::new(maintenance),
@@ -2315,6 +2317,7 @@ fn wire_inbox_sweeper(
                 make,
                 worker_health,
                 token,
+                EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
         },
     );
@@ -3321,7 +3324,10 @@ mod tests {
             Duration::from_millis(300_000)
         );
         assert_eq!(worker.outbox_retain_seconds(), 604_800);
-        assert_eq!(worker.relay_budget().required_budget_millis(), 50_000);
+        assert_eq!(
+            worker.relay_budget().required_budget().as_millis() as i64,
+            50_000
+        );
     }
 
     #[test]
@@ -4317,7 +4323,7 @@ mod tests {
             "test-threaded-worker",
             token,
             Arc::clone(&health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
+            EVENT_WORKER_SHUTDOWN_BUDGET,
             move |_| Ok(()),
         );
 

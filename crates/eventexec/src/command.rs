@@ -25,6 +25,7 @@ use consistency::{
 };
 use diport::dead_letter_store::DynDeadLetterStore;
 use diport::{EnvelopeSubjectId, MessageStream, OutboxActor, OutboxEnvelopeParts, RedactedSource};
+use eventing::lifecycle::RetryPolicy;
 use secure::{BlindIndex, BlindIndexKey, FilterBits, IndexScope};
 use sha2::{Digest as _, Sha256};
 
@@ -801,6 +802,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     token: tokio_util::sync::CancellationToken,
     handler: H,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
 ) where
     S: InboxStore + Send + Sync + 'static,
     R: for<'de> serde::Deserialize<'de> + Send + 'static,
@@ -841,6 +843,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
             })
         },
         lease_cfg,
+        retry_policy,
         admission,
         token,
     )
@@ -887,9 +890,9 @@ mod tests {
         ReviewedCommandJournal, map_emit_store_error, map_journal_store_error,
         register_command_handler,
     };
-    use crate::MAX_REDELIVERY;
     use crate::TenantAuthority;
     use crate::tenant_authority::TenantAuthorityBinding;
+    use eventing::lifecycle::RetryPolicy;
 
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -1366,6 +1369,7 @@ mod tests {
                 }
             },
             lease_cfg(),
+            RetryPolicy::STANDARD,
         )
         .await;
         #[allow(clippy::unwrap_used)]
@@ -1408,6 +1412,7 @@ mod tests {
                 }
             },
             lease_cfg(),
+            RetryPolicy::STANDARD,
         )
         .await;
 
@@ -1446,6 +1451,7 @@ mod tests {
                 }
             },
             lease_cfg(),
+            RetryPolicy::STANDARD,
         )
         .await;
         assert_eq!(
@@ -1474,14 +1480,15 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| async move { HandleResult::ack() },
             lease_cfg(),
+            RetryPolicy::STANDARD,
         )
         .await;
         assert_eq!(dlx.write_count(), 1, "坏 wire → 永久 reject → DLX");
     }
 
-    // ── TC-F5c：requeue 路径 → MAX_REDELIVERY 耗尽 → DLX ────────────────────
+    // ── TC-F5c：requeue 路径 → RetryPolicy::STANDARD.max_attempts().get() 耗尽 → DLX ────────────────────
 
-    /// TC-F5c：handler 恒 Requeue → MAX_REDELIVERY 次后进 DLX（镜像 consumer.rs TC2，经命令 wrapper）。
+    /// TC-F5c：handler 恒 Requeue → RetryPolicy::STANDARD.max_attempts().get() 次后进 DLX（镜像 consumer.rs TC2，经命令 wrapper）。
     #[tokio::test]
     async fn register_requeue_exhausted_to_dlx() {
         let idem = FakeStore::fresh();
@@ -1509,12 +1516,13 @@ mod tests {
                 }
             },
             lease_cfg(),
+            RetryPolicy::STANDARD,
         )
         .await;
         assert_eq!(
             calls.load(Ordering::Relaxed),
-            MAX_REDELIVERY,
-            "requeue handler 应调 MAX_REDELIVERY 次"
+            RetryPolicy::STANDARD.max_attempts().get(),
+            "requeue handler 应调 RetryPolicy::STANDARD.max_attempts().get() 次"
         );
         assert_eq!(dlx.write_count(), 1, "requeue 耗尽 → DLX 写 1 次");
     }

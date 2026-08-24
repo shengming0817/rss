@@ -7,7 +7,7 @@
 
 use consistency::{EngineError, EngineErrorKind, IdemKey};
 use diport::BrokerAccepted;
-use eventexec::RelayBudget;
+use eventing::delivery::DeliveryBudget;
 use ids::DeviceId;
 
 use crate::cotx::eventing::{DeviceMqttPubackMutation, OutboxSettlementFence};
@@ -238,14 +238,14 @@ pub enum PgDeviceOutboxSettlement {
 pub struct PgDeviceOutbox {
     claim_pool: PgDeviceOutboxClaimPool,
     tenant_pool: TenantDb<ServingWriteLane>,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 }
 
 impl PgDeviceOutbox {
     pub(crate) fn from_command_store(
         claim_pool: PgDeviceOutboxClaimPool,
         tenant_pool: TenantDb<ServingWriteLane>,
-        relay_budget: RelayBudget,
+        relay_budget: DeliveryBudget,
     ) -> Self {
         Self {
             claim_pool,
@@ -317,8 +317,8 @@ impl PgDeviceOutbox {
         )
         .bind(kind.as_sql())
         .bind(limit)
-        .bind(self.relay_budget.lease_ttl_millis())
-        .bind(self.relay_budget.required_budget_millis())
+        .bind(self.relay_budget.lease_ttl().as_millis() as i64)
+        .bind(self.relay_budget.required_budget().as_millis() as i64)
         .fetch_all(&mut *tx)
         .await
         .map_err(|error| map_storage(error, "device_outbox_claim"))?;
@@ -532,8 +532,8 @@ mod tests {
     }
 
     #[cfg(feature = "integration")]
-    fn relay_budget() -> Result<RelayBudget, eventexec::RelayBudgetError> {
-        RelayBudget::new(
+    fn relay_budget() -> Result<DeliveryBudget, eventing::delivery::DeliveryBudgetError> {
+        DeliveryBudget::new(
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(40),
             std::time::Duration::from_secs(5),

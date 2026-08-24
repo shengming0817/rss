@@ -7,6 +7,8 @@
 
 use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{EnvelopeCausationId, EnvelopeSubjectId, OutboxActor, OutboxEnvelopeParts};
+use eventing::envelope::{EventEnvelope, EventId};
+use eventing::metadata::EventMetadata;
 
 pub(crate) fn validate_actor_tenant(
     tenant: rss_request_context::TenantId,
@@ -54,8 +56,8 @@ fn current_verified_causation() -> Option<EnvelopeCausationId> {
 #[non_exhaustive]
 pub enum EventEncodeError {
     /// Deterministic event identity was invalid.
-    #[error("generated event idempotency key is invalid")]
-    IdempotencyKey,
+    #[error("generated event id is invalid")]
+    EventId,
     /// Generated topology contained an invalid event topic.
     #[error("generated event topic is invalid")]
     Topic,
@@ -71,17 +73,22 @@ pub enum EventEncodeError {
     /// The author-provided occurrence time is outside the canonical wire range.
     #[error("generated event occurrence time is invalid")]
     OccurredAt(#[source] rss_contract::TimepointError),
+    /// The public envelope and generated fact contract identities diverged inside the seal.
+    #[error("event contract identity diverged inside the reviewed seal")]
+    ContractIdentity,
+    /// The canonical metadata tenant and durable envelope tenant diverged inside the seal.
+    #[error("event tenant identity diverged inside the reviewed seal")]
+    TenantIdentity,
 }
 
 /// One generated, encoded event whose fact and envelope identity were bound atomically.
 ///
 /// Fields and constructors are private. Provider ports accept this capability instead of parallel
 /// `EventEntry` / `OutboxEnvelopeParts` arguments, eliminating topic, contract and envelope drift.
-#[derive(Clone)]
 pub struct ReviewedEvent {
     entry: EventEntry,
     envelope: OutboxEnvelopeParts,
-    occurred_at: rss_contract::Timepoint,
+    metadata: EventMetadata,
     fact: vocab::EventFactBinding,
 }
 
@@ -96,6 +103,33 @@ impl std::fmt::Debug for ReviewedEvent {
 }
 
 impl ReviewedEvent {
+    fn seal(
+        event: EventEnvelope<Box<[u8]>>,
+        envelope: OutboxEnvelopeParts,
+        fact: vocab::EventFactBinding,
+    ) -> Result<Self, EventEncodeError> {
+        let (contract, event_id, metadata, payload) = event.into_parts();
+        if contract != *fact.contract().descriptor() {
+            return Err(EventEncodeError::ContractIdentity);
+        }
+        if metadata.tenant_id() != envelope.tenant() {
+            return Err(EventEncodeError::TenantIdentity);
+        }
+        let topic = EventTopic::parse(fact.topic()).map_err(|_| EventEncodeError::Topic)?;
+        let idempotency_key =
+            IdemKey::parse(event_id.as_str()).map_err(|_| EventEncodeError::EventId)?;
+        Ok(Self {
+            entry: EventEntry::new(
+                topic,
+                idempotency_key,
+                OutboxPayload::from_reviewed_event_bytes(payload.into_vec()),
+            ),
+            envelope,
+            metadata,
+            fact,
+        })
+    }
+
     /// Exact generated fact authorized by this capability.
     pub const fn fact(&self) -> vocab::EventFactBinding {
         self.fact
@@ -113,7 +147,7 @@ impl ReviewedEvent {
 
     /// Canonical occurrence time fixed once at the authoring boundary.
     pub const fn occurred_at(&self) -> rss_contract::Timepoint {
-        self.occurred_at
+        self.metadata.occurred_at()
     }
 
     /// Consume the capability at a persistence boundary.
@@ -122,10 +156,10 @@ impl ReviewedEvent {
     ) -> (
         EventEntry,
         OutboxEnvelopeParts,
-        rss_contract::Timepoint,
+        EventMetadata,
         vocab::EventFactBinding,
     ) {
-        (self.entry, self.envelope, self.occurred_at, self.fact)
+        (self.entry, self.envelope, self.metadata, self.fact)
     }
 }
 
@@ -151,7 +185,7 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
     type Output = ReviewedEvent;
     type SubjectId = EnvelopeSubjectId;
     type Actor = OutboxActor;
-    type IdempotencyKey = IdemKey;
+    type IdempotencyKey = EventId;
 
     async fn emit<C>(
         &self,
@@ -167,7 +201,6 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
         C::Payload: Send + Sync,
     {
         let fact = C::FACT;
-        let topic = EventTopic::parse(fact.topic()).map_err(|_| EventEncodeError::Topic)?;
         validate_actor_tenant(tenant, &actor).map_err(|()| EventEncodeError::ActorTenant)?;
         let partition_key = match C::SPEC.partition_key() {
             generated::event::PartitionKeyStrategy::None => None,
@@ -176,25 +209,24 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
                     .map_err(|_| EventEncodeError::PartitionKey)?,
             ),
         };
-        let payload = serde_json::to_vec(payload).map_err(EventEncodeError::Serialization)?;
-        let entry = EventEntry::new(
-            topic,
+        let payload = serde_json::to_vec(payload)
+            .map_err(EventEncodeError::Serialization)?
+            .into_boxed_slice();
+        let metadata = EventMetadata::new(tenant, occurred_at, rss_diag_context::correlation());
+        let event = EventEnvelope::new(
+            *fact.contract().descriptor(),
             idempotency_key,
-            OutboxPayload::from_reviewed_event_bytes(payload),
+            metadata,
+            payload,
         );
-        let mut envelope = OutboxEnvelopeParts::new(C::SPEC.contract(), tenant, subject_id, actor);
+        let mut envelope = OutboxEnvelopeParts::new(fact.contract(), tenant, subject_id, actor);
         if let Some(partition_key) = partition_key {
             envelope = envelope.with_partition_key(partition_key);
         }
         if let Some(causation_id) = current_verified_causation() {
             envelope = envelope.with_causation_id(causation_id);
         }
-        Ok(ReviewedEvent {
-            entry,
-            envelope,
-            occurred_at,
-            fact,
-        })
+        ReviewedEvent::seal(event, envelope, fact)
     }
 }
 
@@ -231,7 +263,7 @@ mod tests {
             rss_contract::Timepoint::try_from(1_i64).expect("time"),
             diport::EnvelopeSubjectId::from_opaque("app.theme").expect("subject"),
             actor,
-            IdemKey::parse("event-actor-tenant-mismatch").expect("idempotency key"),
+            eventing::envelope::EventId::parse("event-actor-tenant-mismatch").expect("event id"),
         )
         .await;
 
@@ -262,7 +294,7 @@ mod tests {
                 tenant,
                 rss_request_context::RowScope::Tenant,
             ),
-            IdemKey::parse("root-event-1").expect("idempotency key"),
+            eventing::envelope::EventId::parse("root-event-1").expect("event id"),
         )
         .await
         .expect("generated event");

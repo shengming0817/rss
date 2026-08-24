@@ -7,9 +7,9 @@
 //!
 //! INVARIANT: IDENTITY-OUTBOX-USERID-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "pub(crate) helpers take UserId/Uuid" }.
 
-use consistency::IdemKey;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::event::{EventEncodeError, GeneratedEventEncoder, ReviewedEvent};
+use eventing::envelope::EventId;
 use generated::event::identity_v1::device_ingress_receipted::{
     self as device_ingress_receipted, IdentityDeviceIngressReceiptedPayload,
 };
@@ -39,7 +39,7 @@ pub(crate) async fn emit_session_created(
     payload: IdentitySessionCreatedPayload,
     tenant: TenantId,
     user_id: ids::UserId,
-    idempotency_key: IdemKey,
+    idempotency_key: EventId,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     let occurred_at = occurred_at(payload.occurred_at)?;
     session_created::emit(
@@ -65,7 +65,7 @@ pub(crate) async fn emit_role_assigned(
     tenant: TenantId,
     actor: ids::UserId,
     actor_kind: rss_request_context::PrincipalKind,
-    idempotency_key: IdemKey,
+    idempotency_key: EventId,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     let occurred_at = occurred_at(payload.occurred_at)?;
     role_assigned::emit(
@@ -91,7 +91,7 @@ pub(crate) async fn emit_role_revoked(
     tenant: TenantId,
     actor: ids::UserId,
     actor_kind: rss_request_context::PrincipalKind,
-    idempotency_key: IdemKey,
+    idempotency_key: EventId,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     let occurred_at = occurred_at(payload.occurred_at)?;
     role_revoked::emit(
@@ -117,7 +117,7 @@ pub(crate) async fn emit_policy_updated(
     tenant: TenantId,
     actor: ids::UserId,
     actor_kind: rss_request_context::PrincipalKind,
-    idempotency_key: IdemKey,
+    idempotency_key: EventId,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     let occurred_at = occurred_at(payload.occurred_at)?;
     policy_updated::emit(
@@ -144,7 +144,7 @@ pub(crate) async fn emit_security_event(
     initiator_kind: rss_request_context::PrincipalKind,
     target_pseudonym: uuid::Uuid,
     actor_pseudonym: uuid::Uuid,
-    idempotency_key: IdemKey,
+    idempotency_key: EventId,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     let occurred_at = occurred_at(payload.occurred_at)?;
     security_event::emit(
@@ -170,7 +170,7 @@ pub(crate) async fn emit_device_ingress_receipted(
     tenant: TenantId,
     occurred_at: rss_contract::Timepoint,
     device: ids::DeviceId,
-    idempotency_key: IdemKey,
+    idempotency_key: EventId,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     device_ingress_receipted::emit(
         &GeneratedEventEncoder,

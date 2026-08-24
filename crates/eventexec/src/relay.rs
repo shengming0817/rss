@@ -49,9 +49,6 @@ const RELAY_WORKER_NAME: &str = "outbox-relay";
 pub const SWEEPER_WORKER_NAME: &str = "outbox-sweeper";
 const SAMPLER_WORKER_NAME: &str = "outbox-sampler";
 
-/// worker 关闭超时：重 I/O drain，覆盖默认 30s（relay/sweeper 同值）。
-const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
-
 // AtomicU8 编码：0=Healthy 1=Degraded 2=Unhealthy 3=Starting 4=SubscriberUnavailable
 // 5=DlxWriteError 6=Invariant
 const HEALTH_HEALTHY: u8 = 0;
@@ -797,6 +794,7 @@ fn log_sample_failed(domain: &str, e: &impl std::fmt::Display) {
 struct ManagedRelayWorker {
     task: diport::ManagedTask,
     health: Arc<WorkerHealth>,
+    shutdown_budget: eventing::lifecycle::ShutdownBudget,
 }
 
 impl ManagedRelayWorker {
@@ -805,17 +803,22 @@ impl ManagedRelayWorker {
         make: Make,
         health: Arc<WorkerHealth>,
         token: CancellationToken,
+        shutdown_budget: eventing::lifecycle::ShutdownBudget,
     ) -> Self
     where
         F: Future<Output = ()> + Send + 'static,
         Make: FnOnce(CancellationToken) -> F + Send + 'static,
     {
-        let (start, _status) = diport::ManagedTask::prepare(name, WORKER_SHUTDOWN_TIMEOUT);
+        let (start, _status) = diport::ManagedTask::prepare(name, shutdown_budget.timeout());
         let task = start.spawn(token, |managed_token| async move {
             make(managed_token).await;
             Ok(())
         });
-        Self { task, health }
+        Self {
+            task,
+            health,
+            shutdown_budget,
+        }
     }
 
     fn health(&self) -> Arc<WorkerHealth> {
@@ -841,12 +844,19 @@ macro_rules! adopt_worker {
                 make: Make,
                 health: Arc<WorkerHealth>,
                 token: CancellationToken,
+                shutdown_budget: eventing::lifecycle::ShutdownBudget,
             ) -> Self
             where
                 F: Future<Output = ()> + Send + 'static,
                 Make: FnOnce(CancellationToken) -> F + Send + 'static,
             {
-                Self(ManagedRelayWorker::spawn($name_const, make, health, token))
+                Self(ManagedRelayWorker::spawn(
+                    $name_const,
+                    make,
+                    health,
+                    token,
+                    shutdown_budget,
+                ))
             }
 
             /// 读 worker health（readyz 聚合用）。
@@ -861,7 +871,7 @@ macro_rules! adopt_worker {
             }
 
             fn shutdown_timeout(&self) -> Duration {
-                WORKER_SHUTDOWN_TIMEOUT
+                self.0.shutdown_budget.timeout()
             }
 
             async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
@@ -898,13 +908,14 @@ impl SweeperWorker {
         make: Make,
         health: Arc<WorkerHealth>,
         token: CancellationToken,
+        shutdown_budget: eventing::lifecycle::ShutdownBudget,
     ) -> Self
     where
         F: Future<Output = ()> + Send + 'static,
         Make: FnOnce(CancellationToken) -> F + Send + 'static,
     {
         Self {
-            inner: ManagedRelayWorker::spawn(name, make, health, token),
+            inner: ManagedRelayWorker::spawn(name, make, health, token, shutdown_budget),
             name,
         }
     }
@@ -921,7 +932,7 @@ impl diport::ManagedResource for SweeperWorker {
     }
 
     fn shutdown_timeout(&self) -> Duration {
-        WORKER_SHUTDOWN_TIMEOUT
+        self.inner.shutdown_budget.timeout()
     }
 
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
@@ -1612,7 +1623,12 @@ mod tests {
             )
         };
 
-        let worker = RelayWorker::spawn(make, health.clone(), token.clone());
+        let worker = RelayWorker::spawn(
+            make,
+            health.clone(),
+            token.clone(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
+        );
 
         // 推进时间触发 interval tick：relay_loop 会执行一轮 poll+relay。
         tokio::time::advance(std::time::Duration::from_millis(200)).await;
@@ -1705,12 +1721,17 @@ mod tests {
             )
         };
 
-        let worker = RelayWorker::spawn(make, health.clone(), token.clone());
+        let worker = RelayWorker::spawn(
+            make,
+            health.clone(),
+            token.clone(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
+        );
 
         // 验证 shutdown_timeout
         assert_eq!(
             worker.shutdown_timeout(),
-            std::time::Duration::from_secs(45),
+            eventing::lifecycle::ShutdownBudget::STANDARD.timeout(),
             "RelayWorker shutdown_timeout must be 45s"
         );
 
@@ -1747,11 +1768,17 @@ mod tests {
             )
         };
 
-        let worker = SweeperWorker::spawn(SWEEPER_WORKER_NAME, make, health.clone(), token.clone());
+        let worker = SweeperWorker::spawn(
+            SWEEPER_WORKER_NAME,
+            make,
+            health.clone(),
+            token.clone(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
+        );
 
         assert_eq!(
             worker.shutdown_timeout(),
-            std::time::Duration::from_secs(45),
+            eventing::lifecycle::ShutdownBudget::STANDARD.timeout(),
             "SweeperWorker shutdown_timeout must be 45s"
         );
 
@@ -1782,7 +1809,12 @@ mod tests {
             )
         };
 
-        let worker = RelayWorker::spawn(make, health.clone(), token.clone());
+        let worker = RelayWorker::spawn(
+            make,
+            health.clone(),
+            token.clone(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
+        );
 
         // 初始 Healthy。
         assert_eq!(worker.health().status(), HealthStatus::Healthy);
@@ -1935,6 +1967,7 @@ mod tests {
             |_task_token| async { panic!("synthetic worker panic") },
             health,
             token,
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         );
         let result = worker.shutdown().await;
         assert!(
@@ -2119,7 +2152,12 @@ mod tests {
                 relay_admission(),
             )
         };
-        let worker = RelayWorker::spawn(make, health, token);
+        let worker = RelayWorker::spawn(
+            make,
+            health,
+            token,
+            eventing::lifecycle::ShutdownBudget::STANDARD,
+        );
         assert_eq!(worker.name(), "outbox-relay");
         let _ = worker.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
     }
@@ -2143,7 +2181,13 @@ mod tests {
                     write_admission(),
                 )
             };
-            SweeperWorker::spawn(name, make, health, token)
+            SweeperWorker::spawn(
+                name,
+                make,
+                health,
+                token,
+                eventing::lifecycle::ShutdownBudget::STANDARD,
+            )
         }
         let outbox = adopt_named(SWEEPER_WORKER_NAME).await;
         assert_eq!(outbox.name(), "outbox-sweeper", "默认常量 = outbox-sweeper");
@@ -2174,7 +2218,12 @@ mod tests {
                 noop_metrics(),
             )
         };
-        let worker = SamplerWorker::spawn(make, health, token);
+        let worker = SamplerWorker::spawn(
+            make,
+            health,
+            token,
+            eventing::lifecycle::ShutdownBudget::STANDARD,
+        );
         assert_eq!(worker.name(), "outbox-sampler");
         let _ = worker.shutdown().await; // 收敛 spawned task（防 leak；shutdown 内部防御性 cancel）。
     }

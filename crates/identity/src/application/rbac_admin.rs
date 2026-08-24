@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use consistency::IdemKey;
 use diport::{Clock, OutboxEmitError};
 use eventexec::event::EventEncodeError;
+use eventing::envelope::EventId;
 use generated::event::identity_v1::role_assigned::{
     IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind, SPEC as ROLE_ASSIGNED_SPEC,
 };
@@ -49,7 +49,7 @@ pub enum RbacAdminError {
     PayloadEncode(#[source] EventEncodeError),
     /// Stable event idempotency identity is invalid.
     #[error("role-event idempotency identity validation failed")]
-    IdempotencyKey(#[source] consistency::IdemKeyError),
+    IdempotencyKey(#[source] eventing::envelope::EventIdError),
     /// A domain value has no generated role-event wire representation.
     #[error("role-event wire projection failed")]
     WireProjection(#[source] EventWireProjectionError),
@@ -134,7 +134,7 @@ impl RbacAdminService {
             tenant,
             actor,
             actor_kind,
-            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
+            EventId::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
         )
         .await
         .map_err(RbacAdminError::PayloadEncode)?;
@@ -187,7 +187,7 @@ impl RbacAdminService {
             tenant,
             actor,
             actor_kind,
-            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
+            EventId::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
         )
         .await
         .map_err(RbacAdminError::PayloadEncode)?;

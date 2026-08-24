@@ -40,7 +40,7 @@ use sqlx::Row;
 use crate::PgStore;
 use crate::cotx::settings_audit::{ConfigProducerRequest, EncodedConfigValue};
 use crate::cotx::{ProducerTxOutcome, ServingReadLane, ServingWriteLane, TenantDb};
-use crate::outbox::{OutboxEnvelope, metadata_with_ambient};
+use crate::outbox::{OutboxEnvelope, metadata_from_reviewed_event};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error, run_pg_tx_retry};
@@ -1168,7 +1168,7 @@ impl PgConfigRepo {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId；OUTBOX-METADATA-FUNNEL-01，同 PgAuthGrantLifecycle）。
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 sealed `ReviewedEvent` 携带并作为 `OutboxMetadata::new` **构造期必填**参数注入；漏接编译期不可表达。
-        let (outbox_entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (outbox_entry, envelope, metadata, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         if env_tenant != tenant {
@@ -1187,7 +1187,7 @@ impl PgConfigRepo {
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+            metadata_from_reviewed_event(&metadata, contract)
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )

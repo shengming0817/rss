@@ -7,7 +7,9 @@
 //! is the separately rated Medium `PG-OUTBOX-SETTLEMENT-FUNNEL-01` guard.
 
 use consistency::{EngineError, EngineErrorKind, OutboxMetricSubject};
-use eventexec::RelayBudget;
+use eventing::delivery::DeliveryBudget;
+
+use crate::delivery_policy::DeliveryBudgetPgProjection as _;
 
 use crate::dead_letter_payload::ProtectedDlxCapsule;
 
@@ -244,21 +246,21 @@ fn settlement_timeout_error(phase: &'static str, settle_timeout_ms: i64) -> Engi
     EngineError::new(EngineErrorKind::Transient)
 }
 
-fn map_outer_timeout(phase: &'static str, relay_budget: RelayBudget) -> SettlementAttemptError {
+fn map_outer_timeout(phase: &'static str, relay_budget: DeliveryBudget) -> SettlementAttemptError {
     let _ = settlement_timeout_error(phase, relay_budget.settle_timeout_millis());
     SettlementAttemptError::Timeout
 }
 
 fn deadline_or_expired(
     claimed: &PgClaimedOutboxEntry,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> Option<tokio::time::Instant> {
     select_deadline(claimed.lease.monotonic_deadline, relay_budget).ok()
 }
 
 fn select_deadline(
     monotonic_deadline: tokio::time::Instant,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> Result<tokio::time::Instant, SettlementDeadlineExpired> {
     let now = crate::cotx::io_deadline_after(std::time::Duration::ZERO);
     if now >= monotonic_deadline {
@@ -271,7 +273,7 @@ fn select_deadline(
 pub(super) async fn published(
     tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> Result<Settlement<()>, EngineError> {
     let operation = SettlementOperation::Published;
     let scope = MetricScope::from_claim(claimed);
@@ -289,7 +291,7 @@ pub(super) async fn published(
 pub(super) async fn retry(
     tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> Result<Settlement<()>, EngineError> {
     let operation = SettlementOperation::Retry;
     let scope = MetricScope::from_claim(claimed);
@@ -307,7 +309,7 @@ pub(super) async fn retry(
 async fn execute_published(
     tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     deadline: tokio::time::Instant,
 ) -> SettlementAttempt<()> {
     const PHASE: &str = "settle_published";
@@ -346,7 +348,7 @@ async fn execute_published(
 async fn execute_retry(
     tenant_pool: &TenantDb<ServingWriteLane>,
     claimed: &PgClaimedOutboxEntry,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     deadline: tokio::time::Instant,
 ) -> SettlementAttempt<()> {
     const PHASE: &str = "settle_retry";
@@ -388,7 +390,7 @@ pub(super) async fn ordinary_dlx(
     tenant: rss_request_context::TenantId,
     claimed: &PgClaimedOutboxEntry,
     failure: &RelayPublishFailure,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> Result<Settlement<i32>, EngineError> {
     let operation = SettlementOperation::Dlx;
     let scope = MetricScope::from_claim(claimed);
@@ -414,7 +416,7 @@ pub(super) async fn same_id_expiry_dlx(
     tenant: rss_request_context::TenantId,
     claimed: &PgClaimedOutboxEntry,
     phase: SameIdDeliveryPhase,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
 ) -> Result<Settlement<i32>, EngineError> {
     let operation = SettlementOperation::SameIdExpiryDlx;
     let scope = MetricScope::from_claim(claimed);
@@ -445,7 +447,7 @@ async fn execute_dlx(
     tenant_pool: &TenantDb<ServingWriteLane>,
     payload_protector: &DlxPayloadProtector,
     input: DlxInput<'_>,
-    relay_budget: RelayBudget,
+    relay_budget: DeliveryBudget,
     phase: &'static str,
 ) -> SettlementAttempt<i32> {
     let DlxInput {
@@ -702,8 +704,8 @@ mod tests {
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
-    fn relay_budget() -> eventexec::RelayBudget {
-        eventexec::RelayBudget::new(
+    fn relay_budget() -> eventing::delivery::DeliveryBudget {
+        eventing::delivery::DeliveryBudget::new(
             Duration::from_millis(20),
             Duration::from_millis(10),
             Duration::from_millis(3),

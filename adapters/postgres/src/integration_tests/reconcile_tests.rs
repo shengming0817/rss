@@ -57,7 +57,7 @@ async fn settings_consumer_tx_reconcile_failure_keeps_receipt_reclaimable() -> T
     assert!(
         matches!(
             outcome,
-            eventexec::consumer_tx::ConsumerTxOutcome::HandlerTransient
+            eventing::delivery::ConsumerTxOutcome::HandlerTransient
         ),
         "transient reconcile failure must request retry"
     );

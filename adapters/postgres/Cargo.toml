@@ -11,6 +11,7 @@ workspace = true
 # adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
 # 不预连全服务层（由 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 PR #137 review A1/B1/C1 约束）。
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 postgres-migration-inventory = { path = "../../crates/postgres-migration-inventory" }

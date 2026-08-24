@@ -3670,26 +3670,6 @@ pub const diport::pki_artifact::MAX_PKI_CSR_BYTES: usize
 pub const diport::pki_artifact::MAX_PKI_ISSUER_CERTS: usize
 pub fn diport::pki_artifact::canonical_pki_chain_artifact<'a>(&'a [u8], impl core::iter::traits::collect::IntoIterator<Item = &'a [u8]>) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
-pub enum diport::publisher::PublishErrorKind
-pub diport::publisher::PublishErrorKind::Ambiguous
-pub diport::publisher::PublishErrorKind::Permanent
-pub diport::publisher::PublishErrorKind::Transient
-impl core::clone::Clone for diport::publisher::PublishErrorKind
-pub fn diport::publisher::PublishErrorKind::clone(&self) -> diport::publisher::PublishErrorKind
-impl core::cmp::Eq for diport::publisher::PublishErrorKind
-impl core::cmp::PartialEq for diport::publisher::PublishErrorKind
-pub fn diport::publisher::PublishErrorKind::eq(&self, &diport::publisher::PublishErrorKind) -> bool
-impl core::fmt::Debug for diport::publisher::PublishErrorKind
-pub fn diport::publisher::PublishErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for diport::publisher::PublishErrorKind
-impl core::marker::StructuralPartialEq for diport::publisher::PublishErrorKind
-impl core::marker::Freeze for diport::publisher::PublishErrorKind
-impl core::marker::Send for diport::publisher::PublishErrorKind
-impl core::marker::Sync for diport::publisher::PublishErrorKind
-impl core::marker::Unpin for diport::publisher::PublishErrorKind
-impl core::marker::UnsafeUnpin for diport::publisher::PublishErrorKind
-impl core::panic::unwind_safe::RefUnwindSafe for diport::publisher::PublishErrorKind
-impl core::panic::unwind_safe::UnwindSafe for diport::publisher::PublishErrorKind
 #[repr(transparent)] pub struct diport::publisher::DynPublisher<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynPublisher<'dynosaur_struct>
 pub const fn diport::DynPublisher<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::publisher::Publisher + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynPublisher<'dynosaur_struct>>
@@ -3751,7 +3731,7 @@ pub fn diport::publisher::PublisherError::ambiguous<E>(E) -> Self where E: core:
 pub fn diport::publisher::PublisherError::is_ambiguous(&self) -> bool
 pub fn diport::publisher::PublisherError::is_permanent(&self) -> bool
 pub fn diport::publisher::PublisherError::is_retryable(&self) -> bool
-pub fn diport::publisher::PublisherError::kind(&self) -> diport::publisher::PublishErrorKind
+pub fn diport::publisher::PublisherError::kind(&self) -> rss_eventing::delivery::PublishErrorKind
 pub fn diport::publisher::PublisherError::permanent<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 pub fn diport::publisher::PublisherError::transient<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 impl core::error::Error for diport::publisher::PublisherError
@@ -6821,26 +6801,6 @@ impl core::marker::Unpin for diport::pdp::ProjectionOperatorTokenProfile
 impl core::marker::UnsafeUnpin for diport::pdp::ProjectionOperatorTokenProfile
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ProjectionOperatorTokenProfile
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::ProjectionOperatorTokenProfile
-pub enum diport::PublishErrorKind
-pub diport::PublishErrorKind::Ambiguous
-pub diport::PublishErrorKind::Permanent
-pub diport::PublishErrorKind::Transient
-impl core::clone::Clone for diport::publisher::PublishErrorKind
-pub fn diport::publisher::PublishErrorKind::clone(&self) -> diport::publisher::PublishErrorKind
-impl core::cmp::Eq for diport::publisher::PublishErrorKind
-impl core::cmp::PartialEq for diport::publisher::PublishErrorKind
-pub fn diport::publisher::PublishErrorKind::eq(&self, &diport::publisher::PublishErrorKind) -> bool
-impl core::fmt::Debug for diport::publisher::PublishErrorKind
-pub fn diport::publisher::PublishErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for diport::publisher::PublishErrorKind
-impl core::marker::StructuralPartialEq for diport::publisher::PublishErrorKind
-impl core::marker::Freeze for diport::publisher::PublishErrorKind
-impl core::marker::Send for diport::publisher::PublishErrorKind
-impl core::marker::Sync for diport::publisher::PublishErrorKind
-impl core::marker::Unpin for diport::publisher::PublishErrorKind
-impl core::marker::UnsafeUnpin for diport::publisher::PublishErrorKind
-impl core::panic::unwind_safe::RefUnwindSafe for diport::publisher::PublishErrorKind
-impl core::panic::unwind_safe::UnwindSafe for diport::publisher::PublishErrorKind
 #[non_exhaustive] pub enum diport::RateLimitDecision
 pub diport::RateLimitDecision::Allowed
 pub diport::RateLimitDecision::Limited
@@ -10118,7 +10078,7 @@ pub fn diport::publisher::PublisherError::ambiguous<E>(E) -> Self where E: core:
 pub fn diport::publisher::PublisherError::is_ambiguous(&self) -> bool
 pub fn diport::publisher::PublisherError::is_permanent(&self) -> bool
 pub fn diport::publisher::PublisherError::is_retryable(&self) -> bool
-pub fn diport::publisher::PublisherError::kind(&self) -> diport::publisher::PublishErrorKind
+pub fn diport::publisher::PublisherError::kind(&self) -> rss_eventing::delivery::PublishErrorKind
 pub fn diport::publisher::PublisherError::permanent<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 pub fn diport::publisher::PublisherError::transient<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 impl core::error::Error for diport::publisher::PublisherError

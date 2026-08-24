@@ -1,4 +1,4 @@
-use eventexec::consumer_tx::{ConsumerTxOutcome, RejectKind};
+use eventing::delivery::{ConsumerTxOutcome, RejectKind};
 
 #[test]
 fn consumer_tx_outcome_labels_are_closed_and_low_cardinality() {

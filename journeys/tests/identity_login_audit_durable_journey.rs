@@ -43,9 +43,8 @@ use diport::{
     EnvelopeMetadata, KEY_CORRELATION, KEY_SUBJECT_ID, ManagedResource, Message, MessageId,
     PublishRequest, Publisher, Subscriber, Topic,
 };
-use eventexec::{
-    ConsumerMeta, LeaseConfig, RelayBudget, TenantAuthority, TenantAuthorityBinding, run_consumer,
-};
+use eventexec::{ConsumerMeta, LeaseConfig, TenantAuthority, TenantAuthorityBinding, run_consumer};
+use eventing::delivery::DeliveryBudget;
 use futures::future::BoxFuture;
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER};
@@ -375,6 +374,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             consumer_handler(audit_repo, captured.clone()),
             // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
             LeaseConfig::from_ttl(lease_ttl),
+            eventing::lifecycle::RetryPolicy::STANDARD,
             consumer_admission()?,
         );
 
@@ -403,7 +403,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         )?;
         let relay = id.outbox(
             DynPublisher::new_box(bus.publisher()),
-            RelayBudget::new(
+            DeliveryBudget::new(
                 Duration::from_secs(60),
                 Duration::from_secs(40),
                 Duration::from_secs(5),

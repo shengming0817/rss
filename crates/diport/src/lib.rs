@@ -225,9 +225,7 @@ pub use pki_artifact::{
     PkiProviderConfigDigest, PkiRequestGeneration, PkiSan, PkiSanRef, PkiSpkiDigest,
     VerifiedExternalPkiArtifactEvidence, canonical_pki_chain_artifact,
 };
-pub use publisher::{
-    DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,
-};
+pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 pub use rate_limiter::{
     DynRateLimiter, MAX_RATE_LIMIT_QUOTA, RateLimitDecision, RateLimitError, RateLimitKey,
     RateLimitQuota, RateLimitQuotaError, RateLimiter,

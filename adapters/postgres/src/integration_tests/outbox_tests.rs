@@ -226,7 +226,7 @@ async fn settings_consumer_tx_commit_marks_done_and_next_claim_is_duplicate() ->
         .await;
     assert!(matches!(
         outcome,
-        eventexec::consumer_tx::ConsumerTxOutcome::Committed(_)
+        eventing::delivery::ConsumerTxOutcome::Committed(_)
     ));
 
     let receipt: (String, Option<String>) = sqlx::query_as(
@@ -1659,8 +1659,8 @@ async fn t7b_atomic_claim_uses_independent_database_connections() -> TestResult 
                 "SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)",
             )
             .bind(first_domain)
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_all(&mut *first)
             .await
         },
@@ -1669,8 +1669,8 @@ async fn t7b_atomic_claim_uses_independent_database_connections() -> TestResult 
                 "SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)",
             )
             .bind(second_domain)
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_all(&mut *second)
             .await
         }
@@ -1816,8 +1816,8 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
             .bind(&event_id)
             .bind(claim.test_lease_token())
             .bind(short_deadline)
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_one(&store.pool)
             .await?;
     assert!(
@@ -1838,8 +1838,8 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
             .bind(&event_id)
             .bind(claim.test_lease_token())
             .bind(full_deadline)
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_one(&store.pool)
             .await?;
     assert!(
@@ -1914,7 +1914,7 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
         .await?;
-    let maximum_budget = RelayBudget::new(
+    let maximum_budget = DeliveryBudget::new(
         Duration::from_millis(86_400_000),
         Duration::from_millis(86_399_997),
         Duration::from_millis(1),
@@ -1926,8 +1926,8 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
          FROM rss_outbox_claim_batch($1, 1, $2, $3)",
     )
     .bind(&maximum_domain)
-    .bind(maximum_budget.lease_ttl_millis())
-    .bind(maximum_budget.required_budget_millis())
+    .bind(maximum_budget.lease_ttl().as_millis() as i64)
+    .bind(maximum_budget.required_budget().as_millis() as i64)
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(maximum_claim.0, maximum_event_id);
@@ -1939,8 +1939,8 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
             .bind(&maximum_claim.0)
             .bind(&maximum_claim.1)
             .bind(maximum_claim.2)
-            .bind(maximum_budget.lease_ttl_millis())
-            .bind(maximum_budget.required_budget_millis())
+            .bind(maximum_budget.lease_ttl().as_millis() as i64)
+            .bind(maximum_budget.required_budget().as_millis() as i64)
             .fetch_one(&store.pool)
             .await?;
     assert!(
@@ -1948,7 +1948,7 @@ async fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl(
         "maximum representable required budget must complete without interval/timestamp overflow"
     );
 
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(3),
         Duration::from_secs(1),
         Duration::from_millis(500),
@@ -1995,7 +1995,7 @@ async fn preflight_pool_starvation_expires_inside_safety_margin_without_publishi
     let (pg, owner) = connect_pg().await?;
     setup_outbox(&owner).await?;
     let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?;
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(2),
         Duration::from_secs(1),
         Duration::from_millis(500),
@@ -3796,8 +3796,8 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     let blocked: Vec<String> =
         sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)")
             .bind(&domain)
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_all(&store.pool)
             .await?;
     assert!(
@@ -3905,8 +3905,8 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     let released: Vec<String> =
         sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10, $2, $3)")
             .bind(&domain)
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_all(&store.pool)
             .await?;
     assert!(
@@ -4434,7 +4434,7 @@ async fn t9e_relay_settle_timeout_preserves_state_and_same_id_reclaim_converges(
         })
         .await?;
 
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(10),
         Duration::from_secs(2),
         Duration::from_millis(250),
@@ -4542,7 +4542,7 @@ async fn t9e_published_settle_pool_wait_is_bounded_and_preserves_state() -> Test
         })
         .await?;
 
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_secs(10),
         Duration::from_secs(2),
         Duration::from_millis(250),
@@ -4625,7 +4625,7 @@ async fn t9e_expired_settlement_preflight_performs_no_pool_io() -> TestResult {
         })
         .await?;
 
-    let budget = RelayBudget::new(
+    let budget = DeliveryBudget::new(
         Duration::from_millis(500),
         Duration::from_millis(100),
         Duration::from_millis(100),
@@ -5193,6 +5193,7 @@ async fn t10b_pg_emitter_persists_verified_consumer_causation() -> TestResult {
         &(conf_consumer_meta(&group)),
         &(handler),
         conf_lease_cfg(),
+        eventing::lifecycle::RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -6317,7 +6318,7 @@ async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestR
     .execute(&store.pool)
     .await?;
     let alternate_policy = store.load_event_delivery_policy().await?;
-    let alternate_budget = RelayBudget::new(
+    let alternate_budget = DeliveryBudget::new(
         Duration::from_secs(60),
         Duration::from_millis(39_999),
         Duration::from_secs(5),
@@ -6510,8 +6511,8 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         let result = sqlx::query(&format!(
             "SELECT * FROM rss_outbox_claim_batch('outbox-perm', {limit_sql}, $1, $2)"
         ))
-        .bind(relay_budget.lease_ttl_millis())
-        .bind(relay_budget.required_budget_millis())
+        .bind(relay_budget.lease_ttl().as_millis() as i64)
+        .bind(relay_budget.required_budget().as_millis() as i64)
         .execute(&mut *tx)
         .await;
         let Err(err) = result else {
@@ -6534,8 +6535,8 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
          FROM rss_outbox_claim_batch('outbox-perm', 1, $2, $3) WHERE event_id = $1",
     )
     .bind(&event_id)
-    .bind(test_relay_budget().lease_ttl_millis())
-    .bind(test_relay_budget().required_budget_millis())
+    .bind(test_relay_budget().lease_ttl().as_millis() as i64)
+    .bind(test_relay_budget().required_budget().as_millis() as i64)
     .fetch_one(&mut *claim_tx)
     .await?;
     claim_tx.commit().await?;
@@ -6593,8 +6594,8 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
          FROM rss_outbox_claim_batch('outbox-perm', 1, $2, $3) WHERE event_id = $1",
     )
     .bind(&event_id)
-    .bind(test_relay_budget().lease_ttl_millis())
-    .bind(test_relay_budget().required_budget_millis())
+    .bind(test_relay_budget().lease_ttl().as_millis() as i64)
+    .bind(test_relay_budget().required_budget().as_millis() as i64)
     .fetch_one(&mut *high_claim_tx)
     .await?;
     high_claim_tx.commit().await?;

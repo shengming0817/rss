@@ -21,9 +21,9 @@ use consistency::{IdemKey, InboxReceiptContext, LeaseToken};
 #[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
 use eventexec::consumer::ValidatedEvent;
 #[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
-use eventexec::consumer_tx::ConsumerTxOutcome;
+use eventing::delivery::ConsumerTxOutcome;
 #[cfg(any(feature = "domain-audit", feature = "domain-settings"))]
-use eventexec::consumer_tx::RejectKind;
+use eventing::delivery::RejectKind;
 #[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 

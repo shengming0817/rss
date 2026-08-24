@@ -18,13 +18,13 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use tracing::Instrument as _;
 
-use eventexec::MAX_REDELIVERY;
 use eventexec::consumer::{
     ConsumerMeta, LeaseConfig, ReceiptContextBuildError, build_consume_span, dead_letter,
     emit_lease_lost, envelope_header_error_reason, log_lease_lost, receipt_context_error_reason,
     record_dead_letter_skip, renewal_loop, settle, settle_claim_in_progress,
 };
-use eventexec::consumer_tx::{ConsumerTxOutcome, RejectKind};
+use eventing::delivery::{ConsumerTxOutcome, RejectKind};
+use eventing::lifecycle::RetryPolicy;
 
 /// Closed ConsumerTx external-effect policies used as type-level handler capabilities.
 pub(crate) mod policy {
@@ -102,6 +102,7 @@ pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
     meta: &ConsumerMeta,
     handler: Arc<H>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     admission: primitives::ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -119,6 +120,7 @@ pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
             message,
             Some(acker.as_ref()),
             lease_cfg,
+            retry_policy,
             delivery_token,
         )
         .await
@@ -183,6 +185,7 @@ async fn consume_one_tx<S, P, H>(
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     token: tokio_util::sync::CancellationToken,
 ) -> bool
 where
@@ -201,6 +204,7 @@ where
             msg,
             acker,
             lease_cfg,
+            retry_policy,
             inner_token,
         ) => cancelled,
         () = token.cancelled() => true,
@@ -216,6 +220,7 @@ async fn consume_one_tx_inner<S, P, H>(
     msg: Message,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     token: tokio_util::sync::CancellationToken,
 ) -> bool
 where
@@ -257,6 +262,7 @@ where
                 lease,
                 acker,
                 lease_cfg,
+                retry_policy,
                 token,
             )
             .await
@@ -435,6 +441,7 @@ async fn handle_fresh_tx<S, P, H>(
     lease: LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     lifecycle: tokio_util::sync::CancellationToken,
 ) -> bool
 where
@@ -458,6 +465,7 @@ where
             key.clone(),
             lease.clone(),
             acker,
+            retry_policy,
             terminal.clone(),
         )
             .instrument(consume_span) => false,
@@ -511,6 +519,7 @@ async fn run_tx_handler_loop<S, P, H>(
     key: IdemKey,
     lease: LeaseToken,
     acker: Option<&diport::DynAcker<'static>>,
+    retry_policy: RetryPolicy,
     terminal: tokio_util::sync::CancellationToken,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -519,7 +528,7 @@ async fn run_tx_handler_loop<S, P, H>(
 {
     let mut last_requeue_summary = EngineErrorKind::Transient.message();
     let msg = event.message();
-    for attempt in 1..=MAX_REDELIVERY {
+    for attempt in 1..=retry_policy.max_attempts().get() {
         match Arc::clone(handler)
             .handle(Arc::clone(&event), ctx.clone(), key.clone(), lease.clone())
             .await
@@ -559,6 +568,13 @@ async fn run_tx_handler_loop<S, P, H>(
             }
             ConsumerTxOutcome::HandlerTransient => {
                 last_requeue_summary = EngineErrorKind::Transient.message();
+                if attempt < retry_policy.max_attempts().get() {
+                    let failed_attempt =
+                        std::num::NonZeroU32::new(attempt).unwrap_or(std::num::NonZeroU32::MIN);
+                    // `handle_fresh_tx` races this whole future against lifecycle cancellation,
+                    // so dropping this sleep leaves the delivery unsettled for broker redelivery.
+                    tokio::time::sleep(retry_policy.delay_after(failed_attempt)).await;
+                }
             }
             outcome @ (ConsumerTxOutcome::InfrastructureTransient
             | ConsumerTxOutcome::CommitUnknown
@@ -597,7 +613,12 @@ async fn run_tx_handler_loop<S, P, H>(
         meta,
         ConsumerTxOutcome::<postgres::PgConsumerTxCommitProof>::HandlerTransient.as_label(),
     );
-    log_tx_handler_transient_exhausted(meta, &msg, last_requeue_summary);
+    log_tx_handler_transient_exhausted(
+        meta,
+        &msg,
+        retry_policy.max_attempts().get(),
+        last_requeue_summary,
+    );
     settle(
         acker,
         diport::AckAction::Requeue,
@@ -635,20 +656,23 @@ fn log_tx_non_retryable_requeue(meta: &ConsumerMeta, msg: &Message, outcome: &'s
     );
 }
 
-fn log_tx_handler_transient_exhausted(meta: &ConsumerMeta, msg: &Message, summary: &'static str) {
+fn log_tx_handler_transient_exhausted(
+    meta: &ConsumerMeta,
+    msg: &Message,
+    attempts: u32,
+    summary: &'static str,
+) {
     tracing::warn!(
         message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
         consumer_group = meta.consumer_group(),
-        attempts = MAX_REDELIVERY,
+        attempts,
         summary,
         "consumer-tx: handler transient budget exhausted, requeued without app dlx"
     );
 }
-
-const CONSUMER_TX_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 struct HealthReportingDlx {
     inner: tokio::sync::Mutex<Box<diport::DynDeadLetterStore<'static>>>,
@@ -711,8 +735,9 @@ pub(crate) fn spawn_consumer_ackable_tx_subscriber<S, P, H>(
     lease_cfg: LeaseConfig,
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
-    backoff: eventexec::retry::BackoffPolicy,
+    backoff: eventing::lifecycle::RetryPolicy,
     admission: primitives::ConsumerAdmission,
+    shutdown_budget: eventing::lifecycle::ShutdownBudget,
 ) -> eventexec::ManagedBlockingWorker
 where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -729,7 +754,7 @@ where
         name,
         token,
         Arc::clone(&health),
-        CONSUMER_TX_SHUTDOWN_TIMEOUT,
+        shutdown_budget,
         move |token_run| {
             tracing::debug!(worker = worker_name, "consumer-tx: worker thread started");
             runtime.block_on(async move {
@@ -749,6 +774,7 @@ where
                             &meta,
                             Arc::clone(&handler),
                             lease_cfg,
+                            backoff,
                             admission,
                         )
                         .await;
@@ -840,6 +866,7 @@ mod tests {
                 meta,
                 handler,
                 lease_cfg,
+                tiny_backoff(),
                 admission,
             )
             .await;
@@ -1477,9 +1504,13 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     // reason: 测试 tiny backoff 构造失败即参数写错；item-level carve-out。
-    fn tiny_backoff() -> eventexec::retry::BackoffPolicy {
-        eventexec::retry::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))
-            .expect("valid tiny backoff")
+    fn tiny_backoff() -> eventing::lifecycle::RetryPolicy {
+        eventing::lifecycle::RetryPolicy::new(
+            std::num::NonZeroU32::MIN.saturating_add(2),
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+        )
+        .expect("valid tiny backoff")
     }
 
     #[tokio::test]
@@ -1563,6 +1594,40 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(store.commits.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cancel_during_tx_retry_backoff_stops_before_next_attempt() -> TestResult {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(AtomicU32::new(0));
+        let token = tokio_util::sync::CancellationToken::new();
+        let cancel = token.clone();
+        let handler_calls = Arc::clone(&calls);
+        let handler = transactional_handler(move |_msg, _ctx, _key, _lease| {
+            handler_calls.fetch_add(1, Ordering::AcqRel);
+            cancel.cancel();
+            Box::pin(async { ConsumerTxOutcome::HandlerTransient })
+        });
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            run_test_consumer_ackable_tx_with_token(
+                delivery_stream("evt-tx-cancel-backoff", Arc::clone(&actions))?,
+                TxStore::fresh(),
+                (noop_dlx()).as_ref(),
+                &meta()?,
+                Arc::new(handler),
+                lease_cfg(),
+                consumer_admission(),
+                token,
+            ),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("lifecycle cancellation did not preempt backoff"))?;
+
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(actions.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
         Ok(())
     }
 
@@ -1788,9 +1853,10 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn tx_handler_transient_exhaustion_requeues_without_dead_letter_or_commit() -> TestResult
     {
+        let started = tokio::time::Instant::now();
         let actions = Arc::new(Mutex::new(Vec::new()));
         let store = TxStore::fresh();
         let dlx_writes = Arc::new(AtomicU32::new(0));
@@ -1815,7 +1881,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(calls.load(Ordering::Acquire), MAX_REDELIVERY);
+        assert!(started.elapsed() >= Duration::from_millis(3));
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            RetryPolicy::STANDARD.max_attempts().get()
+        );
         assert_eq!(dlx_writes.load(Ordering::Acquire), 0);
         assert_eq!(store.commits.load(Ordering::Acquire), 0);
         assert_eq!(
@@ -2199,6 +2269,7 @@ mod tests {
             Arc::new(eventexec::WorkerHealth::starting()),
             tiny_backoff(),
             consumer_admission(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         );
 
         assert_eq!(observed_receiver.await?, assembly_runtime);
@@ -2225,6 +2296,7 @@ mod tests {
             Arc::clone(&health),
             tiny_backoff(),
             consumer_admission(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         );
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -2268,6 +2340,7 @@ mod tests {
             Arc::clone(&health),
             tiny_backoff(),
             consumer_admission(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         );
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -2311,6 +2384,7 @@ mod tests {
             Arc::clone(&health),
             tiny_backoff(),
             consumer_admission(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         );
 
         // tiny_backoff（1ms base）注入后无需 wall-clock 1s 等待二次订阅。
@@ -2381,6 +2455,7 @@ mod tests {
             Arc::new(eventexec::WorkerHealth::starting()),
             tiny_backoff(),
             consumer_admission(),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         );
 
         tokio::time::timeout(Duration::from_secs(1), handler_started.notified()).await?;

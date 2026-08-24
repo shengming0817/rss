@@ -14,7 +14,7 @@ use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     DeviceCertificateSystemProducer, ReconcileMaxInFlight, Tenancy, Trigger,
 };
-use eventexec::retry::BackoffPolicy;
+use eventing::lifecycle::RetryPolicy;
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
     DeviceCertificateScope, DevicePolicyIdempotencyKey, DraftEligibility, ExpectedGeneration,
@@ -220,7 +220,11 @@ fn pilot_config() -> anyhow::Result<identity_composition::DeviceIdentityRuntimeC
             Tenancy::tenant_scoped(),
             identity_composition::DeviceIdentitySchedulerTiming::new(
                 Trigger::interval(Duration::from_millis(100))?,
-                BackoffPolicy::new(Duration::from_millis(100), Duration::from_secs(1))?,
+                RetryPolicy::new(
+                    std::num::NonZeroU32::MIN.saturating_add(2),
+                    Duration::from_millis(100),
+                    Duration::from_secs(1),
+                )?,
                 Duration::from_secs(30),
                 ReconcileMaxInFlight::try_new(1)?,
             ),

@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use crate::cotx::identity::IdentityTx;
 use crate::cotx::{ProducerTxOutcome, ServingReadLane, ServingWriteLane, TenantDb};
-use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient};
+use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_from_reviewed_event};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -141,16 +141,15 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, OutboxEmitError> {
         let (grant, initial_refresh, persistence) = mutation.into_parts();
         let generated_fact = event.fact();
-        let (entry, envelope, occurred_at, _fact) = event.into_parts();
+        let (entry, envelope, metadata, _fact) = event.into_parts();
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
-        let tenant = grant.tenant();
         validate_login_binding(scope, env_tenant, &grant, &initial_refresh)
             .map_err(OutboxEmitError::new)?;
         let env = OutboxEnvelope::new(
             contract.domain().to_owned(),
             contract.contract_id().to_owned(),
-            metadata_with_ambient(occurred_at.unix_seconds(), tenant, contract)
+            metadata_from_reviewed_event(&metadata, contract)
                 .with_subject_id(subject_id)
                 .with_actor(actor),
         )

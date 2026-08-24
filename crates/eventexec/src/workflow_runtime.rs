@@ -714,6 +714,7 @@ where
                 Arc::clone(&self.clock),
                 self.config,
                 admission,
+                eventing::lifecycle::ShutdownBudget::STANDARD,
             )
             .spawn(token, health),
         )

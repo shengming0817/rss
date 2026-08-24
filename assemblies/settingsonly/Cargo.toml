@@ -30,6 +30,7 @@ test-support = [
 ]
 
 [dependencies]
+eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 anyhow = { workspace = true }

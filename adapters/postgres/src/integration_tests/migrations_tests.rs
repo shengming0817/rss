@@ -2966,8 +2966,8 @@ async fn migration_0060_upgrades_0059_and_expires_all_historical_same_id_paths()
             .bind(&fixtures[0].0)
             .bind(pending_claim.test_lease_token())
             .bind(pending_claim.test_lease_deadline_epoch_micros())
-            .bind(relay_budget.lease_ttl_millis())
-            .bind(relay_budget.required_budget_millis())
+            .bind(relay_budget.lease_ttl().as_millis() as i64)
+            .bind(relay_budget.required_budget().as_millis() as i64)
             .fetch_one(&store.pool)
             .await?;
     assert_eq!(

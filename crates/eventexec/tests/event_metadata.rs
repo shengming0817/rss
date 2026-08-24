@@ -1,4 +1,4 @@
-use eventexec::event_metadata::EventMetadata;
+use eventing::metadata::EventMetadata;
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 

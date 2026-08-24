@@ -23,7 +23,6 @@ use crate::{SagaExecutor, SagaInterruption, SagaOutcome};
 pub const SAGA_EXECUTOR_PROBE: &str = "saga_executor";
 
 const SAGA_WORKER_NAME: &str = "saga-executor";
-const SAGA_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_TENANT_BATCH_SIZE: usize = 128;
 const DEFAULT_BATCH_SIZE: usize = 16;
@@ -81,6 +80,7 @@ pub struct SagaWorker {
     name: String,
     task: diport::ManagedTask,
     health: Arc<WorkerHealth>,
+    shutdown_budget: eventing::lifecycle::ShutdownBudget,
 }
 
 impl SagaWorker {
@@ -89,18 +89,24 @@ impl SagaWorker {
         make: Make,
         health: Arc<WorkerHealth>,
         token: CancellationToken,
+        shutdown_budget: eventing::lifecycle::ShutdownBudget,
     ) -> Self
     where
         F: Future<Output = ()> + Send + 'static,
         Make: FnOnce(CancellationToken) -> F + Send + 'static,
     {
         let (start, _status) =
-            diport::ManagedTask::prepare(name.clone(), SAGA_WORKER_SHUTDOWN_TIMEOUT);
+            diport::ManagedTask::prepare(name.clone(), shutdown_budget.timeout());
         let task = start.spawn(token, |managed_token| async move {
             make(managed_token).await;
             Ok(())
         });
-        Self { name, task, health }
+        Self {
+            name,
+            task,
+            health,
+            shutdown_budget,
+        }
     }
 
     /// Worker health shared with readyz probes.
@@ -119,7 +125,7 @@ impl ManagedResource for SagaWorker {
     }
 
     fn shutdown_timeout(&self) -> Duration {
-        SAGA_WORKER_SHUTDOWN_TIMEOUT
+        self.shutdown_budget.timeout()
     }
 }
 
@@ -132,6 +138,7 @@ pub struct SagaWorkerRuntime<T, S, E> {
     clock: Arc<dyn diport::Clock>,
     config: SagaWorkerConfig,
     admission: primitives::WriteAdmission,
+    shutdown_budget: eventing::lifecycle::ShutdownBudget,
 }
 
 impl<T, S, E> SagaWorkerRuntime<T, S, E>
@@ -149,6 +156,7 @@ where
         clock: Arc<dyn diport::Clock>,
         config: SagaWorkerConfig,
         admission: primitives::WriteAdmission,
+        shutdown_budget: eventing::lifecycle::ShutdownBudget,
     ) -> Self {
         Self {
             identity,
@@ -158,6 +166,7 @@ where
             clock,
             config,
             admission,
+            shutdown_budget,
         }
     }
 
@@ -171,6 +180,7 @@ where
             clock,
             config,
             admission,
+            shutdown_budget,
         } = self;
         let worker_name = saga_worker_name(&identity);
         let task_health = health.clone();
@@ -184,13 +194,14 @@ where
                     clock,
                     config,
                     admission,
+                    shutdown_budget,
                 ),
                 task_token,
                 task_health,
             )
             .await;
         };
-        SagaWorker::spawn(worker_name, make, health, token)
+        SagaWorker::spawn(worker_name, make, health, token, shutdown_budget)
     }
 }
 
@@ -211,6 +222,7 @@ async fn saga_worker_loop<T, S, E>(
         clock,
         config,
         admission,
+        ..
     } = runtime;
     let _stopped_guard = health.stopped_on_exit();
     let mut ticker = tokio::time::interval(config.poll_interval());
@@ -1136,6 +1148,7 @@ mod tests {
             Arc::new(FixedClock),
             SagaWorkerConfig::default(),
             write_admission,
+            eventing::lifecycle::ShutdownBudget::STANDARD,
         )
         .spawn(token, health.clone());
         tokio::task::yield_now().await;

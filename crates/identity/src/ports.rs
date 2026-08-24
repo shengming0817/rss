@@ -367,7 +367,7 @@ pub async fn credential_security_fact(
         tenant_id: event.tenant().to_string(),
     };
     let event_id = uuid::Uuid::new_v4().to_string();
-    let idem_key = consistency::IdemKey::parse(&event_id).map_err(security_fact_build)?;
+    let idem_key = eventing::envelope::EventId::parse(&event_id).map_err(security_fact_build)?;
     // envelope subject/actor = privacy-pseudonym UUID（#1235 / #648 F1：经 outbox_emit）。
     let event = crate::outbox_emit::emit_security_event(
         payload,

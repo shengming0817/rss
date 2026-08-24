@@ -27,9 +27,10 @@ use diport::{
     PublisherError, RedactedBytes,
 };
 use eventexec::{
-    OutboxMetricScope, OutboxMetrics, RelayBudget, RelayConfig, RelayPhase, SamplerConfig,
-    WorkerHealth, backlog_sampler_loop,
+    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, SamplerConfig, WorkerHealth,
+    backlog_sampler_loop,
 };
+use eventing::delivery::DeliveryBudget;
 use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
@@ -561,7 +562,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let publisher = CapturingPublisher::default();
     let outbox = settings_deps.outbox(
         DynPublisher::new_box(publisher.clone()),
-        RelayBudget::new(
+        DeliveryBudget::new(
             Duration::from_secs(60),
             Duration::from_secs(40),
             Duration::from_secs(5),
@@ -583,6 +584,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
         Arc::clone(&relay_health),
         Arc::clone(&telemetry) as Arc<dyn OutboxMetrics>,
         relay_admission,
+        eventing::lifecycle::ShutdownBudget::STANDARD,
     );
 
     wait_until(Duration::from_secs(10), || {

@@ -717,7 +717,8 @@ fn candidate_runtime_config(
     config: &crate::config::DeviceIdentityConfig,
     secrets: &crate::config::ServingSecrets,
 ) -> anyhow::Result<identity_composition::DeviceIdentityRuntimeConfig> {
-    use eventexec::reconcile::{BackoffPolicy, ReconcileMaxInFlight, Tenancy, Trigger};
+    use eventexec::reconcile::{ReconcileMaxInFlight, Tenancy, Trigger};
+    use eventing::lifecycle::RetryPolicy;
     let tenant = rss_request_context::TenantId::parse(&config.identity.tenant)?;
     let keyring = Arc::new(eventexec::command::CommandIdempotencyKeyring::new(
         eventexec::command::CommandAliasKey::new(
@@ -737,7 +738,8 @@ fn candidate_runtime_config(
             Trigger::interval(std::time::Duration::from_millis(
                 config.workers.reconcile_ms,
             ))?,
-            BackoffPolicy::new(
+            RetryPolicy::new(
+                std::num::NonZeroU32::MIN.saturating_add(2),
                 std::time::Duration::from_millis(100),
                 std::time::Duration::from_secs(30),
             )?,
@@ -745,7 +747,7 @@ fn candidate_runtime_config(
             ReconcileMaxInFlight::try_new(16)?,
         ),
     );
-    let relay_budget = eventexec::RelayBudget::new(
+    let relay_budget = eventing::delivery::DeliveryBudget::new(
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(10),

@@ -43,8 +43,9 @@ use crate::WorkerHealth;
 use crate::command::{
     CommandEmitError, CommandIdempotencyKeyring, ReviewedCommandIntent, reviewed_keyed_intent,
 };
-use crate::retry::{BackoffPolicy, wait_or_cancel};
+use crate::retry::{delay_after, wait_or_cancel};
 use crate::worker_control::WorkerDrainObservation;
+use eventing::lifecycle::RetryPolicy;
 
 /// Exact generated fenced carrier for `identity.apply-device-certificate`.
 ///
@@ -2081,7 +2082,7 @@ where
     reconciler_id: String,
     holder_id: String,
     trigger: Trigger,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
     lease_ttl: Duration,
     max_in_flight: ReconcileMaxInFlight,
 }
@@ -2115,14 +2116,14 @@ where
             reconciler_id: reconciler_id.into(),
             holder_id: holder_id.into(),
             trigger,
-            backoff: BackoffPolicy::default(),
+            backoff: RetryPolicy::STANDARD,
             lease_ttl: LEASE_TTL,
             max_in_flight: ReconcileMaxInFlight::default(),
         }
     }
 
     /// Override backoff policy.
-    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
+    pub fn with_backoff(mut self, backoff: RetryPolicy) -> Self {
         self.backoff = backoff;
         self
     }
@@ -2269,7 +2270,7 @@ where
     reconciler_id: String,
     holder_id: String,
     trigger: Trigger,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
     lease_ttl: Duration,
     health: Arc<WorkerHealth>,
 }
@@ -3036,9 +3037,10 @@ where
     ) -> AttemptResult {
         self.health.mark_degraded();
         let (kind, result) = if error.is_transient() {
-            let delay = self
-                .backoff
-                .delay_for(attempt.target().failure_streak().next().get());
+            let delay = delay_after(
+                &self.backoff,
+                attempt.target().failure_streak().next().get(),
+            );
             (
                 DurableAttemptFailureKind::Transient,
                 AttemptResult::from_transient(delay),
@@ -3060,9 +3062,10 @@ where
 
     fn panic_attempt_result(&self, attempt: &ReconcileAttempt) -> AttemptResult {
         self.health.mark_degraded();
-        let delay = self
-            .backoff
-            .delay_for(attempt.target().failure_streak().next().get());
+        let delay = delay_after(
+            &self.backoff,
+            attempt.target().failure_streak().next().get(),
+        );
         let result = AttemptResult::from_panic(delay);
         self.observe_durable_attempt_failure(attempt, DurableAttemptFailureKind::Panic, result);
         result
@@ -3491,7 +3494,7 @@ pub struct Builder<R: Reconciler> {
     reconciler: R,
     tenancy: Tenancy,
     trigger: Trigger,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
 }
 
 impl<R: Reconciler> Builder<R> {
@@ -3501,17 +3504,17 @@ impl<R: Reconciler> Builder<R> {
             reconciler,
             tenancy,
             trigger,
-            backoff: BackoffPolicy::default(),
+            backoff: RetryPolicy::STANDARD,
         }
     }
 
     /// 覆盖默认指数退避策略。
-    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
+    pub fn with_backoff(mut self, backoff: RetryPolicy) -> Self {
         self.backoff = backoff;
         self
     }
 
-    /// 构造 [`ReconcileLoop`]（infallible：两必填项已位置参 Hard 保证，backoff 已在 [`BackoffPolicy::new`] fail-fast）。
+    /// 构造 [`ReconcileLoop`]（infallible：两必填项已位置参 Hard 保证，backoff 已在 [`RetryPolicy::new`] fail-fast）。
     ///
     /// 是 `ReconcileLoop` **唯一**构造入口（其无公开构造器、config 字段私有）。
     pub fn build(self) -> ReconcileLoop<R> {
@@ -3548,7 +3551,7 @@ pub struct ReconcileLoop<R: Reconciler> {
     reconciler: R,
     tenancy: Tenancy,
     trigger: Trigger,
-    backoff: BackoffPolicy,
+    backoff: RetryPolicy,
     health: Arc<WorkerHealth>,
 }
 
@@ -3712,7 +3715,7 @@ impl<R: Reconciler> ReconcileLoop<R> {
     /// dispatch 环：每 tick / 退避到期发一次 resync pulse；`cancel` 取消即返回。
     async fn dispatch_loop(
         reconciler: &R,
-        backoff: &BackoffPolicy,
+        backoff: &RetryPolicy,
         health: &WorkerHealth,
         period: Duration,
         epoch: Option<vocab::Epoch>,
@@ -3753,7 +3756,7 @@ impl<R: Reconciler> ReconcileLoop<R> {
     /// （写经 CAS、不跨 dispatch 复用可变共享态）。
     async fn dispatch_once(
         reconciler: &R,
-        backoff: &BackoffPolicy,
+        backoff: &RetryPolicy,
         health: &WorkerHealth,
         ctx: &Context,
         req: Request,
@@ -3777,7 +3780,7 @@ impl<R: Reconciler> ReconcileLoop<R> {
             Ok(Err(ref e)) if e.is_transient() => {
                 log_transient();
                 health.mark_degraded();
-                NextAction::RequeueAfter(backoff.delay_for(bump_attempts(attempts, key)))
+                NextAction::RequeueAfter(delay_after(backoff, bump_attempts(attempts, key)))
             }
             // permanent / invariant：仅分类，不自动放弃下一步——清退避、等下个 resync tick 重驱动。
             Ok(Err(_)) => {
@@ -3790,7 +3793,7 @@ impl<R: Reconciler> ReconcileLoop<R> {
             Err(_panic) => {
                 log_panicked();
                 health.mark_degraded();
-                NextAction::RequeueAfter(backoff.delay_for(bump_attempts(attempts, key)))
+                NextAction::RequeueAfter(delay_after(backoff, bump_attempts(attempts, key)))
             }
         }
     }
@@ -3877,7 +3880,7 @@ mod tests {
         WorkerLoopEvent, bump_attempts, canonical_fenced_intent_digest_value, emit_lease_churn,
         execute_worker_job, next_worker_event, same_lease_fence,
     };
-    use crate::retry::BackoffPolicy;
+    use eventing::lifecycle::RetryPolicy;
     use std::time::SystemTime;
 
     /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
@@ -5519,7 +5522,7 @@ mod tests {
                     reconciler_id: "test-reconciler".to_owned(),
                     holder_id: "holder-a".to_owned(),
                     trigger: trig(10),
-                    backoff: BackoffPolicy::default(),
+                    backoff: RetryPolicy::STANDARD,
                     lease_ttl: Duration::from_secs(3),
                     health: Arc::new(WorkerHealth::healthy()),
                 });
@@ -5538,7 +5541,7 @@ mod tests {
                     reconciler_id: "test-reconciler".to_owned(),
                     holder_id: "holder-a".to_owned(),
                     trigger: trig(10),
-                    backoff: BackoffPolicy::default(),
+                    backoff: RetryPolicy::STANDARD,
                     lease_ttl: Duration::from_secs(3),
                     health: Arc::new(WorkerHealth::healthy()),
                 });
@@ -5557,7 +5560,7 @@ mod tests {
                     reconciler_id: "test-reconciler".to_owned(),
                     holder_id: "holder-a".to_owned(),
                     trigger: trig(10),
-                    backoff: BackoffPolicy::default(),
+                    backoff: RetryPolicy::STANDARD,
                     lease_ttl: Duration::from_secs(3),
                     health: Arc::new(WorkerHealth::healthy()),
                 });
@@ -5575,7 +5578,7 @@ mod tests {
                     reconciler_id: "test-reconciler".to_owned(),
                     holder_id: "holder-a".to_owned(),
                     trigger: trig(10),
-                    backoff: BackoffPolicy::default(),
+                    backoff: RetryPolicy::STANDARD,
                     lease_ttl: Duration::from_secs(3),
                     health: Arc::new(WorkerHealth::healthy()),
                 });
@@ -7427,7 +7430,7 @@ mod tests {
         req: Request,
         attempts: &mut HashMap<Option<EntityId>, u32>,
     ) -> (NextAction, Arc<WorkerHealth>) {
-        let backoff = BackoffPolicy::default();
+        let backoff = RetryPolicy::STANDARD;
         let health = Arc::new(WorkerHealth::healthy());
         let action = ReconcileLoop::<ScriptedReconciler>::dispatch_once(
             reconciler, &backoff, &health, ctx, req, attempts,

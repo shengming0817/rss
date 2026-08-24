@@ -119,9 +119,12 @@ fn generated_event_wrappers_reject_raw_coordinates() {
 }
 
 #[test]
-fn relay_budget_fields_are_private() {
+fn public_eventing_values_are_opaque() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/relay_budget_private_fields_fail.rs");
+    t.compile_fail("tests/ui/delivery_budget_private_fields_fail.rs");
+    t.compile_fail("tests/ui/event_envelope_private_fields_fail.rs");
+    t.compile_fail("tests/ui/event_envelope_clone_fail.rs");
+    t.compile_fail("tests/ui/event_envelope_debug_fail.rs");
 }
 
 #[test]
@@ -155,7 +158,6 @@ fn event_metadata_surface_is_narrow() {
     t.compile_fail("tests/ui/event_metadata_debug_fail.rs");
     t.compile_fail("tests/ui/event_metadata_display_fail.rs");
     t.compile_fail("tests/ui/event_metadata_clone_fail.rs");
-    t.compile_fail("tests/ui/event_metadata_root_reexport_fail.rs");
 }
 
 #[test]
@@ -168,5 +170,4 @@ fn managed_delivery_stream_constructor_is_private() {
 fn retry_surface_has_one_canonical_owner() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/retry_canonical_path_pass.rs");
-    t.compile_fail("tests/ui/retry_root_reexport_fail.rs");
 }

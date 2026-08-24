@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::conn::{self, REPLY_SUCCESS};
 
-/// 与 `eventexec::RELAY_BUDGET_MAX_MILLIS` 和 PostgreSQL 0062 对齐的 adapter 二次防线。
+/// 与 `eventing::delivery::DELIVERY_BUDGET_MAX` 和 PostgreSQL 0062 对齐的 adapter 二次防线。
 const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;
 
 /// envelope metadata → [`BasicProperties`]：`event_id` 盖 `message_id`（去重锚点）；`occurred_at`
@@ -1735,7 +1735,7 @@ mod classify_tests {
     //! 仅构造 `lapin::Error` 值检验分类逻辑（`Error::from(ErrorKind::..)` + `AMQPError::new(..)`）。
     use std::sync::Arc;
 
-    use diport::PublishErrorKind;
+    use eventing::delivery::PublishErrorKind;
     use lapin::ErrorKind;
     use lapin::protocol::{AMQPError, AMQPErrorKind, AMQPHardError, AMQPSoftError};
 
@@ -2931,9 +2931,10 @@ mod publisher_transport_replacement_integration_tests {
     use anyhow::{Context as _, anyhow};
     use diport::{
         AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_OCCURRED_AT, KEY_SCHEMA_HASH,
-        KEY_SCHEMA_VERSION, KEY_TENANT_ID, ManagedResource, MessageId, PublishErrorKind,
+        KEY_SCHEMA_VERSION, KEY_TENANT_ID, ManagedResource, MessageId,
         PublishRequest as DiPublishRequest, Publisher, Topic,
     };
+    use eventing::delivery::PublishErrorKind;
     use futures::StreamExt;
     use lapin::options::{BasicGetOptions, QueueDeclareOptions};
     use lapin::types::FieldTable;
