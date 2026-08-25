@@ -10,6 +10,7 @@ use bootstrap::{DomainBinding, DomainModuleResult, Registry};
 /// INVARIANT: RUNTIME-DOMAIN-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private expected-domain fields, RuntimePlan-only mint, consuming DomainBinding validation, and private ValidatedDomainBindings compose handoff" } -- generated domain bindings cannot enter the canonical composition helper until their names exactly equal the RuntimePlan declaration filtered by the plan-owned local placement projection.
 pub(crate) struct DomainExecutionPlan {
     local_domains: Vec<AssemblyDomain>,
+    official_profile: Option<assembly_schema::OfficialAssemblyProfile>,
 }
 
 /// Domain bindings whose live names exactly match the plan-owned local projection.
@@ -52,6 +53,12 @@ impl DomainExecutionPlan {
 
     pub(crate) fn contains(&self, domain: AssemblyDomain) -> bool {
         self.local_domains.contains(&domain)
+    }
+
+    pub(crate) const fn official_profile(
+        &self,
+    ) -> Option<assembly_schema::OfficialAssemblyProfile> {
+        self.official_profile
     }
 }
 
@@ -103,14 +110,17 @@ pub(super) fn mint(
         .map(assembly_schema::DomainPlan::id)
         .filter(|domain| placement.is_local(*domain))
         .collect();
-    DomainExecutionPlan { local_domains }
+    DomainExecutionPlan {
+        local_domains,
+        official_profile: plan.plan_kind().official_profile(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use crate::config::test_snapshot;
+    use crate::config::generic_test_snapshot;
     use crate::plan::RuntimePlan;
     use bootstrap::{Domain, DomainBinding, DomainModuleResult, KernelError, Registry};
     use diport::{DynManagedResource, ManagedResource, ShutdownError};
@@ -214,7 +224,7 @@ mod tests {
                 "https://identity.internal/rpc",
             ));
         }
-        let snapshot = test_snapshot(&entries).expect("domain execution snapshot");
+        let snapshot = generic_test_snapshot(&entries).expect("domain execution snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
         let placement = runtime_plan
             .placement_execution_plan(
@@ -384,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_plan_live_relations_reject_each_typed_mapping_drift() {
-        let snapshot = test_snapshot(&[
+        let snapshot = generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -447,7 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_plan_live_closure_matches_typed_relations() {
-        let snapshot = test_snapshot(&[
+        let snapshot = generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

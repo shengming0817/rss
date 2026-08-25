@@ -105,7 +105,7 @@ fn factory_symbol_serde_and_schema_use_the_display_id() {
     let schema =
         serde_json::to_value(schemars::schema_for!(ProviderFactorySymbol)).expect("factory schema");
     let values = schema["enum"].as_array().expect("factory enum values");
-    assert_eq!(values.len(), 21);
+    assert_eq!(values.len(), 24);
     for value in values {
         let factory: ProviderFactorySymbol =
             serde_json::from_value(value.clone()).expect("schema factory ID deserializes");

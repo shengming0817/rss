@@ -498,6 +498,14 @@ impl Registry {
         self.probes.len()
     }
 
+    /// Stable names of the complete composed probe set, for exact profile closure validation.
+    pub fn probe_names(&self) -> Vec<&str> {
+        self.probes
+            .iter()
+            .map(|probe| probe.name.as_str())
+            .collect()
+    }
+
     /// 驱动所有已注册探针并 worst-of 聚合为 [`primitives::HealthReport`]（readyz 求值入口）。
     ///
     /// 每个探针经 [`HealthProbe::check`] 求值，再用 registry **声明的** [`primitives::ProbeName`]

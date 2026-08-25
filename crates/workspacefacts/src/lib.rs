@@ -16,9 +16,9 @@ pub use build::{
     CargoPlatform, FeatureKey, FeatureSelection, ResolverVersion,
 };
 pub use release::{
-    ApiStability, OfficialProfile, PublicApiOwner, ReleasePackageSelection,
-    ReleaseProfileArtifactSelection, ReleaseSelection, ReleaseSelectionError,
-    parse_release_selection,
+    ActiveProfileArtifactSelection, ApiStability, CandidateProfileArtifactSelection,
+    OfficialProfile, OfficialProfileArtifactSelection, PublicApiOwner, ReleasePackageSelection,
+    ReleaseSelection, ReleaseSelectionError, parse_release_selection,
 };
 
 use declarations::{

@@ -342,7 +342,7 @@ provider_factory_symbols! {
     EventexecVaultHotKeyProvider => "eventexec::vault-hot-key-provider",
 }
 
-/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v3.
+/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v4.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
 )]
@@ -1461,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_twenty_one_unique_active_factories_and_one_draft() {
+    fn registry_has_twenty_four_unique_active_factories_and_one_draft() {
         assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
         assert_eq!(
             PROVIDER_ROLE_SPECS
@@ -1478,7 +1478,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
             .count();
-        assert_eq!(active, 21);
+        assert_eq!(active, 24);
         assert_eq!(drafts, 1);
         assert_registry_invariants(&PROVIDER_ROLE_SPECS);
     }

@@ -18,17 +18,25 @@ pub struct AuditModuleDeps<M> {
     mac: M,
     key: MacKey,
     clock: Arc<dyn Clock>,
+    surface: audit::AuditRuntimeSurface,
 }
 
 impl<M> AuditModuleDeps<M> {
     /// Construct the complete audit composition inputs.
     #[must_use]
-    pub fn new(pg: PgDomainDeps<caps::Audit>, mac: M, key: MacKey, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(
+        pg: PgDomainDeps<caps::Audit>,
+        mac: M,
+        key: MacKey,
+        clock: Arc<dyn Clock>,
+        surface: audit::AuditRuntimeSurface,
+    ) -> Self {
         Self {
             pg,
             mac,
             key,
             clock,
+            surface,
         }
     }
 }
@@ -45,6 +53,7 @@ where
         mac,
         key,
         clock,
+        surface,
     } = deps;
 
     let hasher = AuditChainHasher::new(mac.clone(), key.clone())
@@ -58,8 +67,13 @@ where
     let admin_repo = pg
         .audit_admin_repo(admin_hasher)
         .map(|repo| Arc::from(DynAuditAdminRepo::new_box(repo)));
-    let domain =
-        AuditDomain::<PgAuthAuditSink>::new(read_repo, admin_repo, pg.auth_audit_sink(), clock);
+    let domain = AuditDomain::<PgAuthAuditSink>::new(
+        read_repo,
+        admin_repo,
+        pg.auth_audit_sink(),
+        clock,
+        surface,
+    );
 
     Ok(DomainBinding::new(
         DOMAIN_NAME,
@@ -116,6 +130,7 @@ pub mod test_support {
             TestMac,
             MacKey::from_bytes(vec![0x42; 32]),
             Arc::new(TestClock),
+            audit::AuditRuntimeSurface::Full,
         ))
     }
 }

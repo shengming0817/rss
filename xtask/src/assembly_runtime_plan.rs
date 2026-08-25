@@ -4,7 +4,8 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{
-    AssemblyListenerKind, ListenerAuth, ParsedAssemblyLock, RuntimePlan, RuntimePlanV3Input,
+    AssemblyListenerKind, ListenerAuth, OfficialAssemblyProfile, ParsedAssemblyLock, RuntimePlan,
+    RuntimePlanV4Input,
 };
 use std::fs;
 use std::io;
@@ -77,7 +78,7 @@ fn plan_target(assembly: &crate::assembly_governance::GovernedAssembly) -> Resul
         .verify_repository_v2(assembly.source())
         .with_context(|| format!("repository 验证 {} 失败", lock_path.display()))?;
     let input = compiler_input(manifest)?;
-    let plan = RuntimePlan::compile_v3(manifest, &lock, input)
+    let plan = RuntimePlan::compile_v4(manifest, &lock, input)
         .with_context(|| format!("编译 {directory_name} RuntimePlan 失败"))?;
     let mut expected = serde_json::to_vec_pretty(&plan).context("序列化 RuntimePlan 失败")?;
     expected.push(b'\n');
@@ -102,6 +103,92 @@ fn plan_target(assembly: &crate::assembly_governance::GovernedAssembly) -> Resul
     })
 }
 
+pub(crate) struct OfficialPlanFacts {
+    pub(crate) profile: OfficialAssemblyProfile,
+    pub(crate) config_digest: String,
+    pub(crate) assembly_lock_digest: String,
+    pub(crate) runtime_plan_fingerprint: String,
+    pub(crate) listeners: Vec<String>,
+    pub(crate) routes: Vec<String>,
+    pub(crate) providers: Vec<String>,
+    pub(crate) workers: Vec<String>,
+    pub(crate) probes: Vec<String>,
+    pub(crate) forbidden_providers: Vec<String>,
+}
+
+/// Compile one official profile from the same repository-verified manifest/lock funnel as the
+/// committed generic RuntimePlan. No bundle-specific inventory or provider registry exists.
+pub(crate) fn official_plan_facts(
+    root: &Path,
+    assembly_name: &str,
+    profile: OfficialAssemblyProfile,
+) -> Result<OfficialPlanFacts> {
+    let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+        crate::assembly_governance::Core,
+    >::load_target(root, assembly_name)?
+    .with_context(|| format!("official profile assembly `{assembly_name}` missing"))?;
+    let assembly = ir
+        .assembly(assembly_name)
+        .with_context(|| format!("official profile assembly `{assembly_name}` missing manifest"))?;
+    let manifest = assembly.manifest();
+    let lock_bytes = read_plain_file(&assembly.dir().join(LOCK_NAME))?;
+    let lock = ParsedAssemblyLock::from_json_slice(&lock_bytes)?
+        .verify_repository_v2(assembly.source())?;
+    let closure = manifest
+        .official_profile(profile)
+        .with_context(|| format!("official profile `{}` is not declared", profile.as_str()))?;
+    let mut input = RuntimePlanV4Input::official_from_manifest(manifest, profile)?;
+    let required_listeners = closure
+        .required_listeners()
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut domains = std::collections::BTreeSet::new();
+    for listener in manifest
+        .listeners()
+        .iter()
+        .filter(|listener| required_listeners.contains(&listener.kind))
+    {
+        input.listener(
+            listener.kind,
+            listener_auth(manifest.name(), listener.kind)?,
+            listener.domains.clone(),
+        );
+        domains.extend(listener.domains.iter().copied());
+    }
+    for domain in domains {
+        input.domain(domain);
+        input.placement(domain, manifest.name());
+    }
+    let plan = RuntimePlan::compile_v4(manifest, &lock, input)?;
+    Ok(OfficialPlanFacts {
+        profile,
+        config_digest: manifest
+            .official_profile_config_digest(profile)?
+            .to_string(),
+        assembly_lock_digest: lock.fingerprint().as_str().to_owned(),
+        runtime_plan_fingerprint: plan.runtime_plan_fingerprint().as_str().to_owned(),
+        listeners: plan
+            .listener_plans()
+            .iter()
+            .map(|listener| listener.id().to_owned())
+            .collect(),
+        routes: closure.required_routes().to_vec(),
+        providers: plan
+            .provider_plans()
+            .iter()
+            .map(|provider| provider.id().to_owned())
+            .collect(),
+        workers: closure.required_workers(),
+        probes: closure.required_probes(),
+        forbidden_providers: closure
+            .forbidden_providers(manifest.diport_providers())
+            .into_iter()
+            .map(|provider| provider.as_str().to_owned())
+            .collect(),
+    })
+}
+
 #[cfg(test)]
 fn generate_fixture_target(root: &Path, name: &str, check: bool) -> Result<()> {
     let ir = crate::assembly_governance::AssemblyGovernanceIr::<
@@ -123,8 +210,8 @@ fn generate_fixture_target(root: &Path, name: &str, check: bool) -> Result<()> {
 
 fn compiler_input(
     manifest: &assembly_schema::CanonicalAssemblyManifestV2,
-) -> Result<RuntimePlanV3Input> {
-    let mut input = RuntimePlanV3Input::from_manifest(manifest);
+) -> Result<RuntimePlanV4Input> {
+    let mut input = RuntimePlanV4Input::generic_from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {

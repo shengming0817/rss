@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 [features]
-test-support = []
+test-support = ["eventexec/l2-test-support"]
 
 [dependencies]
 eventing.workspace = true

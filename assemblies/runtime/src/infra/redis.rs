@@ -262,7 +262,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn runtime_infra_redis_snapshot_binds_endpoint_ca_readiness_and_redacts_debug() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             (
                 REDIS_URL_ENV,
                 "rediss://redis-user:redis-secret@cache.internal:6379/4",

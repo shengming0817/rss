@@ -29,7 +29,7 @@ pub(crate) mod domain;
 pub(crate) mod internal;
 /// 审计仓储**域形** repo DI port（ADR-005 Option 2）+ I/O 类型 / 签名实体 façade（postgres adapter 跨 crate impl）。
 pub mod ports;
-pub use application::AuditDomain;
+pub use application::{AuditDomain, AuditRuntimeSurface};
 
 /// Explicit test-only surface. Production-default consumers cannot name these providers/helpers.
 #[cfg(any(test, feature = "test-support"))]

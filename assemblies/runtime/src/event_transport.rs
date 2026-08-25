@@ -2738,7 +2738,7 @@ mod tests {
                 values.insert(key, "peer-cell");
             }
             let values = values.into_iter().collect::<Vec<_>>();
-            let snapshot = crate::config::test_snapshot(&values)?;
+            let snapshot = crate::config::generic_test_snapshot(&values)?;
             let execution = crate::plan::RuntimePlan::bundled(snapshot.view())?
                 .place(bootstrap::Topology::DurableShared, snapshot.view())?
                 .into_parts()
@@ -2800,7 +2800,7 @@ mod tests {
 
     #[test]
     fn event_worker_config_reads_one_snapshot_generation() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_RELAY_POLL_INTERVAL_MS", "201"),
             ("RSS_RELAY_MAX_IN_FLIGHT", "17"),
             ("RSS_RELAY_SAMPLE_INTERVAL_MS", "30001"),
@@ -2841,7 +2841,7 @@ mod tests {
             path
         };
         let ca_path = ca_path.to_str().unwrap_or_else(|| unreachable!());
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_TOPOLOGY", "durable-shared"),
             ("RSS_AMQP_URL", "amqps://su:sp@host/shared"),
             (AMQP_CA_CERT_PEM_PATH_ENV, ca_path),
@@ -2872,7 +2872,7 @@ mod tests {
                 "unknown RSS_TOPOLOGY ''; expected demo | durable-shared | durable-isolated",
             ),
         ] {
-            let snapshot = crate::config::test_snapshot(&entries)
+            let snapshot = crate::config::generic_test_snapshot(&entries)
                 .unwrap_or_else(|_| unreachable!("topology snapshot fixture"));
             let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
             let error = EventTransportConfig::from_mapper(&mapper)
@@ -2885,7 +2885,7 @@ mod tests {
 
     #[test]
     fn event_transport_durable_snapshot_missing_ca_fails_fast() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_TOPOLOGY", "durable-shared"),
             ("RSS_AMQP_URL", "amqps://su:sp@host/shared"),
             (
@@ -3310,7 +3310,7 @@ mod tests {
 
     #[test]
     fn event_worker_snapshot_defaults_and_strict_budget_are_typed() {
-        let snapshot = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
+        let snapshot = crate::config::generic_test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
         let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
         let worker = EventWorkerConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
         assert_eq!(worker.relay_poll_interval(), Duration::from_millis(200));
@@ -3332,7 +3332,7 @@ mod tests {
 
     #[test]
     fn event_worker_snapshot_maps_each_relay_budget_field_without_swaps() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_RELAY_LEASE_TTL_MS", "61000"),
             ("RSS_RELAY_PUBLISH_TIMEOUT_MS", "17000"),
             ("RSS_RELAY_SETTLE_TIMEOUT_MS", "9000"),
@@ -3357,15 +3357,15 @@ mod tests {
             ("RSS_RELAY_SETTLE_TIMEOUT_MS", "86400001"),
             ("RSS_RELAY_SAFETY_MARGIN_MS", "86400001"),
         ] {
-            let snapshot =
-                crate::config::test_snapshot(&[(name, value)]).unwrap_or_else(|_| unreachable!());
+            let snapshot = crate::config::generic_test_snapshot(&[(name, value)])
+                .unwrap_or_else(|_| unreachable!());
             let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
             assert!(
                 EventWorkerConfig::from_mapper(&mapper).is_err(),
                 "{name} must reject the governed maximum plus one"
             );
         }
-        let snapshot = crate::config::test_snapshot(&[("RSS_RELAY_MAX_IN_FLIGHT", "0")])
+        let snapshot = crate::config::generic_test_snapshot(&[("RSS_RELAY_MAX_IN_FLIGHT", "0")])
             .unwrap_or_else(|_| unreachable!());
         let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
         assert!(
@@ -4051,7 +4051,7 @@ mod tests {
         );
 
         let mut stack = bootstrap::shutdown::ShutdownStack::new(token);
-        worker.register_into(&mut stack);
+        let _ = worker.register_into(&mut stack);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), tick_observed.recv()).await,
             Ok(Some(()))

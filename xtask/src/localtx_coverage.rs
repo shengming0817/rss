@@ -4615,7 +4615,12 @@ impl<'ast> Visit<'ast> for SameScopeMountCollector<'_> {
         visit::visit_expr_method_call(self, node);
     }
 
-    fn visit_block(&mut self, _node: &'ast syn::Block) {}
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        // A closed runtime profile may select one of several production route subsets inside the
+        // canonical route-group closure. Traverse nested control-flow blocks, while the closure
+        // override below still prevents evidence from escaping into unrelated nested callbacks.
+        visit::visit_block(self, node);
+    }
 
     fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
 }

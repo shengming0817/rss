@@ -95,7 +95,17 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Codegen { check } => codegen::run(check),
         Command::PackageProof {
             export_candidate_bundle,
-        } => package_proof::run_command(export_candidate_bundle.as_deref()),
+            profile_image_archive,
+            profile_image_digest,
+            profile_migration_image_archive,
+            profile_migration_image_digest,
+        } => package_proof::run_command(
+            export_candidate_bundle.as_deref(),
+            profile_image_archive.as_deref(),
+            profile_image_digest.as_deref(),
+            profile_migration_image_archive.as_deref(),
+            profile_migration_image_digest.as_deref(),
+        ),
         Command::CdcConfig(CdcConfigCommand::Debezium) => cdc_config::run_debezium(),
         Command::Contract(ContractCommand::Validate) => {
             diagnostic::run_check(&contract::validate::ContractValidate)

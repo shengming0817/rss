@@ -1495,7 +1495,7 @@ pub mod inventory {
     ///  "type": "object",
     ///  "required": [
     ///    "activatedWorkflows",
-    ///    "assemblyFingerprint",
+    ///    "assemblyLockDigest",
     ///    "domains",
     ///    "listeners",
     ///    "placements",
@@ -1512,7 +1512,7 @@ pub mod inventory {
     ///      },
     ///      "uniqueItems": true
     ///    },
-    ///    "assemblyFingerprint": {
+    ///    "assemblyLockDigest": {
     ///      "$ref": "#/definitions/Sha256Fingerprint"
     ///    },
     ///    "buildMetadata": {
@@ -1535,6 +1535,9 @@ pub mod inventory {
     ///      },
     ///      "uniqueItems": true
     ///    },
+    ///    "officialProfile": {
+    ///      "$ref": "#/definitions/RuntimeOfficialProfile"
+    ///    },
     ///    "placements": {
     ///      "description": "Placements in stable domain then workload order.",
     ///      "type": "array",
@@ -1556,7 +1559,7 @@ pub mod inventory {
     ///    },
     ///    "schemaVersion": {
     ///      "type": "integer",
-    ///      "const": 2
+    ///      "const": 3
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -1570,9 +1573,9 @@ pub mod inventory {
         #[serde(rename = "activatedWorkflows")]
         #[redact(sensitivity = public)]
         pub activated_workflows: Vec<RuntimeActivatedWorkflow>,
-        #[serde(rename = "assemblyFingerprint")]
+        #[serde(rename = "assemblyLockDigest")]
         #[redact(sensitivity = public)]
-        pub assembly_fingerprint: Sha256Fingerprint,
+        pub assembly_lock_digest: Sha256Fingerprint,
         #[serde(
             rename = "buildMetadata",
             default,
@@ -1586,6 +1589,13 @@ pub mod inventory {
         ///Listeners in stable listener-id order.
         #[redact(sensitivity = public)]
         pub listeners: Vec<RuntimeListener>,
+        #[serde(
+            rename = "officialProfile",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub official_profile: ::std::option::Option<RuntimeOfficialProfile>,
         ///Placements in stable domain then workload order.
         #[redact(sensitivity = public)]
         pub placements: Vec<RuntimePlacement>,
@@ -2182,7 +2192,7 @@ pub mod inventory {
     ///      "type": "object",
     ///      "required": [
     ///        "activatedWorkflows",
-    ///        "assemblyFingerprint",
+    ///        "assemblyLockDigest",
     ///        "domains",
     ///        "listeners",
     ///        "placements",
@@ -2199,7 +2209,7 @@ pub mod inventory {
     ///          },
     ///          "uniqueItems": true
     ///        },
-    ///        "assemblyFingerprint": {
+    ///        "assemblyLockDigest": {
     ///          "$ref": "#/definitions/Sha256Fingerprint"
     ///        },
     ///        "buildMetadata": {
@@ -2222,6 +2232,9 @@ pub mod inventory {
     ///          },
     ///          "uniqueItems": true
     ///        },
+    ///        "officialProfile": {
+    ///          "$ref": "#/definitions/RuntimeOfficialProfile"
+    ///        },
     ///        "placements": {
     ///          "description": "Placements in stable domain then workload order.",
     ///          "type": "array",
@@ -2243,7 +2256,7 @@ pub mod inventory {
     ///        },
     ///        "schemaVersion": {
     ///          "type": "integer",
-    ///          "const": 2
+    ///          "const": 3
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2644,6 +2657,355 @@ pub mod inventory {
             value: ::std::string::String,
         ) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
+        }
+    }
+    ///`RuntimeOfficialProfile`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeOfficialProfile",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "configDigest",
+    ///    "probes",
+    ///    "profile",
+    ///    "routes",
+    ///    "workers"
+    ///  ],
+    ///  "properties": {
+    ///    "configDigest": {
+    ///      "$ref": "#/definitions/Sha256Fingerprint"
+    ///    },
+    ///    "probes": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string",
+    ///        "minLength": 1
+    ///      },
+    ///      "minItems": 1,
+    ///      "uniqueItems": true
+    ///    },
+    ///    "profile": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "core"
+    ///      ]
+    ///    },
+    ///    "routes": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string",
+    ///        "minLength": 1
+    ///      },
+    ///      "minItems": 1,
+    ///      "uniqueItems": true
+    ///    },
+    ///    "workers": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string",
+    ///        "minLength": 1
+    ///      },
+    ///      "minItems": 1,
+    ///      "uniqueItems": true
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeOfficialProfile {
+        #[serde(rename = "configDigest")]
+        #[redact(sensitivity = public)]
+        pub config_digest: Sha256Fingerprint,
+        #[redact(sensitivity = public)]
+        pub probes: Vec<RuntimeOfficialProfileProbesItem>,
+        #[redact(sensitivity = public)]
+        pub profile: RuntimeOfficialProfileProfile,
+        #[redact(sensitivity = public)]
+        pub routes: Vec<RuntimeOfficialProfileRoutesItem>,
+        #[redact(sensitivity = public)]
+        pub workers: Vec<RuntimeOfficialProfileWorkersItem>,
+    }
+    ///`RuntimeOfficialProfileProbesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeOfficialProfileProbesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeOfficialProfileProbesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeOfficialProfileProbesItem> for ::std::string::String {
+        fn from(value: RuntimeOfficialProfileProbesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeOfficialProfileProbesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeOfficialProfileProbesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeOfficialProfileProbesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeOfficialProfileProbesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeOfficialProfileProbesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeOfficialProfileProfile`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "core"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeOfficialProfileProfile {
+        #[serde(rename = "core")]
+        Core,
+    }
+    impl ::std::fmt::Display for RuntimeOfficialProfileProfile {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Core => f.write_str("core"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeOfficialProfileProfile {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "core" => Ok(Self::Core),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeOfficialProfileProfile {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeOfficialProfileProfile {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeOfficialProfileProfile {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeOfficialProfileRoutesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeOfficialProfileRoutesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeOfficialProfileRoutesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeOfficialProfileRoutesItem> for ::std::string::String {
+        fn from(value: RuntimeOfficialProfileRoutesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeOfficialProfileRoutesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeOfficialProfileRoutesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeOfficialProfileRoutesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeOfficialProfileRoutesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeOfficialProfileRoutesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeOfficialProfileWorkersItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeOfficialProfileWorkersItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeOfficialProfileWorkersItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeOfficialProfileWorkersItem> for ::std::string::String {
+        fn from(value: RuntimeOfficialProfileWorkersItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeOfficialProfileWorkersItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeOfficialProfileWorkersItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeOfficialProfileWorkersItem {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeOfficialProfileWorkersItem {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeOfficialProfileWorkersItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
         }
     }
     ///`RuntimePlacement`
@@ -5550,26 +5912,26 @@ pub mod inventory {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
     #[serde(try_from = "i64", into = "i64")]
     pub enum RuntimeInventorySchemaVersion {
-        V2,
+        V3,
     }
     impl ::std::convert::TryFrom<i64> for RuntimeInventorySchemaVersion {
         type Error = &'static str;
         fn try_from(value: i64) -> Result<Self, Self::Error> {
-            if value == 2i64 {
-                Ok(Self::V2)
+            if value == 3i64 {
+                Ok(Self::V3)
             } else {
-                Err("runtime inventory schemaVersion must be 2")
+                Err("runtime inventory schemaVersion must be 3")
             }
         }
     }
     impl ::std::convert::From<RuntimeInventorySchemaVersion> for i64 {
         fn from(_: RuntimeInventorySchemaVersion) -> Self {
-            2i64
+            3i64
         }
     }
     impl ::secure::Redact for RuntimeInventorySchemaVersion {
         fn redact_scoped(&self, _scope: ::secure::RedactScope) -> ::std::string::String {
-            "RuntimeInventorySchemaVersion::V2".to_owned()
+            "RuntimeInventorySchemaVersion::V3".to_owned()
         }
     }
 
@@ -5581,7 +5943,7 @@ pub mod inventory {
         ::rss_contract::ContractDescriptor::from_static_version(
             "runtime.inventory",
             "v1",
-            "sha256:5602af09b781f133d009ed514ad62f92c2fa671be9f8e32c75049a60acb56fd5",
+            "sha256:31322abff09b6f97d7e2808dbfbd00076956a5673d3bb6e4d9f868eef23a1541",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =
@@ -5867,8 +6229,12 @@ pub mod inventory {
         PlacementEndpointPort,
         PlacementSpiffeIdentity,
         PlacementWorkload,
-        AssemblyFingerprint,
+        AssemblyLockDigest,
         BuildImageDigest,
+        ConfigDigest,
+        OfficialProbe,
+        OfficialRoute,
+        OfficialWorker,
         BuildSourceRevision,
         RuntimePlanFingerprint,
     }
@@ -5898,8 +6264,12 @@ pub mod inventory {
                 Self::PlacementEndpointPort => "projection.placement.endpoint.port",
                 Self::PlacementSpiffeIdentity => "projection.placement.spiffe_identity",
                 Self::PlacementWorkload => "projection.placement.workload",
-                Self::AssemblyFingerprint => "projection.assembly_fingerprint",
+                Self::AssemblyLockDigest => "projection.assembly_lock_digest",
                 Self::BuildImageDigest => "projection.build_metadata.image_digest",
+                Self::ConfigDigest => "projection.official_profile.config_digest",
+                Self::OfficialProbe => "projection.official_profile.probes",
+                Self::OfficialRoute => "projection.official_profile.routes",
+                Self::OfficialWorker => "projection.official_profile.workers",
                 Self::BuildSourceRevision => "projection.build_metadata.source_revision",
                 Self::RuntimePlanFingerprint => "projection.runtime_plan_fingerprint",
             }
@@ -6263,9 +6633,9 @@ pub mod inventory {
             Ok(Self {
                 data: RuntimeInventoryData {
                     activated_workflows,
-                    assembly_fingerprint: runtime_inventory_parse(
-                        observation.assembly_fingerprint().as_str(),
-                        RuntimeInventoryProjectionStage::AssemblyFingerprint,
+                    assembly_lock_digest: runtime_inventory_parse(
+                        observation.assembly_lock_digest().as_str(),
+                        RuntimeInventoryProjectionStage::AssemblyLockDigest,
                     )?,
                     build_metadata: observation
                         .build_metadata()
@@ -6299,13 +6669,59 @@ pub mod inventory {
                         })
                         .collect(),
                     listeners,
+                    official_profile: observation
+                        .official_profile()
+                        .map(|profile| {
+                            Ok(RuntimeOfficialProfile {
+                                config_digest: runtime_inventory_parse(
+                                    profile.config_digest().as_str(),
+                                    RuntimeInventoryProjectionStage::ConfigDigest,
+                                )?,
+                                probes: profile
+                                    .probes()
+                                    .iter()
+                                    .map(|value| {
+                                        runtime_inventory_parse(
+                                            value,
+                                            RuntimeInventoryProjectionStage::OfficialProbe,
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                                profile: match profile.profile() {
+                                    ::assembly_schema::OfficialAssemblyProfile::Core => {
+                                        RuntimeOfficialProfileProfile::Core
+                                    }
+                                },
+                                routes: profile
+                                    .routes()
+                                    .iter()
+                                    .map(|value| {
+                                        runtime_inventory_parse(
+                                            value,
+                                            RuntimeInventoryProjectionStage::OfficialRoute,
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                                workers: profile
+                                    .workers()
+                                    .iter()
+                                    .map(|value| {
+                                        runtime_inventory_parse(
+                                            value,
+                                            RuntimeInventoryProjectionStage::OfficialWorker,
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            })
+                        })
+                        .transpose()?,
                     placements,
                     provider_posture,
                     runtime_plan_fingerprint: runtime_inventory_parse(
                         observation.runtime_plan_fingerprint().as_str(),
                         RuntimeInventoryProjectionStage::RuntimePlanFingerprint,
                     )?,
-                    schema_version: RuntimeInventorySchemaVersion::V2,
+                    schema_version: RuntimeInventorySchemaVersion::V3,
                 },
             })
         }

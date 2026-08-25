@@ -6,8 +6,8 @@
 #![warn(missing_docs)]
 
 use crate::{
-    AssemblyDomain, AssemblyFingerprint, AssemblyListenerKind, ListenerAuth, RuntimePlan,
-    RuntimePlanFingerprint,
+    AssemblyDomain, AssemblyFingerprint, AssemblyListenerKind, CanonicalAssemblyManifestV2,
+    ListenerAuth, OfficialAssemblyProfile, RuntimePlan, RuntimePlanFingerprint,
 };
 pub use vocab::CanonicalSha256Digest;
 
@@ -23,6 +23,8 @@ fn all_unique<T: PartialEq>(items: &[T]) -> bool {
 pub struct RuntimeInventoryIdentity {
     assembly_fingerprint: AssemblyFingerprint,
     runtime_plan_fingerprint: RuntimePlanFingerprint,
+    official_profile: Option<OfficialAssemblyProfile>,
+    config_digest: Option<CanonicalSha256Digest>,
 }
 
 impl std::fmt::Debug for RuntimeInventoryIdentity {
@@ -44,6 +46,8 @@ impl RuntimeInventoryIdentity {
         Self {
             assembly_fingerprint: runtime_plan.assembly_fingerprint().clone(),
             runtime_plan_fingerprint: runtime_plan.runtime_plan_fingerprint().clone(),
+            official_profile: runtime_plan.plan_kind().official_profile(),
+            config_digest: runtime_plan.plan_kind().config_digest().cloned(),
         }
     }
 
@@ -57,6 +61,16 @@ impl RuntimeInventoryIdentity {
         &self.runtime_plan_fingerprint
     }
 
+    /// Return the official profile selected by the RuntimePlan, if any.
+    pub const fn official_profile(&self) -> Option<OfficialAssemblyProfile> {
+        self.official_profile
+    }
+
+    /// Return the manifest-derived official profile configuration digest, if any.
+    pub const fn config_digest(&self) -> Option<&CanonicalSha256Digest> {
+        self.config_digest.as_ref()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     /// Construct syntax-valid identities for tests that do not compile an assembly plan.
     pub fn for_test(
@@ -68,8 +82,119 @@ impl RuntimeInventoryIdentity {
             runtime_plan_fingerprint: RuntimePlanFingerprint::from_validated(
                 runtime_plan_fingerprint,
             ),
+            official_profile: None,
+            config_digest: None,
         }
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Construct an official-profile identity for inventory contract tests.
+    pub fn for_test_official(
+        assembly_fingerprint: CanonicalSha256Digest,
+        runtime_plan_fingerprint: CanonicalSha256Digest,
+        profile: OfficialAssemblyProfile,
+        config_digest: CanonicalSha256Digest,
+    ) -> Self {
+        Self {
+            assembly_fingerprint: AssemblyFingerprint::from_validated(assembly_fingerprint),
+            runtime_plan_fingerprint: RuntimePlanFingerprint::from_validated(
+                runtime_plan_fingerprint,
+            ),
+            official_profile: Some(profile),
+            config_digest: Some(config_digest),
+        }
+    }
+}
+
+/// Manifest-derived exact official-profile topology carried into the protected inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInventoryOfficialProfile {
+    profile: OfficialAssemblyProfile,
+    config_digest: CanonicalSha256Digest,
+    routes: Vec<String>,
+    workers: Vec<String>,
+    probes: Vec<String>,
+}
+
+impl RuntimeInventoryOfficialProfile {
+    /// Derive the protected closure only from a canonical manifest and its validated plan.
+    pub fn from_manifest_and_plan(
+        manifest: &CanonicalAssemblyManifestV2,
+        plan: &RuntimePlan,
+    ) -> Result<Self, RuntimeInventoryOfficialProfileError> {
+        let profile = plan
+            .plan_kind()
+            .official_profile()
+            .ok_or(RuntimeInventoryOfficialProfileError::GenericPlan)?;
+        let closure = manifest
+            .official_profile(profile)
+            .ok_or(RuntimeInventoryOfficialProfileError::MissingManifestProfile)?;
+        let expected = manifest
+            .official_profile_config_digest(profile)
+            .map_err(|_| RuntimeInventoryOfficialProfileError::ConfigDigest)?;
+        if plan.plan_kind().config_digest() != Some(&expected) {
+            return Err(RuntimeInventoryOfficialProfileError::ConfigDigest);
+        }
+        Ok(Self {
+            profile,
+            config_digest: expected,
+            routes: closure.required_routes().to_vec(),
+            workers: closure.required_workers(),
+            probes: closure.required_probes(),
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Construct an exact official-profile closure for isolated contract tests.
+    pub fn for_test(
+        profile: OfficialAssemblyProfile,
+        config_digest: CanonicalSha256Digest,
+        routes: Vec<String>,
+        workers: Vec<String>,
+        probes: Vec<String>,
+    ) -> Self {
+        Self {
+            profile,
+            config_digest,
+            routes,
+            workers,
+            probes,
+        }
+    }
+    /// Return the closed profile ID.
+    pub const fn profile(&self) -> OfficialAssemblyProfile {
+        self.profile
+    }
+    /// Return the canonical config digest.
+    pub const fn config_digest(&self) -> &CanonicalSha256Digest {
+        &self.config_digest
+    }
+    /// Return exact route IDs.
+    pub fn routes(&self) -> &[String] {
+        &self.routes
+    }
+    /// Return exact worker IDs.
+    pub fn workers(&self) -> &[String] {
+        &self.workers
+    }
+    /// Return exact readiness probe IDs.
+    pub fn probes(&self) -> &[String] {
+        &self.probes
+    }
+}
+
+/// Closed failures while deriving protected official-profile inventory evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeInventoryOfficialProfileError {
+    /// Generic plans cannot produce official-profile evidence.
+    #[error("generic RuntimePlan cannot produce official-profile inventory evidence")]
+    GenericPlan,
+    /// The canonical manifest does not declare the plan's profile.
+    #[error("RuntimePlan official profile is absent from the canonical manifest")]
+    MissingManifestProfile,
+    /// The plan binding and manifest-derived configuration digest differ.
+    #[error("RuntimePlan official-profile configuration digest differs from the manifest")]
+    ConfigDigest,
 }
 
 /// Network scheme for an observed listener or declared placement endpoint.
@@ -588,6 +713,8 @@ impl RuntimeInventoryPlacement {
 /// Closed invariant categories retained for safe runtime-inventory diagnosis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeInventoryInvariantKind {
+    /// Official-profile identity or exact declared closure differs from the RuntimePlan binding.
+    OfficialProfile,
     /// The runtime plan contains no domains or repeated domains.
     Domains,
     /// Launch-supplied build metadata violates the contract shape.
@@ -606,6 +733,7 @@ impl RuntimeInventoryInvariantKind {
     /// Return a stable, non-sensitive diagnostic stage.
     pub const fn diagnostic_stage(self) -> &'static str {
         match self {
+            Self::OfficialProfile => "observation.official_profile",
             Self::Domains => "observation.domains",
             Self::BuildMetadata => "observation.build_metadata",
             Self::ActivatedWorkflows => "observation.activated_workflows",
@@ -631,6 +759,7 @@ pub enum RuntimeInventoryReadFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInventoryParts {
     identity: RuntimeInventoryIdentity,
+    official_profile: Option<RuntimeInventoryOfficialProfile>,
     build_metadata: Option<RuntimeInventoryBuildMetadata>,
     domains: Vec<AssemblyDomain>,
     activated_workflows: Vec<RuntimeInventoryActivatedWorkflow>,
@@ -653,6 +782,7 @@ impl RuntimeInventoryParts {
     ) -> Self {
         Self {
             identity,
+            official_profile: None,
             build_metadata,
             domains,
             activated_workflows,
@@ -660,6 +790,12 @@ impl RuntimeInventoryParts {
             provider_posture,
             placements,
         }
+    }
+
+    /// Attach the manifest-derived official closure exactly once before reader validation.
+    pub fn with_official_profile(mut self, profile: RuntimeInventoryOfficialProfile) -> Self {
+        self.official_profile = Some(profile);
+        self
     }
 }
 
@@ -696,6 +832,29 @@ impl RuntimeInventoryObservation {
         if !build_valid {
             return Err(RuntimeInventoryReadFailure::Invariant(
                 RuntimeInventoryInvariantKind::BuildMetadata,
+            ));
+        }
+        let official_valid = match (
+            parts.identity.official_profile(),
+            parts.identity.config_digest(),
+            parts.official_profile.as_ref(),
+        ) {
+            (None, None, None) => true,
+            (Some(profile), Some(digest), Some(closure)) => {
+                let closed = |values: &[String]| {
+                    !values.is_empty() && values.windows(2).all(|pair| pair[0] < pair[1])
+                };
+                closure.profile() == profile
+                    && closure.config_digest() == digest
+                    && closed(closure.routes())
+                    && closed(closure.workers())
+                    && closed(closure.probes())
+            }
+            _ => false,
+        };
+        if !official_valid {
+            return Err(RuntimeInventoryReadFailure::Invariant(
+                RuntimeInventoryInvariantKind::OfficialProfile,
             ));
         }
         if parts.domains.is_empty() || !all_unique(&parts.domains) {
@@ -757,6 +916,10 @@ impl RuntimeInventoryObservation {
     pub fn assembly_fingerprint(&self) -> &AssemblyFingerprint {
         self.parts.identity.assembly_fingerprint()
     }
+    /// Return the AssemblyLock digest that binds this runtime composition.
+    pub fn assembly_lock_digest(&self) -> &AssemblyFingerprint {
+        self.parts.identity.assembly_fingerprint()
+    }
     /// Return optional launch-supplied build metadata.
     pub fn build_metadata(&self) -> Option<&RuntimeInventoryBuildMetadata> {
         self.parts.build_metadata.as_ref()
@@ -764,6 +927,10 @@ impl RuntimeInventoryObservation {
     /// Return the provenance-bearing runtime-plan fingerprint.
     pub fn runtime_plan_fingerprint(&self) -> &RuntimePlanFingerprint {
         self.parts.identity.runtime_plan_fingerprint()
+    }
+    /// Return the manifest-bound official profile closure, if this is an official RuntimePlan.
+    pub fn official_profile(&self) -> Option<&RuntimeInventoryOfficialProfile> {
+        self.parts.official_profile.as_ref()
     }
     /// Return domains in runtime-plan declaration order.
     pub fn domains(&self) -> &[AssemblyDomain] {
@@ -864,6 +1031,9 @@ mod tests {
                 }
                 RuntimeInventoryInvariantKind::BuildMetadata => {
                     return Err("unexpected invariant fixture".into());
+                }
+                RuntimeInventoryInvariantKind::OfficialProfile => {
+                    return Err("unexpected official-profile invariant fixture".into());
                 }
             }
             assert_eq!(

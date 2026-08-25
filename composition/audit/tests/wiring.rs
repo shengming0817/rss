@@ -33,6 +33,7 @@ fn deps(key_len: usize) -> AuditModuleDeps<TestMac> {
         TestMac,
         MacKey::from_bytes(vec![0x5a; key_len]),
         Arc::new(TestClock),
+        audit::AuditRuntimeSurface::Full,
     )
 }
 

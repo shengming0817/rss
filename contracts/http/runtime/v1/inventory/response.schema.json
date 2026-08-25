@@ -9,7 +9,7 @@
       "type": "object",
       "required": [
         "schemaVersion",
-        "assemblyFingerprint",
+        "assemblyLockDigest",
         "runtimePlanFingerprint",
         "activatedWorkflows",
         "domains",
@@ -18,10 +18,11 @@
         "placements"
       ],
       "properties": {
-        "schemaVersion": { "type": "integer", "const": 2 },
-        "assemblyFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "schemaVersion": { "type": "integer", "const": 3 },
+        "assemblyLockDigest": { "$ref": "#/definitions/Sha256Fingerprint" },
         "buildMetadata": { "$ref": "#/definitions/RuntimeBuildMetadata" },
         "runtimePlanFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "officialProfile": { "$ref": "#/definitions/RuntimeOfficialProfile" },
         "activatedWorkflows": {
           "description": "The sealed non-disabled workflow set in stable runtime-plan order.",
           "type": "array",
@@ -74,6 +75,19 @@
           "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "imageDigest": { "$ref": "#/definitions/Sha256Fingerprint" }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeOfficialProfile": {
+      "title": "RuntimeOfficialProfile",
+      "type": "object",
+      "required": ["profile", "configDigest", "routes", "workers", "probes"],
+      "properties": {
+        "profile": { "type": "string", "enum": ["core"] },
+        "configDigest": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "routes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "workers": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "probes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
       },
       "additionalProperties": false
     },

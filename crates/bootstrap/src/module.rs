@@ -391,55 +391,28 @@ pub fn validate_worker_inventory<'a>(
     })
 }
 
-pub fn validate_worker_inventory_exact<'a>(
-    workers: impl IntoIterator<Item = &'a WorkerSpec>,
-    expected: &ExpectedWorkerInventory,
-) -> Result<WorkerInventory, WorkerInventoryError> {
-    let inventory = validate_worker_inventory(workers)?;
-    let mutating =
-        |descriptor: &&WorkerDescriptor| descriptor.lane != WorkerAdmissionLane::Observational;
-    for descriptor in inventory.descriptors.iter().filter(mutating) {
-        match expected
-            .descriptors
-            .iter()
-            .find(|candidate| candidate.identity == descriptor.identity)
-        {
-            None => return Err(WorkerInventoryError::Unexpected(descriptor.clone())),
-            Some(candidate) if candidate.lane != descriptor.lane => {
-                return Err(WorkerInventoryError::WrongLane {
-                    identity: descriptor.identity.clone(),
-                    expected: candidate.lane,
-                    actual: descriptor.lane,
-                });
-            }
-            Some(_) => {}
-        }
-    }
-    if let Some(missing) = expected.descriptors.iter().find(|candidate| {
-        candidate.lane != WorkerAdmissionLane::Observational
-            && !inventory
-                .descriptors
-                .iter()
-                .filter(mutating)
-                .any(|descriptor| descriptor.identity == candidate.identity)
-    }) {
-        return Err(WorkerInventoryError::Missing(missing.clone()));
-    }
-    Ok(inventory)
-}
-
 /// Validate the complete worker set, including observational workers.
 pub fn validate_worker_inventory_closed<'a>(
     workers: impl IntoIterator<Item = &'a WorkerSpec>,
     expected: &ExpectedWorkerInventory,
 ) -> Result<WorkerInventory, WorkerInventoryError> {
     let inventory = validate_worker_inventory(workers)?;
-    if let Some(unexpected) = inventory
-        .descriptors
-        .iter()
-        .find(|descriptor| !expected.descriptors.contains(descriptor))
-    {
-        return Err(WorkerInventoryError::Unexpected(unexpected.clone()));
+    for actual in &inventory.descriptors {
+        match expected
+            .descriptors
+            .iter()
+            .find(|candidate| candidate.identity == actual.identity)
+        {
+            None => return Err(WorkerInventoryError::Unexpected(actual.clone())),
+            Some(candidate) if candidate.lane != actual.lane => {
+                return Err(WorkerInventoryError::WrongLane {
+                    identity: actual.identity.clone(),
+                    expected: candidate.lane,
+                    actual: actual.lane,
+                });
+            }
+            Some(_) => {}
+        }
     }
     if let Some(missing) = expected
         .descriptors
@@ -771,8 +744,8 @@ mod result_tests {
                 WorkerAdmissionLane::Relay,
             ),
         ])?;
-        let forward = validate_worker_inventory_exact([&first, &second], &expected)?;
-        let reverse = validate_worker_inventory_exact([&second, &first], &expected)?;
+        let forward = validate_worker_inventory_closed([&first, &second], &expected)?;
+        let reverse = validate_worker_inventory_closed([&second, &first], &expected)?;
         assert_eq!(forward.digest, reverse.digest);
         assert_eq!(
             forward
@@ -801,7 +774,7 @@ mod result_tests {
             WorkerAdmissionLane::Observational,
         )])?;
         assert!(matches!(
-            validate_worker_inventory_exact([&first, &second], &expected),
+            validate_worker_inventory_closed([&first, &second], &expected),
             Err(WorkerInventoryError::DuplicateIdentity(identity)) if identity == "duplicate"
         ));
         Ok(())
@@ -837,7 +810,7 @@ mod result_tests {
             WorkerAdmissionLane::Relay,
         )])?;
         assert!(matches!(
-            validate_worker_inventory_exact([&actual], &expected),
+            validate_worker_inventory_closed([&actual], &expected),
             Err(WorkerInventoryError::Unexpected(_))
         ));
 
@@ -846,7 +819,7 @@ mod result_tests {
             WorkerDescriptor::expected("missing", WorkerAdmissionLane::Writes),
         ])?;
         assert!(matches!(
-            validate_worker_inventory_exact([&actual], &missing),
+            validate_worker_inventory_closed([&actual], &missing),
             Err(WorkerInventoryError::Missing(_))
         ));
 
@@ -855,7 +828,7 @@ mod result_tests {
             WorkerAdmissionLane::Consumer,
         )])?;
         assert!(matches!(
-            validate_worker_inventory_exact([&actual], &wrong_lane),
+            validate_worker_inventory_closed([&actual], &wrong_lane),
             Err(WorkerInventoryError::WrongLane { .. })
         ));
         Ok(())

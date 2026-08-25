@@ -530,6 +530,21 @@ where
     let mut live_routes = registry.finalize_routes().context("finalize_routes")?;
     bootstrap::validate_framework_serving(&live_routes, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
         .context("validate framework serving")?;
+    if let Some(expected) = execution_plan.official_routes() {
+        let mut actual = live_routes
+            .iter()
+            .flat_map(|(_, routes)| routes.route_evidence())
+            .map(|evidence| evidence.contract_id().to_owned())
+            .collect::<Vec<_>>();
+        if execution_plan
+            .listeners()
+            .iter()
+            .any(|listener| listener.kind() == ListenerKind::Health)
+        {
+            actual.extend(["health.live", "health.metrics", "health.ready"].map(str::to_owned));
+        }
+        crate::plan::validate_official_profile_exact_ids("route", expected, actual)?;
+    }
     for (listener, _) in &live_routes {
         anyhow::ensure!(
             execution_plan
@@ -929,7 +944,7 @@ pub(crate) fn finalize_health_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_snapshot;
+    use crate::config::generic_test_snapshot;
     use crate::support::{SystemClock, TracingAuthAuditSink};
     use crate::{
         KeyedEs256StaticKey, RssAccessStaticProviderConfig, rss_access_provider_from_static_config,
@@ -1142,7 +1157,7 @@ mod tests {
         {
             registry.route_group::<httpserve::Admin>("/test-admin", Ok)?;
         }
-        let snapshot = test_snapshot(values)?;
+        let snapshot = generic_test_snapshot(values)?;
         let framework_routes =
             crate::runtime_inventory::RuntimeInventoryRoutes::unpublished_fixture(snapshot.view())?;
         let execution_plan =
@@ -1228,7 +1243,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn listener_finalizer_rejects_declared_missing_and_live_health_routes_before_launch() {
         fn snapshot() -> crate::config::RuntimeConfigSnapshot {
-            test_snapshot(&[
+            generic_test_snapshot(&[
                 ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
                 ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
                 ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -1316,7 +1331,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn provider_presence_is_an_exact_projection_of_plan_auth() {
-        let rss = test_snapshot(&[
+        let rss = generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -1346,7 +1361,7 @@ mod tests {
             .is_err()
         );
 
-        let service = test_snapshot(&[
+        let service = generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "service-token"),

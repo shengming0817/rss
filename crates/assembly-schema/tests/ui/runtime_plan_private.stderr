@@ -11,3 +11,45 @@ error: cannot construct `ProviderPlan` with struct literal syntax due to private
    |             ------------------------------------------ private field
    |
    = note: ...and other private field `activation` that was not provided
+
+error: cannot construct `RuntimePlan` with struct literal syntax due to private fields
+  --> tests/ui/runtime_plan_private.rs:11:5
+   |
+11 |       RuntimePlan {
+   |       ^^^^^^^^^^^
+12 |           schema_version: 2,
+   |           ----------------- private field
+13 |           assembly_fingerprint,
+   |           -------------------- private field
+14 |           runtime_plan_fingerprint,
+   |           ------------------------ private field
+15 | /         provider_plans: vec![ProviderPlan {
+16 | |             id: "pdp".to_owned(),
+17 | |             constructor: ProviderConstructor::OidcProvider,
+18 | |             outputs: vec![LifecycleChannel::Resources],
+19 | |         }],
+   | |__________- private field
+20 | /         listener_plans: vec![ListenerPlan {
+21 | |             id: "primary-main".to_owned(),
+22 | |             kind: assembly_schema::AssemblyListenerKind::Primary,
+23 | |             auth: ListenerAuth::RssAccessToken,
+24 | |             domains: vec![AssemblyDomain::Identity],
+25 | |         }],
+   | |__________- private field
+26 | /         domain_plans: vec![DomainPlan {
+27 | |             id: AssemblyDomain::Identity,
+28 | |             lifecycle: vec![
+29 | |                 DomainLifecyclePhase::Construct,
+...  |
+32 | |             ],
+33 | |         }],
+   | |__________- private field
+34 | /         placement_plans: vec![PlacementPlan {
+35 | |             domain: AssemblyDomain::Identity,
+36 | |             workload: "runtime".to_owned(),
+37 | |         }],
+   | |__________- private field
+38 |           workflow_plans: vec![],
+   |           ---------------------- private field
+   |
+   = note: ...and other private field `plan_kind` that was not provided

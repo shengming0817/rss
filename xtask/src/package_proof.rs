@@ -14,6 +14,9 @@ use workspacefacts::{
     DependencySource, FeatureSelection, ResolverVersion, WorkspaceFacts,
 };
 
+const CANDIDATE_BUNDLE_V2_SCHEMA: &str =
+    include_str!("../../contracts/artifacts/candidate-bundle/v2/manifest.schema.json");
+
 /// INVARIANT: RELEASE-PACKAGE-PROOF-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "proof_behavior_is_closed_and_unknown_release_packages_fail", anti_vacuity = "release_proof_plans_are_derived_from_the_complete_release_surface" }.
 /// Every package selected by the validated Release Surface is planned and executed exactly once.
 /// The closed behavior projection supplies only package-specific consumer semantics; it cannot
@@ -23,12 +26,27 @@ use workspacefacts::{
 /// The proof packages a tracked-clean checkout without `--allow-dirty`, parses the archive's
 /// `.cargo_vcs_info.json`, and requires its revision to equal the checkout HEAD.
 ///
-pub(crate) fn run_command(export_candidate_bundle: Option<&Path>) -> Result<()> {
+pub(crate) fn run_command(
+    export_candidate_bundle: Option<&Path>,
+    profile_image_archive: Option<&Path>,
+    profile_image_digest: Option<&str>,
+    profile_migration_image_archive: Option<&Path>,
+    profile_migration_image_digest: Option<&str>,
+) -> Result<()> {
     let root = crate::workspace_root()?;
     let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
     let facts = command_facts.get()?;
     let surface = crate::publicapi::validated_release_surface(&root, facts)?;
-    run(&root, facts, &surface, export_candidate_bundle)
+    run(
+        &root,
+        facts,
+        &surface,
+        export_candidate_bundle,
+        profile_image_archive,
+        profile_image_digest,
+        profile_migration_image_archive,
+        profile_migration_image_digest,
+    )
 }
 
 pub(crate) fn run(
@@ -36,6 +54,10 @@ pub(crate) fn run(
     facts: &WorkspaceFacts,
     surface: &crate::release_surface::ReleaseSurface,
     export_candidate_bundle_path: Option<&Path>,
+    profile_image_archive: Option<&Path>,
+    profile_image_digest: Option<&str>,
+    profile_migration_image_archive: Option<&Path>,
+    profile_migration_image_digest: Option<&str>,
 ) -> Result<()> {
     require_tracked_clean(root)?;
     let head = crate::cmd::source_revision(root)?;
@@ -103,6 +125,17 @@ pub(crate) fn run(
     init_git(&index)?;
 
     if let Some(output) = export_candidate_bundle_path {
+        let image = CandidateProfileImageSource::new(
+            profile_image_archive.context("candidate profile OCI archive is required")?,
+            profile_image_digest.context("candidate profile OCI digest is required")?,
+        )?;
+        let migration_image = CandidateProfileImageSource::new(
+            profile_migration_image_archive
+                .context("candidate migration OCI archive is required")?,
+            profile_migration_image_digest.context("candidate migration OCI digest is required")?,
+        )?;
+        let selector = CandidateArtifactSelector::from_actions_env()?;
+        let core = candidate_core_profile(&root, &image, &migration_image)?;
         let packages = artifacts
             .iter()
             .map(|artifact| CandidateBundlePackage {
@@ -112,18 +145,28 @@ pub(crate) fn run(
             })
             .collect::<Vec<_>>();
         let portable_registry = temp.root.join("portable-candidate-registry");
-        export_candidate_bundle(output, &head, &packages, &registry, |bundle| {
-            materialize_candidate_bundle_registry(bundle, &portable_registry)?;
-            run_registry_consumers(
-                root,
-                &plans,
-                &artifacts,
-                &portable_registry.join("index"),
-                &temp.root,
-                &head,
-            )?;
-            Ok(())
-        })?;
+        export_candidate_bundle(
+            output,
+            &head,
+            selector,
+            vec![core],
+            &image.archive,
+            &migration_image.archive,
+            &packages,
+            &registry,
+            |bundle| {
+                materialize_candidate_bundle_registry(bundle, &portable_registry)?;
+                run_registry_consumers(
+                    root,
+                    &plans,
+                    &artifacts,
+                    &portable_registry.join("index"),
+                    &temp.root,
+                    &head,
+                )?;
+                Ok(())
+            },
+        )?;
         println!(
             "package-proof: candidate-bundle={} rss-head={} packages={}",
             output.display(),
@@ -1084,24 +1127,164 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct CandidateBundlePackage {
     name: String,
     version: String,
     checksum: String,
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateArtifactSelector {
+    workflow: String,
+    run_id: u64,
+    run_attempt: u64,
+    artifact_name: String,
+}
+
+impl CandidateArtifactSelector {
+    fn from_actions_env() -> Result<Self> {
+        let revision = std::env::var("GITHUB_SHA").context("GITHUB_SHA is required")?;
+        let run_id = std::env::var("GITHUB_RUN_ID")
+            .context("GITHUB_RUN_ID is required")?
+            .parse()
+            .context("GITHUB_RUN_ID must be an integer")?;
+        let run_attempt = std::env::var("GITHUB_RUN_ATTEMPT")
+            .context("GITHUB_RUN_ATTEMPT is required")?
+            .parse()
+            .context("GITHUB_RUN_ATTEMPT must be an integer")?;
+        Ok(Self {
+            workflow: "candidate-bundle.yml".to_owned(),
+            run_id,
+            run_attempt,
+            artifact_name: format!("rss-candidate-bundle-{revision}-{run_id}-{run_attempt}"),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CandidateProfileImageSource {
+    archive: PathBuf,
+    image_digest: String,
+    archive_sha256: String,
+}
+
+impl CandidateProfileImageSource {
+    fn new(archive: &Path, image_digest: &str) -> Result<Self> {
+        if !archive.is_absolute() || !archive.is_file() {
+            bail!("candidate profile OCI archive must be an existing absolute file");
+        }
+        validate_sha256_digest(image_digest, "candidate profile OCI image")?;
+        Ok(Self {
+            archive: archive.to_owned(),
+            image_digest: image_digest.to_owned(),
+            archive_sha256: format!("sha256:{:x}", Sha256::digest(fs::read(archive)?)),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateProfileImage {
+    archive: String,
+    archive_sha256: String,
+    image_digest: String,
+    migration_archive: String,
+    migration_archive_sha256: String,
+    migration_image_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateProfileClosure {
+    listeners: Vec<String>,
+    routes: Vec<String>,
+    providers: Vec<String>,
+    workers: Vec<String>,
+    probes: Vec<String>,
+    forbidden_providers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateProfileArtifact {
+    profile: assembly_schema::OfficialAssemblyProfile,
+    assembly: CandidateProfileAssembly,
+    config_digest: String,
+    assembly_lock_digest: String,
+    runtime_plan_fingerprint: String,
+    image: CandidateProfileImage,
+    closure: CandidateProfileClosure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CandidateProfileAssembly {
+    Runtime,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+enum OfficialProfileArtifact {
+    Candidate(CandidateProfileArtifact),
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CandidateBundleManifest {
     schema_version: u32,
     rss_revision: String,
+    artifact_selector: CandidateArtifactSelector,
     packages: Vec<CandidateBundlePackage>,
+    profiles: Vec<OfficialProfileArtifact>,
+}
+
+fn candidate_core_profile(
+    root: &Path,
+    image: &CandidateProfileImageSource,
+    migration_image: &CandidateProfileImageSource,
+) -> Result<OfficialProfileArtifact> {
+    let facts = crate::assembly_runtime_plan::official_plan_facts(
+        root,
+        "runtime",
+        assembly_schema::OfficialAssemblyProfile::Core,
+    )?;
+    let closure = CandidateProfileClosure {
+        listeners: facts.listeners,
+        routes: facts.routes,
+        providers: facts.providers,
+        workers: facts.workers,
+        probes: facts.probes,
+        forbidden_providers: facts.forbidden_providers,
+    };
+    validate_candidate_closure(&closure)?;
+    Ok(OfficialProfileArtifact::Candidate(
+        CandidateProfileArtifact {
+            profile: facts.profile,
+            assembly: CandidateProfileAssembly::Runtime,
+            config_digest: facts.config_digest,
+            assembly_lock_digest: facts.assembly_lock_digest,
+            runtime_plan_fingerprint: facts.runtime_plan_fingerprint,
+            image: CandidateProfileImage {
+                archive: "profiles/core/server.oci".to_owned(),
+                archive_sha256: image.archive_sha256.clone(),
+                image_digest: image.image_digest.clone(),
+                migration_archive: "profiles/core/migrator.oci".to_owned(),
+                migration_archive_sha256: migration_image.archive_sha256.clone(),
+                migration_image_digest: migration_image.image_digest.clone(),
+            },
+            closure,
+        },
+    ))
 }
 
 fn candidate_bundle_manifest(
     rss_revision: &str,
+    artifact_selector: CandidateArtifactSelector,
     mut packages: Vec<CandidateBundlePackage>,
+    profiles: Vec<OfficialProfileArtifact>,
 ) -> Result<CandidateBundleManifest> {
     if rss_revision.len() != 40
         || !rss_revision
@@ -1110,8 +1293,53 @@ fn candidate_bundle_manifest(
     {
         bail!("candidate bundle RSS revision must be a lowercase 40-hex Git identity");
     }
+    if artifact_selector.workflow != "candidate-bundle.yml"
+        || artifact_selector.run_id == 0
+        || artifact_selector.run_attempt == 0
+        || artifact_selector.artifact_name
+            != format!(
+                "rss-candidate-bundle-{rss_revision}-{}-{}",
+                artifact_selector.run_id, artifact_selector.run_attempt
+            )
+    {
+        bail!("candidate bundle artifact selector is not the closed producer identity");
+    }
     if packages.is_empty() {
         bail!("candidate bundle requires at least one Release Surface package");
+    }
+    if profiles.is_empty() {
+        bail!("candidate bundle requires at least one official profile artifact");
+    }
+    let mut selected_profiles = BTreeSet::new();
+    for artifact in &profiles {
+        let OfficialProfileArtifact::Candidate(candidate) = artifact;
+        if !selected_profiles.insert(candidate.profile.as_str()) {
+            bail!("candidate bundle contains duplicate official profile");
+        }
+        for (subject, digest) in [
+            ("config", &candidate.config_digest),
+            ("AssemblyLock", &candidate.assembly_lock_digest),
+            ("RuntimePlan", &candidate.runtime_plan_fingerprint),
+            ("OCI archive", &candidate.image.archive_sha256),
+            ("OCI image", &candidate.image.image_digest),
+            (
+                "migration OCI archive",
+                &candidate.image.migration_archive_sha256,
+            ),
+            (
+                "migration OCI image",
+                &candidate.image.migration_image_digest,
+            ),
+        ] {
+            validate_sha256_digest(digest, subject)?;
+        }
+        if candidate.image.archive != "profiles/core/server.oci" {
+            bail!("candidate profile image archive path is not canonical");
+        }
+        if candidate.image.migration_archive != "profiles/core/migrator.oci" {
+            bail!("candidate migration image archive path is not canonical");
+        }
+        validate_candidate_closure(&candidate.closure)?;
     }
     packages.sort_by(|left, right| left.name.cmp(&right.name));
     let mut seen = BTreeSet::new();
@@ -1135,15 +1363,105 @@ fn candidate_bundle_manifest(
         }
     }
     Ok(CandidateBundleManifest {
-        schema_version: 1,
+        schema_version: 2,
         rss_revision: rss_revision.to_owned(),
+        artifact_selector,
         packages,
+        profiles,
     })
+}
+
+fn parse_candidate_bundle_manifest(bytes: &[u8]) -> Result<CandidateBundleManifest> {
+    let schema: serde_json::Value = serde_json::from_str(CANDIDATE_BUNDLE_V2_SCHEMA)
+        .context("committed candidate bundle v2 schema is invalid")?;
+    let instance: serde_json::Value =
+        serde_json::from_slice(bytes).context("candidate bundle v2 is not JSON")?;
+    let validator = jsonschema::draft7::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .context("compile candidate bundle v2 schema")?;
+    if let Err(mut errors) = validator.validate(&instance) {
+        let diagnostic = errors
+            .next()
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown schema violation".to_owned());
+        bail!("candidate bundle v2 violates its public schema: {diagnostic}");
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let parsed = CandidateBundleManifest::deserialize(&mut deserializer)
+        .context("candidate bundle v2 wire is invalid")?;
+    deserializer
+        .end()
+        .context("candidate bundle v2 has trailing data")?;
+    if parsed.schema_version != 2 {
+        bail!("unsupported candidate bundle schemaVersion");
+    }
+    let normalized = candidate_bundle_manifest(
+        &parsed.rss_revision,
+        parsed.artifact_selector.clone(),
+        parsed.packages.clone(),
+        parsed.profiles.clone(),
+    )?;
+    if normalized != parsed {
+        bail!("candidate bundle v2 sets are not in canonical order");
+    }
+    Ok(parsed)
+}
+
+fn validate_sha256_digest(value: &str, subject: &str) -> Result<()> {
+    if value.len() != 71
+        || !value.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        bail!("{subject} digest must be lowercase sha256");
+    }
+    Ok(())
+}
+
+fn validate_candidate_closure(closure: &CandidateProfileClosure) -> Result<()> {
+    for (name, values) in [
+        ("listeners", &closure.listeners),
+        ("routes", &closure.routes),
+        ("providers", &closure.providers),
+        ("workers", &closure.workers),
+        ("probes", &closure.probes),
+        ("forbiddenProviders", &closure.forbidden_providers),
+    ] {
+        if values.is_empty() {
+            bail!("candidate profile closure `{name}` must be non-empty");
+        }
+        if !values.windows(2).all(|pair| pair[0] < pair[1]) {
+            bail!("candidate profile closure `{name}` must be sorted and unique");
+        }
+    }
+    for sentinel in ["event-publisher", "event-subscriber", "dlx-archive-store"] {
+        if !closure
+            .forbidden_providers
+            .iter()
+            .any(|provider| provider == sentinel)
+        {
+            bail!("candidate Core closure lacks forbidden sentinel `{sentinel}`");
+        }
+        if closure
+            .providers
+            .iter()
+            .any(|provider| provider == sentinel)
+        {
+            bail!("candidate Core closure contains forbidden sentinel `{sentinel}`");
+        }
+    }
+    Ok(())
 }
 
 fn export_candidate_bundle(
     output: &Path,
     rss_revision: &str,
+    artifact_selector: CandidateArtifactSelector,
+    profiles: Vec<OfficialProfileArtifact>,
+    profile_image_archive: &Path,
+    profile_migration_image_archive: &Path,
     packages: &[CandidateBundlePackage],
     registry: &Path,
     prove_portable_bundle: impl FnOnce(&Path) -> Result<()>,
@@ -1166,7 +1484,14 @@ fn export_candidate_bundle(
             parent.display()
         );
     }
-    let manifest = candidate_bundle_manifest(rss_revision, packages.to_vec())?;
+    let manifest =
+        candidate_bundle_manifest(rss_revision, artifact_selector, packages.to_vec(), profiles)?;
+    if !profile_image_archive.is_file() {
+        bail!("candidate profile OCI archive is missing");
+    }
+    if !profile_migration_image_archive.is_file() {
+        bail!("candidate migration OCI archive is missing");
+    }
     validate_candidate_registry_exact_set(registry, &manifest.packages)?;
     let staging = parent.join(format!(
         ".rss-candidate-bundle-{}-{}.tmp",
@@ -1183,7 +1508,20 @@ fn export_candidate_bundle(
     let result = (|| -> Result<()> {
         let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
         manifest_bytes.push(b'\n');
+        parse_candidate_bundle_manifest(&manifest_bytes)
+            .context("producer emitted an invalid candidate bundle v2 manifest")?;
         fs::write(staging.join("candidate-bundle.json"), manifest_bytes)?;
+        let schema_target = staging.join("schemas/candidate-bundle-v2.schema.json");
+        fs::create_dir_all(schema_target.parent().context("bundle schema parent")?)?;
+        fs::write(schema_target, CANDIDATE_BUNDLE_V2_SCHEMA)?;
+
+        let target_image = staging.join("profiles/core/server.oci");
+        fs::create_dir_all(target_image.parent().context("profile image parent")?)?;
+        fs::copy(profile_image_archive, &target_image)?;
+        fs::copy(
+            profile_migration_image_archive,
+            staging.join("profiles/core/migrator.oci"),
+        )?;
 
         for package in &manifest.packages {
             let relative_index = index_relative_path(&package.name);
@@ -1887,10 +2225,54 @@ mod tests {
         assert!(validate_execution_coverage(&plans, &extra).is_err());
     }
 
+    fn candidate_selector() -> CandidateArtifactSelector {
+        CandidateArtifactSelector {
+            workflow: "candidate-bundle.yml".to_owned(),
+            run_id: 42,
+            run_attempt: 1,
+            artifact_name: "rss-candidate-bundle-0123456789abcdef0123456789abcdef01234567-42-1"
+                .to_owned(),
+        }
+    }
+
+    fn candidate_profile() -> OfficialProfileArtifact {
+        OfficialProfileArtifact::Candidate(CandidateProfileArtifact {
+            profile: assembly_schema::OfficialAssemblyProfile::Core,
+            assembly: CandidateProfileAssembly::Runtime,
+            config_digest: format!("sha256:{}", "a".repeat(64)),
+            assembly_lock_digest: format!("sha256:{}", "b".repeat(64)),
+            runtime_plan_fingerprint: format!("sha256:{}", "c".repeat(64)),
+            image: CandidateProfileImage {
+                archive: "profiles/core/server.oci".to_owned(),
+                archive_sha256: format!("sha256:{}", "d".repeat(64)),
+                image_digest: format!("sha256:{}", "e".repeat(64)),
+                migration_archive: "profiles/core/migrator.oci".to_owned(),
+                migration_archive_sha256: format!("sha256:{}", "f".repeat(64)),
+                migration_image_digest: format!("sha256:{}", "1".repeat(64)),
+            },
+            closure: CandidateProfileClosure {
+                listeners: vec!["admin-main".to_owned(), "health-main".to_owned()],
+                routes: vec![
+                    "audit.list-tenant-entries".to_owned(),
+                    "runtime.inventory".to_owned(),
+                ],
+                providers: vec!["auth-audit-sink".to_owned(), "listener-pdp".to_owned()],
+                workers: vec!["audit-localtx".to_owned()],
+                probes: vec!["rls_ready".to_owned()],
+                forbidden_providers: vec![
+                    "dlx-archive-store".to_owned(),
+                    "event-publisher".to_owned(),
+                    "event-subscriber".to_owned(),
+                ],
+            },
+        })
+    }
+
     #[test]
     fn candidate_bundle_manifest_is_sorted_and_rejects_duplicates() -> Result<()> {
         let manifest = candidate_bundle_manifest(
             "0123456789abcdef0123456789abcdef01234567",
+            candidate_selector(),
             vec![
                 CandidateBundlePackage {
                     name: "rss-trace-context".to_owned(),
@@ -1903,18 +2285,64 @@ mod tests {
                     checksum: "aa".repeat(32),
                 },
             ],
+            vec![candidate_profile()],
         )?;
-        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.schema_version, 2);
         assert_eq!(manifest.packages[0].name, "rss-diag-context");
         assert_eq!(manifest.packages[1].name, "rss-trace-context");
+        let wire = serde_json::to_vec(&manifest)?;
+        assert_eq!(parse_candidate_bundle_manifest(&wire)?, manifest);
+
+        let mut old: serde_json::Value = serde_json::from_slice(&wire)?;
+        old["schemaVersion"] = json!(1);
+        assert!(parse_candidate_bundle_manifest(&serde_json::to_vec(&old)?).is_err());
+
+        let mut active: serde_json::Value = serde_json::from_slice(&wire)?;
+        active["profiles"][0]["activationReceipt"] = json!("forbidden-t3");
+        assert!(parse_candidate_bundle_manifest(&serde_json::to_vec(&active)?).is_err());
 
         let duplicate = manifest.packages[0].clone();
         assert!(
             candidate_bundle_manifest(
                 "0123456789abcdef0123456789abcdef01234567",
+                candidate_selector(),
                 vec![duplicate.clone(), duplicate],
+                vec![candidate_profile()],
             )
             .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_core_candidate_is_manifest_bound_and_eventing_forbidden() -> Result<()> {
+        let temp = TempProof::new()?;
+        let archive = temp.root.join("server.oci");
+        fs::write(&archive, b"closed OCI fixture")?;
+        let image =
+            CandidateProfileImageSource::new(&archive, &format!("sha256:{}", "f".repeat(64)))?;
+        let artifact = candidate_core_profile(&crate::workspace_root()?, &image, &image)?;
+        let OfficialProfileArtifact::Candidate(candidate) = artifact;
+        assert_eq!(
+            candidate.profile,
+            assembly_schema::OfficialAssemblyProfile::Core
+        );
+        validate_candidate_closure(&candidate.closure)?;
+        assert_eq!(
+            candidate.closure.providers,
+            ["auth-audit-sink", "listener-pdp", "listener-rate-limiter"]
+        );
+        assert!(
+            candidate
+                .closure
+                .routes
+                .contains(&"runtime.inventory".to_owned())
+        );
+        assert!(
+            candidate
+                .closure
+                .routes
+                .contains(&"audit.list-tenant-entries".to_owned())
         );
         Ok(())
     }
@@ -1942,12 +2370,18 @@ mod tests {
             .join("download");
         fs::create_dir_all(archive.parent().context("archive parent")?)?;
         fs::write(&archive, b"crate archive")?;
+        let image_archive = temp.root.join("server.oci");
+        fs::write(&image_archive, b"oci archive")?;
 
         let output = temp.root.join("candidate-bundle");
         let materialized_registry = temp.root.join("materialized-registry");
         export_candidate_bundle(
             &output,
             "0123456789abcdef0123456789abcdef01234567",
+            candidate_selector(),
+            vec![candidate_profile()],
+            &image_archive,
+            &image_archive,
             std::slice::from_ref(&package),
             &registry,
             |bundle| materialize_candidate_bundle_registry(bundle, &materialized_registry),
@@ -1979,6 +2413,10 @@ mod tests {
             export_candidate_bundle(
                 &proof_failure,
                 "0123456789abcdef0123456789abcdef01234567",
+                candidate_selector(),
+                vec![candidate_profile()],
+                &image_archive,
+                &image_archive,
                 std::slice::from_ref(&package),
                 &registry,
                 |_| bail!("synthetic portable consumer failure"),
@@ -1993,6 +2431,10 @@ mod tests {
             export_candidate_bundle(
                 &checksum_mismatch,
                 "0123456789abcdef0123456789abcdef01234567",
+                candidate_selector(),
+                vec![candidate_profile()],
+                &image_archive,
+                &image_archive,
                 &[CandidateBundlePackage {
                     name: package.name.clone(),
                     version: package.version.clone(),
@@ -2012,6 +2454,10 @@ mod tests {
             export_candidate_bundle(
                 &extra,
                 "0123456789abcdef0123456789abcdef01234567",
+                candidate_selector(),
+                vec![candidate_profile()],
+                &image_archive,
+                &image_archive,
                 std::slice::from_ref(&package),
                 &registry,
                 |_| Ok(()),
@@ -2028,6 +2474,10 @@ mod tests {
             export_candidate_bundle(
                 &missing,
                 "0123456789abcdef0123456789abcdef01234567",
+                candidate_selector(),
+                vec![candidate_profile()],
+                &image_archive,
+                &image_archive,
                 &[CandidateBundlePackage {
                     name: "rss-diag-context".to_owned(),
                     version: "0.1.0".to_owned(),

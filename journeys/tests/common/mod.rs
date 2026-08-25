@@ -397,7 +397,13 @@ pub fn audit_domain() -> (
     let write_repo: Arc<DynAuditWriteRepo<'static>> =
         Arc::from(DynAuditWriteRepo::new_box(Arc::clone(&provider)));
     let read_repo: Arc<DynAuditReadRepo<'static>> = Arc::from(DynAuditReadRepo::new_box(provider));
-    let domain = AuditDomain::new(read_repo, None, NoopAuditSink, Arc::new(FixedAuditClock));
+    let domain = AuditDomain::new(
+        read_repo,
+        None,
+        NoopAuditSink,
+        Arc::new(FixedAuditClock),
+        audit::AuditRuntimeSurface::Full,
+    );
     (domain, verifier, write_repo)
 }
 

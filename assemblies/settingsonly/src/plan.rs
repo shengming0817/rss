@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyProfile, AssemblyTopology,
     CanonicalAssemblyManifestV2, DomainLifecyclePhase, ListenerAuth, RepositoryAssemblySnapshotV2,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV4Input,
 };
 
 #[cfg(test)]
@@ -59,7 +59,7 @@ impl SettingsOnlyPlan {
 
         validate_manifest_closure(manifest, lock.identity())?;
         let input = compiler_input(manifest)?;
-        let typed = TypedRuntimePlan::compile_v3(manifest, lock, input)
+        let typed = TypedRuntimePlan::compile_v4(manifest, lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&typed)
@@ -557,8 +557,8 @@ fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV2) -> anyhow
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV3Input> {
-    let mut input = RuntimePlanV3Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV4Input> {
+    let mut input = RuntimePlanV4Input::generic_from_manifest(manifest);
 
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
@@ -584,8 +584,8 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<Runt
 
 fn validate_typed_closure(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
     anyhow::ensure!(
-        plan.schema_version() == 3,
-        "settingsonly requires RuntimePlan schema version 3"
+        plan.schema_version() == 4,
+        "settingsonly requires RuntimePlan schema version 4"
     );
     let listeners = plan.listener_plans();
     anyhow::ensure!(

@@ -9,8 +9,8 @@ use workspacefacts::testing::{
 };
 use workspacefacts::{
     ApiStability, DependencyKind, DependencyResolution, DependencySource, GitDependencyReq,
-    OfficialProfile, PackageKey, PublicApiOwner, PublishPolicy, ResolvedPackageSource, TargetKind,
-    WorkspaceFacts, WorkspaceFactsError,
+    OfficialProfile, OfficialProfileArtifactSelection, PackageKey, PublicApiOwner, PublishPolicy,
+    ResolvedPackageSource, TargetKind, WorkspaceFacts, WorkspaceFactsError,
 };
 
 fn synthetic_metadata() -> String {
@@ -677,10 +677,10 @@ fn release_selection_is_strict_typed_and_distinguishes_absent_from_empty()
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "standalone-component",
-                "api-stability": "experimental",
-                "profiles": ["core", "eventing"]
+                "api-stability": "experimental"
             }],
-            "profile-artifacts": [{
+            "official-profile-artifacts": [{
+                "state": "candidate",
                 "profile": "core",
                 "assembly": "runtime"
             }]
@@ -701,35 +701,31 @@ fn release_selection_is_strict_typed_and_distinguishes_absent_from_empty()
         PublicApiOwner::StandaloneComponent
     );
     assert_eq!(package.api_stability(), ApiStability::Experimental);
-    assert_eq!(
-        package.profiles(),
-        &[OfficialProfile::Core, OfficialProfile::Eventing]
-    );
-    assert_eq!(selection.profile_artifacts().len(), 1);
-    assert_eq!(
-        selection.profile_artifacts()[0].profile(),
-        OfficialProfile::Core
-    );
-    assert_eq!(selection.profile_artifacts()[0].assembly(), "runtime");
+    assert_eq!(selection.official_profile_artifacts().len(), 1);
+    let OfficialProfileArtifactSelection::Candidate(candidate) =
+        &selection.official_profile_artifacts()[0]
+    else {
+        return Err("core row must be typed as a candidate".into());
+    };
+    assert_eq!(candidate.profile(), OfficialProfile::Core);
+    assert_eq!(candidate.assembly(), "runtime");
 
     let invalid_cases = [
         json!({
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "secret-bait",
-                "api-stability": "stable",
-                "profiles": []
+                "api-stability": "stable"
             }],
-            "profile-artifacts": []
+            "official-profile-artifacts": []
         }),
         json!({
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "platform-public",
-                "api-stability": "secret-bait",
-                "profiles": []
+                "api-stability": "secret-bait"
             }],
-            "profile-artifacts": []
+            "official-profile-artifacts": []
         }),
         json!({
             "packages": [{
@@ -738,21 +734,28 @@ fn release_selection_is_strict_typed_and_distinguishes_absent_from_empty()
                 "api-stability": "stable",
                 "profiles": ["secret-bait"]
             }],
-            "profile-artifacts": []
+            "official-profile-artifacts": []
         }),
         json!({
             "packages": [],
-            "profile-artifacts": [{"profile": "secret-bait", "assembly": "runtime"}]
+            "official-profile-artifacts": [{"state": "candidate", "profile": "secret-bait", "assembly": "runtime"}]
+        }),
+        json!({
+            "packages": [],
+            "official-profile-artifacts": [{"profile": "core", "assembly": "runtime"}]
+        }),
+        json!({
+            "packages": [],
+            "official-profile-artifacts": [{"state": "candidate", "profile": "core", "assembly": "runtime", "t3-owner": "core"}]
         }),
         json!({
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "platform-public",
                 "api-stability": "stable",
-                "profiles": [],
                 "release-status": "secret-bait"
             }],
-            "profile-artifacts": []
+            "official-profile-artifacts": []
         }),
     ];
     for selection in invalid_cases {

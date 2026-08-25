@@ -201,7 +201,7 @@ impl GovernanceCheck for AssemblyValidate<'_> {
             .map(|surface| {
                 (
                     surface.packages().len(),
-                    surface.profile_artifacts().len(),
+                    surface.official_profile_artifacts().len(),
                     surface.observed_summary(),
                 )
             })

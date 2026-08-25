@@ -136,6 +136,7 @@ mod domains {
                 crypto::RustCryptoMacVerifier,
                 deps.audit_chain_key.clone(),
                 Arc::new(SystemClock),
+                audit::AuditRuntimeSurface::Full,
             ))
         }
 

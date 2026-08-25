@@ -121,10 +121,6 @@ impl UncommittedModule {
     fn take_or_default(&mut self) -> DomainModuleResult {
         self.module.take().unwrap_or_default()
     }
-
-    fn restore(&mut self, module: DomainModuleResult) {
-        self.module = Some(module);
-    }
 }
 
 #[cfg(test)]
@@ -429,11 +425,12 @@ pub(crate) struct InfraBuilt<'a> {
     rate_limiter: Arc<redis::RedisRateLimiter>,
     trusted_proxy_config: httpserve::TrustedProxyConfig,
     deps: crate::SharedRuntimeDeps,
-    s3_canary_config: crate::infra::s3::S3CanaryConfig,
+    s3: Option<s3::S3RuntimeDeps>,
+    s3_canary_config: Option<crate::infra::s3::S3CanaryConfig>,
     wiring_inputs: infra::RuntimeWiringInputs,
-    domain_transport: DomainTransportRuntime,
+    domain_transport: Option<DomainTransportRuntime>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    command_idempotency_keyring: Option<Arc<eventexec::command::CommandIdempotencyKeyring>>,
     signing_rotation_probe: Option<crate::infra::signing_rotation::SigningKeyRotationProbe>,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
@@ -460,8 +457,8 @@ pub(crate) struct DomainsWired<'a> {
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
-    domain_transport: DomainTransportRuntime,
-    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    domain_transport: Option<DomainTransportRuntime>,
+    command_idempotency_keyring: Option<Arc<eventexec::command::CommandIdempotencyKeyring>>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
     security_root_registry: domains::SecurityRootWiredRegistry,
     provider_build: crate::provider_output::CompletedProviderBuild,
@@ -477,8 +474,8 @@ pub(crate) struct Finalized<'a> {
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
-    domain_transport: DomainTransportRuntime,
-    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    domain_transport: Option<DomainTransportRuntime>,
+    command_idempotency_keyring: Option<Arc<eventexec::command::CommandIdempotencyKeyring>>,
     listeners: crate::routes::FinalizedListenerSet,
     probe_receipt: runtimeexec::LaunchProbeReceipt<Arc<bootstrap::HealthReporter>>,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
@@ -631,7 +628,7 @@ mod tests {
 
     #[test]
     fn runtime_config_inputs_separate_serving_policy_from_operator_capabilities() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -646,7 +643,7 @@ mod tests {
         assert!(serving.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(serving.take_trace_export().is_none());
 
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -657,7 +654,7 @@ mod tests {
         assert!(operator.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(operator.prepared_mut().take_trace_export().is_none());
 
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

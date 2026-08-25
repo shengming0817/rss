@@ -3,17 +3,33 @@ use crate::{
     plan::{RuntimePlanError, is_kebab_case_workload},
 };
 use assembly_schema::{
-    CanonicalAssemblyManifestV2, RepositoryVerifiedAssemblyLock, RuntimePlanV3Input,
+    CanonicalAssemblyManifestV2, RepositoryVerifiedAssemblyLock, RuntimePlanV4Input,
 };
 
 pub(super) fn append(
     manifest: &CanonicalAssemblyManifestV2,
     lock: &RepositoryVerifiedAssemblyLock,
     config: SnapshotConfig<'_>,
-    input: &mut RuntimePlanV3Input,
+    input: &mut RuntimePlanV4Input,
 ) -> Result<(), RuntimePlanError> {
     let default_workload = lock.identity().name();
-    let mut placements = manifest.domains().to_vec();
+    let required_listeners = input
+        .plan_kind()
+        .official_profile()
+        .and_then(|profile| manifest.official_profile(profile))
+        .map(|profile| profile.required_listeners());
+    let mut placements = manifest
+        .domains()
+        .iter()
+        .copied()
+        .filter(|domain| {
+            required_listeners.is_none_or(|listeners| {
+                manifest.listeners().iter().any(|listener| {
+                    listeners.contains(&listener.kind) && listener.domains.contains(domain)
+                })
+            })
+        })
+        .collect::<Vec<_>>();
     placements.sort_by_key(|domain| domain.as_str());
     for domain in placements {
         let env = format!(

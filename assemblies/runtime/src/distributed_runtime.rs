@@ -101,6 +101,7 @@ impl DistributedRuntimeDeps {
 /// - state-CAS provider: `SharedRuntimeDeps.pg.infra().cas_store()`
 pub(crate) fn wire_distributed(
     deps: &SharedRuntimeDeps,
+    domain_transport: Arc<dyn HttpContractTransport>,
     worker: DistributedWorkerConfig,
 ) -> anyhow::Result<DistributedRuntimeDeps> {
     let redis = deps.redis.clone();
@@ -109,7 +110,7 @@ pub(crate) fn wire_distributed(
         lock_store: Arc::new(move || redis.infra().lock_store()),
         cas_store: Arc::new(move || pg.infra().cas_store()),
         maintenance_ttl: worker.maintenance_ttl,
-        domain_transport: Arc::clone(&deps.domain_transport),
+        domain_transport,
     })
 }
 

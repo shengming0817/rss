@@ -9,6 +9,31 @@ workflowActivations = [
     { mode = "projection", id = "audit.session-projection", definitionVersion = "v2", definitionSchemaDigest = "sha256:f741f3d37379a56dcafe564b4b7c79d495e8a683534abcc9216cb87a1ab1bf82", targetGeneration = "v2", activation = "disabled" },
 ]
 
+# Unique Core official-profile candidate closure (#2165). Required sets are the policy owner;
+# every other canonical runtime capability is forbidden by complement.
+[[officialProfiles]]
+profile = "core"
+requiredListeners = ["admin", "health"]
+requiredRoutes = [
+    "audit.list-tenant-entries",
+    "health.live",
+    "health.metrics",
+    "health.ready",
+    "runtime.inventory",
+]
+requiredProviders = ["auth-audit-sink", "listener-pdp", "listener-rate-limiter"]
+requiredWorkers = [
+    "assemblies.runtime.src.phase.infra.01",
+    "assemblies.runtime.src.phase.maintenance.01",
+    "assemblies.runtime.src.provider_output.01",
+]
+requiredProbes = [
+    "auth_grant_sweeper",
+    "redis_ready",
+    "rls_ready",
+    "rss_access_token_jwks_ready",
+]
+
 [[listeners]]
 kind = "primary"
 domains = ["settings", "identity"]

@@ -449,6 +449,7 @@ pub struct runtimeexec::inventory::RuntimeInventorySeed
 impl runtimeexec::inventory::RuntimeInventorySeed
 pub fn runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(&assembly_schema::runtime_plan::RuntimePlan, eventexec::workflow_runtime::ActivatedWorkflowsView<'_>, runtimeexec::inventory::ProviderExecutionReceipt, alloc::vec::Vec<runtimeexec::inventory::PlacementObservation>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
 pub fn runtimeexec::inventory::RuntimeInventorySeed::with_build_metadata(self, runtimeexec::inventory::BuildMetadata) -> Self
+pub fn runtimeexec::inventory::RuntimeInventorySeed::with_official_profile(self, assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile) -> Self
 impl core::marker::Freeze for runtimeexec::inventory::RuntimeInventorySeed
 impl core::marker::Send for runtimeexec::inventory::RuntimeInventorySeed
 impl core::marker::Sync for runtimeexec::inventory::RuntimeInventorySeed

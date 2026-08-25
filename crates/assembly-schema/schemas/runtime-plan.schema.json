@@ -3,12 +3,13 @@
   "$id": "https://rss.local/assembly-schema/runtime-plan.schema.json",
   "title": "RuntimePlan target contract",
   "type": "object", "additionalProperties": false,
-  "required": ["assemblyFingerprint", "domainPlans", "listenerPlans", "placementPlans", "providerPlans", "runtimePlanFingerprint", "schemaVersion", "workflowPlans"],
+  "required": ["assemblyFingerprint", "domainPlans", "listenerPlans", "placementPlans", "planKind", "providerPlans", "runtimePlanFingerprint", "schemaVersion", "workflowPlans"],
   "properties": {
-    "schemaVersion": { "type": "integer", "const": 3 },
+    "schemaVersion": { "type": "integer", "const": 4 },
+    "planKind": { "$ref": "#/definitions/runtimePlanKind" },
     "assemblyFingerprint": { "$ref": "#/definitions/sha256" },
     "runtimePlanFingerprint": {
-      "description": "sha256: + lowercase SHA-256 of ASCII stage tag rss-runtime-plan-v3, one NUL byte, then RFC 8785 JCS UTF-8 bytes of unsigned {schemaVersion,assemblyFingerprint,providerPlans,listenerPlans,domainPlans,placementPlans,workflowPlans}; every stable plan fact is covered and this result field is excluded from its own preimage.",
+      "description": "sha256: + lowercase SHA-256 of ASCII stage tag rss-runtime-plan-v4, one NUL byte, then RFC 8785 JCS UTF-8 bytes of unsigned {schemaVersion,planKind,assemblyFingerprint,providerPlans,listenerPlans,domainPlans,placementPlans,workflowPlans}; every stable plan fact is covered and this result field is excluded from its own preimage.",
       "allOf": [{ "$ref": "#/definitions/sha256" }]
     },
     "providerPlans": { "description": "Non-empty set-like declarations; serialize by ascending provider id. The strict reader rejects keyed duplicates and any other order.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/providerPlan" } },
@@ -19,6 +20,12 @@
   },
   "definitions": {
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "runtimePlanKind": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "generic" } } },
+        { "type": "object", "additionalProperties": false, "required": ["configDigest", "kind", "profile"], "properties": { "kind": { "const": "official" }, "profile": { "type": "string", "const": "core" }, "configDigest": { "$ref": "#/definitions/sha256" } } }
+      ]
+    },
     "assemblyDomain": { "type": "string", "enum": ["identity", "settings", "audit", "contractreg", "syshealth"] },
     "listenerKind": { "type": "string", "enum": ["primary", "internal", "health", "admin"] },
     "authScheme": { "type": "string", "enum": ["noAuth", "rssAccessToken", "federatedAccessToken", "mtls", "serviceToken"] },

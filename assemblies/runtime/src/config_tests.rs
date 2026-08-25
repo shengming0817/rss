@@ -344,6 +344,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
 
 fn complete_shared_serving_values() -> Vec<(String, String)> {
     let mut values = [
+        ("RSS_RUNTIME_PLAN_KIND", "generic"),
         ("RSS_TOPOLOGY", "durable-shared"),
         ("RSS_AMQP_URL", "amqps://user:pass@broker.test/rss"),
         (
@@ -715,11 +716,14 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
     for _ in 0..2 {
-        let pg = crate::infra::pg::PgRuntimeConfig::from_snapshot(snapshot.view())
-            .expect("PG typed mapping succeeds");
+        let pg = crate::infra::pg::PgRuntimeConfig::serving_from_snapshot(snapshot.view())
+            .expect("PG serving typed mapping succeeds");
+        let dlx = crate::infra::pg::PgRuntimeConfig::from_snapshot(snapshot.view())
+            .expect("PG DLX typed mapping succeeds")
+            .into_parts();
         let redis = crate::infra::redis::RedisRuntimeConfig::from_snapshot(snapshot.view())
             .expect("Redis typed mapping succeeds");
-        drop((pg, redis));
+        drop((pg, dlx, redis));
     }
 
     let reads = reads.lock().expect("read log mutex");
@@ -807,7 +811,7 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
 #[test]
 fn runtime_infra_vault_s3_snapshot_debug_is_opaque() {
     let s3_ca = config_test_ca_pem_path();
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_VAULT_ADDR", "https://vault.snapshot.test"),
         ("RSS_VAULT_TOKEN", "vault-debug-bait"),
         ("RSS_VAULT_TRANSIT_MOUNT", "transit"),
@@ -1199,6 +1203,10 @@ fn runtime_config_snapshot_is_owned_send_sync_static() {
 fn snapshot_capability_reuses_one_generation_for_serving_decisions() {
     let source = FakeSource::new([
         ("RUST_LOG", FakeValue::Present("runtime=debug".to_owned())),
+        (
+            "RSS_RUNTIME_PLAN_KIND",
+            FakeValue::Present("generic".to_owned()),
+        ),
         (
             "RSS_PRIMARY_TOKEN_PROFILE",
             FakeValue::Present("rss-access".to_owned()),

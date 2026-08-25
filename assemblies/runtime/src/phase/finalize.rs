@@ -50,7 +50,7 @@ impl<'a> DomainsWired<'a> {
                     .as_ref()
                     .map(|provider| provider.provider()),
             );
-            let seed = runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
+            let mut seed = runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
                 context.runtime_plan.as_typed(),
                 context
                     .runtime_plan
@@ -64,6 +64,9 @@ impl<'a> DomainsWired<'a> {
                     .context("project runtime placement inventory")?,
             )
             .context("seal runtime inventory seed")?;
+            if let Some(profile) = context.runtime_plan.official_inventory_profile() {
+                seed = seed.with_official_profile(profile.clone());
+            }
             let seed = match crate::config::build_metadata(context.config())
                 .context("capture launch-supplied build metadata")?
             {
@@ -82,9 +85,11 @@ impl<'a> DomainsWired<'a> {
                 platform_host.clone(),
             )
             .context("compose Platform runtime inventory dispatcher")?;
-            inventory_placement_publisher
-                .publish(domain_transport.readiness_sampler())
-                .context("publish runtime inventory placement readiness sampler")?;
+            if let Some(domain_transport) = domain_transport.as_ref() {
+                inventory_placement_publisher
+                    .publish(domain_transport.readiness_sampler())
+                    .context("publish runtime inventory placement readiness sampler")?;
+            }
             let finalized_listeners = finalize_listener_plan(FinalizeListenerPlanInputs {
                 execution_plan: listener_execution_plan,
                 config: context.config(),

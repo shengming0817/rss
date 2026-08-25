@@ -1,6 +1,6 @@
 //! Strict owned projection of the workspace-level positive Release Surface selection.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -28,7 +28,6 @@ pub enum ApiStability {
 #[serde(rename_all = "kebab-case")]
 pub enum OfficialProfile {
     Core,
-    Eventing,
 }
 
 impl OfficialProfile {
@@ -36,7 +35,6 @@ impl OfficialProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Core => "core",
-            Self::Eventing => "eventing",
         }
     }
 }
@@ -49,7 +47,6 @@ pub struct ReleasePackageSelection {
     version_line: Option<String>,
     public_api_owner: PublicApiOwner,
     api_stability: ApiStability,
-    profiles: Vec<OfficialProfile>,
 }
 
 impl ReleasePackageSelection {
@@ -72,21 +69,15 @@ impl ReleasePackageSelection {
     pub const fn api_stability(&self) -> ApiStability {
         self.api_stability
     }
-
-    #[must_use]
-    pub fn profiles(&self) -> &[OfficialProfile] {
-        &self.profiles
-    }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct ReleaseProfileArtifactSelection {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateProfileArtifactSelection {
     profile: OfficialProfile,
     assembly: String,
 }
 
-impl ReleaseProfileArtifactSelection {
+impl CandidateProfileArtifactSelection {
     #[must_use]
     pub const fn profile(&self) -> OfficialProfile {
         self.profile
@@ -98,12 +89,118 @@ impl ReleaseProfileArtifactSelection {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveProfileArtifactSelection {
+    profile: OfficialProfile,
+    assembly: String,
+    activation_receipt: String,
+    t3_owner: String,
+}
+
+impl ActiveProfileArtifactSelection {
+    #[must_use]
+    pub const fn profile(&self) -> OfficialProfile {
+        self.profile
+    }
+
+    #[must_use]
+    pub fn assembly(&self) -> &str {
+        &self.assembly
+    }
+
+    #[must_use]
+    pub fn activation_receipt(&self) -> &str {
+        &self.activation_receipt
+    }
+
+    #[must_use]
+    pub fn t3_owner(&self) -> &str {
+        &self.t3_owner
+    }
+}
+
+/// One closed official-profile artifact state. Candidate values cannot carry activation/T3 data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OfficialProfileArtifactSelection {
+    Candidate(CandidateProfileArtifactSelection),
+    Active(ActiveProfileArtifactSelection),
+}
+
+impl OfficialProfileArtifactSelection {
+    #[must_use]
+    pub const fn profile(&self) -> OfficialProfile {
+        match self {
+            Self::Candidate(candidate) => candidate.profile(),
+            Self::Active(active) => active.profile(),
+        }
+    }
+
+    #[must_use]
+    pub fn assembly(&self) -> &str {
+        match self {
+            Self::Candidate(candidate) => candidate.assembly(),
+            Self::Active(active) => active.assembly(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ProfileArtifactState {
+    Candidate,
+    Active,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawProfileArtifactSelection {
+    state: ProfileArtifactState,
+    profile: OfficialProfile,
+    assembly: String,
+    activation_receipt: Option<String>,
+    t3_owner: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for OfficialProfileArtifactSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawProfileArtifactSelection::deserialize(deserializer)?;
+        match (raw.state, raw.activation_receipt, raw.t3_owner) {
+            (ProfileArtifactState::Candidate, None, None) => {
+                Ok(Self::Candidate(CandidateProfileArtifactSelection {
+                    profile: raw.profile,
+                    assembly: raw.assembly,
+                }))
+            }
+            (ProfileArtifactState::Active, Some(activation_receipt), Some(t3_owner))
+                if !activation_receipt.trim().is_empty() && !t3_owner.trim().is_empty() =>
+            {
+                Ok(Self::Active(ActiveProfileArtifactSelection {
+                    profile: raw.profile,
+                    assembly: raw.assembly,
+                    activation_receipt,
+                    t3_owner,
+                }))
+            }
+            (ProfileArtifactState::Candidate, _, _) => Err(de::Error::custom(
+                "candidate profile artifact cannot carry activation or T3 authority",
+            )),
+            (ProfileArtifactState::Active, _, _) => Err(de::Error::custom(
+                "active profile artifact requires non-empty activation-receipt and t3-owner",
+            )),
+        }
+    }
+}
+
 /// Positive selection only: anything absent remains internal.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ReleaseSelection {
     packages: Vec<ReleasePackageSelection>,
-    profile_artifacts: Vec<ReleaseProfileArtifactSelection>,
+    #[serde(rename = "official-profile-artifacts")]
+    official_profile_artifacts: Vec<OfficialProfileArtifactSelection>,
 }
 
 impl ReleaseSelection {
@@ -113,8 +210,8 @@ impl ReleaseSelection {
     }
 
     #[must_use]
-    pub fn profile_artifacts(&self) -> &[ReleaseProfileArtifactSelection] {
-        &self.profile_artifacts
+    pub fn official_profile_artifacts(&self) -> &[OfficialProfileArtifactSelection] {
+        &self.official_profile_artifacts
     }
 }
 

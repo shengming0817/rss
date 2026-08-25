@@ -7,17 +7,23 @@ journeys described below.
 
 ## Profile transition status
 
-The bare release smoke in this runbook is transition-era legacy runtime evidence, not the Core
-profile carrier. [ADR-024](../architecture/202608012034-024-enterprise-framework-product-surface.md)
-authorizes the stable product-profile evidence ownership, and Azure PBI
-[#2124](https://dev.azure.com/shengming0923/rss/_workitems/edit/2124) is the single source for the
-Core lifecycle evidence plan. This runbook intentionally does not duplicate that plan's selector,
-receipt contract or future carrier details.
+The Core candidate carrier is the strict candidate-bundle v2 artifact selected by Azure PBI
+[#2165](https://dev.azure.com/shengming0923/rss/_workitems/edit/2165) and consumed by the
+`rss-incubator` companion PR. The bundle binds one Core candidate, the exact manifest-derived
+closure, AssemblyLock v3 digest, RuntimePlan v4 fingerprint, configuration digest, serving OCI and
+migration-only OCI. The external consumer owns the real PostgreSQL/Redis/HTTP issuer assertions and
+uses only the public bundle schema and immutable producer selector.
 
-Until the authorized Core evidence set is green on one exact closure and the whole profile is
-activated atomically, the bare release smoke remains the canonical legacy runtime evidence. At
-activation it is demoted to a packaging regression covering image build, entrypoint, configuration
-load and process start only; it no longer proves profile readiness, drain or outage behavior.
+This first-green remains candidate evidence: it cannot carry activation or T3 fields and does not
+replace the canonical legacy runtime evidence. Activation remains owned by #2127. Any RSS source
+HEAD change invalidates the bundle pin and requires a new producer artifact plus a new companion
+green result; no receipt registry or compatibility reader exists.
+
+The candidate consumer proves exact protected inventory, a valid authorized inventory request, an
+invalid-token rejection, the Core audit route's durable deny-before-grant LocalTx write, PostgreSQL
+RLS isolation, non-root immutable entrypoints, and fail-closed rejection of Eventing configuration.
+The serving image never contains migration capability; its separately digest-bound migration image
+is used only to prepare the disposable database in the same candidate artifact.
 
 ## Release identity
 

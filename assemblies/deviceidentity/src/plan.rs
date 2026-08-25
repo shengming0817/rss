@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyProfile, AssemblyTopology,
     CanonicalAssemblyManifestV2, ListenerAuth, RepositoryAssemblySnapshotV2,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV4Input,
 };
 
 const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] =
@@ -21,13 +21,13 @@ impl DeviceIdentityPlan {
         let repository = RepositoryAssemblySnapshotV2::from_json_slice(BUNDLED_REPOSITORY_SNAPSHOT)
             .context("verify bundled deviceidentity repository snapshot")?;
         validate_manifest(repository.manifest(), repository.lock().identity())?;
-        let typed = TypedRuntimePlan::compile_v3(
+        let typed = TypedRuntimePlan::compile_v4(
             repository.manifest(),
             repository.lock(),
             compiler_input(repository.manifest()),
         )
         .context("compile bundled deviceidentity RuntimePlan")?;
-        anyhow::ensure!(typed.schema_version() == 3, "unexpected RuntimePlan schema");
+        anyhow::ensure!(typed.schema_version() == 4, "unexpected RuntimePlan schema");
         let workflows = eventexec::WorkflowActivationPlan::select(&typed)
             .and_then(|selection| selection.bind(std::iter::empty(), std::iter::empty()))
             .context("compile deviceidentity empty workflow plan")?;
@@ -107,8 +107,8 @@ fn validate_manifest(
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> RuntimePlanV3Input {
-    let mut input = RuntimePlanV3Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> RuntimePlanV4Input {
+    let mut input = RuntimePlanV4Input::generic_from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {

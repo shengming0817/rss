@@ -12,9 +12,10 @@ use self::domain_transport::{
 };
 use self::keyring::build_command_idempotency_keyring_from;
 use super::maintenance::wire_service_token_replay_sweeper;
+use super::maintenance::{RLS_READY_PROBE_NAME, RlsReadyProbe};
 use crate::SharedRuntimeDeps;
 use crate::config::RuntimeServingConfigParts;
-use crate::infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
+use crate::infra::pg::PgRuntimeConfig;
 use crate::infra::redis::{
     REDIS_READY_PROBE_NAME, RedisReadyProbe, prepare_redis_readiness_sampler,
 };
@@ -44,11 +45,12 @@ struct BuiltInfra {
     rate_limiter: Arc<redis::RedisRateLimiter>,
     trusted_proxy_config: httpserve::TrustedProxyConfig,
     deps: SharedRuntimeDeps,
-    s3_canary_config: crate::infra::s3::S3CanaryConfig,
+    s3: Option<s3::S3RuntimeDeps>,
+    s3_canary_config: Option<crate::infra::s3::S3CanaryConfig>,
     wiring_inputs: RuntimeWiringInputs,
-    domain_transport: DomainTransportRuntime,
+    domain_transport: Option<DomainTransportRuntime>,
     metrics_exporter: Arc<dyn diport::MetricsExporter>,
-    command_idempotency_keyring: Arc<eventexec::command::CommandIdempotencyKeyring>,
+    command_idempotency_keyring: Option<Arc<eventexec::command::CommandIdempotencyKeyring>>,
     signing_rotation_probe: Option<crate::infra::signing_rotation::SigningKeyRotationProbe>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
 }
@@ -103,15 +105,26 @@ struct PhaseACarried {
     trusted_proxy_config: httpserve::TrustedProxyConfig,
     local_vault: LocalVaultAwaitingPostgres,
     redis: redis::RedisRuntimeDeps,
+    redis_output: DomainModuleResult,
+    pg_monitor_config: postgres::PgRuntimeMonitorConfig,
+    auth_audit_sink_permit: crate::provider_output::AuthAuditSinkPermit,
+    device_revocation_store_permit: Option<crate::provider_output::DeviceRevocationStorePermit>,
+    service_token_replay_store: crate::provider_output::ServiceTokenReplayStoreSelection,
+    distributed_cas_store_permit: Option<crate::provider_output::DistributedCasStorePermit>,
+    event: PhaseAEventCarried,
+}
+
+enum PhaseAEventCarried {
+    Inactive,
+    Active(Box<PhaseAActiveEventCarried>),
+}
+
+struct PhaseAActiveEventCarried {
     s3: s3::S3RuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
-    pg_monitor_config: postgres::PgRuntimeMonitorConfig,
     hot_payload_protector: postgres::DlxPayloadProtector,
     archive_key: eventexec::DlxArchiveKeyName,
-    auth_audit_sink_permit: crate::provider_output::AuthAuditSinkPermit,
-    device_revocation_store_permit: crate::provider_output::DeviceRevocationStorePermit,
-    distributed_cas_store_permit: crate::provider_output::DistributedCasStorePermit,
-    service_token_replay_store_permit: crate::provider_output::ServiceTokenReplayStorePermit,
+    distributed_lock_store_permit: crate::provider_output::DistributedLockStorePermit,
     dlx_lifecycle_repository_permit: crate::provider_output::DlxLifecycleRepositoryPermit,
     dlx_archive_store_permit: crate::provider_output::DlxArchiveStorePermit,
     dlx_archive_key_provider_permit: crate::provider_output::DlxArchiveKeyProviderPermit,
@@ -190,7 +203,7 @@ impl LocalVaultAwaitingPostgres {
 struct PhaseAPrepared {
     pg_setup: PhaseBSetupInputs,
     carried: PhaseACarried,
-    dlx_preflight: PhaseADlxPreflightInputs,
+    dlx_preflight: Option<PhaseADlxPreflightInputs>,
 }
 
 impl<'a> ProvidersBuilt<'a> {
@@ -231,29 +244,26 @@ impl<'a> ProvidersBuilt<'a> {
                 &mut provider_factories,
             )
             .await?;
-            // LIVE-01 / dlx-lifecycle-funnel helper expansion only inlines `Self::…` /
-            // `self.…` *call expressions*. Keep both preflight proofs and Phase B setup as
-            // `Self::…(...)` calls so ordered evidence spans Phase A/B helpers. Return the
-            // migrate future directly (no nested `async` closure) to keep rustc layout depth
-            // bounded through the rss binary.
-            let (pg_owner, verified) = after_required_preflight(
-                Self::phase_a_run_dlx_preflight(dlx_preflight),
-                |verified| {
-                    Self::phase_b_setup_postgres_after_preflight(
-                        pg_setup,
-                        verified,
-                        projection_capture,
+            let (pg_owner, verified) = match dlx_preflight {
+                Some(dlx_preflight) => {
+                    let (pg, verified) = after_required_preflight(
+                        Self::phase_a_run_dlx_preflight(dlx_preflight),
+                        |verified| {
+                            Self::phase_b_setup_postgres_after_preflight(
+                                pg_setup,
+                                verified,
+                                projection_capture,
+                            )
+                        },
                     )
-                },
-            )
-            .await?;
-            let PhaseADlxVerified {
-                dlx_archiver_pg_config,
-                dlx_verifier_pg_config,
-                dlx_purger_pg_config,
-                archive_store,
-                archive_vault_provider,
-            } = verified;
+                    .await?;
+                    (pg, Some(verified))
+                }
+                None => (
+                    phase_b_setup_postgres_without_dlx(pg_setup, projection_capture).await?,
+                    None,
+                ),
+            };
             let PhaseACarried {
                 token_profiles,
                 event_transport,
@@ -267,18 +277,13 @@ impl<'a> ProvidersBuilt<'a> {
                 trusted_proxy_config,
                 local_vault,
                 redis,
-                s3,
-                s3_canary_config,
+                redis_output,
                 pg_monitor_config,
-                hot_payload_protector,
-                archive_key,
                 auth_audit_sink_permit,
                 device_revocation_store_permit,
+                service_token_replay_store,
                 distributed_cas_store_permit,
-                service_token_replay_store_permit,
-                dlx_lifecycle_repository_permit,
-                dlx_archive_store_permit,
-                dlx_archive_key_provider_permit,
+                event,
             } = carried;
             if let Some(event_worker) = event_worker.as_ref() {
                 let relay_budget = event_worker.relay_budget();
@@ -298,32 +303,61 @@ impl<'a> ProvidersBuilt<'a> {
                      use durable-shared or durable-isolated"
                 );
             }
-            let config_value = |name: &str| config.value(name).map(str::to_owned);
-            let runtime_service_token_result = token_profiles
-                .service_token()
-                .map(|config| {
-                    crate::infra::oidc::build_service_token_provider(
-                        config,
-                        &pg_owner,
-                        SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
-                    )
-                    .context("build service-token verifier with durable replay")
-                })
-                .transpose();
             let pg = pg_owner.handle();
             let (local_domain_providers, local_provider_pg_output) =
                 local_vault.bind(pg.readiness_handle())?;
-            // The unique permit builds both the concrete store and exact probes+workers output
-            // from this same verified PostgreSQL handle.
-            let revocation_provider = crate::provider_output::BuiltDeviceRevocationProvider::build(
-                &pg,
-                device_revocation_store_permit,
-                &write_admission,
-            )
-            .context("build typed device revocation provider")?;
-            let (revocation_store, revocation_output) = revocation_provider.into_parts();
-            let pg_provider_module =
+            let (revocation_store, revocation_output) = match device_revocation_store_permit {
+                Some(permit) => {
+                    let provider =
+                        crate::provider_output::BuiltDeviceRevocationProvider::build(
+                            &pg,
+                            permit,
+                            &write_admission,
+                        )
+                        .context("build typed device revocation provider")?;
+                    let (store, output) = provider.into_parts();
+                    (Some(store), Some(output))
+                }
+                None => (None, None),
+            };
+            let (runtime_service_token, service_token_replay_output) =
+                match service_token_replay_store {
+                crate::provider_output::ServiceTokenReplayStoreSelection::Inactive => {
+                    anyhow::ensure!(
+                        token_profiles.service_token().is_none(),
+                        "service-token configuration requires its selected replay-store provider"
+                    );
+                    (None, None)
+                }
+                crate::provider_output::ServiceTokenReplayStoreSelection::Active(permit) => {
+                    let provider = token_profiles
+                        .service_token()
+                        .map(|config| {
+                            crate::infra::oidc::build_service_token_provider(
+                                config,
+                                &pg_owner,
+                                SERVICE_TOKEN_REPLAY_STORE_TIMEOUT,
+                            )
+                            .context("build service-token verifier with durable replay")
+                        })
+                        .transpose()?;
+                    let mut module = wire_service_token_replay_sweeper(&pg, &write_admission)
+                        .context("wire service-token replay sweeper")?;
+                    if let Some(provider) = provider.as_ref() {
+                        module.push_resource(provider.managed_resource());
+                    }
+                    (provider, Some((module, permit)))
+                }
+            };
+
+            let mut pg_provider_module =
                 crate::provider_output::build_pg_runtime_module(pg_owner, pg_monitor_config);
+            let rls_probe_name = primitives::ProbeName::parse(RLS_READY_PROBE_NAME)
+                .context("parse rls_ready probe name")?;
+            pg_provider_module.push_probe((
+                rls_probe_name,
+                Box::new(RlsReadyProbe::new(pg.rls_readiness())),
+            ));
             *uncommitted_provider_module.get_mut() = pg_provider_module;
             uncommitted_provider_module
                 .get_mut()
@@ -333,83 +367,130 @@ impl<'a> ProvidersBuilt<'a> {
                 rls_attestation_interval_secs = pg_monitor_config.rls_attestation().get().as_secs(),
                 "pg runtime monitor intervals configured"
             );
-            let runtime_service_token = runtime_service_token_result?;
-            if let Some(provider) = runtime_service_token.as_ref() {
-                uncommitted_provider_module
-                    .get_mut()
-                    .push_resource(provider.managed_resource());
-            }
-            let replay_sweeper_module = wire_service_token_replay_sweeper(&pg, &write_admission)
-                .context("wire service-token replay sweeper")?;
-            uncommitted_provider_module
-                .get_mut()
-                .merge(replay_sweeper_module);
             let pg_provider_module = uncommitted_provider_module.take();
-            provider_build
-                .record(crate::provider_output::ProviderOutput::postgres(
-                    pg_provider_module,
-                    revocation_output,
-                    auth_audit_sink_permit,
-                    distributed_cas_store_permit,
-                    service_token_replay_store_permit,
-                ))
-                .context("record postgres provider output")?;
-
-            let dlx_pg_owner = PgDlxLifecycleRuntime::setup(
-                &dlx_archiver_pg_config,
-                &dlx_verifier_pg_config,
-                &dlx_purger_pg_config,
-                hot_payload_protector,
-            )
-            .await
-            .context("verify exact DLX lifecycle postgres ACLs")?;
-            let dlx_lifecycle = crate::event_transport::DlxLifecycleRuntimeDeps::new(
-                dlx_pg_owner,
-                archive_store,
-                archive_vault_provider,
-                archive_key,
-            );
-            let dlx_outputs = match crate::event_transport::wire_dlx_lifecycle(
-                dlx_lifecycle,
-                dlx_worker,
-                write_admission.clone(),
+            let mut redis_output = Some(redis_output);
+            match (
+                distributed_cas_store_permit,
+                revocation_output,
+                service_token_replay_output,
             ) {
-                Ok(module) => module,
-                Err(failure) => {
-                    let (module, error) = failure.into_rollback();
-                    uncommitted_provider_module.restore(module);
-                    return Err(error.context("wire DLX lifecycle"));
+                (Some(cas_permit), Some(revocation), Some((replay_module, replay_permit))) => {
+                    provider_build
+                        .record(crate::provider_output::ProviderOutput::postgres_event_runtime(
+                            pg_provider_module,
+                            revocation,
+                            replay_module,
+                            auth_audit_sink_permit,
+                            cas_permit,
+                            replay_permit,
+                        ))
+                        .context("record event-runtime PostgreSQL provider outputs")?;
                 }
-            };
-            provider_build
-                .record(crate::provider_output::ProviderOutput::dlx(
-                    dlx_outputs.lifecycle_repository,
-                    dlx_outputs.archive_store,
-                    dlx_outputs.archive_key_provider,
-                    dlx_lifecycle_repository_permit,
-                    dlx_archive_store_permit,
-                    dlx_archive_key_provider_permit,
-                ))
-                .context("record DLX provider output")?;
-            let domain_transport_config = DomainTransportConfig::from_placement(
-                &placement_execution_plan,
-                &crate::config::ServingConfigMapper::new(config),
-            )
-            .context("build placement-backed domain transport config")?;
-            let domain_transport = wire_domain_transport(domain_transport_config)
-                .await
-                .context("wire outbound domain transport")?;
-            provider_build.record_domain(domain_transport.module_result());
-            let command_idempotency_keyring = build_command_idempotency_keyring_from(config_value)
-                .context("build command idempotency keyring")?;
+                (None, None, None) => {
+                    provider_build
+                        .record(crate::provider_output::ProviderOutput::auth_audit_postgres(
+                            pg_provider_module,
+                            auth_audit_sink_permit,
+                        ))
+                        .context("record auth-audit PostgreSQL provider output")?;
+                    provider_build.record_domain(
+                        redis_output
+                            .take()
+                            .unwrap_or_else(|| unreachable!("Redis lifecycle is recorded once")),
+                    );
+                }
+                _ => anyhow::bail!("PostgreSQL provider projection is not a closed runtime set"),
+            }
 
-            let deps = SharedRuntimeDeps::from_built_provider(
-                pg,
-                revocation_store,
-                redis,
-                s3,
-                domain_transport.dispatch_handle(),
-            );
+            let (s3, s3_canary_config, domain_transport, command_idempotency_keyring) =
+                match (event, verified) {
+                    (PhaseAEventCarried::Inactive, None) => (None, None, None, None),
+                    (
+                        PhaseAEventCarried::Active(active),
+                        Some(PhaseADlxVerified {
+                            dlx_archiver_pg_config,
+                            dlx_verifier_pg_config,
+                            dlx_purger_pg_config,
+                            archive_store,
+                            archive_vault_provider,
+                        }),
+                    ) => {
+                        let PhaseAActiveEventCarried {
+                            s3,
+                            s3_canary_config,
+                            hot_payload_protector,
+                            archive_key,
+                            distributed_lock_store_permit,
+                            dlx_lifecycle_repository_permit,
+                            dlx_archive_store_permit,
+                            dlx_archive_key_provider_permit,
+                        } = *active;
+                        provider_build
+                            .record(crate::provider_output::ProviderOutput::distributed_lock_store(
+                                redis_output.take().unwrap_or_else(|| {
+                                    unreachable!("Redis lifecycle is recorded once")
+                                }),
+                                distributed_lock_store_permit,
+                            ))
+                            .context("record distributed lock provider output")?;
+                        let dlx_pg_owner = PgDlxLifecycleRuntime::setup(
+                            &dlx_archiver_pg_config,
+                            &dlx_verifier_pg_config,
+                            &dlx_purger_pg_config,
+                            hot_payload_protector,
+                        )
+                        .await
+                        .context("verify exact DLX lifecycle postgres ACLs")?;
+                        let dlx_lifecycle = crate::event_transport::DlxLifecycleRuntimeDeps::new(
+                            dlx_pg_owner,
+                            archive_store,
+                            archive_vault_provider,
+                            archive_key,
+                        );
+                        let dlx_outputs = match crate::event_transport::wire_dlx_lifecycle(
+                            dlx_lifecycle,
+                            dlx_worker,
+                            write_admission.clone(),
+                        ) {
+                            Ok(outputs) => outputs,
+                            Err(failure) => {
+                                let (module, error) = failure.into_rollback();
+                                provider_build.record_domain(module);
+                                return Err(error.context("wire DLX lifecycle"));
+                            }
+                        };
+                        provider_build
+                            .record(crate::provider_output::ProviderOutput::dlx(
+                                dlx_outputs.lifecycle_repository,
+                                dlx_outputs.archive_store,
+                                dlx_outputs.archive_key_provider,
+                                dlx_lifecycle_repository_permit,
+                                dlx_archive_store_permit,
+                                dlx_archive_key_provider_permit,
+                            ))
+                            .context("record DLX provider output")?;
+                        let transport_config = DomainTransportConfig::from_placement(
+                            &placement_execution_plan,
+                            &crate::config::ServingConfigMapper::new(config),
+                        )
+                        .context("build placement-backed domain transport config")?;
+                        let transport = wire_domain_transport(transport_config)
+                            .await
+                            .context("wire outbound domain transport")?;
+                        provider_build.record_domain(transport.module_result());
+                        let keyring = build_command_idempotency_keyring_from(|name| {
+                            config.value(name).map(str::to_owned)
+                        })
+                        .context("build command idempotency keyring")?;
+                        (Some(s3), Some(s3_canary_config), Some(transport), Some(keyring))
+                    }
+                    _ => anyhow::bail!("event infrastructure and DLX preflight projection drift"),
+                };
+
+            if let Some(revocation_store) = revocation_store {
+                drop(revocation_store.into_inner());
+            }
+            let deps = SharedRuntimeDeps::from_built_provider(pg, redis);
             // Pull metrics have no shutdown lifecycle and therefore never enter ShutdownStack.
             let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
                 prometheus::PromExporter::install().context("install prometheus recorder")?,
@@ -440,6 +521,7 @@ impl<'a> ProvidersBuilt<'a> {
                 rate_limiter,
                 trusted_proxy_config,
                 deps,
+                s3,
                 s3_canary_config,
                 wiring_inputs,
                 domain_transport,
@@ -462,6 +544,7 @@ impl<'a> ProvidersBuilt<'a> {
                 rate_limiter: built.rate_limiter,
                 trusted_proxy_config: built.trusted_proxy_config,
                 deps: built.deps,
+                s3: built.s3,
                 s3_canary_config: built.s3_canary_config,
                 wiring_inputs: built.wiring_inputs,
                 domain_transport: built.domain_transport,
@@ -508,27 +591,16 @@ impl<'a> ProvidersBuilt<'a> {
             trusted_proxy_config,
             rate_limit_quota,
         } = serving_config;
-        let pg_config = PgRuntimeConfig::from_snapshot(config)
-            .context("build snapshot-backed postgres config")?;
+        let pg_config = PgRuntimeConfig::serving_from_snapshot(config)
+            .context("build snapshot-backed serving postgres config")?;
         let redis_config = RedisRuntimeConfig::from_snapshot(config)
             .context("build snapshot-backed redis config")?;
-        let s3_config =
-            S3RuntimeConfig::from_snapshot(config).context("build snapshot-backed s3 config")?;
-        let PgRuntimeConfigParts {
+        let crate::infra::pg::PgServingRuntimeConfigParts {
             serving: app_pg_config,
             tenant_read: tenant_read_pg_config,
             audit_admin: audit_admin_config,
-            dlx_archiver: dlx_archiver_pg_config,
-            dlx_verifier: dlx_verifier_pg_config,
-            dlx_purger: dlx_purger_pg_config,
             monitor_config: pg_monitor_config,
-        } = pg_config.into_parts();
-        let S3RuntimeConfigParts {
-            general: s3_general_config,
-            canary: s3_canary_config,
-            dlx_archive: s3_dlx_archive_config,
-        } = s3_config.into_parts();
-        let config_value = |name: &str| config.value(name).map(str::to_owned);
+        } = pg_config;
 
         let local_provider_permits =
             provider_factories.take_local_domain_permits(domain_execution)?;
@@ -601,25 +673,9 @@ impl<'a> ProvidersBuilt<'a> {
             }
         };
 
-        let distributed_lock_store_permit = provider_factories.distributed_lock_store()?;
         let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
             .await
             .context("setup redis deps")?;
-        let listener_rate_limiter_permit = provider_factories.listener_rate_limiter()?;
-        let rate_limiter_capability = redis
-            .infra()
-            .rate_limiter_capability(crate::providers_gen::ASSEMBLY_NAMESPACE, rate_limit_quota)
-            .await
-            .context("verify Redis listener rate-limiter capability")?;
-        let (listener_rate_limiter_output, rate_limiter) =
-            crate::provider_output::ProviderOutput::listener_rate_limiter(
-                listener_rate_limiter_permit,
-                rate_limiter_capability,
-            );
-        let rate_limiter = Arc::new(rate_limiter);
-        provider_build
-            .record(listener_rate_limiter_output)
-            .context("record listener rate-limiter provider output")?;
         let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let redis_probe_name = primitives::ProbeName::parse(REDIS_READY_PROBE_NAME)
             .context("parse redis_ready probe name")?;
@@ -642,53 +698,112 @@ impl<'a> ProvidersBuilt<'a> {
         ));
         redis_output.extend_resources(redis.runtime_resources());
         redis_output.push_worker(redis_readiness_worker);
+        let listener_rate_limiter_permit = provider_factories.listener_rate_limiter()?;
+        let rate_limiter_capability = redis
+            .infra()
+            .rate_limiter_capability(crate::providers_gen::ASSEMBLY_NAMESPACE, rate_limit_quota)
+            .await
+            .context("verify Redis listener rate-limiter capability")?;
+        let (listener_rate_limiter_output, rate_limiter) =
+            crate::provider_output::ProviderOutput::listener_rate_limiter(
+                listener_rate_limiter_permit,
+                rate_limiter_capability,
+            );
+        let rate_limiter = Arc::new(rate_limiter);
         provider_build
-            .record(crate::provider_output::ProviderOutput::redis(
-                redis_output,
-                distributed_lock_store_permit,
-            ))
-            .context("record redis provider output")?;
+            .record(listener_rate_limiter_output)
+            .context("record listener rate-limiter provider output")?;
 
-        let runtime_object_store_permit = provider_factories.runtime_object_store()?;
-        let s3 = build_s3_runtime_deps(s3_general_config).context("setup s3 deps")?;
-        let mut s3_output = DomainModuleResult::default();
-        s3_output.extend_resources(s3.runtime_resources());
-        provider_build
-            .record(crate::provider_output::ProviderOutput::s3(
-                s3_output,
-                runtime_object_store_permit,
-            ))
-            .context("record S3 provider output")?;
-        let dlx_bootstrap = build_dlx_lifecycle_bootstrap_config_from(
-            dlx_archiver_pg_config,
-            dlx_verifier_pg_config,
-            dlx_purger_pg_config,
-            s3_dlx_archive_config,
-            config_value,
-            Arc::new(SystemClock),
-        )
-        .await?;
-        let DlxLifecycleBootstrapConfig {
-            archiver_pg: dlx_archiver_pg_config,
-            verifier_pg: dlx_verifier_pg_config,
-            purger_pg: dlx_purger_pg_config,
-            archive_store,
-            hot_vault_provider,
-            archive_vault_provider,
-            hot_key,
-            archive_key,
-        } = dlx_bootstrap;
-        let hot_payload_protector = event_transport
-            .dlx_payload_protector()
-            .context("durable DLX hot payload protector missing")?;
-        let archive_key_for_preflight = archive_key.clone();
         let auth_audit_sink_permit = provider_factories.auth_audit_sink()?;
-        let device_revocation_store_permit = provider_factories.device_revocation_store()?;
-        let distributed_cas_store_permit = provider_factories.distributed_cas_store()?;
-        let service_token_replay_store_permit = provider_factories.service_token_replay_store()?;
-        let dlx_lifecycle_repository_permit = provider_factories.dlx_lifecycle_repository()?;
-        let dlx_archive_store_permit = provider_factories.dlx_archive_store()?;
-        let dlx_archive_key_provider_permit = provider_factories.dlx_archive_key_provider()?;
+        let device_revocation_store_permit = domain_execution
+            .contains(assembly_schema::AssemblyDomain::Identity)
+            .then(|| provider_factories.device_revocation_store())
+            .transpose()?;
+        let service_token_replay_store = provider_factories.take_service_token_replay_store();
+        let distributed_cas_store_permit = event_worker
+            .as_ref()
+            .map(|_| provider_factories.distributed_cas_store())
+            .transpose()?;
+
+        let (event, dlx_preflight) = if event_worker.is_some() {
+            let S3RuntimeConfigParts {
+                general: s3_general_config,
+                canary: s3_canary_config,
+                dlx_archive: s3_dlx_archive_config,
+            } = S3RuntimeConfig::from_snapshot(config)
+                .context("build event-selected snapshot-backed s3 config")?
+                .into_parts();
+            let runtime_object_store_permit = provider_factories.runtime_object_store()?;
+            let s3 = build_s3_runtime_deps(s3_general_config).context("setup s3 deps")?;
+            let mut s3_output = DomainModuleResult::default();
+            s3_output.extend_resources(s3.runtime_resources());
+            provider_build
+                .record(crate::provider_output::ProviderOutput::s3(
+                    s3_output,
+                    runtime_object_store_permit,
+                ))
+                .context("record S3 provider output")?;
+
+            let crate::infra::pg::PgDlxRuntimeConfigParts {
+                archiver: dlx_archiver_pg_config,
+                verifier: dlx_verifier_pg_config,
+                purger: dlx_purger_pg_config,
+            } = PgRuntimeConfig::from_snapshot(config)
+                .context("build event-selected DLX postgres config")?
+                .into_parts();
+            let config_value = |name: &str| config.value(name).map(str::to_owned);
+            let dlx_bootstrap = build_dlx_lifecycle_bootstrap_config_from(
+                dlx_archiver_pg_config,
+                dlx_verifier_pg_config,
+                dlx_purger_pg_config,
+                s3_dlx_archive_config,
+                config_value,
+                Arc::new(SystemClock),
+            )
+            .await?;
+            let DlxLifecycleBootstrapConfig {
+                archiver_pg: dlx_archiver_pg_config,
+                verifier_pg: dlx_verifier_pg_config,
+                purger_pg: dlx_purger_pg_config,
+                archive_store,
+                hot_vault_provider,
+                archive_vault_provider,
+                hot_key,
+                archive_key,
+            } = dlx_bootstrap;
+            let hot_payload_protector = event_transport
+                .dlx_payload_protector()
+                .context("durable DLX hot payload protector missing")?;
+            let archive_key_for_preflight = archive_key.clone();
+            let distributed_lock_store_permit = provider_factories.distributed_lock_store()?;
+            let dlx_lifecycle_repository_permit = provider_factories.dlx_lifecycle_repository()?;
+            let dlx_archive_store_permit = provider_factories.dlx_archive_store()?;
+            let dlx_archive_key_provider_permit = provider_factories.dlx_archive_key_provider()?;
+            (
+                PhaseAEventCarried::Active(Box::new(PhaseAActiveEventCarried {
+                    s3,
+                    s3_canary_config,
+                    hot_payload_protector,
+                    archive_key,
+                    distributed_lock_store_permit,
+                    dlx_lifecycle_repository_permit,
+                    dlx_archive_store_permit,
+                    dlx_archive_key_provider_permit,
+                })),
+                Some(PhaseADlxPreflightInputs {
+                    dlx_archiver_pg_config,
+                    dlx_verifier_pg_config,
+                    dlx_purger_pg_config,
+                    archive_store,
+                    hot_vault_provider,
+                    archive_vault_provider,
+                    hot_key,
+                    archive_key_for_preflight,
+                }),
+            )
+        } else {
+            (PhaseAEventCarried::Inactive, None)
+        };
 
         Ok(PhaseAPrepared {
             pg_setup: PhaseBSetupInputs {
@@ -709,29 +824,15 @@ impl<'a> ProvidersBuilt<'a> {
                 trusted_proxy_config,
                 local_vault,
                 redis,
-                s3,
-                s3_canary_config,
+                redis_output,
                 pg_monitor_config,
-                hot_payload_protector,
-                archive_key,
                 auth_audit_sink_permit,
                 device_revocation_store_permit,
+                service_token_replay_store,
                 distributed_cas_store_permit,
-                service_token_replay_store_permit,
-                dlx_lifecycle_repository_permit,
-                dlx_archive_store_permit,
-                dlx_archive_key_provider_permit,
+                event,
             },
-            dlx_preflight: PhaseADlxPreflightInputs {
-                dlx_archiver_pg_config,
-                dlx_verifier_pg_config,
-                dlx_purger_pg_config,
-                archive_store,
-                hot_vault_provider,
-                archive_vault_provider,
-                hot_key,
-                archive_key_for_preflight,
-            },
+            dlx_preflight,
         })
     }
 
@@ -862,32 +963,43 @@ impl<'a> ProvidersBuilt<'a> {
         })
     }
 
-    async fn phase_b_setup_postgres(
+    async fn phase_b_setup_postgres_after_preflight(
         inputs: PhaseBSetupInputs,
+        verified: PhaseADlxVerified,
         projection_capture: eventexec::ProjectionCaptureView<'_>,
-    ) -> anyhow::Result<PgRuntimeDeps> {
-        // Serving startup is non-destructive and accepts no migration capability.
+    ) -> anyhow::Result<(PgRuntimeDeps, PhaseADlxVerified)> {
         let PhaseBSetupInputs {
             app_pg_config,
             tenant_read_pg_config,
             audit_admin_config,
         } = inputs;
-        PgRuntimeDeps::connect_serving(
+        let pg = PgRuntimeDeps::connect_serving(
             &app_pg_config,
             &tenant_read_pg_config,
             audit_admin_config.as_ref(),
             projection_capture,
         )
         .await
-        .context("connect postgres serving deps after DLX capability preflight")
-    }
-
-    async fn phase_b_setup_postgres_after_preflight(
-        inputs: PhaseBSetupInputs,
-        verified: PhaseADlxVerified,
-        projection_capture: eventexec::ProjectionCaptureView<'_>,
-    ) -> anyhow::Result<(PgRuntimeDeps, PhaseADlxVerified)> {
-        let pg = Self::phase_b_setup_postgres(inputs, projection_capture).await?;
+        .context("connect postgres serving deps after DLX capability preflight")?;
         Ok((pg, verified))
     }
+}
+
+async fn phase_b_setup_postgres_without_dlx(
+    inputs: PhaseBSetupInputs,
+    projection_capture: eventexec::ProjectionCaptureView<'_>,
+) -> anyhow::Result<PgRuntimeDeps> {
+    let PhaseBSetupInputs {
+        app_pg_config,
+        tenant_read_pg_config,
+        audit_admin_config,
+    } = inputs;
+    PgRuntimeDeps::connect_serving(
+        &app_pg_config,
+        &tenant_read_pg_config,
+        audit_admin_config.as_ref(),
+        projection_capture,
+    )
+    .await
+    .context("connect postgres serving deps without Eventing")
 }

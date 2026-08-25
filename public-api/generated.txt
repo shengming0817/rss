@@ -12869,12 +12869,16 @@ pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::Act
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ActivatedWorkflowId
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ActivatedWorkflowSelectedGeneration
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ActivatedWorkflowTargetGeneration
-pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::AssemblyFingerprint
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::AssemblyLockDigest
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::BuildImageDigest
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::BuildSourceRevision
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ConfigDigest
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ListenerEndpointHost
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ListenerEndpointPort
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ListenerId
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::OfficialProbe
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::OfficialRoute
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::OfficialWorker
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementEndpointHost
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementEndpointPort
 pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementSpiffeIdentity
@@ -12996,7 +13000,7 @@ impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::Runti
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
 pub enum generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion
-pub generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion::V2
+pub generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion::V3
 impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion
 pub fn generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion
 impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventorySchemaVersion
@@ -13112,6 +13116,48 @@ impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeList
 impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerKind
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerKind
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerKind
+pub enum generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::Core
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::eq(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
 pub enum generated::http::runtime_v1::inventory::RuntimePlacementMode
 pub generated::http::runtime_v1::inventory::RuntimePlacementMode::Local
 pub generated::http::runtime_v1::inventory::RuntimePlacementMode::Remote
@@ -14635,10 +14681,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::in
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeBuildMetadataSourceRevision
 pub struct generated::http::runtime_v1::inventory::RuntimeInventoryData
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::activated_workflows: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeActivatedWorkflow>
-pub generated::http::runtime_v1::inventory::RuntimeInventoryData::assembly_fingerprint: generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::assembly_lock_digest: generated::http::runtime_v1::inventory::Sha256Fingerprint
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::build_metadata: core::option::Option<generated::http::runtime_v1::inventory::RuntimeBuildMetadata>
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::domains: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeDomain>
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::listeners: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeListener>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryData::official_profile: core::option::Option<generated::http::runtime_v1::inventory::RuntimeOfficialProfile>
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::placements: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimePlacement>
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::provider_posture: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeProviderPosture>
 pub generated::http::runtime_v1::inventory::RuntimeInventoryData::runtime_plan_fingerprint: generated::http::runtime_v1::inventory::Sha256Fingerprint
@@ -14994,6 +15041,164 @@ impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeList
 impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeListenerId
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerId
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeListenerId
+pub struct generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub generated::http::runtime_v1::inventory::RuntimeOfficialProfile::config_digest: generated::http::runtime_v1::inventory::Sha256Fingerprint
+pub generated::http::runtime_v1::inventory::RuntimeOfficialProfile::probes: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem>
+pub generated::http::runtime_v1::inventory::RuntimeOfficialProfile::profile: generated::http::runtime_v1::inventory::RuntimeOfficialProfileProfile
+pub generated::http::runtime_v1::inventory::RuntimeOfficialProfile::routes: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem>
+pub generated::http::runtime_v1::inventory::RuntimeOfficialProfile::workers: alloc::vec::Vec<generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem>
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfile::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfile::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfile::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfile::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfile
+pub struct generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::eq(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileProbesItem
+pub struct generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::eq(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileRoutesItem
+pub struct generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem(_)
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::eq(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem> for alloc::string::String
+pub fn alloc::string::String::from(generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::ops::deref::Deref for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::Target = alloc::string::String
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub type generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+pub fn generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeOfficialProfileWorkersItem
 pub struct generated::http::runtime_v1::inventory::RuntimePlacement
 pub generated::http::runtime_v1::inventory::RuntimePlacement::domain: generated::http::runtime_v1::inventory::RuntimeDomain
 pub generated::http::runtime_v1::inventory::RuntimePlacement::endpoint: core::option::Option<generated::http::runtime_v1::inventory::RuntimeListenerEndpoint>

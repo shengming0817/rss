@@ -64,7 +64,7 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn omitted_saga_cannot_construct_worker_or_probe() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

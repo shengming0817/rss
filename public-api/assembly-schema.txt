@@ -65,6 +65,7 @@ pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Activated
 pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::BuildMetadata
 pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Domains
 pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Listeners
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::OfficialProfile
 pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Placements
 pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::ProviderPosture
 impl assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
@@ -85,6 +86,29 @@ impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventor
 impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+pub assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::ConfigDigest
+pub assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::GenericPlan
+pub assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::MissingManifestProfile
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError) -> bool
+impl core::error::Error for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError
 pub enum assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
 pub assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::Local
 pub assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::Remote
@@ -407,7 +431,9 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory
 pub struct assembly_schema::runtime_inventory::RuntimeInventoryIdentity
 impl assembly_schema::runtime_inventory::RuntimeInventoryIdentity
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::config_digest(&self) -> core::option::Option<&vocab::digest::CanonicalSha256Digest>
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::from_runtime_plan(&assembly_schema::RuntimePlan) -> Self
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::official_profile(&self) -> core::option::Option<assembly_schema::OfficialAssemblyProfile>
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
 impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryIdentity
@@ -450,10 +476,12 @@ pub struct assembly_schema::runtime_inventory::RuntimeInventoryObservation
 impl assembly_schema::runtime_inventory::RuntimeInventoryObservation
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::activated_workflows(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow]
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::assembly_lock_digest(&self) -> &assembly_schema::AssemblyFingerprint
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::build_metadata(&self) -> core::option::Option<&assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata>
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::domains(&self) -> &[assembly_schema::AssemblyDomain]
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::from_runtimeexec(assembly_schema::runtime_inventory::RuntimeInventoryParts, runtimeinventorymint::RuntimeInventoryMint) -> core::result::Result<Self, assembly_schema::runtime_inventory::RuntimeInventoryReadFailure>
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::listeners(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryListener]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::official_profile(&self) -> core::option::Option<&assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile>
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::placements(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryPlacement]
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::provider_posture(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture]
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
@@ -472,9 +500,33 @@ impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventor
 impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryObservation
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryObservation
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::config_digest(&self) -> &vocab::digest::CanonicalSha256Digest
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::from_manifest_and_plan(&assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::RuntimePlan) -> core::result::Result<Self, assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfileError>
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::probes(&self) -> &[alloc::string::String]
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::profile(&self) -> assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::routes(&self) -> &[alloc::string::String]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::workers(&self) -> &[alloc::string::String]
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile
 pub struct assembly_schema::runtime_inventory::RuntimeInventoryParts
 impl assembly_schema::runtime_inventory::RuntimeInventoryParts
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::new(assembly_schema::runtime_inventory::RuntimeInventoryIdentity, core::option::Option<assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata>, alloc::vec::Vec<assembly_schema::AssemblyDomain>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryListener>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryPlacement>) -> Self
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::with_official_profile(self, assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile) -> Self
 impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryParts
 pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryParts
 impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryParts
@@ -945,6 +997,136 @@ impl core::marker::Unpin for assembly_schema::ManifestValidationError
 impl core::marker::UnsafeUnpin for assembly_schema::ManifestValidationError
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ManifestValidationError
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ManifestValidationError
+pub enum assembly_schema::OfficialAssemblyProfile
+pub assembly_schema::OfficialAssemblyProfile::Core
+impl assembly_schema::OfficialAssemblyProfile
+pub const fn assembly_schema::OfficialAssemblyProfile::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::clone(&self) -> assembly_schema::OfficialAssemblyProfile
+impl core::cmp::Eq for assembly_schema::OfficialAssemblyProfile
+impl core::cmp::Ord for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::cmp(&self, &assembly_schema::OfficialAssemblyProfile) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::eq(&self, &assembly_schema::OfficialAssemblyProfile) -> bool
+impl core::cmp::PartialOrd for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::partial_cmp(&self, &assembly_schema::OfficialAssemblyProfile) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::OfficialAssemblyProfile
+impl core::marker::StructuralPartialEq for assembly_schema::OfficialAssemblyProfile
+impl schemars::JsonSchema for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::json_schema(&mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema
+pub fn assembly_schema::OfficialAssemblyProfile::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn assembly_schema::OfficialAssemblyProfile::schema_name() -> alloc::string::String
+impl serde_core::ser::Serialize for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialAssemblyProfile::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::OfficialAssemblyProfile
+impl core::marker::Send for assembly_schema::OfficialAssemblyProfile
+impl core::marker::Sync for assembly_schema::OfficialAssemblyProfile
+impl core::marker::Unpin for assembly_schema::OfficialAssemblyProfile
+impl core::marker::UnsafeUnpin for assembly_schema::OfficialAssemblyProfile
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::OfficialAssemblyProfile
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::OfficialAssemblyProfile
+pub enum assembly_schema::OfficialProfileDigestError
+pub assembly_schema::OfficialProfileDigestError::CanonicalJson(serde_json::error::Error)
+pub assembly_schema::OfficialProfileDigestError::ComputedDigest
+pub assembly_schema::OfficialProfileDigestError::MissingProfile
+impl core::error::Error for assembly_schema::OfficialProfileDigestError
+pub fn assembly_schema::OfficialProfileDigestError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for assembly_schema::OfficialProfileDigestError
+pub fn assembly_schema::OfficialProfileDigestError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::OfficialProfileDigestError
+pub fn assembly_schema::OfficialProfileDigestError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for assembly_schema::OfficialProfileDigestError
+impl core::marker::Send for assembly_schema::OfficialProfileDigestError
+impl core::marker::Sync for assembly_schema::OfficialProfileDigestError
+impl core::marker::Unpin for assembly_schema::OfficialProfileDigestError
+impl core::marker::UnsafeUnpin for assembly_schema::OfficialProfileDigestError
+impl !core::panic::unwind_safe::RefUnwindSafe for assembly_schema::OfficialProfileDigestError
+impl !core::panic::unwind_safe::UnwindSafe for assembly_schema::OfficialProfileDigestError
+pub enum assembly_schema::OfficialProfileProbe
+pub assembly_schema::OfficialProfileProbe::AuthGrantSweeper
+pub assembly_schema::OfficialProfileProbe::RedisReady
+pub assembly_schema::OfficialProfileProbe::RlsReady
+pub assembly_schema::OfficialProfileProbe::RssAccessTokenJwksReady
+impl assembly_schema::OfficialProfileProbe
+pub const fn assembly_schema::OfficialProfileProbe::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::clone(&self) -> assembly_schema::OfficialProfileProbe
+impl core::cmp::Eq for assembly_schema::OfficialProfileProbe
+impl core::cmp::Ord for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::cmp(&self, &assembly_schema::OfficialProfileProbe) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::eq(&self, &assembly_schema::OfficialProfileProbe) -> bool
+impl core::cmp::PartialOrd for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::partial_cmp(&self, &assembly_schema::OfficialProfileProbe) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::OfficialProfileProbe
+impl core::marker::StructuralPartialEq for assembly_schema::OfficialProfileProbe
+impl serde_core::ser::Serialize for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::OfficialProfileProbe
+pub fn assembly_schema::OfficialProfileProbe::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::OfficialProfileProbe
+impl core::marker::Send for assembly_schema::OfficialProfileProbe
+impl core::marker::Sync for assembly_schema::OfficialProfileProbe
+impl core::marker::Unpin for assembly_schema::OfficialProfileProbe
+impl core::marker::UnsafeUnpin for assembly_schema::OfficialProfileProbe
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::OfficialProfileProbe
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::OfficialProfileProbe
+pub enum assembly_schema::OfficialProfileWorker
+pub assembly_schema::OfficialProfileWorker::AuthGrantSweeper
+pub assembly_schema::OfficialProfileWorker::PgRuntimeMonitor
+pub assembly_schema::OfficialProfileWorker::RedisReadiness
+impl assembly_schema::OfficialProfileWorker
+pub const fn assembly_schema::OfficialProfileWorker::as_str(self) -> &'static str
+pub const fn assembly_schema::OfficialProfileWorker::lane(self) -> assembly_schema::OfficialProfileWorkerLane
+impl core::clone::Clone for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::clone(&self) -> assembly_schema::OfficialProfileWorker
+impl core::cmp::Eq for assembly_schema::OfficialProfileWorker
+impl core::cmp::Ord for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::cmp(&self, &assembly_schema::OfficialProfileWorker) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::eq(&self, &assembly_schema::OfficialProfileWorker) -> bool
+impl core::cmp::PartialOrd for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::partial_cmp(&self, &assembly_schema::OfficialProfileWorker) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::OfficialProfileWorker
+impl core::marker::StructuralPartialEq for assembly_schema::OfficialProfileWorker
+impl serde_core::ser::Serialize for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::OfficialProfileWorker
+pub fn assembly_schema::OfficialProfileWorker::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::OfficialProfileWorker
+impl core::marker::Send for assembly_schema::OfficialProfileWorker
+impl core::marker::Sync for assembly_schema::OfficialProfileWorker
+impl core::marker::Unpin for assembly_schema::OfficialProfileWorker
+impl core::marker::UnsafeUnpin for assembly_schema::OfficialProfileWorker
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::OfficialProfileWorker
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::OfficialProfileWorker
+pub enum assembly_schema::OfficialProfileWorkerLane
+pub assembly_schema::OfficialProfileWorkerLane::Observational
+pub assembly_schema::OfficialProfileWorkerLane::Writes
+impl core::clone::Clone for assembly_schema::OfficialProfileWorkerLane
+pub fn assembly_schema::OfficialProfileWorkerLane::clone(&self) -> assembly_schema::OfficialProfileWorkerLane
+impl core::cmp::Eq for assembly_schema::OfficialProfileWorkerLane
+impl core::cmp::PartialEq for assembly_schema::OfficialProfileWorkerLane
+pub fn assembly_schema::OfficialProfileWorkerLane::eq(&self, &assembly_schema::OfficialProfileWorkerLane) -> bool
+impl core::fmt::Debug for assembly_schema::OfficialProfileWorkerLane
+pub fn assembly_schema::OfficialProfileWorkerLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::OfficialProfileWorkerLane
+impl core::marker::StructuralPartialEq for assembly_schema::OfficialProfileWorkerLane
+impl core::marker::Freeze for assembly_schema::OfficialProfileWorkerLane
+impl core::marker::Send for assembly_schema::OfficialProfileWorkerLane
+impl core::marker::Sync for assembly_schema::OfficialProfileWorkerLane
+impl core::marker::Unpin for assembly_schema::OfficialProfileWorkerLane
+impl core::marker::UnsafeUnpin for assembly_schema::OfficialProfileWorkerLane
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::OfficialProfileWorkerLane
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::OfficialProfileWorkerLane
 pub enum assembly_schema::ProjectionActivation
 pub assembly_schema::ProjectionActivation::Active
 pub assembly_schema::ProjectionActivation::CaptureOnly
@@ -1659,6 +1841,7 @@ pub assembly_schema::AssemblyManifest::domains: alloc::vec::Vec<assembly_schema:
 pub assembly_schema::AssemblyManifest::framework_contracts: alloc::vec::Vec<assembly_schema::FrameworkContractMount>
 pub assembly_schema::AssemblyManifest::listeners: alloc::vec::Vec<assembly_schema::AssemblyListener>
 pub assembly_schema::AssemblyManifest::name: alloc::string::String
+pub assembly_schema::AssemblyManifest::official_profiles: alloc::vec::Vec<assembly_schema::OfficialProfileClosure>
 pub assembly_schema::AssemblyManifest::profile: assembly_schema::AssemblyProfile
 pub assembly_schema::AssemblyManifest::schema_version: assembly_schema::AssemblyManifestSchemaVersion
 pub assembly_schema::AssemblyManifest::topology: assembly_schema::AssemblyTopology
@@ -1712,6 +1895,9 @@ pub fn assembly_schema::CanonicalAssemblyManifestV2::framework_contracts(&self) 
 pub fn assembly_schema::CanonicalAssemblyManifestV2::listeners(&self) -> &[assembly_schema::AssemblyListener]
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::manifest_digest(&self) -> &vocab::digest::CanonicalSha256Digest
 pub fn assembly_schema::CanonicalAssemblyManifestV2::name(&self) -> &str
+pub fn assembly_schema::CanonicalAssemblyManifestV2::official_profile(&self, assembly_schema::OfficialAssemblyProfile) -> core::option::Option<&assembly_schema::OfficialProfileClosure>
+pub fn assembly_schema::CanonicalAssemblyManifestV2::official_profile_config_digest(&self, assembly_schema::OfficialAssemblyProfile) -> core::result::Result<vocab::digest::CanonicalSha256Digest, assembly_schema::OfficialProfileDigestError>
+pub fn assembly_schema::CanonicalAssemblyManifestV2::official_profiles(&self) -> &[assembly_schema::OfficialProfileClosure]
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::profile(&self) -> assembly_schema::AssemblyProfile
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::schema_version(&self) -> assembly_schema::AssemblyManifestSchemaVersion
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::topology(&self) -> assembly_schema::AssemblyTopology
@@ -1872,6 +2058,36 @@ impl core::marker::Unpin for assembly_schema::ManifestValidationErrors
 impl core::marker::UnsafeUnpin for assembly_schema::ManifestValidationErrors
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ManifestValidationErrors
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ManifestValidationErrors
+pub struct assembly_schema::OfficialProfileClosure
+impl assembly_schema::OfficialProfileClosure
+pub fn assembly_schema::OfficialProfileClosure::forbidden_providers<'a>(&'a self, &'a [assembly_schema::DiportProvider]) -> impl core::iter::traits::iterator::Iterator<Item = assembly_schema::ProviderRole> + 'a
+pub const fn assembly_schema::OfficialProfileClosure::profile(&self) -> assembly_schema::OfficialAssemblyProfile
+pub fn assembly_schema::OfficialProfileClosure::required_listeners(&self) -> &[assembly_schema::AssemblyListenerKind]
+pub fn assembly_schema::OfficialProfileClosure::required_probe_specs(&self) -> &[assembly_schema::OfficialProfileProbe]
+pub fn assembly_schema::OfficialProfileClosure::required_probes(&self) -> alloc::vec::Vec<alloc::string::String>
+pub fn assembly_schema::OfficialProfileClosure::required_providers(&self) -> &[assembly_schema::ProviderRole]
+pub fn assembly_schema::OfficialProfileClosure::required_routes(&self) -> &[alloc::string::String]
+pub fn assembly_schema::OfficialProfileClosure::required_worker_specs(&self) -> &[assembly_schema::OfficialProfileWorker]
+pub fn assembly_schema::OfficialProfileClosure::required_workers(&self) -> alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for assembly_schema::OfficialProfileClosure
+pub fn assembly_schema::OfficialProfileClosure::clone(&self) -> assembly_schema::OfficialProfileClosure
+impl core::cmp::Eq for assembly_schema::OfficialProfileClosure
+impl core::cmp::PartialEq for assembly_schema::OfficialProfileClosure
+pub fn assembly_schema::OfficialProfileClosure::eq(&self, &assembly_schema::OfficialProfileClosure) -> bool
+impl core::fmt::Debug for assembly_schema::OfficialProfileClosure
+pub fn assembly_schema::OfficialProfileClosure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::OfficialProfileClosure
+impl serde_core::ser::Serialize for assembly_schema::OfficialProfileClosure
+pub fn assembly_schema::OfficialProfileClosure::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::OfficialProfileClosure
+pub fn assembly_schema::OfficialProfileClosure::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::OfficialProfileClosure
+impl core::marker::Send for assembly_schema::OfficialProfileClosure
+impl core::marker::Sync for assembly_schema::OfficialProfileClosure
+impl core::marker::Unpin for assembly_schema::OfficialProfileClosure
+impl core::marker::UnsafeUnpin for assembly_schema::OfficialProfileClosure
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::OfficialProfileClosure
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::OfficialProfileClosure
 pub struct assembly_schema::ParsedAssemblyLock(_)
 impl assembly_schema::ParsedAssemblyLock
 pub const fn assembly_schema::ParsedAssemblyLock::digests(&self) -> &assembly_schema::AssemblyDigests
@@ -2034,10 +2250,11 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RepositoryVerifie
 pub struct assembly_schema::RuntimePlan
 impl assembly_schema::RuntimePlan
 pub const fn assembly_schema::RuntimePlan::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
-pub fn assembly_schema::RuntimePlan::compile_v3(&assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::RuntimePlanV3Input) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::RuntimePlan::compile_v4(&assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::RuntimePlanV4Input) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
 pub fn assembly_schema::RuntimePlan::domain_plans(&self) -> &[assembly_schema::DomainPlan]
 pub fn assembly_schema::RuntimePlan::listener_plans(&self) -> &[assembly_schema::ListenerPlan]
 pub fn assembly_schema::RuntimePlan::placement_plans(&self) -> &[assembly_schema::PlacementPlan]
+pub const fn assembly_schema::RuntimePlan::plan_kind(&self) -> &assembly_schema::RuntimePlanKind
 pub fn assembly_schema::RuntimePlan::provider_plans(&self) -> &[assembly_schema::ProviderPlan]
 pub const fn assembly_schema::RuntimePlan::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
 pub const fn assembly_schema::RuntimePlan::schema_version(&self) -> u32
@@ -2118,23 +2335,52 @@ impl core::marker::Unpin for assembly_schema::RuntimePlanJsonPath
 impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanJsonPath
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanJsonPath
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanJsonPath
-pub struct assembly_schema::RuntimePlanV3Input
-impl assembly_schema::RuntimePlanV3Input
-pub fn assembly_schema::RuntimePlanV3Input::domain(&mut self, assembly_schema::AssemblyDomain)
-pub fn assembly_schema::RuntimePlanV3Input::from_manifest(&assembly_schema::CanonicalAssemblyManifestV2) -> Self
-pub fn assembly_schema::RuntimePlanV3Input::listener(&mut self, assembly_schema::AssemblyListenerKind, assembly_schema::ListenerAuth, alloc::vec::Vec<assembly_schema::AssemblyDomain>)
-pub fn assembly_schema::RuntimePlanV3Input::new() -> Self
-pub fn assembly_schema::RuntimePlanV3Input::placement(&mut self, assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>)
-pub fn assembly_schema::RuntimePlanV3Input::provider(&mut self, assembly_schema::ProviderRole, assembly_schema::ProviderConstructor, alloc::vec::Vec<assembly_schema::LifecycleChannel>)
-impl core::default::Default for assembly_schema::RuntimePlanV3Input
-pub fn assembly_schema::RuntimePlanV3Input::default() -> assembly_schema::RuntimePlanV3Input
-impl core::marker::Freeze for assembly_schema::RuntimePlanV3Input
-impl core::marker::Send for assembly_schema::RuntimePlanV3Input
-impl core::marker::Sync for assembly_schema::RuntimePlanV3Input
-impl core::marker::Unpin for assembly_schema::RuntimePlanV3Input
-impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanV3Input
-impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanV3Input
-impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanV3Input
+pub struct assembly_schema::RuntimePlanKind(_)
+impl assembly_schema::RuntimePlanKind
+pub const fn assembly_schema::RuntimePlanKind::config_digest(&self) -> core::option::Option<&vocab::digest::CanonicalSha256Digest>
+pub const fn assembly_schema::RuntimePlanKind::generic() -> Self
+pub const fn assembly_schema::RuntimePlanKind::official_profile(&self) -> core::option::Option<assembly_schema::OfficialAssemblyProfile>
+impl core::clone::Clone for assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanKind::clone(&self) -> assembly_schema::RuntimePlanKind
+impl core::cmp::Eq for assembly_schema::RuntimePlanKind
+impl core::cmp::PartialEq for assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanKind::eq(&self, &assembly_schema::RuntimePlanKind) -> bool
+impl core::fmt::Debug for assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::RuntimePlanKind
+impl schemars::JsonSchema for assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanKind::is_referenceable() -> bool
+pub fn assembly_schema::RuntimePlanKind::json_schema(&mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema
+pub fn assembly_schema::RuntimePlanKind::schema_id() -> alloc::borrow::Cow<'static, str>
+pub fn assembly_schema::RuntimePlanKind::schema_name() -> alloc::string::String
+impl serde_core::ser::Serialize for assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::RuntimePlanKind
+impl core::marker::Send for assembly_schema::RuntimePlanKind
+impl core::marker::Sync for assembly_schema::RuntimePlanKind
+impl core::marker::Unpin for assembly_schema::RuntimePlanKind
+impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanKind
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanKind
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanKind
+pub struct assembly_schema::RuntimePlanV4Input
+impl assembly_schema::RuntimePlanV4Input
+pub fn assembly_schema::RuntimePlanV4Input::domain(&mut self, assembly_schema::AssemblyDomain)
+pub fn assembly_schema::RuntimePlanV4Input::generic_from_manifest(&assembly_schema::CanonicalAssemblyManifestV2) -> Self
+pub fn assembly_schema::RuntimePlanV4Input::listener(&mut self, assembly_schema::AssemblyListenerKind, assembly_schema::ListenerAuth, alloc::vec::Vec<assembly_schema::AssemblyDomain>)
+pub fn assembly_schema::RuntimePlanV4Input::new(assembly_schema::RuntimePlanKind) -> Self
+pub fn assembly_schema::RuntimePlanV4Input::official_from_manifest(&assembly_schema::CanonicalAssemblyManifestV2, assembly_schema::OfficialAssemblyProfile) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::RuntimePlanV4Input::placement(&mut self, assembly_schema::AssemblyDomain, impl core::convert::Into<alloc::string::String>)
+pub const fn assembly_schema::RuntimePlanV4Input::plan_kind(&self) -> &assembly_schema::RuntimePlanKind
+pub fn assembly_schema::RuntimePlanV4Input::provider(&mut self, assembly_schema::ProviderRole, assembly_schema::ProviderConstructor, alloc::vec::Vec<assembly_schema::LifecycleChannel>)
+impl core::marker::Freeze for assembly_schema::RuntimePlanV4Input
+impl core::marker::Send for assembly_schema::RuntimePlanV4Input
+impl core::marker::Sync for assembly_schema::RuntimePlanV4Input
+impl core::marker::Unpin for assembly_schema::RuntimePlanV4Input
+impl core::marker::UnsafeUnpin for assembly_schema::RuntimePlanV4Input
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RuntimePlanV4Input
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RuntimePlanV4Input
 pub struct assembly_schema::WorkflowPlan(_)
 impl assembly_schema::WorkflowPlan
 pub const fn assembly_schema::WorkflowPlan::activation(&self) -> &assembly_schema::WorkflowActivation

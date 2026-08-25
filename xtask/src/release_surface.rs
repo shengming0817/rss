@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use workspacefacts::{
     ApiStability, DependencyKind, DependencyResolution, DependencySource, OfficialProfile,
-    PublicApiOwner, PublishPolicy, ReleaseProfileArtifactSelection, TargetKind, WorkspaceFacts,
+    OfficialProfileArtifactSelection, PublicApiOwner, PublishPolicy, TargetKind, WorkspaceFacts,
 };
 
 use crate::assembly::{Finding, Rule};
@@ -20,7 +20,7 @@ const CRATES_IO_SPARSE_INDEX: &str = "https://index.crates.io/";
 #[derive(Debug)]
 pub(crate) struct ReleaseSurface {
     packages: Vec<ReleasePackage>,
-    profile_artifacts: Vec<ReleaseProfileArtifact>,
+    official_profile_artifacts: Vec<OfficialProfileArtifact>,
     publish_order: Vec<String>,
 }
 
@@ -29,8 +29,8 @@ impl ReleaseSurface {
         &self.packages
     }
 
-    pub(crate) fn profile_artifacts(&self) -> &[ReleaseProfileArtifact] {
-        &self.profile_artifacts
+    pub(crate) fn official_profile_artifacts(&self) -> &[OfficialProfileArtifact] {
+        &self.official_profile_artifacts
     }
 
     #[cfg(test)]
@@ -63,22 +63,16 @@ impl ReleaseSurface {
                 ApiStability::Experimental => "experimental",
                 ApiStability::Stable => "stable",
             };
-            let profiles = package
-                .profiles()
-                .iter()
-                .map(|profile| profile.as_str())
-                .collect::<Vec<_>>()
-                .join("+");
             let _ = write!(
                 output,
-                "{}@{}/msrv:{}/{registries}/{owner}/{stability}/profiles:{profiles}",
+                "{}@{}/msrv:{}/{registries}/{owner}/{stability}",
                 package.package(),
                 package.version(),
                 package.minimum_rust_version()
             );
         }
         output.push_str("], profile artifacts=[");
-        for (index, artifact) in self.profile_artifacts.iter().enumerate() {
+        for (index, artifact) in self.official_profile_artifacts.iter().enumerate() {
             if index > 0 {
                 output.push_str(", ");
             }
@@ -92,6 +86,17 @@ impl ReleaseSurface {
                 artifact.image_dockerfile(),
                 artifact.image_target()
             );
+            match artifact {
+                OfficialProfileArtifact::Candidate(_) => output.push_str("@candidate"),
+                OfficialProfileArtifact::Active(active) => {
+                    let _ = write!(
+                        output,
+                        "@active:{}:{}",
+                        active.activation_receipt(),
+                        active.t3_owner()
+                    );
+                }
+            }
         }
         output.push_str("], publish order=[");
         output.push_str(&self.publish_order.join(", "));
@@ -455,7 +460,6 @@ pub(crate) struct ReleasePackage {
     publish_policy: PublishPolicy,
     public_api_owner: PublicApiOwner,
     api_stability: ApiStability,
-    profiles: Vec<OfficialProfile>,
 }
 
 impl ReleasePackage {
@@ -485,14 +489,16 @@ impl ReleasePackage {
     pub(crate) const fn api_stability(&self) -> ApiStability {
         self.api_stability
     }
-
-    pub(crate) fn profiles(&self) -> &[OfficialProfile] {
-        &self.profiles
-    }
 }
 
 #[derive(Debug)]
-pub(crate) struct ReleaseProfileArtifact {
+pub(crate) enum OfficialProfileArtifact {
+    Candidate(CandidateProfileArtifact),
+    Active(ActiveProfileArtifact),
+}
+
+#[derive(Debug)]
+pub(crate) struct CandidateProfileArtifact {
     profile: OfficialProfile,
     assembly: String,
     binary_package: String,
@@ -501,35 +507,76 @@ pub(crate) struct ReleaseProfileArtifact {
     image_target: String,
 }
 
-impl ReleaseProfileArtifact {
+#[derive(Debug)]
+pub(crate) struct ActiveProfileArtifact {
+    profile: OfficialProfile,
+    assembly: String,
+    binary_package: String,
+    binary_target: String,
+    image_dockerfile: String,
+    image_target: String,
+    activation_receipt: String,
+    t3_owner: String,
+}
+
+impl OfficialProfileArtifact {
     pub(crate) const fn profile(&self) -> OfficialProfile {
-        self.profile
+        match self {
+            Self::Candidate(candidate) => candidate.profile,
+            Self::Active(active) => active.profile,
+        }
     }
 
     pub(crate) fn assembly(&self) -> &str {
-        &self.assembly
+        match self {
+            Self::Candidate(candidate) => &candidate.assembly,
+            Self::Active(active) => &active.assembly,
+        }
     }
 
     pub(crate) fn binary_package(&self) -> &str {
-        &self.binary_package
+        match self {
+            Self::Candidate(candidate) => &candidate.binary_package,
+            Self::Active(active) => &active.binary_package,
+        }
     }
 
     pub(crate) fn binary_target(&self) -> &str {
-        &self.binary_target
+        match self {
+            Self::Candidate(candidate) => &candidate.binary_target,
+            Self::Active(active) => &active.binary_target,
+        }
     }
 
     pub(crate) fn image_dockerfile(&self) -> &str {
-        &self.image_dockerfile
+        match self {
+            Self::Candidate(candidate) => &candidate.image_dockerfile,
+            Self::Active(active) => &active.image_dockerfile,
+        }
     }
 
     pub(crate) fn image_target(&self) -> &str {
-        &self.image_target
+        match self {
+            Self::Candidate(candidate) => &candidate.image_target,
+            Self::Active(active) => &active.image_target,
+        }
+    }
+}
+
+impl ActiveProfileArtifact {
+    pub(crate) fn activation_receipt(&self) -> &str {
+        &self.activation_receipt
+    }
+
+    pub(crate) fn t3_owner(&self) -> &str {
+        &self.t3_owner
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ArtifactProjection {
     assembly: String,
+    official_core_declared: bool,
     lifecycle: ProjectedArtifactLifecycle,
 }
 
@@ -561,6 +608,7 @@ impl ArtifactProjection {
     ) -> Self {
         Self {
             assembly: assembly.to_owned(),
+            official_core_declared: assembly == "runtime",
             lifecycle: ProjectedArtifactLifecycle::Supported {
                 binary_package: binary_package.to_owned(),
                 binary_target: binary_target.to_owned(),
@@ -574,6 +622,7 @@ impl ArtifactProjection {
     fn compile_only(assembly: &str) -> Self {
         Self {
             assembly: assembly.to_owned(),
+            official_core_declared: assembly == "runtime",
             lifecycle: ProjectedArtifactLifecycle::CompileOnly,
         }
     }
@@ -588,6 +637,7 @@ impl ArtifactProjection {
     ) -> Self {
         Self {
             assembly: assembly.to_owned(),
+            official_core_declared: assembly == "runtime",
             lifecycle: ProjectedArtifactLifecycle::Candidate {
                 binary_package: binary_package.to_owned(),
                 binary_target: binary_target.to_owned(),
@@ -601,7 +651,7 @@ impl ArtifactProjection {
 pub(crate) fn requires_artifact_join(facts: &WorkspaceFacts) -> bool {
     matches!(
         facts.release_selection(),
-        Ok(Some(selection)) if !selection.profile_artifacts().is_empty()
+        Ok(Some(selection)) if !selection.official_profile_artifacts().is_empty()
     )
 }
 
@@ -628,6 +678,12 @@ pub(crate) fn project_artifacts(
             };
             ArtifactProjection {
                 assembly: artifact.id.as_str().to_owned(),
+                official_core_declared: ir.assembly(artifact.id.as_str()).is_some_and(|assembly| {
+                    assembly
+                        .manifest()
+                        .official_profile(assembly_schema::OfficialAssemblyProfile::Core)
+                        .is_some()
+                }),
                 lifecycle,
             }
         })
@@ -637,18 +693,15 @@ pub(crate) fn project_artifacts(
 fn validate_profile_artifacts(
     facts: &WorkspaceFacts,
     artifacts: &[ArtifactProjection],
-    selections: &[ReleaseProfileArtifactSelection],
-) -> Vec<Finding> {
+    selections: &[OfficialProfileArtifactSelection],
+) -> (Vec<OfficialProfileArtifact>, Vec<Finding>) {
+    let mut projected = Vec::new();
     let mut findings = Vec::new();
     let mut profile_rows = BTreeMap::new();
     for (index, selected_profile) in selections.iter().enumerate() {
         let profile = selected_profile.profile();
-        let subject = format!("workspace.metadata.release-surface.profile-artifacts[{index}]");
-        findings.push(finding(
-            Rule::ReleaseSurfaceProfile,
-            subject.clone(),
-            "official profile activation facts are unavailable; artifact support alone cannot authorize selection",
-        ));
+        let subject =
+            format!("workspace.metadata.release-surface.official-profile-artifacts[{index}]");
         if profile_rows.insert(profile, selected_profile).is_some() {
             findings.push(finding(
                 Rule::ReleaseSurfaceProfile,
@@ -676,55 +729,107 @@ fn validate_profile_artifacts(
             ));
             continue;
         };
-        match &artifact.lifecycle {
+        if profile != OfficialProfile::Core || !artifact.official_core_declared {
+            findings.push(finding(
+                Rule::ReleaseSurfaceProfile,
+                subject,
+                "selected official profile is not declared by the joined assembly manifest",
+            ));
+            continue;
+        }
+        let (identity, artifact_is_candidate) = match &artifact.lifecycle {
             ProjectedArtifactLifecycle::Candidate {
                 binary_package,
                 binary_target,
                 image_dockerfile,
                 image_target,
-            } => findings.push(finding(
-                Rule::ReleaseSurfaceProfile,
-                subject,
-                format!(
-                    "candidate assembly cannot be selected as an official release profile artifact (static identity: {binary_package}/{binary_target}, {image_dockerfile}#{image_target})"
-                ),
-            )),
-            ProjectedArtifactLifecycle::CompileOnly => findings.push(finding(
-                Rule::ReleaseSurfaceProfile,
-                subject,
-                "compile-only assembly cannot be a release profile artifact",
-            )),
+            } => (
+                Some((
+                    binary_package,
+                    binary_target,
+                    image_dockerfile,
+                    image_target,
+                )),
+                true,
+            ),
             ProjectedArtifactLifecycle::Supported {
                 binary_package,
                 binary_target,
                 image_dockerfile,
                 image_target,
-            } => {
-                let artifact_identity_valid = !image_dockerfile.is_empty()
-                    && !image_target.is_empty()
-                    && facts
-                        .package_key(binary_package)
-                        .ok()
-                        .and_then(|package| facts.targets_for(&package).ok())
-                        .is_some_and(|targets| {
-                            targets.iter().any(|target| {
-                                target.kind() == TargetKind::Binary
-                                    && target.name() == binary_target
-                            })
-                        });
-                if !artifact_identity_valid {
-                    findings.push(finding(
-                        Rule::ReleaseSurfaceProfile,
-                        subject,
-                        "selected artifact binary/image identity does not resolve in governed facts",
-                    ));
-                }
-                // The joined artifact proves identity only. A later profile-activation owner must
-                // provide independent typed authority before this row may mint surface state.
+            } => (
+                Some((
+                    binary_package,
+                    binary_target,
+                    image_dockerfile,
+                    image_target,
+                )),
+                false,
+            ),
+            ProjectedArtifactLifecycle::CompileOnly => {
+                findings.push(finding(
+                    Rule::ReleaseSurfaceProfile,
+                    subject.clone(),
+                    "compile-only assembly cannot be an official profile candidate",
+                ));
+                (None, false)
             }
+        };
+        let Some((binary_package, binary_target, image_dockerfile, image_target)) = identity else {
+            continue;
+        };
+        let artifact_identity_valid = !image_dockerfile.is_empty()
+            && !image_target.is_empty()
+            && facts
+                .package_key(binary_package)
+                .ok()
+                .and_then(|package| facts.targets_for(&package).ok())
+                .is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        target.kind() == TargetKind::Binary && target.name() == binary_target
+                    })
+                });
+        if !artifact_identity_valid {
+            findings.push(finding(
+                Rule::ReleaseSurfaceProfile,
+                subject.clone(),
+                "selected artifact binary/image identity does not resolve in governed facts",
+            ));
+            continue;
+        }
+        match selected_profile {
+            OfficialProfileArtifactSelection::Candidate(_) => {
+                projected.push(OfficialProfileArtifact::Candidate(
+                    CandidateProfileArtifact {
+                        profile,
+                        assembly: selected_profile.assembly().to_owned(),
+                        binary_package: binary_package.clone(),
+                        binary_target: binary_target.clone(),
+                        image_dockerfile: image_dockerfile.clone(),
+                        image_target: image_target.clone(),
+                    },
+                ));
+            }
+            OfficialProfileArtifactSelection::Active(active) if !artifact_is_candidate => {
+                projected.push(OfficialProfileArtifact::Active(ActiveProfileArtifact {
+                    profile,
+                    assembly: selected_profile.assembly().to_owned(),
+                    binary_package: binary_package.clone(),
+                    binary_target: binary_target.clone(),
+                    image_dockerfile: image_dockerfile.clone(),
+                    image_target: image_target.clone(),
+                    activation_receipt: active.activation_receipt().to_owned(),
+                    t3_owner: active.t3_owner().to_owned(),
+                }));
+            }
+            OfficialProfileArtifactSelection::Active(_) => findings.push(finding(
+                Rule::ReleaseSurfaceProfile,
+                subject,
+                "active profile requires a supported assembly artifact lifecycle",
+            )),
         }
     }
-    findings
+    (projected, findings)
 }
 
 pub(crate) fn validate(
@@ -734,7 +839,7 @@ pub(crate) fn validate(
     // INVARIANT: PREPUBLICATION-PATCH-LINE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::release_version_line_rejects_major_or_minor_changes", anti_vacuity = "tests::synthetic_nonempty_surface_derives_cargo_facts" }.
     let mut surface = ReleaseSurface {
         packages: Vec::new(),
-        profile_artifacts: Vec::new(),
+        official_profile_artifacts: Vec::new(),
         publish_order: Vec::new(),
     };
     let selection = match facts.release_selection() {
@@ -788,13 +893,11 @@ pub(crate) fn validate(
         ));
     }
 
-    findings.extend(validate_profile_artifacts(
-        facts,
-        artifacts,
-        selection.profile_artifacts(),
-    ));
+    let (profile_artifacts, profile_findings) =
+        validate_profile_artifacts(facts, artifacts, selection.official_profile_artifacts());
+    surface.official_profile_artifacts = profile_artifacts;
+    findings.extend(profile_findings);
 
-    let selected_profiles = BTreeSet::<OfficialProfile>::new();
     let mut seen_packages = BTreeSet::new();
     for (index, selected_package) in selection.packages().iter().enumerate() {
         let name = selected_package.package();
@@ -849,33 +952,7 @@ pub(crate) fn validate(
             ));
             continue;
         }
-        let mut package_profiles = BTreeSet::new();
-        let mut profiles_valid = true;
-        for profile in selected_package.profiles() {
-            if !package_profiles.insert(*profile) {
-                findings.push(finding(
-                    Rule::ReleaseSurfacePackage,
-                    subject.clone(),
-                    format!(
-                        "profile `{}` is referenced more than once",
-                        profile.as_str()
-                    ),
-                ));
-                profiles_valid = false;
-            }
-            if !selected_profiles.contains(profile) {
-                findings.push(finding(
-                    Rule::ReleaseSurfacePackage,
-                    subject.clone(),
-                    format!(
-                        "profile `{}` has no selected release artifact",
-                        profile.as_str()
-                    ),
-                ));
-                profiles_valid = false;
-            }
-        }
-        if package.publish_policy().is_publishable() && profiles_valid {
+        if package.publish_policy().is_publishable() {
             surface.packages.push(ReleasePackage {
                 package: package.key().as_str().to_owned(),
                 version: package.version().clone(),
@@ -884,7 +961,6 @@ pub(crate) fn validate(
                 publish_policy: package.publish_policy().clone(),
                 public_api_owner: selected_package.public_api_owner(),
                 api_stability: selected_package.api_stability(),
-                profiles: package_profiles.into_iter().collect(),
             });
         }
     }
@@ -893,8 +969,8 @@ pub(crate) fn validate(
         .packages
         .sort_by(|left, right| left.package.cmp(&right.package));
     surface
-        .profile_artifacts
-        .sort_by_key(|artifact| artifact.profile);
+        .official_profile_artifacts
+        .sort_by_key(OfficialProfileArtifact::profile);
     findings.sort_by(|left, right| {
         (&left.subject, left.rule, &left.detail).cmp(&(&right.subject, right.rule, &right.detail))
     });
@@ -1315,10 +1391,9 @@ mod tests {
                     "package": "alpha",
                     "version-line": "0.1",
                     "public-api-owner": "standalone-component",
-                    "api-stability": "experimental",
-                    "profiles": []
+                    "api-stability": "experimental"
                 }],
-                "profile-artifacts": []
+                "official-profile-artifacts": []
             }),
             json!(null),
             json!("1.86"),
@@ -1427,10 +1502,9 @@ mod tests {
                     "package": "alpha",
                     "version-line": "0.1",
                     "public-api-owner": "standalone-component",
-                    "api-stability": "experimental",
-                    "profiles": []
+                    "api-stability": "experimental"
                 }],
-                "profile-artifacts": []
+                "official-profile-artifacts": []
             }),
             json!(["crates-io"]),
             json!("1.86"),
@@ -1447,7 +1521,7 @@ mod tests {
             surface.packages()[0].minimum_rust_version().to_string(),
             "1.86.0"
         );
-        assert!(surface.profile_artifacts().is_empty());
+        assert!(surface.official_profile_artifacts().is_empty());
         Ok(())
     }
 
@@ -1459,10 +1533,9 @@ mod tests {
                     "package": "alpha",
                     "version-line": "0.2",
                     "public-api-owner": "standalone-component",
-                    "api-stability": "experimental",
-                    "profiles": []
+                    "api-stability": "experimental"
                 }],
-                "profile-artifacts": []
+                "official-profile-artifacts": []
             }),
             json!(["crates-io"]),
             json!("1.86"),
@@ -1485,27 +1558,24 @@ mod tests {
                         "package": "alpha",
                         "version-line": "0.1",
                         "public-api-owner": "platform-public",
-                        "api-stability": "stable",
-                        "profiles": ["eventing", "eventing"]
+                        "api-stability": "stable"
                     },
                     {
                         "package": "alpha",
                         "version-line": "0.1",
                         "public-api-owner": "platform-public",
-                        "api-stability": "stable",
-                        "profiles": []
+                        "api-stability": "stable"
                     },
                     {
                         "package": "ghost",
                         "version-line": "0.1",
                         "public-api-owner": "standalone-component",
-                        "api-stability": "experimental",
-                        "profiles": []
+                        "api-stability": "experimental"
                     }
                 ],
-                "profile-artifacts": [
-                    {"profile": "core", "assembly": "identityaudit"},
-                    {"profile": "core", "assembly": "runtime"}
+                "official-profile-artifacts": [
+                    {"state": "candidate", "profile": "core", "assembly": "identityaudit"},
+                    {"state": "candidate", "profile": "core", "assembly": "runtime"}
                 ]
             }),
             json!([]),
@@ -1556,7 +1626,7 @@ mod tests {
     #[test]
     fn supported_artifacts_do_not_auto_select_a_profile() -> Result<()> {
         let facts = facts_with_selection(
-            json!({"packages": [], "profile-artifacts": []}),
+            json!({"packages": [], "official-profile-artifacts": []}),
             json!([]),
             json!("1.86"),
             json!([]),
@@ -1565,26 +1635,89 @@ mod tests {
         assert!(findings.is_empty());
         let surface = surface.context("valid empty selection must mint a ReleaseSurface")?;
         assert!(surface.packages().is_empty());
-        assert!(surface.profile_artifacts().is_empty());
+        assert!(surface.official_profile_artifacts().is_empty());
         Ok(())
     }
 
     #[test]
-    fn supported_artifact_cannot_authorize_an_official_profile() -> Result<()> {
+    fn supported_artifact_mints_the_selected_candidate_profile() -> Result<()> {
         let facts = facts_with_selection(
             json!({
                 "packages": [],
-                "profile-artifacts": [{"profile": "core", "assembly": "runtime"}]
+                "official-profile-artifacts": [{"state": "candidate", "profile": "core", "assembly": "runtime"}]
             }),
             json!([]),
             json!("1.86"),
             json!([]),
         )?;
         let (surface, findings) = validate(&facts, &[supported_runtime()]);
+        assert!(findings.is_empty());
+        let surface = surface.context("candidate selection")?;
+        assert_eq!(surface.official_profile_artifacts().len(), 1);
+        assert!(matches!(
+            surface.official_profile_artifacts()[0],
+            OfficialProfileArtifact::Candidate(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn supported_artifact_mints_the_selected_active_profile() -> Result<()> {
+        let facts = facts_with_selection(
+            json!({
+                "packages": [],
+                "official-profile-artifacts": [{
+                    "state": "active",
+                    "profile": "core",
+                    "assembly": "runtime",
+                    "activation-receipt": "receipt:core:t3",
+                    "t3-owner": "issue-2127"
+                }]
+            }),
+            json!([]),
+            json!("1.86"),
+            json!([]),
+        )?;
+        let (surface, findings) = validate(&facts, &[supported_runtime()]);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+        assert!(matches!(
+            surface
+                .context("active selection")?
+                .official_profile_artifacts()[0],
+            OfficialProfileArtifact::Active(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_artifact_cannot_mint_an_active_profile() -> Result<()> {
+        let facts = facts_with_selection(
+            json!({
+                "packages": [],
+                "official-profile-artifacts": [{
+                    "state": "active",
+                    "profile": "core",
+                    "assembly": "runtime",
+                    "activation-receipt": "receipt:core:t3",
+                    "t3-owner": "issue-2127"
+                }]
+            }),
+            json!([]),
+            json!("1.86"),
+            json!([]),
+        )?;
+        let artifact = ArtifactProjection::candidate(
+            "runtime",
+            "server",
+            "server",
+            "Dockerfile",
+            "candidate-runtime",
+        );
+        let (surface, findings) = validate(&facts, &[artifact]);
         assert!(surface.is_none());
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::ReleaseSurfaceProfile
-                && finding.detail.contains("activation facts are unavailable")
+                && finding.detail.contains("requires a supported")
         }));
         Ok(())
     }
@@ -1594,7 +1727,7 @@ mod tests {
         let facts = facts_with_selection(
             json!({
                 "packages": [],
-                "profile-artifacts": [{"profile": "core", "assembly": "runtime"}]
+                "official-profile-artifacts": [{"state": "candidate", "profile": "core", "assembly": "runtime"}]
             }),
             json!([]),
             json!("1.86"),
@@ -1612,20 +1745,15 @@ mod tests {
                 .iter()
                 .any(|finding| finding.detail.contains("compile-only"))
         );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("activation facts are unavailable"))
-        );
         Ok(())
     }
 
     #[test]
-    fn candidate_selected_profile_is_rejected_without_inspecting_identity() -> Result<()> {
+    fn candidate_artifact_mints_candidate_profile_after_identity_join() -> Result<()> {
         let facts = facts_with_selection(
             json!({
                 "packages": [],
-                "profile-artifacts": [{"profile": "core", "assembly": "runtime"}]
+                "official-profile-artifacts": [{"state": "candidate", "profile": "core", "assembly": "runtime"}]
             }),
             json!([]),
             json!("1.86"),
@@ -1633,23 +1761,20 @@ mod tests {
         )?;
         let artifact = ArtifactProjection::candidate(
             "runtime",
-            "missing-package",
-            "missing-target",
+            "server",
+            "server",
             "Dockerfile",
             "candidate-runtime",
         );
         let (surface, findings) = validate(&facts, &[artifact]);
-        assert!(surface.is_none());
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::ReleaseSurfaceProfile
-                && finding
-                    .detail
-                    .contains("candidate assembly cannot be selected")
-        }));
-        assert!(!findings.iter().any(|finding| {
-            finding.rule == Rule::ReleaseSurfaceProfile
-                && finding.detail.contains("binary/image identity")
-        }));
+        assert!(findings.is_empty());
+        assert_eq!(
+            surface
+                .context("candidate surface")?
+                .official_profile_artifacts()
+                .len(),
+            1
+        );
         Ok(())
     }
 
@@ -1658,7 +1783,7 @@ mod tests {
         let facts = facts_with_selection(
             json!({
                 "packages": [],
-                "profile-artifacts": [{"profile": "core", "assembly": "runtime"}]
+                "official-profile-artifacts": [{"state": "candidate", "profile": "core", "assembly": "runtime"}]
             }),
             json!([]),
             json!("1.86"),
@@ -1683,11 +1808,6 @@ mod tests {
                 .iter()
                 .any(|finding| finding.detail.contains("binary/image identity"))
         );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("activation facts are unavailable"))
-        );
         Ok(())
     }
 
@@ -1699,10 +1819,9 @@ mod tests {
                 "packages": [{
                     "package": bait,
                     "public-api-owner": "standalone-component",
-                    "api-stability": "experimental",
-                    "profiles": []
+                    "api-stability": "experimental"
                 }],
-                "profile-artifacts": []
+                "official-profile-artifacts": []
             }),
             json!([]),
             json!("1.86"),
@@ -1784,7 +1903,7 @@ mod tests {
             .map(|package| package.package())
             .collect::<BTreeSet<_>>();
         assert_eq!(surfaced, selected);
-        assert!(surface.profile_artifacts().is_empty());
+        assert_eq!(surface.official_profile_artifacts().len(), 1);
         let publish_order = surface
             .publish_order()
             .iter()

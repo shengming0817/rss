@@ -151,31 +151,19 @@ const PG_DLX_PURGER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     bundle_password: Some(BUNDLE_PG_DLX_PURGER_PASSWORD),
 };
 
-/// One immutable, fully parsed PostgreSQL configuration generation.
-///
-/// Private fields prevent callers from assembling a mixed-generation bundle. The only production
-/// constructor accepts the unforgeable snapshot capability, and [`Self::into_parts`] consumes the
-/// bundle before any pool is built.
-pub(crate) struct PgRuntimeConfig {
-    serving: PgConfig,
-    tenant_read: PgTenantReadConfig,
-    audit_admin: Option<PgConfig>,
-    dlx_archiver: PgConfig,
-    dlx_verifier: PgConfig,
-    dlx_purger: PgConfig,
-    monitor_config: postgres::PgRuntimeMonitorConfig,
-}
-
-/// Named consumed form; names keep PostgreSQL roles impossible to transpose by tuple position at
-/// the composition root.
-pub(crate) struct PgRuntimeConfigParts {
+/// Closed serving projection used by profiles that do not activate DLX providers.
+pub(crate) struct PgServingRuntimeConfigParts {
     pub(crate) serving: PgConfig,
     pub(crate) tenant_read: PgTenantReadConfig,
     pub(crate) audit_admin: Option<PgConfig>,
-    pub(crate) dlx_archiver: PgConfig,
-    pub(crate) dlx_verifier: PgConfig,
-    pub(crate) dlx_purger: PgConfig,
     pub(crate) monitor_config: postgres::PgRuntimeMonitorConfig,
+}
+
+/// Closed DLX-only projection. It is parsed only after event provider activation is proven.
+pub(crate) struct PgDlxRuntimeConfigParts {
+    pub(crate) archiver: PgConfig,
+    pub(crate) verifier: PgConfig,
+    pub(crate) purger: PgConfig,
 }
 
 struct PgSharedValues {
@@ -316,8 +304,16 @@ fn read_password_file(raw_path: String, key: &'static str) -> anyhow::Result<Str
     Ok(password)
 }
 
+pub(crate) struct PgRuntimeConfig {
+    dlx_archiver: PgConfig,
+    dlx_verifier: PgConfig,
+    dlx_purger: PgConfig,
+}
+
 impl PgRuntimeConfig {
-    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+    pub(crate) fn serving_from_snapshot(
+        config: SnapshotConfig<'_>,
+    ) -> anyhow::Result<PgServingRuntimeConfigParts> {
         let shared = PgSharedValues::from_snapshot(config)?;
         let serving = apply_pool_limit_from_value(
             shared.role_config(config, PG_SERVING_ROLE_KEYS)?,
@@ -330,33 +326,35 @@ impl PgRuntimeConfig {
             PG_READER_MAX_CONNECTIONS_ENV,
         )?);
         let audit_admin = shared.optional_audit_config(config)?;
-        let dlx_archiver = shared.role_config(config, PG_DLX_ARCHIVER_ROLE_KEYS)?;
-        let dlx_verifier = shared.role_config(config, PG_DLX_VERIFIER_ROLE_KEYS)?;
-        let dlx_purger = shared.role_config(config, PG_DLX_PURGER_ROLE_KEYS)?;
         let monitor_config = postgres::PgRuntimeMonitorConfig::new(
             pg_readiness_interval_from_value(config.value(PG_READINESS_INTERVAL_ENV)),
             pg_rls_attestation_interval_from_value(config.value(PG_RLS_ATTESTATION_INTERVAL_ENV))?,
         );
-        Ok(Self {
+        Ok(PgServingRuntimeConfigParts {
             serving,
             tenant_read,
             audit_admin,
-            dlx_archiver,
-            dlx_verifier,
-            dlx_purger,
             monitor_config,
         })
     }
 
-    pub(crate) fn into_parts(self) -> PgRuntimeConfigParts {
-        PgRuntimeConfigParts {
-            serving: self.serving,
-            tenant_read: self.tenant_read,
-            audit_admin: self.audit_admin,
-            dlx_archiver: self.dlx_archiver,
-            dlx_verifier: self.dlx_verifier,
-            dlx_purger: self.dlx_purger,
-            monitor_config: self.monitor_config,
+    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let shared = PgSharedValues::from_snapshot(config)?;
+        let dlx_archiver = shared.role_config(config, PG_DLX_ARCHIVER_ROLE_KEYS)?;
+        let dlx_verifier = shared.role_config(config, PG_DLX_VERIFIER_ROLE_KEYS)?;
+        let dlx_purger = shared.role_config(config, PG_DLX_PURGER_ROLE_KEYS)?;
+        Ok(Self {
+            dlx_archiver,
+            dlx_verifier,
+            dlx_purger,
+        })
+    }
+
+    pub(crate) fn into_parts(self) -> PgDlxRuntimeConfigParts {
+        PgDlxRuntimeConfigParts {
+            archiver: self.dlx_archiver,
+            verifier: self.dlx_verifier,
+            purger: self.dlx_purger,
         }
     }
 }
@@ -746,14 +744,16 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn runtime_infra_pg_snapshot_maps_named_roles_policy_readiness_and_redacts_secrets() {
         let snapshot = snapshot_from_get(full_runtime_get).expect("snapshot");
-        let parts = PgRuntimeConfig::from_snapshot(snapshot.view())
-            .expect("runtime config")
+        let parts = PgRuntimeConfig::serving_from_snapshot(snapshot.view())
+            .expect("serving runtime config");
+        let dlx = PgRuntimeConfig::from_snapshot(snapshot.view())
+            .expect("DLX runtime config")
             .into_parts();
         for (config, role, max) in [
             (&parts.serving, "rss_app_snapshot", 5),
-            (&parts.dlx_archiver, "rss_dlx_archiver_snapshot", 7),
-            (&parts.dlx_verifier, "rss_dlx_verifier_snapshot", 8),
-            (&parts.dlx_purger, "rss_dlx_purger_snapshot", 9),
+            (&dlx.archiver, "rss_dlx_archiver_snapshot", 7),
+            (&dlx.verifier, "rss_dlx_verifier_snapshot", 8),
+            (&dlx.purger, "rss_dlx_purger_snapshot", 9),
         ] {
             let debug = format!("{config:?}");
             assert!(debug.contains(role), "{debug}");
@@ -793,7 +793,15 @@ mod tests {
                 (name != missing).then(|| full_runtime_get(name)).flatten()
             })
             .expect("snapshot");
-            let error = match PgRuntimeConfig::from_snapshot(snapshot.view()) {
+            let result = match missing {
+                PG_DLX_ARCHIVER_PASSWORD_FILE_ENV
+                | PG_DLX_VERIFIER_USERNAME_ENV
+                | PG_DLX_PURGER_PASSWORD_FILE_ENV => {
+                    PgRuntimeConfig::from_snapshot(snapshot.view()).map(|_| ())
+                }
+                _ => PgRuntimeConfig::serving_from_snapshot(snapshot.view()).map(|_| ()),
+            };
+            let error = match result {
                 Ok(_) => panic!("missing narrow role must fail"),
                 Err(error) => error,
             };
@@ -808,9 +816,8 @@ mod tests {
         })
         .expect("snapshot");
         assert!(
-            PgRuntimeConfig::from_snapshot(snapshot.view())
+            PgRuntimeConfig::serving_from_snapshot(snapshot.view())
                 .expect("absent audit pair")
-                .into_parts()
                 .audit_admin
                 .is_none()
         );
@@ -822,7 +829,7 @@ mod tests {
                 (name != missing).then(|| full_runtime_get(name)).flatten()
             })
             .expect("snapshot");
-            let error = match PgRuntimeConfig::from_snapshot(snapshot.view()) {
+            let error = match PgRuntimeConfig::serving_from_snapshot(snapshot.view()) {
                 Ok(_) => panic!("half audit pair must fail"),
                 Err(error) => error,
             };
@@ -1213,11 +1220,11 @@ mod tests {
         })
         .expect("reader must share serving TLS configuration");
         let debug = format!("{cfg:?}");
+        assert!(debug.contains("PrivateCa"));
         assert!(
-            debug.contains("VerifyFull"),
-            "production PG TLS is hardcoded VerifyFull: {debug}"
+            !debug.contains("pg-reader-root-ca.pem"),
+            "private CA path must remain redacted: {debug}"
         );
-        assert!(debug.contains("pg-reader-root-ca.pem"));
     }
 
     #[allow(clippy::panic)]

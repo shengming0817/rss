@@ -46,6 +46,34 @@ pub(crate) enum Command {
         /// Atomically export the proven Release Surface as a portable candidate bundle.
         #[arg(long, value_name = "ABSENT_ABSOLUTE_DIR")]
         export_candidate_bundle: Option<PathBuf>,
+        /// OCI archive for the Core candidate image; required with bundle export.
+        #[arg(
+            long,
+            value_name = "ABSOLUTE_FILE",
+            requires = "export_candidate_bundle"
+        )]
+        profile_image_archive: Option<PathBuf>,
+        /// Immutable OCI manifest digest emitted by the image builder.
+        #[arg(
+            long,
+            value_name = "SHA256_DIGEST",
+            requires = "export_candidate_bundle"
+        )]
+        profile_image_digest: Option<String>,
+        /// OCI archive for the migration-only Core bootstrap image; required with bundle export.
+        #[arg(
+            long,
+            value_name = "ABSOLUTE_FILE",
+            requires = "export_candidate_bundle"
+        )]
+        profile_migration_image_archive: Option<PathBuf>,
+        /// Immutable OCI manifest digest emitted for the migration-only image.
+        #[arg(
+            long,
+            value_name = "SHA256_DIGEST",
+            requires = "export_candidate_bundle"
+        )]
+        profile_migration_image_digest: Option<String>,
     },
     /// Debezium / CDC connector skeleton。
     #[command(subcommand)]
@@ -321,9 +349,37 @@ impl Command {
         match self {
             Self::PackageProof {
                 export_candidate_bundle: Some(output),
+                profile_image_archive,
+                profile_image_digest,
+                profile_migration_image_archive,
+                profile_migration_image_digest,
             } => {
                 if !output.is_absolute() || output.file_name().is_none() {
                     bail!("package-proof --export-candidate-bundle 必须是带目录名的绝对路径");
+                }
+                let Some(archive) = profile_image_archive else {
+                    bail!("candidate bundle export requires --profile-image-archive");
+                };
+                if !archive.is_absolute() || archive.file_name().is_none() {
+                    bail!("--profile-image-archive 必须是绝对文件路径");
+                }
+                let Some(digest) = profile_image_digest else {
+                    bail!("candidate bundle export requires --profile-image-digest");
+                };
+                if !is_sha256_digest(digest) {
+                    bail!("--profile-image-digest 必须是 lowercase sha256 digest");
+                }
+                let Some(archive) = profile_migration_image_archive else {
+                    bail!("candidate bundle export requires --profile-migration-image-archive");
+                };
+                if !archive.is_absolute() || archive.file_name().is_none() {
+                    bail!("--profile-migration-image-archive 必须是绝对文件路径");
+                }
+                let Some(digest) = profile_migration_image_digest else {
+                    bail!("candidate bundle export requires --profile-migration-image-digest");
+                };
+                if !is_sha256_digest(digest) {
+                    bail!("--profile-migration-image-digest 必须是 lowercase sha256 digest");
                 }
                 Ok(())
             }
@@ -370,6 +426,14 @@ impl Command {
             _ => Ok(()),
         }
     }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 /// 进程入口：clap 语法错误与 argv validate 均固定 exit；其余仍返回 Result。
@@ -480,6 +544,10 @@ mod tests {
             parse(&["package-proof"])?,
             Command::PackageProof {
                 export_candidate_bundle: None,
+                profile_image_archive: None,
+                profile_image_digest: None,
+                profile_migration_image_archive: None,
+                profile_migration_image_digest: None,
             }
         );
         assert_eq!(
@@ -487,9 +555,27 @@ mod tests {
                 "package-proof",
                 "--export-candidate-bundle",
                 "/tmp/rss-candidate-bundle",
+                "--profile-image-archive",
+                "/tmp/server.oci",
+                "--profile-image-digest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--profile-migration-image-archive",
+                "/tmp/rss-operator.oci",
+                "--profile-migration-image-digest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ])?,
             Command::PackageProof {
                 export_candidate_bundle: Some("/tmp/rss-candidate-bundle".into()),
+                profile_image_archive: Some("/tmp/server.oci".into()),
+                profile_image_digest: Some(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                ),
+                profile_migration_image_archive: Some("/tmp/rss-operator.oci".into()),
+                profile_migration_image_digest: Some(
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                ),
             }
         );
         assert!(parse(&["package-proof", "--export-candidate-bundle", "relative",]).is_err());

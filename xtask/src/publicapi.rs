@@ -3226,10 +3226,9 @@ mod tests {
                     "package": "alpha-release",
                     "version-line": "0.1",
                     "public-api-owner": "standalone-component",
-                    "api-stability": "experimental",
-                    "profiles": []
+                    "api-stability": "experimental"
                 }],
-                "profile-artifacts": []
+                "official-profile-artifacts": []
             }
         });
         Ok(WorkspaceFacts::from_metadata_json(
@@ -3293,10 +3292,10 @@ mod tests {
         metadata["metadata"] = json!({
             "release-surface": {
                 "packages": [
-                    {"package":"alpha-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
-                    {"package":"beta-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
+                    {"package":"alpha-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable"},
+                    {"package":"beta-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable"}
                 ],
-                "profile-artifacts": []
+                "official-profile-artifacts": []
             }
         });
         Ok(WorkspaceFacts::from_metadata_json(

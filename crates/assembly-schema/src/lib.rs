@@ -24,12 +24,13 @@ pub use provider::{
 pub use runtime_plan::{
     DomainLifecyclePhase, DomainPlan, ListenerAuth, ListenerPlan, ParsedRuntimePlan, PlacementPlan,
     ProviderPlan, RuntimePlan, RuntimePlanError, RuntimePlanErrorStage, RuntimePlanFingerprint,
-    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV3Input, WorkflowPlan,
-    validate_runtime_plan_json_slice,
+    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanKind, RuntimePlanV4Input,
+    WorkflowPlan, validate_runtime_plan_json_slice,
 };
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -318,6 +319,157 @@ impl SagaCapabilityRequirement {
     }
 }
 
+/// Official profile identities admitted by the runtime assembly owner.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum OfficialAssemblyProfile {
+    Core,
+}
+
+impl OfficialAssemblyProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub enum OfficialProfileWorker {
+    #[serde(rename = "assemblies.runtime.src.phase.infra.01")]
+    RedisReadiness,
+    #[serde(rename = "assemblies.runtime.src.phase.maintenance.01")]
+    AuthGrantSweeper,
+    #[serde(rename = "assemblies.runtime.src.provider_output.01")]
+    PgRuntimeMonitor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Closed runtime admission lanes for official-profile workers.
+pub enum OfficialProfileWorkerLane {
+    /// A worker that only observes runtime state.
+    Observational,
+    /// A worker that may mutate durable state.
+    Writes,
+}
+
+impl OfficialProfileWorker {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PgRuntimeMonitor => "assemblies.runtime.src.provider_output.01",
+            Self::RedisReadiness => "assemblies.runtime.src.phase.infra.01",
+            Self::AuthGrantSweeper => "assemblies.runtime.src.phase.maintenance.01",
+        }
+    }
+
+    /// Return the manifest-owned admission lane for this stable worker ID.
+    pub const fn lane(self) -> OfficialProfileWorkerLane {
+        match self {
+            Self::PgRuntimeMonitor | Self::RedisReadiness => {
+                OfficialProfileWorkerLane::Observational
+            }
+            Self::AuthGrantSweeper => OfficialProfileWorkerLane::Writes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfficialProfileProbe {
+    AuthGrantSweeper,
+    RedisReady,
+    RlsReady,
+    RssAccessTokenJwksReady,
+}
+
+impl OfficialProfileProbe {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthGrantSweeper => "auth_grant_sweeper",
+            Self::RedisReady => "redis_ready",
+            Self::RlsReady => "rls_ready",
+            Self::RssAccessTokenJwksReady => "rss_access_token_jwks_ready",
+        }
+    }
+}
+
+/// Closed required set for one official profile. The forbidden set is the canonical catalog
+/// complement, so a new assembly capability is forbidden until this owner explicitly selects it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OfficialProfileClosure {
+    profile: OfficialAssemblyProfile,
+    required_listeners: Vec<AssemblyListenerKind>,
+    required_routes: Vec<String>,
+    required_providers: Vec<ProviderRole>,
+    required_workers: Vec<OfficialProfileWorker>,
+    required_probes: Vec<OfficialProfileProbe>,
+}
+
+impl OfficialProfileClosure {
+    pub const fn profile(&self) -> OfficialAssemblyProfile {
+        self.profile
+    }
+
+    pub fn required_listeners(&self) -> &[AssemblyListenerKind] {
+        &self.required_listeners
+    }
+
+    pub fn required_routes(&self) -> &[String] {
+        &self.required_routes
+    }
+
+    pub fn required_providers(&self) -> &[ProviderRole] {
+        &self.required_providers
+    }
+
+    pub fn required_workers(&self) -> Vec<String> {
+        self.required_workers
+            .iter()
+            .map(|worker| worker.as_str().to_owned())
+            .collect()
+    }
+
+    /// Return the typed worker specs used by stable-ID code generation.
+    pub fn required_worker_specs(&self) -> &[OfficialProfileWorker] {
+        &self.required_workers
+    }
+
+    pub fn required_probes(&self) -> Vec<String> {
+        self.required_probes
+            .iter()
+            .map(|probe| probe.as_str().to_owned())
+            .collect()
+    }
+
+    /// Return the typed probe specs used by stable-ID code generation.
+    pub fn required_probe_specs(&self) -> &[OfficialProfileProbe] {
+        &self.required_probes
+    }
+
+    pub fn forbidden_providers<'a>(
+        &'a self,
+        catalog: &'a [DiportProvider],
+    ) -> impl Iterator<Item = ProviderRole> + 'a {
+        catalog
+            .iter()
+            .map(|provider| provider.id)
+            .filter(|provider| !self.required_providers.contains(provider))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OfficialProfileDigestError {
+    #[error("official profile is not declared by the assembly")]
+    MissingProfile,
+    #[error("official profile canonical JSON failed")]
+    CanonicalJson(#[source] serde_json::Error),
+    #[error("computed official profile digest is invalid")]
+    ComputedDigest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssemblyManifest {
@@ -333,6 +485,8 @@ pub struct AssemblyManifest {
     pub framework_contracts: Vec<FrameworkContractMount>,
     #[serde(rename = "workflowActivations")]
     pub workflow_activations: Vec<WorkflowActivation>,
+    #[serde(default, rename = "officialProfiles")]
+    pub official_profiles: Vec<OfficialProfileClosure>,
     pub listeners: Vec<AssemblyListener>,
     #[serde(rename = "diportProviders")]
     pub diport_providers: Vec<DiportProvider>,
@@ -377,6 +531,108 @@ impl AssemblyManifest {
             "workflowActivations.id",
             &mut errors,
         );
+        ensure_unique(
+            self.official_profiles.iter().map(|profile| profile.profile),
+            "officialProfiles.profile",
+            &mut errors,
+        );
+        if self.name == "runtime"
+            && self.profile == AssemblyProfile::Production
+            && self.official_profiles.is_empty()
+        {
+            errors.push(ManifestValidationError::Empty {
+                field: "officialProfiles",
+            });
+        }
+        if self.name != "runtime" && !self.official_profiles.is_empty() {
+            errors.push(ManifestValidationError::Invalid {
+                field: "officialProfiles",
+            });
+        }
+        let declared_listeners = self
+            .listeners
+            .iter()
+            .map(|listener| listener.kind)
+            .collect::<BTreeSet<_>>();
+        let declared_providers = self
+            .diport_providers
+            .iter()
+            .map(|provider| provider.id)
+            .collect::<BTreeSet<_>>();
+        for profile in &self.official_profiles {
+            let field = "officialProfiles.requiredRoutes";
+            ensure_non_empty_slice(&profile.required_routes, field, &mut errors);
+            ensure_unique(
+                profile.required_routes.iter().map(String::as_str),
+                field,
+                &mut errors,
+            );
+            if profile
+                .required_routes
+                .iter()
+                .any(|value| !valid_profile_component_id(value))
+            {
+                errors.push(ManifestValidationError::Invalid { field });
+            }
+            ensure_non_empty_slice(
+                &profile.required_workers,
+                "officialProfiles.requiredWorkers",
+                &mut errors,
+            );
+            ensure_unique(
+                profile.required_workers.iter().copied(),
+                "officialProfiles.requiredWorkers",
+                &mut errors,
+            );
+            ensure_non_empty_slice(
+                &profile.required_probes,
+                "officialProfiles.requiredProbes",
+                &mut errors,
+            );
+            ensure_unique(
+                profile.required_probes.iter().copied(),
+                "officialProfiles.requiredProbes",
+                &mut errors,
+            );
+            ensure_non_empty_slice(
+                &profile.required_listeners,
+                "officialProfiles.requiredListeners",
+                &mut errors,
+            );
+            ensure_unique(
+                profile.required_listeners.iter().copied(),
+                "officialProfiles.requiredListeners",
+                &mut errors,
+            );
+            if profile
+                .required_listeners
+                .iter()
+                .any(|listener| !declared_listeners.contains(listener))
+            {
+                errors.push(ManifestValidationError::Invalid {
+                    field: "officialProfiles.requiredListeners",
+                });
+            }
+            ensure_non_empty_slice(
+                &profile.required_providers,
+                "officialProfiles.requiredProviders",
+                &mut errors,
+            );
+            ensure_unique(
+                profile.required_providers.iter().copied(),
+                "officialProfiles.requiredProviders",
+                &mut errors,
+            );
+            if profile
+                .required_providers
+                .iter()
+                .any(|provider| !declared_providers.contains(provider))
+            {
+                errors.push(ManifestValidationError::Invalid {
+                    field: "officialProfiles.requiredProviders",
+                });
+            }
+        }
         for activation in &self.workflow_activations {
             ensure_non_empty_string(activation.id(), "workflowActivations.id", &mut errors);
             ensure_non_empty_string(
@@ -529,6 +785,7 @@ impl AssemblyManifest {
             typed_domain_inputs,
             framework_contracts,
             mut workflow_activations,
+            mut official_profiles,
             listeners,
             mut diport_providers,
         } = self;
@@ -540,6 +797,14 @@ impl AssemblyManifest {
         }
         diport_providers.sort_by(|left, right| provider_key(left).cmp(&provider_key(right)));
         workflow_activations.sort_by(|left, right| left.id().cmp(right.id()));
+        for profile in &mut official_profiles {
+            profile.required_listeners.sort();
+            profile.required_routes.sort();
+            profile.required_providers.sort();
+            profile.required_workers.sort();
+            profile.required_probes.sort();
+        }
+        official_profiles.sort_by_key(|profile| profile.profile);
 
         let value = CanonicalAssemblyManifestV2Value {
             schema_version,
@@ -550,6 +815,7 @@ impl AssemblyManifest {
             typed_domain_inputs,
             framework_contracts,
             workflow_activations,
+            official_profiles,
             listeners,
             diport_providers,
         };
@@ -586,6 +852,8 @@ struct CanonicalAssemblyManifestV2Value {
     typed_domain_inputs: bool,
     framework_contracts: Vec<FrameworkContractMount>,
     workflow_activations: Vec<WorkflowActivation>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    official_profiles: Vec<OfficialProfileClosure>,
     listeners: Vec<AssemblyListener>,
     diport_providers: Vec<DiportProvider>,
 }
@@ -621,6 +889,37 @@ impl CanonicalAssemblyManifestV2 {
 
     pub fn workflow_activations(&self) -> &[WorkflowActivation] {
         &self.value.workflow_activations
+    }
+
+    pub fn official_profiles(&self) -> &[OfficialProfileClosure] {
+        &self.value.official_profiles
+    }
+
+    pub fn official_profile(
+        &self,
+        profile: OfficialAssemblyProfile,
+    ) -> Option<&OfficialProfileClosure> {
+        self.value
+            .official_profiles
+            .iter()
+            .find(|candidate| candidate.profile == profile)
+    }
+
+    pub fn official_profile_config_digest(
+        &self,
+        profile: OfficialAssemblyProfile,
+    ) -> Result<vocab::CanonicalSha256Digest, OfficialProfileDigestError> {
+        let closure = self
+            .official_profile(profile)
+            .ok_or(OfficialProfileDigestError::MissingProfile)?;
+        let bytes = serde_json_canonicalizer::to_vec(&(
+            "rss-official-profile-config-v1",
+            self.manifest_digest.as_str(),
+            closure,
+        ))
+        .map_err(OfficialProfileDigestError::CanonicalJson)?;
+        vocab::CanonicalSha256Digest::parse(format!("sha256:{:x}", Sha256::digest(bytes)))
+            .map_err(|_| OfficialProfileDigestError::ComputedDigest)
     }
 
     pub fn listeners(&self) -> &[AssemblyListener] {
@@ -932,6 +1231,14 @@ fn provider_key(provider: &DiportProvider) -> (&str, &str, &str, &str, &str) {
     )
 }
 
+fn valid_profile_component_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._:-".contains(&byte)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -998,11 +1305,98 @@ outputs = ["probes", "resources"]
     }
 
     #[test]
+    fn official_core_profile_is_closed_canonical_and_secret_free() {
+        let profile = r#"
+
+[[officialProfiles]]
+profile = "core"
+requiredListeners = ["primary"]
+requiredRoutes = ["audit.list-tenant-entries", "runtime.inventory"]
+requiredProviders = ["listener-pdp"]
+requiredWorkers = ["assemblies.runtime.src.provider_output.01"]
+requiredProbes = ["rls_ready"]
+"#;
+        let source = format!("{MINIMAL}{profile}");
+        let manifest = AssemblyManifest::from_toml_str(&source)
+            .expect("closed official profile parses")
+            .canonicalize_v2()
+            .expect("official profile canonicalizes");
+        let core = manifest
+            .official_profile(OfficialAssemblyProfile::Core)
+            .expect("core profile");
+        assert_eq!(core.required_listeners(), [AssemblyListenerKind::Primary]);
+        assert_eq!(core.required_providers(), [ProviderRole::ListenerPdp]);
+        assert_eq!(
+            core.required_routes(),
+            ["audit.list-tenant-entries", "runtime.inventory"]
+        );
+        let digest = manifest
+            .official_profile_config_digest(OfficialAssemblyProfile::Core)
+            .expect("core config digest");
+        assert!(digest.as_str().starts_with("sha256:"));
+
+        let reordered = source.replace(
+            "[\"audit.list-tenant-entries\", \"runtime.inventory\"]",
+            "[\"runtime.inventory\", \"audit.list-tenant-entries\"]",
+        );
+        let reordered = AssemblyManifest::from_toml_str(&reordered)
+            .expect("reordered profile parses")
+            .canonicalize_v2()
+            .expect("reordered profile canonicalizes");
+        assert_eq!(
+            digest,
+            reordered
+                .official_profile_config_digest(OfficialAssemblyProfile::Core)
+                .expect("reordered digest")
+        );
+
+        let catalog_drift = format!(
+            "{source}\n{}",
+            r#"
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
+purpose = "catalog-drift-sentinel"
+outputs = []
+"#
+        );
+        let catalog_drift = AssemblyManifest::from_toml_str(&catalog_drift)
+            .expect("catalog drift parses")
+            .canonicalize_v2()
+            .expect("catalog drift canonicalizes");
+        assert_ne!(
+            digest,
+            catalog_drift
+                .official_profile_config_digest(OfficialAssemblyProfile::Core)
+                .expect("catalog drift digest")
+        );
+
+        assert!(
+            AssemblyManifest::from_toml_str(&source.replace(
+                "requiredProbes =",
+                "secretValue = \"bait\"\nrequiredProbes ="
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn listenerless_shape_is_closed_to_demo_identity_library_assembly() {
-        let pilot = AssemblyManifest::from_toml_str(include_str!(
+        let mut pilot = AssemblyManifest::from_toml_str(include_str!(
             "../../../assemblies/deviceidentity/assembly.toml"
         ))
         .expect("listenerless pilot parses");
+        pilot.profile = AssemblyProfile::Demo;
+        pilot.topology = AssemblyTopology::Demo;
+        pilot.listeners.clear();
         assert!(pilot.listeners.is_empty());
         assert!(pilot.basic_validation_errors().is_empty());
         pilot

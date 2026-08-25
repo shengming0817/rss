@@ -533,7 +533,7 @@ async fn mtls_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_snapshot;
+    use crate::config::generic_test_snapshot;
 
     use primitives::{HealthCheck, HealthStatus, ProbeName};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -715,18 +715,18 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn server_request_budget_is_required_non_zero_and_snapshot_backed() {
-        let missing = test_snapshot(&[]).expect("capture empty config");
+        let missing = generic_test_snapshot(&[]).expect("capture empty config");
         let error = server_request_budget(missing.view()).expect_err("budget is mandatory");
         assert!(error.to_string().contains(HTTP_SERVER_REQUEST_BUDGET_ENV));
 
         for raw in ["0", "not-a-number"] {
-            let snapshot = test_snapshot(&[(HTTP_SERVER_REQUEST_BUDGET_ENV, raw)])
+            let snapshot = generic_test_snapshot(&[(HTTP_SERVER_REQUEST_BUDGET_ENV, raw)])
                 .expect("capture invalid budget");
             let error = server_request_budget(snapshot.view()).expect_err("invalid budget");
             assert!(error.to_string().contains(HTTP_SERVER_REQUEST_BUDGET_ENV));
         }
 
-        let snapshot = test_snapshot(&[(HTTP_SERVER_REQUEST_BUDGET_ENV, "2500")])
+        let snapshot = generic_test_snapshot(&[(HTTP_SERVER_REQUEST_BUDGET_ENV, "2500")])
             .expect("capture valid budget");
         assert_eq!(
             server_request_budget(snapshot.view())

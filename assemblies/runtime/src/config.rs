@@ -26,6 +26,7 @@ const PROJECTION_OPERATOR_SECRET_BUNDLE_PATH: &str =
     "/var/run/rss/secrets/projection-operator-secret-bundle";
 pub(crate) const BUILD_SOURCE_REVISION_ENV: &str = "RSS_BUILD_SOURCE_REVISION";
 pub(crate) const DECLARED_IMAGE_DIGEST_ENV: &str = "RSS_DECLARED_IMAGE_DIGEST";
+pub(crate) const RUNTIME_PLAN_KIND_ENV: &str = "RSS_RUNTIME_PLAN_KIND";
 pub(crate) const BUNDLE_PG_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_PASSWORD";
 pub(crate) const BUNDLE_PG_READ_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_READ_PASSWORD";
 pub(crate) const BUNDLE_PG_AUDIT_ADMIN_PASSWORD: &str =
@@ -100,6 +101,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_HEALTH_LISTEN_ADDR",
     "RSS_HTTP_SERVER_REQUEST_BUDGET_MS",
     "RSS_RUNTIME_INSTANCE_ID",
+    RUNTIME_PLAN_KIND_ENV,
     "RSS_DR_REQUIRED_ADMISSION_EPOCH_ID",
     runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV,
     runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV,
@@ -553,15 +555,29 @@ impl RuntimeConfigSource for TestConfigSource {
     }
 }
 
-/// Capture a test generation from explicit UTF-8 values without duplicating source fakes.
+/// Capture an explicitly generic test generation from UTF-8 values.
 ///
 /// Read-count and non-Unicode tests keep their purpose-built sources in `config_tests`.
 #[cfg(test)]
-pub(crate) fn test_snapshot(
+pub(crate) fn generic_test_snapshot(
     entries: &[(&str, &str)],
 ) -> Result<RuntimeConfigSnapshot, RuntimeConfigCaptureError> {
+    let mut values = BTreeMap::from([(RUNTIME_PLAN_KIND_ENV.to_owned(), "generic".to_owned())]);
+    values.extend(
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+    );
     // Test fixtures may explicitly seed legacy secret slots; production still rejects ambient
     // secret environment channels via capture_process_snapshot + ServingSecretBundle.
+    RuntimeConfigSnapshot::capture_test(TestConfigSource(values))
+}
+
+/// Capture a deliberately unbound generation for mandatory-plan-kind rejection tests only.
+#[cfg(test)]
+pub(crate) fn unbound_test_snapshot(
+    entries: &[(&str, &str)],
+) -> Result<RuntimeConfigSnapshot, RuntimeConfigCaptureError> {
     RuntimeConfigSnapshot::capture_test(TestConfigSource(
         entries
             .iter()
@@ -623,6 +639,35 @@ impl<'a> SnapshotConfig<'a> {
             .values
             .get(name)
             .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
+    }
+
+    /// Return the first configured capability namespace that Core forbids. This inspects only the
+    /// closed captured catalog and never reads ambient process state or secret values.
+    pub(crate) fn core_forbidden_key(self) -> Option<&'a str> {
+        for key in [PRIMARY_TOKEN_PROFILE_ENV, ADMIN_TOKEN_PROFILE_ENV] {
+            if self.value(key) != Some("rss-access") {
+                return Some(key);
+            }
+        }
+        self.snapshot.values.iter().find_map(|(key, value)| {
+            let configured = !matches!(value, CapturedConfigValue::Missing);
+            let name = key.as_str();
+            let eventing = name.starts_with("RSS_AMQP_")
+                || name.contains("_AMQP_")
+                || name.starts_with("RSS_DLX_")
+                || name.starts_with("RSS_PG_DLX_")
+                || name.starts_with("RSS_INTERNAL_BUNDLE_PG_DLX_")
+                || name.starts_with("RSS_OUTBOX_")
+                || name.starts_with("RSS_INBOX_")
+                || name.starts_with("RSS_RELAY_")
+                || name.starts_with("RSS_S3_")
+                || name.starts_with("RSS_VAULT_")
+                || name.starts_with("RSS_DR_")
+                || name.starts_with("RSS_FEDERATED_ACCESS_TOKEN_")
+                || name.starts_with("RSS_SERVICE_TOKEN_")
+                || name.contains("DOMAIN_TRANSPORT_");
+            (configured && eventing).then_some(name)
+        })
     }
 }
 
@@ -2017,14 +2062,14 @@ mod build_metadata_tests {
     #[allow(clippy::expect_used)]
     #[test]
     fn build_metadata_capture_is_optional_but_atomic() {
-        let empty = test_snapshot(&[]).expect("empty snapshot");
+        let empty = generic_test_snapshot(&[]).expect("empty snapshot");
         assert!(
             build_metadata(empty.view())
                 .expect("optional metadata")
                 .is_none()
         );
 
-        let complete = test_snapshot(&[
+        let complete = generic_test_snapshot(&[
             (
                 BUILD_SOURCE_REVISION_ENV,
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2047,7 +2092,8 @@ mod build_metadata_tests {
                 format!("sha256:{}", "b".repeat(64)),
             ),
         ] {
-            let partial = test_snapshot(&[(key, value.as_str())]).expect("partial snapshot");
+            let partial =
+                generic_test_snapshot(&[(key, value.as_str())]).expect("partial snapshot");
             assert!(build_metadata(partial.view()).is_err());
         }
     }

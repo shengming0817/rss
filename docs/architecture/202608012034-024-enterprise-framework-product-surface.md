@@ -209,6 +209,19 @@ maturity 或 conformance receipt，且必须汇入既有 assembly governance/com
 
 ### 官方 profile
 
+#### 2026-08-25 #2165 amendment：Core candidate first-green cutover
+
+当前可执行 official-profile protocol 一次性收敛为唯一闭值 `core`。`assemblies/runtime/assembly.toml`
+是 profile closure 唯一 owner；AssemblyLock v3、RuntimePlan v4、protected inventory v3 与 strict
+candidate-bundle v2 从同一 manifest 投影。`eventing` 与 `device-security` 仍保留为产品路线和后续独立接纳
+坐标，但不再是当前 wire enum、candidate artifact 或 runtime official-plan 的可表达值；未来接纳必须再次做
+显式 breaking schema/type cutover，不能借 alias、unknown string 或 generic plan 进入 official proof。
+
+Core candidate 不可携带 activation/T3；#2127 继续拥有后续 activation。#2165 的 companion first-green
+仅消费公开 bundle schema 和两份 digest-bound OCI（serving 与 migration-only bootstrap），在真实 PostgreSQL、
+Redis 和 HTTP issuer 上验证 exact inventory、授权/拒绝、Audit LocalTx、RLS 与 Eventing config fail-closed。
+它不创建第二 receipt registry，也不把 migration capability 放进 serving image。
+
 首批官方 profile 按依赖关系形成闭包：
 
 1. **core**：runtime lifecycle、HTTP、PostgreSQL LocalTx、external OIDC/verified Principal、TenantContext/RLS/authz、

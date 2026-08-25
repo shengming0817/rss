@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyProfile, AssemblyTopology,
     CanonicalAssemblyManifestV2, DomainLifecyclePhase, ListenerAuth, RepositoryAssemblySnapshotV2,
-    RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV4Input,
 };
 
 const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] =
@@ -25,7 +25,7 @@ impl IdentityAuditPlan {
         let manifest = repository.manifest();
         let lock = repository.lock();
         validate_manifest(manifest, lock.identity())?;
-        let typed = TypedRuntimePlan::compile_v3(manifest, lock, compiler_input(manifest)?)
+        let typed = TypedRuntimePlan::compile_v4(manifest, lock, compiler_input(manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
         let workflow_runtime = eventexec::WorkflowActivationPlan::select(&typed)
@@ -179,8 +179,8 @@ fn validate_manifest(
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV3Input> {
-    let mut input = RuntimePlanV3Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV4Input> {
+    let mut input = RuntimePlanV4Input::generic_from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {
@@ -207,7 +207,7 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<Runt
 }
 
 fn validate_typed(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
-    anyhow::ensure!(plan.schema_version() == 3, "unexpected RuntimePlan schema");
+    anyhow::ensure!(plan.schema_version() == 4, "unexpected RuntimePlan schema");
     let listeners = plan.listener_plans();
     anyhow::ensure!(
         listeners.len() == 3

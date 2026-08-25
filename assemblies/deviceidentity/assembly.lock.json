@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "identity": {
     "name": "deviceidentity",
     "profile": "production"
@@ -9,5 +9,5 @@
     "generated": "sha256:bebfa2e06281bb060e25b918ea6964451dff2c89c1d79b075ff77c9809a9f617",
     "contracts": "sha256:9ee6f3fb1d7e92ad25ad36157b1478cc40d9905a83f1ac7be78938b4d613c5fa"
   },
-  "fingerprint": "sha256:b9040d180a60019171b1d87e3e150de3a7ac0022feccf345026a99900f60d810"
+  "fingerprint": "sha256:f83a9962e1e31c6610e848add419adfbb7677cd82759fc66c22bf73215c69fe2"
 }

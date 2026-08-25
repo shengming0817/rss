@@ -408,6 +408,7 @@ impl PlacementObservation {
 
 pub struct RuntimeInventorySeed {
     identity: observation::RuntimeInventoryIdentity,
+    official_profile: Option<observation::RuntimeInventoryOfficialProfile>,
     build_metadata: Option<BuildMetadata>,
     domains: Vec<AssemblyDomain>,
     activated_workflows: Vec<ActivatedWorkflowObservation>,
@@ -499,6 +500,7 @@ impl RuntimeInventorySeed {
 
         Ok(Self {
             identity: observation::RuntimeInventoryIdentity::from_runtime_plan(runtime),
+            official_profile: None,
             build_metadata: None,
             domains: runtime
                 .domain_plans()
@@ -523,6 +525,16 @@ impl RuntimeInventorySeed {
     /// Attach launch-supplied build metadata without coupling it to runtime/deployment identity.
     pub fn with_build_metadata(mut self, build_metadata: BuildMetadata) -> Self {
         self.build_metadata = Some(build_metadata);
+        self
+    }
+
+    /// Attach the manifest-derived official closure; the live reader joins it to RuntimePlan
+    /// profile/config identity before exposing an observation.
+    pub fn with_official_profile(
+        mut self,
+        profile: observation::RuntimeInventoryOfficialProfile,
+    ) -> Self {
+        self.official_profile = Some(profile);
         self
     }
 }
@@ -701,7 +713,7 @@ fn read_parts(
             placement
         })
         .collect();
-    Ok(observation::RuntimeInventoryParts::new(
+    let parts = observation::RuntimeInventoryParts::new(
         state.seed.identity.clone(),
         state.seed.build_metadata.as_ref().map(|metadata| {
             observation::RuntimeInventoryBuildMetadata::new(
@@ -719,7 +731,11 @@ fn read_parts(
         listeners.iter().map(listener_observation).collect(),
         provider_posture,
         placements.iter().map(placement_observation).collect(),
-    ))
+    );
+    Ok(match state.seed.official_profile.clone() {
+        Some(profile) => parts.with_official_profile(profile),
+        None => parts,
+    })
 }
 
 fn provider_state(

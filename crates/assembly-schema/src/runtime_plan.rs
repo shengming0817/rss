@@ -1,11 +1,11 @@
-//! Canonical RuntimePlan v3 protocol.
+//! Canonical RuntimePlan v4 protocol.
 //!
-//! INVARIANT: RUNTIME-PLAN-CONSTRUCTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private plan fields plus the validated compile_v3 funnel" } — callers can describe candidate facts, but only a manifest/lock-bound compiler or the strict reader can mint a RuntimePlan.
+//! INVARIANT: RUNTIME-PLAN-CONSTRUCTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private plan fields plus the validated compile_v4 funnel" } — callers can describe candidate facts, but only a manifest/lock-bound compiler or the strict reader can mint a RuntimePlan.
 
 use crate::{
     AssemblyDomain, AssemblyFingerprint, AssemblyListenerKind, CanonicalAssemblyManifestV2,
-    LifecycleChannel, ProviderActivation, ProviderConstructor, ProviderLifecycle, ProviderRole,
-    RepositoryVerifiedAssemblyLock, WorkflowActivation,
+    LifecycleChannel, OfficialAssemblyProfile, ProviderActivation, ProviderConstructor,
+    ProviderLifecycle, ProviderRole, RepositoryVerifiedAssemblyLock, WorkflowActivation,
 };
 use schemars::JsonSchema;
 use schemars::schema::{RootSchema, Schema};
@@ -15,19 +15,65 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use vocab::CanonicalSha256Digest;
 
-const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v3";
-const SCHEMA_VERSION: u32 = 3;
+const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v4";
+const SCHEMA_VERSION: u32 = 4;
 const FIXED_DOMAIN_LIFECYCLE: [DomainLifecyclePhase; 3] = [
     DomainLifecyclePhase::Construct,
     DomainLifecyclePhase::Ready,
     DomainLifecyclePhase::Shutdown,
 ];
 
-/// Validated, closed RuntimePlan v3 value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum RuntimePlanKindValue {
+    Generic,
+    Official {
+        profile: OfficialAssemblyProfile,
+        #[schemars(with = "String", regex(pattern = "^sha256:[0-9a-f]{64}$"))]
+        config_digest: CanonicalSha256Digest,
+    },
+}
+
+/// Mandatory runtime composition kind. Private representation prevents forging an official
+/// profile binding without the manifest-derived configuration digest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct RuntimePlanKind(RuntimePlanKindValue);
+
+impl RuntimePlanKind {
+    /// Select the explicit generic-runtime semantics.
+    pub const fn generic() -> Self {
+        Self(RuntimePlanKindValue::Generic)
+    }
+
+    fn official(profile: OfficialAssemblyProfile, config_digest: CanonicalSha256Digest) -> Self {
+        Self(RuntimePlanKindValue::Official {
+            profile,
+            config_digest,
+        })
+    }
+
+    pub const fn official_profile(&self) -> Option<OfficialAssemblyProfile> {
+        match self.0 {
+            RuntimePlanKindValue::Generic => None,
+            RuntimePlanKindValue::Official { profile, .. } => Some(profile),
+        }
+    }
+
+    pub const fn config_digest(&self) -> Option<&CanonicalSha256Digest> {
+        match &self.0 {
+            RuntimePlanKindValue::Generic => None,
+            RuntimePlanKindValue::Official { config_digest, .. } => Some(config_digest),
+        }
+    }
+}
+
+/// Validated, closed RuntimePlan v4 value.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimePlan {
     schema_version: u32,
+    plan_kind: RuntimePlanKind,
     assembly_fingerprint: AssemblyFingerprint,
     runtime_plan_fingerprint: RuntimePlanFingerprint,
     provider_plans: Vec<ProviderPlan>,
@@ -61,14 +107,15 @@ impl JsonSchema for RuntimePlan {
 
 impl RuntimePlan {
     /// Validate candidate facts against the exact canonical manifest and a provenance proof.
-    pub fn compile_v3(
+    pub fn compile_v4(
         manifest: &CanonicalAssemblyManifestV2,
         lock: &RepositoryVerifiedAssemblyLock,
-        input: RuntimePlanV3Input,
+        input: RuntimePlanV4Input,
     ) -> Result<Self, RuntimePlanError> {
         validate_manifest_lock(manifest, lock)?;
         validate_candidates(manifest, lock, &input)?;
         Self::from_parts(
+            input.plan_kind,
             lock.fingerprint().clone(),
             input.provider_plans,
             input.listener_plans,
@@ -79,6 +126,7 @@ impl RuntimePlan {
     }
 
     fn from_parts(
+        plan_kind: RuntimePlanKind,
         assembly_fingerprint: AssemblyFingerprint,
         provider_plans: Vec<ProviderPlan>,
         listener_plans: Vec<ListenerPlan>,
@@ -94,6 +142,7 @@ impl RuntimePlan {
             &workflow_plans,
         )?;
         let runtime_plan_fingerprint = fingerprint_for(
+            &plan_kind,
             &assembly_fingerprint,
             &provider_plans,
             &listener_plans,
@@ -103,6 +152,7 @@ impl RuntimePlan {
         )?;
         Ok(Self {
             schema_version: SCHEMA_VERSION,
+            plan_kind,
             assembly_fingerprint,
             runtime_plan_fingerprint,
             provider_plans,
@@ -119,6 +169,10 @@ impl RuntimePlan {
 
     pub const fn assembly_fingerprint(&self) -> &AssemblyFingerprint {
         &self.assembly_fingerprint
+    }
+
+    pub const fn plan_kind(&self) -> &RuntimePlanKind {
+        &self.plan_kind
     }
 
     pub const fn runtime_plan_fingerprint(&self) -> &RuntimePlanFingerprint {
@@ -149,6 +203,7 @@ impl RuntimePlan {
 impl fmt::Debug for RuntimePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuntimePlan")
+            .field("plan_kind", &self.plan_kind)
             .field("assembly_fingerprint", &self.assembly_fingerprint.as_str())
             .field(
                 "runtime_plan_fingerprint",
@@ -207,6 +262,7 @@ impl ParsedRuntimePlan {
         }
 
         let RuntimePlan {
+            plan_kind,
             runtime_plan_fingerprint: expected_fingerprint,
             provider_plans,
             listener_plans,
@@ -215,10 +271,11 @@ impl ParsedRuntimePlan {
             workflow_plans,
             ..
         } = candidate;
-        let plan = RuntimePlan::compile_v3(
+        let plan = RuntimePlan::compile_v4(
             manifest,
             lock,
-            RuntimePlanV3Input {
+            RuntimePlanV4Input {
+                plan_kind,
                 provider_plans,
                 listener_plans,
                 domain_plans,
@@ -303,6 +360,7 @@ fn parse_unbound_runtime_plan(bytes: &[u8]) -> Result<RuntimePlan, RuntimePlanEr
     }
     let expected_fingerprint = wire.runtime_plan_fingerprint;
     let plan = RuntimePlan::from_parts(
+        wire.plan_kind,
         AssemblyFingerprint::from_validated(wire.assembly_fingerprint),
         wire.provider_plans.into_iter().map(Into::into).collect(),
         wire.listener_plans.into_iter().map(Into::into).collect(),
@@ -318,12 +376,12 @@ fn parse_unbound_runtime_plan(bytes: &[u8]) -> Result<RuntimePlan, RuntimePlanEr
     Ok(plan)
 }
 
-/// Candidate carrier consumed by [`RuntimePlan::compile_v3`].
+/// Candidate carrier consumed by [`RuntimePlan::compile_v4`].
 ///
 /// Its methods deliberately accept duplicate or incomplete declarations so the compiler can
 /// exercise a single fail-closed validation path. It is not serializable.
-#[derive(Default)]
-pub struct RuntimePlanV3Input {
+pub struct RuntimePlanV4Input {
+    plan_kind: RuntimePlanKind,
     provider_plans: Vec<ProviderPlan>,
     listener_plans: Vec<ListenerPlan>,
     domain_plans: Vec<DomainPlan>,
@@ -331,14 +389,21 @@ pub struct RuntimePlanV3Input {
     workflow_plans: Vec<WorkflowPlan>,
 }
 
-impl RuntimePlanV3Input {
-    pub fn new() -> Self {
-        Self::default()
+impl RuntimePlanV4Input {
+    pub fn new(plan_kind: RuntimePlanKind) -> Self {
+        Self {
+            plan_kind,
+            provider_plans: Vec::new(),
+            listener_plans: Vec::new(),
+            domain_plans: Vec::new(),
+            placement_plans: Vec::new(),
+            workflow_plans: Vec::new(),
+        }
     }
 
     /// Seed the only executable provider candidate set from active canonical declarations.
-    pub fn from_manifest(manifest: &CanonicalAssemblyManifestV2) -> Self {
-        let mut input = Self::new();
+    pub fn generic_from_manifest(manifest: &CanonicalAssemblyManifestV2) -> Self {
+        let mut input = Self::new(RuntimePlanKind::generic());
         input.workflow_plans = manifest
             .workflow_activations()
             .iter()
@@ -355,6 +420,38 @@ impl RuntimePlanV3Input {
             input.provider(provider.id, provider.provider, provider.outputs.clone());
         }
         input
+    }
+
+    pub fn official_from_manifest(
+        manifest: &CanonicalAssemblyManifestV2,
+        profile: OfficialAssemblyProfile,
+    ) -> Result<Self, RuntimePlanError> {
+        let closure = manifest.official_profile(profile).ok_or_else(|| {
+            RuntimePlanError::new(RuntimePlanErrorKind::DeclarationMismatch(
+                "planKind.profile",
+            ))
+        })?;
+        let digest = manifest
+            .official_profile_config_digest(profile)
+            .map_err(|_| {
+                RuntimePlanError::new(RuntimePlanErrorKind::InvalidDigest("planKind.configDigest"))
+            })?;
+        let mut input = Self::new(RuntimePlanKind::official(profile, digest));
+        let required = closure
+            .required_providers()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for provider in manifest.diport_providers().iter().filter(|provider| {
+            provider.lifecycle == ProviderLifecycle::Active && required.contains(&provider.id)
+        }) {
+            input.provider(provider.id, provider.provider, provider.outputs.clone());
+        }
+        Ok(input)
+    }
+
+    pub const fn plan_kind(&self) -> &RuntimePlanKind {
+        &self.plan_kind
     }
 
     pub fn provider(
@@ -740,6 +837,7 @@ fn safe_json_path(path: &serde_path_to_error::Path) -> RuntimePlanJsonPath {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WireRuntimePlan {
     schema_version: u32,
+    plan_kind: RuntimePlanKind,
     assembly_fingerprint: CanonicalSha256Digest,
     runtime_plan_fingerprint: CanonicalSha256Digest,
     provider_plans: Vec<WireProviderPlan>,
@@ -825,6 +923,7 @@ impl From<WirePlacementPlan> for PlacementPlan {
 #[serde(rename_all = "camelCase")]
 struct UnsignedRuntimePlan<'a> {
     schema_version: u32,
+    plan_kind: &'a RuntimePlanKind,
     assembly_fingerprint: &'a AssemblyFingerprint,
     provider_plans: &'a [ProviderPlan],
     listener_plans: &'a [ListenerPlan],
@@ -854,9 +953,32 @@ fn validate_manifest_lock(
 fn validate_candidates(
     manifest: &CanonicalAssemblyManifestV2,
     _lock: &RepositoryVerifiedAssemblyLock,
-    input: &RuntimePlanV3Input,
+    input: &RuntimePlanV4Input,
 ) -> Result<(), RuntimePlanError> {
-    let expected_workflows = manifest.workflow_activations();
+    let official = input.plan_kind.official_profile();
+    let closure = official.and_then(|profile| manifest.official_profile(profile));
+    if official.is_some() && closure.is_none() {
+        return Err(RuntimePlanError::new(
+            RuntimePlanErrorKind::DeclarationMismatch("planKind.profile"),
+        ));
+    }
+    if let Some(profile) = official {
+        let expected = manifest
+            .official_profile_config_digest(profile)
+            .map_err(|_| {
+                RuntimePlanError::new(RuntimePlanErrorKind::InvalidDigest("planKind.configDigest"))
+            })?;
+        if input.plan_kind.config_digest() != Some(&expected) {
+            return Err(RuntimePlanError::new(
+                RuntimePlanErrorKind::DeclarationMismatch("planKind.configDigest"),
+            ));
+        }
+    }
+    let expected_workflows = if official.is_some() {
+        &[][..]
+    } else {
+        manifest.workflow_activations()
+    };
     let actual_workflows = input
         .workflow_plans
         .iter()
@@ -869,7 +991,7 @@ fn validate_candidates(
         ));
     }
 
-    let expected_providers = executable_provider_declarations(manifest);
+    let expected_providers = executable_provider_declarations(manifest, closure);
     let actual_providers = input
         .provider_plans
         .iter()
@@ -890,9 +1012,21 @@ fn validate_candidates(
         ));
     }
 
+    let required_listeners = closure.map(|profile| {
+        profile
+            .required_listeners()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+    });
     let expected_listeners = manifest
         .listeners()
         .iter()
+        .filter(|listener| {
+            required_listeners
+                .as_ref()
+                .is_none_or(|required| required.contains(&listener.kind))
+        })
         .map(|listener| (listener.kind, listener.domains.as_slice()))
         .collect::<BTreeMap<_, _>>();
     let actual_listeners = input
@@ -908,18 +1042,24 @@ fn validate_candidates(
         ));
     }
 
+    let expected_domains = expected_listeners
+        .values()
+        .flat_map(|domains| domains.iter().copied())
+        .collect::<BTreeSet<_>>();
     let actual_domains = input
         .domain_plans
         .iter()
         .map(|plan| plan.id)
         .collect::<Vec<_>>();
-    if actual_domains != manifest.domains() {
+    if actual_domains.iter().copied().collect::<BTreeSet<_>>() != expected_domains
+        || actual_domains.len() != expected_domains.len()
+    {
         return Err(RuntimePlanError::new(
             RuntimePlanErrorKind::DeclarationMismatch("domainPlans"),
         ));
     }
 
-    let mut expected_domains = manifest.domains().to_vec();
+    let mut expected_domains = expected_domains.into_iter().collect::<Vec<_>>();
     expected_domains.sort_by_key(|domain| domain.as_str());
     let actual_placement_domains = input
         .placement_plans
@@ -934,18 +1074,22 @@ fn validate_candidates(
     Ok(())
 }
 
-fn executable_provider_declarations(
-    manifest: &CanonicalAssemblyManifestV2,
+fn executable_provider_declarations<'a>(
+    manifest: &'a CanonicalAssemblyManifestV2,
+    profile: Option<&'a crate::OfficialProfileClosure>,
 ) -> BTreeSet<(
-    &str,
+    &'a str,
     ProviderConstructor,
     ProviderActivation,
-    &[LifecycleChannel],
+    &'a [LifecycleChannel],
 )> {
     manifest
         .diport_providers()
         .iter()
         .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+        .filter(|provider| {
+            profile.is_none_or(|profile| profile.required_providers().contains(&provider.id))
+        })
         .map(|provider| {
             (
                 provider.id.as_str(),
@@ -1193,6 +1337,7 @@ fn valid_projection_target_generation(value: &str) -> bool {
 }
 
 fn fingerprint_for(
+    plan_kind: &RuntimePlanKind,
     assembly_fingerprint: &AssemblyFingerprint,
     provider_plans: &[ProviderPlan],
     listener_plans: &[ListenerPlan],
@@ -1202,6 +1347,7 @@ fn fingerprint_for(
 ) -> Result<RuntimePlanFingerprint, RuntimePlanError> {
     let unsigned = UnsignedRuntimePlan {
         schema_version: SCHEMA_VERSION,
+        plan_kind,
         assembly_fingerprint,
         provider_plans,
         listener_plans,
@@ -1242,7 +1388,7 @@ mod tests {
             error.0,
             RuntimePlanErrorKind::UnsupportedVersion {
                 actual: 1,
-                supported: 3
+                supported: 4
             }
         ));
         Ok(())
@@ -1291,14 +1437,14 @@ outputs = ["resources"]
         )?
         .canonicalize_v2()?;
 
-        let declarations = executable_provider_declarations(&manifest);
+        let declarations = executable_provider_declarations(&manifest, None);
         assert_eq!(declarations.len(), 1);
         assert!(
             declarations
                 .iter()
                 .all(|(id, _, _, _)| *id != "distributed-cas-store-alternative")
         );
-        let input = RuntimePlanV3Input::from_manifest(&manifest);
+        let input = RuntimePlanV4Input::generic_from_manifest(&manifest);
         assert!(
             input.workflow_plans.is_empty(),
             "omitted workflows must derive an explicit empty RuntimePlan workflow set"
@@ -1353,6 +1499,7 @@ outputs = ["resources"]
         });
         provider_plans.sort_by(|left, right| left.id.cmp(&right.id));
         let forged = RuntimePlan::from_parts(
+            RuntimePlanKind::generic(),
             lock.fingerprint().clone(),
             provider_plans,
             listener_plans,
@@ -1368,6 +1515,94 @@ outputs = ["resources"]
             Err(error) => error,
         };
         assert!(error.to_string().contains("providerPlans"));
+        Ok(())
+    }
+
+    #[test]
+    fn core_official_plan_projects_the_exact_non_eventing_closure() -> anyhow::Result<()> {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .context("repository root")?;
+        let source = crate::RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            &repository_root.join("assemblies/runtime"),
+        )?;
+        let manifest = source.canonical();
+        let lock = crate::ParsedAssemblyLock::from_json_slice(include_bytes!(
+            "../../../assemblies/runtime/assembly.lock.json"
+        ))?
+        .verify_repository_v2(&source)?;
+        let mut input =
+            RuntimePlanV4Input::official_from_manifest(manifest, OfficialAssemblyProfile::Core)?;
+        input.listener(
+            AssemblyListenerKind::Admin,
+            ListenerAuth::RssAccessToken,
+            vec![AssemblyDomain::Audit],
+        );
+        input.listener(
+            AssemblyListenerKind::Health,
+            ListenerAuth::NoAuth,
+            Vec::new(),
+        );
+        input.domain(AssemblyDomain::Audit);
+        input.placement(AssemblyDomain::Audit, "runtime");
+        let plan = RuntimePlan::compile_v4(manifest, &lock, input)?;
+
+        assert_eq!(
+            plan.plan_kind().official_profile(),
+            Some(OfficialAssemblyProfile::Core)
+        );
+        assert_eq!(
+            plan.provider_plans()
+                .iter()
+                .map(ProviderPlan::id)
+                .collect::<Vec<_>>(),
+            ["auth-audit-sink", "listener-pdp", "listener-rate-limiter"]
+        );
+        assert!(
+            plan.provider_plans()
+                .iter()
+                .all(|provider| !provider.id().contains("event") && !provider.id().contains("dlx"))
+        );
+        assert_eq!(plan.domain_plans().len(), 1);
+        assert!(plan.workflow_plans().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn generic_runtime_plan_cannot_mint_core_inventory_evidence() -> anyhow::Result<()> {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .context("repository root")?;
+        let source = crate::RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            &repository_root.join("assemblies/runtime"),
+        )?;
+        let manifest = source.canonical();
+        let lock = crate::ParsedAssemblyLock::from_json_slice(include_bytes!(
+            "../../../assemblies/runtime/assembly.lock.json"
+        ))?
+        .verify_repository_v2(&source)?;
+        let plan = ParsedRuntimePlan::from_json_slice_bound(
+            include_bytes!("../../../assemblies/runtime/runtime-plan.json"),
+            manifest,
+            &lock,
+        )?;
+
+        let error =
+            match crate::runtime_inventory::RuntimeInventoryOfficialProfile::from_manifest_and_plan(
+                manifest,
+                plan.as_plan(),
+            ) {
+                Ok(_) => anyhow::bail!("generic RuntimePlan proved the Core profile"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            crate::runtime_inventory::RuntimeInventoryOfficialProfileError::GenericPlan
+        );
         Ok(())
     }
 }

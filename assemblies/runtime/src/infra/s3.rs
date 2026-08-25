@@ -9,8 +9,8 @@ use primitives::{HealthCheck, HealthStatus, ProbeName};
 use s3::{S3DlxArchiveStore, S3RuntimeDeps, S3Store};
 use tokio_util::sync::CancellationToken;
 
+use crate::EnvSecret;
 use crate::config::SnapshotConfig;
-use crate::{EnvSecret, SharedRuntimeDeps};
 
 /// 默认 S3 canary 周期（60 秒）。
 const DEFAULT_S3_CANARY_INTERVAL: Duration = Duration::from_secs(60);
@@ -649,7 +649,7 @@ fn spawn_s3_canary_sampler(
 }
 
 pub(crate) fn wire_s3_canary(
-    deps: &SharedRuntimeDeps,
+    s3: S3RuntimeDeps,
     config: S3CanaryConfig,
 ) -> anyhow::Result<DomainModuleResult> {
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -657,7 +657,6 @@ pub(crate) fn wire_s3_canary(
         ProbeName::parse(S3_READY_PROBE_NAME).context("parse s3_object_store_ready probe name")?;
     let probe_ready = Arc::clone(&ready);
     let worker_ready = Arc::clone(&ready);
-    let s3 = deps.s3.clone();
     let (start, task_status) =
         diport::ManagedTask::prepare("s3-canary-sampler", diport::DEFAULT_SHUTDOWN_TIMEOUT);
     let worker = bootstrap::WorkerSpec::observational_phase_one(
@@ -751,13 +750,13 @@ mod tests {
         };
         entry.1 = value.to_owned();
         let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        Ok(crate::config::test_snapshot(&borrowed)?)
+        Ok(crate::config::generic_test_snapshot(&borrowed)?)
     }
 
     fn snapshot_from_valid_s3() -> anyhow::Result<crate::config::RuntimeConfigSnapshot> {
         let values = valid_s3_values();
         let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        Ok(crate::config::test_snapshot(&borrowed)?)
+        Ok(crate::config::generic_test_snapshot(&borrowed)?)
     }
 
     fn assert_general_config(general: &S3GeneralConfig) {
@@ -868,7 +867,7 @@ mod tests {
             .filter(|(name, _)| *name != S3_ENDPOINT_URL_ENV)
             .collect::<Vec<_>>();
         let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let snapshot = crate::config::test_snapshot(&borrowed)?;
+        let snapshot = crate::config::generic_test_snapshot(&borrowed)?;
         let Err(error) = S3RuntimeConfig::from_snapshot(snapshot.view()) else {
             anyhow::bail!("missing endpoint fixture unexpectedly succeeded");
         };
@@ -880,7 +879,7 @@ mod tests {
             .filter(|(name, _)| *name != S3_CA_CERT_PEM_PATH_ENV)
             .collect::<Vec<_>>();
         let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let snapshot = crate::config::test_snapshot(&borrowed)?;
+        let snapshot = crate::config::generic_test_snapshot(&borrowed)?;
         let Err(error) = S3RuntimeConfig::from_snapshot(snapshot.view()) else {
             anyhow::bail!("missing S3 CA path fixture unexpectedly succeeded");
         };

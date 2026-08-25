@@ -11,7 +11,12 @@ fn observation() -> Result<
         model::CanonicalSha256Digest::parse(format!("sha256:{}", byte.to_string().repeat(64)))
     };
     let parts = model::RuntimeInventoryParts::new(
-        model::RuntimeInventoryIdentity::for_test(digest('a')?, digest('b')?),
+        model::RuntimeInventoryIdentity::for_test_official(
+            digest('a')?,
+            digest('b')?,
+            assembly_schema::OfficialAssemblyProfile::Core,
+            digest('9')?,
+        ),
         Some(model::RuntimeInventoryBuildMetadata::new(
             "d".repeat(40),
             digest('e')?,
@@ -61,7 +66,17 @@ fn observation() -> Result<
             None,
             model::RuntimeInventoryPlacementReadiness::Ready,
         )],
-    );
+    )
+    .with_official_profile(model::RuntimeInventoryOfficialProfile::for_test(
+        assembly_schema::OfficialAssemblyProfile::Core,
+        digest('9')?,
+        vec![
+            "audit.list-tenant-entries".to_owned(),
+            "runtime.inventory".to_owned(),
+        ],
+        vec!["audit-localtx".to_owned()],
+        vec!["rls_ready".to_owned()],
+    ));
     Ok(model::RuntimeInventoryObservation::for_test(parts)?)
 }
 
@@ -75,13 +90,20 @@ fn valid_response() -> serde_json::Value {
     let fingerprint = format!("sha256:{}", "a".repeat(64));
     serde_json::json!({
         "data": {
-            "assemblyFingerprint": fingerprint,
+            "assemblyLockDigest": fingerprint,
             "buildMetadata": {
                 "sourceRevision": "d".repeat(40),
                 "imageDigest": format!("sha256:{}", "e".repeat(64))
             },
             "runtimePlanFingerprint": format!("sha256:{}", "b".repeat(64)),
-            "schemaVersion": 2,
+            "officialProfile": {
+                "profile": "core",
+                "configDigest": format!("sha256:{}", "9".repeat(64)),
+                "routes": ["audit.list-tenant-entries", "runtime.inventory"],
+                "workers": ["audit-localtx"],
+                "probes": ["rls_ready"]
+            },
+            "schemaVersion": 3,
             "activatedWorkflows": [{
                 "mode": "projection",
                 "id": "settings.config-projection",
@@ -121,6 +143,9 @@ fn runtime_inventory_wire_is_closed_and_camel_case() -> Result<(), Box<dyn std::
     let encoded = serde_json::to_value(response)?;
     assert!(encoded["data"].get("providerPosture").is_some());
     assert!(encoded["data"].get("activatedWorkflows").is_some());
+    assert!(encoded["data"].get("assemblyLockDigest").is_some());
+    assert!(encoded["data"].get("assemblyFingerprint").is_none());
+    assert_eq!(encoded["data"]["officialProfile"]["profile"], "core");
     assert!(encoded["data"].get("provider_posture").is_none());
     assert!(encoded["data"].get("deploymentFingerprint").is_none());
     assert_eq!(
@@ -330,7 +355,7 @@ fn runtime_inventory_projection_is_complete_and_owns_schema_version()
     let schema = response_schema()?;
     let validator = jsonschema::draft7::options().build(&schema)?;
     assert!(validator.validate(&value).is_ok());
-    assert_eq!(value["data"]["schemaVersion"], 2);
+    assert_eq!(value["data"]["schemaVersion"], 3);
     assert_eq!(value["data"]["providerPosture"][0]["state"], "unobserved");
     assert_eq!(
         value["data"]["activatedWorkflows"].as_array().map(Vec::len),

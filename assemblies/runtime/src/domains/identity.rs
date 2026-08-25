@@ -436,7 +436,7 @@ pub(crate) mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn production_mapper_rejects_refresh_longer_than_auth_grant_before_provider_setup() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             (IDENTITY_AUTH_GRANT_TTL_ENV, "3600"),
             (REFRESH_TTL_ENV, "7200"),
         ])
@@ -483,7 +483,8 @@ pub(crate) mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn federated_profile_does_not_read_or_construct_local_rss_auth_grant_inputs() {
-        let snapshot = crate::config::test_snapshot(&[]).expect("empty captured generation");
+        let snapshot =
+            crate::config::generic_test_snapshot(&[]).expect("empty captured generation");
         let mapper = ServingConfigMapper::for_test(snapshot.view());
         let input = IdentityModuleInput::from_mapper(
             &mapper,

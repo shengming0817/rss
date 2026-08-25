@@ -1804,6 +1804,29 @@ fn render_modules(
         }
         code.push_str("];\n\n");
 
+        if let Some(core) =
+            manifest.official_profile(assembly_schema::OfficialAssemblyProfile::Core)
+        {
+            code.push_str(
+                "pub(crate) const OFFICIAL_CORE_WORKERS: &[(&str, bootstrap::WorkerAdmissionLane)] = &[\n",
+            );
+            for worker in core.required_worker_specs() {
+                let lane = match worker.lane() {
+                    assembly_schema::OfficialProfileWorkerLane::Observational => "Observational",
+                    assembly_schema::OfficialProfileWorkerLane::Writes => "Writes",
+                };
+                code.push_str(&format!(
+                    "    (\"{}\", bootstrap::WorkerAdmissionLane::{lane}),\n",
+                    worker.as_str()
+                ));
+            }
+            code.push_str("];\n\npub(crate) const OFFICIAL_CORE_PROBES: &[&str] = &[\n");
+            for probe in core.required_probe_specs() {
+                code.push_str(&format!("    \"{}\",\n", probe.as_str()));
+            }
+            code.push_str("];\n\n");
+        }
+
         code.push_str("pub(crate) struct PreparedLocalDomainInputs {\n    inputs: Vec<LocalDomainModuleInput>,\n}\n\npub(crate) enum LocalDomainModuleInput {\n");
         for domain in manifest.domains() {
             let module = module_name(*domain)?;
@@ -1825,7 +1848,9 @@ fn render_modules(
                     "crate::domains::{module}::{variant}ModuleInput::from_mapper(mapper, token_profiles.primary_identity_profile()?)?"
                 ),
                 AssemblyDomain::Audit => {
-                    format!("crate::domains::{module}::{variant}ModuleInput::from_mapper(mapper)?")
+                    format!(
+                        "crate::domains::{module}::{variant}ModuleInput::from_execution(execution, mapper)?"
+                    )
                 }
                 other => bail!(
                     "runtime input generator does not support domain '{}'",

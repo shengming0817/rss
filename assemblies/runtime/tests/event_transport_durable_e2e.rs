@@ -392,6 +392,7 @@ fn audit_domain() -> (AuditDomain<TestAuditListTenantAppender>, CapturingVerifie
         None,
         TestAuditListTenantAppender,
         Arc::new(SystemClock),
+        audit::AuditRuntimeSurface::Full,
     );
     (domain, verifier)
 }

@@ -1845,8 +1845,12 @@ pub enum RuntimeInventoryProjectionStage {
     PlacementEndpointPort,
     PlacementSpiffeIdentity,
     PlacementWorkload,
-    AssemblyFingerprint,
+    AssemblyLockDigest,
     BuildImageDigest,
+    ConfigDigest,
+    OfficialProbe,
+    OfficialRoute,
+    OfficialWorker,
     BuildSourceRevision,
     RuntimePlanFingerprint,
 }
@@ -1868,8 +1872,12 @@ impl RuntimeInventoryProjectionStage {
             Self::PlacementEndpointPort => "projection.placement.endpoint.port",
             Self::PlacementSpiffeIdentity => "projection.placement.spiffe_identity",
             Self::PlacementWorkload => "projection.placement.workload",
-            Self::AssemblyFingerprint => "projection.assembly_fingerprint",
+            Self::AssemblyLockDigest => "projection.assembly_lock_digest",
             Self::BuildImageDigest => "projection.build_metadata.image_digest",
+            Self::ConfigDigest => "projection.official_profile.config_digest",
+            Self::OfficialProbe => "projection.official_profile.probes",
+            Self::OfficialRoute => "projection.official_profile.routes",
+            Self::OfficialWorker => "projection.official_profile.workers",
             Self::BuildSourceRevision => "projection.build_metadata.source_revision",
             Self::RuntimePlanFingerprint => "projection.runtime_plan_fingerprint",
         }
@@ -2094,7 +2102,7 @@ impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInvent
         Ok(Self {
             data: RuntimeInventoryData {
                 activated_workflows,
-                assembly_fingerprint: runtime_inventory_parse(observation.assembly_fingerprint().as_str(), RuntimeInventoryProjectionStage::AssemblyFingerprint)?,
+                assembly_lock_digest: runtime_inventory_parse(observation.assembly_lock_digest().as_str(), RuntimeInventoryProjectionStage::AssemblyLockDigest)?,
                 build_metadata: observation.build_metadata().map(|metadata| {
                     Ok(RuntimeBuildMetadata {
                         image_digest: runtime_inventory_parse(metadata.image_digest().as_str(), RuntimeInventoryProjectionStage::BuildImageDigest)?,
@@ -2109,6 +2117,17 @@ impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInvent
                     ::assembly_schema::AssemblyDomain::Syshealth => RuntimeDomain::Syshealth,
                 }).collect(),
                 listeners,
+                official_profile: observation.official_profile().map(|profile| {
+                    Ok(RuntimeOfficialProfile {
+                        config_digest: runtime_inventory_parse(profile.config_digest().as_str(), RuntimeInventoryProjectionStage::ConfigDigest)?,
+                        probes: profile.probes().iter().map(|value| runtime_inventory_parse(value, RuntimeInventoryProjectionStage::OfficialProbe)).collect::<Result<Vec<_>, _>>()?,
+                        profile: match profile.profile() {
+                            ::assembly_schema::OfficialAssemblyProfile::Core => RuntimeOfficialProfileProfile::Core,
+                        },
+                        routes: profile.routes().iter().map(|value| runtime_inventory_parse(value, RuntimeInventoryProjectionStage::OfficialRoute)).collect::<Result<Vec<_>, _>>()?,
+                        workers: profile.workers().iter().map(|value| runtime_inventory_parse(value, RuntimeInventoryProjectionStage::OfficialWorker)).collect::<Result<Vec<_>, _>>()?,
+                    })
+                }).transpose()?,
                 placements,
                 provider_posture,
                 runtime_plan_fingerprint: runtime_inventory_parse(observation.runtime_plan_fingerprint().as_str(), RuntimeInventoryProjectionStage::RuntimePlanFingerprint)?,

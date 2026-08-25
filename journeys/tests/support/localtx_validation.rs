@@ -1563,6 +1563,7 @@ fn ordered_audit_router(
         Some(ordered_admin),
         audit_deps.auth_audit_sink(),
         Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+        audit::AuditRuntimeSurface::Full,
     );
     finalized_audit_router(
         &domain,

@@ -1269,7 +1269,7 @@ fn projection_args_SECRET_BAIT_too_many_values_is_redacted() {
 
 #[test]
 fn bundled_disabled_projection_is_absent_from_operator_registry() -> anyhow::Result<()> {
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

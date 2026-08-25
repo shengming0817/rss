@@ -9,8 +9,9 @@ mod placement_exec;
 use crate::config::SnapshotConfig;
 use anyhow::Context as _;
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, ListenerAuth, ProviderActivation, ProviderCatalogEntry,
-    RepositoryAssemblySnapshotV2, RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
+    AssemblyDomain, AssemblyListenerKind, ListenerAuth, OfficialAssemblyProfile,
+    ProviderActivation, ProviderCatalogEntry, RepositoryAssemblySnapshotV2,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV4Input,
 };
 use primitives::{AuthScheme, ListenerKind};
 use std::fmt;
@@ -27,12 +28,40 @@ pub(crate) use placement_exec::PlacementExecutionPlan;
 #[cfg(test)]
 pub(crate) use placement_exec::PlacementExecutionSpec;
 
+/// Close one manifest-derived official-profile identity set against the live composition.
+///
+/// The manifest canonicalizer owns the expected order. Live construction order is deliberately
+/// irrelevant, but duplicate live identities are always a hard error rather than being hidden by
+/// set normalization.
+pub(crate) fn validate_official_profile_exact_ids(
+    label: &str,
+    expected: &[String],
+    mut actual: Vec<String>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        expected.windows(2).all(|pair| pair[0] < pair[1]),
+        "official profile {label} expectation is not a closed canonical set: {expected:?}"
+    );
+    actual.sort();
+    anyhow::ensure!(
+        actual.windows(2).all(|pair| pair[0] < pair[1]),
+        "official profile composed duplicate {label}: {actual:?}"
+    );
+    anyhow::ensure!(
+        actual == expected,
+        "official profile {label} closure drift: expected={expected:?} actual={actual:?}"
+    );
+    Ok(())
+}
+
 /// Runtime-owned entrypoint around the shared, sealed protocol value.
 pub struct RuntimePlan {
     plan: TypedRuntimePlan,
     workflow_activation: Option<eventexec::WorkflowActivationPlan>,
     workflow_runtime: Option<eventexec::WorkflowRuntimePlan>,
     pending_worker_descriptors: Option<Vec<bootstrap::WorkerDescriptor>>,
+    official_inventory_profile:
+        Option<assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile>,
     assembly_identity: String,
     telemetry_resource: observ::TelemetryResource,
 }
@@ -173,6 +202,7 @@ impl PlacedRuntimePlan {
 pub(crate) struct ListenerExecutionPlan {
     declared: Vec<ListenerExecutionSpec>,
     listeners: Vec<ListenerExecutionSpec>,
+    official_routes: Option<Vec<String>>,
 }
 
 pub(crate) struct ListenerExecutionSpec {
@@ -193,6 +223,10 @@ impl ListenerExecutionPlan {
 
     pub(crate) fn into_listeners(self) -> Vec<ListenerExecutionSpec> {
         self.listeners
+    }
+
+    pub(crate) fn official_routes(&self) -> Option<&[String]> {
+        self.official_routes.as_deref()
     }
 }
 
@@ -254,13 +288,31 @@ impl RuntimePlan {
         let manifest = repository.manifest();
         let lock = repository.lock();
 
-        let mut input = RuntimePlanV3Input::from_manifest(manifest);
+        let mut input = match config.value(crate::config::RUNTIME_PLAN_KIND_ENV) {
+            Some("generic") => RuntimePlanV4Input::generic_from_manifest(manifest),
+            Some("core") => {
+                if let Some(env) = config.core_forbidden_key() {
+                    return Err(RuntimePlanError::CoreExtraConfig {
+                        env: env.to_owned(),
+                    });
+                }
+                RuntimePlanV4Input::official_from_manifest(manifest, OfficialAssemblyProfile::Core)
+                    .map_err(RuntimePlanError::Protocol)?
+            }
+            _ => return Err(RuntimePlanError::PlanKind),
+        };
         listener::append(manifest, config, &mut input)?;
         domain::append(manifest, &mut input);
         placement::append(manifest, lock, config, &mut input)?;
 
-        let plan = TypedRuntimePlan::compile_v3(manifest, lock, input)
+        let plan = TypedRuntimePlan::compile_v4(manifest, lock, input)
             .map_err(RuntimePlanError::Protocol)?;
+        let official_inventory_profile = plan.plan_kind().official_profile().map(|_| {
+            assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile::from_manifest_and_plan(
+                manifest, &plan,
+            )
+            .unwrap_or_else(|_| unreachable!("compiled official plan is manifest-bound"))
+        });
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
             .map_err(RuntimePlanError::WorkflowRuntime)?;
         let assembly_identity = lock.identity().name().to_owned();
@@ -275,6 +327,7 @@ impl RuntimePlan {
             workflow_activation: Some(workflow_activation),
             workflow_runtime: None,
             pending_worker_descriptors: None,
+            official_inventory_profile,
             assembly_identity,
             telemetry_resource,
         })
@@ -347,6 +400,7 @@ impl RuntimePlan {
             workflow_activation: Some(workflow_activation),
             workflow_runtime: None,
             pending_worker_descriptors: None,
+            official_inventory_profile: None,
             assembly_identity,
             telemetry_resource,
         })
@@ -358,15 +412,38 @@ impl RuntimePlan {
             .unwrap_or_else(|| unreachable!("workflow runtime must be bound before consumption"))
     }
 
+    pub(crate) fn official_inventory_profile(
+        &self,
+    ) -> Option<&assembly_schema::runtime_inventory::RuntimeInventoryOfficialProfile> {
+        self.official_inventory_profile.as_ref()
+    }
+
     pub(crate) fn take_expected_workers(
         &mut self,
     ) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
         use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
 
-        let mut expected = self
-            .pending_worker_descriptors
-            .take()
-            .context("runtime worker descriptors were not prepared during placement")?;
+        let mut expected = match self.official_inventory_profile.as_ref() {
+            Some(profile) => {
+                let generated = crate::modules_gen::OFFICIAL_CORE_WORKERS
+                    .iter()
+                    .map(|(identity, _)| (*identity).to_owned())
+                    .collect::<Vec<_>>();
+                validate_official_profile_exact_ids(
+                    "worker-codegen",
+                    profile.workers(),
+                    generated,
+                )?;
+                crate::modules_gen::OFFICIAL_CORE_WORKERS
+                    .iter()
+                    .map(|(identity, lane)| Worker::expected(*identity, *lane))
+                    .collect()
+            }
+            None => self
+                .pending_worker_descriptors
+                .take()
+                .context("runtime worker descriptors were not prepared during placement")?,
+        };
         let sagas = self.workflow_runtime().sagas();
         if !sagas.is_empty() {
             expected.push(Worker::expected(
@@ -400,24 +477,41 @@ impl RuntimePlan {
         let placement =
             placement_exec::mint(&self.plan, &self.assembly_identity, topology, config)?;
         let domain = domain_exec::mint(&self.plan, &placement);
-        let listeners = listener_execution_plan_from_typed(&self.plan, Some(&placement));
+        let official_routes = self
+            .official_inventory_profile
+            .as_ref()
+            .map(|profile| profile.routes().to_vec());
+        let listeners =
+            listener_execution_plan_from_typed(&self.plan, Some(&placement), official_routes);
         let local_domains = domain.local_domains().to_vec();
-        let local_producers = generated::event::PRODUCER_DOMAINS
+        let event_transport_selected = self
+            .plan
+            .provider_plans()
             .iter()
-            .copied()
-            .filter(|producer| {
-                local_domains
-                    .iter()
-                    .any(|domain| domain.as_str() == producer.as_str())
-            })
-            .collect::<Vec<_>>();
+            .any(|provider| provider.activation() == ProviderActivation::LocalEventExecution);
+        let local_producers = if event_transport_selected {
+            generated::event::PRODUCER_DOMAINS
+                .iter()
+                .copied()
+                .filter(|producer| {
+                    local_domains
+                        .iter()
+                        .any(|domain| domain.as_str() == producer.as_str())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let mut local_subscriptions = Vec::new();
         let mut requires_audit_consumer_key = false;
         let mut required_amqp_domains = local_producers
             .iter()
             .map(|producer| producer.as_str().to_owned())
             .collect::<Vec<_>>();
-        for event in generated::event::EVENTS {
+        for event in generated::event::EVENTS
+            .iter()
+            .filter(|_| event_transport_selected)
+        {
             requires_audit_consumer_key |= event.subscriptions().iter().any(|subscription| {
                 subscription.consumer() == AssemblyDomain::Audit.as_str()
                     && local_domains.contains(&AssemblyDomain::Audit)
@@ -461,11 +555,23 @@ impl RuntimePlan {
             Some(expected_runtime_worker_descriptors(&events, &local_domains));
         let mut plans = Vec::new();
         let mut catalog = Vec::new();
-        anyhow::ensure!(
-            self.plan.provider_plans().len() == crate::providers_gen::PROVIDER_CATALOG.len(),
-            "RuntimePlan provider set disagrees with generated catalog"
-        );
-        for entry in crate::providers_gen::PROVIDER_CATALOG {
+        for plan in self.plan.provider_plans() {
+            anyhow::ensure!(
+                crate::providers_gen::PROVIDER_CATALOG
+                    .iter()
+                    .any(|entry| entry.role().as_str() == plan.id()),
+                "RuntimePlan provider set contains an unclassified provider"
+            );
+        }
+        for entry in crate::providers_gen::PROVIDER_CATALOG
+            .iter()
+            .filter(|entry| {
+                self.plan
+                    .provider_plans()
+                    .iter()
+                    .any(|plan| plan.id() == entry.role().as_str())
+            })
+        {
             let active = match entry.activation() {
                 ProviderActivation::Process => true,
                 ProviderActivation::DomainLocal(domain) => placement.is_local(domain),
@@ -476,9 +582,7 @@ impl RuntimePlan {
                 .provider_plans()
                 .iter()
                 .find(|plan| plan.id() == entry.role().as_str())
-                .with_context(|| {
-                    format!("RuntimePlan omits provider '{}'", entry.role().as_str())
-                })?;
+                .unwrap_or_else(|| unreachable!("catalog was projected from RuntimePlan ids"));
             anyhow::ensure!(
                 plan.activation() == entry.activation(),
                 "RuntimePlan provider activation disagrees with generated catalog"
@@ -535,7 +639,7 @@ impl RuntimePlan {
 
     #[cfg(any(test, feature = "integration"))]
     pub(crate) fn listener_execution_plan(&self) -> ListenerExecutionPlan {
-        listener_execution_plan_from_typed(&self.plan, None)
+        listener_execution_plan_from_typed(&self.plan, None, None)
     }
 
     #[cfg(test)]
@@ -543,7 +647,7 @@ impl RuntimePlan {
         &self,
         placement: &PlacementExecutionPlan,
     ) -> ListenerExecutionPlan {
-        listener_execution_plan_from_typed(&self.plan, Some(placement))
+        listener_execution_plan_from_typed(&self.plan, Some(placement), None)
     }
 }
 
@@ -554,13 +658,19 @@ fn expected_runtime_worker_descriptors(
     use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
 
     let mut expected = vec![
-        Worker::expected("assemblies.runtime.src.event_transport.03", Lane::Writes),
+        Worker::expected(
+            "assemblies.runtime.src.provider_output.01",
+            Lane::Observational,
+        ),
+        Worker::expected("assemblies.runtime.src.phase.infra.01", Lane::Observational),
         Worker::expected("assemblies.runtime.src.phase.maintenance.01", Lane::Writes),
-        Worker::expected("assemblies.runtime.src.phase.maintenance.02", Lane::Writes),
-        Worker::expected("assemblies.runtime.src.phase.maintenance.03", Lane::Writes),
     ];
     if events.is_active() {
         expected.extend([
+            Worker::expected("assemblies.runtime.src.event_transport.03", Lane::Writes),
+            Worker::expected("assemblies.runtime.src.infra.s3.01", Lane::Observational),
+            Worker::expected("assemblies.runtime.src.phase.maintenance.02", Lane::Writes),
+            Worker::expected("assemblies.runtime.src.phase.maintenance.03", Lane::Writes),
             Worker::expected("assemblies.runtime.src.event_transport.07", Lane::Writes),
             Worker::expected("assemblies.runtime.src.event_transport.08", Lane::Writes),
         ]);
@@ -593,6 +703,7 @@ fn expected_runtime_worker_descriptors(
 fn listener_execution_plan_from_typed(
     plan: &TypedRuntimePlan,
     placement: Option<&PlacementExecutionPlan>,
+    official_routes: Option<Vec<String>>,
 ) -> ListenerExecutionPlan {
     let declared = plan
         .listener_plans()
@@ -621,6 +732,7 @@ fn listener_execution_plan_from_typed(
     ListenerExecutionPlan {
         declared,
         listeners,
+        official_routes,
     }
 }
 
@@ -655,7 +767,7 @@ pub(crate) fn fixture_listener_spec(
         repository.lock(),
     )
     .map_err(|error| anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}"))?;
-    listener_execution_plan_from_typed(parsed.as_plan(), None)
+    listener_execution_plan_from_typed(parsed.as_plan(), None, None)
         .into_listeners()
         .into_iter()
         .find(|listener| listener.kind() == runtime_listener_kind(kind))
@@ -695,6 +807,10 @@ pub(crate) enum RuntimePlanError {
         "resolve RSS_PRIMARY_TOKEN_PROFILE, RSS_ADMIN_TOKEN_PROFILE, or RSS_INTERNAL_AUTH_SCHEME failed; expected rss-access/federated-access and mtls/service-token"
     )]
     ListenerAuth,
+    #[error("resolve RSS_RUNTIME_PLAN_KIND failed; expected the closed value generic or core")]
+    PlanKind,
+    #[error("Core official profile forbids configured Eventing capability `{env}`")]
+    CoreExtraConfig { env: String },
     #[error("resolve {env} failed; expected a non-empty lowercase kebab-case workload name")]
     PlacementWorkload {
         /// Exact `RSS_<DOMAIN>_DOMAIN_PLACEMENT_WORKLOAD` env key that failed validation.
@@ -716,7 +832,7 @@ mod tests {
     // reason: bundled protocol/golden tests should stop at the exact local drift assertion.
 
     use super::*;
-    use crate::config::test_snapshot;
+    use crate::config::{generic_test_snapshot, unbound_test_snapshot};
     use assembly_schema::{
         AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV2,
         DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock, ProviderLifecycle,
@@ -745,20 +861,147 @@ mod tests {
         ReversePlacements,
     }
 
+    #[test]
+    fn official_profile_exact_id_join_rejects_missing_extra_duplicate_and_wrong_id() {
+        let core = bundled(&[("RSS_RUNTIME_PLAN_KIND", "core")]);
+        let inventory = core
+            .official_inventory_profile()
+            .expect("Core plan carries manifest-derived inventory");
+        let categories = [
+            (
+                "listener",
+                core.as_typed()
+                    .listener_plans()
+                    .iter()
+                    .map(|listener| listener.id().to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "provider",
+                core.as_typed()
+                    .provider_plans()
+                    .iter()
+                    .map(|provider| provider.id().to_owned())
+                    .collect(),
+            ),
+            ("route", inventory.routes().to_vec()),
+            ("worker", inventory.workers().to_vec()),
+            ("probe", inventory.probes().to_vec()),
+        ];
+
+        for (label, expected) in categories {
+            assert!(!expected.is_empty(), "Core {label} closure is vacuous");
+            let mut reordered = expected.clone();
+            reordered.reverse();
+            validate_official_profile_exact_ids(label, &expected, reordered)
+                .expect("live construction order is not identity drift");
+
+            let mut missing = expected.clone();
+            missing.pop();
+            let mut extra = expected.clone();
+            extra.push("zz-unclassified-extra".to_owned());
+            let mut duplicate = expected.clone();
+            duplicate.push(expected[0].clone());
+            for actual in [missing, extra, duplicate] {
+                assert!(
+                    validate_official_profile_exact_ids(label, &expected, actual).is_err(),
+                    "Core {label} mutation crossed the exact join"
+                );
+            }
+        }
+    }
+
     fn profile_snapshot(entries: &[(&str, &str)]) -> crate::config::RuntimeConfigSnapshot {
         let mut merged = BTreeMap::from([
+            ("RSS_RUNTIME_PLAN_KIND", "generic"),
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ]);
         merged.extend(entries.iter().copied());
         let merged = merged.into_iter().collect::<Vec<_>>();
-        test_snapshot(&merged).expect("test snapshot")
+        generic_test_snapshot(&merged).expect("test snapshot")
     }
 
     fn bundled(entries: &[(&str, &str)]) -> RuntimePlan {
         let snapshot = profile_snapshot(entries);
         RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan")
+    }
+
+    #[test]
+    fn runtime_plan_kind_is_mandatory_and_core_projects_exact_closure() {
+        let missing = unbound_test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("snapshot");
+        assert!(matches!(
+            RuntimePlan::bundled(missing.view()),
+            Err(RuntimePlanError::PlanKind)
+        ));
+
+        let core = bundled(&[("RSS_RUNTIME_PLAN_KIND", "core")]);
+        assert_eq!(
+            core.as_typed().plan_kind().official_profile(),
+            Some(OfficialAssemblyProfile::Core)
+        );
+        assert_eq!(
+            core.as_typed()
+                .provider_plans()
+                .iter()
+                .map(assembly_schema::ProviderPlan::id)
+                .collect::<Vec<_>>(),
+            ["auth-audit-sink", "listener-pdp", "listener-rate-limiter"]
+        );
+        assert_eq!(
+            core.as_typed()
+                .listener_plans()
+                .iter()
+                .map(assembly_schema::ListenerPlan::kind)
+                .collect::<Vec<_>>(),
+            [AssemblyListenerKind::Admin, AssemblyListenerKind::Health]
+        );
+        assert_eq!(
+            core.as_typed()
+                .domain_plans()
+                .iter()
+                .map(assembly_schema::DomainPlan::id)
+                .collect::<Vec<_>>(),
+            [AssemblyDomain::Audit]
+        );
+
+        let placed_snapshot = profile_snapshot(&[("RSS_RUNTIME_PLAN_KIND", "core")]);
+        let placed = RuntimePlan::bundled(placed_snapshot.view())
+            .expect("Core plan")
+            .place(bootstrap::Topology::DurableShared, placed_snapshot.view())
+            .expect("Core placement projects before construction")
+            .into_parts();
+        assert!(!placed.events.is_active());
+        let (_, providers, catalog) = placed.providers.into_parts();
+        assert_eq!(
+            providers
+                .iter()
+                .map(ProviderExecutionSpec::id)
+                .collect::<Vec<_>>(),
+            ["auth-audit-sink", "listener-pdp", "listener-rate-limiter"]
+        );
+        assert_eq!(catalog.len(), providers.len());
+
+        for key in [
+            "RSS_AMQP_URL",
+            "RSS_DLX_ARCHIVE_S3_BUCKET",
+            "RSS_OUTBOX_SWEEP_INTERVAL_MS",
+            "RSS_AUDIT_DOMAIN_TRANSPORT_URL",
+            "RSS_FEDERATED_ACCESS_TOKEN_ISSUER",
+            "RSS_SERVICE_TOKEN_ISSUER",
+        ] {
+            let snapshot = profile_snapshot(&[("RSS_RUNTIME_PLAN_KIND", "core"), (key, "set")]);
+            assert!(matches!(
+                RuntimePlan::bundled(snapshot.view()),
+                Err(RuntimePlanError::CoreExtraConfig { env }) if env == key
+            ));
+        }
     }
 
     fn artifact_error(manifest_toml: &str, assembly_lock_json: &[u8]) -> RuntimePlanError {
@@ -811,7 +1054,7 @@ mod tests {
         manifest: &CanonicalAssemblyManifestV2,
         lock: &RepositoryVerifiedAssemblyLock,
     ) -> assembly_schema::RuntimePlanError {
-        TypedRuntimePlan::compile_v3(manifest, lock, compiler_input(manifest, lock, None))
+        TypedRuntimePlan::compile_v4(manifest, lock, compiler_input(manifest, lock, None))
             .expect_err("mismatched manifest/lock must fail")
     }
 
@@ -819,8 +1062,8 @@ mod tests {
         manifest: &CanonicalAssemblyManifestV2,
         lock: &RepositoryVerifiedAssemblyLock,
         mutation: Option<Mutation>,
-    ) -> RuntimePlanV3Input {
-        let mut input = RuntimePlanV3Input::from_manifest(manifest);
+    ) -> RuntimePlanV4Input {
+        let mut input = RuntimePlanV4Input::generic_from_manifest(manifest);
         append_candidate_providers(manifest, mutation, &mut input);
         append_candidate_listeners(manifest, mutation, &mut input);
         append_candidate_domains(manifest, mutation, &mut input);
@@ -831,7 +1074,7 @@ mod tests {
     fn append_candidate_providers(
         manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV3Input,
+        input: &mut RuntimePlanV4Input,
     ) {
         if mutation != Some(Mutation::DuplicateProvider) {
             return;
@@ -848,7 +1091,7 @@ mod tests {
     fn append_candidate_listeners(
         manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV3Input,
+        input: &mut RuntimePlanV4Input,
     ) {
         let mut listeners = manifest
             .listeners()
@@ -887,7 +1130,7 @@ mod tests {
     fn append_candidate_domains(
         manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV3Input,
+        input: &mut RuntimePlanV4Input,
     ) {
         for (index, domain) in manifest.domains().iter().enumerate() {
             if index == 0 && mutation == Some(Mutation::MissingDomain) {
@@ -904,7 +1147,7 @@ mod tests {
         manifest: &CanonicalAssemblyManifestV2,
         lock: &RepositoryVerifiedAssemblyLock,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV3Input,
+        input: &mut RuntimePlanV4Input,
     ) {
         let mut placements = manifest
             .domains()
@@ -1193,7 +1436,7 @@ mod tests {
             .expect("canonical manifest");
         let lock = verified_lock(BUNDLED_ASSEMBLY_LOCK, "runtime");
 
-        TypedRuntimePlan::compile_v3(&manifest, &lock, compiler_input(&manifest, &lock, None))
+        TypedRuntimePlan::compile_v4(&manifest, &lock, compiler_input(&manifest, &lock, None))
             .expect("unmutated candidate facts must compile");
         for mutation in [
             Mutation::DuplicateProvider,
@@ -1209,7 +1452,7 @@ mod tests {
             Mutation::ReversePlacements,
         ] {
             assert!(
-                TypedRuntimePlan::compile_v3(
+                TypedRuntimePlan::compile_v4(
                     &manifest,
                     &lock,
                     compiler_input(&manifest, &lock, Some(mutation))

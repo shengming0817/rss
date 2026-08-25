@@ -67,7 +67,7 @@ impl diport::Clock for FixedDlxBootstrapClock {
 #[test]
 fn production_prepare_runtime_defers_domain_policy_until_after_placement() {
     let external_calls = AtomicUsize::new(0);
-    let missing = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
+    let missing = crate::config::generic_test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
     let ((), ()) = prepare_local_before_external(missing.view(), prepare_serving_local, || {
         external_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -79,7 +79,7 @@ fn production_prepare_runtime_defers_domain_policy_until_after_placement() {
 #[test]
 fn operator_preparation_does_not_require_serving_password_policy() {
     let external_calls = AtomicUsize::new(0);
-    let missing = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
+    let missing = crate::config::generic_test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
     let ((), ()) = prepare_local_before_external(missing.view(), prepare_operator_local, || {
         external_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -156,7 +156,7 @@ fn test_s3_ca_pem_path() -> String {
 #[allow(clippy::expect_used)]
 fn test_s3_dlx_archive_config() -> S3DlxArchiveConfig {
     let ca = test_s3_ca_pem_path();
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_S3_ENDPOINT_URL", "https://s3.example.test"),
         ("RSS_S3_BUCKET", "rss-general"),
         ("RSS_S3_CA_CERT_PEM_PATH", ca.as_str()),
@@ -211,7 +211,7 @@ async fn failed_dlx_preflight_never_enters_destructive_migration_phase() {
 
 #[test]
 fn generated_graph_evidence_matches_live_runtime_carriers() {
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -483,10 +483,10 @@ fn harness_worker(name: &'static str) -> bootstrap::WorkerSpec {
 }
 
 fn harness_worker_owned(name: String) -> bootstrap::WorkerSpec {
-    bootstrap::WorkerSpec::observational_phase_one(
-        "assemblies.runtime.src.lib_tests.01",
-        move |_token| harness_resource_owned(name.clone()),
-    )
+    let identity = name.clone();
+    bootstrap::WorkerSpec::observational_phase_one(identity, move |_token| {
+        harness_resource_owned(name.clone())
+    })
 }
 
 fn phase_order_transcript_for_harness() -> String {
@@ -1236,6 +1236,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
         Some(test_audit_admin_repo(Arc::clone(&audit_repo.read))),
         TracingAuthAuditSink,
         Arc::new(SystemClock),
+        audit::AuditRuntimeSurface::Full,
     );
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
     let mut registry = bootstrap::compose(&domains)?;
@@ -1246,7 +1247,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     let mut registry = registry.admit_writes(write_admission);
     let providers =
         routes::TokenProviderBindings::new(None, None, Some(runtime_test_provider()), None);
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_PRIMARY_TOKEN_PROFILE", "federated-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "federated-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -1335,7 +1336,7 @@ async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     registry.register_primary_authorizer(authorizer)?;
     let authorizer = registry.take_primary_authorizer()?;
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -1429,10 +1430,13 @@ async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
             bootstrap::DomainLifecycleOutput::Worker(worker) => Some(worker),
         })
         .expect("one revocation worker");
-    assert_eq!(worker.descriptor().identity, REVOCATION_SWEEPER_WORKER_NAME);
+    assert_eq!(
+        worker.descriptor().identity,
+        "assemblies.runtime.src.phase.maintenance.03"
+    );
     let root = CancellationToken::new();
     let mut stack = bootstrap::shutdown::ShutdownStack::new(root.clone());
-    worker.register_into(&mut stack);
+    let _ = worker.register_into(&mut stack);
     root.cancel();
     assert!(stack.shutdown().await.is_empty());
 }
@@ -1965,8 +1969,9 @@ fn build_trace_export_unset_endpoint_is_none() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn build_trace_export_uses_the_captured_endpoint_mapping() {
-    let snapshot = crate::config::test_snapshot(&[(OTEL_ENDPOINT_ENV, "http://localhost:4317")])
-        .expect("capture trace endpoint");
+    let snapshot =
+        crate::config::generic_test_snapshot(&[(OTEL_ENDPOINT_ENV, "http://localhost:4317")])
+            .expect("capture trace endpoint");
 
     let out = build_trace_export(snapshot.view(), &test_telemetry_resource())
         .expect("snapshot-backed loopback endpoint builds exporter");
@@ -1976,7 +1981,7 @@ async fn build_trace_export_uses_the_captured_endpoint_mapping() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         (
             domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
             concat!(
@@ -2016,7 +2021,7 @@ async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
-    let snapshot = crate::config::test_snapshot(&[
+    let snapshot = crate::config::generic_test_snapshot(&[
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

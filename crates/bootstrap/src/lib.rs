@@ -61,7 +61,7 @@ pub use module::{
     DomainBinding, DomainLifecycleOutput, DomainModuleResult, ExpectedWorkerInventory,
     WorkerAdmissionLane, WorkerDescriptor, WorkerInventory, WorkerInventoryError,
     WorkerRegistration, WorkerSpec, compose_bindings, drain_binding_outputs,
-    validate_worker_inventory, validate_worker_inventory_closed, validate_worker_inventory_exact,
+    validate_worker_inventory, validate_worker_inventory_closed,
 };
 pub use primitives::ListenerKind;
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};

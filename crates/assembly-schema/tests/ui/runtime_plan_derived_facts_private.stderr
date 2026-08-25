@@ -1,9 +1,9 @@
 error[E0061]: this method takes 3 arguments but 4 arguments were supplied
- --> tests/ui/runtime_plan_derived_facts_private.rs:7:11
+ --> tests/ui/runtime_plan_derived_facts_private.rs:8:11
   |
-7 |     input.listener(
+8 |     input.listener(
   |           ^^^^^^^^
-8 |         "primary-main",
+9 |         "primary-main",
   |         -------------- unexpected argument #1 of type `&'static str`
   |
 note: method defined here
@@ -13,20 +13,20 @@ note: method defined here
   |            ^^^^^^^^
 help: remove the extra argument
   |
-8 -         "primary-main",
+9 -         "primary-main",
   |
 
 error[E0061]: this method takes 1 argument but 2 arguments were supplied
-  --> tests/ui/runtime_plan_derived_facts_private.rs:13:11
+  --> tests/ui/runtime_plan_derived_facts_private.rs:14:11
    |
-13 |       input.domain(
+14 |       input.domain(
    |             ^^^^^^
-14 |           AssemblyDomain::Identity,
-15 | /         vec![
-16 | |             DomainLifecyclePhase::Construct,
-17 | |             DomainLifecyclePhase::Ready,
-18 | |             DomainLifecyclePhase::Shutdown,
-19 | |         ],
+15 |           AssemblyDomain::Identity,
+16 | /         vec![
+17 | |             DomainLifecyclePhase::Construct,
+18 | |             DomainLifecyclePhase::Ready,
+19 | |             DomainLifecyclePhase::Shutdown,
+20 | |         ],
    | |_________- unexpected argument #2 of type `Vec<DomainLifecyclePhase>`
    |
 note: method defined here
@@ -36,11 +36,11 @@ note: method defined here
    |            ^^^^^^
 help: remove the extra argument
    |
-14 -         AssemblyDomain::Identity,
-15 -         vec![
-16 -             DomainLifecyclePhase::Construct,
-17 -             DomainLifecyclePhase::Ready,
-18 -             DomainLifecyclePhase::Shutdown,
-19 -         ],
-14 +         AssemblyDomain::Identity,
+15 -         AssemblyDomain::Identity,
+16 -         vec![
+17 -             DomainLifecyclePhase::Construct,
+18 -             DomainLifecyclePhase::Ready,
+19 -             DomainLifecyclePhase::Shutdown,
+20 -         ],
+15 +         AssemblyDomain::Identity,
    |

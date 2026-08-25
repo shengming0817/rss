@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rss.local/artifacts/candidate-bundle/v2/manifest.schema.json",
+  "title": "RSS Candidate Bundle v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "rssRevision", "artifactSelector", "packages", "profiles"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 2 },
+    "rssRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "artifactSelector": { "$ref": "#/definitions/artifactSelector" },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/package" }
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/candidateProfile" }
+    }
+  },
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "artifactSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow", "runId", "runAttempt", "artifactName"],
+      "properties": {
+        "workflow": { "const": "candidate-bundle.yml" },
+        "runId": { "type": "integer", "minimum": 1 },
+        "runAttempt": { "type": "integer", "minimum": 1 },
+        "artifactName": { "type": "string", "pattern": "^rss-candidate-bundle-[0-9a-f]{40}-[1-9][0-9]*-[1-9][0-9]*$" }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "checksum"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^rss-[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "version": { "type": "string", "minLength": 1 },
+        "checksum": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "closedSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "candidateProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "profile", "assembly", "configDigest", "assemblyLockDigest", "runtimePlanFingerprint", "image", "closure"],
+      "properties": {
+        "state": { "const": "candidate" },
+        "profile": { "enum": ["core"] },
+        "assembly": { "const": "runtime" },
+        "configDigest": { "$ref": "#/definitions/sha256" },
+        "assemblyLockDigest": { "$ref": "#/definitions/sha256" },
+        "runtimePlanFingerprint": { "$ref": "#/definitions/sha256" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["archive", "archiveSha256", "imageDigest", "migrationArchive", "migrationArchiveSha256", "migrationImageDigest"],
+          "properties": {
+            "archive": { "const": "profiles/core/server.oci" },
+            "archiveSha256": { "$ref": "#/definitions/sha256" },
+            "imageDigest": { "$ref": "#/definitions/sha256" },
+            "migrationArchive": { "const": "profiles/core/migrator.oci" },
+            "migrationArchiveSha256": { "$ref": "#/definitions/sha256" },
+            "migrationImageDigest": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        "closure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["listeners", "routes", "providers", "workers", "probes", "forbiddenProviders"],
+          "properties": {
+            "listeners": { "$ref": "#/definitions/closedSet" },
+            "routes": { "$ref": "#/definitions/closedSet" },
+            "providers": { "$ref": "#/definitions/closedSet" },
+            "workers": { "$ref": "#/definitions/closedSet" },
+            "probes": { "$ref": "#/definitions/closedSet" },
+            "forbiddenProviders": { "$ref": "#/definitions/closedSet" }
+          }
+        }
+      }
+    }
+  }
+}

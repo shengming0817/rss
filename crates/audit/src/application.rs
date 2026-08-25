@@ -1158,6 +1158,12 @@ fn policy_updated_actor_kind(
 /// ConsumerTx capability 执行，并与 inbox commit 保持同一事务。链 HMAC key 强度 fail-fast
 /// 在组合根构造 [`AuditChainHasher`](crate::ports::AuditChainHasher) 时收口（`new` 返回 `Option`，弱 key → `None`），
 /// 不在本域——本域只消费已装配的 erased provider。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditRuntimeSurface {
+    Full,
+    TenantEntriesLocalTx,
+}
+
 pub struct AuditDomain<S>
 where
     S: AuditListTenantAppender + Send + Sync + 'static,
@@ -1166,6 +1172,7 @@ where
     admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
     audit_sink: Arc<S>,
     audit_clock: Arc<dyn diport::Clock>,
+    surface: AuditRuntimeSurface,
 }
 
 impl<S> AuditDomain<S>
@@ -1181,12 +1188,14 @@ where
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         audit_sink: S,
         audit_clock: Arc<dyn diport::Clock>,
+        surface: AuditRuntimeSurface,
     ) -> Self {
         Self {
             read_repo,
             admin_repo,
             audit_sink: Arc::new(audit_sink),
             audit_clock,
+            surface,
         }
     }
 }
@@ -1222,7 +1231,9 @@ where
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         // 订阅元数据（contract_id / topic / group）单源自 generated event `SPEC`（契约 codegen 派生）——
         // 不手维护平行 const，消除 contract↔consumer 漂移（AI-HARD：codegen funnel + golden）。缺失即 fail-fast。
-        register_audit_subscriber(reg)?;
+        if self.surface == AuditRuntimeSurface::Full {
+            register_audit_subscriber(reg)?;
+        }
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
         let scoped_repo = self.read_repo.clone();
@@ -1231,13 +1242,18 @@ where
             audit_sink: self.audit_sink.clone(),
             audit_clock: self.audit_clock.clone(),
         };
+        let surface = self.surface;
         reg.route_group::<Admin>(AUDIT_ROUTE_PREFIX, move |rb| {
-            let scoped_endpoint =
-                GeneratedEndpoint::new_declared(AUDIT_LIST_HTTP_ROUTE, list_entries_handler)?
-                    .with_classified_state(AuditListHandlerState {
-                        repo: scoped_repo.clone(),
-                    });
-            let rb = rb.mount(scoped_endpoint)?;
+            let rb = if surface == AuditRuntimeSurface::Full {
+                rb.mount(
+                    GeneratedEndpoint::new_declared(AUDIT_LIST_HTTP_ROUTE, list_entries_handler)?
+                        .with_classified_state(AuditListHandlerState {
+                            repo: scoped_repo.clone(),
+                        }),
+                )?
+            } else {
+                rb
+            };
             let target_deps = target_deps.clone();
             let target_endpoint = GeneratedEndpoint::new(
                 AUDIT_LIST_TENANT_HTTP_ROUTE,
@@ -1461,7 +1477,13 @@ mod tests {
     }
 
     fn domain(repo: TestRepo) -> AuditDomain<NoopAuditSink> {
-        AuditDomain::new(repo.read, None, audit_sink(), audit_clock())
+        AuditDomain::new(
+            repo.read,
+            None,
+            audit_sink(),
+            audit_clock(),
+            AuditRuntimeSurface::Full,
+        )
     }
 
     struct DelegatingAdminRepo {
@@ -2615,6 +2637,40 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    fn core_audit_surface_is_exactly_local_tx_tenant_entries_without_subscribers() {
+        let fixture = repo();
+        let domain = AuditDomain::new(
+            fixture.read,
+            None,
+            audit_sink(),
+            audit_clock(),
+            AuditRuntimeSurface::TenantEntriesLocalTx,
+        );
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose Core audit surface");
+        assert!(
+            registry.drain_subscribers().is_empty(),
+            "Core audit surface cannot construct Eventing subscribers"
+        );
+
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("Core audit test write admission starts running");
+        let finalized = registry
+            .admit_writes(write_admission)
+            .finalize_routes()
+            .expect("finalize Core audit routes");
+        let route_ids = finalized
+            .iter()
+            .flat_map(|(_, routes)| routes.route_evidence())
+            .map(|evidence| evidence.contract_id())
+            .collect::<Vec<_>>();
+        assert_eq!(route_ids, ["audit.list-tenant-entries"]);
+    }
+
+    #[test]
     fn audit_http_routes_and_error_logs_use_single_source_funnels() {
         let source = include_str!("application.rs");
         let production = source
@@ -2886,6 +2942,7 @@ mod tests {
             Some(admin_repo),
             domain_sink.clone(),
             audit_clock(),
+            AuditRuntimeSurface::Full,
         );
         let registry = bootstrap::compose(&[&domain]).expect("compose audit domain");
         let (admission_control, _, _, write_admission) =
@@ -3664,6 +3721,7 @@ mod tests {
                 Some(admin_repo(repo)),
                 sink.clone(),
                 audit_clock(),
+                AuditRuntimeSurface::Full,
             );
             let reg = bootstrap::compose(&[&domain]).expect("compose ok");
             let routes = admit_test_writes(reg)

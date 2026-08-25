@@ -333,11 +333,14 @@ impl ProviderOutput {
         )
     }
 
-    pub(crate) fn redis(module: DomainModuleResult, permit: DistributedLockStorePermit) -> Self {
+    pub(crate) fn distributed_lock_store(
+        module: DomainModuleResult,
+        permit: DistributedLockStorePermit,
+    ) -> Self {
         Self::new(
             module,
             vec![ProviderReceipt::DistributedLockStore(permit.0)],
-            "redis",
+            "distributed-lock-store",
             CHANNELS_ALL,
         )
     }
@@ -411,9 +414,22 @@ impl ProviderOutput {
         identity
     }
 
-    pub(crate) fn postgres(
+    pub(crate) fn auth_audit_postgres(
+        module: DomainModuleResult,
+        auth_audit_sink: AuthAuditSinkPermit,
+    ) -> Self {
+        Self::new(
+            module,
+            vec![ProviderReceipt::AuthAuditSink(auth_audit_sink.0)],
+            "auth-audit-postgres",
+            CHANNELS_ALL,
+        )
+    }
+
+    pub(crate) fn postgres_event_runtime(
         mut module: DomainModuleResult,
         device_revocation_store: DeviceRevocationProviderOutput,
+        service_token_replay_module: DomainModuleResult,
         auth_audit_sink: AuthAuditSinkPermit,
         distributed_cas_store: DistributedCasStorePermit,
         service_token_replay_store: ServiceTokenReplayStorePermit,
@@ -423,6 +439,7 @@ impl ProviderOutput {
             permit: device_revocation_store,
         } = device_revocation_store;
         module.merge(revocation_module);
+        module.merge(service_token_replay_module);
         Self::new(
             module,
             vec![
@@ -431,7 +448,7 @@ impl ProviderOutput {
                 ProviderReceipt::DistributedCasStore(distributed_cas_store.0),
                 ProviderReceipt::ServiceTokenReplayStore(service_token_replay_store.0),
             ],
-            "postgres",
+            "postgres-event-runtime",
             CHANNELS_ALL,
         )
     }
@@ -519,6 +536,7 @@ const CHANNELS_ALL: &[LifecycleChannel] = &[
 /// Generates permit newtypes, receipts, dispatch fields, catalog join, completeness checks, and
 /// consuming accessors so expanding the active catalog cannot Soft-drift across three hand sites.
 macro_rules! provider_permit_accessor {
+    (selected, $field:ident, $permit:ident, $factory:ident) => {};
     (process, $field:ident, $permit:ident, $factory:ident) => {
         pub(crate) fn $field(&mut self) -> Result<$permit, ProviderBuildError> {
             Self::take(
@@ -733,7 +751,7 @@ provider_permits! {
         factory: OidcPostgresServiceTokenReplayStore,
         receipt: ServiceTokenReplayStore,
         channels: CHANNELS_ALL,
-        access: process,
+        access: selected,
     },
     SettingsKeyProviderPermit {
         field: settings_key_provider,
@@ -778,7 +796,18 @@ pub(crate) enum EventProviderPermits {
     },
 }
 
+pub(crate) enum ServiceTokenReplayStoreSelection {
+    Inactive,
+    Active(ServiceTokenReplayStorePermit),
+}
+
 impl ProviderFactoryDispatch {
+    pub(crate) fn take_service_token_replay_store(&mut self) -> ServiceTokenReplayStoreSelection {
+        match self.service_token_replay_store.take() {
+            Some(permit) => ServiceTokenReplayStoreSelection::Active(permit),
+            None => ServiceTokenReplayStoreSelection::Inactive,
+        }
+    }
     pub(crate) fn take_local_domain_permits(
         &mut self,
         execution: &crate::plan::DomainExecutionPlan,
@@ -1323,10 +1352,11 @@ pub(crate) enum ProviderBuildError {
 mod tests {
     use super::{
         BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_PROBES_WORKERS, CHANNELS_RESOURCES,
-        DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpConstructor,
-        LocalDomainProviderPermits, ProviderBuild, ProviderBuildError, ProviderFactoryDispatch,
-        ProviderFactoryPermit, ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit,
-        build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle, identity_signer_resource,
+        DeviceRevocationStorePermit, DistributedLockStorePermit, EventProviderPermits,
+        ListenerPdpConstructor, LocalDomainProviderPermits, ProviderBuild, ProviderBuildError,
+        ProviderFactoryDispatch, ProviderFactoryPermit, ProviderOutput, ProviderReceipt,
+        RuntimeObjectStorePermit, ServiceTokenReplayStoreSelection, build_pg_runtime_module,
+        commit_listener_pdp_jwks_lifecycle, identity_signer_resource,
     };
     use crate::providers_gen::ListenerPdpJwksLifecycle;
 
@@ -1530,7 +1560,7 @@ mod tests {
         let worker_starts = Arc::new(AtomicUsize::new(0));
 
         build
-            .record(ProviderOutput::redis(
+            .record(ProviderOutput::distributed_lock_store(
                 recording_module_all("first-resource", Arc::clone(&shutdowns)),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
@@ -1665,7 +1695,8 @@ mod tests {
 
     #[test]
     fn remote_domain_factories_have_no_active_permits() -> anyhow::Result<()> {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
+            ("RSS_RUNTIME_PLAN_KIND", "generic"),
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -1708,7 +1739,7 @@ mod tests {
         let (mut build, mut dispatch) = provider_build_and_dispatch();
         let shutdowns = Arc::new(Mutex::new(Vec::new()));
         build
-            .record(ProviderOutput::redis(
+            .record(ProviderOutput::distributed_lock_store(
                 recording_module_all("first-resource", Arc::clone(&shutdowns)),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
@@ -1747,7 +1778,7 @@ mod tests {
     async fn provider_abort_preserves_primary_when_cleanup_shutdown_fails() {
         let (mut build, mut dispatch) = provider_build_and_dispatch();
         build
-            .record(ProviderOutput::redis(
+            .record(ProviderOutput::distributed_lock_store(
                 DomainModuleResult::from_parts(
                     [probe("failing-cleanup")],
                     [DynManagedResource::new_box(FailingShutdownResource {
@@ -1793,7 +1824,10 @@ mod tests {
         );
 
         assert_eq!(resource_names(&output), ["postgres"]);
-        assert_eq!(worker_names(output), ["pg-runtime-monitor"]);
+        assert_eq!(
+            worker_names(output),
+            ["assemblies.runtime.src.provider_output.03"]
+        );
     }
 
     #[test]
@@ -1819,7 +1853,7 @@ mod tests {
             path
         };
         let ca_path = ca_path.to_str().expect("utf-8 path");
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_S3_ENDPOINT_URL", "https://s3.us-east-1.amazonaws.com"),
             ("RSS_S3_BUCKET", "rss-provider-output-test"),
             ("RSS_S3_CA_CERT_PEM_PATH", ca_path),
@@ -1927,7 +1961,7 @@ mod tests {
                 .expect("PDP output");
         }
         build
-            .record(ProviderOutput::redis(
+            .record(ProviderOutput::distributed_lock_store(
                 module_for_channels("redis", CHANNELS_ALL),
                 dispatch.distributed_lock_store().expect("redis permit"),
             ))
@@ -1963,16 +1997,20 @@ mod tests {
         .expect("typed device revocation provider");
         let (_store, revocation_output) = built_revocation.into_parts();
         build
-            .record(ProviderOutput::postgres(
+            .record(ProviderOutput::postgres_event_runtime(
                 module_for_channels("postgres", CHANNELS_ALL),
                 revocation_output,
+                module_for_channels("service-replay", CHANNELS_ALL),
                 dispatch.auth_audit_sink().expect("audit sink permit"),
                 dispatch
                     .distributed_cas_store()
                     .expect("distributed CAS permit"),
-                dispatch
-                    .service_token_replay_store()
-                    .expect("service-token replay permit"),
+                match dispatch.take_service_token_replay_store() {
+                    ServiceTokenReplayStoreSelection::Active(permit) => permit,
+                    ServiceTokenReplayStoreSelection::Inactive => {
+                        unreachable!("generic catalog selects service-token replay")
+                    }
+                },
             ))
             .expect("postgres output");
         build
@@ -2089,13 +2127,63 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn bundled_provider_plan() -> crate::plan::RuntimePlan {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
+            ("RSS_RUNTIME_PLAN_KIND", "generic"),
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ])
         .expect("valid provider-plan profile snapshot");
         crate::plan::RuntimePlan::bundled(snapshot.view()).expect("bundled provider plan")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn core_dispatch_cannot_construct_eventing_or_dlx_extras() {
+        let snapshot = crate::config::generic_test_snapshot(&[
+            ("RSS_RUNTIME_PLAN_KIND", "core"),
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("Core snapshot");
+        let parts = crate::plan::RuntimePlan::bundled(snapshot.view())
+            .expect("Core plan")
+            .place(bootstrap::Topology::DurableShared, snapshot.view())
+            .expect("Core placement")
+            .into_parts();
+        let events = parts.events;
+        let (_build, mut dispatch) =
+            ProviderBuild::from_execution_plan(parts.providers).expect("Core provider exact join");
+
+        dispatch.auth_audit_sink().expect("Core audit sink");
+        dispatch.listener_pdp().expect("Core listener PDP");
+        dispatch
+            .listener_rate_limiter()
+            .expect("Core listener rate limiter");
+        assert!(matches!(
+            dispatch
+                .take_event_permits(&events)
+                .expect("closed event state"),
+            EventProviderPermits::Inactive
+        ));
+        assert!(matches!(
+            dispatch.take_service_token_replay_store(),
+            ServiceTokenReplayStoreSelection::Inactive
+        ));
+        for result in [
+            dispatch.distributed_lock_store().map(|_| ()),
+            dispatch.distributed_cas_store().map(|_| ()),
+            dispatch.runtime_object_store().map(|_| ()),
+            dispatch.dlx_lifecycle_repository().map(|_| ()),
+            dispatch.dlx_archive_store().map(|_| ()),
+            dispatch.dlx_archive_key_provider().map(|_| ()),
+        ] {
+            assert!(
+                result.is_err(),
+                "Core must not mint an extra provider permit"
+            );
+        }
     }
 
     fn resource_names(module: &DomainModuleResult) -> Vec<&str> {

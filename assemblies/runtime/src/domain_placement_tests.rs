@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 // reason: placement matrix assertions use expect/panic for exact local fail-closed diagnostics.
 
-use crate::config::test_snapshot;
+use crate::config::generic_test_snapshot;
 use crate::plan::RuntimePlan;
 use assembly_schema::AssemblyDomain;
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ fn profile_snapshot(entries: &[(&str, &str)]) -> crate::config::RuntimeConfigSna
     ]);
     merged.extend(entries.iter().copied());
     let merged = merged.into_iter().collect::<Vec<_>>();
-    test_snapshot(&merged).expect("test snapshot")
+    generic_test_snapshot(&merged).expect("test snapshot")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

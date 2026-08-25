@@ -2191,7 +2191,7 @@ mod tests {
 
     #[test]
     fn inactive_assembly_has_no_saga_operator_target() -> anyhow::Result<()> {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

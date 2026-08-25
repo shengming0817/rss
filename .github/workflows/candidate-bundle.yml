@@ -39,14 +39,48 @@ jobs:
           ./hack/cargo.sh xtask assembly lock check
           ./hack/cargo.sh xtask assembly generate-runtime-plans --check
 
+      - name: Build immutable Core candidate OCI archive
+        env:
+          RSS_IMAGE_ARCHIVE: ${{ runner.temp }}/rss-core-server.oci
+          RSS_IMAGE_METADATA: ${{ runner.temp }}/rss-core-server.metadata.json
+          RSS_MIGRATION_IMAGE_ARCHIVE: ${{ runner.temp }}/rss-core-migrator.oci
+          RSS_MIGRATION_IMAGE_METADATA: ${{ runner.temp }}/rss-core-migrator.metadata.json
+        run: |
+          set -euo pipefail
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker buildx build . \
+            --target runtime \
+            --build-arg "GIT_SHA=$GITHUB_SHA" \
+            --build-arg "BUILD_DATE=$build_date" \
+            --output "type=oci,dest=$RSS_IMAGE_ARCHIVE" \
+            --metadata-file "$RSS_IMAGE_METADATA"
+          digest="$(jq -er '."containerimage.digest"' "$RSS_IMAGE_METADATA")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$digest" > "${RSS_IMAGE_METADATA%.json}.digest"
+          docker buildx build . \
+            --target operator-runtime \
+            --output "type=oci,dest=$RSS_MIGRATION_IMAGE_ARCHIVE" \
+            --metadata-file "$RSS_MIGRATION_IMAGE_METADATA"
+          migration_digest="$(jq -er '."containerimage.digest"' "$RSS_MIGRATION_IMAGE_METADATA")"
+          [[ "$migration_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$migration_digest" > "${RSS_MIGRATION_IMAGE_METADATA%.json}.digest"
+
       - name: Prove and export candidate bundle
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/rss-candidate-target
           RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
+          RSS_IMAGE_ARCHIVE: ${{ runner.temp }}/rss-core-server.oci
+          RSS_IMAGE_DIGEST_FILE: ${{ runner.temp }}/rss-core-server.metadata.digest
+          RSS_MIGRATION_IMAGE_ARCHIVE: ${{ runner.temp }}/rss-core-migrator.oci
+          RSS_MIGRATION_IMAGE_DIGEST_FILE: ${{ runner.temp }}/rss-core-migrator.metadata.digest
         run: |
           set -euo pipefail
           ./hack/cargo.sh xtask package-proof \
-            --export-candidate-bundle "$RSS_BUNDLE_PATH"
+            --export-candidate-bundle "$RSS_BUNDLE_PATH" \
+            --profile-image-archive "$RSS_IMAGE_ARCHIVE" \
+            --profile-image-digest "$(cat "$RSS_IMAGE_DIGEST_FILE")" \
+            --profile-migration-image-archive "$RSS_MIGRATION_IMAGE_ARCHIVE" \
+            --profile-migration-image-digest "$(cat "$RSS_MIGRATION_IMAGE_DIGEST_FILE")"
 
       - name: Validate bundle identity before upload
         env:
@@ -55,9 +89,23 @@ jobs:
           set -euo pipefail
           manifest="$RSS_BUNDLE_PATH/candidate-bundle.json"
           jq -e --arg revision "$GITHUB_SHA" '
-            .schemaVersion == 1 and
+            .schemaVersion == 2 and
             .rssRevision == $revision and
             (.packages | type == "array" and length > 0) and
+            (.profiles | type == "array" and length == 1) and
+            (.profiles[0].state == "candidate") and
+            (.profiles[0].profile == "core") and
+            (.profiles[0].assembly == "runtime") and
+            (.profiles[0].configDigest | test("^sha256:[0-9a-f]{64}$")) and
+            (.profiles[0].assemblyLockDigest | test("^sha256:[0-9a-f]{64}$")) and
+            (.profiles[0].runtimePlanFingerprint | test("^sha256:[0-9a-f]{64}$")) and
+            (.profiles[0].image.archive == "profiles/core/server.oci") and
+            (.profiles[0].image.archiveSha256 | test("^sha256:[0-9a-f]{64}$")) and
+            (.profiles[0].image.imageDigest | test("^sha256:[0-9a-f]{64}$")) and
+            (.profiles[0].image.migrationArchive == "profiles/core/migrator.oci") and
+            (.profiles[0].image.migrationArchiveSha256 | test("^sha256:[0-9a-f]{64}$")) and
+            (.profiles[0].image.migrationImageDigest | test("^sha256:[0-9a-f]{64}$")) and
+            all(.profiles[0].closure[]; type == "array" and length > 0) and
             all(.packages[];
               (.name | test("^rss-[a-z0-9]+(-[a-z0-9]+)*$")) and
               (.version | test("^[0-9A-Za-z.+-]+$")) and
@@ -69,6 +117,14 @@ jobs:
             test -f "$archive"
             test "$(sha256sum "$archive" | awk '{print $1}')" = "$checksum"
           done
+          image="$RSS_BUNDLE_PATH/$(jq -r '.profiles[0].image.archive' "$manifest")"
+          test -f "$image"
+          test "sha256:$(sha256sum "$image" | awk '{print $1}')" = \
+            "$(jq -r '.profiles[0].image.archiveSha256' "$manifest")"
+          migration_image="$RSS_BUNDLE_PATH/$(jq -r '.profiles[0].image.migrationArchive' "$manifest")"
+          test -f "$migration_image"
+          test "sha256:$(sha256sum "$migration_image" | awk '{print $1}')" = \
+            "$(jq -r '.profiles[0].image.migrationArchiveSha256' "$manifest")"
 
       - name: Upload immutable candidate bundle
         id: upload
@@ -78,7 +134,7 @@ jobs:
           path: ${{ runner.temp }}/rss-candidate-bundle
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 90
 
       - name: Publish traceable bundle summary
         env:

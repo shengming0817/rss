@@ -30,7 +30,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn generated_modules_compose_in_manifest_order_with_stable_outputs() {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

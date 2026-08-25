@@ -485,6 +485,7 @@ pub fn build_shared_runtime_deps(
 pub struct IntegrationRuntimeDeps {
     shared: SharedRuntimeDeps,
     local: crate::LocalDomainProviderCatalog,
+    domain_transport: Arc<dyn distributed::HttpContractTransport>,
 }
 
 impl std::ops::Deref for IntegrationRuntimeDeps {
@@ -579,7 +580,8 @@ fn shared_runtime_deps_from_parts(
     settings_readiness: settings_composition::SettingsReadinessDeps,
     domain_transport: Arc<dyn distributed::HttpContractTransport>,
 ) -> IntegrationRuntimeDeps {
-    let shared = SharedRuntimeDeps::from_integration_parts(pg, redis, s3, domain_transport);
+    let shared = SharedRuntimeDeps::from_integration_parts(pg, redis);
+    drop(s3);
     let local = crate::LocalDomainProviderCatalog::IdentitySettings {
         password_blocklist,
         signer: identity_signer,
@@ -587,7 +589,11 @@ fn shared_runtime_deps_from_parts(
         key_name: settings_config_value_key_name,
         readiness: settings_readiness,
     };
-    IntegrationRuntimeDeps { shared, local }
+    IntegrationRuntimeDeps {
+        shared,
+        local,
+        domain_transport,
+    }
 }
 
 /// Wires the production event transport through an integration-only seam.
@@ -670,9 +676,10 @@ pub async fn wire_event_transport_with_admission(
 }
 
 /// Wires distributed providers with the canonical non-configurable worker timing.
-pub fn wire_distributed(deps: &SharedRuntimeDeps) -> anyhow::Result<DistributedRuntimeDeps> {
+pub fn wire_distributed(deps: &IntegrationRuntimeDeps) -> anyhow::Result<DistributedRuntimeDeps> {
     crate::distributed_runtime::wire_distributed(
         deps,
+        Arc::clone(&deps.domain_transport),
         crate::distributed_runtime::DistributedWorkerConfig::canonical(),
     )
 }

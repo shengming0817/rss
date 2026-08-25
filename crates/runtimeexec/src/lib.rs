@@ -1079,7 +1079,7 @@ fn register_lifecycle_outputs(
     } = lifecycle_batches;
     let workers = || provider.0.workers().chain(domain.0.workers());
     let validation: anyhow::Result<bootstrap::WorkerInventory> = match expected_workers.as_ref() {
-        Some(expected) => bootstrap::validate_worker_inventory_exact(workers(), expected)
+        Some(expected) => bootstrap::validate_worker_inventory_closed(workers(), expected)
             .map_err(anyhow::Error::from),
         None if require_exact_inventory => Err(anyhow::anyhow!(
             "successful launch requires a plan-derived exact mutating-worker inventory"

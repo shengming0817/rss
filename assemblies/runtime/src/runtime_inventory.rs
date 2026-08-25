@@ -72,7 +72,7 @@ impl RuntimeInventoryRoutes {
     pub(crate) fn unpublished_fixture(
         _config: crate::config::SnapshotConfig<'_>,
     ) -> anyhow::Result<Self> {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -318,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn unpublished_inventory_returns_retryable_provider_unavailable() -> anyhow::Result<()> {
-        let snapshot = crate::config::test_snapshot(&[
+        let snapshot = crate::config::generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),

@@ -10,8 +10,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v3";
-const ASSEMBLY_PLAN_TAG: &str = "rss-assembly-lock-v2";
+const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v4";
+const ASSEMBLY_PLAN_TAG: &str = "rss-assembly-lock-v3";
 const SECRET_SENTINEL: &str = "ZZ_RUNTIME_PLAN_SECRET_1788_DO_NOT_SERIALIZE";
 
 fn vectors() -> Value {
@@ -191,7 +191,7 @@ fn runtime_plan_shared_vector_freezes_rfc8785_bytes_and_tagged_fingerprint() {
 }
 
 #[test]
-fn assembly_lock_shared_vector_is_v2_and_the_reader_rejects_v1() {
+fn assembly_lock_shared_vector_is_v3_and_the_reader_rejects_v2() {
     let vector = assembly_lock_vector();
     let unsigned = &vector["unsigned"];
     let canonical_hex = canonical_bytes(unsigned)
@@ -208,29 +208,29 @@ fn assembly_lock_shared_vector_is_v2_and_the_reader_rejects_v1() {
 
     let valid = assembly_lock_wire_from_vector();
     ParsedAssemblyLock::from_json_slice(&serde_json::to_vec(&valid).expect("lock JSON"))
-        .expect("valid v2 AssemblyLock vector");
+        .expect("valid v3 AssemblyLock vector");
     let committed: Value =
         serde_json::from_str(include_str!("../schemas/assembly-lock.schema.json"))
             .expect("committed AssemblyLock schema");
-    assert_eq!(committed["properties"]["schemaVersion"]["const"], 2);
+    assert_eq!(committed["properties"]["schemaVersion"]["const"], 3);
     let validator = jsonschema::draft7::options()
         .should_validate_formats(true)
         .build(&committed)
         .expect("Draft-07 AssemblyLock schema");
     assert!(validator.validate(&valid).is_ok());
 
-    let mut v1 = valid;
-    v1["schemaVersion"] = json!(1);
-    assert!(validator.validate(&v1).is_err());
-    let result = ParsedAssemblyLock::from_json_slice(&serde_json::to_vec(&v1).expect("lock JSON"));
-    assert!(result.is_err(), "AssemblyLock v1 must be rejected");
+    let mut v2 = valid;
+    v2["schemaVersion"] = json!(2);
+    assert!(validator.validate(&v2).is_err());
+    let result = ParsedAssemblyLock::from_json_slice(&serde_json::to_vec(&v2).expect("lock JSON"));
+    assert!(result.is_err(), "AssemblyLock v2 must be rejected");
     let Some(error) = result.err() else {
         return;
     };
     assert!(
         error
             .to_string()
-            .contains("unsupported AssemblyLock schemaVersion 1")
+            .contains("unsupported AssemblyLock schemaVersion 2")
     );
 }
 
@@ -240,7 +240,8 @@ fn runtime_plan_reader_accepts_the_shared_closed_vector() {
     let wire = wire_from_vector();
     parse(&wire).expect("valid shared RuntimePlan vector");
 
-    assert_eq!(wire["schemaVersion"], 3);
+    assert_eq!(wire["schemaVersion"], 4);
+    assert_eq!(wire["planKind"], json!({"kind": "generic"}));
     assert_eq!(
         wire["assemblyFingerprint"],
         vector["unsigned"]["assemblyFingerprint"].clone()
@@ -301,7 +302,7 @@ fn runtime_plan_reader_is_closed_and_fails_on_bad_version_enum_or_digest() {
     );
     assert_eq!(
         unsupported_error.to_string(),
-        "unsupported RuntimePlan schemaVersion 1; supported schemaVersion is 3; regenerate the RuntimePlan"
+        "unsupported RuntimePlan schemaVersion 1; supported schemaVersion is 4; regenerate the RuntimePlan"
     );
 
     let mut uppercase_digest = valid.clone();
@@ -714,15 +715,15 @@ fn runtime_plan_reader_detects_semantics_preserving_fingerprint_mutations() {
 fn runtime_plan_reader_rejects_duplicate_json_keys_and_does_not_echo_secret_values() {
     let wire = serde_json::to_string(&wire_from_vector()).expect("wire string");
     let duplicate = wire.replacen(
-        "\"schemaVersion\":3",
-        "\"schemaVersion\":3,\"schemaVersion\":3",
+        "\"schemaVersion\":4",
+        "\"schemaVersion\":4,\"schemaVersion\":4",
         1,
     );
     assert!(validate_runtime_plan_json_slice(duplicate.as_bytes()).is_err());
 
     let bait = wire.replacen(
-        "\"schemaVersion\":3",
-        &format!("\"secret\":\"{SECRET_SENTINEL}\",\"schemaVersion\":3"),
+        "\"schemaVersion\":4",
+        &format!("\"secret\":\"{SECRET_SENTINEL}\",\"schemaVersion\":4"),
         1,
     );
     let result = validate_runtime_plan_json_slice(bait.as_bytes());
@@ -794,8 +795,8 @@ fn runtime_plan_reader_reports_sealed_redacted_json_stage_category_and_path() {
 
     let mut secret_key = serde_json::to_string(&wire_from_vector()).expect("wire string");
     secret_key = secret_key.replacen(
-        "\"schemaVersion\":3",
-        &format!("\"{SECRET_SENTINEL}\":true,\"schemaVersion\":3"),
+        "\"schemaVersion\":4",
+        &format!("\"{SECRET_SENTINEL}\":true,\"schemaVersion\":4"),
         1,
     );
     let unknown_field = validate_runtime_plan_json_slice(secret_key.as_bytes())
@@ -846,7 +847,7 @@ fn runtime_plan_writer_validates_against_draft7_and_round_trips_through_the_read
 }
 
 #[test]
-fn runtime_plan_v3_freezes_closed_workflow_activation_states_without_capability_facts() {
+fn runtime_plan_v4_freezes_closed_workflow_activation_states_without_capability_facts() {
     let committed: Value =
         serde_json::from_str(include_str!("../schemas/runtime-plan.schema.json"))
             .expect("committed schema");
@@ -935,7 +936,7 @@ fn runtime_plan_v3_freezes_closed_workflow_activation_states_without_capability_
 }
 
 #[test]
-fn runtime_plan_rust_schema_matches_the_committed_v3_boundary() {
+fn runtime_plan_rust_schema_matches_the_committed_v4_boundary() {
     let rust = serde_json::to_value(schemars::schema_for!(RuntimePlan)).expect("Rust schema");
     let committed: Value =
         serde_json::from_str(include_str!("../schemas/runtime-plan.schema.json"))

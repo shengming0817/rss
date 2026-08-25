@@ -18,13 +18,23 @@ const AUDIT_CHAIN_KEY_ENV: &str = "RSS_AUDIT_CHAIN_KEY_B64URL";
 
 pub(crate) struct AuditModuleInput {
     key: MacKey,
+    surface: audit::AuditRuntimeSurface,
 }
 
 impl AuditModuleInput {
-    pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
+    pub(crate) fn from_execution(
+        execution: &crate::plan::DomainExecutionPlan,
+        mapper: &ServingConfigMapper<'_>,
+    ) -> anyhow::Result<Self> {
         let config = mapper.config();
         Ok(Self {
             key: build_audit_key(config.value(AUDIT_CHAIN_KEY_ENV))?,
+            surface: match execution.official_profile() {
+                Some(assembly_schema::OfficialAssemblyProfile::Core) => {
+                    audit::AuditRuntimeSurface::TenantEntriesLocalTx
+                }
+                None => audit::AuditRuntimeSurface::Full,
+            },
         })
     }
 }
@@ -43,6 +53,7 @@ pub async fn module(
         RustCryptoMacVerifier,
         input.key,
         Arc::new(SystemClock),
+        input.surface,
     ))
 }
 
@@ -96,6 +107,7 @@ pub(crate) mod tests {
     pub(crate) fn test_input() -> anyhow::Result<AuditModuleInput> {
         Ok(AuditModuleInput {
             key: MacKey::from_bytes(vec![0x42; 32]),
+            surface: audit::AuditRuntimeSurface::Full,
         })
     }
 
@@ -106,6 +118,7 @@ pub(crate) mod tests {
             RustCryptoMacVerifier,
             input.key,
             Arc::new(SystemClock),
+            input.surface,
         ))
     }
 

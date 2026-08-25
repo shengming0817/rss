@@ -38,7 +38,6 @@ use std::sync::Arc;
 
 use postgres::PgRuntimeHandle;
 use redis::RedisRuntimeDeps;
-use s3::S3RuntimeDeps;
 use vault::VaultRuntimeDeps;
 
 /// 共享基础设施依赖，流入每个域的 `wire_X`（parameter object，[`bootstrap::DomainModuleResult`] 的入向配对）。
@@ -54,30 +53,12 @@ pub struct SharedRuntimeDeps {
     /// 投影；sampler/pool guard 只经 lifecycle owner 的 consuming output 交接，不进入共享参数对象。
     pub pg: PgRuntimeHandle,
 
-    /// Receipt-backed concrete certificate revocation provider.
-    ///
-    /// Private and non-optional: runtime construction cannot represent a PostgreSQL capability
-    /// handle without also constructing the active persistent provider. `deviceloop` consumption
-    /// remains blocked on its existing reconcile implementation task.
-    #[allow(dead_code)]
-    revocation_store: postgres::PgRevocationStore,
-
     /// 共享 redis capability bundle，生产必配；distributed runtime 通过此唯一入口取得 lock provider。
     ///
     /// 不暴露 `deadpool_redis::Pool`，保持 REDIS-BUNDLE-FUNNEL-01：pool guard、distlock、CAS、idempotency
     /// 均经 `RedisRuntimeDeps::infra()` / `runtime_resources()` 派发；后者连同 typed factory receipt
     /// 进入 runtime-local `ProviderBuild` transaction。
     pub redis: RedisRuntimeDeps,
-
-    /// 共享 S3 object-store capability bundle。runtime canary 与后续对象消费方只能经此 bundle 取得
-    /// `S3Store`，endpoint/TLS/credentials 仍由组合根启动期 fail-fast 构造。
-    /// 其 `runtime_resources()` 连同 typed factory receipt 进入 runtime-local `ProviderBuild`。
-    pub s3: S3RuntimeDeps,
-
-    /// 共享 outbound domain transport dispatch seam。组合根构造真实 provider 并注入 typed trait
-    /// object，后续域/运行时消费者只能经 `distributed::HttpContractTransport` 发起跨域同步调用；底层 HTTP
-    /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult` 的 resource 输出托管。
-    pub domain_transport: Arc<dyn distributed::HttpContractTransport>,
 }
 
 pub(crate) enum LocalDomainProviderCatalog {
@@ -152,20 +133,8 @@ impl LocalDomainProviderCatalog {
 impl SharedRuntimeDeps {
     /// Production construction path consuming the store half of the typed provider funnel.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_built_provider(
-        pg: PgRuntimeHandle,
-        revocation_store: crate::provider_output::ReceiptBackedRevocationStore,
-        redis: RedisRuntimeDeps,
-        s3: S3RuntimeDeps,
-        domain_transport: Arc<dyn distributed::HttpContractTransport>,
-    ) -> Self {
-        Self::from_parts(
-            pg,
-            revocation_store.into_inner(),
-            redis,
-            s3,
-            domain_transport,
-        )
+    pub(crate) fn from_built_provider(pg: PgRuntimeHandle, redis: RedisRuntimeDeps) -> Self {
+        Self::from_parts(pg, redis)
     }
 
     /// Integration-only construction path for focused domain wiring tests.
@@ -174,31 +143,13 @@ impl SharedRuntimeDeps {
     /// provider permit and its lifecycle output are consumed in the same build transaction.
     #[cfg(feature = "integration")]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_integration_parts(
-        pg: PgRuntimeHandle,
-        redis: RedisRuntimeDeps,
-        s3: S3RuntimeDeps,
-        domain_transport: Arc<dyn distributed::HttpContractTransport>,
-    ) -> Self {
-        let revocation_store = pg.infra().revocation_store();
-        Self::from_parts(pg, revocation_store, redis, s3, domain_transport)
+    pub(crate) fn from_integration_parts(pg: PgRuntimeHandle, redis: RedisRuntimeDeps) -> Self {
+        Self::from_parts(pg, redis)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn from_parts(
-        pg: PgRuntimeHandle,
-        revocation_store: postgres::PgRevocationStore,
-        redis: RedisRuntimeDeps,
-        s3: S3RuntimeDeps,
-        domain_transport: Arc<dyn distributed::HttpContractTransport>,
-    ) -> Self {
-        Self {
-            pg,
-            revocation_store,
-            redis,
-            s3,
-            domain_transport,
-        }
+    fn from_parts(pg: PgRuntimeHandle, redis: RedisRuntimeDeps) -> Self {
+        Self { pg, redis }
     }
 }
 

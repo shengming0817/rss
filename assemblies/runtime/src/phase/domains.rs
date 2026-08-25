@@ -1,6 +1,4 @@
-use super::maintenance::{
-    RLS_READY_PROBE_NAME, RlsReadyProbe, wire_auth_grant_sweeper, wire_saga_terminal_sweeper,
-};
+use super::maintenance::{wire_auth_grant_sweeper, wire_saga_terminal_sweeper};
 use super::{DomainsWired, InfraBuilt, RuntimePhaseState, phase_result};
 use crate::infra::s3::wire_s3_canary;
 use crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME;
@@ -135,6 +133,7 @@ impl<'a> InfraBuilt<'a> {
             rate_limiter,
             trusted_proxy_config,
             deps,
+            s3,
             s3_canary_config,
             wiring_inputs,
             domain_transport,
@@ -213,9 +212,14 @@ impl<'a> InfraBuilt<'a> {
             )
             .context("validate runtime domain-listener evidence")?;
 
-            let s3_canary_module =
-                wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
-            provider_build.record_domain(s3_canary_module);
+            if let Some(s3_canary_config) = s3_canary_config {
+                let s3 = s3.context("S3 canary requires active runtime object store")?;
+                let s3_canary_module =
+                    wire_s3_canary(s3, s3_canary_config).context("wire s3 canary")?;
+                provider_build.record_domain(s3_canary_module);
+            } else {
+                anyhow::ensure!(s3.is_none(), "inactive S3 canary retained an object store");
+            }
             let (saga_module, active_saga_count) =
                 crate::saga_runtime::bind_and_wire_selected_sagas(
                     &mut context.runtime_plan,
@@ -229,15 +233,6 @@ impl<'a> InfraBuilt<'a> {
                 wire_saga_terminal_sweeper(&deps.pg, active_saga_count, &write_admission)
                     .context("wire terminal Saga retention")?;
             provider_build.record_domain(saga_retention_module);
-            let rls_probe_name =
-                ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
-            registry
-                .registry_mut()
-                .probe(
-                    rls_probe_name,
-                    Box::new(RlsReadyProbe::new(deps.pg.rls_readiness())),
-                )
-                .context("register rls_ready probe")?;
             if let Some(probe) = signing_rotation_probe {
                 let name = ProbeName::parse(RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME)
                     .context("parse RSS access signing rotation probe name")?;
@@ -253,9 +248,16 @@ impl<'a> InfraBuilt<'a> {
                 subscriber,
             } = event_provider_permits
             {
-                let distributed =
-                    crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
-                        .context("wire distributed")?;
+                let transport = domain_transport
+                    .as_ref()
+                    .context("active Eventing requires domain transport")?
+                    .dispatch_handle();
+                let distributed = crate::distributed_runtime::wire_distributed(
+                    &deps,
+                    transport,
+                    distributed_worker,
+                )
+                .context("wire distributed")?;
                 let event_subscribers =
                     crate::event_transport::bridge_generated_subscriptions_for_execution(
                         registry.registry_mut().drain_subscribers(),
@@ -316,22 +318,45 @@ impl<'a> InfraBuilt<'a> {
                 Ok(mut completed) => match completed.register_probes(wired.registry.registry_mut())
                 {
                     Err(error) => Err(completed.abort(error).await),
-                    Ok(()) => Ok(DomainsWired {
-                        context,
-                        listener_execution_plan,
-                        rate_limiter,
-                        trusted_proxy_config,
-                        deps,
-                        runtime_rss_access,
-                        runtime_federated_access,
-                        runtime_service_token,
-                        domain_transport,
-                        command_idempotency_keyring,
-                        metrics_exporter,
-                        security_root_registry: wired.registry,
-                        provider_build: completed,
-                        placement_execution_plan,
-                    }),
+                    Ok(()) => {
+                        if let Some(profile) = context.runtime_plan.official_inventory_profile() {
+                            let expected = crate::modules_gen::OFFICIAL_CORE_PROBES
+                                .iter()
+                                .map(|probe| (*probe).to_owned())
+                                .collect::<Vec<_>>();
+                            crate::plan::validate_official_profile_exact_ids(
+                                "probe-codegen",
+                                profile.probes(),
+                                expected.clone(),
+                            )?;
+                            let actual = wired
+                                .registry
+                                .registry()
+                                .probe_names()
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect();
+                            crate::plan::validate_official_profile_exact_ids(
+                                "probe", &expected, actual,
+                            )?;
+                        }
+                        Ok(DomainsWired {
+                            context,
+                            listener_execution_plan,
+                            rate_limiter,
+                            trusted_proxy_config,
+                            deps,
+                            runtime_rss_access,
+                            runtime_federated_access,
+                            runtime_service_token,
+                            domain_transport,
+                            command_idempotency_keyring,
+                            metrics_exporter,
+                            security_root_registry: wired.registry,
+                            provider_build: completed,
+                            placement_execution_plan,
+                        })
+                    }
                 },
             },
         };
@@ -343,7 +368,7 @@ impl<'a> InfraBuilt<'a> {
 #[cfg(test)]
 mod listener_plan_tests {
     use super::{validate_domain_listener_evidence, wire_runtime_security_root};
-    use crate::config::test_snapshot;
+    use crate::config::generic_test_snapshot;
     use crate::plan::RuntimePlan;
 
     #[allow(clippy::expect_used)]
@@ -351,7 +376,7 @@ mod listener_plan_tests {
         crate::plan::ListenerExecutionPlan,
         crate::plan::PlacementExecutionPlan,
     ) {
-        let snapshot = test_snapshot(&[
+        let snapshot = generic_test_snapshot(&[
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -382,7 +407,7 @@ mod listener_plan_tests {
                 "https://identity.internal/rpc",
             ),
         ];
-        let snapshot = test_snapshot(&merged).expect("remote identity snapshot");
+        let snapshot = generic_test_snapshot(&merged).expect("remote identity snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
         let parts = runtime_plan
             .place(bootstrap::Topology::DurableShared, snapshot.view())

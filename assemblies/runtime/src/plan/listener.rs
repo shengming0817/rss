@@ -5,19 +5,26 @@ use crate::{
     plan::RuntimePlanError,
 };
 use assembly_schema::{
-    AssemblyListenerKind, CanonicalAssemblyManifestV2, ListenerAuth, RuntimePlanV3Input,
+    AssemblyListenerKind, CanonicalAssemblyManifestV2, ListenerAuth, RuntimePlanV4Input,
 };
 
 pub(super) fn append(
     manifest: &CanonicalAssemblyManifestV2,
     config: SnapshotConfig<'_>,
-    input: &mut RuntimePlanV3Input,
+    input: &mut RuntimePlanV4Input,
 ) -> Result<(), RuntimePlanError> {
     let (primary, admin, internal) = TokenProfilesConfig::listener_selections(config)
         .map_err(|_| RuntimePlanError::ListenerAuth)?;
     let mut listeners = manifest
         .listeners()
         .iter()
+        .filter(|listener| {
+            input
+                .plan_kind()
+                .official_profile()
+                .and_then(|profile| manifest.official_profile(profile))
+                .is_none_or(|profile| profile.required_listeners().contains(&listener.kind))
+        })
         .map(|listener| {
             let auth = match listener.kind {
                 AssemblyListenerKind::Primary => access_auth(primary),

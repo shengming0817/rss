@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, ensure};
 use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, ListenerAuth, RepositoryAssemblyManifestV2,
-    RepositoryVerifiedAssemblyLock, RuntimePlan, RuntimePlanV3Input,
+    RepositoryVerifiedAssemblyLock, RuntimePlan, RuntimePlanV4Input,
 };
 use consistency::{SagaInstanceRef, SagaInstanceStatus};
 use diport::{
@@ -164,7 +164,7 @@ impl FixtureRepository {
         let assembly = self.root.join("assemblies").join(FIXTURE_ASSEMBLY_ID);
         let manifest = RepositoryAssemblyManifestV2::discover_v2(&self.root, &assembly)?;
         let lock = RepositoryVerifiedAssemblyLock::compile_v2(&manifest)?;
-        let mut input = RuntimePlanV3Input::from_manifest(manifest.canonical());
+        let mut input = RuntimePlanV4Input::generic_from_manifest(manifest.canonical());
         input.listener(
             AssemblyListenerKind::Admin,
             ListenerAuth::RssAccessToken,
@@ -199,7 +199,7 @@ impl FixtureRepository {
         ] {
             input.placement(domain, FIXTURE_ASSEMBLY_ID);
         }
-        Ok(RuntimePlan::compile_v3(manifest.canonical(), &lock, input)?)
+        Ok(RuntimePlan::compile_v4(manifest.canonical(), &lock, input)?)
     }
 }
 
