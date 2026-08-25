@@ -1661,7 +1661,9 @@ fn map_event_transport_from_snapshot(
                 active
                     .then(|| build_tenant_authority_from(&get))
                     .transpose()?,
-                Some(build_dlx_payload_protector(config)?),
+                active
+                    .then(|| build_dlx_payload_protector(config))
+                    .transpose()?,
                 amqp_ca,
             )
         };
@@ -2861,6 +2863,20 @@ mod tests {
         let config = EventTransportConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
 
         assert!(matches!(config.decision, EventDecision::Durable { .. }));
+    }
+
+    #[test]
+    fn inactive_durable_projection_does_not_construct_eventing_security() {
+        let snapshot = crate::config::generic_test_snapshot(&[("RSS_TOPOLOGY", "durable-shared")])
+            .unwrap_or_else(|_| unreachable!());
+
+        let config = map_event_transport_from_snapshot(snapshot.view(), &[], &[], false)
+            .unwrap_or_else(|error| unreachable!("inactive projection parsed Eventing: {error}"));
+
+        assert!(matches!(config.decision, EventDecision::Inactive));
+        assert!(config.tenant_authority.is_none());
+        assert!(config.dlx_payload_protector.is_none());
+        assert!(config.amqp_ca.is_none());
     }
 
     #[test]
