@@ -29,9 +29,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
 
-const SELECTION_SCHEMA_VERSION: u8 = 2;
-const POLICY_SCHEMA_VERSION: u8 = 3;
+const SELECTION_SCHEMA_VERSION: u8 = 3;
+const POLICY_SCHEMA_VERSION: u8 = 4;
 const UNKNOWN_REVISION: &str = "unknown";
+const CANONICAL_POLICY_PATH: &str = ".config/ci-impact.toml";
+const PROTECTED_EXTERNAL_PATH_PREFIXES: &[&str] = &[".cargo/", ".config/", ".git/", ".github/"];
 const GITHUB_EVENT_NAME_ENV: &str = "GITHUB_EVENT_NAME";
 const GITHUB_SHA_ENV: &str = "GITHUB_SHA";
 pub(crate) const LOCAL_WORKER_ENV: &str = "RSS_CI_LOCAL_WORKER";
@@ -59,7 +61,7 @@ pub(crate) const LOCAL_PRIVATE_ENV: &[&str] = &[
     LOCAL_MERGE_BASE_ENV,
 ];
 const DOCUMENTATION_PATHS: &[&str] = &["README.md", "contracts/README.md"];
-const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
+const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", "hack/"];
 #[cfg(test)]
 const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
 #[derive(Clone, Copy)]
@@ -208,8 +210,6 @@ impl LocalOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum LocalStage {
     Meta,
-    #[value(name = "python-hooks")]
-    PythonHooks,
     #[value(name = "cargo-wrapper-selftest")]
     CargoWrapperSelftest,
     Check,
@@ -221,7 +221,6 @@ impl LocalStage {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Meta => "meta",
-            Self::PythonHooks => "python-hooks",
             Self::CargoWrapperSelftest => "cargo-wrapper-selftest",
             Self::Check => "check",
             Self::Test => "test",
@@ -241,6 +240,95 @@ pub(crate) enum PolicyMode {
 struct PolicyWire {
     schema_version: u8,
     mode: PolicyMode,
+    external_path_prefixes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImpactPolicy {
+    mode: PolicyMode,
+    external_path_prefixes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilteredEntries {
+    included: Vec<DiffEntry>,
+    external_count: usize,
+}
+
+impl ImpactPolicy {
+    fn filter_entries(&self, entries: &[DiffEntry]) -> FilteredEntries {
+        let (external, included): (Vec<_>, Vec<_>) = entries.iter().partition(|entry| {
+            self.external_path_prefixes
+                .iter()
+                .any(|prefix| entry.path.starts_with(prefix))
+        });
+        FilteredEntries {
+            included: included.into_iter().cloned().collect(),
+            external_count: external.len(),
+        }
+    }
+}
+
+fn parse_impact_policy(source: &[u8]) -> Result<ImpactPolicy> {
+    let source = std::str::from_utf8(source).context("CI impact policy is not valid UTF-8")?;
+    let wire = toml::from_str::<PolicyWire>(source).context("parse CI impact policy")?;
+    if wire.schema_version != POLICY_SCHEMA_VERSION {
+        bail!(
+            "unsupported CI impact policy schemaVersion {}; expected {}",
+            wire.schema_version,
+            POLICY_SCHEMA_VERSION
+        );
+    }
+    validate_external_path_prefixes(&wire.external_path_prefixes)?;
+    Ok(ImpactPolicy {
+        mode: wire.mode,
+        external_path_prefixes: wire.external_path_prefixes,
+    })
+}
+
+fn load_impact_policy(root: &Path) -> Result<ImpactPolicy> {
+    let policy_path = root.join(CANONICAL_POLICY_PATH);
+    let policy_source = fs::read(&policy_path)
+        .with_context(|| format!("read canonical CI impact policy {}", policy_path.display()))?;
+    parse_impact_policy(&policy_source).with_context(|| {
+        format!(
+            "validate canonical CI impact policy {}",
+            policy_path.display()
+        )
+    })
+}
+
+fn validate_external_path_prefixes(prefixes: &[String]) -> Result<()> {
+    let mut previous: Option<&str> = None;
+    for prefix in prefixes {
+        if previous.is_some_and(|previous| previous >= prefix.as_str()) {
+            bail!("externalPathPrefixes must be sorted and unique");
+        }
+        previous = Some(prefix);
+        if PROTECTED_EXTERNAL_PATH_PREFIXES.contains(&prefix.as_str()) {
+            bail!("externalPathPrefixes cannot exclude protected path `{prefix}`");
+        }
+        let Some(name) = prefix
+            .strip_prefix('.')
+            .and_then(|value| value.strip_suffix('/'))
+        else {
+            bail!(
+                "externalPathPrefixes entry `{prefix}` must be a top-level hidden directory ending in `/`"
+            );
+        };
+        if name.is_empty()
+            || name.starts_with('.')
+            || name.contains('/')
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            bail!(
+                "externalPathPrefixes entry `{prefix}` must be a normalized top-level hidden directory"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,6 +624,7 @@ pub(crate) struct SelectionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback_context: Option<FallbackContext>,
     revisions: RevisionIdentity,
+    external_paths_excluded: usize,
     unknown_paths: Vec<String>,
 }
 
@@ -549,6 +638,7 @@ struct SelectionInput {
     public_api: PublicApiInput,
     test_packages: BTreeSet<String>,
     integration_units: BTreeSet<IntegrationUnitId>,
+    external_paths_excluded: usize,
     unknown_paths: BTreeSet<String>,
 }
 
@@ -605,6 +695,7 @@ impl SelectionPlan {
             decision_reason: input.decision_reason,
             fallback_context: input.fallback_context,
             revisions: input.revisions,
+            external_paths_excluded: input.external_paths_excluded,
             unknown_paths: input.unknown_paths.into_iter().collect(),
         };
         selection.validate()?;
@@ -895,7 +986,6 @@ enum PackageImpact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum GovernanceImpact {
-    PythonHooks,
     CargoWrapper,
 }
 
@@ -940,6 +1030,7 @@ struct RemoteProjection {
     public_api_packages: BTreeSet<String>,
     test_packages: BTreeSet<String>,
     integration_units: BTreeSet<IntegrationUnitId>,
+    external_paths_excluded: usize,
     unknown_paths: BTreeSet<String>,
 }
 
@@ -953,6 +1044,7 @@ impl From<&ImpactSet> for RemoteProjection {
                 public_api_packages: BTreeSet::new(),
                 test_packages: BTreeSet::new(),
                 integration_units: BTreeSet::new(),
+                external_paths_excluded: 0,
                 unknown_paths: BTreeSet::new(),
             },
             ImpactSet::Escalated {
@@ -973,6 +1065,7 @@ impl From<&ImpactSet> for RemoteProjection {
                 public_api_packages: public_api_packages.clone(),
                 test_packages: BTreeSet::new(),
                 integration_units: BTreeSet::new(),
+                external_paths_excluded: 0,
                 unknown_paths: BTreeSet::new(),
             },
             ImpactSet::Selective(selective) => {
@@ -996,6 +1089,7 @@ impl From<&ImpactSet> for RemoteProjection {
                     public_api_packages: selective.public_api_packages.clone(),
                     test_packages,
                     integration_units: selective.integration_units.clone(),
+                    external_paths_excluded: 0,
                     unknown_paths: selective.unknown_paths.clone(),
                 }
             }
@@ -1004,6 +1098,11 @@ impl From<&ImpactSet> for RemoteProjection {
 }
 
 impl RemoteProjection {
+    fn with_external_paths_excluded(mut self, count: usize) -> Self {
+        self.external_paths_excluded = count;
+        self
+    }
+
     fn decision_reason(&self) -> DecisionReason {
         match self.cause {
             None => DecisionReason::PullRequestImpact,
@@ -1138,7 +1237,6 @@ enum LocalStep {
     Meta(Vec<GateId>),
     PublicApi(Vec<String>),
     CompleteInternalPublicApi,
-    PythonHooks,
     CargoWrapperSelftest,
     Packages {
         operation: LocalCargoOperation,
@@ -1191,7 +1289,6 @@ impl LocalProjection {
                     }
                 }));
                 steps.extend(governance.iter().map(|impact| match impact {
-                    GovernanceImpact::PythonHooks => LocalStep::PythonHooks,
                     GovernanceImpact::CargoWrapper => LocalStep::CargoWrapperSelftest,
                 }));
                 steps
@@ -1411,13 +1508,17 @@ pub(crate) fn coverage_scope_for_typed_job(root: &Path) -> Result<CoverageScope>
             cause: CoverageWorkspaceCause::MandatoryCatalog,
         });
     }
-    Ok(coverage_scope_for_pull_request(root, &command_facts)
-        .unwrap_or_else(coverage_fallback_uncertainty))
+    let policy = load_impact_policy(root)?;
+    Ok(
+        coverage_scope_for_pull_request(root, &command_facts, &policy)
+            .unwrap_or_else(coverage_fallback_uncertainty),
+    )
 }
 
 fn coverage_scope_for_pull_request(
     root: &Path,
     command_facts: &CommandWorkspaceFacts,
+    policy: &ImpactPolicy,
 ) -> Option<CoverageScope> {
     let event_path = PathBuf::from(std::env::var_os("GITHUB_EVENT_PATH")?);
     if !event_path_is_trusted(root, &event_path) {
@@ -1443,7 +1544,9 @@ fn coverage_scope_for_pull_request(
     .ok()?;
     let merge_base = merge_base.trim();
     validate_revision(merge_base, "merge-base revision").ok()?;
-    let entries = read_diff(root, &pull_request.base.sha, &pull_request.head.sha).ok()?;
+    let entries = read_filtered_diff(root, policy, &pull_request.base.sha, &pull_request.head.sha)
+        .ok()?
+        .included;
     if let Some(cause) = immediate_escalation_cause(&entries) {
         return Some(
             CoverageProjection::from(&ImpactSet::escalated(cause)).into_scope_or_fallback(),
@@ -1542,9 +1645,7 @@ struct Revision {
 pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
     let policy_source = fs::read(&options.policy_path).unwrap_or_default();
     let policy_version = policy_version(&policy_source);
-    let policy = std::str::from_utf8(&policy_source)
-        .map_err(anyhow::Error::from)
-        .and_then(|source| toml::from_str::<PolicyWire>(source).map_err(anyhow::Error::from));
+    let policy = parse_impact_policy(&policy_source);
     let event_name = std::env::var(GITHUB_EVENT_NAME_ENV).unwrap_or_default();
     let execution_revision =
         std::env::var(GITHUB_SHA_ENV).unwrap_or_else(|_| UNKNOWN_REVISION.to_owned());
@@ -1577,19 +1678,13 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
                 fallback_mode,
                 execution_revision,
             )?,
-            Ok(policy) if policy.schema_version != POLICY_SCHEMA_VERSION => fallback_selection(
-                policy_version,
-                DecisionReason::PolicyInvalid,
-                fallback_mode,
-                execution_revision,
-            )?,
             Ok(policy) => plan_event_with_facts(
                 root,
                 &command_facts,
                 &event_name,
                 event_source.as_deref().unwrap_or("{}"),
                 policy_version,
-                policy.mode,
+                &policy,
                 execution_revision,
             )?,
         }
@@ -1614,7 +1709,7 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
 
 fn render_selection_summary(selection: &SelectionPlan) -> String {
     let mut summary = format!(
-        "## Typed CI selection\n\n- Policy: `{}`\n- Mode: `{}`\n- Reason: `{}`\n- Affected packages: `{}`\n- Internal public-api owners: `{}`\n- Integration selection: `{}`\n- Unknown paths retained for trace: `{}`\n",
+        "## Typed CI selection\n\n- Policy: `{}`\n- Mode: `{}`\n- Reason: `{}`\n- Affected packages: `{}`\n- Internal public-api owners: `{}`\n- Integration selection: `{}`\n- External paths excluded: `{}`\n- Unknown paths retained for trace: `{}`\n",
         selection.policy_version,
         selection_mode_name(selection.mode()),
         decision_reason_name(selection.decision_reason),
@@ -1628,6 +1723,7 @@ fn render_selection_summary(selection: &SelectionPlan) -> String {
             .integration_selection()
             .map(|value| value.to_string())
             .unwrap_or_else(|error| format!("invalid: {error}")),
+        selection.external_paths_excluded,
         selection.unknown_paths.len(),
     );
     if let Some(context) = &selection.fallback_context {
@@ -1666,9 +1762,13 @@ fn plan_event(
     event_name: &str,
     event_source: &str,
     policy_version: String,
-    _policy_mode: PolicyMode,
+    policy_mode: PolicyMode,
     execution_revision: String,
 ) -> Result<SelectionPlan> {
+    let policy = ImpactPolicy {
+        mode: policy_mode,
+        external_path_prefixes: Vec::new(),
+    };
     let command_facts = CommandWorkspaceFacts::new(root);
     if matches!(
         validate_planner_catalog(root, &command_facts)?,
@@ -1692,7 +1792,7 @@ fn plan_event(
         event_name,
         event_source,
         policy_version,
-        _policy_mode,
+        &policy,
         execution_revision,
     )
 }
@@ -1703,7 +1803,7 @@ fn plan_event_with_facts(
     event_name: &str,
     event_source: &str,
     policy_version: String,
-    _policy_mode: PolicyMode,
+    policy: &ImpactPolicy,
     execution_revision: String,
 ) -> Result<SelectionPlan> {
     let fallback_mode = if event_name == "pull_request" {
@@ -1793,6 +1893,7 @@ fn plan_event_with_facts(
             let projection = match pull_request_projection(
                 root,
                 command_facts,
+                policy,
                 &pull_request.base.sha,
                 &pull_request.head.sha,
                 &merge_base,
@@ -1825,6 +1926,7 @@ fn plan_event_with_facts(
                 public_api,
                 test_packages: projection.test_packages,
                 integration_units: projection.integration_units,
+                external_paths_excluded: projection.external_paths_excluded,
                 unknown_paths: projection.unknown_paths,
             })
         }
@@ -1868,6 +1970,7 @@ fn release_selection(
         public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
+        external_paths_excluded: 0,
         unknown_paths: BTreeSet::new(),
     })
 }
@@ -1917,6 +2020,7 @@ fn fallback_selection_with_revisions(
         public_api: PublicApiInput::CompleteInternal,
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
+        external_paths_excluded: 0,
         unknown_paths: BTreeSet::new(),
     })
 }
@@ -1959,6 +2063,7 @@ impl PlannerFailure {
 fn pull_request_projection(
     root: &Path,
     command_facts: &CommandWorkspaceFacts,
+    policy: &ImpactPolicy,
     base: &str,
     head: &str,
     merge_base: &str,
@@ -1968,8 +2073,9 @@ fn pull_request_projection(
     if shallow.trim() != "false" {
         return Err(PlannerFailure::new(FallbackCode::ShallowRepository, None));
     }
-    let entries = read_diff(root, base, head)
+    let filtered = read_filtered_diff(root, policy, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
+    let entries = filtered.included;
     let facts = workspace_facts_for_impact(&entries, command_facts).map_err(|_| {
         PlannerFailure::new(
             FallbackCode::MetadataUnavailable,
@@ -1979,9 +2085,11 @@ fn pull_request_projection(
     match facts {
         None => try_impact_entries(&entries, None, &BTreeSet::new(), &BTreeMap::new())
             .map(|impact| RemoteProjection::from(&impact))
+            .map(|projection| projection.with_external_paths_excluded(filtered.external_count))
             .map_err(|_| PlannerFailure::new(FallbackCode::DiffUnavailable, None)),
         Some(facts) => impact_with_facts(root, &entries, facts, merge_base)
             .map(|impact| RemoteProjection::from(&impact))
+            .map(|projection| projection.with_external_paths_excluded(filtered.external_count))
             .map_err(|_| {
                 let subject = entries
                     .iter()
@@ -2001,7 +2109,15 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         "ci local 必须通过 make ci 或 ./hack/cargo.sh xtask ci local 的 committed-snapshot supervisor 启动",
     )?;
     let context = LocalExecutionContext::from_worker(root, options.base_ref(), &worker)?;
-    let entries = context.diff_entries()?;
+    let policy = load_impact_policy(context.root())?;
+    let filtered = policy.filter_entries(&context.diff_entries()?);
+    if filtered.external_count > 0 {
+        eprintln!(
+            "ci local：External policy 排除 {} 个路径",
+            filtered.external_count
+        );
+    }
+    let entries = filtered.included;
     let command_facts = CommandWorkspaceFacts::new(context.root());
     let impact = context
         .impact_entries(&entries, &command_facts)
@@ -2548,7 +2664,6 @@ impl LocalStep {
             Self::Meta(_) => LocalStage::Meta,
             Self::PublicApi(_) => LocalStage::Meta,
             Self::CompleteInternalPublicApi => LocalStage::Meta,
-            Self::PythonHooks => LocalStage::PythonHooks,
             Self::CargoWrapperSelftest => LocalStage::CargoWrapperSelftest,
             Self::Packages { operation, .. } => match operation {
                 LocalCargoOperation::Check => LocalStage::Check,
@@ -2565,7 +2680,6 @@ impl LocalStep {
                 format!("public-api affected {}", packages.join(","))
             }
             Self::CompleteInternalPublicApi => "public-api complete internal".to_owned(),
-            Self::PythonHooks => "python hook tests".to_owned(),
             Self::CargoWrapperSelftest => "cargo wrapper selftest".to_owned(),
             Self::Packages {
                 operation,
@@ -2744,28 +2858,6 @@ fn run_local_step(
         LocalStep::CompleteInternalPublicApi => {
             let command_facts = CommandWorkspaceFacts::new(context.root());
             crate::publicapi::run_complete_internal_check(context.root(), command_facts.get()?)
-        }
-        LocalStep::PythonHooks => {
-            let status = external_cmd(
-                ExternalProgram::SystemPython,
-                &[
-                    "-B",
-                    "-m",
-                    "unittest",
-                    "discover",
-                    "-s",
-                    ".codex/hooks",
-                    "-p",
-                    "test_*.py",
-                ],
-                &[],
-                Some(context.root()),
-            )
-            .status()?;
-            if !status.success() {
-                bail!("ci local python hook tests failed");
-            }
-            Ok(())
         }
         LocalStep::CargoWrapperSelftest => {
             let status = external_cmd(
@@ -2958,6 +3050,15 @@ fn read_diff(root: &Path, base: &str, head: &str) -> Result<Vec<DiffEntry>> {
     parse_diff(&output.stdout)
 }
 
+fn read_filtered_diff(
+    root: &Path,
+    policy: &ImpactPolicy,
+    base: &str,
+    head: &str,
+) -> Result<FilteredEntries> {
+    read_diff(root, base, head).map(|entries| policy.filter_entries(&entries))
+}
+
 fn parse_diff(source: &[u8]) -> Result<Vec<DiffEntry>> {
     let mut fields = source.split(|byte| *byte == 0).collect::<Vec<_>>();
     if fields.last().is_some_and(|field| field.is_empty()) {
@@ -2992,7 +3093,7 @@ fn parse_diff(source: &[u8]) -> Result<Vec<DiffEntry>> {
                     rename_or_copy: false,
                 });
             }
-            value if valid_similarity_status(value, 'R') || valid_similarity_status(value, 'C') => {
+            value if valid_similarity_status(value, 'R') => {
                 if index + 2 > fields.len() {
                     bail!("truncated git diff record");
                 }
@@ -3008,6 +3109,20 @@ fn parse_diff(source: &[u8]) -> Result<Vec<DiffEntry>> {
                     path: old_path,
                     rename_or_copy: true,
                 });
+                entries.push(DiffEntry {
+                    status: DiffStatus::Added,
+                    path: new_path,
+                    rename_or_copy: true,
+                });
+            }
+            value if valid_similarity_status(value, 'C') => {
+                if index + 2 > fields.len() {
+                    bail!("truncated git diff record");
+                }
+                let new_path = std::str::from_utf8(fields[index + 1])
+                    .context("non-UTF-8 new diff path")?
+                    .to_owned();
+                index += 2;
                 entries.push(DiffEntry {
                     status: DiffStatus::Added,
                     path: new_path,
@@ -3716,9 +3831,7 @@ fn coverage_closure_for(
 }
 
 fn governance_impact(path: &str) -> Option<GovernanceImpact> {
-    if path.starts_with(".codex/hooks/") {
-        Some(GovernanceImpact::PythonHooks)
-    } else if matches!(
+    if matches!(
         path,
         ".cargo/config.toml"
             | "hack/cargo.sh"
@@ -4168,16 +4281,21 @@ fn policy_version(source: &[u8]) -> String {
 
 fn policy_version_with_catalog(source: &[u8], catalog: &[String]) -> String {
     let mut material = Vec::new();
-    match std::str::from_utf8(source)
-        .ok()
-        .and_then(|value| toml::from_str::<PolicyWire>(value).ok())
-    {
-        Some(policy) => {
+    match parse_impact_policy(source) {
+        Ok(policy) => {
             push_policy_field(&mut material, b"policy-valid");
-            push_policy_field(&mut material, policy.schema_version.to_string().as_bytes());
-            push_policy_field(&mut material, b"adaptive");
+            push_policy_field(&mut material, POLICY_SCHEMA_VERSION.to_string().as_bytes());
+            push_policy_field(
+                &mut material,
+                match policy.mode {
+                    PolicyMode::Adaptive => b"adaptive",
+                },
+            );
+            for prefix in policy.external_path_prefixes {
+                push_policy_field(&mut material, prefix.as_bytes());
+            }
         }
-        None => {
+        Err(_) => {
             push_policy_field(&mut material, b"policy-invalid");
             push_policy_field(&mut material, sha256(source).as_bytes());
         }
@@ -4204,6 +4322,12 @@ fn policy_semantic_catalog_with_selector_overrides(
 ) -> Vec<String> {
     let mut catalog = vec![format!("policy-schema={POLICY_SCHEMA_VERSION}")];
     catalog.push(normalized_behavior_spec_identity(behavior_spec));
+    catalog.push(format!("canonical-policy-path={CANONICAL_POLICY_PATH}"));
+    catalog.extend(
+        PROTECTED_EXTERNAL_PATH_PREFIXES
+            .iter()
+            .map(|path| format!("protected-external-path-prefix={path}")),
+    );
     catalog.extend(
         DOCUMENTATION_PATHS
             .iter()
@@ -4440,6 +4564,7 @@ pub(crate) fn test_selection_plan() -> Result<SelectionPlan> {
         public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
+        external_paths_excluded: 0,
         unknown_paths: BTreeSet::new(),
     })
 }
@@ -4461,6 +4586,7 @@ pub(crate) fn test_adaptive_selection_plan() -> Result<SelectionPlan> {
         public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
+        external_paths_excluded: 0,
         unknown_paths: BTreeSet::new(),
     })
 }
@@ -4482,6 +4608,7 @@ pub(crate) fn test_pr_complete_selection_plan() -> Result<SelectionPlan> {
         public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
+        external_paths_excluded: 0,
         unknown_paths: BTreeSet::new(),
     })
 }
@@ -4880,10 +5007,17 @@ mod tests {
             root,
             "pull_request",
             &pr_event(base, head),
-            policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
+            policy_version(b"schemaVersion=4\nmode='adaptive'\nexternalPathPrefixes=[]\n"),
             mode,
             head.to_owned(),
         )
+    }
+
+    fn adaptive_policy() -> ImpactPolicy {
+        ImpactPolicy {
+            mode: PolicyMode::Adaptive,
+            external_path_prefixes: Vec::new(),
+        }
     }
 
     #[test]
@@ -4908,10 +5042,183 @@ mod tests {
     }
 
     #[test]
+    fn external_path_policy_is_closed_and_fail_closed() -> Result<()> {
+        let policy = parse_impact_policy(
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".external-tool/"]
+"#,
+        )?;
+        assert_eq!(policy.external_path_prefixes, [".external-tool/"]);
+
+        for source in [
+            br#"schemaVersion = 4
+mode = "adaptive"
+"#
+            .as_slice(),
+            br#"schemaVersion = 3
+mode = "adaptive"
+externalPathPrefixes = [".external-tool/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".z-tool/", ".a-tool/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".external-tool/", ".external-tool/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = ["tools/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".external/tool/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = ["../"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".cargo/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".config/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".git/"]
+"#
+            .as_slice(),
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".github/"]
+"#
+            .as_slice(),
+        ] {
+            assert!(parse_impact_policy(source).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn external_path_policy_filters_before_shared_local_and_remote_projection() -> Result<()> {
+        let policy = parse_impact_policy(
+            br#"schemaVersion = 4
+mode = "adaptive"
+externalPathPrefixes = [".external-tool/"]
+"#,
+        )?;
+        let external = DiffEntry::modified(".external-tool/config.json");
+        let project = DiffEntry::modified("crates/leaf/src/lib.rs");
+
+        let external_only = policy.filter_entries(&[external.clone()]);
+        assert!(external_only.included.is_empty());
+        assert_eq!(external_only.external_count, 1);
+        let empty = impact_entries(
+            &external_only.included,
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(LocalProjection::from(&empty), LocalProjection::Empty);
+        let empty_remote = RemoteProjection::from(&empty)
+            .with_external_paths_excluded(external_only.external_count);
+        assert_eq!(empty_remote.mode, SelectionMode::Adaptive);
+        assert!(empty_remote.affected_packages.is_empty());
+        assert!(empty_remote.unknown_paths.is_empty());
+        assert_eq!(empty_remote.external_paths_excluded, 1);
+
+        let project_only = policy.filter_entries(std::slice::from_ref(&project));
+        let mixed = policy.filter_entries(&[external, project.clone()]);
+        assert_eq!(mixed.included, project_only.included);
+        assert_eq!(mixed.external_count, 1);
+        let project_impact = impact_entries(
+            &project_only.included,
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+        let mixed_impact =
+            impact_entries(&mixed.included, None, &BTreeSet::new(), &BTreeMap::new());
+        assert_eq!(
+            LocalProjection::from(&mixed_impact),
+            LocalProjection::from(&project_impact)
+        );
+        assert_eq!(
+            RemoteProjection::from(&mixed_impact),
+            RemoteProjection::from(&project_impact)
+        );
+
+        let crossing = policy.filter_entries(&[
+            DiffEntry {
+                status: DiffStatus::Deleted,
+                path: project.path.clone(),
+                rename_or_copy: true,
+            },
+            DiffEntry {
+                status: DiffStatus::Added,
+                path: ".external-tool/lib.rs".to_owned(),
+                rename_or_copy: true,
+            },
+        ]);
+        assert_eq!(
+            crossing.included,
+            [DiffEntry {
+                status: DiffStatus::Deleted,
+                path: project.path,
+                rename_or_copy: true,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_hook_policy_filters_exact_paths_and_preserves_real_rename_source() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let policy = load_impact_policy(&root)?;
+        assert_eq!(
+            policy.external_path_prefixes,
+            [".codex/".to_owned(), ".cursor/".to_owned()]
+        );
+
+        let external_only =
+            parse_diff(b"M\0.codex/hooks/example.py\0M\0.cursor/hooks/example.sh\0")?;
+        assert!(policy.filter_entries(&external_only).included.is_empty());
+
+        let copy_to_external =
+            parse_diff(b"C100\0crates/leaf/src/lib.rs\0.codex/hooks/copied.py\0")?;
+        assert!(policy.filter_entries(&copy_to_external).included.is_empty());
+
+        let rename_to_external =
+            parse_diff(b"R100\0crates/leaf/src/lib.rs\0.cursor/hooks/moved.rs\0")?;
+        assert_eq!(
+            policy.filter_entries(&rename_to_external).included,
+            [DiffEntry {
+                status: DiffStatus::Deleted,
+                path: "crates/leaf/src/lib.rs".to_owned(),
+                rename_or_copy: true,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fixed_events_exclude_scheduled_nightly() -> Result<()> {
         let root = Path::new(".");
         let facts = CommandWorkspaceFacts::new(root);
-        let policy = policy_version(b"schemaVersion=3\nmode='adaptive'\n");
+        let policy = policy_version(b"schemaVersion=4\nmode='adaptive'\nexternalPathPrefixes=[]\n");
         let revision = "a".repeat(40);
 
         for (event, reason) in [
@@ -4924,7 +5231,7 @@ mod tests {
                 event,
                 "{}",
                 policy.clone(),
-                PolicyMode::Adaptive,
+                &adaptive_policy(),
                 revision.clone(),
             )?;
             assert_eq!(plan.mode(), SelectionMode::ReleaseCheck);
@@ -4937,7 +5244,7 @@ mod tests {
             "schedule",
             "{}",
             policy,
-            PolicyMode::Adaptive,
+            &adaptive_policy(),
             revision,
         )?;
         assert_eq!(plan.mode(), SelectionMode::ReleaseCheck);
@@ -4950,33 +5257,39 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_rename_and_copy_merge_both_crate_paths_red() -> Result<()> {
-        for status in ["R100", "C100"] {
+    fn rename_changes_both_endpoints_but_copy_changes_only_its_destination() -> Result<()> {
+        for (status, expected_paths) in [
+            (
+                "R100",
+                vec![
+                    (DiffStatus::Deleted, "crates/leaf/src/old.rs"),
+                    (DiffStatus::Added, "crates/consumer/src/new.rs"),
+                ],
+            ),
+            (
+                "C100",
+                vec![(DiffStatus::Added, "crates/consumer/src/new.rs")],
+            ),
+        ] {
             let raw = format!("{status}\0crates/leaf/src/old.rs\0crates/consumer/src/new.rs\0");
             let entries = parse_diff(raw.as_bytes())?;
             assert_eq!(
-                entries,
-                vec![
-                    DiffEntry {
-                        status: DiffStatus::Deleted,
-                        path: "crates/leaf/src/old.rs".to_owned(),
-                        rename_or_copy: true,
-                    },
-                    DiffEntry {
-                        status: DiffStatus::Added,
-                        path: "crates/consumer/src/new.rs".to_owned(),
-                        rename_or_copy: true,
-                    },
-                ]
+                entries
+                    .iter()
+                    .map(|entry| (entry.status, entry.path.as_str()))
+                    .collect::<Vec<_>>(),
+                expected_paths
             );
+            assert!(entries.iter().all(|entry| entry.rename_or_copy));
             assert_eq!(immediate_escalation_cause(&entries), None);
             let projection = classify_diff(&entries);
             assert_eq!(projection.mode, SelectionMode::Adaptive);
-            assert_eq!(
-                projection.affected_packages,
-                BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()]),
-                "{status} must merge both crate endpoints"
-            );
+            let expected_packages = if status.starts_with('R') {
+                BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()])
+            } else {
+                BTreeSet::from(["consumer".to_owned()])
+            };
+            assert_eq!(projection.affected_packages, expected_packages, "{status}");
         }
         Ok(())
     }
@@ -5108,6 +5421,7 @@ mod tests {
             public_api: PublicApiInput::Affected(mixed.public_api_packages),
             test_packages: mixed.test_packages,
             integration_units: mixed.integration_units,
+            external_paths_excluded: mixed.external_paths_excluded,
             unknown_paths: mixed.unknown_paths,
         })?;
         assert!(selection.affected_packages().is_empty());
@@ -5570,6 +5884,7 @@ mod tests {
             public_api: PublicApiInput::Affected(remote.public_api_packages),
             test_packages: remote.test_packages,
             integration_units: remote.integration_units,
+            external_paths_excluded: remote.external_paths_excluded,
             unknown_paths: remote.unknown_paths,
         })?;
         assert_eq!(selection.mode(), SelectionMode::Adaptive);
@@ -5642,13 +5957,9 @@ mod tests {
     }
 
     #[test]
-    fn local_tooling_paths_select_targeted_selftests() {
+    fn cargo_tooling_paths_select_targeted_selftests() {
         let always_meta = LocalStep::Meta(local_meta_gates(None)).label();
         for (path, expected) in [
-            (
-                ".codex/hooks/test_guard.py",
-                vec![always_meta.clone(), "python hook tests".to_owned()],
-            ),
             (
                 "hack/cargo.sh",
                 vec![always_meta.clone(), "cargo wrapper selftest".to_owned()],
@@ -6932,6 +7243,8 @@ mod tests {
         let source = selection.to_json()?;
         assert_eq!(SelectionPlan::from_json(&source)?, selection);
         let wire: serde_json::Value = serde_json::from_str(&source)?;
+        assert_eq!(wire["schemaVersion"], SELECTION_SCHEMA_VERSION);
+        assert_eq!(wire["externalPathsExcluded"], 0);
         let selection_wire = wire
             .get("selection")
             .and_then(serde_json::Value::as_object)
@@ -7101,7 +7414,7 @@ mod tests {
                 &root,
                 "push",
                 "{}",
-                policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
+                policy_version(b"schemaVersion=4\nmode='adaptive'\nexternalPathPrefixes=[]\n"),
                 PolicyMode::Adaptive,
                 "a".repeat(40),
             ) else {
@@ -7189,8 +7502,8 @@ mod tests {
             &command_facts,
             "push",
             "{}",
-            policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
-            PolicyMode::Adaptive,
+            policy_version(b"schemaVersion=4\nmode='adaptive'\nexternalPathPrefixes=[]\n"),
+            &adaptive_policy(),
             "b".repeat(40),
         )?;
         assert_eq!(plan.mode(), SelectionMode::ReleaseCheck);
@@ -8574,6 +8887,14 @@ readiness = "required"
             DOCUMENTATION_PATHS.len(),
             "documentation-path catalog must mirror DOCUMENTATION_PATHS"
         );
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|field| field.starts_with("protected-external-path-prefix="))
+                .count(),
+            PROTECTED_EXTERNAL_PATH_PREFIXES.len(),
+            "protected external paths must be complete policy semantics"
+        );
         assert!(
             catalog
                 .iter()
@@ -8708,9 +9029,9 @@ readiness = "required"
 
     #[test]
     fn policy_digest_is_deterministic_and_binds_config() -> Result<()> {
-        let compact = b"schemaVersion=3\nmode='adaptive'\n";
+        let compact = b"schemaVersion=4\nmode='adaptive'\nexternalPathPrefixes=[]\n";
         let formatted =
-            b"# operator comment\nschemaVersion = 3\n\nmode = \"adaptive\" # same policy\n";
+            b"# operator comment\nschemaVersion = 4\n\nmode = \"adaptive\" # same policy\nexternalPathPrefixes = []\n";
         assert_eq!(
             policy_version(compact),
             policy_version(formatted),
@@ -8720,9 +9041,23 @@ readiness = "required"
             policy_version(compact),
             policy_version(b"schemaVersion=1\nmode='adaptive'\n")
         );
-        assert!(toml::from_str::<PolicyWire>("schemaVersion=3\nmode='shadow'\n").is_err());
+        assert_ne!(
+            policy_version(compact),
+            policy_version(
+                b"schemaVersion=4\nmode='adaptive'\nexternalPathPrefixes=['.external-tool/']\n"
+            ),
+            "external path ownership is policy semantics"
+        );
+        assert!(
+            toml::from_str::<PolicyWire>(
+                "schemaVersion=4\nmode='shadow'\nexternalPathPrefixes=[]\n"
+            )
+            .is_err()
+        );
         assert!(matches!(
-            toml::from_str::<PolicyWire>("schemaVersion=2\nmode='adaptive'\n"),
+            toml::from_str::<PolicyWire>(
+                "schemaVersion=2\nmode='adaptive'\nexternalPathPrefixes=[]\n"
+            ),
             Ok(legacy) if legacy.schema_version != POLICY_SCHEMA_VERSION
         ));
         let catalog = policy_semantic_catalog();

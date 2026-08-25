@@ -710,7 +710,7 @@ fi
                 "ci local --base \"$(CI_BASE)\"\n\t$(RSS_CARGO) check --workspace",
             ),
             green.replace(" $(VERIFY_ARGS)", ""),
-            green.replace("verify-fast:\n", "verify-fast: verify-hooks\n"),
+            green.replace("verify-fast:\n", "verify-fast: verify\n"),
             green.replace(" $(CI_ARGS)", ""),
             format!("{green}override VERIFY_ARGS := --fail-fast\n"),
             format!("{green}override CI_ARGS := --fail-fast\n"),

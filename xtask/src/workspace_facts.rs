@@ -604,7 +604,7 @@ fn external_interpreter_can_forward_cargo_graph(
     else {
         return false;
     };
-    if !matches!(program.as_str(), "SystemShell" | "SystemPython") {
+    if program != "SystemShell" {
         return false;
     }
     let Some(arguments) = expression.args.iter().nth(1) else {
@@ -702,9 +702,7 @@ mod tests {
             "fn bad() { use crate::cmd::CargoSubcommand as C; cargo_cmd(C::Metadata, &[], &[], None); }",
             "fn bad() { external_cmd(ExternalProgram::SystemShell, &[\"-c\", \"cargo tree\"], &[], None); }",
             "fn bad(args: &[&str]) { external_cmd(ExternalProgram::SystemShell, args, &[], None); }",
-            "fn bad(args: &[&str]) { external_cmd(ExternalProgram::SystemPython, args, &[], None); }",
             "fn bad(args: &[&str]) { use crate::cmd::external_cmd as run; run(ExternalProgram::SystemShell, args, &[], None); }",
-            "fn bad(args: &[&str]) { use crate::cmd::{external_cmd as run}; run(ExternalProgram::SystemPython, args, &[], None); }",
             "fn bad() { std::process::Command::new(\"cargo\").arg(\"tree\"); }",
             "fn bad(program: String, arg: String) { std::process::Command::new(program).arg(arg); }",
             "fn bad() { use std::process::Command as Process; Process::new(\"cargo\").arg(\"metadata\"); }",

@@ -600,11 +600,5 @@ class PrmonitorHookTest(unittest.TestCase):
             self.assertTrue(config["approval_policy"]["granular"][category])
         self.assertTrue(config["mcp_servers"]["prmonitor_human"]["enabled"])
 
-    def test_verify_fast_runs_hook_tests(self):
-        makefile = (HERE.parent.parent / "Makefile").read_text(encoding="utf-8")
-        self.assertIn("verify-hooks", makefile)
-        self.assertIn("/usr/bin/python3 -m unittest discover -s .codex/hooks", makefile)
-
-
 if __name__ == "__main__":
     unittest.main()
