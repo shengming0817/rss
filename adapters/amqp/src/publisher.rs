@@ -16,7 +16,7 @@ use diport::{
 };
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
-use lapin::types::{AMQPValue, FieldTable};
+use lapin::types::{AMQPValue, FieldTable, ShortString, ShortStringError};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -34,9 +34,10 @@ fn build_properties(
     event_id: &str,
     header: &EnvelopeHeader,
     md: &EnvelopeMetadata,
-) -> BasicProperties {
+) -> Result<BasicProperties, ShortStringError> {
+    let message_id = ShortString::try_new(event_id)?;
     let props = BasicProperties::default()
-        .with_message_id(event_id.into())
+        .with_message_id(message_id)
         .with_delivery_mode(2);
     // occurred_at 来自 validated `Timepoint`；畸形或负 wire 值在任何 broker I/O 前已 fail-closed。
     let props = match u64::try_from(header.occurred_at().unix_seconds()) {
@@ -55,9 +56,9 @@ fn build_properties(
         );
     }
     if table.inner().is_empty() {
-        props
+        Ok(props)
     } else {
-        props.with_headers(table)
+        Ok(props.with_headers(table))
     }
 }
 
@@ -555,6 +556,8 @@ enum PublisherTransportError {
 enum PublishAttemptFailure {
     #[error("amqp publish envelope validation failed")]
     Envelope(#[source] EnvelopeHeaderError),
+    #[error("amqp publish message id validation failed")]
+    MessageId(#[source] ShortStringError),
     #[error("amqp publish admission failed")]
     Admission(#[source] PublisherTransportError),
     #[error("amqp publish client failed")]
@@ -591,7 +594,7 @@ impl PublishAttemptFailure {
 
     fn decision(&self) -> PublishFailureDecision {
         match self {
-            Self::Envelope(_) => {
+            Self::Envelope(_) | Self::MessageId(_) => {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
             }
             Self::Admission(_) | Self::Rejected(_) => {
@@ -616,7 +619,7 @@ impl PublishAttemptFailure {
 
     fn phase(&self) -> PublishPhase {
         match self {
-            Self::Envelope(_) | Self::Admission(_) => PublishPhase::PreSend,
+            Self::Envelope(_) | Self::MessageId(_) | Self::Admission(_) => PublishPhase::PreSend,
             Self::Client { phase, .. } => *phase,
             Self::Deadline { elapsed, .. } => elapsed.phase,
             Self::Rejected(_) => PublishPhase::Confirm,
@@ -1571,6 +1574,13 @@ impl Publisher for AmqpPublisher {
                 return Err(self.handle_publish_failure(PublishAttemptFailure::Envelope(error)));
             }
         };
+        let event_id = request.event_id().as_str().to_string();
+        let properties = match build_properties(&event_id, &header, request.metadata()) {
+            Ok(properties) => properties,
+            Err(error) => {
+                return Err(self.handle_publish_failure(PublishAttemptFailure::MessageId(error)));
+            }
+        };
         let snapshot = match self.transport_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1594,9 +1604,7 @@ impl Publisher for AmqpPublisher {
         // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message::id()`（subscriber 的
         // `pick_message_id` 优先读 message_id 再回退 delivery_tag），实现跨进程「至少一次 + 幂等去重」。
         // envelope metadata 透传：occurred_at → AMQP timestamp；其余 → FieldTable LongString headers。
-        let event_id = request.event_id().as_str().to_string();
         let topic = request.topic().as_str().to_string();
-        let properties = build_properties(&event_id, &header, request.metadata());
         // into_payload()：move payload 出 request（event_id / topic / metadata 已借用完毕）。
         let payload = request.into_payload();
         let inject_post_send_close = self.take_post_send_connection_close_fault();
@@ -1891,13 +1899,21 @@ mod build_properties_tests {
     fn validated_metadata_sets_message_id_persistence_and_timestamp() {
         let md = complete_metadata("0");
         let header = header(&md);
-        let props = build_properties("evt-1", &header, &md);
+        let props = build_properties("evt-1", &header, &md).expect("valid message id");
         assert_eq!(
             props.message_id().as_ref().map(|s| s.as_str()),
             Some("evt-1")
         );
         assert_eq!(props.delivery_mode(), &Some(2));
         assert_eq!(props.timestamp(), &Some(0));
+    }
+
+    #[test]
+    fn message_id_property_is_fallible_at_the_short_string_boundary() {
+        let md = complete_metadata("0");
+        let header = header(&md);
+        assert!(build_properties(&"x".repeat(255), &header, &md).is_ok());
+        assert!(build_properties(&"x".repeat(256), &header, &md).is_err());
     }
 
     #[test]
@@ -1910,7 +1926,7 @@ mod build_properties_tests {
     fn occurred_at_goes_to_timestamp_not_headers() {
         let md = complete_metadata("1700000000");
         let header = header(&md);
-        let props = build_properties("evt-2", &header, &md);
+        let props = build_properties("evt-2", &header, &md).expect("valid message id");
         assert_eq!(props.timestamp(), &Some(1_700_000_000_u64));
         // occurred_at 不得出现在 headers。
         if let Some(table) = props.headers() {
@@ -1941,7 +1957,7 @@ mod build_properties_tests {
         md.insert_wire_pair(KEY_ACTOR, "actor-42");
         let _ = md.try_insert("requestPath", "/login");
         let header = header(&md);
-        let props = build_properties("evt-3", &header, &md);
+        let props = build_properties("evt-3", &header, &md).expect("valid message id");
         assert_eq!(props.timestamp(), &Some(1_700_000_000));
         let table = props.headers().as_ref().expect("headers should be set");
         let get = |key: &str| {
@@ -1976,7 +1992,7 @@ mod build_properties_tests {
         let mut md = complete_metadata("1700000001");
         md.insert_wire_pair(KEY_CORRELATION, "corr-full");
         let header = header(&md);
-        let props = build_properties("evt-full", &header, &md);
+        let props = build_properties("evt-full", &header, &md).expect("valid message id");
         // message_id = event_id。
         assert_eq!(
             props.message_id().as_ref().map(|s| s.as_str()),
@@ -2292,6 +2308,13 @@ mod publish_pipeline_red_tests {
             (
                 super::PublishAttemptFailure::Envelope(
                     diport::EnvelopeHeaderError::MissingTenantId,
+                ),
+                PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent),
+            ),
+            (
+                super::PublishAttemptFailure::MessageId(
+                    lapin::types::ShortString::try_new("x".repeat(256))
+                        .expect_err("oversized message id"),
                 ),
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent),
             ),

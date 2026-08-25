@@ -1544,6 +1544,173 @@ impl core::marker::Unpin for rss_device_security_contracts::policy_put::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::ErrCoreProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::ProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Body
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::DeviceId
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::ExpectedGeneration
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Policy
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidFormat
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidJson
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidMutation
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidPolicy
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::OutOfRange
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
 pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode::ErrCoreValidation
 impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode
@@ -1791,6 +1958,40 @@ impl core::marker::Unpin for rss_device_security_contracts::policy_put::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicySansItem
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicySansItem
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicySansItem
+pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::code: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::message: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::request_id: alloc::string::String
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::retryable: bool
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::error: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
 pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutRequest
 impl rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutRequest
 pub const fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutRequest::expected_generation(&self) -> i64
@@ -1825,9 +2026,25 @@ impl core::marker::Unpin for rss_device_security_contracts::policy_put::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutResponse
+pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::field: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::reason: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
 pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::code: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode
-pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::details: [rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail; 1]
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::message: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorMessage
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::request_id: alloc::string::String
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::retryable: bool
@@ -2084,6 +2301,246 @@ impl core::marker::Unpin for rss_device_security_contracts::status_get::Conditio
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::ConditionType
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::ConditionType
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::ConditionType
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::ErrCoreProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::ProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::DeviceId
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::InvalidFormat
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::ErrCoreValidation
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::ValidationFailed
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
 pub struct rss_device_security_contracts::status_get::ActiveCommand
 pub rss_device_security_contracts::status_get::ActiveCommand::fence_epoch: core::num::nonzero::NonZeroU64
 pub rss_device_security_contracts::status_get::ActiveCommand::state: rss_device_security_contracts::status_get::ActiveCommandState
@@ -2153,6 +2610,40 @@ impl core::marker::Unpin for rss_device_security_contracts::status_get::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetData
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetData
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetData
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::code: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::message: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::request_id: alloc::string::String
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::retryable: bool
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::error: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
 pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest
 impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest
 pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest
@@ -2184,6 +2675,56 @@ impl core::marker::Unpin for rss_device_security_contracts::status_get::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::field: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::reason: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::code: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::details: [rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail; 1]
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::message: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::request_id: alloc::string::String
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::retryable: bool
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::error: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
 pub const rss_device_security_contracts::status_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const rss_device_security_contracts::status_get::LIFECYCLE: &str
 pub const rss_device_security_contracts::status_get::OPERATION: rss_device_security_contracts::HttpOperationDescriptor
@@ -3856,6 +4397,173 @@ impl core::marker::Unpin for rss_device_security_contracts::policy_put::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::ErrCoreProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::ProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Body
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::DeviceId
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::ExpectedGeneration
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Policy
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidFormat
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidJson
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidMutation
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::InvalidPolicy
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::OutOfRange
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::cmp::Eq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::cmp::Ord for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::eq(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::partial_cmp(&self, &rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Error = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::str::traits::FromStr for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub type rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::Err = rss_device_security_contracts::policy_put::error::ConversionError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::policy_put::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
 pub enum rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode::ErrCoreValidation
 impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode
@@ -4103,6 +4811,40 @@ impl core::marker::Unpin for rss_device_security_contracts::policy_put::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicySansItem
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicySansItem
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutPolicySansItem
+pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::code: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorCode
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::message: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableErrorMessage
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::request_id: alloc::string::String
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::retryable: bool
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::error: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableError
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutProviderUnavailableResponse
 pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutRequest
 impl rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutRequest
 pub const fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutRequest::expected_generation(&self) -> i64
@@ -4137,9 +4879,25 @@ impl core::marker::Unpin for rss_device_security_contracts::policy_put::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutResponse
+pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::field: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailField
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::reason: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetailReason
+impl core::clone::Clone for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::clone(&self) -> rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl serde_core::ser::Serialize for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+pub fn rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::Send for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::Sync for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::Unpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail
 pub struct rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::code: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorCode
-pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::details: [rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationDetail; 1]
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::message: rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationErrorMessage
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::request_id: alloc::string::String
 pub rss_device_security_contracts::policy_put::IdentityDeviceCertificatePolicyPutValidationError::retryable: bool
@@ -4396,6 +5154,246 @@ impl core::marker::Unpin for rss_device_security_contracts::status_get::Conditio
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::ConditionType
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::ConditionType
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::ConditionType
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::ErrCoreProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::ProviderUnavailable
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::DeviceId
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::InvalidFormat
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::ErrCoreValidation
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub enum rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::ValidationFailed
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::cmp::Eq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::cmp::Ord for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::eq(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage) -> bool
+impl core::cmp::PartialOrd for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::partial_cmp(&self, &rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::try_from(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Error = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl core::fmt::Display for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::StructuralPartialEq for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::str::traits::FromStr for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub type rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::Err = rss_device_security_contracts::status_get::error::ConversionError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::from_str(&str) -> core::result::Result<Self, rss_device_security_contracts::status_get::error::ConversionError>
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
 pub struct rss_device_security_contracts::status_get::ActiveCommand
 pub rss_device_security_contracts::status_get::ActiveCommand::fence_epoch: core::num::nonzero::NonZeroU64
 pub rss_device_security_contracts::status_get::ActiveCommand::state: rss_device_security_contracts::status_get::ActiveCommandState
@@ -4465,6 +5463,40 @@ impl core::marker::Unpin for rss_device_security_contracts::status_get::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetData
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetData
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetData
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::code: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::message: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::request_id: alloc::string::String
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::retryable: bool
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::error: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableError
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetProviderUnavailableResponse
 pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest
 impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest
 pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetRequest
@@ -4496,6 +5528,56 @@ impl core::marker::Unpin for rss_device_security_contracts::status_get::Identity
 impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
 impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
 impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetResponse
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::field: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailField
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::reason: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetailReason
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::code: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorCode
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::details: [rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationDetail; 1]
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::message: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationErrorMessage
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::request_id: alloc::string::String
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::retryable: bool
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+pub struct rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::error: rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationError
+impl core::clone::Clone for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::clone(&self) -> rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl serde_core::ser::Serialize for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+pub fn rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::Send for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::Sync for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::Unpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::marker::UnsafeUnpin for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_device_security_contracts::status_get::IdentityDeviceCertificateStatusGetValidationResponse
 pub const rss_device_security_contracts::status_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const rss_device_security_contracts::status_get::LIFECYCLE: &str
 pub const rss_device_security_contracts::status_get::OPERATION: rss_device_security_contracts::HttpOperationDescriptor

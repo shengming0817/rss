@@ -189,13 +189,13 @@ fn write_archive_patch_config(
     artifact: &PackageArtifact<'_>,
     artifacts: &[PackageArtifact<'_>],
 ) -> Result<()> {
-    if artifact.plan.workspace_dependencies.is_empty() {
+    if artifact.plan.package_workspace_dependencies.is_empty() {
         return Ok(());
     }
     let cargo = artifact.crate_root.join(".cargo");
     fs::create_dir_all(&cargo)?;
     let mut config = String::from("[patch.crates-io]\n");
-    for (dependency, _) in &artifact.plan.workspace_dependencies {
+    for (dependency, _) in &artifact.plan.package_workspace_dependencies {
         let source = artifacts
             .iter()
             .find(|candidate| candidate.plan.package == *dependency)
@@ -214,6 +214,7 @@ enum ProofBehavior {
     Conformance,
     Contract,
     DeviceSecurityContracts,
+    Eventing,
     RequestContext,
     Platform,
     DiagContext,
@@ -226,6 +227,7 @@ impl ProofBehavior {
             "rss-conformance" => Ok(Self::Conformance),
             "rss-contract" => Ok(Self::Contract),
             "rss-device-security-contracts" => Ok(Self::DeviceSecurityContracts),
+            "rss-eventing" => Ok(Self::Eventing),
             "rss-request-context" => Ok(Self::RequestContext),
             "rss-platform" => Ok(Self::Platform),
             "rss-diag-context" => Ok(Self::DiagContext),
@@ -239,6 +241,7 @@ impl ProofBehavior {
             Self::Conformance => "conformance",
             Self::Contract => "contract",
             Self::DeviceSecurityContracts => "device-security-contracts",
+            Self::Eventing => "eventing",
             Self::RequestContext => "request-context",
             Self::Platform => "platform",
             Self::DiagContext => "diag-context",
@@ -251,6 +254,7 @@ impl ProofBehavior {
             Self::Conformance => conformance_receipt(),
             Self::Contract => contract_receipt(),
             Self::DeviceSecurityContracts => device_security_contracts_receipt(),
+            Self::Eventing => eventing_receipt(),
             Self::RequestContext => request_context_receipt(),
             Self::Platform => platform_receipt(),
             Self::DiagContext => diag_context_receipt(),
@@ -292,7 +296,10 @@ struct PackageProofPlan {
     version: String,
     minimum_rust_version: String,
     dependencies: Vec<serde_json::Value>,
-    workspace_dependencies: Vec<(String, PathBuf)>,
+    /// Selected local dependencies Cargo must resolve while building and checking the archive.
+    /// This additionally includes dev-only proof owners without admitting them into the index
+    /// production dependency record.
+    package_workspace_dependencies: Vec<(String, PathBuf)>,
     features: BTreeMap<String, BTreeSet<String>>,
     behavior: ProofBehavior,
 }
@@ -329,28 +336,48 @@ impl PackageProofPlan {
         }
         let key = facts.package_key(release.package())?;
         let mut dependencies = Vec::new();
-        let mut workspace_dependencies = Vec::new();
+        let mut package_workspace_dependencies = Vec::new();
         for dependency in facts.direct_dependencies_for(&key)? {
-            if dependency.kind() == DependencyKind::Dev {
-                continue;
-            }
-            if !dependency.unconditional() {
-                bail!("package proof requires an owned target expression projection");
-            }
             let resolved = match dependency.resolution() {
                 DependencyResolution::Resolved(package) => package.as_str(),
                 DependencyResolution::Unresolved => {
                     bail!("release dependency identity is unresolved")
                 }
             };
-            let registry = match dependency.source() {
-                DependencySource::Registry { url } | DependencySource::Sparse { url } => Some(url),
+            let selected_local = match dependency.source() {
                 DependencySource::Workspace { repo_relative_root }
                 | DependencySource::Path { repo_relative_root }
                     if selected.contains(resolved) =>
                 {
-                    workspace_dependencies
-                        .push((resolved.to_owned(), repo_relative_root.to_path_buf()));
+                    Some(repo_relative_root.to_path_buf())
+                }
+                _ => None,
+            };
+            if let Some(path) = selected_local.as_ref() {
+                package_workspace_dependencies.push((resolved.to_owned(), path.clone()));
+            }
+            if dependency.kind() == DependencyKind::Dev {
+                if matches!(
+                    dependency.source(),
+                    DependencySource::Workspace { .. } | DependencySource::Path { .. }
+                ) && selected_local.is_none()
+                {
+                    bail!(
+                        "release package `{}` has local dev dependency `{}` resolving to `{resolved}` outside the validated Release Surface",
+                        release.package(),
+                        dependency.name(),
+                    );
+                }
+                continue;
+            }
+            if !dependency.unconditional() {
+                bail!("package proof requires an owned target expression projection");
+            }
+            let registry = match dependency.source() {
+                DependencySource::Registry { url } | DependencySource::Sparse { url } => Some(url),
+                DependencySource::Workspace { .. } | DependencySource::Path { .. }
+                    if selected_local.is_some() =>
+                {
                     None
                 }
                 _ => bail!(
@@ -386,7 +413,7 @@ impl PackageProofPlan {
             version: release.version().to_string(),
             minimum_rust_version: release.minimum_rust_version().to_string(),
             dependencies,
-            workspace_dependencies,
+            package_workspace_dependencies,
             features: package.publish_metadata().features().clone(),
             behavior,
         })
@@ -491,6 +518,16 @@ fn device_security_contracts_receipt() -> serde_json::Value {
     })
 }
 
+fn eventing_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-eventing",
+        "metadataEnvelopeRoundtrip": true,
+        "deliveryClosed": true,
+        "lifecycleBounded": true,
+        "observabilityDescriptorReachable": true
+    })
+}
+
 fn request_context_receipt() -> serde_json::Value {
     json!({
         "package": "rss-request-context", "tenantCanonical": true, "requestId": true,
@@ -552,7 +589,7 @@ fn package(root: &Path, target: &Path, plan: &PackageProofPlan) -> Result<()> {
         "--target-dir".to_owned(),
         target.to_owned(),
     ];
-    for (package, path) in &plan.workspace_dependencies {
+    for (package, path) in &plan.package_workspace_dependencies {
         args.push("--config".to_owned());
         args.push(format!(
             "patch.crates-io.{package}.path={:?}",
@@ -1651,6 +1688,7 @@ mod tests {
             ("rss-request-context", "crates/request-context"),
             ("rss-platform", "crates/platform"),
             ("rss-diag-context", "crates/diagctx"),
+            ("rss-eventing", "crates/eventing"),
             ("rss-trace-context", "crates/tracewire"),
         ] {
             let library_path = root.join(path).join("src/lib.rs");
@@ -1716,6 +1754,7 @@ mod tests {
                     ProofBehavior::DeviceSecurityContracts,
                 ),
                 ("rss-diag-context", ProofBehavior::DiagContext),
+                ("rss-eventing", ProofBehavior::Eventing),
                 ("rss-platform", ProofBehavior::Platform),
                 ("rss-request-context", ProofBehavior::RequestContext),
                 ("rss-trace-context", ProofBehavior::TraceContext),
@@ -1764,6 +1803,34 @@ mod tests {
             device_security_surface_dependencies,
             BTreeSet::from(["rss-contract"])
         );
+        let eventing = plans
+            .iter()
+            .find(|plan| plan.package == "rss-eventing")
+            .expect("eventing plan");
+        let eventing_surface_dependencies = eventing
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency["registry"].is_null())
+            .map(|dependency| dependency["name"].as_str().expect("dependency name"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            eventing_surface_dependencies,
+            BTreeSet::from(["rss-contract", "rss-diag-context", "rss-request-context"])
+        );
+        let eventing_package_patches = eventing
+            .package_workspace_dependencies
+            .iter()
+            .map(|(package, _)| package.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            eventing_package_patches,
+            BTreeSet::from([
+                "rss-conformance",
+                "rss-contract",
+                "rss-diag-context",
+                "rss-request-context"
+            ])
+        );
     }
 
     #[test]
@@ -1788,8 +1855,43 @@ mod tests {
             ProofBehavior::for_package("rss-trace-context")?,
             ProofBehavior::TraceContext
         );
+        assert_eq!(
+            ProofBehavior::for_package("rss-eventing")?,
+            ProofBehavior::Eventing
+        );
         assert!(ProofBehavior::for_package("future-release").is_err());
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn eventing_receipt_requires_every_public_axis() {
+        let green = eventing_receipt();
+        assert!(ProofBehavior::Eventing.validate_receipt(&green).is_ok());
+        for field in [
+            "package",
+            "metadataEnvelopeRoundtrip",
+            "deliveryClosed",
+            "lifecycleBounded",
+            "observabilityDescriptorReachable",
+        ] {
+            let mut red = green.clone();
+            red.as_object_mut().expect("receipt object").remove(field);
+            assert!(
+                ProofBehavior::Eventing.validate_receipt(&red).is_err(),
+                "missing {field} must fail"
+            );
+        }
+        let mut false_axis = green;
+        false_axis
+            .as_object_mut()
+            .expect("receipt object")
+            .insert("lifecycleBounded".to_owned(), false.into());
+        assert!(
+            ProofBehavior::Eventing
+                .validate_receipt(&false_axis)
+                .is_err()
+        );
     }
 
     #[test]

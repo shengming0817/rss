@@ -2,6 +2,8 @@
 
 use crate::metadata::EventMetadata;
 
+const EVENT_ID_MAX_LEN: usize = 255;
+
 /// Stable identity reused by every retry of one authored event.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct EventId(String);
@@ -12,13 +14,32 @@ pub enum EventIdError {
     /// An empty identity cannot provide idempotency.
     #[error("event id must not be empty")]
     Empty,
+    /// The identity exceeds the transport and durable-causation boundary.
+    #[error("event id must not exceed 255 bytes")]
+    TooLong,
+    /// The identity contains a byte outside the stable transport-safe alphabet.
+    #[error("event id contains an invalid character")]
+    InvalidChar,
 }
 
 impl EventId {
-    /// Parses an opaque stable event identity, rejecting only the incomplete empty value.
+    /// Parses a stable event identity accepted by every supported transport boundary.
+    ///
+    /// Valid identities are at most 255 bytes and contain only ASCII letters, digits, `.`, `-`,
+    /// `_`, or `:`. The closed alphabet prevents control characters from reaching broker headers,
+    /// logs, and durable causation identities.
     pub fn parse(raw: &str) -> Result<Self, EventIdError> {
         if raw.is_empty() {
             return Err(EventIdError::Empty);
+        }
+        if raw.len() > EVENT_ID_MAX_LEN {
+            return Err(EventIdError::TooLong);
+        }
+        if !raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
+        {
+            return Err(EventIdError::InvalidChar);
         }
         Ok(Self(raw.to_owned()))
     }

@@ -488,21 +488,37 @@ pub trait EventingEmitter: Send + Sync {
 /// Closed canonical metric identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventingMetric {
+    /// Count of outbox publish outcomes.
     OutboxPublishTotal,
+    /// Current number of pending outbox records.
     OutboxPendingDepth,
+    /// Age in seconds of the oldest pending outbox record.
     OutboxOldestPendingAgeSeconds,
+    /// Current number of outbox records blocked by partition ordering.
     OutboxPartitionBlockedDepth,
+    /// Duration in seconds of each outbox relay tick phase.
     OutboxRelayTickDurationSeconds,
+    /// Current number of stale inbox claims.
     InboxStaleClaimDepth,
+    /// Age in seconds of the oldest stale inbox claim.
     InboxOldestStaleClaimAgeSeconds,
+    /// Count of consumer claims already in progress.
     ConsumerClaimInProgressTotal,
+    /// Count of consumer transaction outcomes.
     ConsumerTransactionOutcomeTotal,
+    /// Count of consumer settlement outcomes by action.
     ConsumerSettlementTotal,
+    /// Count of consumer dead-letter skips by reason.
     ConsumerDeadLetterSkipTotal,
+    /// Count of consumer dead-letter write outcomes.
     ConsumerDeadLetterWriteTotal,
+    /// Count of consumer subscription retry outcomes.
     ConsumerSubscribeRetryTotal,
+    /// Count of consumer lease-loss detections.
     ConsumerLeaseLostTotal,
+    /// Count of failed consumer releases.
     ConsumerReleaseFailedTotal,
+    /// Count of dead-letter queue redrive outcomes by mutation kind.
     DlqRedriveTotal,
 }
 
@@ -576,20 +592,35 @@ impl EventingMetric {
 /// Closed canonical structured-event identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventingEvent {
+    /// One outbox publish outcome.
     OutboxPublish,
+    /// One available outbox backlog sample.
     OutboxBacklog,
+    /// Failure to obtain an outbox backlog sample.
     OutboxBacklogUnavailable,
+    /// One measured outbox relay tick phase.
     OutboxRelayTick,
+    /// One available inbox backlog sample.
     InboxBacklog,
+    /// Failure to obtain an inbox backlog sample.
     InboxBacklogUnavailable,
+    /// A consumer claim that is already in progress.
     ConsumerClaimInProgress,
+    /// One consumer transaction outcome.
     ConsumerTransaction,
+    /// One consumer settlement outcome.
     ConsumerSettlement,
+    /// A skipped consumer dead-letter mutation.
     ConsumerDeadLetterSkip,
+    /// One consumer dead-letter write outcome.
     ConsumerDeadLetterWrite,
+    /// One consumer subscription retry outcome.
     ConsumerSubscribeRetry,
+    /// A consumer lease-loss detection.
     ConsumerLeaseLost,
+    /// A failed consumer release.
     ConsumerReleaseFailed,
+    /// One dead-letter queue mutation outcome.
     DlqMutation,
 }
 

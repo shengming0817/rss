@@ -44,6 +44,7 @@ base64 = { workspace = true }
 axum = { workspace = true }
 # 配置发布结构化 span（不记 ConfigValue；`crates/observ`、`secure::redact_error` 与 typed metric enums）。
 tracing = { workspace = true }
+sha2 = { workspace = true }
 # seed-data UoW 串行化 mutation + emit，emit 失败时安全撤销，维持 both-or-neither 终态。
 tokio = { workspace = true, features = ["sync"] }
 

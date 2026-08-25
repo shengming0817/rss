@@ -72,11 +72,34 @@ fn envelope_binds_identity_metadata_and_generic_payload() {
 }
 
 #[test]
-fn event_id_rejects_only_empty_input_and_clones_stably() {
+fn event_id_enforces_the_shared_transport_boundary_and_clones_stably() {
     assert!(matches!(EventId::parse(""), Err(EventIdError::Empty)));
-    let id = EventId::parse(" stable-id ").expect("non-empty ids remain opaque");
+    assert!(matches!(
+        EventId::parse(&"x".repeat(256)),
+        Err(EventIdError::TooLong)
+    ));
+    for invalid in [
+        " stable-id",
+        "stable-id ",
+        "line\nbreak",
+        "event/id",
+        "事件",
+    ] {
+        assert!(matches!(
+            EventId::parse(invalid),
+            Err(EventIdError::InvalidChar)
+        ));
+    }
+
+    let id = EventId::parse(&"x".repeat(255)).expect("boundary-length id is valid");
     assert!(id.clone() == id);
-    assert_eq!(id.as_str(), " stable-id ");
+    assert_eq!(id.as_str().len(), 255);
+    assert_eq!(
+        EventId::parse("urn:event.stable_42")
+            .expect("transport-safe alphabet")
+            .as_str(),
+        "urn:event.stable_42"
+    );
 }
 
 #[test]

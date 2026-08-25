@@ -3435,6 +3435,7 @@ mod tests {
                 "rss-contract",
                 "rss-device-security-contracts",
                 "rss-diag-context",
+                "rss-eventing",
                 "rss-platform",
                 "rss-request-context",
                 "rss-trace-context"

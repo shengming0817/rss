@@ -33,6 +33,7 @@ use tracing::Instrument as _;
 use primitives::{AdmissionError, ConsumerAdmission};
 
 use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
+use eventing::envelope::EventId;
 use eventing::lifecycle::RetryPolicy;
 use eventing::metadata::EventMetadata;
 use eventing::observability::{
@@ -560,21 +561,29 @@ where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Arc<ValidatedEvent>) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
-    // parse 失败 → 结构化 warn + 丢弃（不 panic；key 漂移即等价新消费者，fail-closed）。
-    let key = match IdemKey::parse(msg.id().as_str()) {
-        Ok(k) => k,
+    // Transport ID 在任何日志、claim 或 causation 构造前先进入 canonical validation funnel。
+    let event_id = match EventId::parse(msg.id().as_str()) {
+        Ok(event_id) => event_id,
         Err(_) => {
-            log_parse_failed(&msg);
-            // malformed id：broker Reject（不重投）。
-            settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
+            log_parse_failed();
+            settle_invalid_message_id(acker, diport::AckAction::Reject, meta).await;
             return false;
         }
     };
-    let parent_causation = match EnvelopeCausationId::from_opaque(msg.id().as_str()) {
+    let key = match IdemKey::parse(event_id.as_str()) {
+        Ok(k) => k,
+        Err(_) => {
+            log_parse_failed();
+            // malformed id：broker Reject（不重投）。
+            settle_invalid_message_id(acker, diport::AckAction::Reject, meta).await;
+            return false;
+        }
+    };
+    let parent_causation = match EnvelopeCausationId::from_opaque(event_id.as_str()) {
         Ok(causation_id) => causation_id,
         Err(_) => {
-            log_parse_failed(&msg);
-            settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
+            log_parse_failed();
+            settle_invalid_message_id(acker, diport::AckAction::Reject, meta).await;
             return false;
         }
     };
@@ -1095,16 +1104,41 @@ pub async fn settle(
     meta: &ConsumerMeta,
     message_id: &str,
 ) {
+    settle_with_optional_message_id(acker, action, meta, Some(message_id)).await;
+}
+
+async fn settle_invalid_message_id(
+    acker: Option<&diport::DynAcker<'static>>,
+    action: diport::AckAction,
+    meta: &ConsumerMeta,
+) {
+    settle_with_optional_message_id(acker, action, meta, None).await;
+}
+
+async fn settle_with_optional_message_id(
+    acker: Option<&diport::DynAcker<'static>>,
+    action: diport::AckAction,
+    meta: &ConsumerMeta,
+    message_id: Option<&str>,
+) {
     let Some(a) = acker else { return };
     let outcome = match a.settle(action).await {
         Ok(()) => EventingIoOutcome::Ok,
         Err(e) => {
-            tracing::error!(
-                message_id,
-                action = action.as_label(),
-                error = %e,
-                "consumer: broker settle failed"
-            );
+            if let Some(message_id) = message_id {
+                tracing::error!(
+                    message_id,
+                    action = action.as_label(),
+                    error = %e,
+                    "consumer: broker settle failed"
+                );
+            } else {
+                tracing::error!(
+                    action = action.as_label(),
+                    error = %e,
+                    "consumer: broker settle failed for invalid message id"
+                );
+            }
             EventingIoOutcome::Error
         }
     };
@@ -1242,9 +1276,9 @@ pub fn receipt_context_error_reason(
 // ── 日志 helper（tracing 宏收口，控制调用方认知复杂度 ≤15；同 lib.rs::log_dropped_* 范式）──
 
 /// IdemKey parse 失败（malformed id，fail-closed 不重投）。
-fn log_parse_failed(msg: &Message) {
+fn log_parse_failed() {
     tracing::warn!(
-        message_id = msg.id().as_str(),
+        reason = "invalid_event_id",
         // 处置随路径：ackable 路径 settle(Reject)（→broker DLX，不无限重投）；brokerless 路径丢弃。
         "consumer: IdemKey parse failed (malformed), rejected to broker DLX (dropped if brokerless)"
     );
@@ -3533,15 +3567,51 @@ mod tests {
         );
     }
 
-    /// ACK-7：空 id（parse 失败）→ settle=[Reject]，handler 0，commit 0。
+    /// ACK-7：非 canonical EventId → settle=[Reject]，handler 0，commit 0。
     #[tokio::test]
     async fn ack7_parse_failed_settles_reject() {
+        for invalid_id in [
+            String::new(),
+            "line\nbreak".to_string(),
+            "事件".to_string(),
+            "x".repeat(256),
+        ] {
+            let idem = FakeInboxStore::fresh();
+            let dlx = fake_dlx(FakeDeadLetterStore::new());
+            let handler_count = Arc::new(AtomicU32::new(0));
+            let (stream, ackers) =
+                delivery_stream_of(&[(invalid_id.as_str(), b"payload".as_slice())]);
+
+            run_test_consumer_ackable(
+                stream,
+                idem.clone(),
+                (dlx).as_ref(),
+                &(meta()),
+                &(handler_ack(handler_count.clone())),
+                lease_cfg_test(),
+                RetryPolicy::STANDARD,
+                consumer_admission(),
+                CancellationToken::new(),
+            )
+            .await;
+
+            assert_eq!(handler_count.load(Ordering::Relaxed), 0, "handler 应 0 次");
+            assert_eq!(idem.commit_count(), 0, "commit 应 0");
+            assert_eq!(
+                ackers[0].settled_actions(),
+                vec![AckAction::Reject],
+                "parse 失败后 settle 应为 [Reject]"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_event_id_accepts_the_255_byte_transport_boundary() {
         let idem = FakeInboxStore::fresh();
-        let dlx_store = FakeDeadLetterStore::new();
-        let dlx = fake_dlx(dlx_store.clone());
+        let dlx = fake_dlx(FakeDeadLetterStore::new());
         let handler_count = Arc::new(AtomicU32::new(0));
-        // 空 id → IdemKey::parse 失败
-        let (stream, ackers) = delivery_stream_of(&[("", b"payload")]);
+        let message_id = "x".repeat(255);
+        let (stream, ackers) = delivery_stream_of(&[(message_id.as_str(), b"payload".as_slice())]);
 
         run_test_consumer_ackable(
             stream,
@@ -3556,13 +3626,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(handler_count.load(Ordering::Relaxed), 0, "handler 应 0 次");
-        assert_eq!(idem.commit_count(), 0, "commit 应 0");
-        assert_eq!(
-            ackers[0].settled_actions(),
-            vec![AckAction::Reject],
-            "parse 失败后 settle 应为 [Reject]"
-        );
+        assert_eq!(handler_count.load(Ordering::Relaxed), 1);
+        assert_eq!(idem.commit_count(), 1);
+        assert_eq!(ackers[0].settled_actions(), vec![AckAction::Ack]);
     }
 
     // ── F1（review #265 C1）：commit 失败终态须 broker Requeue、不可 Ack ──────────

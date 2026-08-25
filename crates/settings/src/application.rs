@@ -60,9 +60,10 @@ use consistency::{EngineError, EngineErrorKind, HandleResult, PermanentError, Pe
 use diport::OutboxEnvelopeParts;
 use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor};
 use eventexec::event::{EventEncodeError, GeneratedEventEncoder, ReviewedEvent};
+#[cfg(test)]
+use generated::event::settings_v1::SPEC as VERSION_CHANGED_SPEC;
 use generated::event::settings_v1::{
-    self as version_changed, SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind,
-    SettingsConfigVersionChangedPayload,
+    self as version_changed, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
 #[cfg(test)]
 use generated::event::{SubscriptionEffect, SubscriptionExecution};
@@ -70,6 +71,7 @@ use generated::event::{SubscriptionEffect, SubscriptionExecution};
 #[cfg(test)]
 use primitives::ListenerKind;
 use rss_request_context::TenantId;
+use sha2::{Digest as _, Sha256};
 use vocab::{CoreError, CoreErrorKind};
 
 use crate::secret_application::{
@@ -501,7 +503,7 @@ impl SettingsService {
     /// 经 generated sealed carrier 构造 `config-version-changed` [`ReviewedEvent`]（纯派生，无 I/O）；实际落
     /// durable outbox 与配置写**同事务**由 route-specific [`ConfigUnitOfWork`] 方法承载（L2 OutboxFact）。
     ///
-    /// EventId（outbox `event_id` / `IdemKey`）= 内容派生 `{topic}:{tenant}:{key}:v{version}`：每个
+    /// EventId（outbox `event_id` / `IdemKey`）由带 domain separator 的 canonical 坐标摘要派生：每个
     /// (tenant, key, version) 仅一次发射（version 单调递增，publish/rollback 各产新版本），故按内容确定唯一——
     /// 重试同版本产同锚点，经 relay 盖章 broker message_id 流回消费侧实现「至少一次 + 幂等」端到端去重（#1100）。
     /// tenant 是可观测标识（非凭据，ADR-002）；key 是 opaque 配置标识（非 value，无 secret）。
@@ -523,11 +525,7 @@ impl SettingsService {
             tenant_id: tenant.to_string(),
             version: wire_version(version),
         };
-        let event_id = format!(
-            "{}:{tenant}:{}:v{version}",
-            VERSION_CHANGED_SPEC.topic(),
-            key.as_str()
-        );
+        let event_id = version_changed_event_id(tenant, key, version);
         // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
         // subject = opaque 配置 key。
         let subject_id = EnvelopeSubjectId::from_opaque(key.as_str())
@@ -692,6 +690,29 @@ impl SettingsService {
         self.query.cache.remove(tenant, &key);
         Ok(())
     }
+}
+
+fn version_changed_event_id(tenant: TenantId, key: &SettingKey, version: u64) -> String {
+    const DOMAIN: &[u8] = b"rss.settings.config-version-changed.event-id.v1\0";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let tenant = tenant.to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    hasher.update(tenant.as_bytes());
+    hasher.update([0]);
+    hasher.update(key.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(version.to_be_bytes());
+
+    let digest = hasher.finalize();
+    let mut id = String::with_capacity("settings-v1:".len() + digest.len() * 2);
+    id.push_str("settings-v1:");
+    for byte in digest {
+        id.push(HEX[usize::from(byte >> 4)] as char);
+        id.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    id
 }
 
 fn config_refresh_error() -> EngineError {
@@ -4384,7 +4405,7 @@ mod tests {
         assert!(val.is_none(), "跨租户隔离：tenant_b 不应读到 tenant_a 的值");
     }
 
-    // event_id (idem_key) 派生稳定性：同 tenant/key/version → 同 idem-key。
+    // event_id (idem_key) 派生稳定性：同 tenant/key/version → 同 idem-key；合法最大 key 仍有界。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn event_id_derivation_is_stable() {
@@ -4394,11 +4415,12 @@ mod tests {
         let cap2 = CapturingEmitter::default();
         let svc2 = service_with(&cap2);
 
+        let max_key = format!("app.{}", "x".repeat(252));
         svc1.publish_config(
             publish_receipt(),
             tenant(),
             actor(),
-            publish_req("app.timeout", "30s"),
+            publish_req(&max_key, "30s"),
         )
         .await
         .expect("svc1 publish");
@@ -4406,7 +4428,7 @@ mod tests {
             publish_receipt(),
             tenant(),
             actor(),
-            publish_req("app.timeout", "30s"),
+            publish_req(&max_key, "30s"),
         )
         .await
         .expect("svc2 publish");
@@ -4419,15 +4441,32 @@ mod tests {
             facts1[0].idem, facts2[0].idem,
             "同 tenant/key/version 应产生相同 idem-key（去重锚点）"
         );
-        // 断言 idem-key 格式包含 topic:tenant:key:vN。
         let eid = &facts1[0].idem;
         assert!(
-            eid.contains(VERSION_CHANGED_SPEC.topic()),
-            "idem 含 topic: {eid}"
+            eid.len() <= 255,
+            "最大合法 key 派生的 idem-key 必须可进入 AMQP: {eid}"
         );
-        assert!(eid.contains(TENANT), "idem 含 tenant: {eid}");
-        assert!(eid.contains("app.timeout"), "idem 含 key: {eid}");
-        assert!(eid.contains("v1"), "idem 含版本: {eid}");
+        assert!(
+            !eid.contains(&max_key),
+            "opaque business key 不应直接拼入 transport id"
+        );
+
+        let cap3 = CapturingEmitter::default();
+        let svc3 = service_with(&cap3);
+        let different_key = format!("app.{}y", "x".repeat(251));
+        svc3.publish_config(
+            publish_receipt(),
+            tenant(),
+            actor(),
+            publish_req(&different_key, "30s"),
+        )
+        .await
+        .expect("different max-length key publish");
+        assert_ne!(
+            eid,
+            &emitted_facts(&cap3)[0].idem,
+            "不同 key 不得派生同一 id"
+        );
     }
 
     // wire_version 溢出收口：u64::MAX → i64::MAX。
