@@ -15,11 +15,18 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 ### rss-contract 0.1.0
 
 - Establish the sole public owner for canonical contract IDs, versions, SHA-256 schema digests and descriptors.
+- Add authority-free `Timepoint` values with non-negative Unix-second ordering and fallible or
+  saturating `SystemTime` conversions, without clock, `now`, deadline, or scheduling authority.
+- Add opaque `PageCursor` values with a 4096-byte canonical unpadded base64url bound, closed
+  malformed/too-long/stale rejection, and redacted diagnostics that expose neither tokens nor
+  provider-owned pagination state.
 - Establish the sole public owner for the closed `DataClass`, `SafeErrorCode`, and
   `SafeErrorCategory` vocabularies and the code-only `SafeError` projection.
 - Remove `secure::Sensitivity` without an alias, shim, conversion, or dual API; redaction
   mechanisms remain owned by `secure`.
 - Keep registries, generated catalogs, runtime bindings and admission authority outside the package.
+- Set MSRV to Rust 1.96 with no default features. This is the initial 0.1 Release API baseline;
+  there is no Foundation facade, compatibility re-export, alias, shim, or alternate owner path.
 
 ### rss-request-context 0.1.0
 
