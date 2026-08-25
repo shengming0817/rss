@@ -7,35 +7,34 @@
 ## 背景
 
 outbox relay/sweeper/consumer 此前全链仅 `tracing` 结构化日志 + readyz 三态 health，无 metrics——运维对
-积压、投递延迟、DLX 速率无量化感知。#1209 经注入式 `OutboxMetrics` 端口（`crates/eventexec`，生产实现
-`MetricsOutboxMetrics` 经 `metrics` facade global recorder，`adapters/prometheus` 渲染 `/metrics`）暴露最少
+积压、投递延迟、DLX 速率无量化感知。Eventing 统一经 `EventingEmitter` 端口（`rss-eventing`，生产实现
+`observ::EventingTelemetryEmitter` 同时发射 metrics/tracing，`adapters/prometheus` 渲染 `/metrics`）暴露最少
 metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 
 ## Metric 集
 
 | metric | 类型 | label | 采集点 | 语义 |
 |--------|------|-------|--------|------|
-| `outbox_publish_total` | Counter | `domain`,`contract_id`,`tenant_id`,`status` | relay tick 逐条结算 | status=`ack`(已投递)/`requeue`(退避重投)/`reject`(进 DLX) |
-| `outbox_dlx_total` | Counter | `domain`,`contract_id`,`tenant_id` | relay 结算 Reject 时 | 永久失败进 DLX；= `outbox_publish_total{status="reject"}` |
+| `outbox_publish_total` | Counter | `status` | relay tick 逐条结算 | status=`ack`(已投递)/`requeue`(退避重投)/`reject`(进 DLX) |
 | `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`reason` | relay 发布前本地 envelope header 校验失败 | reason 为 envelope header 闭集 |
-| `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器（默认 ≤60s/轮） | 可投递 backlog：到期 pending + stale publishing；正常 in-flight publishing 排除 |
-| `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | `now()−min(created_at)`；**进程内已观测 scope 后续无 backlog ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
-| `outbox_partition_blocked_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | 同 tenant/domain/partition 前序未 published 阻塞的行数；不暴露 `partition_key` |
+| `outbox_pending_depth` | Gauge | 无 | backlog 采样器（默认 ≤60s/轮） | 全 active scope depth 求和；空集合归零；任一 unavailable 整组 NaN |
+| `outbox_oldest_pending_age_seconds` | Gauge | 无 | backlog 采样器 | 全 active scope oldest age 求最大；空集合归零；任一 unavailable 整组 NaN |
+| `outbox_partition_blocked_depth` | Gauge | 无 | backlog 采样器 | 全 active scope blocked depth 求和；不暴露 `partition_key` |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`claim`(原子租约相)/`publish`(同批即时并发中继的 wall time + adapter 内 settle 相) |
 | `outbox_same_id_window_expired_total` | Counter | `domain`,`contract_id`,`tenant_id`,`phase` | broker publish 前 DB preflight | phase=`automatic`/`redrive` 的绝对 same-ID deadline 到期；不调用 broker，行 settle 到 DLX |
 | `outbox_relay_settlement_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`operation`,`reason` | postgres settlement funnel | operation=`published|retry|dlx|same_id_expiry_dlx`；reason=`timeout|expired|lost_lease|storage|payload_protection|invariant` |
-| `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；dead-letter replay 存储失败 outcome 直接为闭值阶段，不双报 `store`；一次性 CLI 发射，长期告警看 audit/log |
-| `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
-| `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
-| `consumer_subscribe_retry_total` | Counter | `domain`,`outcome` | ackable subscribe 监督循环 | subscribe 失败或 delivery stream 非取消断流后的退避重入；outcome=`subscribe_error`/`stream_end`；**禁止** topic / error text 入 label |
-| `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；active `claimed` 是 transient，consumer broker `Requeue`；只有 durable `done` 才 Duplicate→Ack |
-| `consumer_lease_lost_total` | Counter | `domain` | consumer inbox lease CAS hard-fence | handler/tx/commit 期间 lease lost；取消当前执行并 broker Requeue，不写 app DLX |
+| `dlq_redrive_total` | Counter | `kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` / `resolve-expired-outbox` | operator mutation 结果；一次性 CLI 发射，长期告警看 audit/log |
+| `consumer_dlx_skip_total` | Counter | `reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为闭集 |
+| `consumer_dlx_write_total` | Counter | `outcome` | consumer app DLX store wrapper | outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
+| `consumer_subscribe_retry_total` | Counter | `outcome` | ackable subscribe 监督循环 | outcome=`subscribe_error`/`stream_end`；禁止 topic/error text 入 label |
+| `consumer_release_failed_total` | Counter | 无 | DLX 写失败后 release 也失败 | 正确性告警面 |
+| `consumer_lease_lost_total` | Counter | 无 | consumer inbox lease CAS hard-fence | 取消当前执行并 broker Requeue，不写 app DLX |
 | `saga_dead_letters_total` | Counter | `domain`,`contract_id`,`outcome` | saga compensation DLX path | saga 补偿失败 dead-letter 写入结果；outcome=`written`/`write_error` |
 
 ### Label 闭值集
 
-- `status`：闭合于 `consistency::Disposition::as_label()`，值 `ack`/`requeue`/`reject`。
-- `outbox_relay_tick_duration_seconds.phase`：闭合于 `eventexec::RelayPhase::as_label()`，值
+- `status`：闭合于 `eventing::observability::EventingDisposition::as_label()`，值 `ack`/`requeue`/`reject`。
+- `outbox_relay_tick_duration_seconds.phase`：闭合于 `eventing::observability::EventingRelayPhase::as_label()`，值
   `claim`/`publish`。settle（CAS 落库）是 postgres adapter 内部、对 eventexec 不可见，故并入
   `publish` 相，不单列。
 - `outbox_same_id_window_expired_total.phase`：闭合于 postgres `SameIdDeliveryPhase::as_label()`，值
@@ -50,17 +49,11 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 - `claim` 相完整覆盖 `PgOutbox::claim_batch`。该 provider 铸造并按值交接 opaque
   `PgClaimedOutboxEntry`；lease/durable context 不进 `consistency` 公开可 hydrate 面，也不进 metric
   label。relay 只借出 typed metric subject，因此 operator 不应从 metric 反推 token/deadline。
-- `domain`：来自 provider 构造期绑定并经 `claim_domain()` 暴露的 typed `vocab::DomainName`；
-  `RelayConfig` 不保存 domain，`claim_batch(limit)` 也不接受 raw domain。该值由 assembly/provider 声明、
-  非请求/租户派生，基数有界。**不**经 `observ` typed enum（层矩阵禁 `eventexec`→`observ`）；收敛进 `observ`
-  词表统一 otel 映射是 #1076 后续项。
-- `contract_id` / `tenant_id`：#1625 例外的 outbox 路由维度，分别来自
-  `consistency::OutboxContractId` 与 `vocab::TenantId`。禁止把 payload、topic、subject、actor、metadata、
-  error text、handler error 或请求输入放入 label。backlog zero sample 覆盖 adapter 本轮返回的历史 outbox
-  scope，以及同一 sampler 进程内曾返回、后续成功采样时消失的 `(domain, tenant_id, contract_id)`；从未出现、
-  新进程尚未观测或 recorder 已清理的 scope 不补 series。`outbox_partition_blocked_depth` 只输出 count，不输出
-  `partition_key`。
-- `consumer_dlx_skip_total.reason`：闭合于 `eventexec::consumer::record_dead_letter_skip` 的模块内 literal 调用点；
+- canonical Eventing 指标与事件的 owner 是 `rss_eventing::observability`；唯一 production 投影是
+  `observ::EventingTelemetryEmitter`。outbox/inbox backlog 每轮把全部 active scope 聚合成单个进程级样本：
+  depth/blocked 求和、oldest age 求最大；全 active 且为空发零，任一失败、standby、ownership loss 或 shutdown
+  整组发 `NaN`。canonical label 禁止 `domain`、`tenant_id`、`contract_id`、topic、ID、payload 与错误文本。
+- `consumer_dlx_skip_total.reason`：闭合于 `eventing::observability::EventingDeadLetterSkipReason::as_label()`；
   禁止携带 handler error、tenant、message id 或 payload 派生值。当前闭集：
   `malformed_id` / `tenant_authority_missing` / `tenant_authority_invalid` / `tenant_authority_expired` /
   `tenant_authority_binding_mismatch` / `envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
@@ -72,21 +65,21 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   `inbox_receipt_invalid_schema_hash` / `inbox_receipt_invalid_trace` /
   `inbox_receipt_invalid_correlation_id` / `inbox_receipt_invalid_context`。
 - `outbox_relay_envelope_validation_failure_total.reason`：闭合于 postgres relay 的 envelope validation reason，
-  与 consumer envelope reason 同一字符串集合；该 metric 只描述本地 header gate，broker publish failure
-  仍看 `outbox_publish_total` / `outbox_dlx_total`。
-- `dlq_redrive_total.kind/outcome`：闭合于 `eventexec::DlqMutationKind::as_label()`、mutation outcome 与
-  `DlqError::as_label()`；常见 outcome 为 `inserted` / `already_exists` / `redriven` / `not_found` / `expired`，依赖或数据错误为
+  与 consumer envelope reason 同一字符串集合；该 metric 只描述本地 header gate。broker transient publish
+  failure 看 `outbox_publish_total{status="requeue"}`，永久失败或重试预算耗尽看 `status="reject"`。
+- `dlq_redrive_total.kind/outcome`：闭合于 `rss_eventing::observability` 按 replay/redrive/resolve 拆分的 typed result；
+  常见 outcome 为 `inserted` / `already_exists` / `redriven` / `not_found` / `expired`，依赖或数据错误为
   `invalid_payload` / `invalid_schema_headers` / `payload_key_unavailable` / `payload_key_forbidden`；replay 存储失败为
   `fetch_dead_letter` / `encode_metadata` / `append_outbox` / `projection_mirror` / `transaction`。通用 `store` 只用于
   非 replay DLQ 操作。禁止把
   event id、dead_letter id、partition key 或错误文本放进 label。
 - `consumer_dlx_write_total.outcome`：闭合于 `eventexec::consumer_worker` 的 DLX wrapper，值 `ok`/`error`；
   禁止携带 handler error、tenant、message id 或 payload 派生值。
-- `consumer_subscribe_retry_total.outcome`：闭合于 `eventexec::consumer_worker::SubscribeRetryOutcome::as_label()`，
-  值 `subscribe_error`/`stream_end`；`domain` 来自 `ConsumerMeta`（装配期有界）。禁止 topic、error text、
-  tenant、message id 入 label。监督重试日志用 `tracing::warn!`（可恢复退避），并带 `domain`/
+- `consumer_subscribe_retry_total.outcome`：闭合于 `rss_eventing::observability::EventingSubscribeOutcome`，
+  值 `subscribe_error`/`stream_end`，无 domain label。禁止 topic、error text、tenant、message id 入 label。
+  监督重试日志用 `tracing::warn!`（可恢复退避），并带诊断用 `domain`/
   `component=event_consumer`。
-- `consumer_lease_lost_total`：label 仅 `domain`；它是 lease CAS hard-fence 观测信号，不代表 handler 业务失败。
+- `consumer_lease_lost_total`：无 label；它是 lease CAS hard-fence 观测信号，不代表 handler 业务失败。
 - `saga_dead_letters_total.outcome`：闭合于 `eventexec::saga` emit site 的模块内 literal，值
   `written`/`write_error`；`domain`/`contract_id` 来自 `SagaExecutorConfig`，禁止携带 saga_id、step、
   tenant、payload 或 store error 派生值。
@@ -121,26 +114,24 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | settlement lease 到期 | 5min 内 `reason="expired"` 增长 > 0，或首次非零 series 且 5min offset 不存在 | critical | `OutboxSettlementExpired` |
 | settlement integrity/protection | 5min 内 `reason=~"payload_protection|invariant"` 增长 > 0，或首次非零 series 且 5min offset 不存在 | critical | `OutboxSettlementIntegrityFailure` |
 | settlement timeout/lost lease/storage | 按 domain/reason 的 5min rate > 1/s 持续 5min | warning | `OutboxSettlementFailureRateHigh` |
-| pending 深度 | > 10k 持续 5min | warning | `OutboxPendingDepthHigh` |
+| 进程级 pending 深度 | > 20k 持续 5min | warning | `OutboxPendingDepthHigh` |
 | partition blocked 深度 | > 0 持续 10min | critical | `OutboxPartitionBlocked` |
-| 重试风暴（requeue 速率） | > 5/s 持续 5min | warning | `OutboxRequeueStorm` |
+| 进程级重试风暴（requeue 速率） | > 10/s 持续 5min | warning | `OutboxRequeueStorm` |
 | relay tick P95 耗时 | > 5s 持续 5min | warning | `OutboxRelayTickSlow` |
 | consumer DLX 写失败 | 5min 内 `outcome="error"` 增长 > 0 | critical | `ConsumerDlxWriteError` |
 | consumer release 失败 | 5min 内增长 > 0 | critical | `ConsumerReleaseFailed` |
-| consumer lease lost | 5min rate > 1/s 持续 5min | warning | `ConsumerLeaseLostHigh` |
+| 进程级 consumer lease lost | 5min rate > 2/s 持续 5min | warning | `ConsumerLeaseLostHigh` |
 | saga DLX 增长 | 10min 内 `outcome="written"` 增长 > 0 | critical | `SagaDeadLetterGrowth` |
 | saga DLX 写失败 | 5min 内 `outcome="write_error"` 增长 > 0 | critical | `SagaDeadLetterWriteError` |
 
-outbox 告警在 PromQL 层按 domain 聚合：depth 用 `sum by (domain)`，oldest age 用 `max by (domain)`，
-DLX/requeue 用 `sum by (domain)`，settlement failure 用 `sum by (domain, reason)`，tick 用
-`by (phase)`。scoped backlog gauges 对 adapter 返回或进程内已观测的
-`(domain, tenant_id, contract_id)` 输出；已观测 scope drain / sweep 后会保留零值 series，空部署、从未出现、
-新进程尚未观测或 recorder 已清理的 scope 可以没有 `outbox_pending_depth` series，因此 Prometheus 侧不再用
+canonical outbox backlog gauge 已是进程级全局聚合，不再按 domain/tenant/contract 二次聚合；publish 只按
+`status`，tick 只按 `phase`。provider-owned settlement/same-ID/saga families 仍按各自 owner 的闭合 labels 查询。
+全 active 空集合会保留零值；失败、standby、ownership loss 与 shutdown 会写 `NaN`，Prometheus 侧不使用
 `absent_over_time(outbox_pending_depth)` 判采样器停更。
 采样器/relay worker liveness 的权威信号是 readyz probe（`outbox_sampler` / `outbox_relay`）和外部监控。
 `consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支。`consumer_dlx_write_total{outcome="error"}`
 是告警面：DLX 未落库时 consumer 会 release inbox claim；release 成功则 broker Requeue，release 失败则
-`consumer_release_failed_total{domain}` 增长并继续 broker Requeue，active claim 等待 release 成功或 TTL 重捞；
+`consumer_release_failed_total` 增长并继续 broker Requeue，active claim 等待 release 成功或 TTL 重捞；
 该路径必须由 degraded health + metric 共同暴露。只有 durable `done` receipt 才会在重投时 Duplicate→Ack。
 `saga_dead_letters_total{outcome="written"}` 是人工介入面：补偿失败已进入统一 dead_letter 表；
 `outcome="write_error"` 是正确性告警面：journal Failed 行是 durable 审计兜底，但 dead_letter 未落库。
@@ -159,11 +150,11 @@ timeout/lost-lease/storage 告警由持续速率测试锁定。
 
 ## Dashboard 面板建议
 
-1. **投递延迟**：`max by (domain) (outbox_oldest_pending_age_seconds)` 折线 + 5min SLO 阈值线。
-2. **积压深度**：`sum by (domain) (outbox_pending_depth)` 折线 / 堆叠。
-3. **partition blocked 深度**：`sum by (domain, contract_id) (outbox_partition_blocked_depth)`。
-4. **投递速率与处置分布**：`sum by (domain, status) (rate(outbox_publish_total[5m]))`（ack/requeue/reject 堆叠）。
-5. **DLX 速率**：`sum by (domain) (rate(outbox_dlx_total[5m]))`。
+1. **投递延迟**：`outbox_oldest_pending_age_seconds` 折线 + 5min SLO 阈值线。
+2. **积压深度**：`outbox_pending_depth` 折线。
+3. **partition blocked 深度**：`outbox_partition_blocked_depth`。
+4. **投递速率与处置分布**：`sum by (status) (rate(outbox_publish_total[5m]))`（ack/requeue/reject 堆叠）。
+5. **DLX 速率**：`rate(outbox_publish_total{status="reject"}[5m])`。
 6. **same-ID 窗口到期**：`sum by (domain, phase) ((increase(outbox_same_id_window_expired_total[10m]) > 0) or
    ((outbox_same_id_window_expired_total > 0) unless
    (outbox_same_id_window_expired_total offset 10m)))`；`phase` 在此只显示 `automatic|redrive`。右侧是首次
@@ -183,12 +174,12 @@ timeout/lost-lease/storage 告警由持续速率测试锁定。
   属 #1208 接线时决策。当前是有意的范围收窄，非遗漏。
 - **对标 gocell RelayCollector**：RSS 覆盖 pending depth gauge、oldest-age gauge、三处置耗时
   （claim/publish）、
-  reject 计数（`outbox_dlx_total` = gocell `reject_total` 等效）。**fail-open drop 率无对应**——RSS relay **不采用
+  reject 计数（`outbox_publish_total{status="reject"}` = gocell `reject_total` 等效）。**fail-open drop 率无对应**——RSS relay **不采用
   fail-open**：broker 失败走 `Requeue` 退避 / 预算耗尽 `Reject` 进 DLX，无 drop 路径，故不设 `fail_open_drop` metric。
 - **relay/sampler worker unhealthy 无专属 Prometheus 告警**：worker 健康经 `WorkerHealth` → readyz probe
   （`outbox_relay`/`outbox_sweeper`/`outbox_sampler`，未导出为 metric）暴露，权威 liveness 信号是 readyz endpoint 的
-  外部 liveness/readiness 监控。scoped backlog gauges 可在进程内保留零值 series，但空部署 / 新进程无已观测
-  scope 时仍可完全缺失，不能作为采样器 heartbeat；Prometheus 侧仅保留 `OutboxBacklogOldestAgeHigh`（积压增长）等业务信号。如需 worker health
+  外部 liveness/readiness 监控。backlog gauges 每轮形成一个进程级全局样本：全部 active 且为空时发零，任一
+  scope 不可用或 worker 退出时整组发 NaN；不能作为采样器 heartbeat。Prometheus 侧仅保留 `OutboxBacklogOldestAgeHigh`（积压增长）等业务信号。如需 worker health
   gauge/heartbeat，属 #1208 接线时决策。
 - **acceptance 边界**：#1209 验收标准 = 仪表 seam + 护栏 + 生产实现 + 单元测试（含 facade
   `with_local_recorder` 渲染断言 + postgres `OutboxBacklog` 集成测试 T15–T18，testcontainers gated）。**E2E
@@ -196,8 +187,7 @@ timeout/lost-lease/storage 告警由持续速率测试锁定。
   `/metrics` 返回 `outbox_publish_total` / `outbox_pending_depth` 等。
 - **settings durable journey 模板（#1433）**：`assemblies/runtime/tests/settings_config_publish_durable_e2e.rs`
   用真实 Postgres + `PgConfigUnitOfWork` + `PgOutbox` + 测试 publisher 验证 `settings` 写入、co-tx outbox、
-  relay settle、`outbox_publish_total{domain="settings",contract_id="settings.config-version-changed",tenant_id="...",status="ack"}`、
-  `outbox_pending_depth{domain="settings",contract_id="settings.config-version-changed",tenant_id="..."}`
+  relay settle、`outbox_publish_total{status="ack"}`、`outbox_pending_depth`
   与测试 `outbox_relay_settings` readyz 闭环。`settings.config-version-changed` 现为 active 事件，生产
   relay domain 已包含 `settings`；runtime 通过 generated subscription 接线到 settings subscriber，consumer
   处理时按事件 `(tenant,key,version)` 回读配置仓储并刷新本进程 config cache。该模板仍刻意注入测试 publisher，

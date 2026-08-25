@@ -145,7 +145,7 @@ pub async fn coordinated_inbox_backlog_sampler_loop<S>(
     config: eventexec::InboxSamplerConfig,
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
-    metrics: Arc<dyn eventexec::InboxMetrics>,
+    emitter: Arc<dyn eventing::observability::EventingEmitter>,
 ) where
     S: eventexec::InboxBacklogSource,
 {
@@ -163,16 +163,16 @@ pub async fn coordinated_inbox_backlog_sampler_loop<S>(
                     &mut state,
                     token.clone(),
                     Arc::clone(&health),
-                    Arc::clone(&metrics),
+                    Arc::clone(&emitter),
                 )
                 .await;
                 Ok(())
             };
             operation.await
         },
-        eventexec::retire_inbox_backlog_metrics(&mut state, metrics.as_ref())
+        eventexec::retire_inbox_backlog_metrics(&mut state, emitter.as_ref())
     );
-    eventexec::retire_inbox_backlog_metrics(&mut state, metrics.as_ref());
+    eventexec::retire_inbox_backlog_metrics(&mut state, emitter.as_ref());
     health.mark_stopped();
 }
 
@@ -183,7 +183,7 @@ pub async fn coordinated_outbox_backlog_sampler_loop<B>(
     config: eventexec::SamplerConfig,
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
-    metrics: Arc<dyn eventexec::OutboxMetrics>,
+    emitter: Arc<dyn eventing::observability::EventingEmitter>,
 ) where
     B: consistency::OutboxBacklog,
 {
@@ -201,16 +201,16 @@ pub async fn coordinated_outbox_backlog_sampler_loop<B>(
                     &mut state,
                     token.clone(),
                     Arc::clone(&health),
-                    Arc::clone(&metrics),
+                    Arc::clone(&emitter),
                 )
                 .await;
                 Ok(())
             };
             operation.await
         },
-        eventexec::retire_outbox_backlog_metrics(&mut state, config.domains(), metrics.as_ref())
+        eventexec::retire_outbox_backlog_metrics(&mut state, config.domains(), emitter.as_ref())
     );
-    eventexec::retire_outbox_backlog_metrics(&mut state, config.domains(), metrics.as_ref());
+    eventexec::retire_outbox_backlog_metrics(&mut state, config.domains(), emitter.as_ref());
     health.mark_stopped();
 }
 
@@ -271,7 +271,11 @@ impl BridgedSubscription {
     }
 
     #[must_use]
-    pub fn consumer_meta(&self, tenant_authority: Arc<eventexec::TenantAuthority>) -> ConsumerMeta {
+    pub fn consumer_meta(
+        &self,
+        tenant_authority: Arc<eventexec::TenantAuthority>,
+        observability: Arc<dyn eventing::observability::EventingEmitter>,
+    ) -> ConsumerMeta {
         ConsumerMeta::new(
             self.consumer(),
             self.topic_owner(),
@@ -279,6 +283,7 @@ impl BridgedSubscription {
             self.topic(),
             self.group().as_str(),
             tenant_authority,
+            observability,
         )
         .with_expected_schema(self.schema_version(), self.schema_hash())
     }

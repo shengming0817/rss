@@ -30,6 +30,7 @@ test-support = [
 ]
 
 [dependencies]
+observ = { path = "../../crates/observ" }
 eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true

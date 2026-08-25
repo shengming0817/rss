@@ -1,7 +1,7 @@
 //! observ — RSS 可观测性服务 crate。
 //!
 //! 提供：
-//! - metrics label 闭值集（HttpLabel / EventLabel / CertLabel），编译期防高基数扩散
+//! - metrics label 闭值集（HttpLabel / CertLabel），编译期防高基数扩散
 //! - provider-agnostic MetricLabel 出口（adapters/otel 负责映射 KeyValue；本 crate 不引 otel）
 //! - sink-neutral [`TelemetryResource`]（RuntimePlan 铸造一次，JSON/OTLP 只做具名映射）
 //!
@@ -9,16 +9,18 @@
 //! 已迁 `diport`（issue #1075，ADR-003 DI port 收敛）——消费方经 `diport::AuditSink` 注入。
 //!
 //! 层级：服务层（依赖基础 + 引擎；不依赖域 / adapters）。
-//! #1625 outbox metrics 的 `tenant_id` / `contract_id` 是运行期 typed route scope，由
-//! `consistency` / `eventexec` 收口；`eventexec` 不能依赖 sibling service crate `observ`，所以这里
-//! 不新增动态 `LabelValue` 或 outbox label enum。
+//! Eventing telemetry 经 `rss_eventing::observability` 的闭合 observation seam 注入；本 crate 的
+//! [`EventingTelemetryEmitter`] 是唯一 production metrics/tracing 投影，不接收 domain/tenant/contract
+//! 等动态 label，也不向 eventexec 反向暴露 runtime implementation。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
 
 mod device_latent;
+mod eventing;
 mod localtx;
 mod telemetry;
 
 pub use device_latent::{DeviceLatentMetric, DeviceLatentObservation};
+pub use eventing::EventingTelemetryEmitter;
 pub use localtx::{
     LocalTxActionableAlert, LocalTxMetric, LocalTxMetricPurpose, LocalTxObservation,
     LocalTxOperationsDescriptor, LocalTxRetryPressureClassification, localtx_operations_descriptor,
@@ -58,23 +60,6 @@ pub enum HttpLabel {
     Domain(&'static str),
 }
 
-/// EventBus Disposition 闭值集。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispositionLabel {
-    Ack,
-    Nack,
-    Requeue,
-}
-
-/// EventBus metrics label 集合。
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum EventLabel {
-    Topic(&'static str),
-    Disposition(DispositionLabel),
-    Handler(&'static str),
-}
-
 /// 证书操作结果闭值集。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertOutcomeLabel {
@@ -98,7 +83,7 @@ pub enum CertLabel {
 /// 只保留 `Static(&'static str)`（compile-time literal），防止 runtime 动态字符串
 /// 进入 label value 导致高基数扩散（F10，Medium）。
 ///
-/// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` / `Topic` / `Handler` 的公开裸
+/// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` 的公开裸
 /// `&'static str` 构造面尚未收敛成 sealed resolver / 闭值集枚举，
 /// 业务仍可写任意字面量，未满足 `crates/observ`、`secure::redact_error` 与 typed metric enums
 /// 必须冻结或经 typed enum 入口、禁止业务手写裸 string label」。本 crate（#1006）只兑现
@@ -113,7 +98,7 @@ pub enum LabelValue {
 ///
 /// `key()` 返回低基数 label 键（Prometheus 风格短 snake_case）；`value()` 返回
 /// `LabelValue::Static`——只承编译期 literal，runtime 高基数串无法进入（F10）。
-/// 携 `&'static str` 字段的变体（`RouteTemplate` / `Domain` / `Topic` / `Handler`）透传
+/// 携 `&'static str` 字段的变体（`RouteTemplate` / `Domain`）透传
 /// 内串，调用方只许传 compile-time 类别字面量，不许传 runtime 标识（如租户 ID）。
 ///
 /// value 大小写约定：HTTP method 用大写（对齐 OTel `http.request.method`），
@@ -153,28 +138,6 @@ impl MetricLabel for HttpLabel {
             }),
             // RouteTemplate / Domain 已是 compile-time literal，透传内串。
             HttpLabel::RouteTemplate(s) | HttpLabel::Domain(s) => LabelValue::Static(s),
-        }
-    }
-}
-
-impl MetricLabel for EventLabel {
-    fn key(&self) -> &'static str {
-        match self {
-            EventLabel::Topic(_) => "topic",
-            EventLabel::Disposition(_) => "disposition",
-            EventLabel::Handler(_) => "handler",
-        }
-    }
-
-    fn value(&self) -> LabelValue {
-        match self {
-            EventLabel::Disposition(disposition) => LabelValue::Static(match disposition {
-                DispositionLabel::Ack => "ack",
-                DispositionLabel::Nack => "nack",
-                DispositionLabel::Requeue => "requeue",
-            }),
-            // Topic / Handler 已是 compile-time literal，透传内串。
-            EventLabel::Topic(s) | EventLabel::Handler(s) => LabelValue::Static(s),
         }
     }
 }
@@ -263,32 +226,6 @@ mod tests {
         assert_eq!(domain.value(), LabelValue::Static("identity"));
     }
 
-    // ── EventLabel ───────────────────────────────────────────────────────
-    #[test]
-    fn event_label_disposition_key_value() {
-        let cases = [
-            (DispositionLabel::Ack, "ack"),
-            (DispositionLabel::Nack, "nack"),
-            (DispositionLabel::Requeue, "requeue"),
-        ];
-        for (disp, want) in cases {
-            let label = EventLabel::Disposition(disp);
-            assert_eq!(label.key(), "disposition");
-            assert_eq!(label.value(), LabelValue::Static(want));
-        }
-    }
-
-    #[test]
-    fn event_label_static_fields_pass_through() {
-        let topic = EventLabel::Topic("session.created");
-        assert_eq!(topic.key(), "topic");
-        assert_eq!(topic.value(), LabelValue::Static("session.created"));
-
-        let handler = EventLabel::Handler("session_handler");
-        assert_eq!(handler.key(), "handler");
-        assert_eq!(handler.value(), LabelValue::Static("session_handler"));
-    }
-
     // ── CertLabel ────────────────────────────────────────────────────────
     #[test]
     fn cert_label_outcome_key_value() {
@@ -316,23 +253,17 @@ mod tests {
         assert_ne!(LabelValue::Static("a"), LabelValue::Static("b"));
     }
 
-    // #1625：outbox tenant/contract scope 在 consistency/eventexec typed scope 内收口；
-    // observ 仍保持 static-only label value，避免为运行期 scope 打开通用动态 label 入口。
+    // 通用 HTTP/cert label 仍保持 static-only；Eventing 使用独立闭合 observation seam。
     #[test]
-    fn label_value_remains_static_only_for_outbox_scope() {
+    fn label_value_remains_static_only() {
         let labels = [
             HttpLabel::Domain("identity").value(),
-            EventLabel::Topic("session.created").value(),
             CertLabel::Outcome(CertOutcomeLabel::Issued).value(),
         ];
 
         assert_eq!(
             labels,
-            [
-                LabelValue::Static("identity"),
-                LabelValue::Static("session.created"),
-                LabelValue::Static("issued"),
-            ]
+            [LabelValue::Static("identity"), LabelValue::Static("issued"),]
         );
     }
 }

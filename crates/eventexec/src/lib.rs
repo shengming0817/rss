@@ -61,15 +61,12 @@ pub use relay_config::{
     RelayConfig, RelayConfigError, SamplerConfig, SamplerConfigError, SweeperConfig,
     SweeperConfigError,
 };
-pub mod relay_metrics;
-pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, RelayPhase};
-
 pub mod inbox_backlog;
 pub use inbox_backlog::{
     INBOX_SAMPLER_PROBE, InboxBacklogObservation, InboxBacklogSample, InboxBacklogSelection,
-    InboxBacklogSelectionError, InboxBacklogSource, InboxMetricScope, InboxMetrics,
-    InboxSamplerConfig, InboxSamplerConfigError, InboxSamplerState, MetricsInboxMetrics,
-    inbox_backlog_sampler_loop, inbox_backlog_sampler_session, retire_inbox_backlog_metrics,
+    InboxBacklogSelectionError, InboxBacklogSource, InboxSamplerConfig, InboxSamplerConfigError,
+    InboxSamplerState, inbox_backlog_sampler_loop, inbox_backlog_sampler_session,
+    retire_inbox_backlog_metrics,
 };
 
 pub mod projection_metrics;
@@ -88,11 +85,12 @@ pub use projection_observation::{
 pub mod dlq;
 pub use dlq::{
     DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget,
-    DlqListQuery, DlqListResult, DlqMutationKind, DlqMutationMetricOutcome, DlqRedriveOutcome,
-    DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqReplayStoreStage, DlqStore,
-    DurablyAuditedDlqMutation, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, record_dlq_mutation_error,
-    record_dlq_outbox_redrive, record_dlq_replay, record_outbox_expired_resolution,
+    DlqListQuery, DlqListResult, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
+    DlqReplayRequest, DlqReplayStoreStage, DlqStore, DurablyAuditedDlqMutation,
+    OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+    OutboxResolutionChangeTicket, record_dlq_outbox_redrive, record_dlq_outbox_redrive_error,
+    record_dlq_replay, record_dlq_replay_error, record_outbox_expired_resolution,
+    record_outbox_expired_resolution_error,
 };
 
 pub mod dr_admission_runtime;
@@ -449,6 +447,38 @@ fn log_dropped_exhausted(msg: &Message, attempts: u32) {
 }
 
 // ── smoke tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestEventingRecorder(
+    std::sync::Mutex<Vec<eventing::observability::EventingObservation>>,
+);
+
+#[cfg(test)]
+impl TestEventingRecorder {
+    pub(crate) fn observations(&self) -> Vec<eventing::observability::EventingObservation> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[cfg(test)]
+impl eventing::observability::EventingEmitter for TestEventingRecorder {
+    fn emit(&self, observation: eventing::observability::EventingObservation) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(observation);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_eventing_emitter() -> std::sync::Arc<dyn eventing::observability::EventingEmitter>
+{
+    std::sync::Arc::new(TestEventingRecorder::default())
+}
 
 #[cfg(test)]
 mod tests {

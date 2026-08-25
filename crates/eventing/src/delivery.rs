@@ -42,6 +42,22 @@ pub enum ConsumerTxOutcome<C> {
 }
 
 impl<C> ConsumerTxOutcome<C> {
+    /// Projects the provider-owned outcome into the data-free observability vocabulary.
+    #[must_use]
+    pub const fn observability_status(&self) -> crate::observability::EventingTransactionStatus {
+        use crate::observability::EventingTransactionStatus;
+        match self {
+            Self::Committed(_) => EventingTransactionStatus::Committed,
+            Self::HandlerTransient => EventingTransactionStatus::HandlerTransient,
+            Self::InfrastructureTransient => EventingTransactionStatus::InfrastructureTransient,
+            Self::Rejected(RejectKind::Permanent) => EventingTransactionStatus::RejectedPermanent,
+            Self::Rejected(RejectKind::Invariant) => EventingTransactionStatus::RejectedInvariant,
+            Self::CommitUnknown => EventingTransactionStatus::CommitUnknown,
+            Self::RollbackFailed => EventingTransactionStatus::RollbackFailed,
+            Self::Fenced => EventingTransactionStatus::Fenced,
+        }
+    }
+
     /// Stable low-cardinality observability label.
     #[must_use]
     pub const fn as_label(&self) -> &'static str {

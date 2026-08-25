@@ -43,11 +43,11 @@ use eventexec::ManagedBlockingWorker;
 use eventexec::{
     ConsumerMeta, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle, DlxLifecycleHealth,
     DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, INBOX_SAMPLER_PROBE, InboxBacklogSelection,
-    InboxSamplerConfig, LeaseConfig, MetricsInboxMetrics, MetricsOutboxMetrics,
-    MetricsRetentionMetrics, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE,
-    RelayConfig, RetentionMetrics, RetentionOutcome, RetentionTarget, SWEEPER_WORKER_NAME,
-    SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority, WorkerHealth,
-    apply_dlx_lifecycle_health, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
+    InboxSamplerConfig, LeaseConfig, MetricsRetentionMetrics, OUTBOX_RELAY_PROBE,
+    OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig, RetentionMetrics, RetentionOutcome,
+    RetentionTarget, SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker,
+    TenantAuthority, WorkerHealth, apply_dlx_lifecycle_health, spawn_on_dedicated_runtime,
+    spawn_relay, sweeper_loop,
 };
 use eventing::delivery::DeliveryBudget;
 #[cfg(test)]
@@ -766,7 +766,7 @@ fn consumer_meta_for_subscription(
     subscription: &BridgedSubscription,
     tenant_authority: Arc<TenantAuthority>,
 ) -> ConsumerMeta {
-    subscription.consumer_meta(tenant_authority)
+    subscription.consumer_meta(tenant_authority, Arc::new(observ::EventingTelemetryEmitter))
 }
 
 pub(crate) fn bridge_generated_subscriptions_for_execution(
@@ -1934,7 +1934,7 @@ fn wire_domain_relay(
                 Arc::new(SystemClock),
                 token,
                 worker_health,
-                Arc::new(MetricsOutboxMetrics),
+                Arc::new(observ::EventingTelemetryEmitter),
                 relay_admission,
                 EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
@@ -2008,7 +2008,7 @@ fn wire_inbox_backlog_sampler(
                         config,
                         thread_token,
                         Arc::clone(&worker_health),
-                        Arc::new(MetricsInboxMetrics),
+                        Arc::new(observ::EventingTelemetryEmitter),
                     )
                     .await;
                     Ok(())
@@ -2065,7 +2065,7 @@ fn wire_sampler_worker(
                         config,
                         thread_token,
                         Arc::clone(&worker_health),
-                        Arc::new(MetricsOutboxMetrics),
+                        Arc::new(observ::EventingTelemetryEmitter),
                     )
                     .await;
                     Ok(())

@@ -798,6 +798,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     topic: impl Into<String>,
     consumer_group: impl Into<String>,
     tenant_authority: Arc<TenantAuthority>,
+    observability: Arc<dyn eventing::observability::EventingEmitter>,
     admission: primitives::ConsumerAdmission,
     token: tokio_util::sync::CancellationToken,
     handler: H,
@@ -818,6 +819,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
         &*topic_s,
         consumer_group,
         tenant_authority,
+        observability,
     )
     .with_expected_schema(contract.version(), contract.schema_hash());
     let handler = Arc::new(handler);
@@ -1357,6 +1359,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            crate::test_eventing_emitter(),
             consumer_admission(),
             tokio_util::sync::CancellationToken::new(),
             move |req: DoThing| {
@@ -1402,6 +1405,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            crate::test_eventing_emitter(),
             consumer_admission(),
             tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| {
@@ -1441,6 +1445,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            crate::test_eventing_emitter(),
             consumer_admission(),
             tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| {
@@ -1476,6 +1481,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            crate::test_eventing_emitter(),
             consumer_admission(),
             tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| async move { HandleResult::ack() },
@@ -1504,6 +1510,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            crate::test_eventing_emitter(),
             consumer_admission(),
             tokio_util::sync::CancellationToken::new(),
             move |_req: DoThing| {

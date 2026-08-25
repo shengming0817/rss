@@ -683,7 +683,7 @@ impl core::marker::Unpin for consistency::outbox::BacklogObservation
 impl core::marker::UnsafeUnpin for consistency::outbox::BacklogObservation
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::BacklogObservation
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::BacklogObservation
-#[non_exhaustive] pub enum consistency::outbox::Disposition
+pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
 pub consistency::outbox::Disposition::Reject
 pub consistency::outbox::Disposition::Requeue
@@ -2851,7 +2851,7 @@ impl core::marker::Unpin for consistency::reconcile::ConvergeAction
 impl core::marker::UnsafeUnpin for consistency::reconcile::ConvergeAction
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::reconcile::ConvergeAction
 impl core::panic::unwind_safe::UnwindSafe for consistency::reconcile::ConvergeAction
-#[non_exhaustive] pub enum consistency::Disposition
+pub enum consistency::Disposition
 pub consistency::Disposition::Ack
 pub consistency::Disposition::Reject
 pub consistency::Disposition::Requeue

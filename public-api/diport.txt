@@ -4,7 +4,7 @@ pub use diport::SagaContractIdError
 pub use diport::SagaWorkerIdentity
 pub use diport::SagaWorkerIdentityError
 pub mod diport::acker
-#[non_exhaustive] pub enum diport::acker::AckAction
+pub enum diport::acker::AckAction
 pub diport::acker::AckAction::Ack
 pub diport::acker::AckAction::Reject
 pub diport::acker::AckAction::Requeue
@@ -6028,7 +6028,7 @@ impl<TraitVariantBlanketType: diport::subscriber::Subscriber> diport::subscriber
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::subscriber::SubscriberError>
 pub async fn TraitVariantBlanketType::subscribe(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> core::result::Result<diport::subscriber::MessageStream, diport::subscriber::SubscriberError>
 pub type diport::subscriber::MessageStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::subscriber::Message> + core::marker::Send)>>
-#[non_exhaustive] pub enum diport::AckAction
+pub enum diport::AckAction
 pub diport::AckAction::Ack
 pub diport::AckAction::Reject
 pub diport::AckAction::Requeue

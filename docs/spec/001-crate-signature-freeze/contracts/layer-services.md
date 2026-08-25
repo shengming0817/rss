@@ -10,7 +10,7 @@
 | **authn** | jwt/session/refresh 值类型、`Principal`（RowScope 派生）类型；ctx 遵 ADR-002 显式传 `&RequestCtx` | type + 函数；**PDP/session store dyn port → diport** | authplan 类型在 primitives::authplan |
 | **bootstrap** | `Domain::init(&self,&mut Registry)->Result<(),KernelError>`、`Registry`、私有字段 `DomainBinding` + `DomainBinding::new` + `compose_bindings(&mut Vec<DomainBinding>)`、shutdown 编排（持 `ManagedResource` LIFO）；runtime 三域 `module()->DomainBinding` 已存在但尚未接 live | init=sync 不 I/O/spawn；成功 compose 后才返回只含 probes/resources/workers 的聚合 result，失败保持 bindings/output；`ManagedResource` 遵 **ADR-001** | shutdown ADR-001；ref: kube-rs/fx/omicron |
 | **eventexec** | `Disposition`(Ack/Nack/Requeue 穷尽 enum)、`HandlerFn`/`ConsumerFn` 类型别名、saga executor·tailer/command 接缝 | type/enum/函数；**Publisher dyn port + `Subscriber`/`SubscribeInitializer` dyn port + `Message` 原语已迁 diport（#1075）** | ref: watermill |
-| **observ** | metrics label 值类型（`HttpLabel`/`EventLabel`/`CertLabel`/`MetricLabel`，闭值集） | type/enum；**audit sink port（`AuditSink`/`AuditEvent`/`AuditOutcome`）已迁 diport（#1075）**；结构化 tracing 字段脱敏由 `secure::safe`/`#[derive(secure::Redact)]` 承载（本 PR 删除零使用的 `SpanField`） | metrics label 闭值集 |
+| **observ** | metrics label 值类型（`HttpLabel`/`CertLabel`/`MetricLabel`）及唯一 `EventingTelemetryEmitter` | type/enum；Eventing vocabulary 归 `rss-eventing::observability`，本层只做 production metrics/tracing 投影；结构化 tracing 字段脱敏由 `secure::safe`/`#[derive(secure::Redact)]` 承载 | metrics label 闭值集 + Eventing adapter |
 | **distributed** | distlock/cas/transport 值类型 | **dyn port → diport** | — |
 | **deviceloop** | cert lifecycle·signing（L4）状态机类型 | 态机 type；**signer dyn port → diport** | L4 reconcile |
 

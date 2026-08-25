@@ -53,7 +53,7 @@ tracewire = { package = "rss-trace-context", path = "../tracewire", version = "0
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（relay_loop/sweeper_loop 取消信号）。
 tokio-util = { workspace = true }
-# #1209 outbox metrics 发射（MetricsOutboxMetrics 经 metrics facade）。硬依赖、非 optional——idiomatic
+# retention/projection/reconcile 等非 Eventing canonical family 仍经 metrics facade 发射。硬依赖、非 optional——idiomatic
 # metrics facade 范式：库无条件发射，executable（组合根）选 recorder（装 PromExporter 才导出，否则 facade
 # 自身 no-op）；不留 public no-op metrics 让生产静默降级（#1209 review F3 fail-closed）。同 tracing 层级。
 metrics = { workspace = true }
@@ -73,7 +73,7 @@ tracewiretest = { path = "../tracewiretest" }
 tracing-subscriber = { workspace = true }
 # RECONCILE-TENANCY-REQ-01：production 三参数签名为 Hard owner；UI 以缺 trigger 作 Medium 代表性误用。
 trybuild = { workspace = true }
-# #1209 MetricsOutboxMetrics 发射测试（with_local_recorder + render 断言，默认 lane 运行）；同 adapters/prometheus 范式。
+# 非 Eventing family 的 metrics facade 测试（with_local_recorder + render 断言）；同 adapters/prometheus 范式。
 metrics-exporter-prometheus = { workspace = true }
 
 [[test]]

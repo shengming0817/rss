@@ -52,12 +52,13 @@ pub enum TenantAuthorityError {
 }
 
 impl TenantAuthorityError {
-    pub const fn skip_reason(self) -> &'static str {
+    pub const fn skip_reason(self) -> eventing::observability::EventingDeadLetterSkipReason {
+        use eventing::observability::EventingDeadLetterSkipReason;
         match self {
-            Self::Missing => "tenant_authority_missing",
-            Self::Malformed | Self::BadMac => "tenant_authority_invalid",
-            Self::Expired => "tenant_authority_expired",
-            Self::BindingMismatch => "tenant_authority_binding_mismatch",
+            Self::Missing => EventingDeadLetterSkipReason::TenantAuthorityMissing,
+            Self::Malformed | Self::BadMac => EventingDeadLetterSkipReason::TenantAuthorityInvalid,
+            Self::Expired => EventingDeadLetterSkipReason::TenantAuthorityExpired,
+            Self::BindingMismatch => EventingDeadLetterSkipReason::TenantAuthorityBindingMismatch,
         }
     }
 }

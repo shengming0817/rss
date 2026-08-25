@@ -20,17 +20,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use consistency::{BacklogSample, Disposition};
 use diport::{
     DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef,
     KeyVersion, ManagedResource as _, OpaqueActorId, OutboxActor, PublishRequest, Publisher,
     PublisherError, RedactedBytes,
 };
-use eventexec::{
-    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, SamplerConfig, WorkerHealth,
-    backlog_sampler_loop,
-};
+use eventexec::{RelayConfig, SamplerConfig, WorkerHealth, backlog_sampler_loop};
 use eventing::delivery::DeliveryBudget;
+use eventing::observability::{EventingDisposition, EventingEmitter, EventingObservation};
 use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
@@ -172,135 +169,77 @@ impl Publisher for CapturingPublisher {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct PublishMetric {
-    domain: String,
-    contract_id: String,
-    tenant_id: String,
-    status: &'static str,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct BacklogMetric {
-    domain: String,
-    contract_id: String,
-    tenant_id: String,
-    depth: u64,
-    oldest_age_seconds: u64,
-}
-
 #[derive(Clone, Default)]
 struct TestTelemetry {
-    publishes: Arc<Mutex<Vec<PublishMetric>>>,
-    backlogs: Arc<Mutex<Vec<BacklogMetric>>>,
-    tick_phases: Arc<Mutex<Vec<&'static str>>>,
+    observations: Arc<Mutex<Vec<EventingObservation>>>,
 }
 
 impl TestTelemetry {
     fn has_ack_for_settings(&self) -> bool {
-        self.publishes
+        self.observations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|m| {
-                m.domain == "settings"
-                    && m.contract_id == settings_v1::CONTRACT_ID
-                    && m.tenant_id == CANON_TENANT
-                    && m.status == "ack"
+            .any(|observation| {
+                matches!(
+                    observation,
+                    EventingObservation::OutboxPublish {
+                        status: EventingDisposition::Ack
+                    }
+                )
             })
     }
 
     fn has_pending_settings_backlog(&self) -> bool {
-        self.backlogs
+        self.observations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|m| {
-                m.domain == "settings"
-                    && m.contract_id == settings_v1::CONTRACT_ID
-                    && m.tenant_id == CANON_TENANT
-                    && m.depth >= 1
+            .any(|observation| {
+                matches!(
+                    observation,
+                    EventingObservation::OutboxBacklog { pending_depth, .. } if *pending_depth >= 1
+                )
             })
     }
 }
 
-impl OutboxMetrics for TestTelemetry {
-    fn record_publish(&self, scope: &OutboxMetricScope<'_>, disposition: Disposition) {
-        self.publishes
+impl EventingEmitter for TestTelemetry {
+    fn emit(&self, observation: EventingObservation) {
+        self.observations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(PublishMetric {
-                domain: scope.domain_label().to_owned(),
-                contract_id: scope.contract_id_label().to_owned(),
-                tenant_id: scope.tenant_id_label(),
-                status: disposition.as_label(),
-            });
-    }
-
-    fn record_backlog(&self, scope: &OutboxMetricScope<'_>, sample: BacklogSample) {
-        self.backlogs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(BacklogMetric {
-                domain: scope.domain_label().to_owned(),
-                contract_id: scope.contract_id_label().to_owned(),
-                tenant_id: scope.tenant_id_label(),
-                depth: sample.depth(),
-                oldest_age_seconds: sample.oldest_age_seconds(),
-            });
-    }
-
-    fn record_backlog_unavailable(&self, _scope: &OutboxMetricScope<'_>) {}
-
-    fn record_partition_blocked(&self, _scope: &OutboxMetricScope<'_>, _blocked_depth: u64) {}
-
-    fn record_tick_duration(&self, phase: RelayPhase, _seconds: f64) {
-        self.tick_phases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(phase.as_label());
+            .push(observation);
     }
 }
 
 impl diport::MetricsExporter for TestTelemetry {
     fn render(&self) -> String {
         let mut out = String::new();
-        for metric in self
-            .publishes
+        for observation in self
+            .observations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
         {
-            out.push_str(&format!(
-                "outbox_publish_total{{domain=\"{}\",contract_id=\"{}\",tenant_id=\"{}\",status=\"{}\"}} 1\n",
-                metric.domain, metric.contract_id, metric.tenant_id, metric.status
-            ));
-        }
-        for metric in self
-            .backlogs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            out.push_str(&format!(
-                "outbox_pending_depth{{domain=\"{}\",contract_id=\"{}\",tenant_id=\"{}\"}} {}\n",
-                metric.domain, metric.contract_id, metric.tenant_id, metric.depth
-            ));
-            out.push_str(&format!(
-                "outbox_oldest_pending_age_seconds{{domain=\"{}\",contract_id=\"{}\",tenant_id=\"{}\"}} {}\n",
-                metric.domain, metric.contract_id, metric.tenant_id, metric.oldest_age_seconds
-            ));
-        }
-        for phase in self
-            .tick_phases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            out.push_str(&format!(
-                "outbox_relay_tick_duration_seconds{{phase=\"{}\"}} 0\n",
-                phase
-            ));
+            match observation {
+                EventingObservation::OutboxPublish { status } => out.push_str(&format!(
+                    "outbox_publish_total{{status=\"{}\"}} 1\n",
+                    status.as_label()
+                )),
+                EventingObservation::OutboxBacklog {
+                    pending_depth,
+                    oldest_pending_age,
+                    ..
+                } => {
+                    out.push_str(&format!("outbox_pending_depth {}\n", pending_depth));
+                    out.push_str(&format!(
+                        "outbox_oldest_pending_age_seconds {}\n",
+                        oldest_pending_age.as_secs()
+                    ));
+                }
+                _ => {}
+            }
         }
         out
     }
@@ -552,7 +491,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
         sampler_config,
         sampler_token.clone(),
         Arc::clone(&sampler_health),
-        Arc::clone(&telemetry) as Arc<dyn OutboxMetrics>,
+        Arc::clone(&telemetry) as Arc<dyn EventingEmitter>,
     ));
     wait_until(Duration::from_secs(5), || {
         telemetry.has_pending_settings_backlog()
@@ -582,7 +521,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
         Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
         CancellationToken::new(),
         Arc::clone(&relay_health),
-        Arc::clone(&telemetry) as Arc<dyn OutboxMetrics>,
+        Arc::clone(&telemetry) as Arc<dyn EventingEmitter>,
         relay_admission,
         eventing::lifecycle::ShutdownBudget::STANDARD,
     );
@@ -669,19 +608,11 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
             .to_vec(),
     )?;
     assert!(
-        metrics_body.contains(&format!(
-            r#"outbox_publish_total{{domain="settings",contract_id="{}",tenant_id="{}",status="ack"}}"#,
-            settings_v1::CONTRACT_ID,
-            CANON_TENANT
-        )),
+        metrics_body.contains(r#"outbox_publish_total{status="ack"}"#),
         "metrics must expose settings ack counter: {metrics_body}"
     );
     assert!(
-        metrics_body.contains(&format!(
-            r#"outbox_pending_depth{{domain="settings",contract_id="{}",tenant_id="{}"}}"#,
-            settings_v1::CONTRACT_ID,
-            CANON_TENANT
-        )),
+        metrics_body.contains("outbox_pending_depth "),
         "metrics must expose settings backlog gauge: {metrics_body}"
     );
 

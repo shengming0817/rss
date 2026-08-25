@@ -190,7 +190,7 @@ rss dlq redrive-outbox \
   --event-id "$EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-6. 等 relay 发布该队头，再观察 `outbox_partition_blocked_depth{tenant_id,domain,contract_id}` 回到 0。
+6. 等 relay 发布该队头，再观察全局 `outbox_partition_blocked_depth` 回到 0。
 
 如果第 5 步返回 `Expired`，不得重试 redrive。取得业务所有者和变更工单批准，按上述
 `accepted_gap` / `compensated` 选择执行 `resolve-expired-outbox`。命令只在目标是当前 tenant、
@@ -202,10 +202,10 @@ rss dlq redrive-outbox \
 
 ## Metrics
 
-- `outbox_partition_blocked_depth{domain,contract_id,tenant_id}`：blocked 后继行数。
+- `outbox_partition_blocked_depth`：所有 active scope 聚合后的 blocked 后继行数。
 - `outbox_same_id_window_expired_total{domain,contract_id,tenant_id,phase}`：relay publish preflight 发现
   deadline 到期；`phase=automatic|redrive`，broker publish 未发生。
-- `dlq_redrive_total{tenant_id,kind,outcome}`：operator mutation 结果；`kind=dead_letter_replay|outbox_dlx_redrive|outbox_dlx_resolve_expired`，
+- `dlq_redrive_total{kind,outcome}`：operator mutation 结果；`kind=dead_letter_replay|outbox_dlx_redrive|outbox_dlx_resolve_expired`，
   outbox redrive outcome 包含 `redriven|not_found|expired`；dead-letter replay 的存储失败直接使用闭值阶段
   `fetch_dead_letter|encode_metadata|append_outbox|projection_mirror|transaction`，不再同时上报 `store`。
   该计数只在进程安装 metrics recorder 时可采集；
@@ -213,7 +213,7 @@ rss dlq redrive-outbox \
   与 `dlq.maintenance` audit/log 为准。
 - `outbox_publish_total{status="requeue|reject"}`：broker publish transient/permanent 处置。
 - `outbox_relay_envelope_validation_failure_total{reason}`：本地 envelope/schema header gate。
-- `consumer_lease_lost_total{domain}`：consumer inbox lease hard-fence。
+- `consumer_lease_lost_total`：consumer inbox lease hard-fence。
 
 `dlq_redrive_total{outcome="not_found"}` 对 outbox redrive 表示未 mutation，命令以非零状态退出且 finish audit 记
 `failure/not_found`；常见原因是 wrong tenant、目标非 DLX 或已被其它 operator redrive。

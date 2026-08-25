@@ -320,7 +320,6 @@ pub struct OutboxFactConflict;
 
 /// 消费处置（穷尽闭值集，Hard 冻结；漏 case 编不过）。`contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Disposition {
     /// 成功：broker ack + receipt commit。
     Ack,

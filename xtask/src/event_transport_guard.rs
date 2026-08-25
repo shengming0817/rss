@@ -46,6 +46,10 @@
 //! ackable subscribe 生命周期必须经 `run_ackable_subscription_loop`（AST：spawn 生产函数体调用，非文件 contains）；每个
 //! required spawn 必须跨 TARGETS 命中 ≥1；禁串只扫非 `#[doc]` 字符串字面量；禁止 subscribe 失败后
 //! `worker exiting` one-shot 永久退出（#1605）。
+//! INVARIANT: EVENTING-OBSERVABILITY-CLOSURE-01 { level = "Medium", exec = "check/release-check", source = "rust-ast", synthetic_red = "tests::eventing_observability_closure_rejects_forbidden_label|tests::eventing_observability_closure_rejects_forbidden_payload|tests::eventing_observability_closure_rejects_nested_forbidden_payload|tests::eventing_observability_closure_rejects_private_carrier_alias|tests::eventing_observability_closure_rejects_projection_mapping_drift|tests::eventing_observability_closure_rejects_public_compatibility_surface|tests::eventing_observability_closure_rejects_direct_macro|tests::eventing_observability_closure_rejects_indirect_or_aliased_macro|tests::eventing_observability_closure_rejects_second_or_noop_adapter|tests::eventing_observability_closure_rejects_root_reexport", anti_vacuity = "tests::workspace_eventing_observability_closure_is_exact" }——
+//! Eventing observation payload、metric/event identity 与 label/field keys 是闭合集；canonical
+//! identity 的 production metrics/tracing 投影由 `observ` adapter 收口，scanner 只拒绝引用这些 typed
+//! identity 或 canonical literal 的旁路；公开 provider-neutral emitter 可由消费者实现，crate root 不得兼容 re-export。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -133,6 +137,7 @@ pub(crate) enum Rule {
     ConsumerExternalEffectCapability,
     DedicatedRuntimeFunnel,
     ConsumerSubscribeSupervise,
+    EventingObservabilityClosure,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -200,6 +205,7 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     findings.extend(scan_domain_crates(root)?);
     findings.extend(scan_production_bypasses(root)?);
     findings.extend(scan_event_producers(root)?);
+    findings.extend(eventing_observability_closure_findings(root)?);
     let claim_cutover_sources = load_outbox_claim_cutover_sources(root)?;
     findings.extend(scan_outbox_claim_cutover_sources(&claim_cutover_sources));
     findings.extend(scan_settlement_funnel_sources(&claim_cutover_sources).findings);
@@ -6928,6 +6934,1499 @@ fn skip_sql_dollar(bytes: &[u8], cursor: usize, tag: &[u8]) -> usize {
             .map_or(remaining.len(), |offset| offset + tag.len())
 }
 
+const EVENTING_OBSERVABILITY_OWNER: &str = "crates/eventing/src/observability.rs";
+const EVENTING_OBSERVABILITY_ADAPTER: &str = "crates/observ/src/eventing.rs";
+fn eventing_identity_names(source: &str) -> BTreeSet<String> {
+    let Ok(file) = syn::parse_file(source) else {
+        return BTreeSet::new();
+    };
+    ["EventingMetric", "EventingEvent"]
+        .into_iter()
+        .flat_map(|owner| {
+            impl_method_arm_literals(&file, owner, "name")
+                .0
+                .into_values()
+        })
+        .flatten()
+        .collect()
+}
+
+fn eventing_observation_variants(source: &str) -> BTreeSet<String> {
+    let Ok(file) = syn::parse_file(source) else {
+        return BTreeSet::new();
+    };
+    enum_variant_shapes(&file, "EventingObservation")
+        .unwrap_or_default()
+        .into_keys()
+        .collect()
+}
+
+fn eventing_observability_closure_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let owner_path = root.join(EVENTING_OBSERVABILITY_OWNER);
+    let owner = std::fs::read_to_string(&owner_path)
+        .with_context(|| format!("read {}", owner_path.display()))?;
+    let identity_names = eventing_identity_names(&owner);
+    let observation_variants = eventing_observation_variants(&owner);
+    let mut findings = scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &owner);
+    let root_lib = std::fs::read_to_string(root.join("crates/eventing/src/lib.rs"))?;
+    findings.extend(scan_eventing_root_reexports(
+        "crates/eventing/src/lib.rs",
+        &root_lib,
+    ));
+    let adapter_path = root.join(EVENTING_OBSERVABILITY_ADAPTER);
+    let adapter = std::fs::read_to_string(&adapter_path)
+        .with_context(|| format!("read {}", adapter_path.display()))?;
+    findings.extend(scan_eventing_observability_adapter(
+        EVENTING_OBSERVABILITY_ADAPTER,
+        &adapter,
+        &observation_variants,
+    ));
+
+    for member in ["crates", "adapters", "composition", "assemblies", "bins"] {
+        let base = root.join(member);
+        if !base.exists() {
+            continue;
+        }
+        for file in rs_files(&base)? {
+            let relative = rel_path(root, &file);
+            let relative_text = relative.to_string_lossy();
+            if relative_text == EVENTING_OBSERVABILITY_ADAPTER
+                || relative_text == EVENTING_OBSERVABILITY_OWNER
+                || relative.components().any(|component| {
+                    component.as_os_str().to_str().is_some_and(|name| {
+                        matches!(name, "tests" | "benches" | "examples") || name.ends_with("_tests")
+                    })
+                })
+                || relative
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("_test") || name.ends_with("_tests"))
+                || !relative
+                    .components()
+                    .any(|component| component.as_os_str().to_str() == Some("src"))
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&file)?;
+            findings.extend(scan_eventing_macro_bypass(
+                &relative,
+                &source,
+                &identity_names,
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn pattern_variant_names(pattern: &syn::Pat, names: &mut Vec<String>) {
+    match pattern {
+        syn::Pat::Path(pattern) => {
+            if let Some(segment) = pattern.path.segments.last() {
+                names.push(segment.ident.to_string());
+            }
+        }
+        syn::Pat::TupleStruct(pattern) => {
+            if let Some(segment) = pattern.path.segments.last() {
+                names.push(segment.ident.to_string());
+            }
+        }
+        syn::Pat::Struct(pattern) => {
+            if let Some(segment) = pattern.path.segments.last() {
+                names.push(segment.ident.to_string());
+            }
+        }
+        syn::Pat::Or(pattern) => {
+            for case in &pattern.cases {
+                pattern_variant_names(case, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn impl_method_arm_literals(
+    file: &syn::File,
+    owner: &str,
+    method: &str,
+) -> (BTreeMap<String, BTreeSet<String>>, Vec<String>) {
+    struct Literals(Vec<String>);
+    impl<'ast> Visit<'ast> for Literals {
+        fn visit_lit_str(&mut self, value: &'ast syn::LitStr) {
+            self.0.push(value.value());
+        }
+    }
+    let mut mapping = BTreeMap::new();
+    let mut duplicates = Vec::new();
+    for item in &file.items {
+        let syn::Item::Impl(block) = item else {
+            continue;
+        };
+        let syn::Type::Path(ty) = block.self_ty.as_ref() else {
+            continue;
+        };
+        if ty
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != owner)
+        {
+            continue;
+        }
+        for item in &block.items {
+            let syn::ImplItem::Fn(function) = item else {
+                continue;
+            };
+            if function.sig.ident != method {
+                continue;
+            }
+            for statement in &function.block.stmts {
+                let syn::Stmt::Expr(syn::Expr::Match(expression), _) = statement else {
+                    continue;
+                };
+                for arm in &expression.arms {
+                    let mut variants = Vec::new();
+                    pattern_variant_names(&arm.pat, &mut variants);
+                    let mut literals = Literals(Vec::new());
+                    literals.visit_expr(&arm.body);
+                    let values = literals.0.into_iter().collect::<BTreeSet<_>>();
+                    for variant in variants {
+                        if mapping.insert(variant.clone(), values.clone()).is_some() {
+                            duplicates.push(variant);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (mapping, duplicates)
+}
+
+fn impl_method_arm_path_targets(
+    file: &syn::File,
+    owner: &str,
+    method: &str,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut mapping = BTreeMap::new();
+    let mut duplicates = Vec::new();
+    for item in &file.items {
+        let syn::Item::Impl(block) = item else {
+            continue;
+        };
+        let syn::Type::Path(ty) = block.self_ty.as_ref() else {
+            continue;
+        };
+        if ty
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != owner)
+        {
+            continue;
+        }
+        for member in &block.items {
+            let syn::ImplItem::Fn(function) = member else {
+                continue;
+            };
+            if function.sig.ident != method {
+                continue;
+            }
+            for statement in &function.block.stmts {
+                let syn::Stmt::Expr(syn::Expr::Match(expression), _) = statement else {
+                    continue;
+                };
+                for arm in &expression.arms {
+                    let syn::Expr::Path(target) = arm.body.as_ref() else {
+                        continue;
+                    };
+                    let Some(target) = target.path.segments.last() else {
+                        continue;
+                    };
+                    let mut variants = Vec::new();
+                    pattern_variant_names(&arm.pat, &mut variants);
+                    for variant in variants {
+                        if mapping
+                            .insert(variant.clone(), target.ident.to_string())
+                            .is_some()
+                        {
+                            duplicates.push(variant);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (mapping, duplicates)
+}
+
+fn typed_result_failed_arm_forwards(file: &syn::File, owner: &str) -> bool {
+    file.items.iter().any(|item| {
+        let syn::Item::Impl(block) = item else {
+            return false;
+        };
+        let syn::Type::Path(ty) = block.self_ty.as_ref() else {
+            return false;
+        };
+        if ty
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != owner)
+        {
+            return false;
+        }
+        block.items.iter().any(|member| {
+            let syn::ImplItem::Fn(function) = member else {
+                return false;
+            };
+            if function.sig.ident != "as_label" {
+                return false;
+            }
+            function.block.stmts.iter().any(|statement| {
+                let syn::Stmt::Expr(syn::Expr::Match(expression), _) = statement else {
+                    return false;
+                };
+                expression.arms.iter().any(|arm| {
+                    let syn::Pat::TupleStruct(pattern) = &arm.pat else {
+                        return false;
+                    };
+                    if pattern
+                        .path
+                        .segments
+                        .last()
+                        .is_none_or(|segment| segment.ident != "Failed")
+                        || pattern.elems.len() != 1
+                    {
+                        return false;
+                    }
+                    let syn::Pat::Ident(binding) = &pattern.elems[0] else {
+                        return false;
+                    };
+                    let syn::Expr::MethodCall(call) = arm.body.as_ref() else {
+                        return false;
+                    };
+                    let syn::Expr::Path(receiver) = call.receiver.as_ref() else {
+                        return false;
+                    };
+                    call.method == "as_label"
+                        && call.args.is_empty()
+                        && receiver.path.is_ident(&binding.ident)
+                })
+            })
+        })
+    })
+}
+
+fn snake_case_variant(name: &str) -> String {
+    let mut output = String::new();
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() && index != 0 {
+            output.push('_');
+        }
+        output.extend(character.to_lowercase());
+    }
+    output
+}
+
+fn enum_variant_shapes(file: &syn::File, owner: &str) -> Option<BTreeMap<String, Vec<String>>> {
+    let item = file.items.iter().find_map(|item| match item {
+        syn::Item::Enum(item) if item.ident == owner => Some(item),
+        _ => None,
+    })?;
+    Some(
+        item.variants
+            .iter()
+            .map(|variant| {
+                let fields = variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        let name = field
+                            .ident
+                            .as_ref()
+                            .map_or_else(|| index.to_string(), ToString::to_string);
+                        format!("{name}:{}", field.ty.to_token_stream())
+                    })
+                    .collect();
+                (variant.ident.to_string(), fields)
+            })
+            .collect(),
+    )
+}
+
+fn expected_shapes(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    entries
+        .iter()
+        .map(|(variant, fields)| {
+            (
+                (*variant).to_owned(),
+                fields.iter().map(|field| (*field).to_owned()).collect(),
+            )
+        })
+        .collect()
+}
+
+fn impl_public_members(file: &syn::File, owner: &str) -> BTreeSet<String> {
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item),
+            _ => None,
+        })
+        .filter(|item| {
+            item.trait_.is_none()
+                && matches!(item.self_ty.as_ref(), syn::Type::Path(ty) if ty.path.segments.last().is_some_and(|segment| segment.ident == owner))
+        })
+        .flat_map(|item| item.items.iter())
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("fn:{}", item.sig.ident))
+            }
+            syn::ImplItem::Const(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("const:{}", item.ident))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn impl_const_variants(file: &syn::File, owner: &str, name: &str) -> Vec<String> {
+    for item in &file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        let syn::Type::Path(ty) = item.self_ty.as_ref() else {
+            continue;
+        };
+        if ty
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != owner)
+        {
+            continue;
+        }
+        for member in &item.items {
+            let syn::ImplItem::Const(member) = member else {
+                continue;
+            };
+            if member.ident != name {
+                continue;
+            }
+            let syn::Expr::Array(array) = &member.expr else {
+                return Vec::new();
+            };
+            return array
+                .elems
+                .iter()
+                .filter_map(|expression| match expression {
+                    syn::Expr::Path(path) => path.path.segments.last(),
+                    _ => None,
+                })
+                .map(|segment| segment.ident.to_string())
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn scan_eventing_observability_owner(path: &str, source: &str) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            "owner AST 无法解析",
+        )];
+    };
+    let mut findings = Vec::new();
+    for (owner, keys_method) in [
+        ("EventingMetric", "label_keys"),
+        ("EventingEvent", "field_keys"),
+    ] {
+        let variants = enum_variant_shapes(&file, owner).unwrap_or_default();
+        let (names, name_duplicates) = impl_method_arm_literals(&file, owner, "name");
+        let (keys, key_duplicates) = impl_method_arm_literals(&file, owner, keys_method);
+        let forbidden_keys = [
+            "contract_id",
+            "domain",
+            "error",
+            "event_id",
+            "message_id",
+            "partition_key",
+            "payload",
+            "tenant_id",
+            "topic",
+        ];
+        let forbidden = keys
+            .values()
+            .flatten()
+            .filter(|key| forbidden_keys.contains(&key.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let unique_names = names
+            .values()
+            .filter_map(|values| {
+                (values.len() == 1)
+                    .then(|| values.iter().next().cloned())
+                    .flatten()
+            })
+            .collect::<BTreeSet<_>>();
+        let identities_are_closed = variants.values().all(Vec::is_empty)
+            && variants.keys().eq(names.keys())
+            && variants.keys().eq(keys.keys())
+            && unique_names.len() == variants.len();
+        if !identities_are_closed
+            || !forbidden.is_empty()
+            || !name_duplicates.is_empty()
+            || !key_duplicates.is_empty()
+        {
+            findings.push(finding(
+                Rule::EventingObservabilityClosure,
+                path,
+                format!(
+                    "{owner} owner-derived identity closure drift: variants={variants:?}, names={names:?}, keys={keys:?}, forbidden={forbidden:?}, name_duplicates={name_duplicates:?}, key_duplicates={key_duplicates:?}"
+                ),
+            ));
+        }
+    }
+    for item in file.items.iter().filter_map(|item| match item {
+        syn::Item::Enum(item)
+            if impl_public_members(&file, &item.ident.to_string()).contains("fn:as_label") =>
+        {
+            Some(item)
+        }
+        _ => None,
+    }) {
+        let owner = item.ident.to_string();
+        let forbidden_carriers = item
+            .variants
+            .iter()
+            .filter(|variant| !variant.fields.is_empty() && variant.ident != "Failed")
+            .map(|variant| variant.ident.to_string())
+            .collect::<Vec<_>>();
+        if !forbidden_carriers.is_empty() {
+            findings.push(finding(
+                Rule::EventingObservabilityClosure,
+                path,
+                format!(
+                    "{owner} closed value/shape drift: forbidden carriers={forbidden_carriers:?}"
+                ),
+            ));
+        }
+        if item
+            .variants
+            .iter()
+            .any(|variant| !variant.fields.is_empty())
+        {
+            continue;
+        }
+        let expected = item
+            .variants
+            .iter()
+            .map(|variant| snake_case_variant(&variant.ident.to_string()))
+            .collect::<BTreeSet<_>>();
+        let expected_mapping = item
+            .variants
+            .iter()
+            .map(|variant| {
+                (
+                    variant.ident.to_string(),
+                    [snake_case_variant(&variant.ident.to_string())]
+                        .into_iter()
+                        .collect(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (actual_mapping, duplicates) = impl_method_arm_literals(&file, &owner, "as_label");
+        if actual_mapping != expected_mapping || !duplicates.is_empty() {
+            findings.push(finding(
+                Rule::EventingObservabilityClosure,
+                path,
+                format!(
+                    "{owner} closed value/shape drift: expected_values={expected:?}, mapping={actual_mapping:?}, duplicates={duplicates:?}"
+                ),
+            ));
+        }
+    }
+    for (owner, expected) in [
+        (
+            "EventingDeadLetterReplayResult",
+            expected_shapes(&[
+                ("Inserted", &[]),
+                ("AlreadyExists", &[]),
+                ("Failed", &["0:EventingDeadLetterReplayFailure"]),
+            ]),
+        ),
+        (
+            "EventingOutboxDlxRedriveResult",
+            expected_shapes(&[
+                ("Redriven", &[]),
+                ("NotFound", &[]),
+                ("Expired", &[]),
+                ("Failed", &["0:EventingOutboxDlxRedriveFailure"]),
+            ]),
+        ),
+        (
+            "EventingOutboxDlxResolveResult",
+            expected_shapes(&[
+                ("Resolved", &[]),
+                ("NotFound", &[]),
+                ("NotExpired", &[]),
+                ("EvidenceRejected", &[]),
+                ("Failed", &["0:EventingOutboxDlxResolveFailure"]),
+            ]),
+        ),
+    ] {
+        let actual = enum_variant_shapes(&file, owner).unwrap_or_default();
+        let expected_mapping = expected
+            .keys()
+            .map(|variant| {
+                let values = if variant == "Failed" {
+                    BTreeSet::new()
+                } else {
+                    [snake_case_variant(variant)].into_iter().collect()
+                };
+                (variant.clone(), values)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (actual_mapping, duplicates) = impl_method_arm_literals(&file, owner, "as_label");
+        let failed_forwards = typed_result_failed_arm_forwards(&file, owner);
+        if actual != expected
+            || actual_mapping != expected_mapping
+            || !duplicates.is_empty()
+            || !failed_forwards
+        {
+            findings.push(finding(
+                Rule::EventingObservabilityClosure,
+                path,
+                format!(
+                    "{owner} typed result drift: expected={expected:?}, actual={actual:?}, mapping={actual_mapping:?}, duplicates={duplicates:?}, failed_forwards={failed_forwards}"
+                ),
+            ));
+        }
+    }
+    let expected_observation = expected_shapes(&[
+        ("OutboxPublish", &["status:EventingDisposition"]),
+        (
+            "OutboxBacklog",
+            &[
+                "pending_depth:u64",
+                "oldest_pending_age:Duration",
+                "partition_blocked_depth:u64",
+            ],
+        ),
+        ("OutboxBacklogUnavailable", &[]),
+        (
+            "RelayTick",
+            &["phase:EventingRelayPhase", "duration:Duration"],
+        ),
+        (
+            "InboxBacklog",
+            &["stale_claim_depth:u64", "oldest_stale_claim_age:Duration"],
+        ),
+        ("InboxBacklogUnavailable", &[]),
+        ("ConsumerClaimInProgress", &[]),
+        ("ConsumerTransaction", &["status:EventingTransactionStatus"]),
+        (
+            "ConsumerSettlement",
+            &["action:EventingDisposition", "outcome:EventingIoOutcome"],
+        ),
+        (
+            "ConsumerDeadLetterSkip",
+            &["reason:EventingDeadLetterSkipReason"],
+        ),
+        ("ConsumerDeadLetterWrite", &["outcome:EventingIoOutcome"]),
+        (
+            "ConsumerSubscribeRetry",
+            &["outcome:EventingSubscribeOutcome"],
+        ),
+        ("ConsumerLeaseLost", &[]),
+        ("ConsumerReleaseFailed", &[]),
+        (
+            "DeadLetterReplay",
+            &["result:EventingDeadLetterReplayResult"],
+        ),
+        (
+            "OutboxDlxRedrive",
+            &["result:EventingOutboxDlxRedriveResult"],
+        ),
+        (
+            "OutboxDlxResolveExpired",
+            &["result:EventingOutboxDlxResolveResult"],
+        ),
+    ]);
+    let actual_observation = enum_variant_shapes(&file, "EventingObservation").unwrap_or_default();
+    if actual_observation != expected_observation {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            format!(
+                "EventingObservation recursive carrier shape drift: expected={expected_observation:?}, actual={actual_observation:?}"
+            ),
+        ));
+    }
+    let expected_event_mapping = [
+        ("OutboxPublish", "OutboxPublish"),
+        ("OutboxBacklog", "OutboxBacklog"),
+        ("OutboxBacklogUnavailable", "OutboxBacklogUnavailable"),
+        ("RelayTick", "OutboxRelayTick"),
+        ("InboxBacklog", "InboxBacklog"),
+        ("InboxBacklogUnavailable", "InboxBacklogUnavailable"),
+        ("ConsumerClaimInProgress", "ConsumerClaimInProgress"),
+        ("ConsumerTransaction", "ConsumerTransaction"),
+        ("ConsumerSettlement", "ConsumerSettlement"),
+        ("ConsumerDeadLetterSkip", "ConsumerDeadLetterSkip"),
+        ("ConsumerDeadLetterWrite", "ConsumerDeadLetterWrite"),
+        ("ConsumerSubscribeRetry", "ConsumerSubscribeRetry"),
+        ("ConsumerLeaseLost", "ConsumerLeaseLost"),
+        ("ConsumerReleaseFailed", "ConsumerReleaseFailed"),
+        ("DeadLetterReplay", "DlqMutation"),
+        ("OutboxDlxRedrive", "DlqMutation"),
+        ("OutboxDlxResolveExpired", "DlqMutation"),
+    ]
+    .into_iter()
+    .map(|(observation, event)| (observation.to_owned(), event.to_owned()))
+    .collect::<BTreeMap<_, _>>();
+    let (actual_event_mapping, event_duplicates) =
+        impl_method_arm_path_targets(&file, "EventingObservation", "event");
+    if actual_event_mapping != expected_event_mapping || !event_duplicates.is_empty() {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            format!(
+                "EventingObservation::event exact mapping drift: expected={expected_event_mapping:?}, actual={actual_event_mapping:?}, duplicates={event_duplicates:?}"
+            ),
+        ));
+    }
+    let expected_public_items = [
+        "enum:EventingDisposition",
+        "enum:EventingRelayPhase",
+        "enum:EventingTransactionStatus",
+        "enum:EventingIoOutcome",
+        "enum:EventingSubscribeOutcome",
+        "enum:EventingDeadLetterSkipReason",
+        "enum:EventingDeadLetterReplayFailure",
+        "enum:EventingOutboxDlxRedriveFailure",
+        "enum:EventingOutboxDlxResolveFailure",
+        "enum:EventingDeadLetterReplayResult",
+        "enum:EventingOutboxDlxRedriveResult",
+        "enum:EventingOutboxDlxResolveResult",
+        "enum:EventingObservation",
+        "enum:EventingMetric",
+        "enum:EventingEvent",
+        "struct:EventingObservabilityDescriptor",
+        "trait:EventingEmitter",
+        "fn:eventing_observability_descriptor",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let actual_public_items = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("enum:{}", item.ident))
+            }
+            syn::Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("struct:{}", item.ident))
+            }
+            syn::Item::Trait(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("trait:{}", item.ident))
+            }
+            syn::Item::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("fn:{}", item.sig.ident))
+            }
+            syn::Item::Type(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("type:{}", item.ident))
+            }
+            syn::Item::Use(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(format!("use:{}", item.tree.to_token_stream()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if actual_public_items != expected_public_items {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            format!(
+                "observability public item exact surface drift: expected={expected_public_items:?}, actual={actual_public_items:?}"
+            ),
+        ));
+    }
+    let duration_import_is_exact = file.items.iter().any(|item| {
+        matches!(item, syn::Item::Use(item) if item.tree.to_token_stream().to_string() == "std :: time :: Duration")
+    });
+    let private_carriers = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Type(item) => Some(format!("type:{}", item.ident)),
+            syn::Item::Struct(item) if matches!(item.vis, syn::Visibility::Inherited) => {
+                Some(format!("struct:{}", item.ident))
+            }
+            syn::Item::Enum(item) if matches!(item.vis, syn::Visibility::Inherited) => {
+                Some(format!("enum:{}", item.ident))
+            }
+            syn::Item::Union(item) => Some(format!("union:{}", item.ident)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !duration_import_is_exact || !private_carriers.is_empty() {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            format!(
+                "observation carrier resolution drift: std_duration={duration_import_is_exact}, private_carriers={private_carriers:?}"
+            ),
+        ));
+    }
+    let emitter_contract_is_exact = file.items.iter().any(|item| {
+        let syn::Item::Trait(item) = item else {
+            return false;
+        };
+        if item.ident != "EventingEmitter"
+            || item.supertraits.to_token_stream().to_string() != "Send + Sync"
+            || item.items.len() != 1
+        {
+            return false;
+        }
+        let syn::TraitItem::Fn(method) = &item.items[0] else {
+            return false;
+        };
+        method.sig.ident == "emit"
+            && method.sig.generics.params.is_empty()
+            && matches!(method.sig.output, syn::ReturnType::Default)
+            && method.sig.inputs.len() == 2
+            && matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.mutability.is_none())
+            && matches!(method.sig.inputs.last(), Some(syn::FnArg::Typed(argument)) if argument.ty.to_token_stream().to_string() == "EventingObservation")
+    });
+    let descriptor_fields_are_private = file.items.iter().any(|item| {
+        matches!(item, syn::Item::Struct(item) if item.ident == "EventingObservabilityDescriptor" && item.fields.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited)))
+    });
+    if !emitter_contract_is_exact || !descriptor_fields_are_private {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            format!(
+                "emitter/descriptor exact contract drift: emitter={emitter_contract_is_exact}, private_descriptor={descriptor_fields_are_private}"
+            ),
+        ));
+    }
+    for (owner, expected) in [
+        ("EventingDisposition", &["fn:as_label"][..]),
+        ("EventingRelayPhase", &["fn:as_label"]),
+        ("EventingTransactionStatus", &["fn:as_label"]),
+        ("EventingIoOutcome", &["fn:as_label"]),
+        ("EventingSubscribeOutcome", &["fn:as_label"]),
+        ("EventingDeadLetterSkipReason", &["fn:as_label"]),
+        ("EventingDeadLetterReplayFailure", &["fn:as_label"]),
+        ("EventingOutboxDlxRedriveFailure", &["fn:as_label"]),
+        ("EventingOutboxDlxResolveFailure", &["fn:as_label"]),
+        ("EventingDeadLetterReplayResult", &["fn:as_label"]),
+        ("EventingOutboxDlxRedriveResult", &["fn:as_label"]),
+        ("EventingOutboxDlxResolveResult", &["fn:as_label"]),
+        ("EventingObservation", &["fn:event"]),
+        ("EventingMetric", &["const:ALL", "fn:label_keys", "fn:name"]),
+        ("EventingEvent", &["const:ALL", "fn:field_keys", "fn:name"]),
+        (
+            "EventingObservabilityDescriptor",
+            &["fn:events", "fn:metrics"],
+        ),
+    ] {
+        let expected = expected
+            .iter()
+            .map(|member| (*member).to_owned())
+            .collect::<BTreeSet<_>>();
+        let actual = impl_public_members(&file, owner);
+        if actual != expected {
+            findings.push(finding(
+                Rule::EventingObservabilityClosure,
+                path,
+                format!("{owner} public member exact surface drift: expected={expected:?}, actual={actual:?}"),
+            ));
+        }
+    }
+    for owner in ["EventingMetric", "EventingEvent"] {
+        let expected = enum_variant_shapes(&file, owner)
+            .unwrap_or_default()
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        let actual = impl_const_variants(&file, owner, "ALL");
+        if actual.iter().cloned().collect::<BTreeSet<_>>() != expected
+            || actual.len() != expected.len()
+        {
+            findings.push(finding(
+                Rule::EventingObservabilityClosure,
+                path,
+                format!(
+                    "{owner}::ALL exact inventory drift: expected={expected:?}, actual={actual:?}"
+                ),
+            ));
+        }
+    }
+    let allowed = [
+        "EventingDisposition",
+        "EventingRelayPhase",
+        "EventingTransactionStatus",
+        "EventingIoOutcome",
+        "EventingSubscribeOutcome",
+        "EventingDeadLetterSkipReason",
+        "EventingDeadLetterReplayFailure",
+        "EventingDeadLetterReplayResult",
+        "EventingOutboxDlxRedriveFailure",
+        "EventingOutboxDlxRedriveResult",
+        "EventingOutboxDlxResolveFailure",
+        "EventingOutboxDlxResolveResult",
+        "u64",
+        "Duration",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    for item in &file.items {
+        let syn::Item::Enum(item) = item else {
+            continue;
+        };
+        if item.ident != "EventingObservation" {
+            continue;
+        }
+        for variant in &item.variants {
+            for field in &variant.fields {
+                let type_name = match &field.ty {
+                    syn::Type::Path(ty) => ty
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string()),
+                    _ => None,
+                };
+                if type_name
+                    .as_deref()
+                    .is_none_or(|name| !allowed.contains(name))
+                {
+                    findings.push(finding(
+                        Rule::EventingObservabilityClosure,
+                        path,
+                        format!(
+                            "EventingObservation::{} forbidden payload type `{}`",
+                            variant.ident,
+                            field.ty.to_token_stream()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    findings
+}
+
+fn scan_eventing_root_reexports(path: &str, source: &str) -> Vec<Finding<Rule>> {
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![];
+    };
+    file.items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Use(item) = item else {
+                return None;
+            };
+            if matches!(item.vis, syn::Visibility::Public(_))
+                && item
+                    .tree
+                    .to_token_stream()
+                    .to_string()
+                    .contains("observability")
+            {
+                Some(finding(
+                    Rule::EventingObservabilityClosure,
+                    path,
+                    "crate root compatibility re-export is forbidden",
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn scan_eventing_observability_adapter(
+    path: &str,
+    source: &str,
+    expected_variants: &BTreeSet<String>,
+) -> Vec<Finding<Rule>> {
+    let production = strip_cfg_test_modules(source);
+    let Ok(file) = syn::parse_file(&production) else {
+        return vec![finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            "production adapter AST 无法解析",
+        )];
+    };
+    let public_structs = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut emitter_impls = Vec::new();
+    let mut projected_variants = BTreeSet::new();
+    for item in &file.items {
+        let syn::Item::Impl(block) = item else {
+            continue;
+        };
+        let Some((_, trait_path, _)) = &block.trait_ else {
+            continue;
+        };
+        if trait_path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "EventingEmitter")
+        {
+            continue;
+        }
+        let target = block.self_ty.to_token_stream().to_string();
+        emitter_impls.push(target);
+        for member in &block.items {
+            let syn::ImplItem::Fn(method) = member else {
+                continue;
+            };
+            if method.sig.ident != "emit" {
+                continue;
+            }
+            for statement in &method.block.stmts {
+                let syn::Stmt::Expr(syn::Expr::Match(expression), _) = statement else {
+                    continue;
+                };
+                for arm in &expression.arms {
+                    let mut variants = Vec::new();
+                    pattern_variant_names(&arm.pat, &mut variants);
+                    projected_variants.extend(variants);
+                }
+            }
+        }
+    }
+    if public_structs
+        != ["EventingTelemetryEmitter".to_owned()]
+            .into_iter()
+            .collect()
+        || emitter_impls != ["EventingTelemetryEmitter"]
+        || &projected_variants != expected_variants
+    {
+        return vec![finding(
+            Rule::EventingObservabilityClosure,
+            path,
+            format!(
+                "canonical adapter exact shape drift: public_structs={public_structs:?}, emitter_impls={emitter_impls:?}, projected_variants={projected_variants:?}"
+            ),
+        )];
+    }
+    Vec::new()
+}
+
+fn expand_concat_string(mac: &syn::Macro) -> Option<String> {
+    if mac
+        .path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "concat")
+    {
+        return None;
+    }
+    let expressions = mac
+        .parse_body_with(syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated)
+        .ok()?;
+    let mut value = String::new();
+    for expression in expressions {
+        match expression {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(part),
+                ..
+            }) => value.push_str(&part.value()),
+            syn::Expr::Macro(nested) => value.push_str(&expand_concat_string(&nested.mac)?),
+            _ => return None,
+        }
+    }
+    Some(value)
+}
+
+fn metric_macro_name_expression(mac: &syn::Macro) -> Option<syn::Expr> {
+    if mac.path.segments.last().is_none_or(|segment| {
+        !matches!(
+            segment.ident.to_string().as_str(),
+            "counter" | "gauge" | "histogram"
+        )
+    }) {
+        return None;
+    }
+    let mut first = proc_macro2::TokenStream::new();
+    for token in mac.tokens.clone() {
+        if matches!(&token, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ',') {
+            break;
+        }
+        first.extend([token]);
+    }
+    syn::parse2(first).ok()
+}
+
+fn tracing_macro_name_expression(mac: &syn::Macro) -> Option<syn::Expr> {
+    if mac.path.segments.last().is_none_or(|segment| {
+        !matches!(
+            segment.ident.to_string().as_str(),
+            "event" | "debug" | "info" | "warn" | "error" | "trace"
+        )
+    }) {
+        return None;
+    }
+    let tokens = mac.tokens.clone().into_iter().collect::<Vec<_>>();
+    for index in 0..tokens.len().saturating_sub(1) {
+        if !matches!(&tokens[index], proc_macro2::TokenTree::Ident(ident) if ident == "name")
+            || !matches!(&tokens[index + 1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ':')
+        {
+            continue;
+        }
+        let mut expression = proc_macro2::TokenStream::new();
+        for token in tokens.iter().skip(index + 2) {
+            if matches!(token, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ',') {
+                break;
+            }
+            expression.extend([token.clone()]);
+        }
+        return syn::parse2(expression).ok();
+    }
+    None
+}
+
+fn scan_eventing_macro_bypass(
+    path: &Path,
+    source: &str,
+    identity_names: &BTreeSet<String>,
+) -> Vec<Finding<Rule>> {
+    let production = strip_cfg_test_modules(source);
+    let Ok(file) = syn::parse_file(&production) else {
+        return vec![];
+    };
+    struct ProductionSurface {
+        strings: Vec<String>,
+        forbidden_descriptor_refs: Vec<String>,
+        dynamic_metric_names: Vec<String>,
+        metric_macro_aliases: Vec<String>,
+        metric_macro_wrappers: Vec<String>,
+        dynamic_tracing_names: Vec<String>,
+        tracing_macro_aliases: Vec<String>,
+        tracing_macro_wrappers: Vec<String>,
+        provider_api_refs: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for ProductionSurface {
+        fn visit_lit_str(&mut self, value: &'ast syn::LitStr) {
+            self.strings.push(value.value());
+        }
+
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if !is_claim_test_only(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            if !is_claim_test_only(&item.attrs) {
+                syn::visit::visit_item_const(self, item);
+            }
+        }
+
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            if !is_claim_test_only(&item.attrs) {
+                syn::visit::visit_item_static(self, item);
+            }
+        }
+
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if let Some(name) = metric_macro_name_expression(node) {
+                if !matches!(
+                    name,
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(_),
+                        ..
+                    })
+                ) {
+                    self.dynamic_metric_names
+                        .push(name.to_token_stream().to_string());
+                }
+            }
+            if let Some(name) = tracing_macro_name_expression(node) {
+                if !matches!(
+                    name,
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(_),
+                        ..
+                    })
+                ) {
+                    self.dynamic_tracing_names
+                        .push(name.to_token_stream().to_string());
+                }
+            }
+            fn collect(
+                stream: proc_macro2::TokenStream,
+                strings: &mut Vec<String>,
+                forbidden_descriptor_refs: &mut Vec<String>,
+            ) {
+                for token in stream {
+                    match token {
+                        proc_macro2::TokenTree::Group(group) => {
+                            collect(group.stream(), strings, forbidden_descriptor_refs);
+                        }
+                        proc_macro2::TokenTree::Literal(literal) => {
+                            if let Ok(value) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                                strings.push(value.value());
+                            }
+                        }
+                        proc_macro2::TokenTree::Ident(ident) => {
+                            let name = ident.to_string();
+                            if matches!(
+                                name.as_str(),
+                                "EventingMetric"
+                                    | "EventingEvent"
+                                    | "eventing_observability_descriptor"
+                            ) {
+                                forbidden_descriptor_refs.push(name);
+                            }
+                        }
+                        proc_macro2::TokenTree::Punct(_) => {}
+                    }
+                }
+            }
+            let mut macro_strings = Vec::new();
+            collect(
+                node.tokens.clone(),
+                &mut macro_strings,
+                &mut self.forbidden_descriptor_refs,
+            );
+            for start in 0..macro_strings.len() {
+                let mut joined = String::new();
+                for part in &macro_strings[start..] {
+                    joined.push_str(part);
+                    self.strings.push(joined.clone());
+                }
+            }
+            self.strings.extend(macro_strings);
+            if let Some(value) = expand_concat_string(node) {
+                self.strings.push(value);
+            }
+            syn::visit::visit_macro(self, node);
+        }
+
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            fn walk(
+                tree: &syn::UseTree,
+                prefix: &mut Vec<String>,
+                metrics_alias: &mut bool,
+                tracing_alias: &mut bool,
+                provider_api: &mut bool,
+            ) {
+                match tree {
+                    syn::UseTree::Path(path) => {
+                        prefix.push(path.ident.to_string());
+                        walk(
+                            &path.tree,
+                            prefix,
+                            metrics_alias,
+                            tracing_alias,
+                            provider_api,
+                        );
+                        prefix.pop();
+                    }
+                    syn::UseTree::Group(group) => {
+                        for tree in &group.items {
+                            walk(tree, prefix, metrics_alias, tracing_alias, provider_api);
+                        }
+                    }
+                    syn::UseTree::Name(name) => {
+                        let mut source = prefix.clone();
+                        source.push(name.ident.to_string());
+                        *metrics_alias |= source.first().is_some_and(|root| root == "metrics")
+                            && source.last().is_some_and(|leaf| {
+                                matches!(leaf.as_str(), "counter" | "gauge" | "histogram")
+                            });
+                        *tracing_alias |= source.first().is_some_and(|root| root == "tracing")
+                            && source.last().is_some_and(|leaf| {
+                                matches!(
+                                    leaf.as_str(),
+                                    "event" | "debug" | "info" | "warn" | "error" | "trace"
+                                )
+                            });
+                        *provider_api |= source.first().is_some_and(|root| root == "metrics")
+                            && source.last().is_some_and(|leaf| {
+                                matches!(
+                                    leaf.as_str(),
+                                    "Key" | "KeyName" | "Recorder" | "with_recorder"
+                                )
+                            });
+                    }
+                    syn::UseTree::Rename(rename) => {
+                        let mut source = prefix.clone();
+                        source.push(rename.ident.to_string());
+                        *metrics_alias |= source == ["metrics"]
+                            || (source.first().is_some_and(|root| root == "metrics")
+                                && source.last().is_some_and(|leaf| {
+                                    matches!(leaf.as_str(), "counter" | "gauge" | "histogram")
+                                }));
+                        *tracing_alias |= source == ["tracing"]
+                            || (source.first().is_some_and(|root| root == "tracing")
+                                && source.last().is_some_and(|leaf| {
+                                    matches!(
+                                        leaf.as_str(),
+                                        "event" | "debug" | "info" | "warn" | "error" | "trace"
+                                    )
+                                }));
+                        *provider_api |= source.first().is_some_and(|root| root == "metrics")
+                            && source.last().is_some_and(|leaf| {
+                                matches!(
+                                    leaf.as_str(),
+                                    "Key" | "KeyName" | "Recorder" | "with_recorder"
+                                )
+                            });
+                    }
+                    syn::UseTree::Glob(_) => {
+                        *metrics_alias |= prefix.as_slice() == ["metrics"];
+                        *tracing_alias |= prefix.as_slice() == ["tracing"];
+                        *provider_api |= prefix.as_slice() == ["metrics"];
+                    }
+                }
+            }
+            let mut metrics_alias = false;
+            let mut tracing_alias = false;
+            let mut provider_api = false;
+            walk(
+                &item.tree,
+                &mut Vec::new(),
+                &mut metrics_alias,
+                &mut tracing_alias,
+                &mut provider_api,
+            );
+            let rendered = item.tree.to_token_stream().to_string();
+            if metrics_alias {
+                self.metric_macro_aliases.push(rendered.clone());
+            }
+            if tracing_alias {
+                self.tracing_macro_aliases.push(rendered);
+            }
+            if provider_api {
+                self.provider_api_refs
+                    .push(item.tree.to_token_stream().to_string());
+            }
+            syn::visit::visit_item_use(self, item);
+        }
+
+        fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+            if item.rename.is_some() && item.ident == "metrics" {
+                self.metric_macro_aliases
+                    .push(item.to_token_stream().to_string());
+            }
+            if item.rename.is_some() && item.ident == "tracing" {
+                self.tracing_macro_aliases
+                    .push(item.to_token_stream().to_string());
+            }
+            syn::visit::visit_item_extern_crate(self, item);
+        }
+
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            fn identifiers(stream: proc_macro2::TokenStream, names: &mut BTreeSet<String>) {
+                for token in stream {
+                    match token {
+                        proc_macro2::TokenTree::Group(group) => identifiers(group.stream(), names),
+                        proc_macro2::TokenTree::Ident(ident) => {
+                            names.insert(ident.to_string());
+                        }
+                        proc_macro2::TokenTree::Literal(_) | proc_macro2::TokenTree::Punct(_) => {}
+                    }
+                }
+            }
+            let mut names = BTreeSet::new();
+            identifiers(item.mac.tokens.clone(), &mut names);
+            if names.contains("metrics")
+                && ["counter", "gauge", "histogram"]
+                    .iter()
+                    .any(|name| names.contains(*name))
+            {
+                self.metric_macro_wrappers.push(
+                    item.ident
+                        .as_ref()
+                        .map_or_else(|| "<anonymous>".to_owned(), ToString::to_string),
+                );
+            }
+            if names.contains("metrics")
+                && [
+                    "Key",
+                    "KeyName",
+                    "Recorder",
+                    "with_recorder",
+                    "register_counter",
+                    "register_gauge",
+                    "register_histogram",
+                ]
+                .iter()
+                .any(|name| names.contains(*name))
+            {
+                self.provider_api_refs.push(item.ident.as_ref().map_or_else(
+                    || "<anonymous-provider-wrapper>".to_owned(),
+                    ToString::to_string,
+                ));
+            }
+            if names.contains("tracing")
+                && ["event", "debug", "info", "warn", "error", "trace"]
+                    .iter()
+                    .any(|name| names.contains(*name))
+            {
+                self.tracing_macro_wrappers.push(
+                    item.ident
+                        .as_ref()
+                        .map_or_else(|| "<anonymous>".to_owned(), ToString::to_string),
+                );
+            }
+            syn::visit::visit_item_macro(self, item);
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            for segment in &path.segments {
+                let name = segment.ident.to_string();
+                if matches!(
+                    name.as_str(),
+                    "EventingMetric" | "EventingEvent" | "eventing_observability_descriptor"
+                ) {
+                    self.forbidden_descriptor_refs.push(name);
+                }
+            }
+            let segments = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            if segments.first().is_some_and(|root| root == "metrics")
+                && segments.iter().any(|segment| {
+                    matches!(
+                        segment.as_str(),
+                        "Key" | "KeyName" | "Recorder" | "with_recorder"
+                    )
+                })
+            {
+                self.provider_api_refs.push(segments.join("::"));
+            }
+            syn::visit::visit_path(self, path);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if matches!(
+                call.method.to_string().as_str(),
+                "register_counter" | "register_gauge" | "register_histogram"
+            ) {
+                self.provider_api_refs.push(call.method.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut visitor = ProductionSurface {
+        strings: Vec::new(),
+        forbidden_descriptor_refs: Vec::new(),
+        dynamic_metric_names: Vec::new(),
+        metric_macro_aliases: Vec::new(),
+        metric_macro_wrappers: Vec::new(),
+        dynamic_tracing_names: Vec::new(),
+        tracing_macro_aliases: Vec::new(),
+        tracing_macro_wrappers: Vec::new(),
+        provider_api_refs: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    let max_identity_len = identity_names.iter().map(String::len).max().unwrap_or(0);
+    let mut canonical_strings = visitor
+        .strings
+        .iter()
+        .filter(|value| identity_names.contains(*value))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for start in 0..visitor.strings.len() {
+        let mut joined = String::new();
+        for part in &visitor.strings[start..] {
+            joined.push_str(part);
+            if joined.len() > max_identity_len {
+                break;
+            }
+            if identity_names.contains(&joined) {
+                canonical_strings.insert(joined.clone());
+            }
+        }
+    }
+    let eventing_signal =
+        !canonical_strings.is_empty() || !visitor.forbidden_descriptor_refs.is_empty();
+    let mut findings = canonical_strings
+        .into_iter()
+        .map(|value| {
+            finding(
+                Rule::EventingObservabilityClosure,
+                path.display().to_string(),
+                format!(
+                    "canonical observation `{value}` bypasses {EVENTING_OBSERVABILITY_ADAPTER}"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !visitor.forbidden_descriptor_refs.is_empty() {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path.display().to_string(),
+            format!(
+                "canonical descriptor projected outside canonical adapter: refs={:?}",
+                visitor.forbidden_descriptor_refs
+            ),
+        ));
+    }
+    let unexpected_dynamic = visitor.dynamic_metric_names.into_iter().collect::<Vec<_>>();
+    if eventing_signal
+        && (!unexpected_dynamic.is_empty()
+            || !visitor.metric_macro_aliases.is_empty()
+            || !visitor.metric_macro_wrappers.is_empty())
+    {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path.display().to_string(),
+            format!(
+                "adapter外 metrics macro name 必须是 literal 或 owner allowlist: dynamic={unexpected_dynamic:?}, aliases={:?}, wrappers={:?}",
+                visitor.metric_macro_aliases, visitor.metric_macro_wrappers
+            ),
+        ));
+    }
+    if eventing_signal
+        && (!visitor.dynamic_tracing_names.is_empty()
+            || !visitor.tracing_macro_aliases.is_empty()
+            || !visitor.tracing_macro_wrappers.is_empty())
+    {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path.display().to_string(),
+            format!(
+                "adapter外 tracing explicit name 必须是 literal 且禁止 alias/wrapper: dynamic={:?}, aliases={:?}, wrappers={:?}",
+                visitor.dynamic_tracing_names,
+                visitor.tracing_macro_aliases,
+                visitor.tracing_macro_wrappers
+            ),
+        ));
+    }
+    if eventing_signal && !visitor.provider_api_refs.is_empty() {
+        findings.push(finding(
+            Rule::EventingObservabilityClosure,
+            path.display().to_string(),
+            format!(
+                "adapter外 metrics recorder/key registration API 被禁止: refs={:?}",
+                visitor.provider_api_refs
+            ),
+        ));
+    }
+    findings
+}
+
 fn rel_path(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
@@ -6935,6 +8434,325 @@ fn rel_path(root: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scan_eventing_bypass(path: &Path, source: &str) -> Vec<Finding<Rule>> {
+        let root = workspace_root().expect("workspace root");
+        let owner = std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER))
+            .expect("eventing observability owner");
+        scan_eventing_macro_bypass(path, source, &eventing_identity_names(&owner))
+    }
+
+    fn scan_eventing_adapter(path: &str, source: &str) -> Vec<Finding<Rule>> {
+        let root = workspace_root().expect("workspace root");
+        let owner = std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER))
+            .expect("eventing observability owner");
+        scan_eventing_observability_adapter(path, source, &eventing_observation_variants(&owner))
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_descriptor_drift() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen("\"outbox_publish_total\"", "\"outbox_pending_depth\"", 1);
+        assert!(!scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red).is_empty());
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_equal_count_wrong_set() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen("Self::OutboxPublishTotal,", "Self::OutboxPendingDepth,", 1);
+        let findings = scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("ALL exact inventory drift"))
+        );
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_forbidden_label() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen(
+            "Self::OutboxPublishTotal => &[\"status\"]",
+            "Self::OutboxPublishTotal => &[\"tenant_id\"]",
+            1,
+        );
+        assert!(!scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red).is_empty());
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_forbidden_payload() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen(
+            "pub enum EventingObservation {",
+            "pub enum EventingObservation { Forbidden { tenant_id: String },",
+            1,
+        );
+        let findings = scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("forbidden payload"))
+        );
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_nested_forbidden_payload() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen("    Reject,\n}", "    Reject,\n    Raw(String),\n}", 1);
+        let findings = scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red);
+        assert!(findings.iter().any(|finding| {
+            finding.detail.contains("closed value/shape drift")
+                || finding.detail.contains("recursive carrier shape drift")
+        }));
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_private_carrier_alias() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen("use std::time::Duration;", "type Duration = String;", 1);
+        let findings = scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| { finding.detail.contains("carrier resolution drift") })
+        );
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_projection_mapping_drift() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        for red in [
+            source.replacen(
+                "Self::OutboxPublish { .. } => EventingEvent::OutboxPublish",
+                "Self::OutboxPublish { .. } => EventingEvent::OutboxBacklog",
+                1,
+            ),
+            source.replacen(
+                "Self::Failed(failure) => failure.as_label()",
+                "Self::Failed(_failure) => \"store\"",
+                1,
+            ),
+        ] {
+            assert!(
+                !scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_public_compatibility_surface() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        for addition in [
+            "\npub type LegacyOutboxMetrics = EventingMetric;\n",
+            "\npub struct NoopEmitter;\nimpl EventingEmitter for NoopEmitter { fn emit(&self, _: EventingObservation) {} }\n",
+        ] {
+            let findings = scan_eventing_observability_owner(
+                EVENTING_OBSERVABILITY_OWNER,
+                &format!("{source}{addition}"),
+            );
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.detail.contains("public item exact surface drift"))
+            );
+        }
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_closed_value_drift() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_OWNER)).expect("owner");
+        let red = source.replacen("\"subscribe_error\"", "\"provider_error\"", 1);
+        let findings = scan_eventing_observability_owner(EVENTING_OBSERVABILITY_OWNER, &red);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("closed value/shape drift"))
+        );
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_direct_macro() {
+        let red = r#"fn bypass() { metrics::counter!("outbox_publish_total", "status" => "ack").increment(1); }"#;
+        assert!(!scan_eventing_bypass(Path::new("crates/eventexec/src/red.rs"), red).is_empty());
+    }
+
+    #[test]
+    fn eventing_observability_closure_ignores_unrelated_observability() {
+        let unrelated = r#"
+            fn record(name: &'static str) {
+                metrics::counter!(name).increment(1);
+                tracing::info!(name: name, "projection checkpoint advanced");
+            }
+        "#;
+        assert!(
+            scan_eventing_bypass(
+                Path::new("crates/unrelated/src/observability.rs"),
+                unrelated,
+            )
+            .is_empty(),
+            "Eventing policy must not govern unrelated metrics/tracing"
+        );
+    }
+
+    #[test]
+    fn eventing_observability_closure_allows_public_emitter_implementations() {
+        let implementation = r#"
+            struct DomainEmitter;
+            impl EventingEmitter for DomainEmitter {
+                fn emit(&self, _observation: EventingObservation) {}
+            }
+        "#;
+        assert!(
+            scan_eventing_bypass(
+                Path::new("crates/domain/src/observability.rs"),
+                implementation
+            )
+            .is_empty(),
+            "the provider-neutral public emitter contract is intentionally implementable"
+        );
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_indirect_or_aliased_macro() {
+        for (path, red) in [
+            (
+                "adapters/amqp/src/red.rs",
+                r#"const NAME: &str = "outbox_publish_total"; fn bypass() { metrics::counter!(NAME).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use metrics::counter as emit; fn bypass() { emit!("outbox_publish_total").increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"fn bypass() { tracing::info!(name: "eventing.outbox.publish"); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"fn bypass() { metrics::counter!(concat!("outbox_publish_", "total")).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"fn bypass() { metrics::counter!(EventingMetric::OutboxPublishTotal.name()).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"fn bypass() { metrics::counter!(concat!("outbox_publish_", stringify!(total))).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"fn bypass() { let name = ["outbox_publish_", "total"].concat(); metrics::counter!(name).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use metrics::counter as emit; fn bypass(name: String) { emit!(name).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"macro_rules! emit { ($name:expr) => { metrics::counter!($name) } } fn bypass(name: String) { emit!(name).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"fn bypass() { tracing::event!(name: concat!("eventing.outbox.", stringify!(publish)), target: "rss.eventing", tracing::Level::DEBUG); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use tracing::event as emit; fn bypass(name: &'static str) { emit!(name: name, tracing::Level::DEBUG); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"macro_rules! emit { ($name:expr) => { tracing::event!(name: $name, tracing::Level::DEBUG) } } fn bypass(name: &'static str) { emit!(name); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use tracing as t; macro_rules! emit { ($name:expr) => { t::event!(name: $name, t::Level::DEBUG) } } fn bypass(name: &'static str) { emit!(name); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"extern crate metrics as m; fn bypass(name: String) { m::counter!(name).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use {metrics::counter as emit}; fn bypass() { let name = ["outbox_publish_", "total"].concat(); emit!(name).increment(1); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use {tracing::event as emit}; fn bypass(name: &'static str) { emit!(name: name, tracing::Level::DEBUG); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"use metrics::{Key, Level, Metadata}; fn bypass() { let name = ["outbox_publish_", "total"].concat(); metrics::with_recorder(|recorder| recorder.register_counter(&Key::from_name(name), &Metadata::new("rss", Level::INFO, None)).increment(1)); }"#,
+            ),
+            (
+                "crates/eventexec/src/red.rs",
+                r#"macro_rules! emit { ($name:expr) => { metrics::with_recorder(|r| r.register_counter(&metrics::Key::from_name($name), &metadata()).increment(1)) } } fn bypass(name: String) { emit!(name); }"#,
+            ),
+        ] {
+            let findings = scan_eventing_bypass(Path::new(path), red);
+            if !red.contains("stringify!")
+                && (red.contains("outbox_publish")
+                    || red.contains("eventing.outbox")
+                    || red.contains("EventingMetric")
+                    || red.contains("EventingEvent"))
+            {
+                assert!(!findings.is_empty(), "canonical bypass escaped: {red}");
+            } else {
+                assert!(
+                    findings.is_empty(),
+                    "generic observability helpers are outside Eventing policy: {path}: {red}: {findings:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_second_or_noop_adapter() {
+        let root = workspace_root().expect("workspace root");
+        let source =
+            std::fs::read_to_string(root.join(EVENTING_OBSERVABILITY_ADAPTER)).expect("adapter");
+        let second = format!(
+            "{source}\nstruct OtherEmitter; impl EventingEmitter for OtherEmitter {{ fn emit(&self, _: EventingObservation) {{}} }}\n"
+        );
+        assert!(!scan_eventing_adapter(EVENTING_OBSERVABILITY_ADAPTER, &second).is_empty());
+        let noop = r#"
+            pub struct EventingTelemetryEmitter;
+            impl EventingEmitter for EventingTelemetryEmitter {
+                fn emit(&self, _observation: EventingObservation) {}
+            }
+        "#;
+        assert!(!scan_eventing_adapter(EVENTING_OBSERVABILITY_ADAPTER, &noop).is_empty());
+    }
+
+    #[test]
+    fn eventing_observability_closure_rejects_root_reexport() {
+        let red = "pub mod observability; pub use observability::EventingEmitter;";
+        assert!(!scan_eventing_root_reexports("crates/eventing/src/lib.rs", red).is_empty());
+    }
+
+    #[test]
+    fn workspace_eventing_observability_closure_is_exact() {
+        let root = workspace_root().expect("workspace root");
+        let findings = eventing_observability_closure_findings(&root).expect("closure scan");
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
 
     fn assert_consumer_policy_raw_effect_is_rejected(case: &str, sources: &[(PathBuf, &str)]) {
         let sources = sources

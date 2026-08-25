@@ -1,12 +1,13 @@
 # rss-eventing
 
 `rss-eventing` is the canonical package identity for the provider-neutral Eventing L2 public
-waist. It exposes four modules and no crate-root shortcuts:
+waist. It exposes five modules and no crate-root shortcuts:
 
 - `metadata`: tenant, occurred-at and optional audit correlation.
 - `envelope`: opaque event identity and a contract-bound generic payload envelope.
 - `delivery`: closed transaction/publication outcomes and validated delivery budgets.
 - `lifecycle`: one atomic retry policy and an explicit positive shutdown budget.
+- `observability`: closed low-cardinality metric/event vocabulary and an emit contract.
 
 The package does not expose topics, provider SPI, broker administration, AMQP or PostgreSQL
 implementation details, generated bindings, dependency injection, runtime drivers, composition,

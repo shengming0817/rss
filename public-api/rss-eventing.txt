@@ -10,6 +10,7 @@ pub rss_eventing::delivery::ConsumerTxOutcome::Rejected(rss_eventing::delivery::
 pub rss_eventing::delivery::ConsumerTxOutcome::RollbackFailed
 impl<C> rss_eventing::delivery::ConsumerTxOutcome<C>
 pub const fn rss_eventing::delivery::ConsumerTxOutcome<C>::as_label(&self) -> &'static str
+pub const fn rss_eventing::delivery::ConsumerTxOutcome<C>::observability_status(&self) -> rss_eventing::observability::EventingTransactionStatus
 impl<C> core::marker::Freeze for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Freeze
 impl<C> core::marker::Send for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Send
 impl<C> core::marker::Sync for rss_eventing::delivery::ConsumerTxOutcome<C> where C: core::marker::Sync
@@ -345,3 +346,444 @@ impl core::marker::Unpin for rss_eventing::metadata::EventMetadata
 impl core::marker::UnsafeUnpin for rss_eventing::metadata::EventMetadata
 impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::metadata::EventMetadata
 impl core::panic::unwind_safe::UnwindSafe for rss_eventing::metadata::EventMetadata
+pub mod rss_eventing::observability
+pub enum rss_eventing::observability::EventingDeadLetterReplayFailure
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::AppendOutbox
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::EncodeMetadata
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::FactConflict
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::FetchDeadLetter
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::InvalidPayload
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::InvalidSchemaHeaders
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::Invariant
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::NotFound
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::NotReplayable
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::PayloadKeyForbidden
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::PayloadKeyUnavailable
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::ProjectionMirror
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::Store
+pub rss_eventing::observability::EventingDeadLetterReplayFailure::Transaction
+impl rss_eventing::observability::EventingDeadLetterReplayFailure
+pub const fn rss_eventing::observability::EventingDeadLetterReplayFailure::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingDeadLetterReplayFailure
+pub fn rss_eventing::observability::EventingDeadLetterReplayFailure::clone(&self) -> rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::cmp::Eq for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::cmp::PartialEq for rss_eventing::observability::EventingDeadLetterReplayFailure
+pub fn rss_eventing::observability::EventingDeadLetterReplayFailure::eq(&self, &rss_eventing::observability::EventingDeadLetterReplayFailure) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingDeadLetterReplayFailure
+pub fn rss_eventing::observability::EventingDeadLetterReplayFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::marker::Freeze for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::marker::Send for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::marker::Sync for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::marker::Unpin for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingDeadLetterReplayFailure
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingDeadLetterReplayFailure
+pub enum rss_eventing::observability::EventingDeadLetterReplayResult
+pub rss_eventing::observability::EventingDeadLetterReplayResult::AlreadyExists
+pub rss_eventing::observability::EventingDeadLetterReplayResult::Failed(rss_eventing::observability::EventingDeadLetterReplayFailure)
+pub rss_eventing::observability::EventingDeadLetterReplayResult::Inserted
+impl rss_eventing::observability::EventingDeadLetterReplayResult
+pub const fn rss_eventing::observability::EventingDeadLetterReplayResult::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingDeadLetterReplayResult
+pub fn rss_eventing::observability::EventingDeadLetterReplayResult::clone(&self) -> rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::cmp::Eq for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::cmp::PartialEq for rss_eventing::observability::EventingDeadLetterReplayResult
+pub fn rss_eventing::observability::EventingDeadLetterReplayResult::eq(&self, &rss_eventing::observability::EventingDeadLetterReplayResult) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingDeadLetterReplayResult
+pub fn rss_eventing::observability::EventingDeadLetterReplayResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::marker::Freeze for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::marker::Send for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::marker::Sync for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::marker::Unpin for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingDeadLetterReplayResult
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingDeadLetterReplayResult
+pub enum rss_eventing::observability::EventingDeadLetterSkipReason
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeInvalidOccurredAt
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeInvalidSchemaHash
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeInvalidSchemaVersion
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeInvalidTenantId
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeMissingOccurredAt
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeMissingSchemaHash
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeMissingSchemaVersion
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeMissingTenantId
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeSchemaHashMismatch
+pub rss_eventing::observability::EventingDeadLetterSkipReason::EnvelopeSchemaVersionMismatch
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptEmptyContractId
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptEmptyDomain
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptEmptyTopic
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptInvalidConsumerGroup
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptInvalidContext
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptInvalidContractVersion
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptInvalidCorrelationId
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptInvalidSchemaHash
+pub rss_eventing::observability::EventingDeadLetterSkipReason::InboxReceiptInvalidTrace
+pub rss_eventing::observability::EventingDeadLetterSkipReason::MalformedId
+pub rss_eventing::observability::EventingDeadLetterSkipReason::TenantAuthorityBindingMismatch
+pub rss_eventing::observability::EventingDeadLetterSkipReason::TenantAuthorityExpired
+pub rss_eventing::observability::EventingDeadLetterSkipReason::TenantAuthorityInvalid
+pub rss_eventing::observability::EventingDeadLetterSkipReason::TenantAuthorityMissing
+impl rss_eventing::observability::EventingDeadLetterSkipReason
+pub const fn rss_eventing::observability::EventingDeadLetterSkipReason::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingDeadLetterSkipReason
+pub fn rss_eventing::observability::EventingDeadLetterSkipReason::clone(&self) -> rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::cmp::Eq for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::cmp::PartialEq for rss_eventing::observability::EventingDeadLetterSkipReason
+pub fn rss_eventing::observability::EventingDeadLetterSkipReason::eq(&self, &rss_eventing::observability::EventingDeadLetterSkipReason) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingDeadLetterSkipReason
+pub fn rss_eventing::observability::EventingDeadLetterSkipReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::marker::Freeze for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::marker::Send for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::marker::Sync for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::marker::Unpin for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingDeadLetterSkipReason
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingDeadLetterSkipReason
+pub enum rss_eventing::observability::EventingDisposition
+pub rss_eventing::observability::EventingDisposition::Ack
+pub rss_eventing::observability::EventingDisposition::Reject
+pub rss_eventing::observability::EventingDisposition::Requeue
+impl rss_eventing::observability::EventingDisposition
+pub const fn rss_eventing::observability::EventingDisposition::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingDisposition
+pub fn rss_eventing::observability::EventingDisposition::clone(&self) -> rss_eventing::observability::EventingDisposition
+impl core::cmp::Eq for rss_eventing::observability::EventingDisposition
+impl core::cmp::PartialEq for rss_eventing::observability::EventingDisposition
+pub fn rss_eventing::observability::EventingDisposition::eq(&self, &rss_eventing::observability::EventingDisposition) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingDisposition
+pub fn rss_eventing::observability::EventingDisposition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingDisposition
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingDisposition
+impl core::marker::Freeze for rss_eventing::observability::EventingDisposition
+impl core::marker::Send for rss_eventing::observability::EventingDisposition
+impl core::marker::Sync for rss_eventing::observability::EventingDisposition
+impl core::marker::Unpin for rss_eventing::observability::EventingDisposition
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingDisposition
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingDisposition
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingDisposition
+pub enum rss_eventing::observability::EventingEvent
+pub rss_eventing::observability::EventingEvent::ConsumerClaimInProgress
+pub rss_eventing::observability::EventingEvent::ConsumerDeadLetterSkip
+pub rss_eventing::observability::EventingEvent::ConsumerDeadLetterWrite
+pub rss_eventing::observability::EventingEvent::ConsumerLeaseLost
+pub rss_eventing::observability::EventingEvent::ConsumerReleaseFailed
+pub rss_eventing::observability::EventingEvent::ConsumerSettlement
+pub rss_eventing::observability::EventingEvent::ConsumerSubscribeRetry
+pub rss_eventing::observability::EventingEvent::ConsumerTransaction
+pub rss_eventing::observability::EventingEvent::DlqMutation
+pub rss_eventing::observability::EventingEvent::InboxBacklog
+pub rss_eventing::observability::EventingEvent::InboxBacklogUnavailable
+pub rss_eventing::observability::EventingEvent::OutboxBacklog
+pub rss_eventing::observability::EventingEvent::OutboxBacklogUnavailable
+pub rss_eventing::observability::EventingEvent::OutboxPublish
+pub rss_eventing::observability::EventingEvent::OutboxRelayTick
+impl rss_eventing::observability::EventingEvent
+pub const rss_eventing::observability::EventingEvent::ALL: [Self; 15]
+pub const fn rss_eventing::observability::EventingEvent::field_keys(self) -> &'static [&'static str]
+pub const fn rss_eventing::observability::EventingEvent::name(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingEvent
+pub fn rss_eventing::observability::EventingEvent::clone(&self) -> rss_eventing::observability::EventingEvent
+impl core::cmp::Eq for rss_eventing::observability::EventingEvent
+impl core::cmp::PartialEq for rss_eventing::observability::EventingEvent
+pub fn rss_eventing::observability::EventingEvent::eq(&self, &rss_eventing::observability::EventingEvent) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingEvent
+pub fn rss_eventing::observability::EventingEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingEvent
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingEvent
+impl core::marker::Freeze for rss_eventing::observability::EventingEvent
+impl core::marker::Send for rss_eventing::observability::EventingEvent
+impl core::marker::Sync for rss_eventing::observability::EventingEvent
+impl core::marker::Unpin for rss_eventing::observability::EventingEvent
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingEvent
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingEvent
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingEvent
+pub enum rss_eventing::observability::EventingIoOutcome
+pub rss_eventing::observability::EventingIoOutcome::Error
+pub rss_eventing::observability::EventingIoOutcome::Ok
+impl rss_eventing::observability::EventingIoOutcome
+pub const fn rss_eventing::observability::EventingIoOutcome::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingIoOutcome
+pub fn rss_eventing::observability::EventingIoOutcome::clone(&self) -> rss_eventing::observability::EventingIoOutcome
+impl core::cmp::Eq for rss_eventing::observability::EventingIoOutcome
+impl core::cmp::PartialEq for rss_eventing::observability::EventingIoOutcome
+pub fn rss_eventing::observability::EventingIoOutcome::eq(&self, &rss_eventing::observability::EventingIoOutcome) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingIoOutcome
+pub fn rss_eventing::observability::EventingIoOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingIoOutcome
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingIoOutcome
+impl core::marker::Freeze for rss_eventing::observability::EventingIoOutcome
+impl core::marker::Send for rss_eventing::observability::EventingIoOutcome
+impl core::marker::Sync for rss_eventing::observability::EventingIoOutcome
+impl core::marker::Unpin for rss_eventing::observability::EventingIoOutcome
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingIoOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingIoOutcome
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingIoOutcome
+pub enum rss_eventing::observability::EventingMetric
+pub rss_eventing::observability::EventingMetric::ConsumerClaimInProgressTotal
+pub rss_eventing::observability::EventingMetric::ConsumerDeadLetterSkipTotal
+pub rss_eventing::observability::EventingMetric::ConsumerDeadLetterWriteTotal
+pub rss_eventing::observability::EventingMetric::ConsumerLeaseLostTotal
+pub rss_eventing::observability::EventingMetric::ConsumerReleaseFailedTotal
+pub rss_eventing::observability::EventingMetric::ConsumerSettlementTotal
+pub rss_eventing::observability::EventingMetric::ConsumerSubscribeRetryTotal
+pub rss_eventing::observability::EventingMetric::ConsumerTransactionOutcomeTotal
+pub rss_eventing::observability::EventingMetric::DlqRedriveTotal
+pub rss_eventing::observability::EventingMetric::InboxOldestStaleClaimAgeSeconds
+pub rss_eventing::observability::EventingMetric::InboxStaleClaimDepth
+pub rss_eventing::observability::EventingMetric::OutboxOldestPendingAgeSeconds
+pub rss_eventing::observability::EventingMetric::OutboxPartitionBlockedDepth
+pub rss_eventing::observability::EventingMetric::OutboxPendingDepth
+pub rss_eventing::observability::EventingMetric::OutboxPublishTotal
+pub rss_eventing::observability::EventingMetric::OutboxRelayTickDurationSeconds
+impl rss_eventing::observability::EventingMetric
+pub const rss_eventing::observability::EventingMetric::ALL: [Self; 16]
+pub const fn rss_eventing::observability::EventingMetric::label_keys(self) -> &'static [&'static str]
+pub const fn rss_eventing::observability::EventingMetric::name(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingMetric
+pub fn rss_eventing::observability::EventingMetric::clone(&self) -> rss_eventing::observability::EventingMetric
+impl core::cmp::Eq for rss_eventing::observability::EventingMetric
+impl core::cmp::PartialEq for rss_eventing::observability::EventingMetric
+pub fn rss_eventing::observability::EventingMetric::eq(&self, &rss_eventing::observability::EventingMetric) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingMetric
+pub fn rss_eventing::observability::EventingMetric::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingMetric
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingMetric
+impl core::marker::Freeze for rss_eventing::observability::EventingMetric
+impl core::marker::Send for rss_eventing::observability::EventingMetric
+impl core::marker::Sync for rss_eventing::observability::EventingMetric
+impl core::marker::Unpin for rss_eventing::observability::EventingMetric
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingMetric
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingMetric
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingMetric
+pub enum rss_eventing::observability::EventingObservation
+pub rss_eventing::observability::EventingObservation::ConsumerClaimInProgress
+pub rss_eventing::observability::EventingObservation::ConsumerDeadLetterSkip
+pub rss_eventing::observability::EventingObservation::ConsumerDeadLetterSkip::reason: rss_eventing::observability::EventingDeadLetterSkipReason
+pub rss_eventing::observability::EventingObservation::ConsumerDeadLetterWrite
+pub rss_eventing::observability::EventingObservation::ConsumerDeadLetterWrite::outcome: rss_eventing::observability::EventingIoOutcome
+pub rss_eventing::observability::EventingObservation::ConsumerLeaseLost
+pub rss_eventing::observability::EventingObservation::ConsumerReleaseFailed
+pub rss_eventing::observability::EventingObservation::ConsumerSettlement
+pub rss_eventing::observability::EventingObservation::ConsumerSettlement::action: rss_eventing::observability::EventingDisposition
+pub rss_eventing::observability::EventingObservation::ConsumerSettlement::outcome: rss_eventing::observability::EventingIoOutcome
+pub rss_eventing::observability::EventingObservation::ConsumerSubscribeRetry
+pub rss_eventing::observability::EventingObservation::ConsumerSubscribeRetry::outcome: rss_eventing::observability::EventingSubscribeOutcome
+pub rss_eventing::observability::EventingObservation::ConsumerTransaction
+pub rss_eventing::observability::EventingObservation::ConsumerTransaction::status: rss_eventing::observability::EventingTransactionStatus
+pub rss_eventing::observability::EventingObservation::DeadLetterReplay
+pub rss_eventing::observability::EventingObservation::DeadLetterReplay::result: rss_eventing::observability::EventingDeadLetterReplayResult
+pub rss_eventing::observability::EventingObservation::InboxBacklog
+pub rss_eventing::observability::EventingObservation::InboxBacklog::oldest_stale_claim_age: core::time::Duration
+pub rss_eventing::observability::EventingObservation::InboxBacklog::stale_claim_depth: u64
+pub rss_eventing::observability::EventingObservation::InboxBacklogUnavailable
+pub rss_eventing::observability::EventingObservation::OutboxBacklog
+pub rss_eventing::observability::EventingObservation::OutboxBacklog::oldest_pending_age: core::time::Duration
+pub rss_eventing::observability::EventingObservation::OutboxBacklog::partition_blocked_depth: u64
+pub rss_eventing::observability::EventingObservation::OutboxBacklog::pending_depth: u64
+pub rss_eventing::observability::EventingObservation::OutboxBacklogUnavailable
+pub rss_eventing::observability::EventingObservation::OutboxDlxRedrive
+pub rss_eventing::observability::EventingObservation::OutboxDlxRedrive::result: rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub rss_eventing::observability::EventingObservation::OutboxDlxResolveExpired
+pub rss_eventing::observability::EventingObservation::OutboxDlxResolveExpired::result: rss_eventing::observability::EventingOutboxDlxResolveResult
+pub rss_eventing::observability::EventingObservation::OutboxPublish
+pub rss_eventing::observability::EventingObservation::OutboxPublish::status: rss_eventing::observability::EventingDisposition
+pub rss_eventing::observability::EventingObservation::RelayTick
+pub rss_eventing::observability::EventingObservation::RelayTick::duration: core::time::Duration
+pub rss_eventing::observability::EventingObservation::RelayTick::phase: rss_eventing::observability::EventingRelayPhase
+impl rss_eventing::observability::EventingObservation
+pub const fn rss_eventing::observability::EventingObservation::event(self) -> rss_eventing::observability::EventingEvent
+impl core::clone::Clone for rss_eventing::observability::EventingObservation
+pub fn rss_eventing::observability::EventingObservation::clone(&self) -> rss_eventing::observability::EventingObservation
+impl core::cmp::Eq for rss_eventing::observability::EventingObservation
+impl core::cmp::PartialEq for rss_eventing::observability::EventingObservation
+pub fn rss_eventing::observability::EventingObservation::eq(&self, &rss_eventing::observability::EventingObservation) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingObservation
+pub fn rss_eventing::observability::EventingObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingObservation
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingObservation
+impl core::marker::Freeze for rss_eventing::observability::EventingObservation
+impl core::marker::Send for rss_eventing::observability::EventingObservation
+impl core::marker::Sync for rss_eventing::observability::EventingObservation
+impl core::marker::Unpin for rss_eventing::observability::EventingObservation
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingObservation
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingObservation
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingObservation
+pub enum rss_eventing::observability::EventingOutboxDlxRedriveFailure
+pub rss_eventing::observability::EventingOutboxDlxRedriveFailure::Invariant
+pub rss_eventing::observability::EventingOutboxDlxRedriveFailure::Store
+impl rss_eventing::observability::EventingOutboxDlxRedriveFailure
+pub const fn rss_eventing::observability::EventingOutboxDlxRedriveFailure::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+pub fn rss_eventing::observability::EventingOutboxDlxRedriveFailure::clone(&self) -> rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::cmp::Eq for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::cmp::PartialEq for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+pub fn rss_eventing::observability::EventingOutboxDlxRedriveFailure::eq(&self, &rss_eventing::observability::EventingOutboxDlxRedriveFailure) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+pub fn rss_eventing::observability::EventingOutboxDlxRedriveFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::marker::Freeze for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::marker::Send for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::marker::Sync for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::marker::Unpin for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingOutboxDlxRedriveFailure
+pub enum rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub rss_eventing::observability::EventingOutboxDlxRedriveResult::Expired
+pub rss_eventing::observability::EventingOutboxDlxRedriveResult::Failed(rss_eventing::observability::EventingOutboxDlxRedriveFailure)
+pub rss_eventing::observability::EventingOutboxDlxRedriveResult::NotFound
+pub rss_eventing::observability::EventingOutboxDlxRedriveResult::Redriven
+impl rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub const fn rss_eventing::observability::EventingOutboxDlxRedriveResult::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub fn rss_eventing::observability::EventingOutboxDlxRedriveResult::clone(&self) -> rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::cmp::Eq for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::cmp::PartialEq for rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub fn rss_eventing::observability::EventingOutboxDlxRedriveResult::eq(&self, &rss_eventing::observability::EventingOutboxDlxRedriveResult) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub fn rss_eventing::observability::EventingOutboxDlxRedriveResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::marker::Freeze for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::marker::Send for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::marker::Sync for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::marker::Unpin for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingOutboxDlxRedriveResult
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingOutboxDlxRedriveResult
+pub enum rss_eventing::observability::EventingOutboxDlxResolveFailure
+pub rss_eventing::observability::EventingOutboxDlxResolveFailure::InvalidResolutionInput
+pub rss_eventing::observability::EventingOutboxDlxResolveFailure::Invariant
+pub rss_eventing::observability::EventingOutboxDlxResolveFailure::Store
+impl rss_eventing::observability::EventingOutboxDlxResolveFailure
+pub const fn rss_eventing::observability::EventingOutboxDlxResolveFailure::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingOutboxDlxResolveFailure
+pub fn rss_eventing::observability::EventingOutboxDlxResolveFailure::clone(&self) -> rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::cmp::Eq for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::cmp::PartialEq for rss_eventing::observability::EventingOutboxDlxResolveFailure
+pub fn rss_eventing::observability::EventingOutboxDlxResolveFailure::eq(&self, &rss_eventing::observability::EventingOutboxDlxResolveFailure) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingOutboxDlxResolveFailure
+pub fn rss_eventing::observability::EventingOutboxDlxResolveFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::marker::Freeze for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::marker::Send for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::marker::Sync for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::marker::Unpin for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingOutboxDlxResolveFailure
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingOutboxDlxResolveFailure
+pub enum rss_eventing::observability::EventingOutboxDlxResolveResult
+pub rss_eventing::observability::EventingOutboxDlxResolveResult::EvidenceRejected
+pub rss_eventing::observability::EventingOutboxDlxResolveResult::Failed(rss_eventing::observability::EventingOutboxDlxResolveFailure)
+pub rss_eventing::observability::EventingOutboxDlxResolveResult::NotExpired
+pub rss_eventing::observability::EventingOutboxDlxResolveResult::NotFound
+pub rss_eventing::observability::EventingOutboxDlxResolveResult::Resolved
+impl rss_eventing::observability::EventingOutboxDlxResolveResult
+pub const fn rss_eventing::observability::EventingOutboxDlxResolveResult::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingOutboxDlxResolveResult
+pub fn rss_eventing::observability::EventingOutboxDlxResolveResult::clone(&self) -> rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::cmp::Eq for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::cmp::PartialEq for rss_eventing::observability::EventingOutboxDlxResolveResult
+pub fn rss_eventing::observability::EventingOutboxDlxResolveResult::eq(&self, &rss_eventing::observability::EventingOutboxDlxResolveResult) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingOutboxDlxResolveResult
+pub fn rss_eventing::observability::EventingOutboxDlxResolveResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::marker::Freeze for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::marker::Send for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::marker::Sync for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::marker::Unpin for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingOutboxDlxResolveResult
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingOutboxDlxResolveResult
+pub enum rss_eventing::observability::EventingRelayPhase
+pub rss_eventing::observability::EventingRelayPhase::Claim
+pub rss_eventing::observability::EventingRelayPhase::Publish
+impl rss_eventing::observability::EventingRelayPhase
+pub const fn rss_eventing::observability::EventingRelayPhase::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingRelayPhase
+pub fn rss_eventing::observability::EventingRelayPhase::clone(&self) -> rss_eventing::observability::EventingRelayPhase
+impl core::cmp::Eq for rss_eventing::observability::EventingRelayPhase
+impl core::cmp::PartialEq for rss_eventing::observability::EventingRelayPhase
+pub fn rss_eventing::observability::EventingRelayPhase::eq(&self, &rss_eventing::observability::EventingRelayPhase) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingRelayPhase
+pub fn rss_eventing::observability::EventingRelayPhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingRelayPhase
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingRelayPhase
+impl core::marker::Freeze for rss_eventing::observability::EventingRelayPhase
+impl core::marker::Send for rss_eventing::observability::EventingRelayPhase
+impl core::marker::Sync for rss_eventing::observability::EventingRelayPhase
+impl core::marker::Unpin for rss_eventing::observability::EventingRelayPhase
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingRelayPhase
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingRelayPhase
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingRelayPhase
+pub enum rss_eventing::observability::EventingSubscribeOutcome
+pub rss_eventing::observability::EventingSubscribeOutcome::StreamEnd
+pub rss_eventing::observability::EventingSubscribeOutcome::SubscribeError
+impl rss_eventing::observability::EventingSubscribeOutcome
+pub const fn rss_eventing::observability::EventingSubscribeOutcome::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingSubscribeOutcome
+pub fn rss_eventing::observability::EventingSubscribeOutcome::clone(&self) -> rss_eventing::observability::EventingSubscribeOutcome
+impl core::cmp::Eq for rss_eventing::observability::EventingSubscribeOutcome
+impl core::cmp::PartialEq for rss_eventing::observability::EventingSubscribeOutcome
+pub fn rss_eventing::observability::EventingSubscribeOutcome::eq(&self, &rss_eventing::observability::EventingSubscribeOutcome) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingSubscribeOutcome
+pub fn rss_eventing::observability::EventingSubscribeOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingSubscribeOutcome
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingSubscribeOutcome
+impl core::marker::Freeze for rss_eventing::observability::EventingSubscribeOutcome
+impl core::marker::Send for rss_eventing::observability::EventingSubscribeOutcome
+impl core::marker::Sync for rss_eventing::observability::EventingSubscribeOutcome
+impl core::marker::Unpin for rss_eventing::observability::EventingSubscribeOutcome
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingSubscribeOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingSubscribeOutcome
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingSubscribeOutcome
+pub enum rss_eventing::observability::EventingTransactionStatus
+pub rss_eventing::observability::EventingTransactionStatus::CommitUnknown
+pub rss_eventing::observability::EventingTransactionStatus::Committed
+pub rss_eventing::observability::EventingTransactionStatus::Fenced
+pub rss_eventing::observability::EventingTransactionStatus::HandlerTransient
+pub rss_eventing::observability::EventingTransactionStatus::InfrastructureTransient
+pub rss_eventing::observability::EventingTransactionStatus::RejectedInvariant
+pub rss_eventing::observability::EventingTransactionStatus::RejectedPermanent
+pub rss_eventing::observability::EventingTransactionStatus::RollbackFailed
+impl rss_eventing::observability::EventingTransactionStatus
+pub const fn rss_eventing::observability::EventingTransactionStatus::as_label(self) -> &'static str
+impl core::clone::Clone for rss_eventing::observability::EventingTransactionStatus
+pub fn rss_eventing::observability::EventingTransactionStatus::clone(&self) -> rss_eventing::observability::EventingTransactionStatus
+impl core::cmp::Eq for rss_eventing::observability::EventingTransactionStatus
+impl core::cmp::PartialEq for rss_eventing::observability::EventingTransactionStatus
+pub fn rss_eventing::observability::EventingTransactionStatus::eq(&self, &rss_eventing::observability::EventingTransactionStatus) -> bool
+impl core::fmt::Debug for rss_eventing::observability::EventingTransactionStatus
+pub fn rss_eventing::observability::EventingTransactionStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::observability::EventingTransactionStatus
+impl core::marker::StructuralPartialEq for rss_eventing::observability::EventingTransactionStatus
+impl core::marker::Freeze for rss_eventing::observability::EventingTransactionStatus
+impl core::marker::Send for rss_eventing::observability::EventingTransactionStatus
+impl core::marker::Sync for rss_eventing::observability::EventingTransactionStatus
+impl core::marker::Unpin for rss_eventing::observability::EventingTransactionStatus
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingTransactionStatus
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingTransactionStatus
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingTransactionStatus
+pub struct rss_eventing::observability::EventingObservabilityDescriptor
+impl rss_eventing::observability::EventingObservabilityDescriptor
+pub const fn rss_eventing::observability::EventingObservabilityDescriptor::events(&self) -> &'static [rss_eventing::observability::EventingEvent]
+pub const fn rss_eventing::observability::EventingObservabilityDescriptor::metrics(&self) -> &'static [rss_eventing::observability::EventingMetric]
+impl core::marker::Freeze for rss_eventing::observability::EventingObservabilityDescriptor
+impl core::marker::Send for rss_eventing::observability::EventingObservabilityDescriptor
+impl core::marker::Sync for rss_eventing::observability::EventingObservabilityDescriptor
+impl core::marker::Unpin for rss_eventing::observability::EventingObservabilityDescriptor
+impl core::marker::UnsafeUnpin for rss_eventing::observability::EventingObservabilityDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::observability::EventingObservabilityDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::observability::EventingObservabilityDescriptor
+pub trait rss_eventing::observability::EventingEmitter: core::marker::Send + core::marker::Sync
+pub fn rss_eventing::observability::EventingEmitter::emit(&self, rss_eventing::observability::EventingObservation)
+pub const fn rss_eventing::observability::eventing_observability_descriptor() -> &'static rss_eventing::observability::EventingObservabilityDescriptor

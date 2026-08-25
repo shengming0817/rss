@@ -270,32 +270,6 @@ mod backend_tests {
 
     #[rstest]
     #[case(
-        observ::EventLabel::Disposition(observ::DispositionLabel::Ack),
-        "disposition",
-        "ack"
-    )]
-    #[case(
-        observ::EventLabel::Topic("session.created"),
-        "topic",
-        "session.created"
-    )]
-    #[case(
-        observ::EventLabel::Handler("session_projection"),
-        "handler",
-        "session_projection"
-    )]
-    fn to_key_value_maps_event_label(
-        #[case] label: observ::EventLabel,
-        #[case] key: &str,
-        #[case] value: &str,
-    ) {
-        let kv = to_key_value(&label);
-        assert_eq!(kv.key.as_str(), key);
-        assert_eq!(kv.value.as_str(), value);
-    }
-
-    #[rstest]
-    #[case(
         observ::CertLabel::Outcome(observ::CertOutcomeLabel::Renewed),
         "outcome",
         "renewed"

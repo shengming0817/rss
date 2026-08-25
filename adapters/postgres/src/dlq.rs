@@ -16,11 +16,13 @@ use diport::{
 };
 use eventexec::{
     DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
-    DlqListResult, DlqMutationKind, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
-    DlqReplayRequest, DlqReplayStoreStage, DlqStore, DurablyAuditedDlqMutation,
-    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, record_dlq_mutation_error,
-    record_dlq_outbox_redrive, record_dlq_replay, record_outbox_expired_resolution,
+    DlqListResult, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest,
+    DlqReplayStoreStage, DlqStore, DurablyAuditedDlqMutation, OutboxExpiredResolutionOutcome,
+    OutboxExpiredResolutionRequest, record_dlq_outbox_redrive, record_dlq_outbox_redrive_error,
+    record_dlq_replay, record_dlq_replay_error, record_outbox_expired_resolution,
+    record_outbox_expired_resolution_error,
 };
+use eventing::observability::EventingEmitter;
 
 /// DLQ-private tenant authority. Its private constructor keeps replay and maintenance access tied
 /// to this concern instead of widening the generic infrastructure capability surface.
@@ -174,6 +176,7 @@ pub struct PgDlqStore {
     write: TenantDb<MaintenanceWriteLane>,
     replay: MaintenanceReplayCapability,
     clock: std::sync::Arc<dyn diport::Clock>,
+    observability: std::sync::Arc<dyn EventingEmitter>,
 }
 
 struct DlqListOwned {
@@ -216,6 +219,7 @@ impl PgDlqStore {
         payload_protector: DlxPayloadProtector,
         projection: DlqReplayProjection,
         clock: std::sync::Arc<dyn diport::Clock>,
+        observability: std::sync::Arc<dyn EventingEmitter>,
     ) -> Self {
         Self {
             read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
@@ -225,18 +229,21 @@ impl PgDlqStore {
                 projection,
             },
             clock,
+            observability,
         }
     }
 
     pub(crate) fn without_payload_replay_maintenance(
         store: &VerifiedPgMaintenanceStore,
         clock: std::sync::Arc<dyn diport::Clock>,
+        observability: std::sync::Arc<dyn EventingEmitter>,
     ) -> Self {
         Self {
             read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
             write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
             replay: MaintenanceReplayCapability::Disabled,
             clock,
+            observability,
         }
     }
 }
@@ -265,7 +272,6 @@ impl DlqStore for PgDlqStore {
         &self,
         request: DlqReplayRequest,
     ) -> Result<DurablyAuditedDlqMutation<DlqReplayOutcome>, DlqError> {
-        let tenant = request.tenant();
         let (occurred_at_secs, occurred_at_nanos) = audit_timestamp(self.clock.as_ref());
         let result = match &self.replay {
             MaintenanceReplayCapability::Enabled {
@@ -284,14 +290,14 @@ impl DlqStore for PgDlqStore {
             }
             MaintenanceReplayCapability::Disabled => {
                 let err = DlqError::PayloadKeyUnavailable;
-                record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, &err);
+                record_dlq_replay_error(self.observability.as_ref(), &err);
                 return Err(err);
             }
         };
         match &result {
-            Ok(outcome) => record_dlq_replay(tenant, *outcome),
+            Ok(outcome) => record_dlq_replay(self.observability.as_ref(), *outcome),
             Err(err) => {
-                record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, err);
+                record_dlq_replay_error(self.observability.as_ref(), err);
             }
         }
         result.map(DurablyAuditedDlqMutation::committed)
@@ -344,9 +350,9 @@ impl DlqStore for PgDlqStore {
 
         let outcome = result;
         match &outcome {
-            Ok(outcome) => record_dlq_outbox_redrive(tenant, *outcome),
+            Ok(outcome) => record_dlq_outbox_redrive(self.observability.as_ref(), *outcome),
             Err(err) => {
-                record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxRedrive, err);
+                record_dlq_outbox_redrive_error(self.observability.as_ref(), err);
             }
         }
         outcome.map(DurablyAuditedDlqMutation::committed)
@@ -425,9 +431,9 @@ impl DlqStore for PgDlqStore {
 
         let outcome = result;
         match &outcome {
-            Ok(outcome) => record_outbox_expired_resolution(tenant, *outcome),
+            Ok(outcome) => record_outbox_expired_resolution(self.observability.as_ref(), *outcome),
             Err(error) => {
-                record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxResolveExpired, error)
+                record_outbox_expired_resolution_error(self.observability.as_ref(), error)
             }
         }
         outcome.map(DurablyAuditedDlqMutation::committed)

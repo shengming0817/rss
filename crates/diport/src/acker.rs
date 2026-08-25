@@ -32,7 +32,6 @@ use crate::subscriber::{Message, SubscriberError};
 /// adapter 把它翻成 broker 原语（AMQP：`Ack`→basic_ack、`Requeue`→basic_nack(requeue=true)、
 /// `Reject`→basic_nack(requeue=false)，后者路由 broker 端 DLX/丢弃）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum AckAction {
     /// 成功消费：broker 移除消息（at-least-once 的终态成功）。
     Ack,

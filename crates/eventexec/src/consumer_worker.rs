@@ -87,6 +87,9 @@ use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
 use crate::relay::WorkerHealth;
 use crate::retry::{delay_after, wait_or_cancel};
 use eventing::lifecycle::{RetryPolicy, ShutdownBudget};
+use eventing::observability::{
+    EventingEmitter, EventingIoOutcome, EventingObservation, EventingSubscribeOutcome,
+};
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
 /// [`crate::OUTBOX_RELAY_PROBE`]）。组合根据此 + domain/topic 组装 per-worker `primitives::ProbeName`
@@ -101,7 +104,7 @@ pub const EVENT_CONSUMER_PROBE: &str = "event_consumer";
 struct HealthReportingDlx {
     inner: tokio::sync::Mutex<Box<DynDeadLetterStore<'static>>>,
     health: Arc<WorkerHealth>,
-    domain: String,
+    emitter: Arc<dyn EventingEmitter>,
 }
 
 #[allow(unknown_lints, rss_diport_impl_allowlist)]
@@ -115,17 +118,13 @@ impl DeadLetterStore for HealthReportingDlx {
         let inner = self.inner.lock().await;
         let result = inner.write_dead_letter(record).await;
         let outcome = if result.is_ok() {
-            "ok"
+            EventingIoOutcome::Ok
         } else {
             self.health.mark_dlx_write_error();
-            "error"
+            EventingIoOutcome::Error
         };
-        metrics::counter!(
-            "consumer_dlx_write_total",
-            "domain" => self.domain.clone(),
-            "outcome" => outcome,
-        )
-        .increment(1);
+        self.emitter
+            .emit(EventingObservation::ConsumerDeadLetterWrite { outcome });
         result
     }
 
@@ -143,7 +142,7 @@ fn health_reporting_dlx(
     DynDeadLetterStore::new_box(HealthReportingDlx {
         inner: tokio::sync::Mutex::new(dlx),
         health,
-        domain: meta.domain().to_owned(),
+        emitter: meta.observability_emitter(),
     })
 }
 
@@ -220,7 +219,7 @@ pub fn spawn_relay<A>(
     clock: Arc<dyn diport::Clock>,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-    metrics: Arc<dyn crate::OutboxMetrics>,
+    emitter: Arc<dyn EventingEmitter>,
     admission: primitives::RelayAdmission,
     shutdown_budget: ShutdownBudget,
 ) -> ManagedBlockingWorker
@@ -235,7 +234,7 @@ where
         move |token| async move {
             // Arc::new(store) 在线程内构建：Arc<A>(!Send) 不跨线程；store: A (Send) 跨线程移入。
             let store = Arc::new(store);
-            crate::relay::relay_loop(store, config, clock, token, health, metrics, admission).await;
+            crate::relay::relay_loop(store, config, clock, token, health, emitter, admission).await;
             Ok(())
         },
     )
@@ -308,8 +307,8 @@ where
 /// `run_once` 由调用方以 [`AsyncFnMut`] 注入（可借用 `!Sync` DLX）；spawn 禁止再手写 one-shot
 /// `match subscribe_ackable`。
 ///
-/// 可观测：`consumer_subscribe_retry_total{domain,outcome}`（outcome=`subscribe_error`|
-/// `stream_end`；topic 不入 label）；日志带 `domain`/`component`=`event_consumer`。
+/// 可观测：`consumer_subscribe_retry_total{outcome}`（outcome=`subscribe_error`|`stream_end`，
+/// 无 scope label）；普通诊断日志仍带 `domain`/`component`=`event_consumer`。
 ///
 /// ref: ThreeDotsLabs/watermill message/router.go@master（受监督消费循环）
 ///      kube-rs/kube kube-runtime controller backoff（until-cancel）
@@ -324,6 +323,7 @@ pub async fn run_ackable_subscription_loop<D>(
     domain: String,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
+    emitter: Arc<dyn EventingEmitter>,
     backoff: RetryPolicy,
     admission: primitives::ConsumerAdmission,
     mut run_once: D,
@@ -378,6 +378,7 @@ pub async fn run_ackable_subscription_loop<D>(
                     &mut attempts,
                     &topic,
                     &domain,
+                    emitter.as_ref(),
                 )
                 .await
                 {
@@ -393,6 +394,7 @@ pub async fn run_ackable_subscription_loop<D>(
                     &err,
                     &topic,
                     &domain,
+                    emitter.as_ref(),
                 )
                 .await
                 {
@@ -403,29 +405,8 @@ pub async fn run_ackable_subscription_loop<D>(
     }
 }
 
-/// 监督重试 outcome 闭值（metric label；禁止 topic / error text）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubscribeRetryOutcome {
-    SubscribeError,
-    StreamEnd,
-}
-
-impl SubscribeRetryOutcome {
-    const fn as_label(self) -> &'static str {
-        match self {
-            Self::SubscribeError => "subscribe_error",
-            Self::StreamEnd => "stream_end",
-        }
-    }
-}
-
-fn record_subscribe_retry(domain: &str, outcome: SubscribeRetryOutcome) {
-    metrics::counter!(
-        "consumer_subscribe_retry_total",
-        "domain" => domain.to_owned(),
-        "outcome" => outcome.as_label(),
-    )
-    .increment(1);
+fn record_subscribe_retry(emitter: &dyn EventingEmitter, outcome: EventingSubscribeOutcome) {
+    emitter.emit(EventingObservation::ConsumerSubscribeRetry { outcome });
 }
 
 fn next_recovery_attempt(attempts: &mut u32) -> u32 {
@@ -441,16 +422,17 @@ async fn backoff_after_stream_end(
     attempts: &mut u32,
     topic: &Topic,
     domain: &str,
+    emitter: &dyn EventingEmitter,
 ) -> bool {
     let attempt = next_recovery_attempt(attempts);
     health.mark_subscriber_unavailable();
-    record_subscribe_retry(domain, SubscribeRetryOutcome::StreamEnd);
+    record_subscribe_retry(emitter, EventingSubscribeOutcome::StreamEnd);
     tracing::warn!(
         domain = %domain,
         component = EVENT_CONSUMER_PROBE,
         topic = %topic.as_str(),
         attempts = attempt,
-        outcome = SubscribeRetryOutcome::StreamEnd.as_label(),
+        outcome = EventingSubscribeOutcome::StreamEnd.as_label(),
         "consumer: ackable delivery stream ended; resubscribing after backoff"
     );
     wait_or_cancel(delay_after(backoff, attempt), token).await
@@ -465,17 +447,18 @@ async fn backoff_after_subscribe_error(
     err: &diport::SubscriberError,
     topic: &Topic,
     domain: &str,
+    emitter: &dyn EventingEmitter,
 ) -> bool {
     let attempt = next_recovery_attempt(attempts);
     health.mark_subscriber_unavailable();
-    record_subscribe_retry(domain, SubscribeRetryOutcome::SubscribeError);
+    record_subscribe_retry(emitter, EventingSubscribeOutcome::SubscribeError);
     tracing::warn!(
         domain = %domain,
         component = EVENT_CONSUMER_PROBE,
         topic = %topic.as_str(),
         error = %err,
         attempts = attempt,
-        outcome = SubscribeRetryOutcome::SubscribeError.as_label(),
+        outcome = EventingSubscribeOutcome::SubscribeError.as_label(),
         "consumer: subscribe_ackable failed; retrying after backoff"
     );
     wait_or_cancel(delay_after(backoff, attempt), token).await
@@ -513,6 +496,7 @@ where
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
     let domain = meta.domain().to_owned();
+    let emitter = meta.observability_emitter();
     spawn_on_dedicated_runtime(
         name,
         token,
@@ -525,6 +509,7 @@ where
                 domain,
                 token,
                 health,
+                emitter,
                 backoff,
                 admission,
                 async |stream, admission| {
@@ -946,6 +931,12 @@ mod tests {
     }
 
     fn meta() -> ConsumerMeta {
+        meta_with_observability(crate::test_eventing_emitter())
+    }
+
+    fn meta_with_observability(
+        observability: Arc<dyn eventing::observability::EventingEmitter>,
+    ) -> ConsumerMeta {
         ConsumerMeta::new(
             "audit",
             "audit",
@@ -953,6 +944,7 @@ mod tests {
             "session.created",
             "audit.session.consumer",
             tenant_authority(),
+            observability,
         )
     }
 
@@ -962,8 +954,7 @@ mod tests {
     // reason: 测试 runtime 构造和 wrapper 调用，失败即测试环境错误；item-level carve-out。
     #[test]
     fn health_reporting_dlx_emits_write_metric_and_degrades_on_error() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        let recorder = Arc::new(crate::TestEventingRecorder::default());
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -971,39 +962,31 @@ mod tests {
         let ok_health = Arc::new(WorkerHealth::starting());
         let err_health = Arc::new(WorkerHealth::starting());
 
-        metrics::with_local_recorder(&recorder, || {
-            rt.block_on(async {
-                let meta = meta();
-                let ok = health_reporting_dlx(noop_dlx(), Arc::clone(&ok_health), &meta);
-                ok.write_dead_letter(sample_dead_letter_record("dlx-ok"))
-                    .await
-                    .unwrap();
+        rt.block_on(async {
+            let meta = meta_with_observability(recorder.clone());
+            let ok = health_reporting_dlx(noop_dlx(), Arc::clone(&ok_health), &meta);
+            ok.write_dead_letter(sample_dead_letter_record("dlx-ok"))
+                .await
+                .unwrap();
 
-                let err = health_reporting_dlx(error_dlx(), Arc::clone(&err_health), &meta);
-                assert!(
-                    err.write_dead_letter(sample_dead_letter_record("dlx-error"))
-                        .await
-                        .is_err()
-                );
-            });
+            let err = health_reporting_dlx(error_dlx(), Arc::clone(&err_health), &meta);
+            assert!(
+                err.write_dead_letter(sample_dead_letter_record("dlx-error"))
+                    .await
+                    .is_err()
+            );
         });
 
-        let rendered = handle.render();
-        assert!(
-            rendered.contains("consumer_dlx_write_total"),
-            "缺 metric consumer_dlx_write_total: {rendered}"
-        );
-        assert!(
-            rendered.contains("domain=\"audit\""),
-            "缺 domain label: {rendered}"
-        );
-        assert!(
-            rendered.contains("outcome=\"ok\""),
-            "缺 outcome=ok label: {rendered}"
-        );
-        assert!(
-            rendered.contains("outcome=\"error\""),
-            "缺 outcome=error label: {rendered}"
+        assert_eq!(
+            recorder.observations(),
+            vec![
+                eventing::observability::EventingObservation::ConsumerDeadLetterWrite {
+                    outcome: eventing::observability::EventingIoOutcome::Ok,
+                },
+                eventing::observability::EventingObservation::ConsumerDeadLetterWrite {
+                    outcome: eventing::observability::EventingIoOutcome::Error,
+                },
+            ]
         );
         assert_eq!(ok_health.status(), HealthStatus::Unhealthy);
         assert_eq!(ok_health.detail(), "starting");
@@ -1359,6 +1342,7 @@ mod tests {
             "audit".to_owned(),
             token.clone(),
             Arc::clone(&health),
+            Arc::new(NoopRelayMetrics),
             tiny_backoff(),
             consumer_admission(),
             async |mut stream, _admission| while stream.next().await.is_some() {},
@@ -1413,6 +1397,7 @@ mod tests {
             "audit".to_owned(),
             token.clone(),
             Arc::clone(&health),
+            Arc::new(NoopRelayMetrics),
             tiny_backoff(),
             consumer_admission(),
             async |mut stream, _admission| while stream.next().await.is_some() {},
@@ -1463,6 +1448,7 @@ mod tests {
             "audit".to_owned(),
             token.clone(),
             Arc::clone(&health),
+            Arc::new(NoopRelayMetrics),
             tiny_backoff(),
             consumer_admission(),
             async |mut stream, _admission| while stream.next().await.is_some() {},
@@ -1489,6 +1475,7 @@ mod tests {
             "audit".to_owned(),
             token.clone(),
             Arc::clone(&health),
+            Arc::new(NoopRelayMetrics),
             tiny_backoff(),
             consumer_admission(),
             async |mut stream, _admission| while stream.next().await.is_some() {},
@@ -1540,6 +1527,7 @@ mod tests {
             "audit".to_owned(),
             token.clone(),
             Arc::clone(&health),
+            Arc::new(NoopRelayMetrics),
             tiny_backoff(),
             consumer_admission(),
             async |mut stream, _admission| while stream.next().await.is_some() {},
@@ -1653,19 +1641,10 @@ mod tests {
         }
     }
 
-    /// noop metrics（spawn_relay 测试不断言发射计数）。
+    /// Test emitter（spawn_relay 测试不断言发射计数）。
     struct NoopRelayMetrics;
-    impl crate::OutboxMetrics for NoopRelayMetrics {
-        fn record_publish(
-            &self,
-            _: &crate::OutboxMetricScope<'_>,
-            _: consistency::outbox::Disposition,
-        ) {
-        }
-        fn record_backlog(&self, _: &crate::OutboxMetricScope<'_>, _: consistency::BacklogSample) {}
-        fn record_backlog_unavailable(&self, _: &crate::OutboxMetricScope<'_>) {}
-        fn record_partition_blocked(&self, _: &crate::OutboxMetricScope<'_>, _: u64) {}
-        fn record_tick_duration(&self, _: crate::RelayPhase, _: f64) {}
+    impl eventing::observability::EventingEmitter for NoopRelayMetrics {
+        fn emit(&self, _: eventing::observability::EventingObservation) {}
     }
 
     #[allow(clippy::expect_used)]

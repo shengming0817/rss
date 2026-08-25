@@ -255,7 +255,7 @@ fn validate_event_metadata_root_source(source: &str) -> Result<()> {
     Ok(())
 }
 
-/// INVARIANT: EVENTING-CONSUMER-TX-PUBLIC-SURFACE-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::consumer_tx_surface_rejects_extra_public_owner|tests::consumer_tx_surface_rejects_trait_bridge|tests::consumer_tx_surface_rejects_associated_item|tests::consumer_tx_root_rejects_alias_facade", anti_vacuity = "tests::real_consumer_tx_surface_is_exact|tests::consumer_tx_surface_allows_private_implementation" } -- the current Eventing transaction seam exposes exactly one flat outcome and one reject kind from its owner module; runtime/provider types and compatibility facades are forbidden.
+/// INVARIANT: EVENTING-CONSUMER-TX-PUBLIC-SURFACE-01 { level = "Medium", exec = "release-check", source = "public-api", synthetic_red = "tests::consumer_tx_surface_rejects_extra_public_owner|tests::consumer_tx_surface_rejects_trait_bridge|tests::consumer_tx_surface_rejects_associated_item|tests::consumer_tx_root_rejects_alias_facade", anti_vacuity = "tests::real_consumer_tx_surface_is_exact|tests::consumer_tx_surface_allows_private_implementation" } -- the current Eventing transaction seam exposes exactly one flat outcome, one reject kind, and the closed observability status projection; runtime/provider types and compatibility facades are forbidden.
 fn validate_consumer_tx_public_surface(root: &Path) -> Result<()> {
     let path = root.join("crates/eventing/src/delivery.rs");
     let source = fs::read_to_string(&path)
@@ -419,19 +419,21 @@ fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
         "ConsumerTx owner public impl exact-set drifted"
     );
     for (owner, methods) in public_methods {
-        let expected_signature = match owner.as_str() {
-            "RejectKind" => "constfnas_label(self)->&'staticstr",
-            "ConsumerTxOutcome<C>" => "constfnas_label(&self)->&'staticstr",
+        let expected_signatures = match owner.as_str() {
+            "RejectKind" => vec!["constfnas_label(self)->&'staticstr"],
+            "ConsumerTxOutcome<C>" => vec![
+                "constfnobservability_status(&self)->crate::observability::EventingTransactionStatus",
+                "constfnas_label(&self)->&'staticstr",
+            ],
             _ => unreachable!("owner exact-set checked above"),
         };
-        let actual_signature = methods
-            .first()
-            .map(|method| method.sig.to_token_stream().to_string().replace(' ', ""));
+        let actual_signatures = methods
+            .iter()
+            .map(|method| method.sig.to_token_stream().to_string().replace(' ', ""))
+            .collect::<Vec<_>>();
         anyhow::ensure!(
-            methods.len() == 1
-                && methods[0].sig.ident == "as_label"
-                && actual_signature.as_deref() == Some(expected_signature),
-            "{owner} may expose only const as_label"
+            actual_signatures == expected_signatures,
+            "{owner} public method exact-set drift: expected={expected_signatures:?}, actual={actual_signatures:?}"
         );
     }
     Ok(())
@@ -2920,6 +2922,7 @@ mod tests {
             Fenced,
         }
         impl<C> ConsumerTxOutcome<C> {
+            pub const fn observability_status(&self) -> crate::observability::EventingTransactionStatus { todo!() }
             pub const fn as_label(&self) -> &'static str { "outcome" }
         }
     "#;

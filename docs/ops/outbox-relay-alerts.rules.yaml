@@ -8,33 +8,37 @@
 #   promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
 #   (cd docs/ops && promtool test rules outbox-relay-alerts.test.yaml)
 #
-# 注：outbox scoped counter/gauge 均带 `domain`,`contract_id`,`tenant_id`；settlement failure 另带闭值
-# `operation`,`reason`。
-# 告警按 domain 聚合：depth=sum by(domain)，oldest age=max by(domain)，outbox/consumer DLX/requeue=sum by(domain)；
-# saga DLX 保留 contract_id，按 (domain, contract_id) 聚合，保 annotation 可靠呈现来源。
+# Canonical Eventing 指标不携 domain/contract/tenant；settlement 与 saga 等跨能力 family 保持各自 owner vocabulary。
 groups:
   - name: outbox-relay
     rules:
-      # 积压 SLO：某 domain 最老 pending 龄超 5min（投递延迟核心信号）。max_over_time[2m] 抗采样抖动
-      # （sample_interval 上限 60s ⇒ 2min 窗内 ≥2 样本）；by(domain) 保来源可定位；for:2m 抗瞬时尖峰。
+      # 积压 SLO：进程内全部 active scope 的最老 pending 龄超 5min（投递延迟核心信号）。
+      # max_over_time[2m] 抗采样抖动（sample_interval 上限 60s ⇒ 2min 窗内 ≥2 样本）；for:2m 抗瞬时尖峰。
       - alert: OutboxBacklogOldestAgeHigh
-        expr: max by (domain) (max_over_time(outbox_oldest_pending_age_seconds[2m])) > 300
+        expr: max_over_time(outbox_oldest_pending_age_seconds[2m]) > 300
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "Outbox 最老 pending 龄超 5min SLO（domain={{ $labels.domain }}）"
-          description: "outbox_oldest_pending_age_seconds={{ $value }}s on domain {{ $labels.domain }}；relay 投递滞后或卡死，检查 relay worker readyz（outbox_relay probe）与 broker 连通性。"
+          summary: "Outbox 最老 pending 龄超 5min SLO"
+          description: "outbox_oldest_pending_age_seconds={{ $value }}s；relay 投递滞后或卡死，检查 relay worker readyz（outbox_relay probe）与 broker 连通性。"
 
-      # DLX 增长：某 domain 任意 entry 进 DLX（永久失败 / 重试预算耗尽）即告警——死信不可静默累积。
+      # DLX 增长：任意 entry 进 DLX（永久失败 / 重试预算耗尽）即告警。offset 分支捕获首次单样本 series。
       - alert: OutboxDlxGrowth
-        expr: sum by (domain) (increase(outbox_dlx_total[10m])) > 0
+        expr: |
+          (increase(outbox_publish_total{status="reject"}[10m]) > 0)
+          or
+          (
+            (outbox_publish_total{status="reject"} > 0)
+            unless
+            (outbox_publish_total{status="reject"} offset 10m)
+          )
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Outbox entries 进入 DLX（domain={{ $labels.domain }}）"
-          description: "近 10min outbox_dlx_total 增长 {{ $value }}（domain={{ $labels.domain }}）；永久失败事件需人工巡检 DLX 行（adapters/postgres outbox status='dlx'）。"
+          summary: "Outbox entries 进入 DLX"
+          description: "近 10min outbox_publish_total{status=\"reject\"} 增长/首次 series 信号 {{ $value }}；永久失败事件需人工巡检 DLX 行（adapters/postgres outbox status='dlx'）。"
 
       # 同一 event id 的 automatic/redrive 绝对窗口到期：preflight 不再调用 broker，并将行留在 DLX。
       # increase > 0 先过滤零增长 series，避免 `or` 左值为 0 时遮住右侧首次-series 分支；右侧只在当前值
@@ -109,27 +113,26 @@ groups:
           summary: "Outbox settlement 失败率持续偏高（domain={{ $labels.domain }}, reason={{ $labels.reason }}）"
           description: "settlement failure rate={{ $value }}/s；检查数据库连接池、锁等待、事务/SQL、settle timeout 与 lease ownership。"
 
-      # 积压深度持续高（次级信号；阈值按部署容量调，此处保守 10k 兜底防无界增长）。
-      # 新增 contract/tenant label 后先按 domain 求和；for:5m 承担持续性判断，避免先对各 scope
-      # 取窗口峰值再相加导致不同时间点峰值叠加误报。
+      # 进程级积压深度持续高（次级信号；标准 Identity+Settings 部署预算为 20k，按部署容量调）。
+      # gauge 已在 producer 聚合全部 active scope；for:5m 承担持续性判断。
       - alert: OutboxPendingDepthHigh
-        expr: sum by (domain) (outbox_pending_depth) > 10000
+        expr: outbox_pending_depth > 20000
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Outbox pending 深度持续偏高（domain={{ $labels.domain }}）"
-          description: "outbox_pending_depth={{ $value }} on domain {{ $labels.domain }}；relay 吞吐跟不上写入速率，考虑增大 relay batch 或排查 broker。"
+          summary: "Outbox pending 深度持续偏高"
+          description: "outbox_pending_depth={{ $value }}；relay 吞吐跟不上写入速率，考虑增大 relay batch 或排查 broker。"
 
       # 同 partition 队头进入 DLX 或长时间未发布会阻塞后继；metric 不暴露 partition_key，定位时从 DLQ event_id 入手。
       - alert: OutboxPartitionBlocked
-        expr: sum by (domain, contract_id, tenant_id) (outbox_partition_blocked_depth) > 0
+        expr: outbox_partition_blocked_depth > 0
         for: 10m
         labels:
           severity: critical
         annotations:
-          summary: "Outbox partition 被队头阻塞（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）"
-          description: "outbox_partition_blocked_depth={{ $value }}（tenant={{ $labels.tenant_id }}）；检查 outbox DLX 队头，按 runbook inspect/redrive，不要从 metric 追 partition_key。"
+          summary: "Outbox partition 被队头阻塞"
+          description: "outbox_partition_blocked_depth={{ $value }}；检查 outbox DLX 队头，按 runbook inspect/redrive，不要从 metric 追 partition_key。"
 
       # DLX archive-before-purge 任一 transient/invariant tick 都会停止删除。Degraded readyz 保持 200，
       # 因此该 counter 是值班分页面；首次 series 用 offset 分支补捉，避免 increase() 漏掉首个失败。
@@ -191,15 +194,15 @@ groups:
           description: "retention_expired_oldest_age_seconds={{ $value }}s；检查 backlog depth、retention failure 告警、sweeper readyz 与 PostgreSQL maintenance function。NaN/缺失表示 sampler 不可用，不能按 0 解释。"
 
       # 重试风暴（次级早期信号）：broker 抖动引发批量 Requeue，pending 上涨但 DLX 未增（预算未耗尽）的
-      # 窗口期，oldest-age 超阈前的领先指标。阈值按部署基线调（此处 5/s 兜底）。
+      # 窗口期，oldest-age 超阈前的领先指标。进程级标准部署预算为 10/s，按部署基线调。
       - alert: OutboxRequeueStorm
-        expr: sum by (domain) (rate(outbox_publish_total{status="requeue"}[5m])) > 5
+        expr: rate(outbox_publish_total{status="requeue"}[5m]) > 10
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Outbox relay 重试风暴（domain={{ $labels.domain }}）"
-          description: "requeue 速率 {{ $value }}/s on domain {{ $labels.domain }}；broker 瞬态失败持续退避重投，先于积压告警感知，排查 broker。"
+          summary: "Outbox relay 重试风暴"
+          description: "requeue 速率 {{ $value }}/s；broker 瞬态失败持续退避重投，先于积压告警感知，排查 broker。"
 
       # relay tick 耗时过高（P95）：DB 慢查询/broker 慢导致 tick 变长 → 积压加速。领先于 oldest-age 告警。
       - alert: OutboxRelayTickSlow
@@ -213,32 +216,46 @@ groups:
 
       # Consumer app DLX store 写失败：死信未落库，worker health 已降级；必须人工排查 PG/Vault/KeyProvider。
       - alert: ConsumerDlxWriteError
-        expr: sum by (domain) (increase(consumer_dlx_write_total{outcome="error"}[5m])) > 0
+        expr: |
+          (increase(consumer_dlx_write_total{outcome="error"}[5m]) > 0)
+          or
+          (
+            (consumer_dlx_write_total{outcome="error"} > 0)
+            unless
+            (consumer_dlx_write_total{outcome="error"} offset 5m)
+          )
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Consumer app DLX 写失败（domain={{ $labels.domain }}）"
-          description: "近 5min consumer_dlx_write_total{outcome=\"error\"} 增长 {{ $value }}（domain={{ $labels.domain }}）；检查 dead_letter 写入、Vault transit 与 consumer worker readyz。"
+          summary: "Consumer app DLX 写失败"
+          description: "近 5min consumer_dlx_write_total{outcome=\"error\"} 增长/首次 series 信号 {{ $value }}；检查 dead_letter 写入、Vault transit 与 consumer worker readyz。"
 
       # DLX 写失败后 release claim 也失败：active claimed 仍是 transient/Requeue；只有 durable done 才 Duplicate→Ack。
       - alert: ConsumerReleaseFailed
-        expr: sum by (domain) (increase(consumer_release_failed_total[5m])) > 0
+        expr: |
+          (increase(consumer_release_failed_total[5m]) > 0)
+          or
+          (
+            (consumer_release_failed_total > 0)
+            unless
+            (consumer_release_failed_total offset 5m)
+          )
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Consumer release claim 失败（domain={{ $labels.domain }}）"
-          description: "近 5min consumer_release_failed_total 增长 {{ $value }}（domain={{ $labels.domain }}）；该路径会 broker Requeue 并等待 release 成功或 TTL 重捞，需检查 inbox claim store 和 DLX 写失败根因。"
+          summary: "Consumer release claim 失败"
+          description: "近 5min consumer_release_failed_total 增长/首次 series 信号 {{ $value }}；该路径会 broker Requeue 并等待 release 成功或 TTL 重捞，需检查 inbox claim store 和 DLX 写失败根因。"
 
-      # lease lost 是 hard-fence 正常控制流，但持续升高说明 handler 过慢、TTL 偏小或并发争用异常。
+      # lease lost 是 hard-fence 正常控制流；进程内全部 consumer 聚合速率持续超过 2/s 才说明异常。
       - alert: ConsumerLeaseLostHigh
-        expr: sum by (domain) (rate(consumer_lease_lost_total[5m])) > 1
+        expr: rate(consumer_lease_lost_total[5m]) > 2
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Consumer lease lost 速率偏高（domain={{ $labels.domain }}）"
+          summary: "Consumer lease lost 速率偏高"
           description: "consumer_lease_lost_total rate={{ $value }}/s；检查 handler duration、inbox lease TTL、worker 并发与数据库延迟。"
 
       # Saga 补偿失败已写入 dead_letter：需要人工介入，不允许静默累积。

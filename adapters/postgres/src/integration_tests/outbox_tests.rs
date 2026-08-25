@@ -2322,7 +2322,11 @@ async fn t_dead_letter_replay_wrong_domain_writes_outbox_without_projection_mirr
     )
     .await?;
     let replay_id = IdemKey::parse(&unique_event_id("replay-wrong-domain")).unwrap();
-    let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
+    let dlq = maintenance.dlq_store(
+        test_dlx_payload_protector(),
+        plan.projection_capture(),
+        test_eventing_emitter(),
+    );
 
     let outcome = dlq
         .replay_dead_letter(DlqReplayRequest::new(
@@ -2391,7 +2395,11 @@ async fn t_dead_letter_replay_projection_catalog_drift_rolls_back_atomically() -
         "fixture must remove the live projection catalog"
     );
     let replay_id = IdemKey::parse(&unique_event_id("replay-projection-drift")).unwrap();
-    let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
+    let dlq = maintenance.dlq_store(
+        test_dlx_payload_protector(),
+        plan.projection_capture(),
+        test_eventing_emitter(),
+    );
 
     let replay = dlq
         .replay_dead_letter(DlqReplayRequest::new(
@@ -2453,7 +2461,11 @@ async fn t_dead_letter_replay_aad_tamper_is_invalid_without_writes() -> TestResu
         "consumer-aad-tamper",
     )
     .await?;
-    let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
+    let dlq = maintenance.dlq_store(
+        test_dlx_payload_protector(),
+        plan.projection_capture(),
+        test_eventing_emitter(),
+    );
     let contract_replay_id = IdemKey::parse(&unique_event_id("replay-contract-tampered")).unwrap();
     let group_replay_id = IdemKey::parse(&unique_event_id("replay-group-tampered")).unwrap();
 
@@ -2532,7 +2544,11 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
     let binding = generated::event::PROJECTION_INPUTS[0];
     let dl = store.dead_letter(test_dlx_payload_protector());
-    let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
+    let dlq = maintenance.dlq_store(
+        test_dlx_payload_protector(),
+        plan.projection_capture(),
+        test_eventing_emitter(),
+    );
     let domain = binding.domain().to_string();
     let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("consumer-msg");
@@ -2974,7 +2990,11 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .execute(&store.pool)
         .await?;
 
-    let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
+    let dlq = maintenance.dlq_store(
+        test_dlx_payload_protector(),
+        plan.projection_capture(),
+        test_eventing_emitter(),
+    );
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
     let replay_id = IdemKey::parse(&unique_event_id("bad-replay")).unwrap();
@@ -3423,7 +3443,7 @@ async fn dlq_mutation_rolls_back_when_atomic_finish_audit_fails() -> TestResult 
     .execute(&store.pool)
     .await?;
 
-    let dlq = maintenance.dlq_store_without_payload_replay();
+    let dlq = maintenance.dlq_store_without_payload_replay(test_eventing_emitter());
     let result = dlq
         .redrive_outbox(DlqRedriveRequest::new(
             dlq_authorization_with_audit_id(tenant, audit_id.clone()),
@@ -3470,7 +3490,7 @@ async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
         uuid::Uuid::new_v4()
     ))?;
 
-    let dlq = maintenance.dlq_store_without_payload_replay();
+    let dlq = maintenance.dlq_store_without_payload_replay(test_eventing_emitter());
     let redriven = dlq
         .redrive_outbox(DlqRedriveRequest::new(
             dlq_authorization_with_audit_id(tenant, finish_audit_id.clone()),
@@ -3550,7 +3570,7 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
     setup_outbox(&store).await?;
     let maintenance = connect_pg_maintenance(&pg).await?;
     let tenant = test_tenant();
-    let dlq = Arc::new(maintenance.dlq_store_without_payload_replay());
+    let dlq = Arc::new(maintenance.dlq_store_without_payload_replay(test_eventing_emitter()));
 
     let domain = unique_domain("same-id-manual");
     let event_id = unique_event_id("same-id-manual");
@@ -3805,7 +3825,7 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
         "an unresolved DLX head must block its successor"
     );
 
-    let dlq = maintenance.dlq_store_without_payload_replay();
+    let dlq = maintenance.dlq_store_without_payload_replay(test_eventing_emitter());
     let ticket = OutboxResolutionChangeTicket::parse("CHG-1742")?;
     let unexpired_before: (String, String) =
         sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
@@ -3983,7 +4003,7 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
     .execute(&store.pool)
     .await?;
 
-    let dlq = Arc::new(maintenance.dlq_store_without_payload_replay());
+    let dlq = Arc::new(maintenance.dlq_store_without_payload_replay(test_eventing_emitter()));
     let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-COMP")?;
     let rejected = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::compensated(
@@ -5740,7 +5760,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     );
 
     // re-drive H：经 DLQ store 固定函数把 H 从 dlx 重置回 pending。
-    let dlq = maintenance.dlq_store_without_payload_replay();
+    let dlq = maintenance.dlq_store_without_payload_replay(test_eventing_emitter());
     let redrive = dlq
         .redrive_outbox(DlqRedriveRequest::new(
             dlq_authorization(test_tenant()),
@@ -6903,7 +6923,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         "t29: DLX 队头必须阻塞同 partition 后继投递"
     );
 
-    let dlq = maintenance.dlq_store_without_payload_replay();
+    let dlq = maintenance.dlq_store_without_payload_replay(test_eventing_emitter());
     let redrive = dlq
         .redrive_outbox(DlqRedriveRequest::new(
             dlq_authorization(test_tenant()),

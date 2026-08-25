@@ -35,6 +35,10 @@ use primitives::{AdmissionError, ConsumerAdmission};
 use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
 use eventing::lifecycle::RetryPolicy;
 use eventing::metadata::EventMetadata;
+use eventing::observability::{
+    EventingDeadLetterSkipReason, EventingDisposition, EventingEmitter, EventingIoOutcome,
+    EventingObservation,
+};
 
 /// One transport message paired with the metadata validated by consumer preflight.
 ///
@@ -181,6 +185,7 @@ pub struct ConsumerMeta {
     expected_schema_version: Option<String>,
     expected_schema_hash: Option<String>,
     tenant_authority: Arc<TenantAuthority>,
+    observability: Arc<dyn EventingEmitter>,
 }
 
 impl ConsumerMeta {
@@ -192,6 +197,7 @@ impl ConsumerMeta {
         topic: impl Into<String>,
         consumer_group: impl Into<String>,
         tenant_authority: Arc<TenantAuthority>,
+        observability: Arc<dyn EventingEmitter>,
     ) -> Self {
         Self {
             domain: domain.into(),
@@ -202,6 +208,7 @@ impl ConsumerMeta {
             expected_schema_version: None,
             expected_schema_hash: None,
             tenant_authority,
+            observability,
         }
     }
 
@@ -237,6 +244,18 @@ impl ConsumerMeta {
     #[doc(hidden)]
     pub fn consumer_group(&self) -> &str {
         &self.consumer_group
+    }
+
+    /// Closed Eventing observation sink bound by the composition root.
+    #[doc(hidden)]
+    pub fn observability(&self) -> &dyn EventingEmitter {
+        self.observability.as_ref()
+    }
+
+    /// Clone the shared observation sink for a worker-owned wrapper.
+    #[doc(hidden)]
+    pub fn observability_emitter(&self) -> Arc<dyn EventingEmitter> {
+        Arc::clone(&self.observability)
     }
 
     #[doc(hidden)]
@@ -547,13 +566,7 @@ where
         Err(_) => {
             log_parse_failed(&msg);
             // malformed id：broker Reject（不重投）。
-            settle(
-                acker,
-                diport::AckAction::Reject,
-                meta.domain(),
-                msg.id().as_str(),
-            )
-            .await;
+            settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
             return false;
         }
     };
@@ -561,13 +574,7 @@ where
         Ok(causation_id) => causation_id,
         Err(_) => {
             log_parse_failed(&msg);
-            settle(
-                acker,
-                diport::AckAction::Reject,
-                meta.domain(),
-                msg.id().as_str(),
-            )
-            .await;
+            settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
             return false;
         }
     };
@@ -600,13 +607,7 @@ where
         // 后端故障：结构化 warn，不 commit；disposition 按 EngineErrorKind 分流（见 try_claim_err_action）。
         Err(e) => {
             log_try_claim_failed(&msg, &e);
-            settle(
-                acker,
-                try_claim_err_action(&e),
-                meta.domain(),
-                msg.id().as_str(),
-            )
-            .await;
+            settle(acker, try_claim_err_action(&e), meta, msg.id().as_str()).await;
             false
         }
         // Expected contention is not a backend error: keep it out of warn/health signals and hold
@@ -618,13 +619,7 @@ where
         // 幂等短路：不调 handler、不 commit；broker Ack（已处理过，无需再投）。
         Ok(SeenState::Duplicate) => {
             log_duplicate(&msg, meta);
-            settle(
-                acker,
-                diport::AckAction::Ack,
-                meta.domain(),
-                msg.id().as_str(),
-            )
-            .await;
+            settle(acker, diport::AckAction::Ack, meta, msg.id().as_str()).await;
             false
         }
         Ok(SeenState::Fresh) => {
@@ -659,11 +654,8 @@ pub async fn settle_claim_in_progress(
     lease_cfg: LeaseConfig,
 ) {
     let delay = claim_in_progress_delay(lease_cfg);
-    metrics::counter!(
-        "consumer_claim_in_progress_total",
-        "domain" => meta.domain().to_owned(),
-    )
-    .increment(1);
+    meta.observability()
+        .emit(EventingObservation::ConsumerClaimInProgress);
     tracing::debug!(
         message_id = msg.id().as_str(),
         domain = meta.domain(),
@@ -675,13 +667,7 @@ pub async fn settle_claim_in_progress(
     if acker.is_some() {
         tokio::time::sleep(delay).await;
     }
-    settle(
-        acker,
-        diport::AckAction::Requeue,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
+    settle(acker, diport::AckAction::Requeue, meta, msg.id().as_str()).await;
 }
 
 fn claim_in_progress_delay(lease_cfg: LeaseConfig) -> Duration {
@@ -752,8 +738,8 @@ where
         // 续租侧判租约丢失：handler future 被 drop（cancel 执行上下文），hard-fence 结算 Requeue、不 commit。
         () = renewal_loop(idempotency, meta, ctx, key, lease, lease_cfg, &message_id) => {
             log_lease_lost(meta, &message_id);
-            emit_lease_lost(meta.domain());
-            settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
+            emit_lease_lost(meta);
+            settle(acker, diport::AckAction::Requeue, meta, &message_id).await;
             false
         }
     }
@@ -885,7 +871,7 @@ async fn run_handler_loop<S, H>(
                     } else {
                         diport::AckAction::Requeue
                     };
-                settle(acker, action, meta.domain(), msg.id().as_str()).await;
+                settle(acker, action, meta, msg.id().as_str()).await;
                 return;
             }
             consistency::Settled::Reject { kind } => {
@@ -963,7 +949,7 @@ where
         // leaseLost hard-fence：commit 期租约已被重捞 → 不 Ack、降级 Requeue（stale holder 不双写 done）。
         Ok(LeaseOutcome::Lost) => {
             log_commit_lost(meta, message_id);
-            emit_lease_lost(meta.domain());
+            emit_lease_lost(meta);
             false
         }
         Err(e) => {
@@ -991,7 +977,7 @@ where
     match idempotency.release(ctx, key, lease).await {
         Ok(()) => true,
         Err(e) => {
-            emit_release_failed(meta.domain());
+            emit_release_failed(meta);
             tracing::error!(
                 message_id,
                 domain = meta.domain(),
@@ -1069,7 +1055,7 @@ pub async fn dead_letter<S>(
             } else {
                 diport::AckAction::Requeue
             };
-            settle(acker, action, meta.domain(), msg.id().as_str()).await;
+            settle(acker, action, meta, msg.id().as_str()).await;
         }
         Err(e) => {
             // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 try_claim 回 Fresh、
@@ -1085,7 +1071,7 @@ pub async fn dead_letter<S>(
                 } else {
                     diport::AckAction::Reject
                 },
-                meta.domain(),
+                meta,
                 msg.id().as_str(),
             )
             .await;
@@ -1097,12 +1083,8 @@ pub async fn dead_letter<S>(
 ///
 /// `acker = None` 是 brokerless / MemBus 路径（`run_consumer`），noop（无 broker、不发 metric）。
 /// `acker = Some(a)` 是 at-least-once 路径（`run_consumer_ackable`）：结算失败仅结构化 error 日志（不 panic），
-/// 并发 `consumer_settle_total{domain,action,outcome}` counter 供告警（review #265 F3/C3）——闭值集 label：
-/// `action`=[`diport::AckAction::as_label`]、`outcome`=`ok|error`、`domain` 由 [`ConsumerMeta`] 封边。
-///
-/// metric 形态：minimal 直发 `metrics` facade（无 recorder 即 no-op，对齐 `relay_metrics::MetricsOutboxMetrics`
-/// 的底层发射）；注入式 `ConsumerMetrics` port（与 `OutboxMetrics` 同形、组合根注入）属重构，随 consumer worker
-/// 生命周期落地（follow-up #1301）。
+/// 并发 `consumer_settle_total{action,outcome}` observation 供告警——闭值集 label 由公共
+/// [`EventingEmitter`] contract 封边，provider metrics/tracing 只在 `observ` adapter 投影。
 ///
 /// `error = %e` 安全前提：`AckError::Display` 是 const literal `"ack settle failed"`，不携 runtime 数据
 /// （见 `diport::AckError` rustdoc，INVARIANT DIPORT-ERR-SOURCE-REDACT-01）。
@@ -1110,12 +1092,12 @@ pub async fn dead_letter<S>(
 pub async fn settle(
     acker: Option<&diport::DynAcker<'static>>,
     action: diport::AckAction,
-    domain: &str,
+    meta: &ConsumerMeta,
     message_id: &str,
 ) {
     let Some(a) = acker else { return };
     let outcome = match a.settle(action).await {
-        Ok(()) => "ok",
+        Ok(()) => EventingIoOutcome::Ok,
         Err(e) => {
             tracing::error!(
                 message_id,
@@ -1123,31 +1105,32 @@ pub async fn settle(
                 error = %e,
                 "consumer: broker settle failed"
             );
-            "error"
+            EventingIoOutcome::Error
         }
     };
-    // 闭值集 label：domain 由 ConsumerMeta 封边、action/outcome 编译期闭集；domain 在发射处才降 owned String。
-    metrics::counter!(
-        "consumer_settle_total",
-        "domain" => domain.to_owned(),
-        "action" => action.as_label(),
-        "outcome" => outcome,
-    )
-    .increment(1);
+    meta.observability()
+        .emit(EventingObservation::ConsumerSettlement {
+            action: ack_action(action),
+            outcome,
+        });
+}
+
+fn ack_action(action: diport::AckAction) -> EventingDisposition {
+    match action {
+        diport::AckAction::Ack => EventingDisposition::Ack,
+        diport::AckAction::Requeue => EventingDisposition::Requeue,
+        diport::AckAction::Reject => EventingDisposition::Reject,
+    }
 }
 
 /// DLX skip metric for fail-closed paths where the app DLX write is intentionally suppressed.
 ///
-/// Closed labels: `reason` is emitted from module-owned literals; `domain` is bounded by `ConsumerMeta`.
-/// This keeps alerts separate from broker settle metrics, which only describe final broker disposition.
+/// The typed `reason` is projected by the public Eventing vocabulary with no scope labels. This
+/// keeps alerts separate from broker settle metrics, which only describe final broker disposition.
 #[doc(hidden)]
-pub fn record_dead_letter_skip(meta: &ConsumerMeta, reason: &'static str) {
-    metrics::counter!(
-        "consumer_dlx_skip_total",
-        "domain" => meta.domain().to_owned(),
-        "reason" => reason,
-    )
-    .increment(1);
+pub fn record_dead_letter_skip(meta: &ConsumerMeta, reason: EventingDeadLetterSkipReason) {
+    meta.observability()
+        .emit(EventingObservation::ConsumerDeadLetterSkip { reason });
 }
 
 async fn reject_invalid_envelope_header(
@@ -1158,14 +1141,8 @@ async fn reject_invalid_envelope_header(
 ) {
     let reason = envelope_header_error_reason(error);
     record_dead_letter_skip(meta, reason);
-    log_invalid_envelope_header(meta, msg, reason, error);
-    settle(
-        acker,
-        diport::AckAction::Reject,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
+    log_invalid_envelope_header(meta, msg, reason.as_label(), error);
+    settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
 }
 
 async fn reject_invalid_tenant_authority(
@@ -1176,13 +1153,7 @@ async fn reject_invalid_tenant_authority(
 ) {
     record_dead_letter_skip(meta, error.skip_reason());
     log_dead_letter_tenant_authority_failed(meta, msg.id().as_str(), error);
-    settle(
-        acker,
-        diport::AckAction::Reject,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
+    settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
 }
 
 async fn reject_invalid_receipt_context(
@@ -1193,58 +1164,78 @@ async fn reject_invalid_receipt_context(
 ) {
     let reason = receipt_context_error_reason(error);
     record_dead_letter_skip(meta, reason);
-    log_invalid_receipt_context(meta, msg, reason);
-    settle(
-        acker,
-        diport::AckAction::Reject,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
+    log_invalid_receipt_context(meta, msg, reason.as_label());
+    settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
 }
 
 #[doc(hidden)]
-pub fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> &'static str {
+pub fn envelope_header_error_reason(error: &EnvelopeHeaderError) -> EventingDeadLetterSkipReason {
     match error {
-        EnvelopeHeaderError::MissingTenantId => "envelope_missing_tenant_id",
-        EnvelopeHeaderError::InvalidTenantId => "envelope_invalid_tenant_id",
-        EnvelopeHeaderError::MissingOccurredAt => "envelope_missing_occurred_at",
-        EnvelopeHeaderError::InvalidOccurredAt => "envelope_invalid_occurred_at",
-        EnvelopeHeaderError::MissingSchemaVersion => "envelope_missing_schema_version",
-        EnvelopeHeaderError::InvalidSchemaVersion => "envelope_invalid_schema_version",
-        EnvelopeHeaderError::MissingSchemaHash => "envelope_missing_schema_hash",
-        EnvelopeHeaderError::InvalidSchemaHash => "envelope_invalid_schema_hash",
-        EnvelopeHeaderError::SchemaVersionMismatch => "envelope_schema_version_mismatch",
-        EnvelopeHeaderError::SchemaHashMismatch => "envelope_schema_hash_mismatch",
+        EnvelopeHeaderError::MissingTenantId => {
+            EventingDeadLetterSkipReason::EnvelopeMissingTenantId
+        }
+        EnvelopeHeaderError::InvalidTenantId => {
+            EventingDeadLetterSkipReason::EnvelopeInvalidTenantId
+        }
+        EnvelopeHeaderError::MissingOccurredAt => {
+            EventingDeadLetterSkipReason::EnvelopeMissingOccurredAt
+        }
+        EnvelopeHeaderError::InvalidOccurredAt => {
+            EventingDeadLetterSkipReason::EnvelopeInvalidOccurredAt
+        }
+        EnvelopeHeaderError::MissingSchemaVersion => {
+            EventingDeadLetterSkipReason::EnvelopeMissingSchemaVersion
+        }
+        EnvelopeHeaderError::InvalidSchemaVersion => {
+            EventingDeadLetterSkipReason::EnvelopeInvalidSchemaVersion
+        }
+        EnvelopeHeaderError::MissingSchemaHash => {
+            EventingDeadLetterSkipReason::EnvelopeMissingSchemaHash
+        }
+        EnvelopeHeaderError::InvalidSchemaHash => {
+            EventingDeadLetterSkipReason::EnvelopeInvalidSchemaHash
+        }
+        EnvelopeHeaderError::SchemaVersionMismatch => {
+            EventingDeadLetterSkipReason::EnvelopeSchemaVersionMismatch
+        }
+        EnvelopeHeaderError::SchemaHashMismatch => {
+            EventingDeadLetterSkipReason::EnvelopeSchemaHashMismatch
+        }
     }
 }
 
 #[doc(hidden)]
-pub fn receipt_context_error_reason(error: ReceiptContextBuildError) -> &'static str {
+pub fn receipt_context_error_reason(
+    error: ReceiptContextBuildError,
+) -> EventingDeadLetterSkipReason {
     match error {
-        ReceiptContextBuildError::ConsumerGroup => "inbox_receipt_invalid_consumer_group",
+        ReceiptContextBuildError::ConsumerGroup => {
+            EventingDeadLetterSkipReason::InboxReceiptInvalidConsumerGroup
+        }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyDomain) => {
-            "inbox_receipt_empty_domain"
+            EventingDeadLetterSkipReason::InboxReceiptEmptyDomain
         }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyTopic) => {
-            "inbox_receipt_empty_topic"
+            EventingDeadLetterSkipReason::InboxReceiptEmptyTopic
         }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::EmptyContractId) => {
-            "inbox_receipt_empty_contract_id"
+            EventingDeadLetterSkipReason::InboxReceiptEmptyContractId
         }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidContractVersion) => {
-            "inbox_receipt_invalid_contract_version"
+            EventingDeadLetterSkipReason::InboxReceiptInvalidContractVersion
         }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidSchemaHash) => {
-            "inbox_receipt_invalid_schema_hash"
+            EventingDeadLetterSkipReason::InboxReceiptInvalidSchemaHash
         }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidTrace) => {
-            "inbox_receipt_invalid_trace"
+            EventingDeadLetterSkipReason::InboxReceiptInvalidTrace
         }
         ReceiptContextBuildError::Receipt(InboxReceiptContextError::InvalidCorrelationId) => {
-            "inbox_receipt_invalid_correlation_id"
+            EventingDeadLetterSkipReason::InboxReceiptInvalidCorrelationId
         }
-        ReceiptContextBuildError::Receipt(_) => "inbox_receipt_invalid_context",
+        ReceiptContextBuildError::Receipt(_) => {
+            EventingDeadLetterSkipReason::InboxReceiptInvalidContext
+        }
     }
 }
 
@@ -1353,7 +1344,7 @@ fn log_dead_letter_tenant_authority_failed(
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
-        reason = error.skip_reason(),
+        reason = error.skip_reason().as_label(),
         "consumer: dead-letter skipped because tenant authority is missing or invalid"
     );
 }
@@ -1444,25 +1435,19 @@ fn log_commit_failed(
 /// leaseLost 事件 counter（#1213，review #279 运维）：续租侧 + commit 侧 hard-fence 触发点均 +1，供独立
 /// 告警（与聚合的 `consumer_settle_total{action=requeue}` 区分——后者混合多种 requeue 原因）。
 ///
-/// 闭值集 label：`domain` 由 [`ConsumerMeta`] 封边（发射处才降 owned String）。minimal 直发 `metrics` facade
-/// （无 recorder 即 no-op，同 `consumer_settle_total` 范式；注入式 port 随 consumer worker 生命周期 #1301）。
+/// 无 label 的闭合 observation 经 [`ConsumerMeta`] 持有的 [`EventingEmitter`] 发射；provider
+/// metrics/tracing 只由 `observ` adapter 投影。
 #[doc(hidden)]
-pub fn emit_lease_lost(domain: &str) {
-    metrics::counter!(
-        "consumer_lease_lost_total",
-        "domain" => domain.to_owned(),
-    )
-    .increment(1);
+pub fn emit_lease_lost(meta: &ConsumerMeta) {
+    meta.observability()
+        .emit(EventingObservation::ConsumerLeaseLost);
 }
 
 /// release 失败事件 counter：DLX 写失败后 claim 可能仍存活，该指标驱动告警；
 /// 该双失败路径按 eventbus 真源 Reject，指标驱动持久化/DLX 故障告警。
-fn emit_release_failed(domain: &str) {
-    metrics::counter!(
-        "consumer_release_failed_total",
-        "domain" => domain.to_owned(),
-    )
-    .increment(1);
+fn emit_release_failed(meta: &ConsumerMeta) {
+    meta.observability()
+        .emit(EventingObservation::ConsumerReleaseFailed);
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -1494,6 +1479,9 @@ mod tests {
     };
     use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding};
     use eventing::lifecycle::RetryPolicy;
+    use eventing::observability::{
+        EventingDeadLetterSkipReason, EventingDisposition, EventingIoOutcome, EventingObservation,
+    };
 
     async fn run_test_consumer_ackable<S, H>(
         stream: diport::DeliveryStream,
@@ -1716,6 +1704,12 @@ mod tests {
     }
 
     fn meta() -> ConsumerMeta {
+        meta_with_observability(crate::test_eventing_emitter())
+    }
+
+    fn meta_with_observability(
+        observability: Arc<dyn eventing::observability::EventingEmitter>,
+    ) -> ConsumerMeta {
         ConsumerMeta::new(
             "identity",
             "identity",
@@ -1723,6 +1717,7 @@ mod tests {
             "session.created",
             "identity.session.consumer",
             tenant_authority(),
+            observability,
         )
         .with_expected_schema("v1", SCHEMA_HASH)
     }
@@ -1735,6 +1730,7 @@ mod tests {
             "session.created",
             "audit.session-created",
             tenant_authority(),
+            crate::test_eventing_emitter(),
         )
         .with_expected_schema("v1", SCHEMA_HASH)
     }
@@ -2199,6 +2195,16 @@ mod tests {
         actions: Mutex<Vec<AckAction>>,
     }
 
+    struct FailingAcker;
+
+    impl Acker for FailingAcker {
+        async fn settle(&self, _action: AckAction) -> Result<(), diport::AckError> {
+            Err(diport::AckError::new(std::io::Error::other(
+                "synthetic settle failure",
+            )))
+        }
+    }
+
     impl FakeAcker {
         /// 构造 FakeAcker + 对应 Box<DynAcker<'static>>（Arc 代理范式，与 fake_dlx 同构）。
         fn new() -> (Arc<Self>, Box<DynAcker<'static>>) {
@@ -2239,6 +2245,29 @@ mod tests {
         }
         let stream: DeliveryStream = Box::pin(futures::stream::iter(deliveries));
         (stream, ackers)
+    }
+
+    #[tokio::test]
+    async fn settle_failure_emits_error_observation_from_producer_path() {
+        let recorder = Arc::new(crate::TestEventingRecorder::default());
+        let consumer = meta_with_observability(recorder.clone());
+        let acker = DynAcker::new_box(FailingAcker);
+
+        super::settle(
+            Some(acker.as_ref()),
+            AckAction::Reject,
+            &consumer,
+            "message-1",
+        )
+        .await;
+
+        assert_eq!(
+            recorder.observations(),
+            [EventingObservation::ConsumerSettlement {
+                action: EventingDisposition::Reject,
+                outcome: EventingIoOutcome::Error,
+            }]
+        );
     }
 
     // ── handler 工厂 ─────────────────────────────────────────────────────────
@@ -2606,8 +2635,8 @@ mod tests {
             .unwrap();
 
         for (message_id, metadata, reason) in cases {
-            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-            let handle = recorder.handle();
+            let recorder = Arc::new(crate::TestEventingRecorder::default());
+            let consumer_meta = meta_with_observability(recorder.clone());
             let idem = FakeInboxStore::fresh();
             let dlx_store = FakeDeadLetterStore::new();
             let dlx = fake_dlx(dlx_store.clone());
@@ -2619,19 +2648,17 @@ mod tests {
                     boxed,
                 )]));
 
-            metrics::with_local_recorder(&recorder, || {
-                rt.block_on(run_test_consumer_ackable(
-                    stream,
-                    idem.clone(),
-                    (dlx).as_ref(),
-                    &(meta()),
-                    &(handler_ack(handler_count.clone())),
-                    lease_cfg_test(),
-                    RetryPolicy::STANDARD,
-                    consumer_admission(),
-                    CancellationToken::new(),
-                ));
-            });
+            rt.block_on(run_test_consumer_ackable(
+                stream,
+                idem.clone(),
+                (dlx).as_ref(),
+                &consumer_meta,
+                &(handler_ack(handler_count.clone())),
+                lease_cfg_test(),
+                RetryPolicy::STANDARD,
+                consumer_admission(),
+                CancellationToken::new(),
+            ));
 
             assert_eq!(
                 handler_count.load(Ordering::Relaxed),
@@ -2647,14 +2674,13 @@ mod tests {
                 "{message_id}: header gate 不写 app DLX"
             );
             assert_eq!(acker.settled_actions(), vec![AckAction::Reject]);
-            let rendered = handle.render();
             assert!(
-                rendered.contains("consumer_dlx_skip_total"),
-                "{message_id}: 缺 skip metric: {rendered}"
-            );
-            assert!(
-                rendered.contains(&format!("reason=\"{reason}\"")),
-                "{message_id}: 缺 reason={reason}: {rendered}"
+                recorder.observations().iter().any(|observation| matches!(
+                    observation,
+                    EventingObservation::ConsumerDeadLetterSkip { reason: observed }
+                        if observed.as_label() == reason
+                )),
+                "{message_id}: 缺 reason={reason} observation"
             );
         }
     }
@@ -2696,7 +2722,7 @@ mod tests {
             ),
         ];
         for (error, expected) in cases {
-            assert_eq!(receipt_context_error_reason(error), expected);
+            assert_eq!(receipt_context_error_reason(error).as_label(), expected);
         }
     }
 
@@ -2759,8 +2785,8 @@ mod tests {
             .unwrap();
 
         for (message_id, metadata, reason) in cases {
-            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-            let handle = recorder.handle();
+            let recorder = Arc::new(crate::TestEventingRecorder::default());
+            let consumer_meta = meta_with_observability(recorder.clone());
             let idem = FakeInboxStore::fresh();
             let dlx_store = FakeDeadLetterStore::new();
             let dlx = fake_dlx(dlx_store.clone());
@@ -2772,19 +2798,17 @@ mod tests {
                     boxed,
                 )]));
 
-            metrics::with_local_recorder(&recorder, || {
-                rt.block_on(run_test_consumer_ackable(
-                    stream,
-                    idem.clone(),
-                    (dlx).as_ref(),
-                    &(meta()),
-                    &(handler_reject(handler_count.clone())),
-                    lease_cfg_test(),
-                    RetryPolicy::STANDARD,
-                    consumer_admission(),
-                    CancellationToken::new(),
-                ));
-            });
+            rt.block_on(run_test_consumer_ackable(
+                stream,
+                idem.clone(),
+                (dlx).as_ref(),
+                &consumer_meta,
+                &(handler_reject(handler_count.clone())),
+                lease_cfg_test(),
+                RetryPolicy::STANDARD,
+                consumer_admission(),
+                CancellationToken::new(),
+            ));
 
             assert_eq!(
                 handler_count.load(Ordering::Relaxed),
@@ -2812,14 +2836,13 @@ mod tests {
                 "{message_id}: invalid authority 发生在 claim 前，无需 release"
             );
             assert_eq!(acker.settled_actions(), vec![AckAction::Reject]);
-            let rendered = handle.render();
             assert!(
-                rendered.contains("consumer_dlx_skip_total"),
-                "{message_id}: 缺 skip metric: {rendered}"
-            );
-            assert!(
-                rendered.contains(&format!("reason=\"{reason}\"")),
-                "{message_id}: 缺 reason={reason}: {rendered}"
+                recorder.observations().iter().any(|observation| matches!(
+                    observation,
+                    EventingObservation::ConsumerDeadLetterSkip { reason: observed }
+                        if observed.as_label() == reason
+                )),
+                "{message_id}: 缺 reason={reason} observation"
             );
         }
     }
@@ -3110,6 +3133,7 @@ mod tests {
                     "tc5-topic",
                     "tc5-group",
                     tenant_authority(),
+                    crate::test_eventing_emitter(),
                 );
                 let payload = b"SENSITIVE_PAYLOAD_BYTES";
                 let msg = Message::new_with_metadata(
@@ -3322,8 +3346,8 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn ack4b_dlx_fail_and_release_fail_settles_reject() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        let recorder = Arc::new(crate::TestEventingRecorder::default());
+        let consumer_meta = meta_with_observability(recorder.clone());
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3334,19 +3358,17 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack-4b", b"payload")]);
 
-        metrics::with_local_recorder(&recorder, || {
-            rt.block_on(run_test_consumer_ackable(
-                stream,
-                idem.clone(),
-                (dlx).as_ref(),
-                &(meta()),
-                &(handler_reject(handler_count)),
-                lease_cfg_test(),
-                RetryPolicy::STANDARD,
-                consumer_admission(),
-                CancellationToken::new(),
-            ));
-        });
+        rt.block_on(run_test_consumer_ackable(
+            stream,
+            idem.clone(),
+            (dlx).as_ref(),
+            &consumer_meta,
+            &(handler_reject(handler_count)),
+            lease_cfg_test(),
+            RetryPolicy::STANDARD,
+            consumer_admission(),
+            CancellationToken::new(),
+        ));
 
         assert_eq!(dlx_store.write_count(), 1, "dlx write 应尝试 1 次");
         assert_eq!(idem.commit_count(), 0, "双重失败时 commit 应 0");
@@ -3356,14 +3378,11 @@ mod tests {
             vec![AckAction::Reject],
             "DLX write + claim release 双失败必须 fail closed 到 Reject"
         );
-        let rendered = handle.render();
         assert!(
-            rendered.contains("consumer_release_failed_total"),
-            "缺 consumer_release_failed_total: {rendered}"
-        );
-        assert!(
-            rendered.contains("domain=\"identity\""),
-            "缺 domain label: {rendered}"
+            recorder
+                .observations()
+                .contains(&EventingObservation::ConsumerReleaseFailed),
+            "缺 ConsumerReleaseFailed observation"
         );
     }
 
@@ -3437,8 +3456,7 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     // reason: 本测断言墙钟延迟下界（InProgress 不得立即 churn）；不注入 Clock 避免改 #1142 接缝。
     fn ack5c_in_progress_delays_then_requeues_with_low_cardinality_metric() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        let recorder = Arc::new(crate::TestEventingRecorder::default());
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3449,42 +3467,38 @@ mod tests {
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack5c", b"payload")]);
 
-        metrics::with_local_recorder(&recorder, || {
-            rt.block_on(async {
-                let consumer_meta = meta();
-                let handler = handler_ack(handler_count.clone());
-                let mut run = Box::pin(run_test_consumer_ackable(
-                    stream,
-                    idem.clone(),
-                    dlx.as_ref(),
-                    &consumer_meta,
-                    &handler,
-                    lease_cfg_fast(),
-                    RetryPolicy::STANDARD,
-                    consumer_admission(),
-                    CancellationToken::new(),
-                ));
-                let delayed = tokio::time::timeout(Duration::from_millis(1), &mut run)
-                    .await
-                    .is_err();
-                assert!(
-                    delayed,
-                    "InProgress must not immediately churn broker requeue"
-                );
-                run.await;
-            });
+        rt.block_on(async {
+            let consumer_meta = meta_with_observability(recorder.clone());
+            let handler = handler_ack(handler_count.clone());
+            let mut run = Box::pin(run_test_consumer_ackable(
+                stream,
+                idem.clone(),
+                dlx.as_ref(),
+                &consumer_meta,
+                &handler,
+                lease_cfg_fast(),
+                RetryPolicy::STANDARD,
+                consumer_admission(),
+                CancellationToken::new(),
+            ));
+            let delayed = tokio::time::timeout(Duration::from_millis(1), &mut run)
+                .await
+                .is_err();
+            assert!(
+                delayed,
+                "InProgress must not immediately churn broker requeue"
+            );
+            run.await;
         });
 
         assert_eq!(handler_count.load(Ordering::Relaxed), 0);
         assert_eq!(idem.commit_count(), 0);
         assert_eq!(dlx_store.write_count(), 0);
         assert_eq!(ackers[0].settled_actions(), vec![AckAction::Requeue]);
-        let rendered = handle.render();
-        assert!(rendered.contains("consumer_claim_in_progress_total"));
-        assert!(rendered.contains("domain=\"identity\""));
         assert!(
-            !rendered.contains("message_id"),
-            "metric must stay low-cardinality"
+            recorder
+                .observations()
+                .contains(&EventingObservation::ConsumerClaimInProgress)
         );
     }
 
@@ -3622,77 +3636,60 @@ mod tests {
 
     // ── F3（review #265 C3）：settle 发 consumer_settle_total metric ──────────────
 
-    /// F3：ackable Ack settle 成功 → 发 `consumer_settle_total{domain,action,outcome}`
-    /// （domain=identity / action=ack / outcome=ok）。with_local_recorder + block_on 单线程捕获（同 TC5 范式）。
+    /// F3：ackable Ack settle 成功 → 发 `consumer_settle_total{action,outcome}`
+    /// （action=ack / outcome=ok）的 canonical observation。
     #[test]
     fn settle_emits_consumer_settle_total_metric() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        let recorder = Arc::new(crate::TestEventingRecorder::default());
         #[allow(clippy::unwrap_used)]
         // reason: 测试 runtime 构造，item-level carve-out
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        metrics::with_local_recorder(&recorder, || {
-            rt.block_on(async {
-                let idem = FakeInboxStore::fresh();
-                let dlx = fake_dlx(FakeDeadLetterStore::new());
-                let handler_count = Arc::new(AtomicU32::new(0));
-                let (stream, _ackers) = delivery_stream_of(&[("m-metric", b"payload")]);
-                run_test_consumer_ackable(
-                    stream,
-                    idem,
-                    (dlx).as_ref(),
-                    &(meta()),
-                    &(handler_ack(handler_count)),
-                    lease_cfg_test(),
-                    RetryPolicy::STANDARD,
-                    consumer_admission(),
-                    CancellationToken::new(),
-                )
-                .await;
-            });
+        rt.block_on(async {
+            let idem = FakeInboxStore::fresh();
+            let dlx = fake_dlx(FakeDeadLetterStore::new());
+            let handler_count = Arc::new(AtomicU32::new(0));
+            let (stream, _ackers) = delivery_stream_of(&[("m-metric", b"payload")]);
+            run_test_consumer_ackable(
+                stream,
+                idem,
+                (dlx).as_ref(),
+                &meta_with_observability(recorder.clone()),
+                &(handler_ack(handler_count)),
+                lease_cfg_test(),
+                RetryPolicy::STANDARD,
+                consumer_admission(),
+                CancellationToken::new(),
+            )
+            .await;
         });
-        let rendered = handle.render();
         assert!(
-            rendered.contains("consumer_settle_total"),
-            "缺 metric consumer_settle_total: {rendered}"
-        );
-        assert!(
-            rendered.contains("domain=\"identity\""),
-            "缺 domain label: {rendered}"
-        );
-        assert!(
-            rendered.contains("action=\"ack\""),
-            "缺 action=ack label: {rendered}"
-        );
-        assert!(
-            rendered.contains("outcome=\"ok\""),
-            "缺 outcome=ok label: {rendered}"
+            recorder.observations().iter().any(|observation| matches!(
+                observation,
+                EventingObservation::ConsumerSettlement {
+                    action: EventingDisposition::Ack,
+                    outcome: EventingIoOutcome::Ok,
+                }
+            )),
+            "缺 Ack/Ok settlement observation"
         );
     }
 
     /// Missing/invalid tenant on DLX path emits a dedicated skip metric so it is visible independently from Reject settle.
     #[test]
     fn dead_letter_tenant_authority_binding_mismatch_emits_skip_metric() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || {
-            record_dead_letter_skip(&meta(), "tenant_authority_binding_mismatch");
-        });
-        let rendered = handle.render();
-        assert!(
-            rendered.contains("consumer_dlx_skip_total"),
-            "缺 metric consumer_dlx_skip_total: {rendered}"
+        let recorder = Arc::new(crate::TestEventingRecorder::default());
+        record_dead_letter_skip(
+            &meta_with_observability(recorder.clone()),
+            EventingDeadLetterSkipReason::TenantAuthorityBindingMismatch,
         );
-        assert!(
-            rendered.contains("domain=\"identity\""),
-            "缺 domain label: {rendered}"
-        );
-        assert!(
-            rendered.contains("reason=\"tenant_authority_binding_mismatch\""),
-            "缺 reason=tenant_authority_binding_mismatch label: {rendered}"
+        assert_eq!(
+            recorder.observations(),
+            vec![EventingObservation::ConsumerDeadLetterSkip {
+                reason: EventingDeadLetterSkipReason::TenantAuthorityBindingMismatch,
+            }]
         );
     }
 

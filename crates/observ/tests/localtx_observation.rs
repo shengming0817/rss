@@ -20,7 +20,12 @@ struct TestRoute;
 fn route() -> HttpRouteBinding<TestRoute, LocalTx> {
     HttpRouteBinding::from_static(
         HttpContractOwner::domain("identity"),
-        ContractBinding::from_static("identity", "identity.password-change", "v1", "test"),
+        ContractBinding::from_static(
+            "identity",
+            "identity.password-change",
+            "v1",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ),
         "/test",
         "POST",
         &[],

@@ -2,12 +2,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    BacklogSample, Disposition, InboxState, LeaseOutcome, LeaseToken, OutboxContractId,
-    OutboxMetricSubject, OutboxRelay, SeenState,
+    Disposition, InboxState, LeaseOutcome, LeaseToken, OutboxContractId, OutboxMetricSubject,
+    OutboxRelay, SeenState,
 };
-use eventexec::{
-    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, WorkerHealth, relay_loop,
-};
+use eventexec::{RelayConfig, WorkerHealth, relay_loop};
+use eventing::observability::{EventingEmitter, EventingObservation};
 use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashStatus};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -319,14 +318,10 @@ impl diport::Clock for FixedClock {
     }
 }
 
-struct NoopMetrics;
+struct TestEmitter;
 
-impl OutboxMetrics for NoopMetrics {
-    fn record_publish(&self, _scope: &OutboxMetricScope<'_>, _disposition: Disposition) {}
-    fn record_backlog(&self, _scope: &OutboxMetricScope<'_>, _sample: BacklogSample) {}
-    fn record_backlog_unavailable(&self, _scope: &OutboxMetricScope<'_>) {}
-    fn record_partition_blocked(&self, _scope: &OutboxMetricScope<'_>, _blocked_depth: u64) {}
-    fn record_tick_duration(&self, _phase: RelayPhase, _seconds: f64) {}
+impl EventingEmitter for TestEmitter {
+    fn emit(&self, _observation: EventingObservation) {}
 }
 
 #[allow(clippy::expect_used)]
@@ -378,7 +373,7 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
         Arc::new(FixedClock),
         CancellationToken::new(),
         Arc::new(WorkerHealth::healthy()),
-        Arc::new(NoopMetrics),
+        Arc::new(TestEmitter),
         relay_admission(),
     ));
     tokio::time::timeout(
@@ -410,7 +405,7 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
         Arc::new(FixedClock),
         token.clone(),
         Arc::new(WorkerHealth::healthy()),
-        Arc::new(NoopMetrics),
+        Arc::new(TestEmitter),
         relay_admission(),
     ));
     tokio::time::timeout(Duration::from_secs(5), store.settled.notified())

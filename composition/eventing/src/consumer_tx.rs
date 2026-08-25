@@ -25,6 +25,10 @@ use eventexec::consumer::{
 };
 use eventing::delivery::{ConsumerTxOutcome, RejectKind};
 use eventing::lifecycle::{ConsumerTxAction, ConsumerTxLifecycle, RetryPolicy};
+use eventing::observability::{
+    EventingDeadLetterSkipReason, EventingEmitter, EventingIoOutcome, EventingObservation,
+    EventingTransactionStatus,
+};
 
 /// Closed ConsumerTx external-effect policies used as type-level handler capabilities.
 pub(crate) mod policy {
@@ -294,7 +298,7 @@ async fn reject_tx_preflight(
 ) {
     match error {
         TxPreflightError::MalformedId => {
-            record_dead_letter_skip(meta, "malformed_id");
+            record_dead_letter_skip(meta, EventingDeadLetterSkipReason::MalformedId);
             log_tx_parse_failed(msg);
         }
         TxPreflightError::InvalidEnvelopeHeader(error) => {
@@ -308,16 +312,10 @@ async fn reject_tx_preflight(
         TxPreflightError::InvalidReceiptContext(error) => {
             let reason = receipt_context_error_reason(error);
             record_dead_letter_skip(meta, reason);
-            log_tx_invalid_receipt_context(meta, msg, reason);
+            log_tx_invalid_receipt_context(meta, msg, reason.as_label());
         }
     }
-    settle(
-        acker,
-        diport::AckAction::Reject,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
+    settle(acker, diport::AckAction::Reject, meta, msg.id().as_str()).await;
 }
 
 async fn settle_tx_try_claim_error(
@@ -330,7 +328,7 @@ async fn settle_tx_try_claim_error(
     settle(
         acker,
         tx_try_claim_error_action(error),
-        meta.domain(),
+        meta,
         msg.id().as_str(),
     )
     .await;
@@ -350,13 +348,7 @@ async fn ack_tx_duplicate(
     acker: Option<&diport::DynAcker<'static>>,
 ) {
     log_tx_duplicate(msg, meta);
-    settle(
-        acker,
-        diport::AckAction::Ack,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
+    settle(acker, diport::AckAction::Ack, meta, msg.id().as_str()).await;
 }
 
 fn log_tx_parse_failed(msg: &Message) {
@@ -387,7 +379,7 @@ fn log_tx_invalid_tenant_authority(
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
-        reason = error.skip_reason(),
+        reason = error.skip_reason().as_label(),
         "consumer-tx: tenant authority invalid, rejected"
     );
 }
@@ -481,8 +473,8 @@ where
             terminal,
         ) => {
             log_lease_lost(meta, &message_id);
-            emit_lease_lost(meta.domain());
-            settle(acker, diport::AckAction::Requeue, meta.domain(), &message_id).await;
+            emit_lease_lost(meta);
+            settle(acker, diport::AckAction::Requeue, meta, &message_id).await;
             false
         }
     }
@@ -533,6 +525,7 @@ async fn run_tx_handler_loop<S, P, H>(
         let outcome = Arc::clone(handler)
             .handle(Arc::clone(&event), ctx.clone(), key.clone(), lease.clone())
             .await;
+        let outcome_status = outcome.observability_status();
         let outcome_label = outcome.as_label();
         let action = match lifecycle.finish_attempt(&outcome, tokio::time::sleep).await {
             Ok(action) => action,
@@ -543,22 +536,16 @@ async fn run_tx_handler_loop<S, P, H>(
         };
         match action {
             ConsumerTxAction::Commit => {
-                record_consumer_tx_outcome(meta, outcome_label);
+                record_consumer_tx_outcome(meta, outcome_status);
                 // The provider proof means the receipt/domain transaction is durably terminal.
                 // Stop lease fencing before broker settlement: a concurrent extend now observes
                 // `done` as Lost, but must not cancel the Ack authorized by that proof.
                 terminal.cancel();
-                settle(
-                    acker,
-                    diport::AckAction::Ack,
-                    meta.domain(),
-                    msg.id().as_str(),
-                )
-                .await;
+                settle(acker, diport::AckAction::Ack, meta, msg.id().as_str()).await;
                 return;
             }
             ConsumerTxAction::Reject(kind) => {
-                record_consumer_tx_outcome(meta, outcome_label);
+                record_consumer_tx_outcome(meta, outcome_status);
                 dead_letter(
                     dlx,
                     idempotency,
@@ -577,62 +564,40 @@ async fn run_tx_handler_loop<S, P, H>(
             }
             ConsumerTxAction::RetryReady { .. } => {}
             ConsumerTxAction::Requeue => {
-                record_consumer_tx_outcome(meta, outcome_label);
+                record_consumer_tx_outcome(meta, outcome_status);
                 log_tx_non_retryable_requeue(meta, &msg, outcome_label);
-                settle(
-                    acker,
-                    diport::AckAction::Requeue,
-                    meta.domain(),
-                    msg.id().as_str(),
-                )
-                .await;
+                settle(acker, diport::AckAction::Requeue, meta, msg.id().as_str()).await;
                 return;
             }
             ConsumerTxAction::Fenced => {
-                record_consumer_tx_outcome(meta, outcome_label);
+                record_consumer_tx_outcome(meta, outcome_status);
                 log_lease_lost(meta, msg.id().as_str());
-                emit_lease_lost(meta.domain());
+                emit_lease_lost(meta);
                 tracing::warn!(
                     message_id = msg.id().as_str(),
                     "consumer-tx: lease lost in transaction, requeued without app dlx"
                 );
-                settle(
-                    acker,
-                    diport::AckAction::Requeue,
-                    meta.domain(),
-                    msg.id().as_str(),
-                )
-                .await;
+                settle(acker, diport::AckAction::Requeue, meta, msg.id().as_str()).await;
                 return;
             }
             ConsumerTxAction::Exhausted => {
-                record_consumer_tx_outcome(meta, outcome_label);
+                record_consumer_tx_outcome(meta, outcome_status);
                 log_tx_handler_transient_exhausted(
                     meta,
                     &msg,
                     retry_policy.max_attempts().get(),
                     last_requeue_summary,
                 );
-                settle(
-                    acker,
-                    diport::AckAction::Requeue,
-                    meta.domain(),
-                    msg.id().as_str(),
-                )
-                .await;
+                settle(acker, diport::AckAction::Requeue, meta, msg.id().as_str()).await;
                 return;
             }
         }
     }
 }
 
-fn record_consumer_tx_outcome(meta: &ConsumerMeta, outcome: &'static str) {
-    metrics::counter!(
-        "consumer_tx_outcome_total",
-        "domain" => meta.domain().to_owned(),
-        "outcome" => outcome,
-    )
-    .increment(1);
+fn record_consumer_tx_outcome(meta: &ConsumerMeta, status: EventingTransactionStatus) {
+    meta.observability()
+        .emit(EventingObservation::ConsumerTransaction { status });
 }
 
 fn reject_summary(kind: RejectKind) -> &'static str {
@@ -675,7 +640,7 @@ fn log_tx_handler_transient_exhausted(
 struct HealthReportingDlx {
     inner: tokio::sync::Mutex<Box<diport::DynDeadLetterStore<'static>>>,
     health: Arc<eventexec::WorkerHealth>,
-    domain: String,
+    emitter: Arc<dyn EventingEmitter>,
 }
 
 #[allow(unknown_lints, rss_diport_impl_allowlist)]
@@ -689,17 +654,13 @@ impl diport::DeadLetterStore for HealthReportingDlx {
         let inner = self.inner.lock().await;
         let result = inner.write_dead_letter(record).await;
         let outcome = if result.is_ok() {
-            "ok"
+            EventingIoOutcome::Ok
         } else {
             self.health.mark_dlx_write_error();
-            "error"
+            EventingIoOutcome::Error
         };
-        metrics::counter!(
-            "consumer_dlx_write_total",
-            "domain" => self.domain.clone(),
-            "outcome" => outcome,
-        )
-        .increment(1);
+        self.emitter
+            .emit(EventingObservation::ConsumerDeadLetterWrite { outcome });
         result
     }
 
@@ -717,7 +678,7 @@ fn health_reporting_dlx(
     diport::DynDeadLetterStore::new_box(HealthReportingDlx {
         inner: tokio::sync::Mutex::new(dlx),
         health,
-        domain: meta.domain().to_owned(),
+        emitter: meta.observability_emitter(),
     })
 }
 
@@ -746,6 +707,7 @@ where
     let runtime = tokio::runtime::Handle::current();
     let health_run = Arc::clone(&health);
     let domain = meta.domain().to_owned();
+    let emitter = meta.observability_emitter();
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
     let handler = Arc::new(handler);
     eventexec::ManagedBlockingWorker::spawn(
@@ -762,6 +724,7 @@ where
                     domain,
                     token_run,
                     health_run,
+                    emitter,
                     backoff,
                     admission,
                     async |stream, admission| {
@@ -879,62 +842,21 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingMetricKeys(Mutex<Vec<metrics::Key>>);
+    struct RecordingEmitter(Mutex<Vec<EventingObservation>>);
 
-    impl metrics::Recorder for RecordingMetricKeys {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
+    impl EventingEmitter for RecordingEmitter {
+        fn emit(&self, observation: EventingObservation) {
             self.0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(key.to_retained());
-            metrics::Counter::noop()
-        }
-
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
-        }
-
-        fn register_histogram(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::noop()
+                .push(observation);
         }
     }
 
     #[test]
     fn consumer_tx_outcome_metric_covers_the_closed_terminal_set() -> TestResult {
-        let recorder = RecordingMetricKeys::default();
-        let meta = meta()?;
+        let recorder = Arc::new(RecordingEmitter::default());
+        let meta = meta_with_emitter(recorder.clone())?;
         let outcomes = [
             ConsumerTxOutcome::Committed(test_commit_proof()),
             ConsumerTxOutcome::HandlerTransient,
@@ -945,35 +867,30 @@ mod tests {
             ConsumerTxOutcome::Fenced,
         ];
         let mut labels = std::collections::BTreeSet::new();
-        metrics::with_local_recorder(&recorder, || {
-            for outcome in outcomes {
-                let label = outcome.as_label();
-                assert!(labels.insert(label), "outcome labels must be unique");
-                record_consumer_tx_outcome(&meta, label);
-            }
-        });
+        for outcome in outcomes {
+            let status = outcome.observability_status();
+            assert!(
+                labels.insert(status.as_label()),
+                "outcome labels must be unique"
+            );
+            record_consumer_tx_outcome(&meta, status);
+        }
 
         assert_eq!(
             labels.len(),
             7,
             "metric test must cover every closed outcome"
         );
-        let keys = recorder
+        let observations = recorder
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(keys.len(), 7, "one terminal metric per closed outcome");
-        let observed = keys
+        assert_eq!(observations.len(), 7, "one observation per closed outcome");
+        let observed = observations
             .iter()
-            .map(|key| {
-                assert_eq!(key.name(), "consumer_tx_outcome_total");
-                let metric_labels = key
-                    .labels()
-                    .map(|label| (label.key(), label.value()))
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                assert_eq!(metric_labels.len(), 2, "metric labels must stay closed");
-                assert_eq!(metric_labels.get("domain").copied(), Some("audit"));
-                metric_labels.get("outcome").copied().unwrap_or("")
+            .map(|observation| match observation {
+                EventingObservation::ConsumerTransaction { status } => status.as_label(),
+                _ => panic!("unexpected observation: {observation:?}"),
             })
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(observed, labels);
@@ -1251,6 +1168,10 @@ mod tests {
     }
 
     fn meta() -> TestResult<ConsumerMeta> {
+        meta_with_emitter(Arc::new(RecordingEmitter::default()))
+    }
+
+    fn meta_with_emitter(emitter: Arc<dyn EventingEmitter>) -> TestResult<ConsumerMeta> {
         Ok(ConsumerMeta::new(
             "audit",
             "identity",
@@ -1258,6 +1179,7 @@ mod tests {
             "identity.session-created",
             "audit.session-created",
             authority()?,
+            emitter,
         )
         .with_expected_schema("v1", SCHEMA_HASH))
     }

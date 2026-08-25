@@ -5,3 +5,4 @@ pub mod delivery;
 pub mod envelope;
 pub mod lifecycle;
 pub mod metadata;
+pub mod observability;

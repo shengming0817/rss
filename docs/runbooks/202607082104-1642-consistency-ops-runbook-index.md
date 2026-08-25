@@ -12,8 +12,8 @@ redrive 权限均引用已有 Hard / Medium carrier。若某模块尚无 runtime
 
 | Module | Runbook | Metric | Alert | Dashboard | Redrive | Carrier |
 |---|---|---|---|---|---|---|
-| Outbox relay / backlog | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | exported | `docs/ops/outbox-relay-alerts.rules.yaml` | `docs/ops/202607082104-1642-consistency-dashboard-checklist.md` | tenant-scoped `rss dlq redrive-outbox` | `OutboxMetricScope`, `RelayConfig`, `OutboxContractId`, `TenantId`, closed settlement operation/reason; see `crates/observ`、`secure::redact_error` 与 typed metric enums |
-| Inbox / consumer | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | consumer metrics plus inbox stale-claim depth/oldest-age exported; active-owner failure semantics use NaN (#1683) | existing consumer rules only; no inbox backlog alert | same checklist; no shared inbox backlog panel authorized | tenant-scoped `rss dlq replay-dead-letter` | generated `InboxBacklogSelection`, private `InboxMetricScope`, `TenantId`, typed maintenance lane; see `crates/observ`、`secure::redact_error` 与 typed metric enums |
+| Outbox relay / backlog | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | exported | `docs/ops/outbox-relay-alerts.rules.yaml` | `docs/ops/202607082104-1642-consistency-dashboard-checklist.md` | tenant-scoped `rss dlq redrive-outbox` | global low-cardinality `EventingObservation`, `RelayConfig`, closed settlement operation/reason |
+| Inbox / consumer | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | consumer metrics plus global inbox stale-claim depth/oldest-age; active-owner failure semantics use NaN | existing consumer rules only; no inbox backlog alert | same checklist; no shared inbox backlog panel authorized | tenant-scoped `rss dlq replay-dead-letter` | generated `InboxBacklogSelection`, global low-cardinality `EventingObservation`, typed maintenance lane |
 | DLX lifecycle | this index | archive pending depth/oldest age + closed lifecycle outcome exported | `DlxArchiveLifecycleFailure`, `DlxArchiveOldestPendingHigh` | same checklist | no cold list/inspect/replay; expired receipt only via verified HEAD-missing proof | typed receipt/proof, dedicated PG/Vault/S3 credentials, verified WORM store; see `contracts/**/contract.toml`、`generated` 与 `crates/consistency` / `crates/observ`、`secure::redact_error` 与 typed metric enums |
 | Saga | this index | saga DLX exported | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist | no replay; diagnostic DLX only | `SagaInstanceRef`, `SagaExecutorConfig` domain / contract binding, `saga_dead_letters_total` label closure |
 | LocalTx / generic UoW / plain producer settlement | `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md` | `localtx_retry_attempts_total`, `localtx_deadline_exceeded_total`, `localtx_final_total`, `localtx_attempts`, `postgres_localtx_connection_quarantine_total`, `tx_settlement_final_total` | unsafe settlement only: `docs/ops/localtx-alerts.rules.yaml`; deadline diagnostic has no page | same checklist | no automatic replay for unsafe settlement or deadline exhaustion | `observ::LocalTxObservation` for HTTP contracts; Postgres generic runner and move-only plain producer attempt for boundary-only settlement; closed boundary/retry/deadline-stage/final-status/quarantine-stage enums; see `crates/observ`、`secure::redact_error` 与 typed metric enums |
@@ -28,11 +28,10 @@ Primary runbook: `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md`.
 
 Operational signals:
 
-- `outbox_oldest_pending_age_seconds{domain,contract_id,tenant_id}`
-- `outbox_pending_depth{domain,contract_id,tenant_id}`
-- `outbox_partition_blocked_depth{domain,contract_id,tenant_id}`
-- `outbox_publish_total{domain,contract_id,tenant_id,status}`
-- `outbox_dlx_total{domain,contract_id,tenant_id}`
+- `outbox_oldest_pending_age_seconds`
+- `outbox_pending_depth`
+- `outbox_partition_blocked_depth`
+- `outbox_publish_total{status}`（DLX = `status="reject"`）
 - `outbox_relay_tick_duration_seconds{phase}`
 - `outbox_relay_settlement_failure_total{domain,contract_id,tenant_id,operation,reason}`
 
@@ -40,8 +39,8 @@ On-call flow:
 
 1. If `OutboxBacklogOldestAgeHigh` or `OutboxPendingDepthHigh` fires, check relay and sampler readyz
    probes first; a missing backlog series is not a sampler heartbeat.
-2. If `OutboxDlxGrowth` fires, the alert only carries `domain`. Use that domain and deployment
-   ownership data to identify the candidate tenant / contract before running the tenant-scoped DLQ
+2. If `OutboxDlxGrowth` fires, the canonical metric carries only `status=reject`. Use deployment
+   ownership data and durable DLQ inventory to identify the candidate tenant / contract before running the tenant-scoped DLQ
    `list` / `inspect` commands. Do not infer `partition_key` from metrics; it is intentionally
    absent.
 3. If `OutboxPartitionBlocked` fires, inspect the outbox DLX head and only run
@@ -65,13 +64,13 @@ Primary runbook: `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md`.
 
 Operational signals:
 
-- `consumer_settle_total{domain,action,outcome}`
-- `consumer_dlx_skip_total{domain,reason}`
-- `consumer_dlx_write_total{domain,outcome}`
-- `consumer_release_failed_total{domain}`
-- `consumer_lease_lost_total{domain}`
-- `inbox_stale_claim_depth{tenant_id,consumer_group}`
-- `inbox_oldest_stale_claim_age_seconds{tenant_id,consumer_group}`
+- `consumer_settle_total{action,outcome}`
+- `consumer_dlx_skip_total{reason}`
+- `consumer_dlx_write_total{outcome}`
+- `consumer_release_failed_total`
+- `consumer_lease_lost_total`
+- `inbox_stale_claim_depth`
+- `inbox_oldest_stale_claim_age_seconds`
 
 Inbox backlog is emitted only by the active maintenance owner. A receipt enters the metric only when
 `status='claimed'` and `claimed_at <= now() - 60s`; oldest age is the complete time since

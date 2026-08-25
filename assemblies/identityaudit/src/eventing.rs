@@ -11,9 +11,9 @@ use diport::{AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, Top
 #[cfg(test)]
 use eventexec::ManagedBlockingWorker;
 use eventexec::{
-    EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayConfig,
-    RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
-    spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
+    EVENT_CONSUMER_PROBE, LeaseConfig, OUTBOX_RELAY_PROBE, RelayConfig, RetentionTarget,
+    SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth, spawn_on_dedicated_runtime,
+    spawn_relay, sweeper_loop,
 };
 use eventing::delivery::DeliveryBudget;
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
@@ -229,7 +229,7 @@ fn wire_publisher(
                 Arc::new(crate::SystemClock),
                 token,
                 worker_health,
-                Arc::new(MetricsOutboxMetrics),
+                Arc::new(observ::EventingTelemetryEmitter),
                 relay_admission,
                 EVENT_WORKER_SHUTDOWN_BUDGET,
             ))
@@ -289,7 +289,10 @@ async fn wire_subscribers(
                 topic,
                 Arc::new(inbox),
                 DynDeadLetterStore::new_box(pg.infra().dead_letter(dlx_payload_protector.clone())),
-                subscription.consumer_meta(Arc::clone(&tenant_authority)),
+                subscription.consumer_meta(
+                    Arc::clone(&tenant_authority),
+                    Arc::new(observ::EventingTelemetryEmitter),
+                ),
                 lease,
                 Arc::clone(&health),
                 admission.clone(),
@@ -415,7 +418,7 @@ fn wire_distributed_maintenance(
                         sampler_config,
                         thread_token,
                         Arc::clone(&sampler_worker_health),
-                        Arc::new(MetricsOutboxMetrics),
+                        Arc::new(observ::EventingTelemetryEmitter),
                     )
                     .await;
                     Ok(())

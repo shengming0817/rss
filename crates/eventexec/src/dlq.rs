@@ -7,6 +7,11 @@
 
 use consistency::IdemKey;
 use diport::{DeadLetterSource, DlqOperatorAuthorization, dlq_operator_action};
+use eventing::observability::{
+    EventingDeadLetterReplayFailure, EventingDeadLetterReplayResult, EventingEmitter,
+    EventingObservation, EventingOutboxDlxRedriveFailure, EventingOutboxDlxRedriveResult,
+    EventingOutboxDlxResolveFailure, EventingOutboxDlxResolveResult,
+};
 
 use crate::dead_letter::DeadLetterId;
 
@@ -681,33 +686,6 @@ impl DlqRedriveOutcome {
     }
 }
 
-/// DLQ mutation kind for `dlq_redrive_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DlqMutationKind {
-    /// Consumer dead_letter replay into a new outbox id.
-    DeadLetterReplay,
-    /// Outbox relay DLX row restored to pending.
-    OutboxDlxRedrive,
-    /// Expired outbox DLX row resolved to an audited terminal state.
-    OutboxDlxResolveExpired,
-}
-
-impl DlqMutationKind {
-    pub fn as_label(self) -> &'static str {
-        match self {
-            Self::DeadLetterReplay => "dead_letter_replay",
-            Self::OutboxDlxRedrive => "outbox_dlx_redrive",
-            Self::OutboxDlxResolveExpired => "outbox_dlx_resolve_expired",
-        }
-    }
-}
-
-/// Closed outcome label for `dlq_redrive_total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DlqMutationMetricOutcome {
-    label: &'static str,
-}
-
 /// Closed failure stage for PostgreSQL-backed dead-letter replay storage.
 ///
 /// The stage is intentionally data-free: it is safe for logs and metric labels and prevents
@@ -736,36 +714,6 @@ impl DlqReplayStoreStage {
 impl std::fmt::Display for DlqReplayStoreStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_label())
-    }
-}
-
-impl DlqMutationMetricOutcome {
-    pub fn replay(outcome: DlqReplayOutcome) -> Self {
-        Self {
-            label: outcome.as_label(),
-        }
-    }
-
-    pub fn redrive(outcome: DlqRedriveOutcome) -> Self {
-        Self {
-            label: outcome.as_label(),
-        }
-    }
-
-    pub fn resolve_expired(outcome: OutboxExpiredResolutionOutcome) -> Self {
-        Self {
-            label: outcome.as_label(),
-        }
-    }
-
-    pub fn error(error: &DlqError) -> Self {
-        Self {
-            label: error.as_label(),
-        }
-    }
-
-    pub fn as_label(self) -> &'static str {
-        self.label
     }
 }
 
@@ -813,57 +761,113 @@ impl DlqError {
     }
 }
 
-/// Emit a DLQ replay/redrive counter with closed labels.
-fn record_dlq_redrive_metric(
-    tenant: rss_request_context::TenantId,
-    kind: DlqMutationKind,
-    outcome: DlqMutationMetricOutcome,
-) {
-    metrics::counter!(
-        "dlq_redrive_total",
-        "tenant_id" => tenant.to_string(),
-        "kind" => kind.as_label(),
-        "outcome" => outcome.as_label(),
-    )
-    .increment(1);
+pub fn record_dlq_replay(emitter: &dyn EventingEmitter, outcome: DlqReplayOutcome) {
+    let result = match outcome {
+        DlqReplayOutcome::Inserted => EventingDeadLetterReplayResult::Inserted,
+        DlqReplayOutcome::AlreadyExists => EventingDeadLetterReplayResult::AlreadyExists,
+    };
+    emitter.emit(EventingObservation::DeadLetterReplay { result });
 }
 
-pub fn record_dlq_replay(tenant: rss_request_context::TenantId, outcome: DlqReplayOutcome) {
-    record_dlq_redrive_metric(
-        tenant,
-        DlqMutationKind::DeadLetterReplay,
-        DlqMutationMetricOutcome::replay(outcome),
-    );
-}
-
-pub fn record_dlq_outbox_redrive(
-    tenant: rss_request_context::TenantId,
-    outcome: DlqRedriveOutcome,
-) {
-    record_dlq_redrive_metric(
-        tenant,
-        DlqMutationKind::OutboxDlxRedrive,
-        DlqMutationMetricOutcome::redrive(outcome),
-    );
+pub fn record_dlq_outbox_redrive(emitter: &dyn EventingEmitter, outcome: DlqRedriveOutcome) {
+    let result = match outcome {
+        DlqRedriveOutcome::Redriven => EventingOutboxDlxRedriveResult::Redriven,
+        DlqRedriveOutcome::NotFound => EventingOutboxDlxRedriveResult::NotFound,
+        DlqRedriveOutcome::Expired => EventingOutboxDlxRedriveResult::Expired,
+    };
+    emitter.emit(EventingObservation::OutboxDlxRedrive { result });
 }
 
 pub fn record_outbox_expired_resolution(
-    tenant: rss_request_context::TenantId,
+    emitter: &dyn EventingEmitter,
     outcome: OutboxExpiredResolutionOutcome,
 ) {
-    record_dlq_redrive_metric(
-        tenant,
-        DlqMutationKind::OutboxDlxResolveExpired,
-        DlqMutationMetricOutcome::resolve_expired(outcome),
-    );
+    let result = match outcome {
+        OutboxExpiredResolutionOutcome::Resolved => EventingOutboxDlxResolveResult::Resolved,
+        OutboxExpiredResolutionOutcome::NotFound => EventingOutboxDlxResolveResult::NotFound,
+        OutboxExpiredResolutionOutcome::NotExpired => EventingOutboxDlxResolveResult::NotExpired,
+        OutboxExpiredResolutionOutcome::EvidenceRejected => {
+            EventingOutboxDlxResolveResult::EvidenceRejected
+        }
+    };
+    emitter.emit(EventingObservation::OutboxDlxResolveExpired { result });
 }
 
-pub fn record_dlq_mutation_error(
-    tenant: rss_request_context::TenantId,
-    kind: DlqMutationKind,
-    error: &DlqError,
-) {
-    record_dlq_redrive_metric(tenant, kind, DlqMutationMetricOutcome::error(error));
+pub fn record_dlq_replay_error(emitter: &dyn EventingEmitter, error: &DlqError) {
+    emitter.emit(EventingObservation::DeadLetterReplay {
+        result: EventingDeadLetterReplayResult::Failed(dlq_replay_failure(error)),
+    });
+}
+
+pub fn record_dlq_outbox_redrive_error(emitter: &dyn EventingEmitter, error: &DlqError) {
+    emitter.emit(EventingObservation::OutboxDlxRedrive {
+        result: EventingOutboxDlxRedriveResult::Failed(dlq_redrive_failure(error)),
+    });
+}
+
+pub fn record_outbox_expired_resolution_error(emitter: &dyn EventingEmitter, error: &DlqError) {
+    emitter.emit(EventingObservation::OutboxDlxResolveExpired {
+        result: EventingOutboxDlxResolveResult::Failed(dlq_resolve_failure(error)),
+    });
+}
+
+fn dlq_replay_failure(error: &DlqError) -> EventingDeadLetterReplayFailure {
+    match error {
+        DlqError::InvalidCursor | DlqError::InvalidResolutionInput => {
+            EventingDeadLetterReplayFailure::Invariant
+        }
+        DlqError::NotFound => EventingDeadLetterReplayFailure::NotFound,
+        DlqError::NotReplayable => EventingDeadLetterReplayFailure::NotReplayable,
+        DlqError::InvalidPayload => EventingDeadLetterReplayFailure::InvalidPayload,
+        DlqError::InvalidSchemaHeaders => EventingDeadLetterReplayFailure::InvalidSchemaHeaders,
+        DlqError::PayloadKeyUnavailable => EventingDeadLetterReplayFailure::PayloadKeyUnavailable,
+        DlqError::PayloadKeyForbidden => EventingDeadLetterReplayFailure::PayloadKeyForbidden,
+        DlqError::FactConflict(_) => EventingDeadLetterReplayFailure::FactConflict,
+        DlqError::ReplayStore(stage) => match stage {
+            DlqReplayStoreStage::FetchDeadLetter => {
+                EventingDeadLetterReplayFailure::FetchDeadLetter
+            }
+            DlqReplayStoreStage::EncodeMetadata => EventingDeadLetterReplayFailure::EncodeMetadata,
+            DlqReplayStoreStage::AppendOutbox => EventingDeadLetterReplayFailure::AppendOutbox,
+            DlqReplayStoreStage::ProjectionMirror => {
+                EventingDeadLetterReplayFailure::ProjectionMirror
+            }
+            DlqReplayStoreStage::Transaction => EventingDeadLetterReplayFailure::Transaction,
+        },
+        DlqError::Store => EventingDeadLetterReplayFailure::Store,
+    }
+}
+
+fn dlq_redrive_failure(error: &DlqError) -> EventingOutboxDlxRedriveFailure {
+    match error {
+        DlqError::Store => EventingOutboxDlxRedriveFailure::Store,
+        DlqError::InvalidCursor
+        | DlqError::NotFound
+        | DlqError::NotReplayable
+        | DlqError::InvalidPayload
+        | DlqError::InvalidSchemaHeaders
+        | DlqError::PayloadKeyUnavailable
+        | DlqError::PayloadKeyForbidden
+        | DlqError::FactConflict(_)
+        | DlqError::ReplayStore(_)
+        | DlqError::InvalidResolutionInput => EventingOutboxDlxRedriveFailure::Invariant,
+    }
+}
+
+fn dlq_resolve_failure(error: &DlqError) -> EventingOutboxDlxResolveFailure {
+    match error {
+        DlqError::InvalidResolutionInput => EventingOutboxDlxResolveFailure::InvalidResolutionInput,
+        DlqError::Store => EventingOutboxDlxResolveFailure::Store,
+        DlqError::InvalidCursor
+        | DlqError::NotFound
+        | DlqError::NotReplayable
+        | DlqError::InvalidPayload
+        | DlqError::InvalidSchemaHeaders
+        | DlqError::PayloadKeyUnavailable
+        | DlqError::PayloadKeyForbidden
+        | DlqError::FactConflict(_)
+        | DlqError::ReplayStore(_) => EventingOutboxDlxResolveFailure::Invariant,
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -1299,49 +1303,84 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    // reason: metric fixture uses a known canonical tenant id.
-    fn dlq_redrive_metric_uses_closed_kind_and_outcome_labels() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
-            .expect("canonical tenant");
-        metrics::with_local_recorder(&recorder, || {
-            record_dlq_replay(tenant, DlqReplayOutcome::Inserted);
-            record_dlq_outbox_redrive(tenant, DlqRedriveOutcome::Expired);
-            record_outbox_expired_resolution(
-                tenant,
-                OutboxExpiredResolutionOutcome::EvidenceRejected,
-            );
-            record_dlq_mutation_error(
-                tenant,
-                DlqMutationKind::OutboxDlxRedrive,
-                &DlqError::NotFound,
-            );
-            record_dlq_mutation_error(
-                tenant,
-                DlqMutationKind::DeadLetterReplay,
-                &DlqError::ReplayStore(DlqReplayStoreStage::ProjectionMirror),
-            );
-        });
+    fn dlq_redrive_uses_closed_typed_results() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<EventingObservation>>);
+        impl EventingEmitter for Recorder {
+            fn emit(&self, observation: EventingObservation) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(observation);
+            }
+        }
+        let recorder = Recorder::default();
+        record_dlq_replay(&recorder, DlqReplayOutcome::Inserted);
+        record_dlq_replay(&recorder, DlqReplayOutcome::AlreadyExists);
+        record_dlq_outbox_redrive(&recorder, DlqRedriveOutcome::Redriven);
+        record_dlq_outbox_redrive(&recorder, DlqRedriveOutcome::NotFound);
+        record_dlq_outbox_redrive(&recorder, DlqRedriveOutcome::Expired);
+        record_outbox_expired_resolution(&recorder, OutboxExpiredResolutionOutcome::Resolved);
+        record_outbox_expired_resolution(&recorder, OutboxExpiredResolutionOutcome::NotFound);
+        record_outbox_expired_resolution(&recorder, OutboxExpiredResolutionOutcome::NotExpired);
+        record_outbox_expired_resolution(
+            &recorder,
+            OutboxExpiredResolutionOutcome::EvidenceRejected,
+        );
+        record_dlq_outbox_redrive_error(&recorder, &DlqError::NotFound);
+        record_dlq_replay_error(
+            &recorder,
+            &DlqError::ReplayStore(DlqReplayStoreStage::ProjectionMirror),
+        );
+        record_outbox_expired_resolution_error(&recorder, &DlqError::InvalidResolutionInput);
 
-        let rendered = handle.render();
-        assert!(rendered.contains("dlq_redrive_total"), "{rendered}");
-        assert!(
-            rendered.contains("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
-            "{rendered}"
+        assert_eq!(
+            *recorder.0.lock().unwrap_or_else(|error| error.into_inner()),
+            vec![
+                EventingObservation::DeadLetterReplay {
+                    result: EventingDeadLetterReplayResult::Inserted,
+                },
+                EventingObservation::DeadLetterReplay {
+                    result: EventingDeadLetterReplayResult::AlreadyExists,
+                },
+                EventingObservation::OutboxDlxRedrive {
+                    result: EventingOutboxDlxRedriveResult::Redriven,
+                },
+                EventingObservation::OutboxDlxRedrive {
+                    result: EventingOutboxDlxRedriveResult::NotFound,
+                },
+                EventingObservation::OutboxDlxRedrive {
+                    result: EventingOutboxDlxRedriveResult::Expired,
+                },
+                EventingObservation::OutboxDlxResolveExpired {
+                    result: EventingOutboxDlxResolveResult::Resolved,
+                },
+                EventingObservation::OutboxDlxResolveExpired {
+                    result: EventingOutboxDlxResolveResult::NotFound,
+                },
+                EventingObservation::OutboxDlxResolveExpired {
+                    result: EventingOutboxDlxResolveResult::NotExpired,
+                },
+                EventingObservation::OutboxDlxResolveExpired {
+                    result: EventingOutboxDlxResolveResult::EvidenceRejected,
+                },
+                EventingObservation::OutboxDlxRedrive {
+                    result: EventingOutboxDlxRedriveResult::Failed(
+                        EventingOutboxDlxRedriveFailure::Invariant,
+                    ),
+                },
+                EventingObservation::DeadLetterReplay {
+                    result: EventingDeadLetterReplayResult::Failed(
+                        EventingDeadLetterReplayFailure::ProjectionMirror,
+                    ),
+                },
+                EventingObservation::OutboxDlxResolveExpired {
+                    result: EventingOutboxDlxResolveResult::Failed(
+                        EventingOutboxDlxResolveFailure::InvalidResolutionInput,
+                    ),
+                },
+            ]
         );
-        assert!(rendered.contains("dead_letter_replay"), "{rendered}");
-        assert!(rendered.contains("outbox_dlx_redrive"), "{rendered}");
-        assert!(
-            rendered.contains("outbox_dlx_resolve_expired"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("inserted"), "{rendered}");
-        assert!(rendered.contains("expired"), "{rendered}");
-        assert!(rendered.contains("not_found"), "{rendered}");
-        assert!(rendered.contains("projection_mirror"), "{rendered}");
-        assert!(rendered.contains("evidence_rejected"), "{rendered}");
     }
 
     #[test]
@@ -1357,11 +1396,119 @@ mod tests {
             assert_eq!(stage.to_string(), expected);
             let error = DlqError::ReplayStore(stage);
             assert_eq!(error.as_label(), expected);
-            assert_eq!(DlqMutationMetricOutcome::error(&error).as_label(), expected);
+            assert_eq!(dlq_replay_failure(&error).as_label(), expected);
             assert_eq!(
                 error.to_string(),
                 format!("dlq replay store failed at {expected}")
             );
         }
+    }
+
+    #[test]
+    fn dlq_failure_projection_is_exhaustive_per_operation() {
+        let replay_cases = vec![
+            (
+                DlqError::InvalidCursor,
+                EventingDeadLetterReplayFailure::Invariant,
+            ),
+            (
+                DlqError::NotFound,
+                EventingDeadLetterReplayFailure::NotFound,
+            ),
+            (
+                DlqError::NotReplayable,
+                EventingDeadLetterReplayFailure::NotReplayable,
+            ),
+            (
+                DlqError::InvalidPayload,
+                EventingDeadLetterReplayFailure::InvalidPayload,
+            ),
+            (
+                DlqError::InvalidSchemaHeaders,
+                EventingDeadLetterReplayFailure::InvalidSchemaHeaders,
+            ),
+            (
+                DlqError::PayloadKeyUnavailable,
+                EventingDeadLetterReplayFailure::PayloadKeyUnavailable,
+            ),
+            (
+                DlqError::PayloadKeyForbidden,
+                EventingDeadLetterReplayFailure::PayloadKeyForbidden,
+            ),
+            (
+                DlqError::FactConflict(consistency::OutboxFactConflict),
+                EventingDeadLetterReplayFailure::FactConflict,
+            ),
+            (DlqError::Store, EventingDeadLetterReplayFailure::Store),
+            (
+                DlqError::InvalidResolutionInput,
+                EventingDeadLetterReplayFailure::Invariant,
+            ),
+        ];
+        for (error, expected) in replay_cases {
+            assert_eq!(dlq_replay_failure(&error), expected);
+        }
+        for (stage, expected) in [
+            (
+                DlqReplayStoreStage::FetchDeadLetter,
+                EventingDeadLetterReplayFailure::FetchDeadLetter,
+            ),
+            (
+                DlqReplayStoreStage::EncodeMetadata,
+                EventingDeadLetterReplayFailure::EncodeMetadata,
+            ),
+            (
+                DlqReplayStoreStage::AppendOutbox,
+                EventingDeadLetterReplayFailure::AppendOutbox,
+            ),
+            (
+                DlqReplayStoreStage::ProjectionMirror,
+                EventingDeadLetterReplayFailure::ProjectionMirror,
+            ),
+            (
+                DlqReplayStoreStage::Transaction,
+                EventingDeadLetterReplayFailure::Transaction,
+            ),
+        ] {
+            assert_eq!(dlq_replay_failure(&DlqError::ReplayStore(stage)), expected);
+        }
+
+        let invariant_errors = vec![
+            DlqError::InvalidCursor,
+            DlqError::NotFound,
+            DlqError::NotReplayable,
+            DlqError::InvalidPayload,
+            DlqError::InvalidSchemaHeaders,
+            DlqError::PayloadKeyUnavailable,
+            DlqError::PayloadKeyForbidden,
+            DlqError::FactConflict(consistency::OutboxFactConflict),
+            DlqError::ReplayStore(DlqReplayStoreStage::Transaction),
+        ];
+        for error in &invariant_errors {
+            assert_eq!(
+                dlq_redrive_failure(error),
+                EventingOutboxDlxRedriveFailure::Invariant
+            );
+            assert_eq!(
+                dlq_resolve_failure(error),
+                EventingOutboxDlxResolveFailure::Invariant
+            );
+        }
+        assert_eq!(
+            dlq_redrive_failure(&DlqError::InvalidResolutionInput),
+            EventingOutboxDlxRedriveFailure::Invariant
+        );
+        assert_eq!(
+            dlq_redrive_failure(&DlqError::Store),
+            EventingOutboxDlxRedriveFailure::Store
+        );
+        assert_eq!(
+            dlq_resolve_failure(&DlqError::InvalidResolutionInput),
+            EventingOutboxDlxResolveFailure::InvalidResolutionInput
+        );
+        assert_eq!(
+            dlq_resolve_failure(&DlqError::Store),
+            EventingOutboxDlxResolveFailure::Store
+        );
     }
 }

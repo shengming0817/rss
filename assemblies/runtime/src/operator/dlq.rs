@@ -1228,9 +1228,17 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         if command.requires_payload_protector() {
             let dlx_payload_protector = event_transport::build_dlx_payload_protector(self.config)
                 .context("build DLQ payload protector")?;
-            Ok(session.dlq_store(dlx_payload_protector, self.projection_capture))
+            Ok(session.dlq_store(
+                dlx_payload_protector,
+                self.projection_capture,
+                std::sync::Arc::new(observ::EventingTelemetryEmitter),
+            ))
         } else {
-            Ok(session.dlq_store_without_payload_replay())
+            Ok(
+                session.dlq_store_without_payload_replay(std::sync::Arc::new(
+                    observ::EventingTelemetryEmitter,
+                )),
+            )
         }
     }
 

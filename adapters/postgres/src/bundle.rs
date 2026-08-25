@@ -2350,19 +2350,28 @@ impl PgMaintenanceDeps {
         &self,
         payload_protector: DlxPayloadProtector,
         projection_capture: eventexec::ProjectionCaptureView<'_>,
+        observability: Arc<dyn eventing::observability::EventingEmitter>,
     ) -> PgDlqStore {
         PgDlqStore::with_replay_projection_maintenance(
             &self.store,
             payload_protector,
             DlqReplayProjection::from_capture(projection_capture),
             Arc::clone(&self.clock),
+            observability,
         )
     }
 
     /// 不允许 consumer payload replay 的 inspection/outbox-redrive store。
     #[must_use]
-    pub fn dlq_store_without_payload_replay(&self) -> PgDlqStore {
-        PgDlqStore::without_payload_replay_maintenance(&self.store, Arc::clone(&self.clock))
+    pub fn dlq_store_without_payload_replay(
+        &self,
+        observability: Arc<dyn eventing::observability::EventingEmitter>,
+    ) -> PgDlqStore {
+        PgDlqStore::without_payload_replay_maintenance(
+            &self.store,
+            Arc::clone(&self.clock),
+            observability,
+        )
     }
 
     /// 关闭维护连接池。
@@ -3140,6 +3149,16 @@ mod tests {
 
     use super::*;
 
+    fn test_eventing_emitter() -> Arc<dyn eventing::observability::EventingEmitter> {
+        struct TestEmitter;
+
+        impl eventing::observability::EventingEmitter for TestEmitter {
+            fn emit(&self, _observation: eventing::observability::EventingObservation) {}
+        }
+
+        Arc::new(TestEmitter)
+    }
+
     #[test]
     fn l2_dr_admission_row_maps_every_named_column() {
         for expires_at_epoch_micros in [None, Some(1_725_000_000_123_456)] {
@@ -3576,8 +3595,12 @@ mod tests {
         )?;
         let _ = (receipt, selector);
         let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
-        let _ = deps.dlq_store(payload_protector(), plan.projection_capture());
-        let _ = deps.dlq_store_without_payload_replay();
+        let _ = deps.dlq_store(
+            payload_protector(),
+            plan.projection_capture(),
+            test_eventing_emitter(),
+        );
+        let _ = deps.dlq_store_without_payload_replay(test_eventing_emitter());
         Ok(())
     }
 
