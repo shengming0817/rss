@@ -2,8 +2,8 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-11
-- **Last updated**：2026-08-20
-- **Tracking**：#2093
+- **Last updated**：2026-08-24
+- **Tracking**：#2093、#2153
 
 ## Context
 
@@ -17,6 +17,28 @@ Standalone Component 建立真实跨包消费证据，但也把下游产品 work
 assembly、domain 或 contract。
 
 ## Decision
+
+### 2026-08-24 amendment：Cargo-native consumption 与 producer proof 边界
+
+Foundation first-green 采用 breaking cutover：彻底退役 incubator 的 Python candidate proof、动态 workspace/manifest/lock
+改写和临时 fixture materialization，不保留 CLI、schema-v1、shim、alias 或 fallback。所有真实 consumer、conformance fixture
+和 journey 永久属于同一 Cargo workspace，并且只使用一个 committed 根 `Cargo.lock`；candidate proof job 必须显式执行完整
+`--workspace`，不能用 `default-members` 缩小 receipt 覆盖面。
+
+RSS producer 是 `.crate` 包格式、index entry、archive checksum、`.cargo_vcs_info.json` 和 bundle exact-set 的唯一解析与证明
+owner。incubator 不打开 `.crate`、不重算 archive checksum、不解释 index entry，也不读取 archive VCS metadata；它只绑定
+immutable producer revision/run/attempt、artifact name/digest 和 producer 的 `candidate-bundle.json` 公共契约，再由 Cargo
+source replacement、唯一根 lock 与 resolved metadata 证明实际消费。producer 与 consumer 因而保持不同 owner，同时不重复
+解析 package format。
+
+canonical consumer job 在 runner 临时 `CARGO_HOME` 中把 logical candidate registry 映射到下载的 producer registry，先
+`cargo fetch --locked`，再 offline 执行 workspace fmt/check/test/doc/clippy、coverage、release build 和 journey。resolved graph
+中的非 workspace `rss-*` package 必须全部且仅来自该 candidate registry，name/version exact-set 必须与 producer manifest
+一致；path/git/workspace/internal RSS source、artifact identity 漂移或根 lock 改写均 fail closed。
+
+全部门禁通过后只生成一次 breaking `schemaVersion: 2` receipt，绑定 producer/consumer canonical run URL、revision、artifact
+identity、producer package proof、Cargo 实际 consumed exact-set、根 lock hash、locked/offline matrix 与 release binary hash。
+receipt 只写 GitHub job summary并由 issue/PR 链接，不提交、不上传，也不建立第二 registry 或 evidence store。
 
 ### 2026-08-20 amendment：Foundation / Eventing external-consumer handoff
 
@@ -55,7 +77,7 @@ production acceptance owner。双方职责固定为：
 | 事实 | RSS | `rss-incubator` |
 |---|---|---|
 | Release Surface 选择、公开 API、SemVer 与 package metadata | 唯一 owner | 只消费 |
-| 同 RSS revision 的 `.crate`、VCS revision、内容/checksum 与 publish closure | 唯一 owner | 验证输入 |
+| 同 RSS revision 的 `.crate`、VCS revision、内容/checksum 与 publish closure | 唯一 owner | 绑定 producer proof，不重复解析包格式 |
 | RSS package 修复、yank 与 release approval | 唯一 owner | 报告影响并升级 |
 | 下游 workspace、源码、根 `Cargo.lock` 与升级命令 | 不拥有 | 唯一 owner |
 | 产品构建、candidate consumption、CI 与产品回退 | 不拥有 | 唯一 owner |
@@ -81,7 +103,8 @@ RSS release correctness、RC 或 publish approval。
 切换复用现有 PBI DAG，不建立新的迁移状态机或 registry：
 
 1. #2094 在原外仓建立 Edition 2024 virtual workspace、唯一根 lock 和仓级 owner；RSS legacy gitlink 继续作为过渡载体。
-2. #2095 建立 incubator-owned CI 与只修改临时 checkout 的 candidate proof。
+2. #2095 曾建立 incubator-owned CI 与只修改临时 checkout 的 candidate proof；该历史载体已由 #2153
+   breaking cutover 原子替换为永久 Cargo workspace、唯一 committed 根 lock 与 runner-temporary registry transport。
 3. first-green 后由 #2096 原子删除 RSS 的 `.gitmodules`、gitlink、外仓 checkout/upgrade/lock/metadata proof、CI 初始化和
    对应旧 guard，同时保留 RSS 自有的 Release Surface `.crate` proof。
 4. cutover 后，RSS package proof 与 incubator product-consumption proof 各自只有一个 canonical owner，不保留 alias、
@@ -93,8 +116,8 @@ incubator commit、每个 package 的精确版本、checksum 与 archive VCS rev
 现有 issue/PR，不写入 committed receipt、evidence database 或第二套 release registry。
 
 Candidate-first consumer fixture 源码只归 `rss-incubator`；RSS 不保存旧 issue 路径
-`fixtures/external-conformance-consumer/`。fixture 可作为非 workspace 模板提交，由 candidate proof 仅在 committed-HEAD
-临时快照中物化并生成候选 lock，因而普通 CI 与 committed root lock 不解析尚未发布的 package。
+`fixtures/external-conformance-consumer/`。fixture 是永久 Cargo workspace member，和所有 candidate consumer 共用 committed
+根 lock；普通本地开发可只运行不需要 candidate transport 的检查，但 canonical proof 必须覆盖完整 workspace。
 
 ### 失败与回退
 
@@ -120,11 +143,11 @@ Evidence ID、selector、fixture、image、closeout carrier、跨仓 required-st
 
 | 风险 | Canonical carrier | 强度与交付 |
 |---|---|---|
-| RSS artifact correctness 漂移 | Release Surface、Cargo metadata、现有 `package-proof` | Cargo graph Hard + package proof Medium；RSS 已有 |
+| RSS artifact correctness 漂移 | Release Surface、Cargo metadata、现有 `package-proof` | Cargo graph Hard + package proof Medium；RSS 已有且唯一解析 package format |
 | Foundation/Eventing candidate 冒充已发布公共面 | Release Surface selected/planned/executed exact-set、typed owner projection、package proof | Hard + Medium；#2152/#2162 |
-| Foundation/Eventing 外部消费回到 path/source coupling | 独立 lock、registry-only resolution、forbidden-source proof、真实 consumer CI | Medium T2；#2153/#2163 |
+| Foundation/Eventing 外部消费回到 path/source coupling | 单一 committed 根 lock、registry-only Cargo resolution、resolved exact-set、真实 consumer CI | Hard/Medium T2；#2153/#2163 |
 | incubator 重新成为 RSS 子目录或共享 lock | 独立 repository、virtual workspace、唯一根 `Cargo.lock` | 物理/Cargo 边界；#2094 |
-| path/git/workspace 或 RSS internal 依赖 | Cargo resolution、forbidden-source/exact-set proof、真实 candidate CI | Medium T2；#2095 |
+| path/git/workspace 或 RSS internal 依赖 | manifest registry source、Cargo resolved graph、producer manifest/consumed exact-set、真实 candidate CI | Hard/Medium T2；#2095/#2153 |
 | RSS 继续拥有外仓源码拓扑 | 删除 gitlink、checkout/upgrade 实现和 submodule CI，替换旧 standalone proof/既有 workflow guard | Medium；#2096 |
 
 #2096 必须删除或替换旧 carrier，不为该迁移新增 Markdown scanner、平行通用 gate 或永久 source-shape inventory。
