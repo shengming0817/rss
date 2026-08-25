@@ -25,6 +25,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Install OCI-capable Buildx builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          driver: docker-container
       - name: Install pinned Rust toolchain
         run: |
           set -euo pipefail
