@@ -418,6 +418,15 @@ impl RuntimePlan {
         self.official_inventory_profile.as_ref()
     }
 
+    /// Decide construction from the manifest-owned official probe closure. Generic plans retain
+    /// the complete assembly behavior; official plans can construct only explicitly required
+    /// probes, before any probe-specific configuration or runtime object is read or built.
+    pub(crate) fn constructs_probe(&self, probe: &str) -> bool {
+        self.official_inventory_profile
+            .as_ref()
+            .is_none_or(|profile| profile.probes().iter().any(|required| required == probe))
+    }
+
     pub(crate) fn take_expected_workers(
         &mut self,
     ) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
@@ -970,6 +979,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             [AssemblyDomain::Audit]
         );
+        for required in crate::modules_gen::OFFICIAL_CORE_PROBES {
+            assert!(core.constructs_probe(required));
+        }
+        for forbidden in [
+            crate::event_transport::DR_ADMISSION_PROBE_NAME,
+            crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME,
+        ] {
+            assert!(
+                !core.constructs_probe(forbidden),
+                "Core constructed forbidden probe {forbidden}"
+            );
+        }
+        assert!(bundled(&[]).constructs_probe(crate::event_transport::DR_ADMISSION_PROBE_NAME));
 
         let placed_snapshot = profile_snapshot(&[("RSS_RUNTIME_PLAN_KIND", "core")]);
         let placed = RuntimePlan::bundled(placed_snapshot.view())

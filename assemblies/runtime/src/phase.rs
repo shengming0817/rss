@@ -407,7 +407,7 @@ pub(crate) struct ProvidersBuilt<'a> {
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
-    admission_identity: eventexec::DrAdmissionProcessIdentity,
+    admission_identity: Option<eventexec::DrAdmissionProcessIdentity>,
     admission_control: primitives::ProcessAdmissionControl,
     relay_admission: primitives::RelayAdmission,
     consumer_admission: primitives::ConsumerAdmission,
@@ -436,7 +436,7 @@ pub(crate) struct InfraBuilt<'a> {
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
-    admission_identity: eventexec::DrAdmissionProcessIdentity,
+    admission_identity: Option<eventexec::DrAdmissionProcessIdentity>,
     admission_control: primitives::ProcessAdmissionControl,
     relay_admission: primitives::RelayAdmission,
     consumer_admission: primitives::ConsumerAdmission,

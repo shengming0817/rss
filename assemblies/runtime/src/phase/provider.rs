@@ -89,11 +89,18 @@ impl<'a> Planned<'a> {
             &local_event_execution_plan,
         )?
         .into_parts();
-        let admission_identity = crate::event_transport::production_dr_admission_identity(
-            runtime_config,
-            runtime_plan.as_typed().runtime_plan_fingerprint().as_str(),
-        )?;
-        let required_admission_epoch = admission_identity.required_admission_epoch();
+        let admission_identity = runtime_plan
+            .constructs_probe(crate::event_transport::DR_ADMISSION_PROBE_NAME)
+            .then(|| {
+                crate::event_transport::production_dr_admission_identity(
+                    runtime_config,
+                    runtime_plan.as_typed().runtime_plan_fingerprint().as_str(),
+                )
+            })
+            .transpose()?;
+        let required_admission_epoch = admission_identity
+            .as_ref()
+            .and_then(eventexec::DrAdmissionProcessIdentity::required_admission_epoch);
         let context = DomainPhaseContext::new(
             self.runtime_inputs,
             runtime_plan,

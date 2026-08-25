@@ -318,14 +318,16 @@ impl<'a> InfraBuilt<'a> {
                     "inactive local event execution retained subscriber bindings"
                 );
             }
-            let mut admission_module = bootstrap::DomainModuleResult::default();
-            crate::event_transport::retain_admission_authority(
-                deps.pg.clone(),
-                admission_control,
-                admission_identity,
-                &mut admission_module,
-            )?;
-            provider_build.record_domain(admission_module);
+            if let Some(admission_identity) = admission_identity {
+                let mut admission_module = bootstrap::DomainModuleResult::default();
+                crate::event_transport::retain_admission_authority(
+                    deps.pg.clone(),
+                    admission_control,
+                    admission_identity,
+                    &mut admission_module,
+                )?;
+                provider_build.record_domain(admission_module);
+            }
 
             Result::<_, anyhow::Error>::Ok(WiredDomains { registry })
         }

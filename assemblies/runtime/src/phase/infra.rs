@@ -505,7 +505,9 @@ impl<'a> ProvidersBuilt<'a> {
                 auth_grant_sweep_interval,
             };
 
-            let signing_rotation_probe =
+            let signing_rotation_probe = if context.runtime_plan.constructs_probe(
+                crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME,
+            ) {
                 match (runtime_rss_access.as_ref(), token_profiles.rss_access()) {
                     (Some(provider), Some(rss)) => {
                         Some(crate::infra::signing_rotation::signing_rotation_probe(
@@ -515,7 +517,10 @@ impl<'a> ProvidersBuilt<'a> {
                         ))
                     }
                     _ => None,
-                };
+                }
+            } else {
+                None
+            };
 
             Ok(BuiltInfra {
                 rate_limiter,

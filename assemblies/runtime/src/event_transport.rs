@@ -421,6 +421,7 @@ const EVENT_WORKER_SHUTDOWN_BUDGET: eventing::lifecycle::ShutdownBudget =
     eventing::lifecycle::ShutdownBudget::STANDARD;
 pub(crate) const RUNTIME_INSTANCE_ID_ENV: &str = "RSS_RUNTIME_INSTANCE_ID";
 pub(crate) const REQUIRED_ADMISSION_EPOCH_ENV: &str = "RSS_DR_REQUIRED_ADMISSION_EPOCH_ID";
+pub(crate) const DR_ADMISSION_PROBE_NAME: &str = "dr_admission";
 
 pub(crate) fn production_dr_admission_identity(
     config: crate::config::SnapshotConfig<'_>,
@@ -1877,7 +1878,8 @@ pub(crate) fn retain_admission_authority(
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::starting());
-    let probe_name = ProbeName::parse("dr_admission").context("parse DR admission probe name")?;
+    let probe_name =
+        ProbeName::parse(DR_ADMISSION_PROBE_NAME).context("parse DR admission probe name")?;
     module.push_probe((
         probe_name.clone(),
         Box::new(WorkerHealthProbe::new(probe_name, Arc::clone(&health))),
