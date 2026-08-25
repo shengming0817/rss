@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-24
+- **Last updated**：2026-08-25
 - **Scope**：ADR-024 与 production acceptance 边界
 
 ## Context
@@ -11,6 +11,25 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 面向 Rust 企业应用的 AI 友好型企业开发框架后，需要统一公共消费面、官方技术栈闭包和分阶段完成条件。
 
 ## Decision
+
+### 2026-08-25 amendment：device-security lifecycle evidence 授权
+
+正式 GA-hardening acceptance trigger 只为 `device-security` 放行
+`DS-T3-PROFILE-LIFECYCLE`：唯一 T3 owner 是 `ProfileLifecycleJoin`，designated artifact 是 #2117
+物化的 `deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime` candidate。#2126 是唯一完整
+Evidence Plan，#2129 是未来唯一 carrier；本 amendment 不实现或登记 selector、fixture、journey、receipt 或
+artifact transition，也不把六个 Draft contract 或 candidate artifact 写成 active/supported。
+
+该 evidence 只证明 exact image/config/secret/CA/provider/worker 的 startup、readiness、inventory、bounded drain
+与 restart join hazard。#2129 first-green 只产生 review-only lifecycle candidate receipt，不激活 profile；
+`AcceptedValueStreamJoin` 与 ADR-028 要求的 federated operator recovery 仍是 conditional future assignment；本
+amendment 不为它们授权 Evidence ID 或 carrier。只有另经正式 trigger 接纳并在同一 designated closure 上独立
+first-green 后，才能原子切换 contract lifecycle、artifact/profile 与唯一 selector。缺少任一前置都保持
+candidate/draft，不提供 alias、fallback、双 owner 或 partial activation。
+
+本 amendment 只记录产品授权与 carrier handoff。现有 contract lifecycle、sealed production eligibility、
+AssemblyLock/RuntimePlan/generated provider catalog、candidate artifact schema 与 Release Surface rejection 继续拥有
+当前 Hard/Medium 事实；T3 运行事实只能由 #2129 未来的 exact production selector 产生。
 
 ### 2026-08-24 current state：Eventing L2 public waist
 
@@ -62,8 +81,8 @@ internal implementation，再由 #2162/#2163 复用现有 Release Surface/packag
 直接迁到 canonical seam；不得保留 re-export、shim、feature alias、同义双实现或 parallel registry。package
 first-green 只证明公开可消费性，不等于 `eventing` official profile、artifact closure、activation 或 T3。
 
-正式 trigger 将 `core` 与 `eventing` 提升为 `hardening-authorized`，但只授权下列闭集；当前 `active` 集合仍为空，
-`device-security` 继续服从 ADR-028 的 candidate/default-deny 边界：
+2026-08-20 trigger 将 `core` 与 `eventing` 提升为 `hardening-authorized`，2026-08-25 trigger 又只为
+`device-security` 放行一个 lifecycle evidence；当前 `active` 集合仍为空：
 
 | Evidence ID | Plan → carrier | Official profile | 唯一 T3 owner |
 |---|---|---|---|
@@ -71,6 +90,7 @@ first-green 只证明公开可消费性，不等于 `eventing` official profile�
 | `CORE-T3-SECURED-REQUEST-01` | #2167 → #2168 | `core` | `AcceptedValueStreamJoin` |
 | `CP-T3-EVENTING-VALUE-STREAM` | #2125 → #2128 | `eventing` | `AcceptedValueStreamJoin` |
 | `EVENTING-T3-PROFILE-LIFECYCLE-01` | #2169 → #2170 | `eventing` | `ProfileLifecycleJoin` |
+| `DS-T3-PROFILE-LIFECYCLE` | #2126 → #2129 | `device-security` | `ProfileLifecycleJoin` |
 
 每个 profile 仍只有一个 designated/canonical production artifact 与一个 canonical journey infrastructure；多个
 evidence item 只共享 image、fixture 和 setup，各自必须有独立 Evidence ID、selector 与可定位 assertion。plan 只冻结
@@ -78,14 +98,18 @@ evidence item 只共享 image、fixture 和 setup，各自必须有独立 Eviden
 
 transition 分成三个不可合并的门：
 
-1. **profile/artifact T1/T2 first-green**：#2165 冻结 `core` exact closure，#2166 冻结 `eventing` exact closure；
-   对应 lower-layer receipts 未在同一 revision 真实通过前，不得开始该 profile 的 T3 carrier 实施。
+1. **profile/artifact T1/T2 first-green**：#2165 冻结 `core` exact closure，#2166 冻结 `eventing` exact closure，
+   #2117 冻结 `device-security` designated candidate；对应 lower-layer receipts 未在同一 revision 真实通过前，
+   不得开始该 profile 的 T3 carrier 实施。#2123 external consumer T2 不替代也不阻塞 lifecycle join。
 2. **单项 T3 carrier first-green**：`core` 分别由 #2127、#2168 证明，`eventing` 分别由 #2170、#2128 证明；
-   #2170 lifecycle first-green 是 #2128 value-stream carrier 的实施 gate。单项通过只产生该 Evidence ID 的 candidate
-   receipt，不激活 profile、不切换 artifact，也不替换其它 evidence 的 legacy owner。
-3. **整 profile activation**：同一 profile 的两项已授权 evidence 均在同一 designated artifact closure 上真实通过后，
-   才能原子切换 artifact/profile/selectors，并按各 evidence plan 的 mapping 删除或降级旧 carrier。此前 legacy owner
-   继续 canonical；失败只拒绝激活，不以兼容入口、skip、committed receipt 或长期双路径绕过。
+   `device-security` lifecycle 由 #2129 证明。#2170 lifecycle first-green 是 #2128 value-stream carrier 的实施 gate；
+   任一单项通过只产生该 Evidence ID 的 candidate receipt，不激活 profile、不切换 artifact，也不替换其它 evidence
+   的 legacy owner。
+3. **整 profile activation**：该 profile activation closure 要求的全部 evidence 必须先分别获得正式 trigger 授权，
+   再在同一 designated artifact closure 上真实通过，随后才能原子切换 artifact/profile/selectors，并按各 evidence plan
+   的 mapping 删除或降级旧 carrier。`core`/`eventing` 当前各有两项已授权 evidence；`device-security` 当前只授权 lifecycle，
+   future value stream 仍为 conditional，且 federated operator recovery 继续是显式 blocker。此前 legacy owner 继续
+   canonical；失败只拒绝激活，不以兼容入口、skip、committed receipt 或长期双路径绕过。
 
 AI-HARD carrier handoff 保持单链：Foundation 类型/依赖与删除由 #2150/#2151 的 rustc/Cargo Hard carrier 承载，
 owner projection、Release API exact-set 与 package proof 由 #2152 承载，registry-only 外部消费由 #2153 承载；
@@ -94,7 +118,7 @@ first-green → 单项 carrier first-green → 整 profile activation，运行�
 final-HEAD receipt 承载。本文和 tracker 只记录决策，不声明无载体 invariant，也不新增 Markdown scanner、
 registry、runner、receipt schema 或 gate。
 
-四原则复核：**彻底**，owner、公共/内部边界、consumer、driver handoff、四项 T3 与失败 transition 闭合；
+四原则复核：**彻底**，owner、公共/内部边界、consumer、driver handoff、已授权 T3 与失败 transition 闭合；
 **不向后兼容**，Axis A 与 T3 cutover 均不保留 shim/alias/双 owner，Axis B 仍按版本化 wire 规则演进；
 **优雅简洁**，详细 Foundation owner、产品授权、external consumer 与通用 scope 分别只由 ADR-029、本 ADR、ADR-026
 与 project-scope 持有；**AI-HARD**，永久约束落到既有 Cargo/rustc、typed release proof、外部 consumer 与精确
@@ -193,7 +217,8 @@ maturity 或 conformance receipt，且必须汇入既有 assembly governance/com
 3. **device-security**：已由
    [`ADR-028`](202608120423-028-device-security-candidate-scope.md) 接纳 candidate scope；以六契约公共窄腰、真实
    external consumer、credential/replay/fencing、federated operator recovery owner/evidence 和原地演进的
-   `deviceidentity` assembly 为闭包，当前只授权最低充分 T1/T2。
+   `deviceidentity` assembly 为闭包；最低充分 T1/T2 已落地，当前只额外授权一个尚未实现的
+   `ProfileLifecycleJoin` candidate evidence。
 
 profile identity、dependency closure、provider capability、typed config 与 runtime inventory 从 assembly/profile metadata
 派生。profile 的支持承诺由真实 provider conformance、production join evidence 和 release artifact 共同激活。
@@ -205,7 +230,7 @@ profile identity、dependency closure、provider capability、typed config 与 r
 |------------------|---------------------|-------------------------|----------|--------------|
 | `core` | `assemblies/runtime` | `server::server` / Docker `runtime` target | hardening-authorized scope；artifact 仍为 candidate，当前 runtime 尚未形成 core-only closure | 2026-08-20 amendment 明列两项 candidate evidence；first-green 前尚无 profile canonical journey，legacy runtime smoke 只作迁移 evidence |
 | `eventing` | `assemblies/runtime` | `server::server` / Docker `runtime` target | hardening-authorized scope；artifact 仍为 candidate | 2026-08-20 amendment 明列两项 candidate evidence；first-green 前尚无 profile canonical journey，SettingsOnly evidence 是迁移来源而非 eventing owner |
-| `device-security` | `assemblies/deviceidentity`（原地演进） | 已物化 candidate identity：`deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime` | production-typed candidate assembly；六契约仍 Draft，profile selection 仍拒绝 candidate | 零 T3；无 hardening trigger，不得登记 Evidence ID/selector/journey |
+| `device-security` | `assemblies/deviceidentity`（原地演进） | 已物化 candidate identity：`deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime` | `DS-T3-PROFILE-LIFECYCLE` hardening-authorized；artifact 仍为 candidate，六契约仍 Draft，profile selection 仍拒绝 candidate | #2126 只冻结 plan；#2129 first-green 前不得登记 selector/journey 或晋级 artifact |
 
 `core` 与 `eventing` 可以复用同一 release image，但必须各自通过闭值 profile configuration/plan 证明依赖闭包；不能以同一
 binary/image 存在推导两个 profile 均已激活。`identityaudit` 与 `settingsonly` 不映射为 official profile artifact。
@@ -219,16 +244,15 @@ consistency level、binary/image、`profile = "production"` 或 `supported` life
 
 ADR 已接纳、因而可以逐项申请 GA-hardening trigger 的 official candidate 闭集只有 `core`、`eventing` 与
 `device-security`；其中 `core`/`eventing` 属 GA 主线，`device-security` 服从 ADR-028 的独立候选路径。按
-2026-08-20 amendment，`core`/`eventing` 仅对该 amendment 明列的 evidence item 为 `hardening-authorized`，
-`device-security` 仍为 `candidate`，当前 `active` 集合为空。profile 状态依次为：ADR 接纳的 `candidate`；scope freeze 后由正式
+2026-08-20 amendment 只授权 `core`/`eventing` 的明列 evidence，2026-08-25 amendment 又只授权
+`device-security` 的 `DS-T3-PROFILE-LIFECYCLE`；当前 `active` 集合仍为空。profile 状态依次为：ADR 接纳的 `candidate`；scope freeze 后由正式
 GA-hardening acceptance trigger 逐项放行的 `hardening-authorized`；designated artifact、真实 provider conformance、
 T1/T2 前置和 candidate production join evidence 全部真实通过后原子进入 `active`。candidate evidence 在激活前不是
 canonical owner、不能进入普通 PR required selection，也不能替换 legacy carrier；这消除“active 才能建 T3、但激活又需要
 T3”的循环。activation transition 必须把该 profile 唯一 designated production artifact 原子提升为唯一 canonical
 production artifact，不允许 candidate 与 active artifact 并存为两个 owner。
-`device-security` 已完成独立 scope/ADR 接纳，因此无需再次修改 scope 才能申请未来 trigger；但它仍不属于当前 active 或
-hardening-authorized T3 范围。其 candidate
-implementation、hardening trigger、T3 evidence plan/carrier 与 activation transition 继续严格按 ADR-028 分离。L3 是
+`device-security` 已完成独立 scope/ADR 接纳，且 lifecycle plan 已获 hardening 授权，但它仍不属于当前 active 范围；
+其 candidate implementation、T3 evidence plan/carrier 与 activation transition 继续严格按 ADR-028 分离。L3 是
 一致性语义，不是独立产品 profile；真实 L3 value stream 只能在产品承诺已接纳后，作为 `eventing` 的显式 evidence
 item 候选，其 owner 只能是 `AcceptedValueStreamJoin`，不得创建独立 L3 T3 产品面。
 
@@ -242,7 +266,7 @@ production acceptance 所要求的必要性证明；
 
 1. **Hardening trigger 前**：默认禁止成熟度实施；scope freeze 本身不放行 SLO、容量/性能、dashboard/alert、evidence
    聚合、closeout gate、soak/fault matrix 或 T3 扩展。
-2. **GA hardening**：只按正式 acceptance trigger 逐项放行 `core`/`eventing` 的最小 SLI、一个固定环境容量测量、必要
+2. **GA hardening**：只按正式 acceptance trigger 逐项放行 official profile 的最小 SLI、一个固定环境容量测量、必要
    runbook，以及上述两类闭值 owner 的 candidate T3；每项仍需独立 issue/PR 和固定预算。
 3. **GA 后**：只基于真实流量调优 RSS 自有指标、error budget、paging threshold、容量与运行参数；autoscaling、多区域
    delivery、商业 tenant 分级和托管监控继续属于 External，不因 GA 完成自动进入 RSS。
@@ -311,7 +335,7 @@ target、case、fixture、service 或 image。
 | 2 | `core` profile 的 config、composition、lifecycle、diagnostic 与 production join 闭环 | provider conformance、assembly identity、readiness/drain/restart T3 |
 | 3 | `eventing` profile 的 L2 producer/consumer/recovery 闭环 | LocalTx/outbox/inbox T2、broker/process join T3 |
 | 4a | `eventing` 已接纳的真实 L3 value stream | primitive correctness 保持 T2；只有独立接纳的 production join hazard 可进入 `AcceptedValueStreamJoin` T3 |
-| 4b（candidate scope） | `device-security` L4/zero-trust slice | #2117 已物化 binary/image/config/provider/runtime 与最低充分 T1/T2；它仍不是 supported artifact、profile activation 或 production T3，任何 T3 仍需 hardening trigger 与独立 issue/PR |
+| 4b（candidate scope） | `device-security` L4/zero-trust slice | #2117 已物化 binary/image/config/provider/runtime 与最低充分 T1/T2；#2126 已授权 lifecycle plan，但 #2129 first-green 前仍不是 supported artifact、profile activation 或 production T3 |
 
 实施跟踪采用一个 Epic 与可独立交付的 PBI；默认不建立 Feature 层。每个 PBI 对应一个 primary capability owner、一个
 可验证 outcome 和一个 PR 级变更闭包。`core` T3、`eventing` T3 与任何后续条件 T3 分别是独立 issue/
@@ -333,9 +357,11 @@ PR；不将多个 profile 的 T3 收敛成一个无法独立审批、执行和�
 - Foundation 六项语义只有 ADR-029 指定的直接 owner path；planned 类型在 carrier 落地前不冒充 Release API，且不存在聚合 facade 或兼容双路径。
 - `rss-eventing` 只接纳 provider-neutral L2 公共 waist；package、official profile 与 T3 授权保持正交，external first-green 不越权激活 profile。
 - 官方 profile 的 dependency closure、provider posture、runtime inventory 与 release artifact identity 一致。
-- `core`/`eventing` 的 hardening 授权只限 2026-08-20 amendment 明列的四个 Evidence ID；candidate first-green 前无新 canonical owner。
+- `core`/`eventing` 的 hardening 授权只限 2026-08-20 amendment 明列的四个 Evidence ID，`device-security` 只限
+  2026-08-25 amendment 明列的 lifecycle Evidence ID；candidate first-green 前无新 canonical owner。
 - 新增或变更 T3 的 issue/PR 与产品实现分离，并对不可下沉至 T1/T2 的 production join hazard 给出可审查的必要性证明。
 - `identityaudit`/`settingsonly` 不再扩展独立产品/T3 身份；只在官方 profile 和外部 consumer 边界闭合后按独立迁移决策退出核心发布面。
-- L3/L4 primitive 先以最低充分 T1/T2 闭合；`device-security` 已接纳 candidate scope，但产品激活与任何 T3 仍须
-  按 ADR-028 的真实纵向 consumer、candidate first-green、独立 hardening/T3 issue 与原子 activation 要求闭合。
+- L3/L4 primitive 先以最低充分 T1/T2 闭合；`device-security` 已接纳 candidate scope 与一个 lifecycle plan，
+  但产品激活仍须按 ADR-028 的真实纵向 consumer、全部 candidate first-green、federated operator recovery 与
+  原子 activation 要求闭合。
 - Epic/PBI 拆分保持 capability owner、proof owner 与 production evidence item 一一可追踪。

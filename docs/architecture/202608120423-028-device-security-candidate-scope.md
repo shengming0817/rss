@@ -2,6 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-12
+- **Last updated**：2026-08-25
 - **Tracking**：#2109
 - **Amends**：[`ADR-022`](202607291724-022-l4-device-latent-production-loop.md)、
   [`ADR-024`](202608012034-024-enterprise-framework-product-surface.md)
@@ -19,31 +20,33 @@ contract lifecycle 仍全部为 `draft`。`DraftArtifactSimulator` 与 draft Pos
 外部 `rss-main-user-device-abac-speckit-20260811` 与
 `rss-incubator-secure-device-rotation-speckit-20260811` 提议把用户授权、Resource Security Fact、设备凭据轮换和 production
 profile 收敛为同一产品切片。其中 Resource Security Fact write ingress 既可能被解释为第七个 RSS contract，也可能只是
-外部产品/bootstrap 事实；同时，已关闭的 #1910 仍在旧 DeviceLatent 文档中被写成 activation/T3 owner，和 ADR-024 的
-T3 默认拒绝、独立 issue/PR 规则冲突。
+外部产品/bootstrap 事实；同时，在 ADR-028 接纳前，旧输入曾把已关闭的 #1910 解释为 activation/T3 owner。该路线现已
+被本 ADR supersede，不再构成当前 owner 或兼容入口。
 
 本次外部输入的 received archive identity 与 SHA-256 由
 [`source-baseline.md`](../spec/007-l4-device-latent-production-loop/source-baseline.md#2026-08-12-candidate-scope-rebaseline)
 单源记录。
 
-本决策只接纳 candidate product scope 和后续 carrier handoff。它不把未实现类型、artifact、consumer receipt 或 T3
-写成当前事实。
+截至 #2123，`rss-incubator` 已使用 exact candidate crate 完成公开 contract consumer T2；该回执不启动 RSS image，
+也不替代 production lifecycle join。本决策当前接纳 candidate product scope、已完成的 consumer T2 和后续 carrier
+handoff；它不把未实现 carrier、T3 receipt 或 profile activation 写成当前事实。
 
 ## Decision
 
 ### Candidate 产品身份
 
-`device-security` 进入已接纳的 official profile **candidate scope**。状态不是 `hardening-authorized` 或 `active`，当前
-`T3 owner=N/A（未申请 T3）`。以下 identity 被一次冻结，后续实现只能原地物化，不能另建平行设备框架：
+`device-security` 继续是未激活的 official profile candidate。2026-08-25 trigger 只把
+`DS-T3-PROFILE-LIFECYCLE` 提升为 `hardening-authorized`，其 owner 为 `ProfileLifecycleJoin`；artifact、六契约和
+profile 本身都未晋级或激活。以下 identity 被一次冻结，后续实现只能原地物化，不能另建平行设备框架：
 
 | 产品事实 | 唯一 identity | 当前状态 |
 |---|---|---|
-| official profile | `device-security` | candidate scope only |
+| official profile | `device-security` | 一个 lifecycle evidence hardening-authorized；profile 仍未 active |
 | assembly owner | `assemblies/deviceidentity` / Cargo package `deviceidentity` | production candidate，非 official-profile activation |
 | candidate binary | package `deviceidentity` / target `deviceidentity-server` | 已物化；必须 `--config <path>`，仅 `--help` 可无配置成功 |
 | candidate image | `Dockerfile` target `deviceidentity-runtime` | 已物化；distroless nonroot，固定 ENTRYPOINT，仅含 binary 与 config schema |
 | public contract package | internal owner `crates/devicesecuritycontracts` / `devicesecuritycontracts` → public `rss-device-security-contracts` | 已物化的 experimental candidate Release Surface；六契约仍全部为 Draft，未发布、未激活 profile |
-| real consumer | `rss-incubator` 的 Secure Device Credential Rotation product/agent | 外部产品 owner，尚无消费回执 |
+| real consumer | `rss-incubator` 的 Secure Device Credential Rotation product/agent | #2123 已完成 exact public contract consumer T2；不是 image lifecycle receipt |
 
 `assemblies/artifacts.toml` 已破坏式升级至 schema v2，并将 `deviceidentity` 的同一行登记为 `candidate`。candidate 必须携带
 binary/image/configSchema/healthInventory/exact cargo-test acceptance，且类型层禁止 `reason`/`journey`。Release Surface 可读取
@@ -100,7 +103,7 @@ profile，也不能成为 RSS production acceptance owner。
 
 ### Candidate 到 active 的原子条件
 
-后续工作分成互不混合的两个阶段：
+后续工作分成互不混合的三个阶段：
 
 1. **Candidate implementation（只授权最低充分 T1/T2）**：独立 PBIs 原地物化六契约 public package；建立私有 production
    eligibility mint 与不可互换的 assembly-level provider closure/per-command artifact；实现真实 credential rotation
@@ -108,16 +111,21 @@ profile，也不能成为 RSS production acceptance owner。
    真实外部 consumer exact-version/digest receipt，并完成 contract、provider、transaction、MQTT 与组件级
    reload/restart/fencing/disable/drain T1/T2。T1/T2 不得声称 designated binary/image 的真实进程
    startup/readiness/restart/drain 或 secret/CA/config/image join 已闭合。
-2. **Activation（当前未授权）**：只有正式 GA hardening trigger 后，才可另建一个内置完整 evidence plan 的独立 T3 carrier
-   issue/PR。该 T3 才能证明 designated binary/image 的真实进程 startup/readiness/restart/drain、secret/CA/config/image
-   join，以及 federated operator recovery：RSS inspection/自动 repair/pause-drain、incubator 授权产品 runbook、External
-   remediation action 与 audit receipt 必须形成可复现闭环，但不新增 RSS 第七契约。Candidate lower-layer receipts 与独立
-   production join 必须在同一 candidate revision first-green；随后才可在一个原子 transition 中把六契约从 `draft` 切为
-   `active`、把唯一 designated artifact 提升为 canonical，并发布协调 package/image。
+2. **Hardening evidence（plan 已授权，carrier 未实现）**：#2126 是 `DS-T3-PROFILE-LIFECYCLE` 的唯一完整 Evidence Plan，
+   #2129 是未来唯一 carrier。它只证明 designated binary/image 的真实进程 startup/readiness/inventory/restart/drain 与
+   secret/CA/config/provider/worker join；#2129 first-green 只产生 review-only lifecycle candidate receipt，不激活
+   profile，也不登记 canonical selector。#2130/#2131 只是 Secure Device Rotation `AcceptedValueStreamJoin` 的
+   conditional future plan/carrier assignment，仍须各自 Trigger，当前未获本 amendment 授权。ADR-028 要求的
+   federated operator recovery——RSS inspection/自动 repair/pause-drain、
+   incubator 授权产品 runbook、External remediation action 与 audit receipt——不并入 ProfileLifecycleJoin；没有被
+   AcceptedValueStreamJoin 或独立 Evidence Plan 明确接纳并 first-green 前，它继续阻塞 activation。
+3. **Activation（仍未授权执行）**：全部 lower-layer receipt、已授权 T3 和 federated operator recovery 必须在同一
+   designated candidate closure 上 first-green；随后才能在一个原子 transition 中把六契约从 `draft` 切为 `active`、
+   把唯一 designated artifact 提升为 canonical、登记唯一 selector 并发布协调 package/image。
 
 任何前置缺失都保持 candidate/draft。不得部分激活 contract、先登记 selector、用 static artifact metadata
-伪造运行回执，或以 L4/security-critical 名称自动获得 T3。未来 T3 只能使用 `ADR-024` 的闭值 owner，且仍须独立
-证明 production-only join hazard；本 ADR 不预留 Evidence ID、selector、fixture 或 CI lane。
+伪造运行回执，或以 L4/security-critical 名称自动获得额外 T3。已授权 evidence 只能使用 `ADR-024` 的闭值 owner，
+且仍须独立证明 production-only join hazard；本 ADR 不实现 selector、fixture、CI lane 或 receipt registry。
 
 ### Supersession
 
@@ -144,7 +152,8 @@ profile，也不能成为 RSS production acceptance owner。
 | incubator 反向依赖 RSS internals | ADR-026 的独立 repository/Cargo source policy/candidate proof | 已有物理/Cargo/T2 owner |
 | public candidate/package drift | contract lifecycle/codegen、Release Surface、release API 与 locked/offline package proof | experimental Draft package 已物化；仍不构成 activation 或 production eligibility |
 | assembly/provider/listener/worker 漂移 | 同一 manifest 生成 RuntimePlan、AssemblyLock、provider catalog 与 module glue；启动期 exact join | 已落地 T1/T2；不等于 T3/activation |
-| future activation partial cutover | profile artifact chain、六契约 lifecycle 与同一 artifact 行原子晋级 | future activation handoff；不得声明 T3 已闭合 |
+| exact image/config/secret/provider lifecycle join | #2126 冻结唯一 plan；#2129 未来以 `production-artifact` exact selector 承载 | 当前只有 Soft handoff；#2129 first-green 前不得声明 T3 已闭合 |
+| future activation partial cutover | profile artifact chain、六契约 lifecycle 与同一 artifact 行原子晋级 | future activation handoff；全部 evidence 与 recovery first-green 前不得切换 |
 
 不新增 Markdown scanner、当前数量 gate、device-security 专用 registry、Evidence database 或 shape-only temporary guard。未来 PBI
 必须优先使用 schema/codegen、sealed type、必填构造器和既有 assembly/Release Surface gate，并配置与真实风险对应的
@@ -153,17 +162,18 @@ synthetic red/anti-vacuity；没有 carrier 就缩窄或延后 claim。
 ## Four-principle check
 
 - **彻底**：profile、public waist、assembly/image identity、real consumer、RSS/incubator/External owner、六契约、Resource Fact、
-  activation 条件和旧 #1910/#1982/#1983 关系一次裁清；冲突规范在同一 PR 直接重写。
+  lifecycle plan、operator recovery 缺口、activation 条件和旧 #1910/#1982/#1983 关系一次裁清；冲突规范在同一 PR 直接重写。
 - **不向后兼容**：删除 conditional→#1910 的旧激活路线，不保留六/七双集、旧 owner alias、compat package、双 selector 或
   partial activation。
-- **优雅简洁**：复用现有 DeviceLatent、Common ABAC、deviceidentity、Release Surface、assembly 和 ADR-026 边界；不新增
-  framework、control plane、gate、registry、schema 或 speculative implementation。
-- **AI-HARD**：只对已有 Hard/Medium carrier 声称当前事实；缺失的 production closure 明确 handoff，不用 Markdown、issue
-  closed 状态或 static catalog 冒充实现与运行证据。
+- **优雅简洁**：复用现有 DeviceLatent、Common ABAC、deviceidentity、Release Surface、assembly、标准 inventory 与
+  ADR-026 边界；不新增 framework、control plane、gate、registry、schema、runbook 副本或 speculative implementation。
+- **AI-HARD**：只对已有 Hard/Medium carrier 声称当前事实；#2126 仅为 Soft decision/handoff，缺失的 production closure
+  交给 #2129 exact selector，不用 Markdown、issue closed 状态或 static catalog 冒充实现与运行证据。
 
 ## Consequences
 
-`device-security` 已有可构建的 production candidate assembly，但 contract lifecycle、official profile selection 与 T3 状态不变。
+`device-security` 已有可构建的 production candidate assembly，且一个 lifecycle Evidence Plan 已获 hardening 授权；
+contract lifecycle、official profile selection、artifact lifecycle 与 T3 运行状态仍未改变。
 该 candidate 证明本仓拥有的静态 artifact 与 library/component T1/T2；registry provenance、发布、环境选择、真实进程/OCI
 secret-config-image join 和 consumer value stream 仍由后续 delivery/T3 owner 证明。
 真实 PostgreSQL T2 只在 fixture 中短暂授予 production append funnel，且在 restart proof 前撤销；这证明 candidate library
