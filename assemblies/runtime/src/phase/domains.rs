@@ -98,6 +98,26 @@ fn validate_binding_projection(
                 .map(|domain| (listener.kind(), domain.as_str()))
         })
         .collect::<Vec<_>>();
+    // The generated catalog describes the complete generic assembly. Official profiles first
+    // project that catalog through their closed listener/domain plan; only the projected evidence
+    // participates in the exact join. Live evidence is already post-construction and must never be
+    // filtered, otherwise a forbidden binding could cross the composition root unnoticed.
+    let projected_generated;
+    let bindings = match mode {
+        BindingEvidenceMode::GeneratedManifest => {
+            projected_generated = bindings
+                .iter()
+                .copied()
+                .filter(|binding| {
+                    expected.iter().any(|(listener_kind, domain)| {
+                        binding.listener == *listener_kind && binding.domain == *domain
+                    })
+                })
+                .collect::<Vec<_>>();
+            projected_generated.as_slice()
+        }
+        BindingEvidenceMode::LiveOmitRemote => bindings,
+    };
     anyhow::ensure!(
         bindings.len() == expected.len(),
         "{source} domain-listener binding count drifts from RuntimePlan: plan {}, {source} {}",
@@ -502,6 +522,35 @@ mod listener_plan_tests {
         assert!(
             validate_domain_listener_evidence(&plan, generated).is_err(),
             "live evidence still listing remote identity must fail"
+        );
+    }
+
+    #[test]
+    fn core_projects_generated_bindings_before_the_exact_live_join() {
+        let snapshot = generic_test_snapshot(&[
+            ("RSS_RUNTIME_PLAN_KIND", "core"),
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("Core listener plan snapshot");
+        let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("Core RuntimePlan");
+        let placement = runtime_plan
+            .placement_execution_plan(bootstrap::Topology::DurableShared, snapshot.view())
+            .expect("Core placement plan");
+        let plan = runtime_plan.listener_execution_plan_for_placement(&placement);
+        let live = crate::modules_gen::DOMAIN_LISTENER_BINDINGS
+            .iter()
+            .copied()
+            .filter(|binding| binding.domain == "audit")
+            .collect::<Vec<_>>();
+
+        validate_domain_listener_evidence(&plan, &live)
+            .expect("Core generated catalog is projected and live evidence joins exactly");
+        assert!(
+            validate_domain_listener_evidence(&plan, crate::modules_gen::DOMAIN_LISTENER_BINDINGS,)
+                .is_err(),
+            "unprojected live bindings must remain forbidden"
         );
     }
 }
