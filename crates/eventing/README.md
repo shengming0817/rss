@@ -18,3 +18,13 @@ The package is not yet a release candidate, profile or activation surface, exter
 claim, artifact, or T3 capability. Those states require their own positive governance selection.
 Provider-neutral LocalTx assertions remain owned by `rss-conformance` and are consumed here only
 as a development dependency.
+
+The private fake-clock T2 carrier in `testkit` awaits the same closed
+`ConsumerTxLifecycle::finish_attempt` control flow used by production; both pass a real Tokio sleep
+future into the seam, which owns wait invocation and attempt advancement. The carrier also consumes
+the same strict `DeliveryBudget` gate used by the PostgreSQL adapter. Its controlled tasks prove
+bounded fixture cancellation, timeout, abort-and-await, and drop cleanup.
+Provider settlement remains composition-owned; AMQP wire routing, broker confirms, real
+generation replacement, duplicate delivery, and real connection cleanup remain adapter T2
+residuals. The carrier is not an official driver, provider SPI, reusable broker fixture, T3 proof,
+or a trigger for #1992.

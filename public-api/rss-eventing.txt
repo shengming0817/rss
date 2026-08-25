@@ -95,6 +95,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::delivery::RejectK
 impl core::panic::unwind_safe::UnwindSafe for rss_eventing::delivery::RejectKind
 pub struct rss_eventing::delivery::DeliveryBudget
 impl rss_eventing::delivery::DeliveryBudget
+pub fn rss_eventing::delivery::DeliveryBudget::can_start_attempt(&self, core::time::Duration) -> bool
 pub const fn rss_eventing::delivery::DeliveryBudget::lease_ttl(&self) -> core::time::Duration
 pub fn rss_eventing::delivery::DeliveryBudget::new(core::time::Duration, core::time::Duration, core::time::Duration, core::time::Duration) -> core::result::Result<Self, rss_eventing::delivery::DeliveryBudgetError>
 pub const fn rss_eventing::delivery::DeliveryBudget::publish_timeout(&self) -> core::time::Duration
@@ -177,6 +178,31 @@ impl core::marker::UnsafeUnpin for rss_eventing::envelope::EventId
 impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::envelope::EventId
 impl core::panic::unwind_safe::UnwindSafe for rss_eventing::envelope::EventId
 pub mod rss_eventing::lifecycle
+pub enum rss_eventing::lifecycle::ConsumerTxAction
+pub rss_eventing::lifecycle::ConsumerTxAction::Commit
+pub rss_eventing::lifecycle::ConsumerTxAction::Exhausted
+pub rss_eventing::lifecycle::ConsumerTxAction::Fenced
+pub rss_eventing::lifecycle::ConsumerTxAction::Reject(rss_eventing::delivery::RejectKind)
+pub rss_eventing::lifecycle::ConsumerTxAction::Requeue
+pub rss_eventing::lifecycle::ConsumerTxAction::RetryReady
+pub rss_eventing::lifecycle::ConsumerTxAction::RetryReady::delay: core::time::Duration
+pub rss_eventing::lifecycle::ConsumerTxAction::RetryReady::failed_attempt: core::num::nonzero::NonZeroU32
+impl core::clone::Clone for rss_eventing::lifecycle::ConsumerTxAction
+pub fn rss_eventing::lifecycle::ConsumerTxAction::clone(&self) -> rss_eventing::lifecycle::ConsumerTxAction
+impl core::cmp::Eq for rss_eventing::lifecycle::ConsumerTxAction
+impl core::cmp::PartialEq for rss_eventing::lifecycle::ConsumerTxAction
+pub fn rss_eventing::lifecycle::ConsumerTxAction::eq(&self, &rss_eventing::lifecycle::ConsumerTxAction) -> bool
+impl core::fmt::Debug for rss_eventing::lifecycle::ConsumerTxAction
+pub fn rss_eventing::lifecycle::ConsumerTxAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::lifecycle::ConsumerTxAction
+impl core::marker::StructuralPartialEq for rss_eventing::lifecycle::ConsumerTxAction
+impl core::marker::Freeze for rss_eventing::lifecycle::ConsumerTxAction
+impl core::marker::Send for rss_eventing::lifecycle::ConsumerTxAction
+impl core::marker::Sync for rss_eventing::lifecycle::ConsumerTxAction
+impl core::marker::Unpin for rss_eventing::lifecycle::ConsumerTxAction
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::ConsumerTxAction
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::ConsumerTxAction
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::ConsumerTxAction
 pub enum rss_eventing::lifecycle::RetryPolicyError
 pub rss_eventing::lifecycle::RetryPolicyError::AttemptsExceeded
 pub rss_eventing::lifecycle::RetryPolicyError::AttemptsExceeded::max: core::num::nonzero::NonZeroU32
@@ -225,6 +251,40 @@ impl core::marker::Unpin for rss_eventing::lifecycle::ShutdownBudgetError
 impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::ShutdownBudgetError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::ShutdownBudgetError
 impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::ShutdownBudgetError
+pub struct rss_eventing::lifecycle::ConsumerTxLifecycle
+impl rss_eventing::lifecycle::ConsumerTxLifecycle
+pub const fn rss_eventing::lifecycle::ConsumerTxLifecycle::current_attempt(&self) -> core::option::Option<core::num::nonzero::NonZeroU32>
+pub async fn rss_eventing::lifecycle::ConsumerTxLifecycle::finish_attempt<C, W, F>(&mut self, &rss_eventing::delivery::ConsumerTxOutcome<C>, W) -> core::result::Result<rss_eventing::lifecycle::ConsumerTxAction, rss_eventing::lifecycle::ConsumerTxLifecycleClosed> where W: core::ops::function::FnOnce(core::time::Duration) -> F, F: core::future::future::Future<Output = ()>
+pub const fn rss_eventing::lifecycle::ConsumerTxLifecycle::new(rss_eventing::lifecycle::RetryPolicy) -> Self
+impl core::fmt::Debug for rss_eventing::lifecycle::ConsumerTxLifecycle
+pub fn rss_eventing::lifecycle::ConsumerTxLifecycle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_eventing::lifecycle::ConsumerTxLifecycle
+impl core::marker::Send for rss_eventing::lifecycle::ConsumerTxLifecycle
+impl core::marker::Sync for rss_eventing::lifecycle::ConsumerTxLifecycle
+impl core::marker::Unpin for rss_eventing::lifecycle::ConsumerTxLifecycle
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::ConsumerTxLifecycle
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::ConsumerTxLifecycle
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::ConsumerTxLifecycle
+pub struct rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::clone::Clone for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+pub fn rss_eventing::lifecycle::ConsumerTxLifecycleClosed::clone(&self) -> rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::cmp::Eq for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::cmp::PartialEq for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+pub fn rss_eventing::lifecycle::ConsumerTxLifecycleClosed::eq(&self, &rss_eventing::lifecycle::ConsumerTxLifecycleClosed) -> bool
+impl core::error::Error for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::fmt::Debug for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+pub fn rss_eventing::lifecycle::ConsumerTxLifecycleClosed::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+pub fn rss_eventing::lifecycle::ConsumerTxLifecycleClosed::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::marker::StructuralPartialEq for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::marker::Freeze for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::marker::Send for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::marker::Sync for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::marker::Unpin for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::marker::UnsafeUnpin for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::panic::unwind_safe::RefUnwindSafe for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
+impl core::panic::unwind_safe::UnwindSafe for rss_eventing::lifecycle::ConsumerTxLifecycleClosed
 pub struct rss_eventing::lifecycle::RetryPolicy
 impl rss_eventing::lifecycle::RetryPolicy
 pub const rss_eventing::lifecycle::RetryPolicy::STANDARD: Self

@@ -3,6 +3,8 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use crate::delivery::{ConsumerTxOutcome, RejectKind};
+
 /// Maximum total attempts accepted by [`RetryPolicy`].
 pub const RETRY_ATTEMPTS_MAX: NonZeroU32 = NonZeroU32::MIN.saturating_add(127);
 /// Maximum supported timeout for one managed Eventing shutdown lifecycle.
@@ -90,6 +92,116 @@ impl RetryPolicy {
             }
         }
         delay
+    }
+}
+
+/// Closed action selected for one consumer transaction outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsumerTxAction {
+    /// A provider commit proof authorizes broker acknowledgement.
+    Commit,
+    /// A terminal handler result enters the dead-letter path.
+    Reject(RejectKind),
+    /// The exact policy delay has elapsed and the same handler may run again.
+    RetryReady {
+        /// The 1-based attempt that just failed.
+        failed_attempt: NonZeroU32,
+        /// The policy-owned delay before the next attempt.
+        delay: Duration,
+    },
+    /// Broker redelivery is required without another local handler call.
+    Requeue,
+    /// The inbox lease is no longer authoritative.
+    Fenced,
+    /// The bounded local retry allowance is exhausted.
+    Exhausted,
+}
+
+/// Error returned when a terminal consumer transaction lifecycle is reused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("consumer transaction lifecycle is closed")]
+pub struct ConsumerTxLifecycleClosed;
+
+/// Production decision cursor for one bounded consumer transaction lifecycle.
+///
+/// The cursor owns attempt advancement and terminal closure. Runtime owners execute the returned
+/// action, but cannot bypass its real retry wait, obtain a fourth provider attempt from the
+/// standard policy, or reuse the cursor after a terminal result.
+#[derive(Debug)]
+pub struct ConsumerTxLifecycle {
+    policy: RetryPolicy,
+    current_attempt: Option<NonZeroU32>,
+}
+
+impl ConsumerTxLifecycle {
+    /// Starts a fresh lifecycle at attempt one.
+    #[must_use]
+    pub const fn new(policy: RetryPolicy) -> Self {
+        Self {
+            policy,
+            current_attempt: Some(NonZeroU32::MIN),
+        }
+    }
+
+    /// Returns the current 1-based provider attempt, or `None` after a terminal decision.
+    #[must_use]
+    pub const fn current_attempt(&self) -> Option<NonZeroU32> {
+        self.current_attempt
+    }
+
+    /// Completes one provider attempt and returns its only valid action.
+    ///
+    /// A retry action becomes observable only after the supplied delay future has completed.
+    /// Production and conformance callers supply their runtime's real sleep future; this seam owns
+    /// when it is invoked and advances the attempt only after it returns. Dropping this future
+    /// cancels the wait and cannot expose a next-attempt permit.
+    pub async fn finish_attempt<C, W, F>(
+        &mut self,
+        outcome: &ConsumerTxOutcome<C>,
+        wait: W,
+    ) -> Result<ConsumerTxAction, ConsumerTxLifecycleClosed>
+    where
+        W: FnOnce(Duration) -> F,
+        F: Future<Output = ()>,
+    {
+        let action = self.decide(outcome)?;
+        if let ConsumerTxAction::RetryReady {
+            failed_attempt,
+            delay,
+        } = action
+        {
+            wait(delay).await;
+            self.current_attempt = Some(NonZeroU32::MIN.saturating_add(failed_attempt.get()));
+        } else {
+            self.current_attempt = None;
+        }
+        Ok(action)
+    }
+
+    fn decide<C>(
+        &self,
+        outcome: &ConsumerTxOutcome<C>,
+    ) -> Result<ConsumerTxAction, ConsumerTxLifecycleClosed> {
+        let attempt = self.current_attempt.ok_or(ConsumerTxLifecycleClosed)?;
+        let action = match outcome {
+            ConsumerTxOutcome::Committed(_) => ConsumerTxAction::Commit,
+            ConsumerTxOutcome::Rejected(kind) => ConsumerTxAction::Reject(*kind),
+            ConsumerTxOutcome::HandlerTransient
+                if attempt.get() < self.policy.max_attempts().get() =>
+            {
+                let delay = self.policy.delay_after(attempt);
+                return Ok(ConsumerTxAction::RetryReady {
+                    failed_attempt: attempt,
+                    delay,
+                });
+            }
+            ConsumerTxOutcome::HandlerTransient => ConsumerTxAction::Exhausted,
+            ConsumerTxOutcome::InfrastructureTransient
+            | ConsumerTxOutcome::CommitUnknown
+            | ConsumerTxOutcome::RollbackFailed => ConsumerTxAction::Requeue,
+            ConsumerTxOutcome::Fenced => ConsumerTxAction::Fenced,
+        };
+        Ok(action)
     }
 }
 

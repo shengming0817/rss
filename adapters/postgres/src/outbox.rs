@@ -1630,8 +1630,9 @@ fn local_publish_budget_available(
     monotonic_deadline: tokio::time::Instant,
     relay_budget: DeliveryBudget,
 ) -> bool {
-    monotonic_deadline.saturating_duration_since(io_deadline_after(std::time::Duration::ZERO))
-        > relay_budget.required_budget()
+    let remaining =
+        monotonic_deadline.saturating_duration_since(io_deadline_after(std::time::Duration::ZERO));
+    relay_budget.can_start_attempt(remaining)
 }
 
 impl PgOutbox {

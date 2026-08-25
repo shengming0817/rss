@@ -24,7 +24,7 @@ use eventexec::consumer::{
     record_dead_letter_skip, renewal_loop, settle, settle_claim_in_progress,
 };
 use eventing::delivery::{ConsumerTxOutcome, RejectKind};
-use eventing::lifecycle::RetryPolicy;
+use eventing::lifecycle::{ConsumerTxAction, ConsumerTxLifecycle, RetryPolicy};
 
 /// Closed ConsumerTx external-effect policies used as type-level handler capabilities.
 pub(crate) mod policy {
@@ -526,15 +526,24 @@ async fn run_tx_handler_loop<S, P, H>(
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
-    let mut last_requeue_summary = EngineErrorKind::Transient.message();
+    let last_requeue_summary = EngineErrorKind::Transient.message();
     let msg = event.message();
-    for attempt in 1..=retry_policy.max_attempts().get() {
-        match Arc::clone(handler)
+    let mut lifecycle = ConsumerTxLifecycle::new(retry_policy);
+    while let Some(attempt) = lifecycle.current_attempt() {
+        let outcome = Arc::clone(handler)
             .handle(Arc::clone(&event), ctx.clone(), key.clone(), lease.clone())
-            .await
-        {
-            outcome @ ConsumerTxOutcome::Committed(_) => {
-                record_consumer_tx_outcome(meta, outcome.as_label());
+            .await;
+        let outcome_label = outcome.as_label();
+        let action = match lifecycle.finish_attempt(&outcome, tokio::time::sleep).await {
+            Ok(action) => action,
+            Err(error) => {
+                tracing::error!(error = %error, "consumer-tx: closed lifecycle was reused");
+                return;
+            }
+        };
+        match action {
+            ConsumerTxAction::Commit => {
+                record_consumer_tx_outcome(meta, outcome_label);
                 // The provider proof means the receipt/domain transaction is durably terminal.
                 // Stop lease fencing before broker settlement: a concurrent extend now observes
                 // `done` as Lost, but must not cancel the Ack authorized by that proof.
@@ -548,8 +557,8 @@ async fn run_tx_handler_loop<S, P, H>(
                 .await;
                 return;
             }
-            outcome @ ConsumerTxOutcome::Rejected(kind) => {
-                record_consumer_tx_outcome(meta, outcome.as_label());
+            ConsumerTxAction::Reject(kind) => {
+                record_consumer_tx_outcome(meta, outcome_label);
                 dead_letter(
                     dlx,
                     idempotency,
@@ -558,7 +567,7 @@ async fn run_tx_handler_loop<S, P, H>(
                     &lease,
                     meta,
                     &msg,
-                    attempt,
+                    attempt.get(),
                     reject_summary(kind),
                     acker,
                     Some(&terminal),
@@ -566,21 +575,10 @@ async fn run_tx_handler_loop<S, P, H>(
                 .await;
                 return;
             }
-            ConsumerTxOutcome::HandlerTransient => {
-                last_requeue_summary = EngineErrorKind::Transient.message();
-                if attempt < retry_policy.max_attempts().get() {
-                    let failed_attempt =
-                        std::num::NonZeroU32::new(attempt).unwrap_or(std::num::NonZeroU32::MIN);
-                    // `handle_fresh_tx` races this whole future against lifecycle cancellation,
-                    // so dropping this sleep leaves the delivery unsettled for broker redelivery.
-                    tokio::time::sleep(retry_policy.delay_after(failed_attempt)).await;
-                }
-            }
-            outcome @ (ConsumerTxOutcome::InfrastructureTransient
-            | ConsumerTxOutcome::CommitUnknown
-            | ConsumerTxOutcome::RollbackFailed) => {
-                record_consumer_tx_outcome(meta, outcome.as_label());
-                log_tx_non_retryable_requeue(meta, &msg, outcome.as_label());
+            ConsumerTxAction::RetryReady { .. } => {}
+            ConsumerTxAction::Requeue => {
+                record_consumer_tx_outcome(meta, outcome_label);
+                log_tx_non_retryable_requeue(meta, &msg, outcome_label);
                 settle(
                     acker,
                     diport::AckAction::Requeue,
@@ -590,8 +588,8 @@ async fn run_tx_handler_loop<S, P, H>(
                 .await;
                 return;
             }
-            outcome @ ConsumerTxOutcome::Fenced => {
-                record_consumer_tx_outcome(meta, outcome.as_label());
+            ConsumerTxAction::Fenced => {
+                record_consumer_tx_outcome(meta, outcome_label);
                 log_lease_lost(meta, msg.id().as_str());
                 emit_lease_lost(meta.domain());
                 tracing::warn!(
@@ -607,25 +605,25 @@ async fn run_tx_handler_loop<S, P, H>(
                 .await;
                 return;
             }
+            ConsumerTxAction::Exhausted => {
+                record_consumer_tx_outcome(meta, outcome_label);
+                log_tx_handler_transient_exhausted(
+                    meta,
+                    &msg,
+                    retry_policy.max_attempts().get(),
+                    last_requeue_summary,
+                );
+                settle(
+                    acker,
+                    diport::AckAction::Requeue,
+                    meta.domain(),
+                    msg.id().as_str(),
+                )
+                .await;
+                return;
+            }
         }
     }
-    record_consumer_tx_outcome(
-        meta,
-        ConsumerTxOutcome::<postgres::PgConsumerTxCommitProof>::HandlerTransient.as_label(),
-    );
-    log_tx_handler_transient_exhausted(
-        meta,
-        &msg,
-        retry_policy.max_attempts().get(),
-        last_requeue_summary,
-    );
-    settle(
-        acker,
-        diport::AckAction::Requeue,
-        meta.domain(),
-        msg.id().as_str(),
-    )
-    .await;
 }
 
 fn record_consumer_tx_outcome(meta: &ConsumerMeta, outcome: &'static str) {

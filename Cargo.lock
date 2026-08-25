@@ -5368,6 +5368,7 @@ dependencies = [
  "rss-diag-context",
  "rss-request-context",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -6940,6 +6941,7 @@ dependencies = [
  "futures",
  "rcgen",
  "rss-conformance",
+ "rss-eventing",
  "serde",
  "serde_json",
  "sqlx",

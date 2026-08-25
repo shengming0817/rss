@@ -7,8 +7,8 @@ use rss_eventing::delivery::{
 };
 use rss_eventing::envelope::{EventEnvelope, EventId, EventIdError};
 use rss_eventing::lifecycle::{
-    RETRY_ATTEMPTS_MAX, RetryPolicy, RetryPolicyError, SHUTDOWN_BUDGET_MAX, ShutdownBudget,
-    ShutdownBudgetError,
+    ConsumerTxAction, ConsumerTxLifecycle, RETRY_ATTEMPTS_MAX, RetryPolicy, RetryPolicyError,
+    SHUTDOWN_BUDGET_MAX, ShutdownBudget, ShutdownBudgetError,
 };
 use rss_eventing::metadata::EventMetadata;
 
@@ -131,6 +131,8 @@ fn delivery_budget_preserves_existing_bounds_without_provider_projection() {
     assert_eq!(budget.publish_timeout(), Duration::from_secs(30));
     assert_eq!(budget.settle_timeout(), Duration::from_secs(10));
     assert_eq!(budget.safety_margin(), Duration::from_secs(5));
+    assert!(!budget.can_start_attempt(Duration::from_secs(45)));
+    assert!(budget.can_start_attempt(Duration::from_secs(45) + Duration::from_millis(1)));
 
     let valid = Duration::from_millis(10);
     for (field, [lease, publish, settle, safety]) in [
@@ -231,6 +233,96 @@ fn delivery_budget_preserves_existing_bounds_without_provider_projection() {
         ),
         Err(DeliveryBudgetError::RequiredBudgetOverflow)
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn consumer_tx_lifecycle_closes_retry_and_terminal_decisions() {
+    let mut cancelled = ConsumerTxLifecycle::new(RetryPolicy::STANDARD);
+    {
+        let future = cancelled.finish_attempt(
+            &ConsumerTxOutcome::<()>::HandlerTransient,
+            tokio::time::sleep,
+        );
+        tokio::pin!(future);
+        tokio::select! {
+            biased;
+            result = &mut future => panic!("retry became ready before delay: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    assert_eq!(
+        cancelled.current_attempt(),
+        NonZeroU32::new(1),
+        "dropping the retry wait must not expose the next attempt"
+    );
+
+    let mut lifecycle = ConsumerTxLifecycle::new(RetryPolicy::STANDARD);
+    assert_eq!(lifecycle.current_attempt(), NonZeroU32::new(1));
+    let first = {
+        let future = lifecycle.finish_attempt(
+            &ConsumerTxOutcome::<()>::HandlerTransient,
+            tokio::time::sleep,
+        );
+        tokio::pin!(future);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        future.await
+    };
+    assert_eq!(
+        first,
+        Ok(ConsumerTxAction::RetryReady {
+            failed_attempt: NonZeroU32::new(1).expect("non-zero"),
+            delay: Duration::from_secs(1),
+        })
+    );
+    assert_eq!(lifecycle.current_attempt(), NonZeroU32::new(2));
+    assert_eq!(
+        lifecycle
+            .finish_attempt(&ConsumerTxOutcome::<()>::CommitUnknown, tokio::time::sleep,)
+            .await,
+        Ok(ConsumerTxAction::Requeue)
+    );
+    assert!(lifecycle.current_attempt().is_none());
+    assert!(
+        lifecycle
+            .finish_attempt(&ConsumerTxOutcome::<()>::Committed(()), tokio::time::sleep,)
+            .await
+            .is_err()
+    );
+
+    let mut exhausted = ConsumerTxLifecycle::new(RetryPolicy::STANDARD);
+    let first = {
+        let future = exhausted.finish_attempt(
+            &ConsumerTxOutcome::<()>::HandlerTransient,
+            tokio::time::sleep,
+        );
+        tokio::pin!(future);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        future.await
+    };
+    assert!(matches!(first, Ok(ConsumerTxAction::RetryReady { .. })));
+    let second = {
+        let future = exhausted.finish_attempt(
+            &ConsumerTxOutcome::<()>::HandlerTransient,
+            tokio::time::sleep,
+        );
+        tokio::pin!(future);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        future.await
+    };
+    assert!(matches!(second, Ok(ConsumerTxAction::RetryReady { .. })));
+    assert_eq!(
+        exhausted
+            .finish_attempt(
+                &ConsumerTxOutcome::<()>::HandlerTransient,
+                tokio::time::sleep,
+            )
+            .await,
+        Ok(ConsumerTxAction::Exhausted)
+    );
+    assert!(exhausted.current_attempt().is_none());
 }
 
 #[test]

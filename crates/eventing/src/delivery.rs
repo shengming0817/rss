@@ -187,6 +187,14 @@ impl DeliveryBudget {
             .saturating_add(self.safety_margin)
     }
 
+    /// Whether the remaining lease is strictly greater than one complete provider attempt.
+    ///
+    /// Equality fails closed so provider I/O cannot consume the settlement and safety reserve.
+    #[must_use]
+    pub fn can_start_attempt(&self, remaining: Duration) -> bool {
+        remaining > self.required_budget()
+    }
+
     #[must_use]
     /// Returns the publisher watchdog bound including the safety reserve.
     pub fn publisher_watchdog_timeout(&self) -> Duration {
