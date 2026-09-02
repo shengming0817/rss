@@ -1,72 +1,74 @@
 # RSS 项目能力与范围
 
-本文是能力处置与项目边界的规划真源，不是运行证据或 Markdown enforcement carrier。
+本文是能力处置与项目边界的规划真源，不是运行证据或 Markdown enforcement carrier。精确 package、target、
+依赖边与发布集合只由 Cargo facts、发布证明和真实消费者确认。
 
 ## 项目目标
 
-RSS 是面向 Rust 企业应用的 AI 友好型框架：以 contract-driven、static composition 和封闭官方技术栈提供
-一致的开发体验，内建 L0–L4、一致性、tenant isolation 与 device zero-trust execution。
+RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace。它提供可独立消费的契约、事件、事务一致性、
+运行算法与 conformance 语义，不拥有消费方业务、provider 实现、应用装配或生产交付。
+
+最终仓库只保留公共一致性语义所需的 library crates、最低充分 T1/T2、发布证明、法律文件和使用这些 crate 所必需的
+最小文档。当前目录或依赖存在不构成保留依据；最终 package 集合必须由职责唯一性、闭合依赖和真实外部消费者共同确认。
 
 ## 处置状态
 
 | 状态 | 含义 | 允许变更 |
 |---|---|---|
-| Evolve | RSS 持续演进的核心能力 | 增强正确性、可消费性与运行闭环，不吸收相邻产品职责 |
-| Complete | 已有 primitive/contract/provider 尚缺批准的最小闭环 | 完成既定闭环，不借 closeout 创造新工作 |
-| Freeze | 存量能力保留但停止横向产品化 | 修复、加固、性能与兼容演进，不新增资源生命周期 |
-| External | 事实应由相邻控制面拥有 | 仅提供窄 contract、port、adapter 或集成 |
+| Evolve | provider-neutral 消息一致性核心 | 收敛公共语义、依赖方向、可消费性与正确性 |
+| Complete | 已接纳的公共 primitive 或 conformance 尚缺最低充分闭环 | 只完成既定 T1/T2 与发布闭环，不扩展产品面 |
+| Freeze | 已发布且仍有真实消费者的旧公共承诺 | 仅兼容、安全、弃用与退出；不得成为内部旧实现的保留理由 |
+| External | 事实和生命周期由消费方、provider 或交付系统拥有 | RSS 不实现；只消费成熟上游或由外部消费者通过公共 crate 集成 |
 
-Freeze 不等于删除、迁仓或停止维护。删除或迁移需要独立弃用决定，不能从状态自动推出。
+未发布、无真实外部消费者的仓内 `pub`、internal crate、测试便利或历史治理载体不属于 Freeze，可以在 owner 切换时
+直接删除。External 能力不得以 archive、legacy、plugin、compatibility façade 或改名后的内部副本继续留在 RSS。
 
-## 能力矩阵
+## 核心能力
 
-| 能力 | Evolve / Complete | Freeze / External 边界 |
+| 能力 | Evolve / Complete | External 边界 |
 |---|---|---|
-| Domain governance | crate/domain boundary、contract-only、稳定 module factory | 通用构建/CI 平台、插件市场 External |
-| Foundation 与 contract/codegen | 稳定公共 primitive、schema、deterministic binding、breaking proof | 无 consumer 的 facade、第二套 wire/runtime External |
-| Runtime composition | typed config、static assembly、lifecycle、health/readiness、官方 provider closure | deployment/orchestration、secret projection、autoscaling External |
-| DI port/adapter | RSS semantic port、conformance、official reference adapter | 第三方资源管理面 External |
-| Consistency L0–L4 | typed effect/transaction/outbox/workflow/fencing/recovery | 外部 DB/broker backup、PITR 与 delivery control plane External |
-| Security/auth/tenant | verified identity、authorization obligation、RLS、credential/replay/revocation | 企业 IdP/IAM、MDM、组织目录与企业级策略 authoring External；存量 local identity 与 Role/Policy API Freeze |
-| Observability/health/local CI | structured telemetry、redaction、readiness、affected verification | 托管监控、paging/incident 平台、通用 CI service External |
-| Device security | verified device identity、credential/replay/fencing、official candidate profile，以及经独立 production acceptance 接纳的最小 production join | supported/canonical promotion 与 contract/profile activation 只能在 activation closure 明确要求的全部 production evidence 均已正式接纳并在同一 designated closure first-green 后原子切换；任何 required evidence 缺失或尚未接纳均 fail-closed；fleet/firmware/campaign/inventory/CA control plane External |
+| 公共契约与事件 | provider/domain-neutral identity、envelope、metadata、显式 outcome 与算法必需的窄 event port | 业务 endpoint、领域 wire model、generated product binding |
+| 消息一致性 | LocalTx、Outbox/Inbox、幂等、settlement/ambiguity、lease/fencing、bounded retry 与窄 transaction/store port | 业务 Saga、projection、reconcile、command workflow 与领域状态机 |
+| 公共运行算法 | provider-neutral 处理顺序、ACK-after-commit、取消、bounded drain 与 settlement callback | 进程启动、配置、listener、health/readiness、assembly 与部署生命周期 |
+| Conformance | 黑盒、provider-neutral 的公共不变量 assertion 与最低充分 T1/T2 | provider fixture/driver、数据库或 broker 管理、产品 journey、T3 与 evidence 平台 |
+| 发布 | 独立 package、SemVer、文档、registry candidate 与外部消费证明 | 应用 binary/image、生产 profile、部署、迁移、运营与 release control plane |
+
+## 仓库边界
+
+- 生产代码只允许存在于经最终发布闭包确认的 library crate；不得保留 domain、provider adapter、composition、assembly、
+  binary、进程入口或承担产品装配职责的 executable example。
+- RSS 不拥有 Dockerfile、部署资产、业务 SQL migration、业务 contract/generated 代码、T3/profile/journey、消费者源码、
+  git submodule、provider 管理脚本或自定义通用 CI/evidence 平台。
+- crate 自包含测试只证明其公共不变量。真实 provider、产品配置、生产 join 和消费者验收由仓外 owner 承担，并只通过
+  发布 artifact 消费 RSS。
+- 标准 Cargo/rustc、fmt、clippy、deny、SemVer、package/doc 与最小 CI 组合优先；不得为已删除产品面保留自定义 runner、
+  inventory、snapshot 或兼容 gate。
+- 历史实现只通过不可变 Git 历史恢复；仓库不维护迁移副本、归档目录、双 owner、alias、shim、双读或 fallback。
 
 ## 公共消费边界
 
-- internal `pub`、workspace package 或 generated artifact 不自动成为 Release API。
-- 公共面只包含 catalog 接纳、真实 external consumer 可编译、SemVer/breaking proof 和发布 artifact 闭合的能力。
-- provider contract 默认 internal；只有独立 consumer、owner、support matrix 与退出路径被接纳后才发布。
-- product profile 只消费已接纳能力；profile/assembly 存在不自动扩大产品承诺。
+- internal `pub`、workspace package、路径依赖或 generated artifact 不自动成为 Release API。
+- 公共面只包含发布集合接纳、真实 workspace 外 consumer 可编译、SemVer/breaking proof 和 package artifact 闭合的能力。
+- Core 不依赖 provider 或消费方；conformance 不拥有 provider 实现或测试基础设施。
+- 候选 crate 可以拥有其公共算法签名和 conformance 所必需的最小 semantic trait/callback；不得借此引入通用 Provider SPI、
+  registry、动态发现、client、配置、生命周期、选择逻辑或具体实现。
+- package 数量、名称和依赖 DAG 由最终 Cargo metadata 与消费者证据确认，不能从既有目录、临时抽取路径或本文反推。
 
-## 能力完成定义
+## 验证边界
 
-- Domain governance：边界有 Cargo/visibility/type carrier，外部 module consumer 可执行，不复制 exact inventory。
-- Contract/codegen：声明、生成、runtime binding、breaking/deprecation 和 consumer proof 同 identity。
-- Runtime：manifest/config/provider/lifecycle/health 与 canonical artifact 闭合。
-- Adapter：capability、failure、health、lifecycle、conformance 与 composition wiring 同时成立。
-- Consistency：最低充分 T1/T2；production join 只有经正式 acceptance 授权才进入 T3。
-- Security：verified identity、tenant-safe transaction、obligation、freshness/replay/fencing 与 audit 坐标贯通。
-- Observability：闭值字段/label、redaction、readiness 与 affected verification 有 executable owner。
+- T1 证明类型、状态机、API 与 package 不变量；T2 只覆盖公共语义无法由 T1 观察的 provider-neutral seam。
+- T3、production profile、binary/image、deployment 与产品级 recovery 不属于 RSS。
+- 结构边界最终由 Cargo metadata、target kind、依赖图、package proof、真实外部 consumer 和 tracked-path audit 验证。
+- Markdown 只记录范围与决策，不充当 package inventory、删除完成证明或运行 receipt。
 
-## 边界判定
+## 能力准入
 
-新增能力依次回答：
+新增或保留能力必须同时回答：
 
-1. 事实属于应用、环境、身份/组织还是业务？
-2. 是否唯一映射到既有能力 owner？
-3. 是否有两个独立 consumer，或属于 safety-critical invariant？
-4. 成熟标准/上游是否已拥有？
-5. 直接使用或薄适配是否足够？
-6. 移出主仓是否不改变 RSS 核心语义？
+1. 是否唯一属于公共消息一致性语义，而不是应用、领域、provider、环境或交付事实？
+2. 是否存在稳定 owner，且不能直接使用成熟上游或更小的现有公共类型？
+3. 是否被最终候选的公开 API 直接需要，并有真实外部消费者？
+4. 是否能在不依赖 workspace path、internal crate、业务 generated 类型或未发布 package 的情况下独立打包和消费？
+5. 是否有最低充分 Hard/Medium carrier、SemVer owner 与删除路径？
 
-默认：环境/集群事实交 External delivery；用户/组织交 External IAM；套餐/计费交应用控制面；应用正确性
-才是 RSS candidate。成熟机制优先直接使用；单 consumer 由具体 domain/assembly 拥有。
-
-## 范围变更
-
-- Evolve/Complete 可按现有 owner 实施；不得顺带吸收 Freeze/External。
-- Freeze 新增资源类型、管理 API 或控制面属于范围变更。
-- External 进入仓库前必须先接纳 owner、consumer、退出路径与替代方案。
-- 新 official profile、candidate activation 或 production join-hazard 扩展必须独立接纳。
-- “完整体验”“多一道保险”“已有 assembly/provider”都不是扩大范围的理由。
-- 新 wrapper/port/adapter 遵循成熟上游优先与最小 RSS semantic 原则。
+任一答案为否时默认不进入 RSS；历史存在、潜在消费者、测试便利和“完整框架体验”都不是保留理由。
