@@ -7,13 +7,9 @@ use consistency::{
 };
 use eventexec::{RelayConfig, WorkerHealth, relay_loop};
 use eventing::observability::{EventingEmitter, EventingObservation};
-use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashStatus};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-const FIXTURE: &str = include_str!(
-    "../../../fixtures/consistency/outbox/fixture-outbox-after-publish-before-settle.toml"
-);
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TENANT_B: &str = "8d9d3a33-8144-4e49-b1ad-67f6ee88c13a";
 const MESSAGE_ID: &str = "fact-recorded-01";
@@ -64,7 +60,7 @@ struct CrashClaim {
 
 impl CrashClaim {
     #[allow(clippy::expect_used)]
-    // reason: fixed crash fixture tenant/contract values are valid by construction.
+    // reason: fixed crash scenario tenant/contract values are valid by construction.
     fn new(row: &DurableRow, lease_token: String, lease_deadline_epoch_micros: i64) -> Self {
         Self {
             subject: OutboxMetricSubject::new(
@@ -93,10 +89,10 @@ struct CrashStore {
 
 impl CrashStore {
     #[allow(clippy::expect_used)]
-    // reason: fixed crash fixture provider domain is valid by construction.
+    // reason: fixed crash scenario provider domain is valid by construction.
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            domain: vocab::DomainName::parse("runtime").expect("valid fixture domain"),
+            domain: vocab::DomainName::parse("runtime").expect("valid scenario domain"),
             rows: Mutex::new(vec![
                 DurableRow {
                     delivery: delivery(TENANT_A, MESSAGE_ID),
@@ -355,17 +351,8 @@ fn consume_deliveries_once(deliveries: &[Delivery]) -> usize {
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
-// reason: fixture parsing and spawned task completion are assertions in this integration test.
+// reason: spawned task completion is an assertion in this integration test.
 async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
-    let fixture = CrashCase::from_toml_str(FIXTURE).expect("valid crash fixture");
-    let spec = fixture.fault_spec().expect("closed crash spec");
-    assert_eq!(spec, CrashFaultSpec::OutboxAfterPublishBeforeSettle);
-    assert_eq!(fixture.status(), CrashStatus::Ready);
-    assert_eq!(fixture.domain(), "runtime");
-    assert_eq!(fixture.contract_id(), CONTRACT_ID);
-    assert_eq!(fixture.runner(), spec.expected_runner());
-    assert_eq!(TOPIC, fixture.contract_id());
-
     let store = CrashStore::new();
     let worker = tokio::spawn(relay_loop(
         store.clone(),

@@ -16,9 +16,6 @@ rss-request-context.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 sqlx = { workspace = true }
-# Hard witness for RSS's audited SQLx explicit-root exclusivity patch. If the patch/feature is
-# removed, production adapter construction no longer compiles.
-sqlx-core = { workspace = true, features = ["rss-exclusive-explicit-roots"] }
 thiserror = { workspace = true }
 zeroize.workspace = true
 
@@ -27,4 +24,5 @@ default = []
 test-support = []
 
 [dev-dependencies]
+rcgen = { workspace = true }
 static_assertions = { workspace = true }

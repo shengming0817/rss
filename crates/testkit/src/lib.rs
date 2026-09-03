@@ -29,7 +29,6 @@
 mod request;
 mod response;
 
-pub mod crash_matrix;
 pub mod local_only;
 mod wait;
 

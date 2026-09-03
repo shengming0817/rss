@@ -16,7 +16,6 @@ use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Row as _};
-use sqlx_core::net::tls::{ExclusiveExplicitRoots, exclusive_explicit_roots};
 
 const APPLICATION_NAME: &str = "rss-postgres-consistency";
 
@@ -52,11 +51,10 @@ impl std::fmt::Debug for PgPassword {
     }
 }
 
-/// Validated, non-empty explicit private-CA roots used with `VerifyFull`.
+/// Validated, non-empty explicit CA bundle appended to SQLx's roots under `VerifyFull`.
 #[derive(Clone)]
 pub struct PgPrivateCa {
     pem: Arc<[u8]>,
-    _exclusive_roots: ExclusiveExplicitRoots,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,7 +77,6 @@ impl PgPrivateCa {
         }
         Ok(Self {
             pem: Arc::from(pem),
-            _exclusive_roots: exclusive_explicit_roots(),
         })
     }
 }
@@ -511,6 +508,20 @@ mod tests {
         PgConfig::new_for_test_plaintext("localhost", 5432, "rss", "rss", PgPassword::new("secret"))
     }
 
+    #[allow(clippy::expect_used)]
+    // reason: generated test certificate must be accepted by the focused constructor assertions.
+    fn private_ca_pem() -> Vec<u8> {
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        rcgen::CertifiedIssuer::self_signed(
+            params,
+            rcgen::KeyPair::generate().expect("generate CA key"),
+        )
+        .expect("generate CA certificate")
+        .pem()
+        .into_bytes()
+    }
+
     #[test]
     fn production_contract_is_versioned_and_complete() {
         assert_eq!(STORAGE_CONTRACT.id, "rss.postgres.consistency.v1");
@@ -535,6 +546,13 @@ mod tests {
             config().with_acquire_timeout(Duration::ZERO).validate(),
             Err(PgError::InvalidAcquireTimeout)
         ));
+    }
+
+    #[test]
+    fn private_ca_accepts_ca_certificate_and_rejects_invalid_pem() {
+        assert!(PgPrivateCa::from_pem(Vec::new()).is_err());
+        assert!(PgPrivateCa::from_pem(b"not a certificate".to_vec()).is_err());
+        assert!(PgPrivateCa::from_pem(private_ca_pem()).is_ok());
     }
 
     #[test]
@@ -563,10 +581,25 @@ mod tests {
     }
 
     #[test]
-    fn production_connect_options_force_verify_full() {
-        let source = include_str!("lib.rs");
-        assert!(
-            source.contains("PgTlsTrust::PrivateCa(ca) => options.ssl_mode(PgSslMode::VerifyFull)")
+    #[allow(clippy::expect_used)]
+    // reason: generated PEM is valid UTF-8 and its absence from SQLx options must fail the test.
+    fn production_connect_options_force_verify_full_with_explicit_ca() {
+        let pem = private_ca_pem();
+        let expected_root = String::from_utf8(pem.clone()).expect("PEM is UTF-8");
+        let config = PgConfig::new(
+            "db.example.test",
+            5432,
+            "rss",
+            "rss",
+            PgPassword::new("secret"),
+            PgPrivateCa::from_pem(pem).expect("valid CA PEM"),
         );
+
+        let options = config.connect_options();
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+        let explicit_root = sqlx::ConnectOptions::to_url_lossy(&options)
+            .query_pairs()
+            .find_map(|(name, value)| (name == "sslrootcert").then(|| value.into_owned()));
+        assert_eq!(explicit_root.as_deref(), Some(expected_root.as_str()));
     }
 }

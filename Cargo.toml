@@ -73,7 +73,6 @@ members = [
   "tests/redis-integration",
   "tests/s3-integration",
 ]
-exclude = ["vendor/sqlx-core-0.8.6"]
 
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
@@ -171,7 +170,6 @@ tonic-health = "0.14"
 prost = "0.14"
 # 持久化（postgres adapter，#1116）
 sqlx = { version = "=0.8.6", features = ["runtime-tokio", "tls-rustls", "postgres", "macros"] }
-sqlx-core = { version = "=0.8.6", default-features = false }
 # redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
 # re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
 # testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
@@ -263,11 +261,6 @@ insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员�
 # docker 为运行期依赖（编译不需）；独立 integration test package 自持容器。ref: testcontainers/testcontainers-rs-modules-community
 testcontainers = "0.27"
 testcontainers-modules = "0.15"
-
-[patch.crates-io]
-# RSS #1954: SQLx 0.8.6 overlays explicit roots onto Mozilla roots. This audited downstream patch
-# makes an explicit bundle exclusive; see docs/architecture/202608191900-030-pg-exclusive-private-ca.md.
-sqlx-core = { path = "vendor/sqlx-core-0.8.6" }
 
 # 工程护栏（成员经 `[lints] workspace = true` 继承）。
 [workspace.lints.rust]

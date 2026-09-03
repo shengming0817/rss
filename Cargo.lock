@@ -3895,11 +3895,11 @@ dependencies = [
  "consistency",
  "diport",
  "futures",
+ "rcgen",
  "rss-request-context",
  "rustls",
  "rustls-pki-types",
  "sqlx",
- "sqlx-core",
  "static_assertions",
  "thiserror",
  "zeroize",
@@ -5322,6 +5322,8 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
  "base64",
  "bytes",
@@ -5724,7 +5726,6 @@ dependencies = [
  "testcontainers-modules",
  "thiserror",
  "tokio",
- "toml 0.8.23",
  "tower",
  "trybuild",
  "url",

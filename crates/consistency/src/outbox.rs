@@ -995,10 +995,10 @@ pub trait OutboxBacklog {
 mod tests {
     use super::{
         BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
-        HandleResult, OUTBOX_FACT_CANONICAL_VERSION, OutboxAppendOutcome, OutboxContractId,
-        OutboxContractIdError, OutboxFactConflict, OutboxFactIdentity, OutboxMetricSubject,
-        OutboxPayload, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,
-        Settled, StoredOutboxEntry, append_canonical_json,
+        HandleResult, OutboxAppendOutcome, OutboxContractId, OutboxContractIdError,
+        OutboxFactConflict, OutboxFactIdentity, OutboxMetricSubject, OutboxPayload, PartitionKey,
+        PartitionKeyError, PermanentError, PermanentErrorKind, Settled, StoredOutboxEntry,
+        append_canonical_json,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -1412,42 +1412,6 @@ mod tests {
         )
     }
 
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct OutboxFactGoldenFixture {
-        schema_version: u32,
-        canonical_version: String,
-        cases: Vec<OutboxFactGoldenCase>,
-    }
-
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct OutboxFactGoldenCase {
-        label: String,
-        event_id: String,
-        tenant_id: String,
-        domain: String,
-        topic: String,
-        contract_id: String,
-        contract_version: String,
-        schema_hash: String,
-        payload: Vec<u8>,
-        partition_key: Option<String>,
-        causation_id: Option<String>,
-        metadata: serde_json::Value,
-        expected_digest: [u8; 32],
-    }
-
-    #[allow(clippy::expect_used)]
-    // reason: committed test fixture parse failure is itself the focused test failure.
-    fn outbox_fact_golden_fixture() -> OutboxFactGoldenFixture {
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/consistency/outbox-fact-v1-vectors.json"
-        )))
-        .expect("outbox fact v1 golden fixture must be valid")
-    }
-
     #[test]
     fn outbox_fact_fingerprint_is_canonical_and_unambiguous() {
         let metadata = serde_json::json!({
@@ -1472,33 +1436,42 @@ mod tests {
     }
 
     #[test]
-    fn outbox_fact_fingerprint_matches_v1_known_vectors() {
-        let fixture = outbox_fact_golden_fixture();
-        assert_eq!(fixture.schema_version, 1);
-        assert_eq!(fixture.canonical_version, OUTBOX_FACT_CANONICAL_VERSION);
-        assert!(!fixture.cases.is_empty());
-        for case in fixture.cases {
-            let actual = OutboxFactIdentity::new(
-                &case.event_id,
-                &case.tenant_id,
-                &case.domain,
-                &case.topic,
-                &case.contract_id,
-                &case.contract_version,
-                &case.schema_hash,
-                &case.payload,
-                case.partition_key.as_deref(),
-                case.causation_id.as_deref(),
-                &case.metadata,
-            )
-            .fingerprint();
-            assert_eq!(
-                actual.as_bytes(),
-                &case.expected_digest,
-                "fixed digest: {}",
-                case.label
-            );
-        }
+    #[allow(clippy::expect_used)]
+    // reason: fixed literal JSON is known-valid test input.
+    fn outbox_fact_fingerprint_matches_crate_local_known_answers() {
+        let metadata = serde_json::json!({
+            "actor": {"id": "subject-1", "kind": "service"},
+            "occurredAt": "ignored",
+            "subjectId": "subject-1"
+        });
+        let full_fact = fact(
+            "payload-你好".as_bytes(),
+            Some("partition-a"),
+            Some("cause-a"),
+            &metadata,
+        )
+        .fingerprint();
+        assert_eq!(
+            full_fact.as_bytes(),
+            &[
+                204, 84, 62, 18, 15, 86, 36, 145, 223, 5, 160, 219, 218, 29, 163, 194, 192, 51, 2,
+                234, 24, 136, 237, 42, 34, 184, 254, 247, 229, 125, 2, 151,
+            ],
+            "complete fact digest"
+        );
+
+        let precision_boundary: serde_json::Value =
+            serde_json::from_str(r#"{"number":9007199254740993}"#)
+                .expect("valid precision-boundary JSON");
+        let number_fact = fact(b"", None, None, &precision_boundary).fingerprint();
+        assert_eq!(
+            number_fact.as_bytes(),
+            &[
+                44, 21, 60, 218, 209, 246, 4, 99, 135, 202, 150, 102, 15, 158, 192, 42, 108, 176,
+                208, 28, 110, 165, 235, 129, 232, 195, 61, 157, 190, 85, 209, 222,
+            ],
+            "canonical-number boundary digest"
+        );
     }
 
     #[test]
