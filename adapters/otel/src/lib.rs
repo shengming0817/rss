@@ -154,6 +154,8 @@ impl ManagedResource for OtelExporter {
 
 #[cfg(test)]
 mod smoke {
+    #![allow(clippy::expect_used)]
+
     //! build smoke：编译期断言 sealed-marker 已 impl 冻结的 diport DI port trait（PhantomData 绑定检查，
     //! 不构造、不执行 body）。
     //! ADAPTER-PORT-FREEZE-05 support：sealed-marker `OtelExporter` impl 冻结的 diport DI port trait
@@ -170,6 +172,8 @@ mod smoke {
 
 #[cfg(all(test, feature = "backend"))]
 mod backend_tests {
+    #![allow(clippy::expect_used)]
+
     //! 导出行为矩阵（InMemorySpanExporter 确定性捕获，无 live collector）：
     //! tracing span → 桥接 Layer → OTLP 导出 round-trip / observ::MetricLabel→KeyValue 映射 /
     //! OTLP/gRPC provider 构建 + 生命周期（name + shutdown）。

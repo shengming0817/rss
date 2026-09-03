@@ -23,10 +23,8 @@ workspace = true
 eventing.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
-authmint = { path = "../authmint" }
 sagaauthmint = { path = "../sagaauthmint" }
 dlqauthmint = { path = "../dlqauthmint" }
-pkiauthmint = { path = "../pkiauthmint" }
 # DI port 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 dynosaur = { workspace = true }
 # Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur bridge(dyn) 据此生成
@@ -38,7 +36,6 @@ thiserror = { workspace = true }
 secure = { path = "../secure" }
 # AuditEvent.tenant_id: Option<vocab::TenantId>（基础层强类型租户标识；跨租户主体可为空）。DiPort 依赖基础合规。
 vocab = { path = "../vocab" }
-# CertScope.device: ids::DeviceId（基础层强类型设备标识，RevocationStore scope 隔离）。DiPort 依赖基础合规。
 ids = { path = "../ids" }
 # OutboxEmitter port 签名引 consistency::outbox::Entry（引擎类型）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
 consistency = { path = "../consistency" }

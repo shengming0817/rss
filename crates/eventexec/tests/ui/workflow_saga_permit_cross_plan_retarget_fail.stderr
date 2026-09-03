@@ -1,9 +1,0 @@
-error[E0451]: fields `definition` and `source_runtime_plan_fingerprint` of struct `SagaActivationPermit` are private
- --> tests/ui/workflow_saga_permit_cross_plan_retarget_fail.rs:5:9
-  |
-4 |     eventexec::SagaActivationPermit {
-  |     ------------------------------- in this type
-5 |         source_runtime_plan_fingerprint: "sha256:other-plan".to_owned(),
-  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
-6 |         ..permit
-  |           ^^^^^^ field `definition` is private

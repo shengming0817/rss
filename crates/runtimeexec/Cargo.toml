@@ -17,7 +17,6 @@ eventing.workspace = true
 rss-platform.workspace = true
 anyhow = { workspace = true }
 assembly-schema = { path = "../assembly-schema" }
-authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
 diport = { path = "../diport" }
 eventexec = { path = "../eventexec" }

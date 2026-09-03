@@ -1,7 +1,0 @@
-error[E0599]: no associated function or constant named `service_token` found for struct `JwtIssuerConfig<ProjectionOperatorTokenProfile>` in the current scope
- --> tests/ui/projection_operator_issuer_unavailable_fail.rs:7:64
-  |
-7 |     let _ = JwtIssuerConfig::<ProjectionOperatorTokenProfile>::service_token(
-  |                                                                ^^^^^^^^^^^^^ associated function or constant not found in `JwtIssuerConfig<ProjectionOperatorTokenProfile>`
-  |
-  = note: the associated function or constant was found for `JwtIssuerConfig<ServiceTokenProfile>`

@@ -1,5 +1,0 @@
-error[E0451]: field `groups` of struct `InboxBacklogSelection` is private
- --> tests/ui/inbox_backlog_selection_raw_group_fail.rs:6:43
-  |
-6 |     let _forged = InboxBacklogSelection { groups: vec![raw] };
-  |                                           ^^^^^^ private field

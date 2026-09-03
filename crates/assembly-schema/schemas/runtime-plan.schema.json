@@ -19,7 +19,7 @@
   },
   "definitions": {
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "assemblyDomain": { "type": "string", "enum": ["identity", "settings", "audit", "contractreg", "syshealth"] },
+    "assemblyDomain": { "type": "string", "enum": ["platform", "runtime"] },
     "listenerKind": { "type": "string", "enum": ["primary", "internal", "health", "admin"] },
     "authScheme": { "type": "string", "enum": ["noAuth", "rssAccessToken", "federatedAccessToken", "mtls", "serviceToken"] },
     "lifecycleChannel": { "type": "string", "enum": ["probes", "resources", "workers"] },
@@ -30,23 +30,12 @@
         "constructor": {
           "type": "string",
           "enum": [
-            "postgres::PgDeviceCertificateRepository",
-            "postgres::PgDeviceCommandStore",
-            "identity_composition::DraftArtifactSimulator",
-            "mqtt::MqttSession",
-            "postgres::PgRevocationStore",
             "redis::RedisRateLimiter",
             "amqp::AmqpPublisher",
             "amqp::AmqpSubscriber",
             "redis::RedisLockStore",
             "redis::RedisCasStore",
-            "postgres::PgCasStore",
-            "postgres::PgAuthAuditSink",
-            "postgres::PgServiceTokenReplayStore",
-            "postgres::PgDlxLifecycleRepository",
-            "vault::VaultSigner",
             "vault::VaultKeyProvider",
-            "oidc::OidcProvider",
             "s3::S3Store",
             "s3::VerifiedS3DlxArchiveStore"
           ]

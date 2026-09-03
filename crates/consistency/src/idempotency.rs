@@ -244,9 +244,9 @@ mod tests {
         InboxReceiptContext::new(
             rss_request_context::TenantId::parse(tenant).expect("tenant"),
             ConsumerGroup::parse(group).expect("group"),
-            "identity",
-            "identity.session-created",
-            "identity.session-created",
+            "runtime",
+            "runtime.fact-recorded",
+            "runtime.fact-recorded",
             "v1",
             SCHEMA_HASH,
             None,
@@ -436,9 +436,9 @@ mod tests {
                 rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                     .unwrap(),
                 ConsumerGroup::parse("test-consumer").unwrap(),
-                "identity",
-                "identity.session-created",
-                "identity.session-created",
+                "runtime",
+                "runtime.fact-recorded",
+                "runtime.fact-recorded",
                 "v1",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 None,
@@ -719,7 +719,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
     fn consumer_group_parse_accepts_non_empty_and_round_trips() {
-        for &raw in &["audit", "audit.session-created", "grp-1", " "] {
+        for &raw in &["observer", "observer.fact-recorded", "grp-1", " "] {
             assert!(
                 ConsumerGroup::parse(raw).is_ok(),
                 "expected Ok for raw={raw:?}"

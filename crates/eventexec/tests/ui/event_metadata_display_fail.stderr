@@ -1,7 +1,7 @@
 error[E0277]: `EventMetadata` doesn't implement `std::fmt::Display`
- --> tests/ui/event_metadata_display_fail.rs:9:20
+ --> tests/ui/event_metadata_display_fail.rs:6:20
   |
-9 |     println!("{}", EventMetadata::new(tenant, occurred_at, None));
+6 |     println!("{}", EventMetadata::new(tenant, occurred_at, None));
   |               --   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EventMetadata` cannot be formatted with the default formatter
   |               |
   |               required by this formatting parameter

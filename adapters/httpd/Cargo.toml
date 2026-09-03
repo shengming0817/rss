@@ -8,11 +8,6 @@ publish = false
 [lints]
 workspace = true
 
-[features]
-# Hermetic TLS material for downstream assembly unit tests. Default production artifacts do not
-# compile this constructor or its certificate-generation dependency.
-test-support = ["dep:rcgen"]
-
 # HTTP 传输 adapter（对标 adapters/grpc 的 GrpcServer）：bind TcpListener + axum::serve + graceful
 # shutdown，impl diport::ManagedResource。adapter 是 DI port impl 的 blessed 站点（rss_diport_impl_allowlist
 # DIPORT-IMPL-ALLOWLIST-01：crates/* 服务层不可 impl ManagedResource）。组合根经 ShutdownStack 注入 token。
@@ -25,40 +20,23 @@ test-support = ["dep:rcgen"]
 [dependencies]
 diport = { path = "../../crates/diport" }
 listenerlifecycle = { path = "../../crates/listenerlifecycle" }
-authn = { path = "../../crates/authn" }
 httpserve = { path = "../../crates/httpserve" }
-distributed = { path = "../../crates/distributed" }
-diagctx = { package = "rss-diag-context", path = "../../crates/diagctx", version = "0.1.0" }
 tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0" }
-vocab = { path = "../../crates/vocab" }
-secure = { path = "../../crates/secure" }
 axum = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
-rustls = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-spiffe = { workspace = true }
-spiffe-rustls = { workspace = true }
-spiffe-rustls-tokio = { workspace = true }
-tokio-rustls = { workspace = true }
 tower = { workspace = true }
 http-body = { workspace = true }
 metrics = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 # bind 127.0.0.1:0 → 真 socket serve + raw TcpStream HTTP/1.1 GET 断言 200 + shutdown 收敛（hermetic，无外部 dep）。
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net", "test-util"] }
-rcgen = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 primitives = { path = "../../crates/primitives" }
 tracewiretest = { path = "../../crates/tracewiretest" }
 metrics-exporter-prometheus = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
-ids = { path = "../../crates/ids" }
-rss-request-context = { workspace = true }

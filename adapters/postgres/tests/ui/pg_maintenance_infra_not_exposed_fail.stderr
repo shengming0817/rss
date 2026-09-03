@@ -1,5 +1,0 @@
-error[E0599]: no method named `infra` found for reference `&PgMaintenanceDeps` in the current scope
- --> tests/ui/pg_maintenance_infra_not_exposed_fail.rs:4:18
-  |
-4 |     let _ = deps.infra();
-  |                  ^^^^^ method not found in `&PgMaintenanceDeps`

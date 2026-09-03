@@ -10,6 +10,6 @@ fn main() {
     let _ = (
         metadata.tenant_id(),
         metadata.occurred_at(),
-        metadata.audit_correlation(),
+        metadata.correlation(),
     );
 }

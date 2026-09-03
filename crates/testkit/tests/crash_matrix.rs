@@ -14,15 +14,15 @@ title = "publish succeeds before settle crash"
 level = "L2"
 mechanism = "outbox"
 status = "ready"
-domain = "identity"
-contractId = "identity.session-created"
+domain = "runtime"
+contractId = "runtime.fact-recorded"
 tenantAlias = "tenant-a"
 messageAlias = "message-a"
 partitionKeyAlias = "aggregate-a"
 tenantAuthority = "valid"
 crashPoint = "after-publish-before-settle"
 expectedInvariant = "outbox-publish-settled-once"
-runner = "postgres-rabbitmq"
+runner = "provider-neutral"
 "#;
 
 #[test]
@@ -45,8 +45,8 @@ fn assert_case_identity(case: &CrashCase) {
 }
 
 fn assert_case_scope(case: &CrashCase) {
-    assert_eq!(case.domain(), "identity");
-    assert_eq!(case.contract_id(), "identity.session-created");
+    assert_eq!(case.domain(), "runtime");
+    assert_eq!(case.contract_id(), "runtime.fact-recorded");
     assert_eq!(case.tenant_alias(), "tenant-a");
     assert_eq!(case.message_alias(), "message-a");
     assert_eq!(case.partition_key_alias(), "aggregate-a");
@@ -56,7 +56,7 @@ fn assert_case_scope(case: &CrashCase) {
 fn assert_case_fault_contract(case: &CrashCase) {
     assert_eq!(case.crash_point(), "after-publish-before-settle");
     assert_eq!(case.expected_invariant(), "outbox-publish-settled-once");
-    assert_eq!(case.runner(), CrashRunner::PostgresRabbitmq);
+    assert_eq!(case.runner(), CrashRunner::ProviderNeutral);
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn expected_invariant_is_required() -> TestResult {
 
 #[test]
 fn runner_is_required() -> TestResult {
-    let src = VALID_READY.replace("runner = \"postgres-rabbitmq\"\n", "");
+    let src = VALID_READY.replace("runner = \"provider-neutral\"\n", "");
     let err = match CrashCase::from_toml_str(&src) {
         Ok(_) => return Err("runner must be required".into()),
         Err(err) => err,
@@ -190,7 +190,7 @@ fn parse_time_secret_keys_are_rejected_without_raw_leak() -> TestResult {
 
 #[test]
 fn domain_must_be_domain_name_not_dotted_id() -> TestResult {
-    let src = VALID_READY.replace("domain = \"identity\"", "domain = \"identity.foo\"");
+    let src = VALID_READY.replace("domain = \"runtime\"", "domain = \"runtime.foo\"");
     let err = match CrashCase::from_toml_str(&src) {
         Ok(_) => return Err("domain must be a domain name".into()),
         Err(err) => err,

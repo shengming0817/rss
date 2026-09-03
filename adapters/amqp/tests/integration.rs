@@ -1,3 +1,5 @@
+#![allow(clippy::new_ret_no_self)]
+
 //! amqp adapter 集成测试——publish→subscribe 闭环 / 同-vhost topic 隔离 / 跨-vhost 隔离 / 凭据不进错误面 /
 //! broker-confirmed 取消终止流 / **at-least-once**（manual-ack ack/requeue/崩溃重投）。
 //!
@@ -26,12 +28,19 @@ use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
+const NEUTRAL_TOPIC: &str = "rss.event.v1";
 const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TEST_SCHEMA_HASH: &str =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Test-only constructor that keeps broker-behavior fixtures on a valid typed envelope.
 struct PublishRequest;
+
+struct NoopEventingEmitter;
+
+impl eventing::observability::EventingEmitter for NoopEventingEmitter {
+    fn emit(&self, _observation: eventing::observability::EventingObservation) {}
+}
 
 impl PublishRequest {
     fn new(topic: Topic, event_id: MessageId, payload: Vec<u8>) -> DiPublishRequest {
@@ -168,6 +177,7 @@ fn forced_cancel_consumer_contract(
             topic.as_str(),
             "amqp-forced-cancel-group",
             authority,
+            Arc::new(NoopEventingEmitter),
         ),
         metadata,
     ))
@@ -179,7 +189,7 @@ async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wro
     let network = testkit::bridge_network("rss-amqp-tls").await?;
     let dns_name = format!("{}-node", network.name());
     let fixture = testkit::rabbitmq_tls(
-        generated::event::settings_v1::TOPIC,
+        NEUTRAL_TOPIC,
         testkit::NetworkAttachment {
             network: network.name(),
             dns_name: &dns_name,
@@ -223,7 +233,7 @@ async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wro
     publisher.inject_post_send_connection_close_once();
     let error = publisher
         .publish(PublishRequest::new(
-            Topic::new(generated::event::settings_v1::TOPIC),
+            Topic::new(NEUTRAL_TOPIC),
             MessageId::new("evt-private-ca-recovery-1"),
             b"force-private-ca-recovery".to_vec(),
         ))
@@ -256,7 +266,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     let network = testkit::bridge_network("rss-amqp-tls").await?;
     let dns_name = format!("{}-node", network.name());
     let fixture = testkit::rabbitmq_tls(
-        generated::event::settings_v1::TOPIC,
+        NEUTRAL_TOPIC,
         testkit::NetworkAttachment {
             network: network.name(),
             dns_name: &dns_name,
@@ -264,7 +274,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     )
     .await?;
     let ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
-    let topic = Topic::new(generated::event::settings_v1::TOPIC);
+    let topic = Topic::new(NEUTRAL_TOPIC);
     let token = CancellationToken::new();
 
     assert!(
@@ -301,7 +311,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
         deps.subscriber_for_integration_test()
             .default_exchange_publish_is_denied_for_test(&Topic::new(format!(
                 "{}.adjacent",
-                generated::event::settings_v1::TOPIC
+                NEUTRAL_TOPIC
             )))
             .await?,
         "subscriber credential must not publish through the default exchange"
@@ -359,7 +369,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     assert!(
         publisher
             .publish(PublishRequest::new(
-                Topic::new(format!("{}.adjacent", generated::event::settings_v1::TOPIC)),
+                Topic::new(format!("{}.adjacent", NEUTRAL_TOPIC)),
                 MessageId::new("evt-private-ca-adjacent-denied"),
                 b"must-not-route-adjacent".to_vec(),
             ))
@@ -411,7 +421,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
             .infra()
             .subscriber()
             .subscribe_ackable(
-                Topic::new(format!("{}.adjacent", generated::event::settings_v1::TOPIC)),
+                Topic::new(format!("{}.adjacent", NEUTRAL_TOPIC)),
                 CancellationToken::new(),
             )
             .await

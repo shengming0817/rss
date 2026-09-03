@@ -226,7 +226,7 @@ impl Application {
     }
 }
 
-/// Instance-bound authority used by a private AuthN/AuthZ integration to admit request values.
+/// Instance-bound authority used by a consumer integration to admit request values.
 ///
 /// This capability is intentionally not `Clone` and has no public constructor. Holding only a
 /// [`Dispatcher`] and an authority-free [`RequestContextView`] is insufficient to dispatch.
@@ -302,7 +302,12 @@ impl Dispatcher {
         if context.cancellation().is_cancelled() {
             return Ok(DispatchOutcome::Cancelled);
         }
-        if context.deadline().is_expired(Instant::now()) {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "dispatcher compares the borrowed absolute deadline before polling user code"
+        )]
+        let deadline_expired = context.deadline().is_expired(Instant::now());
+        if deadline_expired {
             return Ok(DispatchOutcome::DeadlineExceeded);
         }
         let mut operation = registration.handler.handle(Box::new(request), context);
@@ -342,7 +347,7 @@ struct Registration {
 impl Registration {
     fn new<C: Contract, H: Handler<C>>(handler: H) -> Self {
         Self {
-            descriptor: C::DESCRIPTOR.clone(),
+            descriptor: C::DESCRIPTOR,
             request_type: std::any::TypeId::of::<C::Request>(),
             response_type: std::any::TypeId::of::<C::Response>(),
             handler: Arc::new(TypedHandler::<C, H> {
@@ -362,12 +367,15 @@ fn dispatch_state_error(state: AdmissionState) -> DispatchError {
     }
 }
 
+type ErasedHandlerFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, HandlerFailureClass>> + Send + 'a>>;
+
 trait ErasedHandler: Send + Sync {
     fn handle<'a>(
         &'a self,
         request: Box<dyn Any + Send>,
         context: RequestContextView<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, HandlerFailureClass>> + Send + 'a>>;
+    ) -> ErasedHandlerFuture<'a>;
 }
 struct TypedHandler<C, H> {
     handler: H,
@@ -378,8 +386,7 @@ impl<C: Contract, H: Handler<C>> ErasedHandler for TypedHandler<C, H> {
         &'a self,
         request: Box<dyn Any + Send>,
         context: RequestContextView<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, HandlerFailureClass>> + Send + 'a>>
-    {
+    ) -> ErasedHandlerFuture<'a> {
         Box::pin(async move {
             let request = request
                 .downcast::<C::Request>()

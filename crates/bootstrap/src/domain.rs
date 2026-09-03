@@ -57,12 +57,6 @@ pub fn compose(domains: &[&dyn Domain]) -> Result<Registry, KernelError> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum KernelError {
-    /// 路由组注册失败（如 prefix 冲突、listener 不支持等）。
-    #[error("route group registration failed: {0}")]
-    RouteGroup(#[from] httpserve::RouteGroupError),
-    /// 事件订阅注册失败（如 topic 不存在、handler 已注册等）。
-    #[error("subscriber registration failed")]
-    Subscriber,
     /// 健康探针注册失败（如探针名重复等）。
     #[error("probe registration failed")]
     Probe,

@@ -1,22 +1,19 @@
-//! runctx — 请求级 context 控制流值（tenant / principal）的传播接缝。
+//! runctx — 请求级 tenant 控制流值的传播接缝。
 //!
 //! # 可观测性边界（ADR-002 §D1，Hard）
 //!
-//! 本 crate **只**承载控制流值（授权用的 tenant / principal）。trace / correlation /
+//! 本 crate **只**承载 tenant scope。trace / correlation /
 //! request / cell 等**可观测 ID 是诊断信号**，必须由 consumer（httpserve middleware /
 //! observ）写成 `tracing` span 字段，**不**进 [`RequestCtx`]。runctx 刻意**不依赖 `tracing`**，
-//! 让「把 tenant/principal 塞进 span」在依赖图上不可表达——诊断载体可被采样丢弃 / 任意层
-//! 改写，不配做 row-scope 授权闸门（见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL「tracing span 仅作关联信号、
-//! 不替代持久审计」）。
+//! 让「把 tenant 塞进 span」在依赖图上不可表达——诊断载体可被采样丢弃 / 任意层改写，
+//! 不配做数据隔离依据。
 //!
 //! # 范式（ADR-002 §D2）
 //!
 //! [`RequestCtx`] 是显式 sealed struct，经 `tokio::task_local!` 传播：框架信任边界
-//! （httpserve / authn）用 [`scope`] 绑定一次，深层代码用 [`try_current`] / [`try_with`] 取用。
+//! 用 [`scope`] 绑定一次，深层代码用 [`try_current`] / [`try_with`] 取用。
 //! ctx 缺失 = fail-closed（返回 [`MissingCtx`]，绝不伪造 anonymous / default-tenant；ADR-002 §D6）。
 //!
-//! 构造只允许发生在已认证通道（JWT tenant claim / service-token signed typed `tenant_id` claim）；
-//! service-token 的 exact-one `X-Tenant-ID` 仅 challenger equality，**不能**单独建立 ambient。
 //! [`RequestCtx`] 私有字段 + 无 `Deserialize` ⇒ 从 request body 构造不可表达（ADR-002 §D5）。
 //!
 //! `tokio::spawn` / `spawn_blocking` / `std::thread` **不继承** task_local：跨任务须显式
@@ -25,9 +22,9 @@
 //! # consumer 接线示例（仅示意，runctx 不依赖 axum / tracing）
 //!
 //! ```ignore
-//! // httpserve middleware：认证后边界绑定一次，并把可观测 ID 写进 tracing span（D1：ID 入 span，不入 ctx）。
+//! // consumer boundary binds a validated tenant and keeps observable IDs in the span.
 //! async fn ctx_layer(req: Request, next: Next) -> Response {
-//!     let ctx = runctx::RequestCtx::new(tenant, principal); // tenant/principal 来自已认证通道
+//!     let ctx = runctx::RequestCtx::new(tenant);
 //!     let span = tracing::info_span!("request", trace_id = %trace, correlation = %corr); // 可观测 ID 走 span
 //!     runctx::scope(ctx, next.run(req).instrument(span)).await
 //! }
@@ -40,11 +37,8 @@
 pub mod ctx;
 pub mod local;
 
-// `AppCtx` 的 tenant 已是具体 `rss_request_context::TenantId`（ADR-002 §D3）；principal 是 `Arc<dyn PrincipalFacet>`
-// ——authn 的 `Principal` 经 `PrincipalFacet` 擦除注入（生产 impl 面仅 authn，由 dylint
-// `rss_principal_facet_impl_allowlist` 守，Medium，ADR-002 §D5）。外部 crate impl 不了 facet ⇒ 造不出
-// `AppCtx`（伪造门）。consumer 经 `AppCtx` 不透明持有、经访问器借用。
-pub use ctx::{AppCtx, PrincipalFacet, RequestCtx};
+// `AppCtx` carries only the canonical tenant value required by neutral provider boundaries.
+pub use ctx::{AppCtx, RequestCtx};
 pub use local::{MissingCtx, scope, try_current, try_with};
 
 // 测试支撑（`test-support` feature）：下游 crate 单测经 `runctx::test_support::app_ctx` 构造 `AppCtx`。

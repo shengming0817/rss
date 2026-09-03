@@ -77,13 +77,13 @@ impl ValidatedEvent {
     #[doc(hidden)]
     pub fn for_test(message: Message) -> Result<Self, EnvelopeHeaderError> {
         let header = message.try_header()?;
-        let audit_correlation = message
+        let correlation = message
             .metadata()
             .get(KEY_CORRELATION)
             .and_then(|raw| rss_diag_context::CorrelationId::parse(raw).ok());
         Ok(Self::new(
             message,
-            EventMetadata::new(header.tenant_id(), header.occurred_at(), audit_correlation),
+            EventMetadata::new(header.tenant_id(), header.occurred_at(), correlation),
         ))
     }
 }
@@ -297,12 +297,12 @@ impl ConsumerMeta {
         {
             return Err(EnvelopeHeaderError::SchemaHashMismatch);
         }
-        let audit_correlation = msg
+        let correlation = msg
             .metadata()
             .get(KEY_CORRELATION)
             .and_then(|raw| rss_diag_context::CorrelationId::parse(raw).ok());
         let event_metadata =
-            EventMetadata::new(header.tenant_id(), header.occurred_at(), audit_correlation);
+            EventMetadata::new(header.tenant_id(), header.occurred_at(), correlation);
         Ok((header, event_metadata))
     }
 
@@ -440,6 +440,7 @@ pub async fn run_consumer<S, H>(
 ///
 /// ref: lapin message::Delivery.acker（AMQP 手工 ack 范式）
 ///      watermill-amqp pkg/amqp/subscriber.go@master（Ack/Nack 驱动模型）
+#[allow(clippy::too_many_arguments)]
 pub async fn run_consumer_ackable<S, H>(
     mut stream: ManagedDeliveryStream,
     idempotency: Arc<S>,
@@ -546,6 +547,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::cognitive_complexity)]
 async fn consume_one_inner<S, H>(
     idempotency: &Arc<S>,
     dlx: &DynDeadLetterStore<'static>,
@@ -633,22 +635,20 @@ where
         }
         Ok(SeenState::Fresh) => {
             let event = Arc::new(ValidatedEvent::new(msg, event_metadata));
-            crate::event::scope_verified_event_origin(
-                crate::event::VerifiedEventOrigin::new(parent_causation),
-                handle_fresh(
-                    idempotency,
-                    dlx,
-                    meta,
-                    handler,
-                    event,
-                    &receipt_context,
-                    &key,
-                    &lease,
-                    acker,
-                    lease_cfg,
-                    retry_policy,
-                    token,
-                ),
+            let _parent_causation = parent_causation;
+            handle_fresh(
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                event,
+                &receipt_context,
+                &key,
+                &lease,
+                acker,
+                lease_cfg,
+                retry_policy,
+                token,
             )
             .await
         }
@@ -891,7 +891,7 @@ async fn run_handler_loop<S, H>(
                     key,
                     lease,
                     meta,
-                    &msg,
+                    msg,
                     attempt,
                     kind.message(),
                     acker,
@@ -926,7 +926,7 @@ async fn run_handler_loop<S, H>(
         key,
         lease,
         meta,
-        &msg,
+        msg,
         retry_policy.max_attempts().get(),
         exhausted_summary,
         acker,
@@ -1115,6 +1115,7 @@ async fn settle_invalid_message_id(
     settle_with_optional_message_id(acker, action, meta, None).await;
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn settle_with_optional_message_id(
     acker: Option<&diport::DynAcker<'static>>,
     action: diport::AckAction,
@@ -1488,6 +1489,12 @@ fn emit_release_failed(meta: &ConsumerMeta) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::disallowed_methods,
+        clippy::too_many_arguments
+    )]
+
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1651,12 +1658,7 @@ mod tests {
     }
 
     fn tenant_authority_metadata(message_id: &str) -> EnvelopeMetadata {
-        tenant_authority_metadata_for(
-            message_id,
-            "identity",
-            "contract-session",
-            "session.created",
-        )
+        tenant_authority_metadata_for(message_id, "runtime", "contract-session", "session.created")
     }
 
     fn tenant_metadata_for(
@@ -1671,12 +1673,7 @@ mod tests {
     }
 
     fn tenant_metadata(message_id: &str) -> EnvelopeMetadata {
-        tenant_metadata_for(
-            message_id,
-            "identity",
-            "contract-session",
-            "session.created",
-        )
+        tenant_metadata_for(message_id, "runtime", "contract-session", "session.created")
     }
 
     fn without_occurred_at(source: &EnvelopeMetadata) -> EnvelopeMetadata {
@@ -1697,7 +1694,7 @@ mod tests {
     fn preflight_parses_valid_correlation_and_drops_missing_or_invalid_values() {
         let consumer = meta();
         let cases = [
-            (Some("audit-correlation-1"), Some("audit-correlation-1")),
+            (Some("correlation-1"), Some("correlation-1")),
             (None, None),
             (Some("invalid correlation with spaces"), None),
         ];
@@ -1713,7 +1710,7 @@ mod tests {
                 .expect("standard envelope must remain valid");
             assert_eq!(
                 event_metadata
-                    .audit_correlation()
+                    .correlation()
                     .map(|correlation| correlation.as_str()),
                 expected
             );
@@ -1721,16 +1718,16 @@ mod tests {
     }
 
     #[test]
-    fn valid_audit_correlation_never_enters_receipt_context() {
+    fn valid_correlation_never_enters_receipt_context() {
         let consumer = meta();
         let mut metadata = tenant_metadata("correlation-receipt-case");
-        metadata.insert_wire_pair(KEY_CORRELATION, "audit-correlation-1");
+        metadata.insert_wire_pair(KEY_CORRELATION, "correlation-1");
         let message = Message::new_with_metadata("correlation-receipt-case", Vec::new(), metadata);
         let (header, event_metadata) = consumer
             .verify_envelope_header(&message)
             .expect("standard envelope must remain valid");
 
-        assert!(event_metadata.audit_correlation().is_some());
+        assert!(event_metadata.correlation().is_some());
         let receipt = consumer
             .receipt_context(&event_metadata, &header)
             .expect("validated metadata must build a receipt context");
@@ -1745,11 +1742,11 @@ mod tests {
         observability: Arc<dyn eventing::observability::EventingEmitter>,
     ) -> ConsumerMeta {
         ConsumerMeta::new(
-            "identity",
-            "identity",
+            "runtime",
+            "runtime",
             "contract-session",
             "session.created",
-            "identity.session.consumer",
+            "runtime.fact.consumer",
             tenant_authority(),
             observability,
         )
@@ -1758,11 +1755,11 @@ mod tests {
 
     fn cross_domain_meta() -> ConsumerMeta {
         ConsumerMeta::new(
-            "audit",
-            "identity",
+            "observer",
+            "runtime",
             "contract-session",
             "session.created",
-            "audit.session-created",
+            "observer.fact-recorded",
             tenant_authority(),
             crate::test_eventing_emitter(),
         )
@@ -2410,8 +2407,8 @@ mod tests {
         );
         for ctx in contexts {
             assert_eq!(ctx.tenant_id(), tenant());
-            assert_eq!(ctx.consumer_group().as_str(), "identity.session.consumer");
-            assert_eq!(ctx.domain(), "identity");
+            assert_eq!(ctx.consumer_group().as_str(), "runtime.fact.consumer");
+            assert_eq!(ctx.domain(), "runtime");
             assert_eq!(ctx.topic(), "session.created");
             assert_eq!(ctx.contract_id(), "contract-session");
             assert_eq!(ctx.contract_version(), "v1");
@@ -2481,7 +2478,7 @@ mod tests {
         );
         assert_eq!(
             record.consumer_group.as_deref(),
-            Some("identity.session.consumer"),
+            Some("runtime.fact.consumer"),
             "consumer_group 应来自 ConsumerMeta"
         );
         assert_eq!(idem.commit_count(), 1, "commit 应调 1 次（dlx 终态收口）");
@@ -2553,12 +2550,12 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let record = dlx_store.last_record().unwrap();
         assert_eq!(
-            record.producer_domain, "identity",
+            record.producer_domain, "runtime",
             "DLX attribution preserves the producer domain"
         );
         assert_eq!(
             record.consumer_domain.as_deref(),
-            Some("audit"),
+            Some("observer"),
             "DLX attribution records the consumer domain independently"
         );
         assert_eq!(idem.commit_count(), 1, "verified DLX should commit");
@@ -2785,7 +2782,7 @@ mod tests {
                 let token = signer
                     .sign(TenantAuthorityBinding::new(
                         tenant(),
-                        "identity",
+                        "runtime",
                         "contract-session",
                         "session.created",
                         "msg-expired",
@@ -2801,7 +2798,7 @@ mod tests {
                 let token = tenant_authority()
                     .sign(TenantAuthorityBinding::new(
                         tenant(),
-                        "settings",
+                        "other-runtime",
                         "contract-session",
                         "session.created",
                         "msg-binding",
@@ -3050,7 +3047,7 @@ mod tests {
     /// 且字段值不含 payload 字节原文（anti-PII）。
     ///
     /// anti-vacuity 加固：
-    /// - 使用唯一 meta（domain="tc5-domain"），与 TC2/TC3 的 "identity" 区分，
+    /// - 使用唯一 meta（domain="tc5-domain"），与 TC2/TC3 的 "runtime" 区分，
     ///   防并发写入污染聚合导致「六字段存在」断言恒真。
     /// - CapVisit 捕获 per-event 字段 map（Vec<HashMap<String,String>>），
     ///   每个 ERROR 事件一条，断言「存在某条 event 其 domain=="tc5-domain" 且含全部六字段」。
@@ -3159,7 +3156,7 @@ mod tests {
                 let dlx = fake_dlx(dlx_store.clone());
                 let handler_count = Arc::new(AtomicU32::new(0));
 
-                // 唯一 meta（domain="tc5-domain"），与 TC2/TC3 "identity" 区分——anti-vacuity 核心。
+                // 唯一 meta（domain="tc5-domain"），与 TC2/TC3 "runtime" 区分——anti-vacuity 核心。
                 let tc5_meta = ConsumerMeta::new(
                     "tc5-domain",
                     "tc5-domain",
@@ -3190,7 +3187,7 @@ mod tests {
             });
         });
 
-        // 找到 domain=="tc5-domain" 的 event（排除并发 TC2/TC3 的 "identity" 污染）。
+        // 找到 domain=="tc5-domain" 的 event（排除并发 TC2/TC3 的 "runtime" 污染）。
         #[allow(clippy::unwrap_used)]
         // reason: 测试断言，item-level carve-out
         let events = captured.events.lock().unwrap();
@@ -4327,69 +4324,6 @@ mod tests {
             Some(producer_trace_id.as_str()),
             "run_consumer 经 handle_fresh 读 KEY_TRACE → 还原 → instrument ⇒ handler 与 producer 同 trace_id"
         );
-    }
-
-    #[allow(clippy::unwrap_used, clippy::expect_used)]
-    #[test]
-    fn verified_consumer_parent_is_the_generated_event_causation() {
-        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let seen_handler = seen.clone();
-        let message_id = "verified-parent-event-1";
-        let msg = message(message_id, b"payload");
-
-        let handler = move |_event: Arc<super::ValidatedEvent>| -> futures::future::BoxFuture<'static, HandleResult> {
-            let seen = seen_handler.clone();
-            Box::pin(async move {
-                let tenant = tenant();
-                let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
-                    change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
-                    key: "consumer.child".to_owned(),
-                    occurred_at: 1,
-                    source_version: None,
-                    tenant_id: tenant.to_string(),
-                    version: 1,
-                };
-                let event = generated::event::settings_v1::emit(
-                    &crate::event::GeneratedEventEncoder,
-                    payload,
-                    tenant,
-                    rss_contract::Timepoint::try_from(1_i64).expect("time"),
-                    diport::EnvelopeSubjectId::from_opaque("consumer.child").expect("subject"),
-                    diport::OutboxActor::scoped(
-                        rss_request_context::PrincipalKind::Service,
-                        diport::OpaqueActorId::from_opaque("consumer-service").expect("actor"),
-                        tenant,
-                        rss_request_context::RowScope::Tenant,
-                    ),
-                    eventing::envelope::EventId::parse("child-event-1").expect("event id"),
-                )
-                .await
-                .expect("generated event");
-                *seen.lock().unwrap() = event
-                    .envelope()
-                    .causation_id()
-                    .map(|id| id.as_str().to_owned());
-                HandleResult::ack()
-            })
-        };
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(run_consumer(
-            Box::pin(futures::stream::iter(vec![msg])),
-            FakeInboxStore::fresh(),
-            fake_dlx(FakeDeadLetterStore::new()),
-            meta(),
-            handler,
-            lease_cfg_test(),
-            RetryPolicy::STANDARD,
-            consumer_admission(),
-            CancellationToken::new(),
-        ));
-
-        assert_eq!(seen.lock().unwrap().as_deref(), Some(message_id));
     }
 
     #[allow(clippy::unwrap_used)]

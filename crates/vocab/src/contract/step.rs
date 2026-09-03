@@ -90,6 +90,8 @@ fn is_rust_keyword(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::{RUST_RESERVED_KEYWORDS, RUST_STRICT_KEYWORDS, StepName, StepNameError};
 
     #[test]

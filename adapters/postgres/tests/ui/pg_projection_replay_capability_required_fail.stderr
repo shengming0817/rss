@@ -1,5 +1,0 @@
-error[E0599]: no method named `projection_replay_stores` found for reference `&PgProjectionOperatorDeps` in the current scope
- --> tests/ui/pg_projection_replay_capability_required_fail.rs:7:18
-  |
-7 |     let _ = deps.projection_replay_stores(protector);
-  |                  ^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&PgProjectionOperatorDeps`

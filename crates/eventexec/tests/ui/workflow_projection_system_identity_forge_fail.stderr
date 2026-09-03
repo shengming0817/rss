@@ -1,9 +1,0 @@
-error[E0451]: fields `actor` and `purpose` of struct `ProjectionSystemIdentity` are private
- --> tests/ui/workflow_projection_system_identity_forge_fail.rs:5:9
-  |
-4 |     let _forged = ProjectionSystemIdentity {
-  |                   ------------------------ in this type
-5 |         actor: "request-trigger",
-  |         ^^^^^ private field
-6 |         purpose: ProjectionPurpose::BackgroundWorker,
-  |         ^^^^^^^ private field

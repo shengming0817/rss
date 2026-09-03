@@ -1,31 +1,27 @@
 pub mod runctx
 pub mod runctx::ctx
-pub struct runctx::ctx::RequestCtx<T, P>
-impl<T, P> runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::new(T, P) -> Self
-pub fn runctx::ctx::RequestCtx<T, P>::principal(&self) -> &P
-pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
-impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
-impl<T, P> secure::redaction::Redact for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
-impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
-impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::eq(&self, &runctx::ctx::RequestCtx<T, P>) -> bool
-impl<T, P> core::marker::Freeze for runctx::ctx::RequestCtx<T, P> where T: core::marker::Freeze, P: core::marker::Freeze
-impl<T, P> core::marker::Send for runctx::ctx::RequestCtx<T, P> where T: core::marker::Send, P: core::marker::Send
-impl<T, P> core::marker::Sync for runctx::ctx::RequestCtx<T, P> where T: core::marker::Sync, P: core::marker::Sync
-impl<T, P> core::marker::Unpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::Unpin, P: core::marker::Unpin
-impl<T, P> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::UnsafeUnpin, P: core::marker::UnsafeUnpin
-impl<T, P> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::RefUnwindSafe, P: core::panic::unwind_safe::RefUnwindSafe
-impl<T, P> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::UnwindSafe, P: core::panic::unwind_safe::UnwindSafe
-pub trait runctx::ctx::PrincipalFacet: core::marker::Send + core::marker::Sync + 'static
-pub fn runctx::ctx::PrincipalFacet::kind(&self) -> rss_request_context::PrincipalKind
-pub fn runctx::ctx::PrincipalFacet::matches_subject(&self, &str) -> bool
-pub type runctx::ctx::AppCtx = runctx::ctx::RequestCtx<rss_request_context::TenantId, alloc::sync::Arc<dyn runctx::ctx::PrincipalFacet>>
+pub struct runctx::ctx::RequestCtx<T>
+impl<T> runctx::ctx::RequestCtx<T>
+pub const fn runctx::ctx::RequestCtx<T>::new(T) -> Self
+pub const fn runctx::ctx::RequestCtx<T>::tenant(&self) -> &T
+impl<T: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::clone(&self) -> runctx::ctx::RequestCtx<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::eq(&self, &runctx::ctx::RequestCtx<T>) -> bool
+impl<T> core::fmt::Debug for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T>
+impl<T> secure::redaction::Redact for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl<T> core::marker::Freeze for runctx::ctx::RequestCtx<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for runctx::ctx::RequestCtx<T> where T: core::marker::Send
+impl<T> core::marker::Sync for runctx::ctx::RequestCtx<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for runctx::ctx::RequestCtx<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T> where T: core::panic::unwind_safe::UnwindSafe
+pub type runctx::ctx::AppCtx = runctx::ctx::RequestCtx<rss_request_context::TenantId>
 pub mod runctx::local
 pub struct runctx::local::MissingCtx
 impl core::clone::Clone for runctx::local::MissingCtx
@@ -68,32 +64,28 @@ impl core::marker::Unpin for runctx::local::MissingCtx
 impl core::marker::UnsafeUnpin for runctx::local::MissingCtx
 impl core::panic::unwind_safe::RefUnwindSafe for runctx::local::MissingCtx
 impl core::panic::unwind_safe::UnwindSafe for runctx::local::MissingCtx
-pub struct runctx::RequestCtx<T, P>
-impl<T, P> runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::new(T, P) -> Self
-pub fn runctx::ctx::RequestCtx<T, P>::principal(&self) -> &P
-pub fn runctx::ctx::RequestCtx<T, P>::tenant(&self) -> &T
-impl<T, P> core::fmt::Debug for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<T, P> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T, P>
-impl<T, P> secure::redaction::Redact for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl<T: core::clone::Clone, P: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::clone(&self) -> runctx::ctx::RequestCtx<T, P>
-impl<T: core::cmp::Eq, P: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T, P>
-impl<T: core::cmp::PartialEq, P: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T, P>
-pub fn runctx::ctx::RequestCtx<T, P>::eq(&self, &runctx::ctx::RequestCtx<T, P>) -> bool
-impl<T, P> core::marker::Freeze for runctx::ctx::RequestCtx<T, P> where T: core::marker::Freeze, P: core::marker::Freeze
-impl<T, P> core::marker::Send for runctx::ctx::RequestCtx<T, P> where T: core::marker::Send, P: core::marker::Send
-impl<T, P> core::marker::Sync for runctx::ctx::RequestCtx<T, P> where T: core::marker::Sync, P: core::marker::Sync
-impl<T, P> core::marker::Unpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::Unpin, P: core::marker::Unpin
-impl<T, P> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T, P> where T: core::marker::UnsafeUnpin, P: core::marker::UnsafeUnpin
-impl<T, P> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::RefUnwindSafe, P: core::panic::unwind_safe::RefUnwindSafe
-impl<T, P> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::UnwindSafe, P: core::panic::unwind_safe::UnwindSafe
-pub trait runctx::PrincipalFacet: core::marker::Send + core::marker::Sync + 'static
-pub fn runctx::PrincipalFacet::kind(&self) -> rss_request_context::PrincipalKind
-pub fn runctx::PrincipalFacet::matches_subject(&self, &str) -> bool
+pub struct runctx::RequestCtx<T>
+impl<T> runctx::ctx::RequestCtx<T>
+pub const fn runctx::ctx::RequestCtx<T>::new(T) -> Self
+pub const fn runctx::ctx::RequestCtx<T>::tenant(&self) -> &T
+impl<T: core::clone::Clone> core::clone::Clone for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::clone(&self) -> runctx::ctx::RequestCtx<T>
+impl<T: core::cmp::Eq> core::cmp::Eq for runctx::ctx::RequestCtx<T>
+impl<T: core::cmp::PartialEq> core::cmp::PartialEq for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::eq(&self, &runctx::ctx::RequestCtx<T>) -> bool
+impl<T> core::fmt::Debug for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for runctx::ctx::RequestCtx<T>
+impl<T> secure::redaction::Redact for runctx::ctx::RequestCtx<T>
+pub fn runctx::ctx::RequestCtx<T>::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl<T> core::marker::Freeze for runctx::ctx::RequestCtx<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for runctx::ctx::RequestCtx<T> where T: core::marker::Send
+impl<T> core::marker::Sync for runctx::ctx::RequestCtx<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for runctx::ctx::RequestCtx<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T> where T: core::panic::unwind_safe::UnwindSafe
 pub fn runctx::scope<F>(runctx::ctx::AppCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
 pub fn runctx::try_current() -> core::result::Result<runctx::ctx::AppCtx, runctx::local::MissingCtx>
 pub fn runctx::try_with<R>(impl core::ops::function::FnOnce(&runctx::ctx::AppCtx) -> R) -> core::result::Result<R, runctx::local::MissingCtx>
-pub type runctx::AppCtx = runctx::ctx::RequestCtx<rss_request_context::TenantId, alloc::sync::Arc<dyn runctx::ctx::PrincipalFacet>>
+pub type runctx::AppCtx = runctx::ctx::RequestCtx<rss_request_context::TenantId>

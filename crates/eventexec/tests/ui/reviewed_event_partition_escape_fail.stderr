@@ -1,5 +1,0 @@
-error[E0599]: no method named `with_partition_key` found for struct `ReviewedEvent` in the current scope
- --> tests/ui/reviewed_event_partition_escape_fail.rs:5:11
-  |
-5 |     event.with_partition_key(partition_key)
-  |           ^^^^^^^^^^^^^^^^^^ method not found in `ReviewedEvent`

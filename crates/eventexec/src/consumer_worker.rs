@@ -93,7 +93,7 @@ use eventing::observability::{
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
 /// [`crate::OUTBOX_RELAY_PROBE`]）。组合根据此 + domain/topic 组装 per-worker `primitives::ProbeName`
-/// （如 `event_consumer:audit:identity.session-created`）接 readyz 聚合。
+/// （如 `event_consumer:audit:runtime.fact-recorded`）接 readyz 聚合。
 pub const EVENT_CONSUMER_PROBE: &str = "event_consumer";
 
 // ── spawn（专用线程驱动 !Send 消费 future）─────────────────────────────────────
@@ -439,6 +439,7 @@ async fn backoff_after_stream_end(
 }
 
 /// subscribe 失败：标 unavailable + 退避；`true` = 已 cancel。
+#[allow(clippy::too_many_arguments)]
 async fn backoff_after_subscribe_error(
     health: &WorkerHealth,
     backoff: &RetryPolicy,
@@ -843,7 +844,7 @@ mod tests {
         let token = tenant_authority()
             .sign(TenantAuthorityBinding::new(
                 tenant(),
-                "audit",
+                "observer",
                 "contract-session",
                 "session.created",
                 id,
@@ -865,9 +866,9 @@ mod tests {
             rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000001")
                 .expect("valid tenant id"),
             message_id,
-            DeadLetterProvenance::consumer("identity", "audit"),
-            "identity.session-created",
-            "identity.session-created",
+            DeadLetterProvenance::consumer("runtime", "observer"),
+            "runtime.fact-recorded",
+            "runtime.fact-recorded",
             Some("audit.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("test dead letter"),
@@ -938,8 +939,8 @@ mod tests {
         observability: Arc<dyn eventing::observability::EventingEmitter>,
     ) -> ConsumerMeta {
         ConsumerMeta::new(
-            "audit",
-            "audit",
+            "observer",
+            "observer",
             "contract-session",
             "session.created",
             "audit.session.consumer",
@@ -1339,7 +1340,7 @@ mod tests {
         let supervise = run_ackable_subscription_loop(
             DynAckableSubscriber::new_box(FailingSubscriber),
             Topic::new("session.created"),
-            "audit".to_owned(),
+            "observer".to_owned(),
             token.clone(),
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
@@ -1394,7 +1395,7 @@ mod tests {
                 subscribe_calls: subscribe_calls_run,
             }),
             Topic::new("session.created"),
-            "audit".to_owned(),
+            "observer".to_owned(),
             token.clone(),
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
@@ -1445,7 +1446,7 @@ mod tests {
                 subscribe_calls: subscribe_calls_run,
             }),
             Topic::new("session.created"),
-            "audit".to_owned(),
+            "observer".to_owned(),
             token.clone(),
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
@@ -1472,7 +1473,7 @@ mod tests {
         let supervise = run_ackable_subscription_loop(
             DynAckableSubscriber::new_box(FailingSubscriber),
             Topic::new("session.created"),
-            "audit".to_owned(),
+            "observer".to_owned(),
             token.clone(),
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
@@ -1524,7 +1525,7 @@ mod tests {
                 subscribe_calls: subscribe_calls_run,
             }),
             Topic::new("session.created"),
-            "audit".to_owned(),
+            "observer".to_owned(),
             token.clone(),
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
@@ -1727,14 +1728,14 @@ mod tests {
                 let worker = spawn_relay(
                     "outbox-relay-stalled-publish".to_owned(),
                     StalledRelayStore {
-                        domain: vocab::DomainName::parse("identity")
+                        domain: vocab::DomainName::parse("runtime")
                             .unwrap_or_else(|error| panic!("test domain: {error}")),
                         claimed: std::sync::atomic::AtomicBool::new(false),
                         started: thread_started,
                         release: thread_release,
                         subject: consistency::OutboxMetricSubject::new(
                             tenant(),
-                            consistency::OutboxContractId::parse("identity.session-created")
+                            consistency::OutboxContractId::parse("runtime.fact-recorded")
                                 .unwrap_or_else(|error| panic!("test contract: {error}")),
                         ),
                     },

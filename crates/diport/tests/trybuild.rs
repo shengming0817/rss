@@ -10,7 +10,6 @@
 //!   DIPORT-UNSAFE-HYGIENE-01 的基线（forbid 非恒真；dynosaur 生成 unsafe 不触发 forbid 是 hygiene 效果）。
 //! - fail（arc-not-send）：`async_send` bucket 的 `Arc<DynX>: !Send`（macro-expanded exact set），锁
 //!   #1095 / #1331 注入形态收口；`async_sync` 正向证据在 `async_sync_arc_send_sync_pass.rs`。
-//! - fail（pdp-non-sync）：PDP provider 必须 Sync，锁多线程 serving runtime 的共享边界。
 //!
 //! ## TRYBUILD=overwrite discipline
 //!
@@ -30,17 +29,11 @@ fn ui() {
     t.compile_fail("tests/ui/dyn_incompatible_fail.rs");
     t.compile_fail("tests/ui/unsafe_forbid_fail.rs");
     t.compile_fail("tests/ui/arc_dyn_ports_not_send.rs");
-    t.compile_fail("tests/ui/pdp_non_sync_impl_fail.rs");
     t.compile_fail("tests/ui/dead_letter_record_tenant_fail.rs");
     t.compile_fail("tests/ui/envelope_header_private_fields_fail.rs");
     t.compile_fail("tests/ui/message_envelope_private_fields_fail.rs");
     t.compile_fail("tests/ui/message_envelope_constructor_private_fail.rs");
     t.compile_fail("tests/ui/message_private_fields_fail.rs");
-    t.compile_fail("tests/ui/pki_artifact_request_clone_fail.rs");
-    t.compile_fail("tests/ui/pki_artifact_san_forge_fail.rs");
-    t.compile_fail("tests/ui/pki_artifact_digest_swap_fail.rs");
-    t.compile_fail("tests/ui/pki_external_provider_closure_private_fields_fail.rs");
-    t.compile_fail("tests/ui/pki_external_provider_closure_clone_fail.rs");
     t.compile_fail("tests/ui/saga_operator_authorization_forge_fail.rs");
     t.compile_fail("tests/ui/saga_operator_authorization_clone_fail.rs");
     t.compile_fail("tests/ui/saga_operator_claim_second_consume_fail.rs");

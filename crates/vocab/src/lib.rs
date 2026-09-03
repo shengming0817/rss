@@ -7,10 +7,8 @@ mod digest;
 pub mod epoch;
 pub mod error;
 pub mod http;
-pub mod projection;
 pub mod query;
 pub mod service;
-pub mod tenant;
 
 /// crate-name 形标识符校验：`[a-z][a-z0-9_]*`，整串非空（单一事实源，供 authz / contract 复用）。
 pub(crate) fn is_crate_name(s: &str) -> bool {
@@ -24,10 +22,7 @@ pub(crate) fn is_crate_name(s: &str) -> bool {
     }
 }
 
-pub use authz::{
-    Action, ActionError, Decision, GrantPermission, POLICY_MANAGE_PERMISSION_PREFIX,
-    PermissionParseError, RoutePermissionId,
-};
+pub use authz::{PermissionParseError, RoutePermissionId};
 pub use contract::binding::{
     ContractBinding, EventFactBinding, ProjectionInputBinding, SagaBackoff, SagaContractBinding,
     SagaJitter, SagaRetryClass, SagaRuntimePolicySpec, SagaStepBinding,
@@ -42,16 +37,8 @@ pub use http::{
     HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence, HttpSuccessStatus, LocalTxBoundary,
     LocalTxCommitUnknown, LocalTxModel, LocalTxRetry,
 };
-pub use projection::{
-    AUDIT_ACTOR_FIELD_OBLIGATION, AUDIT_FIELD_ACTOR_PERMISSION, AUDIT_FIELD_RESOURCE_ID_PERMISSION,
-    AUDIT_FIELD_TENANT_ID_PERMISSION, AUDIT_READ_PERMISSION, AUDIT_RESOURCE_ID_FIELD_OBLIGATION,
-    AUDIT_TENANT_ID_FIELD_OBLIGATION, IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION,
-    IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION, IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION,
-    IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION, ProjectionField,
-};
 pub use query::{Limit, LimitError};
 pub use service::ServiceCallerDomain;
-pub use tenant::{CrossTenantVisibility, RowVisibility, VisibilityScope};
 
 /// Closed policy for effects outside a durable ConsumerTx database transaction.
 ///

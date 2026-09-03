@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `federated_access` found for struct `JwtIssuerConfig<P>` in the current scope
- --> tests/ui/federated_issuer_unavailable_fail.rs:7:56
-  |
-7 |     let _ = JwtIssuerConfig::<FederatedAccessProfile>::federated_access(
-  |                                                        ^^^^^^^^^^^^^^^^ associated function or constant not found in `JwtIssuerConfig<FederatedAccessProfile>`

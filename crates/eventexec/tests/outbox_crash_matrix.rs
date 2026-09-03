@@ -16,11 +16,11 @@ const FIXTURE: &str = include_str!(
 );
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TENANT_B: &str = "8d9d3a33-8144-4e49-b1ad-67f6ee88c13a";
-const MESSAGE_ID: &str = "session-created-01";
-const TOPIC: &str = "identity.session-created";
-const CONTRACT_ID: &str = "identity.session-created";
-const PARTITION_KEY: &str = "session-01";
-const PAYLOAD: &[u8] = br#"{"sessionId":"session-01"}"#;
+const MESSAGE_ID: &str = "fact-recorded-01";
+const TOPIC: &str = "runtime.fact-recorded";
+const CONTRACT_ID: &str = "runtime.fact-recorded";
+const PARTITION_KEY: &str = "aggregate-01";
+const PAYLOAD: &[u8] = br#"{"entityId":"aggregate-01"}"#;
 const START_EPOCH_MICROS: i64 = 1_000_000;
 const LEASE_TTL_MICROS: i64 = 60_000_000;
 
@@ -96,7 +96,7 @@ impl CrashStore {
     // reason: fixed crash fixture provider domain is valid by construction.
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            domain: vocab::DomainName::parse("identity").expect("valid fixture domain"),
+            domain: vocab::DomainName::parse("runtime").expect("valid fixture domain"),
             rows: Mutex::new(vec![
                 DurableRow {
                     delivery: delivery(TENANT_A, MESSAGE_ID),
@@ -361,7 +361,7 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
     let spec = fixture.fault_spec().expect("closed crash spec");
     assert_eq!(spec, CrashFaultSpec::OutboxAfterPublishBeforeSettle);
     assert_eq!(fixture.status(), CrashStatus::Ready);
-    assert_eq!(fixture.domain(), "identity");
+    assert_eq!(fixture.domain(), "runtime");
     assert_eq!(fixture.contract_id(), CONTRACT_ID);
     assert_eq!(fixture.runner(), spec.expected_runner());
     assert_eq!(TOPIC, fixture.contract_id());

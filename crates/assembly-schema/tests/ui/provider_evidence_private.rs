@@ -5,11 +5,11 @@ use assembly_schema::{
 
 fn main() {
     let _ = ProviderCapabilityEvidence {
-        port: DiportPort::Pdp,
-        constructor: ProviderConstructor::OidcProvider,
-        provider_crate: "oidc",
+        port: DiportPort::Publisher,
+        constructor: ProviderConstructor::AmqpPublisher,
+        provider_crate: "amqp",
         required_features: &["backend"],
-        consumer: ProviderConsumer::Httpserve,
+        consumer: ProviderConsumer::Eventexec,
         durability: ProviderDurability::Persistent,
         outputs: &[],
     };

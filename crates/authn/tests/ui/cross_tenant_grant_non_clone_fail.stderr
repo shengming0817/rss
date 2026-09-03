@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `CrossTenantAuditGrant` in the current scope
- --> tests/ui/cross_tenant_grant_non_clone_fail.rs:2:28
-  |
-2 |     let _duplicate = grant.clone();
-  |                            ^^^^^ method not found in `CrossTenantAuditGrant`

@@ -133,18 +133,10 @@ pub(crate) enum LocalImpactDomain {
     RuntimeEventing,
     TenancyPostgres,
     Pdp,
-    ContractBinding,
-    CommandSymmetry,
 }
 
 impl LocalImpactDomain {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::RuntimeEventing,
-        Self::TenancyPostgres,
-        Self::Pdp,
-        Self::ContractBinding,
-        Self::CommandSymmetry,
-    ];
+    pub(crate) const ALL: [Self; 3] = [Self::RuntimeEventing, Self::TenancyPostgres, Self::Pdp];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,28 +236,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            ContractValidate => (step_contract_validate, Some("xtask/src/contract/validate.rs"),
-                gate(
-                        GateId::ContractValidate,
-                        "contract-validate",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            ContractBreaking => (step_contract_breaking, Some("xtask/src/contract/breaking.rs"),
-                gate(
-                        GateId::ContractBreaking,
-                        "contract-breaking",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             LayerDeps => (step_layer_deps, Some("xtask/src/layerdeps.rs"),
                 gate(
                         GateId::LayerDeps,
@@ -299,54 +269,10 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            SagaDurableRecoveryGuard => (step_saga_durable_recovery_guard, Some("xtask/src/saga_durable_recovery_guard.rs"),
-                gate(
-                        GateId::SagaDurableRecoveryGuard,
-                        "saga-durable-recovery-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            OutboxSameIdGuard => (step_outbox_same_id_guard, Some("xtask/src/outbox_same_id_guard.rs"),
-                gate(
-                        GateId::OutboxSameIdGuard,
-                        "outbox-same-id-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            InboxCutoverGuard => (step_inbox_cutover_guard, Some("xtask/src/inbox_cutover_guard.rs"),
-                gate(
-                        GateId::InboxCutoverGuard,
-                        "inbox-cutover-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             ArchRules => (step_archrules, Some("xtask/src/archrules.rs"),
                 gate(
                         GateId::ArchRules,
                         "archrules",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            CodegenCheck => (step_codegen_check, Some("xtask/src/codegen.rs"),
-                gate(
-                        GateId::CodegenCheck,
-                        "codegen-check",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -376,87 +302,10 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            ContractBindingGuard => (step_contract_binding_guard, Some("xtask/src/contract_binding_guard.rs"),
-                gate(
-                        GateId::ContractBindingGuard,
-                        "contract-binding-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            SchemaRls => (step_schema_rls_guard, Some("xtask/src/schema_rls.rs"),
-                gate(
-                        GateId::SchemaRls,
-                        "schema-rls",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            PgTenantTxGuard => (step_pg_tenant_tx_guard, Some("xtask/src/pg_tenant_tx_guard.rs"),
-                gate(
-                        GateId::PgTenantTxGuard,
-                        "pg-tenant-tx-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            RepoScopeGuard => (step_repo_scope_guard, Some("xtask/src/repo_scope_guard.rs"),
-                gate(
-                        GateId::RepoScopeGuard,
-                        "repo-scope-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            TenancyCloseout => (step_tenancy_closeout, Some("xtask/src/tenancy_closeout.rs"),
-                gate(
-                        GateId::TenancyCloseout,
-                        "tenancy-closeout",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            CommandSymmetry => (step_command_symmetry, Some("xtask/src/command_symmetry.rs"),
-                gate(
-                        GateId::CommandSymmetry,
-                        "command-symmetry",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             CiEntryGuard => (step_ci_entry_guard, Some("xtask/src/ci_entry_guard.rs"),
                 gate(
                         GateId::CiEntryGuard,
                         "ci-entry-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            ReconcileOutboxCommandGuard => (step_reconcile_outbox_command_guard, Some("xtask/src/reconcile_outbox_command_guard.rs"),
-                gate(
-                        GateId::ReconcileOutboxCommandGuard,
-                        "reconcile-outbox-command-guard",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -484,17 +333,6 @@ macro_rules! gate_catalog {
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
                         SOURCE,
                         GatePolicy::Subsumed(SubsumptionProof::WorkspaceBuildByAllFeatures),
-                    )
-            ),
-            PostgresFeatureMatrix => (step_postgres_feature_matrix, None,
-                gate(
-                        GateId::PostgresFeatureMatrix,
-                        "postgres-feature-matrix",
-                        CORE,
-                        CompileKind::Workspace,
-                        ToolRequirement::InProcess,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
                     )
             ),
             IntegrationCompile => (step_integration_compile, None,
@@ -703,32 +541,15 @@ impl GateId {
 
         match self {
             Self::Fmt
-            | Self::ContractValidate
-            | Self::ContractBreaking
             | Self::LayerDeps
             | Self::WsDepsDrift
             | Self::CiEntryGuard
             | Self::DeferGate => Policy::Always,
 
-            Self::InboxCutoverGuard
-            | Self::OutboxSameIdGuard
-            | Self::ReconcileOutboxCommandGuard => Policy::OnImpact(Domain::RuntimeEventing),
-
-            Self::SchemaRls
-            | Self::PgTenantTxGuard
-            | Self::RepoScopeGuard
-            | Self::TenancyCloseout => Policy::OnImpact(Domain::TenancyPostgres),
-
             Self::PdpAllowGuard => Policy::OnImpact(Domain::Pdp),
-            Self::ContractBindingGuard | Self::CodegenCheck => {
-                Policy::OnImpact(Domain::ContractBinding)
+            Self::ArchRules | Self::ProviderCapabilitiesCheck | Self::SourceSemanticGuard => {
+                Policy::FullOnly
             }
-            Self::CommandSymmetry => Policy::OnImpact(Domain::CommandSymmetry),
-
-            Self::ArchRules
-            | Self::ProviderCapabilitiesCheck
-            | Self::SourceSemanticGuard
-            | Self::SagaDurableRecoveryGuard => Policy::FullOnly,
 
             _ => Policy::NeverLocal,
         }

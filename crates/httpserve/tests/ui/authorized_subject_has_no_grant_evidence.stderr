@@ -1,5 +1,0 @@
-error[E0599]: no method named `current_auth_grant` found for reference `&AuthorizedSubject` in the current scope
- --> tests/ui/authorized_subject_has_no_grant_evidence.rs:2:21
-  |
-2 |     let _ = subject.current_auth_grant();
-  |                     ^^^^^^^^^^^^^^^^^^ method not found in `&AuthorizedSubject`

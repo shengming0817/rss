@@ -2,7 +2,6 @@
 // reason: test setup and assertions use expect/expect_err to retain precise failure context.
 
 use super::minio::*;
-use super::mqtt::*;
 use super::postgres::*;
 use super::rabbitmq::*;
 use super::redis::*;
@@ -39,29 +38,6 @@ fn create_private_test_dir(path: &Path) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .expect("test log directory must be private");
     }
-}
-
-#[test]
-fn mqtt_acl_allows_only_the_closed_downlink_contracts() {
-    let acl = mqtt_exact_acl("device-primary", "device-cross");
-    let downlinks = acl
-        .lines()
-        .filter(|line| line.contains("/downlink/"))
-        .collect::<Vec<_>>();
-    assert_eq!(downlinks.len(), 10);
-    for line in downlinks {
-        assert!(
-            MQTT_DOWNLINK_CONTRACTS
-                .iter()
-                .any(|contract| line.ends_with(contract)),
-            "unknown downlink contract entered the exact ACL: {line}"
-        );
-        assert!(!line.contains('+') && !line.contains('#'));
-    }
-    assert!(
-        !acl.contains("/downlink/identity.device-unknown"),
-        "an extra downlink contract must remain rejected"
-    );
 }
 
 #[test]
@@ -335,20 +311,6 @@ fn vault_fixture_pins_image_and_maps_host_https_endpoint() {
 }
 
 #[test]
-fn mqtt_fixture_keeps_the_exact_acl_available_to_offline_sessions() {
-    let config = mqtt_broker_config(None);
-    assert_eq!(config.matches("listener 8883").count(), 1);
-    assert!(config.contains("per_listener_settings false"));
-    assert!(!config.contains("per_listener_settings true"));
-    assert!(config.contains("acl_file /mosquitto/config/acl"));
-    assert!(!config.contains("plugin_opt_assertion_fault"));
-
-    let faulted = mqtt_broker_config(Some(MqttAssertionFault::CorruptFirstSignature));
-    assert_eq!(faulted.matches("plugin_opt_assertion_fault").count(), 1);
-    assert!(faulted.contains("corrupt_first_signature"));
-}
-
-#[test]
 fn exact_provider_tls_inputs_reject_wildcards_and_policy_drift() {
     for queue in ["", "settings.*", "settings/queue", "空"] {
         assert!(
@@ -356,7 +318,7 @@ fn exact_provider_tls_inputs_reject_wildcards_and_policy_drift() {
             "accepted non-exact RabbitMQ queue {queue:?}"
         );
     }
-    assert!(validate_exact_queue_name("settings.config-version-changed").is_ok());
+    assert!(validate_exact_queue_name("runtime.fact-updated").is_ok());
 
     let policy: serde_json::Value = serde_json::from_str(&minio_archive_policy())
         .expect("fixed MinIO archive policy must be valid JSON");

@@ -53,9 +53,9 @@ pub trait Aead {
     /// 解密：`aad` 必须由调用方从**受信上下文新派生**（`&DerivedAad`，绝不回灌 `envelope.aad()`）。
     ///
     /// 调用方义务（#1466/#1467 落地）：
-    /// - **tenant 必须取自受信源**——已鉴权请求经 `Principal`/JWT（如 `Principal::tenant_id()`），离线维护经
+    /// - **tenant 必须取自受信源**——已鉴权请求经可信认证边界，离线维护经
     ///   被解密记录的已知坐标（[`crate::ProtectionContext`] 两构造器）；**不可**由业务自由拼，否则跨租绑定静默失效
-    ///   （`FIELDPROT-AAD-DERIVE-FROM-CTX-01` 在 L0 不可见 `Principal`，此约束落 #1466 call site governance）。
+    ///   （`FIELDPROT-AAD-DERIVE-FROM-CTX-01` 在 L0 不可见认证对象，此约束落 #1466 call site governance）。
     /// - **错误诊断**：[`AeadError::Open`] 不携带任何上下文（防降级探测），故调用方须在 `Err` 分支自行记录
     ///   envelope 元数据，如 `tracing::error!(kid = envelope.kid(), key_version = envelope.key_version(),
     ///   "aead open failed")`，以保证生产可观测性。

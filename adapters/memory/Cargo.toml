@@ -19,9 +19,6 @@ diport = { path = "../../crates/diport" }
 rss-contract.workspace = true
 secure = { path = "../../crates/secure" }
 primitives = { path = "../../crates/primitives" }
-# AuthGrant aggregate/value types are canonically owned by authn; the memory adapter implements
-# identity lifecycle ports over those values.
-authn = { path = "../../crates/authn" }
 # MemLeaderElector/MemFencedWriter 的 LeaseToken.epoch / FencedWriteRequest.epoch（单调 fencing token）。
 # 单测亦构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
 vocab = { path = "../../crates/vocab" }
@@ -32,9 +29,6 @@ uuid = { workspace = true }
 futures = { workspace = true }
 # 订阅取消信号：tokio_util CancellationToken（与 diport::Subscriber::subscribe 签名同源）。
 tokio-util = { workspace = true }
-# 域形 co-tx 端口 `identity::ports::AuthGrantLifecycle` 的 demo provider（MemAuthGrantLifecycle，#1192）：
-# adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper 加 memory 放行）。
-identity = { path = "../../crates/identity" }
 zeroize = { workspace = true }
 
 [dev-dependencies]
@@ -42,5 +36,3 @@ diport = { path = "../../crates/diport", features = ["test-support"] }
 # 异步单测 runtime + StreamExt::next。
 tokio = { workspace = true }
 futures = { workspace = true }
-identity = { path = "../../crates/identity", features = ["test-support"] }
-generated = { path = "../../generated" }

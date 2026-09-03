@@ -939,11 +939,11 @@ mod tests {
             DeadLetterSource::Consumer,
             tenant,
             "msg-1",
-            "identity",
-            Some("audit".to_string()),
+            "runtime",
+            Some("observer".to_string()),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             4,
             "max retries exhausted",
             3,
@@ -989,11 +989,11 @@ mod tests {
                     DeadLetterSource::Consumer,
                     tenant,
                     format!("msg-{i}"),
-                    "identity",
-                    Some("audit".to_string()),
+                    "runtime",
+                    Some("observer".to_string()),
                     "contract-session",
                     "session.created",
-                    Some("identity.session.consumer".to_string()),
+                    Some("runtime.fact.consumer".to_string()),
                     4,
                     "max retries exhausted",
                     3,
@@ -1022,11 +1022,11 @@ mod tests {
                 DeadLetterSource::Consumer,
                 tenant,
                 "msg-a",
-                "identity",
-                Some("audit".to_string()),
-                "identity.session-created",
+                "runtime",
+                Some("observer".to_string()),
+                "runtime.fact-recorded",
                 "session.created",
-                Some("identity.session.consumer".to_string()),
+                Some("runtime.fact.consumer".to_string()),
                 4,
                 "max retries exhausted",
                 3,
@@ -1038,9 +1038,9 @@ mod tests {
                 DeadLetterSource::Consumer,
                 tenant,
                 "msg-b",
-                "identity",
-                Some("audit".to_string()),
-                "identity.role-assigned",
+                "runtime",
+                Some("observer".to_string()),
+                "runtime.fact-updated",
                 "role.assigned",
                 Some("identity.role.consumer".to_string()),
                 4,
@@ -1052,13 +1052,13 @@ mod tests {
 
         let result = DlqListResult::from_sorted_rows(
             &DlqListQuery::new(authorization(tenant))
-                .with_contract_id("identity.session-created")
+                .with_contract_id("runtime.fact-recorded")
                 .with_limit(1),
             rows,
         );
 
         assert_eq!(result.data().len(), 1);
-        assert_eq!(result.data()[0].contract_id(), "identity.session-created");
+        assert_eq!(result.data()[0].contract_id(), "runtime.fact-recorded");
         assert!(
             !result.has_more(),
             "filtered-out rows must not force paging"
@@ -1071,7 +1071,7 @@ mod tests {
     fn list_result_filters_producer_and_consumer_domains_independently() {
         let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
-        let rows = ["audit", "search"]
+        let rows = ["observer", "search"]
             .into_iter()
             .map(|consumer_domain| {
                 DlqEntrySummary::new(
@@ -1080,9 +1080,9 @@ mod tests {
                     DeadLetterSource::Consumer,
                     tenant,
                     format!("msg-{consumer_domain}"),
-                    "identity",
+                    "runtime",
                     Some(consumer_domain.to_string()),
-                    "identity.session-created",
+                    "runtime.fact-recorded",
                     "session.created",
                     Some(format!("{consumer_domain}.session.consumer")),
                     4,
@@ -1095,14 +1095,14 @@ mod tests {
 
         let result = DlqListResult::from_sorted_rows(
             &DlqListQuery::new(authorization(tenant))
-                .with_producer_domain("identity")
-                .with_consumer_domain("audit"),
+                .with_producer_domain("runtime")
+                .with_consumer_domain("observer"),
             rows,
         );
 
         assert_eq!(result.data().len(), 1);
-        assert_eq!(result.data()[0].producer_domain(), "identity");
-        assert_eq!(result.data()[0].consumer_domain(), Some("audit"));
+        assert_eq!(result.data()[0].producer_domain(), "runtime");
+        assert_eq!(result.data()[0].consumer_domain(), Some("observer"));
     }
 
     #[test]
@@ -1119,11 +1119,11 @@ mod tests {
                     DeadLetterSource::Consumer,
                     tenant,
                     format!("msg-{i}"),
-                    "identity",
-                    Some("audit".to_string()),
+                    "runtime",
+                    Some("observer".to_string()),
                     "contract-session",
                     "session.created",
-                    Some("identity.session.consumer".to_string()),
+                    Some("runtime.fact.consumer".to_string()),
                     4,
                     "max retries exhausted",
                     3,
@@ -1144,11 +1144,11 @@ mod tests {
             DeadLetterSource::Consumer,
             tenant,
             "msg-new",
-            "identity",
-            Some("audit".to_string()),
+            "runtime",
+            Some("observer".to_string()),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             4,
             "newer row",
             1,
@@ -1160,11 +1160,11 @@ mod tests {
             DeadLetterSource::Consumer,
             tenant,
             "msg-tail",
-            "identity",
-            Some("audit".to_string()),
+            "runtime",
+            Some("observer".to_string()),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             4,
             "older row",
             1,
@@ -1198,11 +1198,11 @@ mod tests {
                     DeadLetterSource::Consumer,
                     tenant,
                     format!("msg-{i}"),
-                    "identity",
-                    Some("audit".to_string()),
+                    "runtime",
+                    Some("observer".to_string()),
                     "contract-session",
                     "session.created",
-                    Some("identity.session.consumer".to_string()),
+                    Some("runtime.fact.consumer".to_string()),
                     4,
                     "max retries exhausted",
                     3,

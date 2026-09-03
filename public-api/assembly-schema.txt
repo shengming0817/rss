@@ -555,11 +555,8 @@ impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeIn
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
 pub enum assembly_schema::AssemblyDomain
-pub assembly_schema::AssemblyDomain::Audit
-pub assembly_schema::AssemblyDomain::Contractreg
-pub assembly_schema::AssemblyDomain::Identity
-pub assembly_schema::AssemblyDomain::Settings
-pub assembly_schema::AssemblyDomain::Syshealth
+pub assembly_schema::AssemblyDomain::Platform
+pub assembly_schema::AssemblyDomain::Runtime
 impl assembly_schema::AssemblyDomain
 pub fn assembly_schema::AssemblyDomain::as_str(&self) -> &'static str
 impl core::clone::Clone for assembly_schema::AssemblyDomain
@@ -738,26 +735,13 @@ impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyTopolo
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyTopology
 #[repr(u8)] pub enum assembly_schema::DiportPort
 pub assembly_schema::DiportPort::AckableSubscriber
-pub assembly_schema::DiportPort::AuditSink
 pub assembly_schema::DiportPort::Cas
-pub assembly_schema::DiportPort::CertificateArtifactSource
-pub assembly_schema::DiportPort::CertificateReconcileRepository
-pub assembly_schema::DiportPort::DeviceCommandStore
 pub assembly_schema::DiportPort::DlxArchiveStore
-pub assembly_schema::DiportPort::DlxLifecycleRepository
-pub assembly_schema::DiportPort::ExternalCsrResolver
-pub assembly_schema::DiportPort::ExternalPkiProviderClosure
 pub assembly_schema::DiportPort::KeyProvider
 pub assembly_schema::DiportPort::Lock
-pub assembly_schema::DiportPort::MqttSession
 pub assembly_schema::DiportPort::ObjectStore
-pub assembly_schema::DiportPort::Pdp
 pub assembly_schema::DiportPort::Publisher
 pub assembly_schema::DiportPort::RateLimiter
-pub assembly_schema::DiportPort::RevocationStore
-pub assembly_schema::DiportPort::SecretResolver
-pub assembly_schema::DiportPort::ServiceTokenReplayStore
-pub assembly_schema::DiportPort::Signer
 impl assembly_schema::DiportPort
 pub const fn assembly_schema::DiportPort::as_str(self) -> &'static str
 impl core::clone::Clone for assembly_schema::DiportPort
@@ -1040,27 +1024,12 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderActivatio
 #[repr(u8)] pub enum assembly_schema::ProviderConstructor
 pub assembly_schema::ProviderConstructor::AmqpPublisher
 pub assembly_schema::ProviderConstructor::AmqpSubscriber
-pub assembly_schema::ProviderConstructor::HttpdSpiffeMtlsExternalCsrResolver
-pub assembly_schema::ProviderConstructor::IdentityDraftArtifactSimulator
-pub assembly_schema::ProviderConstructor::IdentityExternalPkiArtifactSource
-pub assembly_schema::ProviderConstructor::MqttSession
-pub assembly_schema::ProviderConstructor::OidcProvider
-pub assembly_schema::ProviderConstructor::PostgresAuthAuditSink
-pub assembly_schema::ProviderConstructor::PostgresCasStore
-pub assembly_schema::ProviderConstructor::PostgresDeviceCertificateRepository
-pub assembly_schema::ProviderConstructor::PostgresDeviceCommandStore
-pub assembly_schema::ProviderConstructor::PostgresDlxLifecycleRepository
-pub assembly_schema::ProviderConstructor::PostgresRevocationStore
-pub assembly_schema::ProviderConstructor::PostgresServiceTokenReplayStore
 pub assembly_schema::ProviderConstructor::RedisCasStore
 pub assembly_schema::ProviderConstructor::RedisLockStore
 pub assembly_schema::ProviderConstructor::RedisRateLimiter
 pub assembly_schema::ProviderConstructor::S3Store
 pub assembly_schema::ProviderConstructor::S3VerifiedDlxArchiveStore
-pub assembly_schema::ProviderConstructor::VaultExternalPkiProviderClosure
 pub assembly_schema::ProviderConstructor::VaultKeyProvider
-pub assembly_schema::ProviderConstructor::VaultSecretResolver
-pub assembly_schema::ProviderConstructor::VaultSigner
 impl assembly_schema::ProviderConstructor
 pub const fn assembly_schema::ProviderConstructor::as_str(self) -> &'static str
 pub const fn assembly_schema::ProviderConstructor::durability(self) -> assembly_schema::ProviderDurability
@@ -1098,14 +1067,10 @@ impl core::marker::UnsafeUnpin for assembly_schema::ProviderConstructor
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderConstructor
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderConstructor
 #[repr(u8)] pub enum assembly_schema::ProviderConsumer
-pub assembly_schema::ProviderConsumer::Deviceloop
 pub assembly_schema::ProviderConsumer::Distributed
 pub assembly_schema::ProviderConsumer::Eventexec
 pub assembly_schema::ProviderConsumer::Httpserve
-pub assembly_schema::ProviderConsumer::Identity
-pub assembly_schema::ProviderConsumer::Oidc
 pub assembly_schema::ProviderConsumer::Runtime
-pub assembly_schema::ProviderConsumer::Settings
 impl assembly_schema::ProviderConsumer
 pub const fn assembly_schema::ProviderConsumer::as_str(self) -> &'static str
 impl core::clone::Clone for assembly_schema::ProviderConsumer
@@ -1174,30 +1139,14 @@ impl core::marker::UnsafeUnpin for assembly_schema::ProviderDurability
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderDurability
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderDurability
 #[repr(u8)] pub enum assembly_schema::ProviderFactorySymbol
-pub assembly_schema::ProviderFactorySymbol::DeviceloopPostgresRevocationStore
-pub assembly_schema::ProviderFactorySymbol::DistributedPostgresCasStore
 pub assembly_schema::ProviderFactorySymbol::DistributedRedisLockStore
 pub assembly_schema::ProviderFactorySymbol::EventexecAmqpPublisher
 pub assembly_schema::ProviderFactorySymbol::EventexecAmqpSubscriber
-pub assembly_schema::ProviderFactorySymbol::EventexecPostgresDlxLifecycleRepository
 pub assembly_schema::ProviderFactorySymbol::EventexecS3DlxArchiveStore
 pub assembly_schema::ProviderFactorySymbol::EventexecVaultArchiveKeyProvider
 pub assembly_schema::ProviderFactorySymbol::EventexecVaultHotKeyProvider
-pub assembly_schema::ProviderFactorySymbol::HttpserveOidcPdp
-pub assembly_schema::ProviderFactorySymbol::HttpservePostgresAuthAuditSink
 pub assembly_schema::ProviderFactorySymbol::HttpserveRedisRateLimiter
-pub assembly_schema::ProviderFactorySymbol::IdentityDraftArtifactSimulator
-pub assembly_schema::ProviderFactorySymbol::IdentityExternalCsrResolver
-pub assembly_schema::ProviderFactorySymbol::IdentityExternalPkiArtifactSource
-pub assembly_schema::ProviderFactorySymbol::IdentityMqttSession
-pub assembly_schema::ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore
-pub assembly_schema::ProviderFactorySymbol::IdentityPostgresDeviceCommandStore
-pub assembly_schema::ProviderFactorySymbol::IdentityVaultExternalPki
-pub assembly_schema::ProviderFactorySymbol::IdentityVaultSigner
-pub assembly_schema::ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore
 pub assembly_schema::ProviderFactorySymbol::RuntimeS3ObjectStore
-pub assembly_schema::ProviderFactorySymbol::SettingsVaultKeyProvider
-pub assembly_schema::ProviderFactorySymbol::SettingsVaultSecretResolver
 impl assembly_schema::ProviderFactorySymbol
 pub const fn assembly_schema::ProviderFactorySymbol::as_str(self) -> &'static str
 impl core::clone::Clone for assembly_schema::ProviderFactorySymbol
@@ -1302,31 +1251,15 @@ impl core::marker::UnsafeUnpin for assembly_schema::ProviderLifecycle
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderLifecycle
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderLifecycle
 #[repr(u8)] pub enum assembly_schema::ProviderRole
-pub assembly_schema::ProviderRole::AuthAuditSink
-pub assembly_schema::ProviderRole::DeviceCertificateStore
-pub assembly_schema::ProviderRole::DeviceCommandStore
-pub assembly_schema::ProviderRole::DeviceDraftArtifactSource
-pub assembly_schema::ProviderRole::DeviceMqttSession
-pub assembly_schema::ProviderRole::DeviceProductionArtifactSource
-pub assembly_schema::ProviderRole::DeviceRevocationStore
-pub assembly_schema::ProviderRole::DistributedCasStore
 pub assembly_schema::ProviderRole::DistributedCasStoreAlternative
 pub assembly_schema::ProviderRole::DistributedLockStore
 pub assembly_schema::ProviderRole::DlxArchiveKeyProvider
 pub assembly_schema::ProviderRole::DlxArchiveStore
 pub assembly_schema::ProviderRole::DlxHotKeyProvider
-pub assembly_schema::ProviderRole::DlxLifecycleRepository
 pub assembly_schema::ProviderRole::EventPublisher
 pub assembly_schema::ProviderRole::EventSubscriber
-pub assembly_schema::ProviderRole::ExternalCsrResolver
-pub assembly_schema::ProviderRole::IdentitySigner
-pub assembly_schema::ProviderRole::ListenerPdp
 pub assembly_schema::ProviderRole::ListenerRateLimiter
 pub assembly_schema::ProviderRole::RuntimeObjectStore
-pub assembly_schema::ProviderRole::ServiceTokenReplayStore
-pub assembly_schema::ProviderRole::SettingsKeyProvider
-pub assembly_schema::ProviderRole::SettingsSecretResolver
-pub assembly_schema::ProviderRole::VaultExternalPki
 impl assembly_schema::ProviderRole
 pub const fn assembly_schema::ProviderRole::activation(self) -> assembly_schema::ProviderActivation
 pub const fn assembly_schema::ProviderRole::as_str(self) -> &'static str

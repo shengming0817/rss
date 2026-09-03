@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::cognitive_complexity)]
+
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -32,7 +34,7 @@ fn envelope_binds_identity_metadata_and_generic_payload() {
         rss_contract::Timepoint::try_from_duration(Duration::from_millis(1_700_000_000_000))
             .expect("valid timepoint");
     let descriptor = rss_contract::ContractDescriptor::from_static_version(
-        "settings.config-version-changed",
+        "runtime.fact-updated",
         "v1",
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
@@ -50,7 +52,7 @@ fn envelope_binds_identity_metadata_and_generic_payload() {
     assert_eq!(
         envelope
             .metadata()
-            .audit_correlation()
+            .correlation()
             .map(rss_diag_context::CorrelationId::as_str),
         Some("corr-2159")
     );
@@ -64,7 +66,7 @@ fn envelope_binds_identity_metadata_and_generic_payload() {
     assert_eq!(metadata.occurred_at(), expected_time);
     assert_eq!(
         metadata
-            .audit_correlation()
+            .correlation()
             .map(rss_diag_context::CorrelationId::as_str),
         Some("corr-2159")
     );

@@ -42,55 +42,6 @@ impl core::marker::Unpin for rss_request_context::ContextValueError
 impl core::marker::UnsafeUnpin for rss_request_context::ContextValueError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::ContextValueError
 impl core::panic::unwind_safe::UnwindSafe for rss_request_context::ContextValueError
-pub enum rss_request_context::PrincipalKind
-pub rss_request_context::PrincipalKind::Admin
-pub rss_request_context::PrincipalKind::Anonymous
-pub rss_request_context::PrincipalKind::Device
-pub rss_request_context::PrincipalKind::Service
-pub rss_request_context::PrincipalKind::SuperAdmin
-pub rss_request_context::PrincipalKind::User
-impl rss_request_context::PrincipalKind
-pub const fn rss_request_context::PrincipalKind::as_actor_metadata_label(self) -> &'static str
-impl core::clone::Clone for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::clone(&self) -> rss_request_context::PrincipalKind
-impl core::cmp::Eq for rss_request_context::PrincipalKind
-impl core::cmp::PartialEq for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::eq(&self, &rss_request_context::PrincipalKind) -> bool
-impl core::fmt::Debug for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for rss_request_context::PrincipalKind
-impl core::marker::StructuralPartialEq for rss_request_context::PrincipalKind
-impl core::marker::Freeze for rss_request_context::PrincipalKind
-impl core::marker::Send for rss_request_context::PrincipalKind
-impl core::marker::Sync for rss_request_context::PrincipalKind
-impl core::marker::Unpin for rss_request_context::PrincipalKind
-impl core::marker::UnsafeUnpin for rss_request_context::PrincipalKind
-impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::PrincipalKind
-impl core::panic::unwind_safe::UnwindSafe for rss_request_context::PrincipalKind
-pub enum rss_request_context::RowScope
-pub rss_request_context::RowScope::Device
-pub rss_request_context::RowScope::SelfOnly
-pub rss_request_context::RowScope::Tenant
-impl rss_request_context::RowScope
-pub const fn rss_request_context::RowScope::as_label(self) -> &'static str
-impl core::clone::Clone for rss_request_context::RowScope
-pub fn rss_request_context::RowScope::clone(&self) -> rss_request_context::RowScope
-impl core::cmp::Eq for rss_request_context::RowScope
-impl core::cmp::PartialEq for rss_request_context::RowScope
-pub fn rss_request_context::RowScope::eq(&self, &rss_request_context::RowScope) -> bool
-impl core::fmt::Debug for rss_request_context::RowScope
-pub fn rss_request_context::RowScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for rss_request_context::RowScope
-impl core::marker::StructuralPartialEq for rss_request_context::RowScope
-impl core::marker::Freeze for rss_request_context::RowScope
-impl core::marker::Send for rss_request_context::RowScope
-impl core::marker::Sync for rss_request_context::RowScope
-impl core::marker::Unpin for rss_request_context::RowScope
-impl core::marker::UnsafeUnpin for rss_request_context::RowScope
-impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::RowScope
-impl core::panic::unwind_safe::UnwindSafe for rss_request_context::RowScope
 #[non_exhaustive] pub enum rss_request_context::TenantIdError
 pub rss_request_context::TenantIdError::Empty
 pub rss_request_context::TenantIdError::InvalidFormat
@@ -154,67 +105,11 @@ impl core::marker::Unpin for rss_request_context::Deadline
 impl core::marker::UnsafeUnpin for rss_request_context::Deadline
 impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::Deadline
 impl core::panic::unwind_safe::UnwindSafe for rss_request_context::Deadline
-pub struct rss_request_context::FieldMaskView<'a>
-impl<'a> rss_request_context::FieldMaskView<'a>
-pub fn rss_request_context::FieldMaskView<'a>::allows(self, &str) -> bool
-pub fn rss_request_context::FieldMaskView<'a>::iter(self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &'a str>
-pub const fn rss_request_context::FieldMaskView<'a>::new(&'a [&'a str]) -> Self
-impl<'a> core::clone::Clone for rss_request_context::FieldMaskView<'a>
-pub fn rss_request_context::FieldMaskView<'a>::clone(&self) -> rss_request_context::FieldMaskView<'a>
-impl<'a> core::fmt::Debug for rss_request_context::FieldMaskView<'a>
-pub fn rss_request_context::FieldMaskView<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'a> core::marker::Copy for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Freeze for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Send for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Sync for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Unpin for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::UnsafeUnpin for rss_request_context::FieldMaskView<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_request_context::FieldMaskView<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for rss_request_context::FieldMaskView<'a>
-pub struct rss_request_context::ObligationsView<'a>
-impl<'a> rss_request_context::ObligationsView<'a>
-pub const fn rss_request_context::ObligationsView<'a>::field_mask(self) -> rss_request_context::FieldMaskView<'a>
-pub const fn rss_request_context::ObligationsView<'a>::new(core::option::Option<rss_request_context::RowScope>, rss_request_context::FieldMaskView<'a>) -> Self
-pub const fn rss_request_context::ObligationsView<'a>::row_scope(self) -> core::option::Option<rss_request_context::RowScope>
-impl<'a> core::clone::Clone for rss_request_context::ObligationsView<'a>
-pub fn rss_request_context::ObligationsView<'a>::clone(&self) -> rss_request_context::ObligationsView<'a>
-impl<'a> core::fmt::Debug for rss_request_context::ObligationsView<'a>
-pub fn rss_request_context::ObligationsView<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'a> core::marker::Copy for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Freeze for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Send for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Sync for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Unpin for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::UnsafeUnpin for rss_request_context::ObligationsView<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_request_context::ObligationsView<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for rss_request_context::ObligationsView<'a>
-pub struct rss_request_context::PrincipalRef
-impl rss_request_context::PrincipalRef
-pub const fn rss_request_context::PrincipalRef::kind(&self) -> rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalRef::matches_subject(&self, &str) -> bool
-pub fn rss_request_context::PrincipalRef::new(rss_request_context::PrincipalKind, &str) -> core::result::Result<Self, rss_request_context::ContextValueError>
-impl core::clone::Clone for rss_request_context::PrincipalRef
-pub fn rss_request_context::PrincipalRef::clone(&self) -> rss_request_context::PrincipalRef
-impl core::cmp::Eq for rss_request_context::PrincipalRef
-impl core::cmp::PartialEq for rss_request_context::PrincipalRef
-pub fn rss_request_context::PrincipalRef::eq(&self, &rss_request_context::PrincipalRef) -> bool
-impl core::fmt::Debug for rss_request_context::PrincipalRef
-pub fn rss_request_context::PrincipalRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rss_request_context::PrincipalRef
-impl core::marker::Freeze for rss_request_context::PrincipalRef
-impl core::marker::Send for rss_request_context::PrincipalRef
-impl core::marker::Sync for rss_request_context::PrincipalRef
-impl core::marker::Unpin for rss_request_context::PrincipalRef
-impl core::marker::UnsafeUnpin for rss_request_context::PrincipalRef
-impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::PrincipalRef
-impl core::panic::unwind_safe::UnwindSafe for rss_request_context::PrincipalRef
 pub struct rss_request_context::RequestContextView<'a>
 impl<'a> rss_request_context::RequestContextView<'a>
 pub const fn rss_request_context::RequestContextView<'a>::cancellation(self) -> rss_request_context::Cancellation<'a>
 pub const fn rss_request_context::RequestContextView<'a>::deadline(self) -> rss_request_context::Deadline
-pub const fn rss_request_context::RequestContextView<'a>::new(core::option::Option<&'a rss_request_context::TenantId>, &'a rss_request_context::RequestId, &'a rss_request_context::PrincipalRef, rss_request_context::Deadline, rss_request_context::Cancellation<'a>, rss_request_context::ObligationsView<'a>) -> Self
-pub const fn rss_request_context::RequestContextView<'a>::obligations(self) -> rss_request_context::ObligationsView<'a>
-pub const fn rss_request_context::RequestContextView<'a>::principal(self) -> &'a rss_request_context::PrincipalRef
+pub const fn rss_request_context::RequestContextView<'a>::new(core::option::Option<&'a rss_request_context::TenantId>, &'a rss_request_context::RequestId, rss_request_context::Deadline, rss_request_context::Cancellation<'a>) -> Self
 pub const fn rss_request_context::RequestContextView<'a>::request_id(self) -> &'a rss_request_context::RequestId
 pub const fn rss_request_context::RequestContextView<'a>::tenant(self) -> core::option::Option<&'a rss_request_context::TenantId>
 impl<'a> core::clone::Clone for rss_request_context::RequestContextView<'a>
@@ -324,55 +219,6 @@ impl core::marker::Unpin for rss_request_context::ContextValueError
 impl core::marker::UnsafeUnpin for rss_request_context::ContextValueError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::ContextValueError
 impl core::panic::unwind_safe::UnwindSafe for rss_request_context::ContextValueError
-pub enum rss_request_context::PrincipalKind
-pub rss_request_context::PrincipalKind::Admin
-pub rss_request_context::PrincipalKind::Anonymous
-pub rss_request_context::PrincipalKind::Device
-pub rss_request_context::PrincipalKind::Service
-pub rss_request_context::PrincipalKind::SuperAdmin
-pub rss_request_context::PrincipalKind::User
-impl rss_request_context::PrincipalKind
-pub const fn rss_request_context::PrincipalKind::as_actor_metadata_label(self) -> &'static str
-impl core::clone::Clone for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::clone(&self) -> rss_request_context::PrincipalKind
-impl core::cmp::Eq for rss_request_context::PrincipalKind
-impl core::cmp::PartialEq for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::eq(&self, &rss_request_context::PrincipalKind) -> bool
-impl core::fmt::Debug for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for rss_request_context::PrincipalKind
-impl core::marker::StructuralPartialEq for rss_request_context::PrincipalKind
-impl core::marker::Freeze for rss_request_context::PrincipalKind
-impl core::marker::Send for rss_request_context::PrincipalKind
-impl core::marker::Sync for rss_request_context::PrincipalKind
-impl core::marker::Unpin for rss_request_context::PrincipalKind
-impl core::marker::UnsafeUnpin for rss_request_context::PrincipalKind
-impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::PrincipalKind
-impl core::panic::unwind_safe::UnwindSafe for rss_request_context::PrincipalKind
-pub enum rss_request_context::RowScope
-pub rss_request_context::RowScope::Device
-pub rss_request_context::RowScope::SelfOnly
-pub rss_request_context::RowScope::Tenant
-impl rss_request_context::RowScope
-pub const fn rss_request_context::RowScope::as_label(self) -> &'static str
-impl core::clone::Clone for rss_request_context::RowScope
-pub fn rss_request_context::RowScope::clone(&self) -> rss_request_context::RowScope
-impl core::cmp::Eq for rss_request_context::RowScope
-impl core::cmp::PartialEq for rss_request_context::RowScope
-pub fn rss_request_context::RowScope::eq(&self, &rss_request_context::RowScope) -> bool
-impl core::fmt::Debug for rss_request_context::RowScope
-pub fn rss_request_context::RowScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for rss_request_context::RowScope
-impl core::marker::StructuralPartialEq for rss_request_context::RowScope
-impl core::marker::Freeze for rss_request_context::RowScope
-impl core::marker::Send for rss_request_context::RowScope
-impl core::marker::Sync for rss_request_context::RowScope
-impl core::marker::Unpin for rss_request_context::RowScope
-impl core::marker::UnsafeUnpin for rss_request_context::RowScope
-impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::RowScope
-impl core::panic::unwind_safe::UnwindSafe for rss_request_context::RowScope
 #[non_exhaustive] pub enum rss_request_context::TenantIdError
 pub rss_request_context::TenantIdError::Empty
 pub rss_request_context::TenantIdError::InvalidFormat
@@ -436,67 +282,11 @@ impl core::marker::Unpin for rss_request_context::Deadline
 impl core::marker::UnsafeUnpin for rss_request_context::Deadline
 impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::Deadline
 impl core::panic::unwind_safe::UnwindSafe for rss_request_context::Deadline
-pub struct rss_request_context::FieldMaskView<'a>
-impl<'a> rss_request_context::FieldMaskView<'a>
-pub fn rss_request_context::FieldMaskView<'a>::allows(self, &str) -> bool
-pub fn rss_request_context::FieldMaskView<'a>::iter(self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &'a str>
-pub const fn rss_request_context::FieldMaskView<'a>::new(&'a [&'a str]) -> Self
-impl<'a> core::clone::Clone for rss_request_context::FieldMaskView<'a>
-pub fn rss_request_context::FieldMaskView<'a>::clone(&self) -> rss_request_context::FieldMaskView<'a>
-impl<'a> core::fmt::Debug for rss_request_context::FieldMaskView<'a>
-pub fn rss_request_context::FieldMaskView<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'a> core::marker::Copy for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Freeze for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Send for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Sync for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::Unpin for rss_request_context::FieldMaskView<'a>
-impl<'a> core::marker::UnsafeUnpin for rss_request_context::FieldMaskView<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_request_context::FieldMaskView<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for rss_request_context::FieldMaskView<'a>
-pub struct rss_request_context::ObligationsView<'a>
-impl<'a> rss_request_context::ObligationsView<'a>
-pub const fn rss_request_context::ObligationsView<'a>::field_mask(self) -> rss_request_context::FieldMaskView<'a>
-pub const fn rss_request_context::ObligationsView<'a>::new(core::option::Option<rss_request_context::RowScope>, rss_request_context::FieldMaskView<'a>) -> Self
-pub const fn rss_request_context::ObligationsView<'a>::row_scope(self) -> core::option::Option<rss_request_context::RowScope>
-impl<'a> core::clone::Clone for rss_request_context::ObligationsView<'a>
-pub fn rss_request_context::ObligationsView<'a>::clone(&self) -> rss_request_context::ObligationsView<'a>
-impl<'a> core::fmt::Debug for rss_request_context::ObligationsView<'a>
-pub fn rss_request_context::ObligationsView<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<'a> core::marker::Copy for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Freeze for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Send for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Sync for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::Unpin for rss_request_context::ObligationsView<'a>
-impl<'a> core::marker::UnsafeUnpin for rss_request_context::ObligationsView<'a>
-impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_request_context::ObligationsView<'a>
-impl<'a> core::panic::unwind_safe::UnwindSafe for rss_request_context::ObligationsView<'a>
-pub struct rss_request_context::PrincipalRef
-impl rss_request_context::PrincipalRef
-pub const fn rss_request_context::PrincipalRef::kind(&self) -> rss_request_context::PrincipalKind
-pub fn rss_request_context::PrincipalRef::matches_subject(&self, &str) -> bool
-pub fn rss_request_context::PrincipalRef::new(rss_request_context::PrincipalKind, &str) -> core::result::Result<Self, rss_request_context::ContextValueError>
-impl core::clone::Clone for rss_request_context::PrincipalRef
-pub fn rss_request_context::PrincipalRef::clone(&self) -> rss_request_context::PrincipalRef
-impl core::cmp::Eq for rss_request_context::PrincipalRef
-impl core::cmp::PartialEq for rss_request_context::PrincipalRef
-pub fn rss_request_context::PrincipalRef::eq(&self, &rss_request_context::PrincipalRef) -> bool
-impl core::fmt::Debug for rss_request_context::PrincipalRef
-pub fn rss_request_context::PrincipalRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rss_request_context::PrincipalRef
-impl core::marker::Freeze for rss_request_context::PrincipalRef
-impl core::marker::Send for rss_request_context::PrincipalRef
-impl core::marker::Sync for rss_request_context::PrincipalRef
-impl core::marker::Unpin for rss_request_context::PrincipalRef
-impl core::marker::UnsafeUnpin for rss_request_context::PrincipalRef
-impl core::panic::unwind_safe::RefUnwindSafe for rss_request_context::PrincipalRef
-impl core::panic::unwind_safe::UnwindSafe for rss_request_context::PrincipalRef
 pub struct rss_request_context::RequestContextView<'a>
 impl<'a> rss_request_context::RequestContextView<'a>
 pub const fn rss_request_context::RequestContextView<'a>::cancellation(self) -> rss_request_context::Cancellation<'a>
 pub const fn rss_request_context::RequestContextView<'a>::deadline(self) -> rss_request_context::Deadline
-pub const fn rss_request_context::RequestContextView<'a>::new(core::option::Option<&'a rss_request_context::TenantId>, &'a rss_request_context::RequestId, &'a rss_request_context::PrincipalRef, rss_request_context::Deadline, rss_request_context::Cancellation<'a>, rss_request_context::ObligationsView<'a>) -> Self
-pub const fn rss_request_context::RequestContextView<'a>::obligations(self) -> rss_request_context::ObligationsView<'a>
-pub const fn rss_request_context::RequestContextView<'a>::principal(self) -> &'a rss_request_context::PrincipalRef
+pub const fn rss_request_context::RequestContextView<'a>::new(core::option::Option<&'a rss_request_context::TenantId>, &'a rss_request_context::RequestId, rss_request_context::Deadline, rss_request_context::Cancellation<'a>) -> Self
 pub const fn rss_request_context::RequestContextView<'a>::request_id(self) -> &'a rss_request_context::RequestId
 pub const fn rss_request_context::RequestContextView<'a>::tenant(self) -> core::option::Option<&'a rss_request_context::TenantId>
 impl<'a> core::clone::Clone for rss_request_context::RequestContextView<'a>

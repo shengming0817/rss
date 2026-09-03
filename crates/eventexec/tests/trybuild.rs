@@ -1,173 +1,59 @@
-//! compile-pass/fail 回归：production 类型系统门禁的 Medium 外部消费者证据。
-//!
-//! - **RECONCILE-TENANCY-REQ-01**：`Builder::new(reconciler, tenancy, trigger)` 三参必填——
-//!   production 三参数签名是 Hard owner；此处以漏 `trigger` 作一条 Medium 代表性外部误用。
-//! - **PROJECTION-SERIAL-WITNESS-01**：`ProjectionHarness::new` 第 5 参须为
-//!   `SerialInOrderGuarantor` witness——漏参 E0061，传非 witness 类型 E0277。
-//!
-//! 类型系统强制（非运行期校验），与 `diport` 的 dyn-port trybuild 同范式。
-
-#[test]
-fn reconcile_ui() {
-    let t = trybuild::TestCases::new();
-    // 三参齐全 → 编译通过。
-    t.pass("tests/ui/reconcile_builder_pass.rs");
-    // durable scheduler + command seam API 齐全 → 编译通过。
-    t.pass("tests/ui/reconcile_durable_scheduler_pass.rs");
-    // concurrency bound fields remain private; only try_new can construct the type.
-    t.compile_fail("tests/ui/reconcile_max_in_flight_forge_fail.rs");
-    // raw topic/contract/payload authoring API 不得从 eventexec 对外可达。
-    t.compile_fail("tests/ui/reconcile_raw_command_authoring_fail.rs");
-    t.compile_fail("tests/ui/reconcile_certificate_command_review_forge_fail.rs");
-    t.compile_fail("tests/ui/reconcile_certificate_command_review_clone_fail.rs");
-    t.compile_fail("tests/ui/reconcile_producer_identity_spoof_fail.rs");
-    // fenced contracts have no ordinary journal/direct producer entry point.
-    t.compile_fail("tests/ui/reconcile_ordinary_journal_entry_fail.rs");
-    // generated typed spec trait is sealed; downstream cannot forge routing/request pairings.
-    t.compile_fail("tests/ui/reconcile_typed_command_spec_impl_fail.rs");
-    // 漏 trigger（第三参）→ 编译错。
-    t.compile_fail("tests/ui/reconcile_missing_trigger_fail.rs");
-}
+//! Compile-time boundaries for the retained provider-neutral runtime surface.
 
 #[test]
 fn dlq_operator_authorization_ui() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/dlq_authorization_requires_runtime_mint_fail.rs");
-    t.compile_fail("tests/ui/dlq_authorization_forge_fail.rs");
-    t.compile_fail("tests/ui/dlq_authorization_clone_fail.rs");
-    t.compile_fail("tests/ui/dlq_authorization_consume_twice_fail.rs");
-    t.compile_fail("tests/ui/dlq_authorization_cross_action_fail.rs");
-    t.compile_fail("tests/ui/dlq_request_separate_tenant_fail.rs");
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/dlq_authorization_requires_runtime_mint_fail.rs");
+    tests.compile_fail("tests/ui/dlq_authorization_forge_fail.rs");
+    tests.compile_fail("tests/ui/dlq_authorization_clone_fail.rs");
+    tests.compile_fail("tests/ui/dlq_authorization_consume_twice_fail.rs");
+    tests.compile_fail("tests/ui/dlq_authorization_cross_action_fail.rs");
+    tests.compile_fail("tests/ui/dlq_request_separate_tenant_fail.rs");
 }
 
 #[test]
-fn projection_ui() {
-    let t = trybuild::TestCases::new();
-    // 五参齐全（含 SerialInOrderGuarantor witness）→ 编译通过。
-    t.pass("tests/ui/projection_with_guarantor_pass.rs");
-    // 漏 witness（第 5 参）→ E0061（fail-closed by absence）。
-    t.compile_fail("tests/ui/projection_missing_guarantor_fail.rs");
-    // 第 5 参传非 SerialInOrderGuarantor 类型 `()` → E0277（bound load-bearing anti-vacuity）。
-    t.compile_fail("tests/ui/projection_non_serial_guarantor_fail.rs");
-    // validated store input 字段私有，只能由 canonical target funnel 构造。
-    t.compile_fail("tests/ui/projection_validated_input_forge_fail.rs");
-    // target definition identity 字段私有，不能拆开伪造 contract / generation。
-    t.compile_fail("tests/ui/projection_target_definition_forge_fail.rs");
-    // runtime target trait sealed，外部只能实现 ProjectionTargetStore SPI。
-    t.compile_fail("tests/ui/projection_external_target_impl_fail.rs");
-}
-
-#[test]
-fn workflow_runtime_views_are_sealed() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/workflow_projection_capture_view_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_target_view_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_source_scope_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_view_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_activated_view_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_plan_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_missing_operator_control_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_operator_cross_action_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_permit_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_permit_clone_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_permit_reuse_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_permit_cross_plan_retarget_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_missing_clock_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_missing_store_fail.rs");
-    t.compile_fail("tests/ui/workflow_saga_missing_executor_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_system_identity_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_background_constructor_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_permit_clone_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_binding_clone_fail.rs");
-    // Offline maintenance authority is plan-issued; neither its adapter binding nor its
-    // resulting capability can be forged with a downstream struct literal.
-    t.compile_fail("tests/ui/workflow_projection_maintenance_binding_forge_fail.rs");
-    t.compile_fail("tests/ui/workflow_projection_maintenance_capability_forge_fail.rs");
-    // No public target()/spawn() factory SPI may select two different runtime targets.
-    t.compile_fail("tests/ui/workflow_projection_drifting_factory_fail.rs");
-    // The single runtime object is plan-issued; downstream code cannot forge its private fields.
-    t.compile_fail("tests/ui/workflow_projection_runtime_forge_fail.rs");
-    t.compile_fail("tests/ui/saga_executor_run_fail.rs");
-}
-
-#[test]
-fn command_authoring_is_sealed() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/command_spec_constructor_private_fail.rs");
-    t.compile_fail("tests/ui/reviewed_command_constructors_private_fail.rs");
-    t.compile_fail("tests/ui/command_wrong_request_fail.rs");
-    t.compile_fail("tests/ui/command_wrong_policy_fail.rs");
-    t.compile_fail("tests/ui/certificate_command_event_payload_mismatch_fail.rs");
-}
-
-#[test]
-fn event_authoring_is_sealed() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/reviewed_event_constructor_private_fail.rs");
-    t.compile_fail("tests/ui/reviewed_event_partition_escape_fail.rs");
-    t.compile_fail("tests/ui/reviewed_event_causation_escape_fail.rs");
-    t.compile_fail("tests/ui/event_contract_external_impl_fail.rs");
-    t.compile_fail("tests/ui/event_subscription_external_impl_fail.rs");
-}
-
-#[test]
-fn generated_event_wrappers_reject_raw_coordinates() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/event_wrapper_payload_mismatch_fail.rs");
-    t.compile_fail("tests/ui/event_emit_raw_coordinates_fail.rs");
-    t.compile_fail("tests/ui/event_subscribe_raw_coordinates_fail.rs");
-}
-
-#[test]
-fn public_eventing_values_are_opaque() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/delivery_budget_private_fields_fail.rs");
-    t.compile_fail("tests/ui/event_envelope_private_fields_fail.rs");
-    t.compile_fail("tests/ui/event_envelope_clone_fail.rs");
-    t.compile_fail("tests/ui/event_envelope_debug_fail.rs");
-}
-
-#[test]
-fn inbox_backlog_selection_is_generated_only() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/inbox_backlog_selection_raw_group_fail.rs");
+fn delivery_budget_and_envelope_values_are_opaque() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/delivery_budget_private_fields_fail.rs");
+    tests.compile_fail("tests/ui/event_envelope_private_fields_fail.rs");
+    tests.compile_fail("tests/ui/event_envelope_clone_fail.rs");
+    tests.compile_fail("tests/ui/event_envelope_debug_fail.rs");
 }
 
 #[test]
 fn dlx_lifecycle_proofs_and_capabilities_are_sealed() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/dlx_hot_archive_key_swap_fail.rs");
-    t.compile_fail("tests/ui/dlx_verified_receipt_forge_fail.rs");
-    t.compile_fail("tests/ui/dlx_missing_archive_proof_forge_fail.rs");
-    t.compile_fail("tests/ui/dlx_archive_store_delete_fail.rs");
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/dlx_hot_archive_key_swap_fail.rs");
+    tests.compile_fail("tests/ui/dlx_verified_receipt_forge_fail.rs");
+    tests.compile_fail("tests/ui/dlx_missing_archive_proof_forge_fail.rs");
+    tests.compile_fail("tests/ui/dlx_archive_store_delete_fail.rs");
 }
 
 #[test]
 fn consumer_tx_policy_capabilities_are_sealed() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/consumer_tx_outcome_clone_fail.rs");
-    t.compile_fail("tests/ui/consumer_tx_outcome_debug_fail.rs");
-    t.compile_fail("tests/ui/consumer_tx_external_key_public_name_fail.rs");
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/consumer_tx_outcome_clone_fail.rs");
+    tests.compile_fail("tests/ui/consumer_tx_outcome_debug_fail.rs");
+    tests.compile_fail("tests/ui/consumer_tx_external_key_public_name_fail.rs");
 }
 
 #[test]
 fn event_metadata_surface_is_narrow() {
-    let t = trybuild::TestCases::new();
-    t.pass("tests/ui/event_metadata_pass.rs");
-    t.compile_fail("tests/ui/event_metadata_private_fields_fail.rs");
-    t.compile_fail("tests/ui/event_metadata_debug_fail.rs");
-    t.compile_fail("tests/ui/event_metadata_display_fail.rs");
-    t.compile_fail("tests/ui/event_metadata_clone_fail.rs");
+    let tests = trybuild::TestCases::new();
+    tests.pass("tests/ui/event_metadata_pass.rs");
+    tests.compile_fail("tests/ui/event_metadata_private_fields_fail.rs");
+    tests.compile_fail("tests/ui/event_metadata_debug_fail.rs");
+    tests.compile_fail("tests/ui/event_metadata_display_fail.rs");
+    tests.compile_fail("tests/ui/event_metadata_clone_fail.rs");
 }
 
 #[test]
 fn managed_delivery_stream_constructor_is_private() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/managed_delivery_stream_constructor_private_fail.rs");
+    trybuild::TestCases::new()
+        .compile_fail("tests/ui/managed_delivery_stream_constructor_private_fail.rs");
 }
 
 #[test]
 fn retry_surface_has_one_canonical_owner() {
-    let t = trybuild::TestCases::new();
-    t.pass("tests/ui/retry_canonical_path_pass.rs");
+    trybuild::TestCases::new().pass("tests/ui/retry_canonical_path_pass.rs");
 }

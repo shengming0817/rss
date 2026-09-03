@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `new` found for struct `ReviewedFencedCommand` in the current scope
- --> tests/ui/reconcile_raw_command_authoring_fail.rs:6:36
-  |
-6 |     let _ = ReviewedFencedCommand::new(
-  |                                    ^^^ associated function or constant not found in `ReviewedFencedCommand`

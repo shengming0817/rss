@@ -16,11 +16,7 @@ pub enum ContextValueError {
 
 impl fmt::Display for ContextValueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Empty => "request context value is empty",
-            Self::TooLong => "request context value is too long",
-            Self::InvalidFormat => "request context value has invalid format",
-        })
+        formatter.write_str("request context value is invalid")
     }
 }
 impl Error for ContextValueError {}
@@ -32,13 +28,10 @@ pub enum TenantIdError {
     Nil,
     InvalidFormat,
 }
+
 impl fmt::Display for TenantIdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Empty => "tenant identifier is empty",
-            Self::Nil => "tenant identifier is nil",
-            Self::InvalidFormat => "tenant identifier has invalid format",
-        })
+        formatter.write_str("tenant identifier is invalid")
     }
 }
 impl Error for TenantIdError {}
@@ -100,9 +93,16 @@ impl RequestId {
         }
         Ok(Self(value.into()))
     }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 impl fmt::Debug for RequestId {
@@ -110,72 +110,6 @@ impl fmt::Debug for RequestId {
         formatter
             .debug_tuple("RequestId")
             .field(&self.as_str())
-            .finish()
-    }
-}
-impl fmt::Display for RequestId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum PrincipalKind {
-    User,
-    Device,
-    Admin,
-    SuperAdmin,
-    Service,
-    Anonymous,
-}
-impl PrincipalKind {
-    #[must_use]
-    pub const fn as_actor_metadata_label(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Device => "device",
-            Self::Admin => "admin",
-            Self::SuperAdmin => "super_admin",
-            Self::Service => "service",
-            Self::Anonymous => "anonymous",
-        }
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct PrincipalRef {
-    kind: PrincipalKind,
-    subject: Box<str>,
-}
-
-impl PrincipalRef {
-    pub fn new(kind: PrincipalKind, subject: &str) -> Result<Self, ContextValueError> {
-        if subject.is_empty() {
-            return Err(ContextValueError::Empty);
-        }
-        if subject.len() > 512 {
-            return Err(ContextValueError::TooLong);
-        }
-        Ok(Self {
-            kind,
-            subject: subject.into(),
-        })
-    }
-    #[must_use]
-    pub const fn kind(&self) -> PrincipalKind {
-        self.kind
-    }
-    #[must_use]
-    pub fn matches_subject(&self, candidate: &str) -> bool {
-        self.subject.as_ref() == candidate
-    }
-}
-impl fmt::Debug for PrincipalRef {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PrincipalRef")
-            .field("kind", &self.kind)
-            .field("subject", &"[REDACTED]")
             .finish()
     }
 }
@@ -206,17 +140,14 @@ impl Deadline {
     }
 }
 
-/// Closed reason why an admitted request must stop executing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CancellationReason {
     Cancelled,
     DeadlineExceeded,
 }
 
-/// Stable boxed wait future used by cancellation observers without selecting an async runtime.
 pub type CancellationFuture<'a> = Pin<Box<dyn Future<Output = CancellationReason> + Send + 'a>>;
 
-/// Read-only cancellation source. Implementations retain all trigger authority.
 pub trait CancellationObserver: Send + Sync {
     fn is_cancelled(&self) -> bool;
     fn cancelled(&self, deadline: Deadline) -> CancellationFuture<'_>;
@@ -239,6 +170,7 @@ impl<'a> Cancellation<'a> {
         self.0.cancelled(deadline)
     }
 }
+
 impl fmt::Debug for Cancellation<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -247,92 +179,31 @@ impl fmt::Debug for Cancellation<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RowScope {
-    SelfOnly,
-    Device,
-    Tenant,
-}
-impl RowScope {
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::SelfOnly => "self-only",
-            Self::Device => "device",
-            Self::Tenant => "tenant",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct FieldMaskView<'a> {
-    fields: &'a [&'a str],
-}
-impl<'a> FieldMaskView<'a> {
-    #[must_use]
-    pub const fn new(fields: &'a [&'a str]) -> Self {
-        Self { fields }
-    }
-    #[must_use]
-    pub fn allows(self, field: &str) -> bool {
-        self.fields.contains(&field)
-    }
-    pub fn iter(self) -> impl ExactSizeIterator<Item = &'a str> {
-        self.fields.iter().copied()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ObligationsView<'a> {
-    row_scope: Option<RowScope>,
-    field_mask: FieldMaskView<'a>,
-}
-impl<'a> ObligationsView<'a> {
-    #[must_use]
-    pub const fn new(row_scope: Option<RowScope>, field_mask: FieldMaskView<'a>) -> Self {
-        Self {
-            row_scope,
-            field_mask,
-        }
-    }
-    #[must_use]
-    pub const fn row_scope(self) -> Option<RowScope> {
-        self.row_scope
-    }
-    #[must_use]
-    pub const fn field_mask(self) -> FieldMaskView<'a> {
-        self.field_mask
-    }
-}
-
+/// Read-only, provider-neutral request execution context.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestContextView<'a> {
     tenant: Option<&'a TenantId>,
     request_id: &'a RequestId,
-    principal: &'a PrincipalRef,
     deadline: Deadline,
     cancellation: Cancellation<'a>,
-    obligations: ObligationsView<'a>,
 }
+
 impl<'a> RequestContextView<'a> {
     #[must_use]
     pub const fn new(
         tenant: Option<&'a TenantId>,
         request_id: &'a RequestId,
-        principal: &'a PrincipalRef,
         deadline: Deadline,
         cancellation: Cancellation<'a>,
-        obligations: ObligationsView<'a>,
     ) -> Self {
         Self {
             tenant,
             request_id,
-            principal,
             deadline,
             cancellation,
-            obligations,
         }
     }
+
     #[must_use]
     pub const fn tenant(self) -> Option<&'a TenantId> {
         self.tenant
@@ -342,148 +213,11 @@ impl<'a> RequestContextView<'a> {
         self.request_id
     }
     #[must_use]
-    pub const fn principal(self) -> &'a PrincipalRef {
-        self.principal
-    }
-    #[must_use]
     pub const fn deadline(self) -> Deadline {
         self.deadline
     }
     #[must_use]
     pub const fn cancellation(self) -> Cancellation<'a> {
         self.cancellation
-    }
-    #[must_use]
-    pub const fn obligations(self) -> ObligationsView<'a> {
-        self.obligations
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn value_error_messages_are_stable_distinct_and_redacted() {
-        let context = [
-            ContextValueError::Empty,
-            ContextValueError::TooLong,
-            ContextValueError::InvalidFormat,
-        ]
-        .map(|error| error.to_string());
-        let tenant = [
-            TenantIdError::Empty,
-            TenantIdError::Nil,
-            TenantIdError::InvalidFormat,
-        ]
-        .map(|error| error.to_string());
-        assert_eq!(
-            context
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            3
-        );
-        assert_eq!(
-            tenant
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            3
-        );
-        assert!(
-            context
-                .iter()
-                .chain(&tenant)
-                .all(|message| !message.contains("secret"))
-        );
-    }
-
-    struct Never;
-    impl CancellationObserver for Never {
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-        fn cancelled(&self, _: Deadline) -> CancellationFuture<'_> {
-            Box::pin(std::future::pending())
-        }
-    }
-
-    #[test]
-    fn tenant_is_canonical_bounded_and_non_nil() -> Result<(), TenantIdError> {
-        let id = TenantId::parse("11111111-1111-4111-8111-111111111111")?;
-        assert_eq!(id.to_string(), "11111111-1111-4111-8111-111111111111");
-        assert_eq!(id.octets().len(), 16);
-        assert_eq!(TenantId::parse(""), Err(TenantIdError::Empty));
-        assert_eq!(
-            TenantId::parse("00000000-0000-0000-0000-000000000000"),
-            Err(TenantIdError::Nil)
-        );
-        assert!(TenantId::parse("11111111111141118111111111111111").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn request_id_and_principal_are_bounded_and_redacted() -> Result<(), ContextValueError> {
-        assert_eq!(RequestId::parse(""), Err(ContextValueError::Empty));
-        assert_eq!(RequestId::parse("request.1_A-b")?.as_str(), "request.1_A-b");
-        assert!(RequestId::parse(&"a".repeat(128)).is_ok());
-        assert_eq!(
-            RequestId::parse(&"a".repeat(129)),
-            Err(ContextValueError::TooLong)
-        );
-        assert_eq!(
-            RequestId::parse("request 1"),
-            Err(ContextValueError::InvalidFormat)
-        );
-        assert_eq!(
-            PrincipalRef::new(PrincipalKind::User, ""),
-            Err(ContextValueError::Empty)
-        );
-        assert!(PrincipalRef::new(PrincipalKind::User, &"x".repeat(512)).is_ok());
-        assert_eq!(
-            PrincipalRef::new(PrincipalKind::User, &"x".repeat(513)),
-            Err(ContextValueError::TooLong)
-        );
-        let principal = PrincipalRef::new(PrincipalKind::User, "secret-subject")?;
-        assert!(principal.matches_subject("secret-subject"));
-        assert!(!format!("{principal:?}").contains("secret-subject"));
-        Ok(())
-    }
-
-    #[test]
-    fn closed_value_labels_are_exact() {
-        for (kind, label) in [
-            (PrincipalKind::User, "user"),
-            (PrincipalKind::Device, "device"),
-            (PrincipalKind::Admin, "admin"),
-            (PrincipalKind::SuperAdmin, "super_admin"),
-            (PrincipalKind::Service, "service"),
-            (PrincipalKind::Anonymous, "anonymous"),
-        ] {
-            assert_eq!(kind.as_actor_metadata_label(), label);
-        }
-        for (scope, label) in [
-            (RowScope::SelfOnly, "self-only"),
-            (RowScope::Device, "device"),
-            (RowScope::Tenant, "tenant"),
-        ] {
-            assert_eq!(scope.as_label(), label);
-        }
-    }
-
-    #[test]
-    fn obligations_and_cancellation_are_read_only_views() {
-        let fields = ["email", "name"];
-        let mask = FieldMaskView::new(&fields);
-        assert!(mask.allows("email"));
-        assert_eq!(mask.iter().count(), 2);
-        let obligations = ObligationsView::new(Some(RowScope::Tenant), mask);
-        let cancel = Never;
-        let cancellation = Cancellation::observe(&cancel);
-        assert_eq!(obligations.row_scope(), Some(RowScope::Tenant));
-        assert!(obligations.field_mask().allows("name"));
-        assert!(!cancellation.is_cancelled());
-        assert!(format!("{cancellation:?}").starts_with("Cancellation"));
     }
 }

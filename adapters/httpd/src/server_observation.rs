@@ -19,6 +19,7 @@ const ACTIVE_REQUESTS: &str = "http.server.active_requests";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TransportScheme {
     Http,
+    #[cfg(test)]
     Https,
 }
 
@@ -26,6 +27,7 @@ impl TransportScheme {
     pub(super) const fn as_label(self) -> &'static str {
         match self {
             Self::Http => "http",
+            #[cfg(test)]
             Self::Https => "https",
         }
     }

@@ -22,14 +22,7 @@ yanked = "deny"
 # 不变式（守卫 `deny_audit_ignore_lists_reconciled`，xtask/src/verify.rs，Medium）：**本 ignore ⊆ cargo-audit
 # --ignore**——deny 接受的任一**图内** advisory 必须同步到 cargo-audit 侧，否则 deny 绿而 audit 红（一过一红、
 # 阻断合入）。反向 audit 可多 ignore（phantom-only，deny 图里没有，无需在此 ignore）。
-# DEFER(#2139) owner=adapters/mqtt; blocked-by=trigger:rumqttc 官方版本同时升级 rustls-webpki 并移除 rustls-pemfile; closes-when=升级 rumqttc 后删除下列五项 ignore
-ignore = [
-  { id = "RUSTSEC-2025-0134", reason = "#2139: rumqttc 0.25.1 仍传递依赖已停维的 rustls-pemfile；等待官方移除" },
-  { id = "RUSTSEC-2026-0049", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
-  { id = "RUSTSEC-2026-0098", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
-  { id = "RUSTSEC-2026-0099", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
-  { id = "RUSTSEC-2026-0104", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
-]
+ignore = []
 
 [licenses]
 confidence-threshold = 0.93
@@ -96,8 +89,8 @@ deny = [
   # port-trait impl-sealing（谁可 impl）：cargo-deny 限「依赖」非「impl」。diport impl-site allowlist 由
   #   dylint 自写 lint `rss_diport_impl_allowlist`（AST 级，Medium，INVARIANT DIPORT-IMPL-ALLOWLIST-01）
   #   承载；adapter→域 impl 域 repo port 经分层 wrapper（见下 identity 行加 postgres）+ source edge 校验放行。
-  { crate = "dynosaur", wrappers = ["diport", "identity", "settings", "audit"] },
-  { crate = "trait-variant", wrappers = ["diport", "identity", "settings", "audit"] },
+  { crate = "dynosaur", wrappers = ["diport"] },
+  { crate = "trait-variant", wrappers = ["diport"] },
   # WORKSPACEFACTS-CONFINEMENT-01：唯一 shipped tooling facts 链路 xtask → workspacefacts → guppy；
   # dev 图只准 xtask 与 workspacefacts 自测消费，禁止生产 crate 消费或 xtask 绕过 façade 依赖 guppy。
   { crate = "workspacefacts", wrappers = ["workspacefacts", "xtask"] },
@@ -105,37 +98,19 @@ deny = [
   # 分层（target-centric wrappers）：只列 all-features 最终图中的真实 direct parents。
   # 集合相等由 cargo-deny 独占证明；layer-deps 只守 source 分层、wrapper 类别和特殊安全边界。
   # adapter→domain wrapper 仍必须有 shipped source edge。
-  # AUTH-EVIDENCE-MINT-01：Authenticated production mint capability 只准 diport（opaque proof mint）
-  # 与 httpserve（构造面）持有。
-  { crate = "authmint", wrappers = ["diport", "httpserve"] },
   # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 可持有。
   { crate = "sagaauthmint", wrappers = ["diport"] },
   # DLQ-OPERATOR-MINT-01：DLQ operator mint 仅 DI proof owner 可持有。
   { crate = "dlqauthmint", wrappers = ["diport"] },
-  # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint；generated 仅消费 opaque carrier。
-  { crate = "requestidmint", wrappers = ["httpserve", "generated"] },
-  # EXTERNAL-PKI-PROVIDER-MINT-01：仅 Vault production 构造面调用 mint；diport 只在 opaque seal 签名中消费 token。
-  { crate = "pkiauthmint", wrappers = ["diport", "vault"] },
+  # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint opaque carrier。
+  { crate = "requestidmint", wrappers = ["httpserve"] },
   # RUNTIME-INVENTORY-MINT-01：assembly-schema only names the token in the private-field receipt
   # constructor; runtimeexec mints full-plan receipts and live observations.
   { crate = "runtimeinventorymint", wrappers = ["assembly-schema", "runtimeexec"] },
-  # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
-  #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
-  { crate = "identity", wrappers = ["memory", "mqtt", "postgres"] },
-  # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
-  # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
-  { crate = "settings", wrappers = ["postgres"] },
-  # postgres impl AuditWriteRepo + AuditReadRepo（per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
-  { crate = "audit", wrappers = ["postgres"] },
   # 注：testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层 test-support 库，
   # 不在此 ban——其「只准 [dev-dependencies] 消费」由 xtask layers.rs TEST_SUPPORT_CRATES + layer-deps
   # LAYER-DEPS-08（check_test_support_confinement：任一 shipped 边指向 testkit 即报）守，testcontainers 树经
   # `containers` feature + dev-dep-only 不进产物。
-  # generated（contract 派生 wire 类型）只能被域 crate + 组合根，以及实现 private command/workflow
-  # runtime seam 的 eventexec 与 typed subscription registrar 的 bootstrap 依赖。两条均为 exact crate
-  # edge；bootstrap 的 production item surface 另由 LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01
-  # 收窄到 registrar vocabulary，其它 Service→Generated 仍由 layer-deps 拒绝。
-  { crate = "generated", wrappers = ["amqp", "audit", "bootstrap", "contractreg", "eventexec", "httpserve", "identity", "memory", "postgres", "settings", "syshealth", "xtask"] },
 ]
 
 # 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml

@@ -1,9 +1,0 @@
-error[E0451]: fields `router` and `observation_policy` of struct `ServerService` are private
- --> tests/ui/cannot_construct_server_service.rs:4:9
-  |
-3 |     let _service = httpserve::ServerService {
-  |                    ------------------------ in this type
-4 |         router: axum::Router::new(),
-  |         ^^^^^^ private field
-5 |         observation_policy: httpserve::ServerObservationPolicy::Disabled,
-  |         ^^^^^^^^^^^^^^^^^^ private field

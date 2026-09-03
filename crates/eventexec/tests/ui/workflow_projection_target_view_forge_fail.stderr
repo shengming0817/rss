@@ -1,7 +1,0 @@
-error: cannot construct `ProjectionTargetView<'_>` with struct literal syntax due to private fields
- --> tests/ui/workflow_projection_target_view_forge_fail.rs:4:19
-  |
-4 |     let _forged = ProjectionTargetView { targets: &[] };
-  |                   ^^^^^^^^^^^^^^^^^^^^   ------------ private field
-  |
-  = note: ...and other private field `generation` that was not provided

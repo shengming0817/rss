@@ -17,7 +17,6 @@ workspace = true
 rss-request-context.workspace = true
 # 实现 diport 已冻 DI port trait（Signer + KeyProvider + ManagedResource + SecretResolver，native AFIT）。
 diport = { path = "../../crates/diport" }
-pkiauthmint = { path = "../../crates/pkiauthmint", optional = true }
 # KeyProvider 明文/AAD 类型（Plaintext / DerivedAad）。Vault provider 只读受控出口，不把明文/AAD 写入日志。
 secure = { path = "../../crates/secure", optional = true }
 # SecretResolver::resolve 签名中的 TenantId（tenant 隔离位置参，Hard）。
@@ -43,7 +42,7 @@ x509-parser = { workspace = true, features = ["verify"], optional = true }
 
 [features]
 default = []
-backend = ["dep:reqwest", "dep:tracing", "dep:thiserror", "dep:serde", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:secure", "dep:sha2", "dep:x509-parser", "dep:pkiauthmint"]
+backend = ["dep:reqwest", "dep:tracing", "dep:thiserror", "dep:serde", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:secure", "dep:sha2"]
 # Hermetic Vault round-trip gate: Cargo eligibility and the integration catalog both name this
 # single target. The test provisions the pinned TLS container; no external-Vault fallback exists.
 integration = ["backend", "testkit/containers"]
@@ -51,14 +50,7 @@ integration = ["backend", "testkit/containers"]
 # assemblies opt in explicitly so loopback Vault fixtures remain possible without weakening `new`.
 test-support = []
 
-# The sole real-Vault T2 covers Transit and PKI through a pinned TLS container.
-[[test]]
-name = "live_vault"
-path = "tests/live_vault.rs"
-required-features = ["integration"]
-
 [dev-dependencies]
-deviceloop = { path = "../../crates/deviceloop" }
 uuid.workspace = true
 # macros/rt：普通 live case；net/io-util/sync：warm-outage TCP forwarder；time：cut/connect timeout（#1982）。
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
@@ -71,4 +63,3 @@ reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
 wiremock = { workspace = true }
 rcgen = { workspace = true }
 testkit = { path = "../../crates/testkit", default-features = false }
-ids = { path = "../../crates/ids" }

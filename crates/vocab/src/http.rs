@@ -124,7 +124,6 @@ define_consistency_classes!(
     LocalTx => LocalTx,
     OutboxFact => OutboxFact,
     WorkflowEventual => WorkflowEventual,
-    DeviceLatent => DeviceLatent,
 );
 
 macro_rules! impl_non_local_consistency {
@@ -136,7 +135,7 @@ macro_rules! impl_non_local_consistency {
     };
 }
 
-impl_non_local_consistency!(LocalTx, OutboxFact, WorkflowEventual, DeviceLatent);
+impl_non_local_consistency!(LocalTx, OutboxFact, WorkflowEventual);
 
 macro_rules! impl_non_producer_consistency {
     ($($class:ident),+ $(,)?) => {
@@ -147,7 +146,7 @@ macro_rules! impl_non_producer_consistency {
     };
 }
 
-impl_non_producer_consistency!(LocalOnly, LocalTx, WorkflowEventual, DeviceLatent);
+impl_non_producer_consistency!(LocalOnly, LocalTx, WorkflowEventual);
 
 /// Runtime consistency semantics declared by an HTTP contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,8 +159,6 @@ pub enum HttpConsistencyLevel {
     OutboxFact,
     /// Durable workflow with eventual completion.
     WorkflowEventual,
-    /// Device-side work whose observation is intentionally latent.
-    DeviceLatent,
 }
 
 /// Closed vocabulary of effects performed by an HTTP contract.
@@ -190,8 +187,6 @@ pub enum HttpEffectKind {
     Reconcile,
     /// Enqueue or execute worker work.
     Worker,
-    /// Record a cross-tenant audit fact.
-    CrossTenantAudit,
 }
 
 /// A validated, non-empty set of distinct HTTP effects.
@@ -792,22 +787,22 @@ mod tests {
     use super::*;
 
     const CONTRACT: ContractBinding = ContractBinding::from_static(
-        "identity",
-        "identity.profile",
+        "runtime",
+        "runtime.inventory",
         "v1",
         "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     );
     const EFFECTS: &[HttpEffectKind] = &[HttpEffectKind::Auth, HttpEffectKind::Read];
     const PROFILE: HttpEffectProfile = HttpEffectProfile::new(EFFECTS);
     const EVIDENCE: HttpRouteEvidence = HttpRouteEvidence::from_static(
-        HttpContractOwner::domain("identity"),
+        HttpContractOwner::domain("runtime"),
         CONTRACT,
         "/v1/profile",
         "GET",
         &[],
         HttpSuccessStatus::new(200),
         HttpIdempotency::Idempotent,
-        HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead),
+        HttpRouteAuth::Permission(RoutePermissionId::RuntimeInventoryRead),
         None,
         true,
         HttpResourceSharing::TenantScoped,
@@ -817,16 +812,16 @@ mod tests {
 
     #[test]
     fn evidence_exposes_the_atomic_generated_values() {
-        assert_eq!(EVIDENCE.owner().domain_name(), Some("identity"));
+        assert_eq!(EVIDENCE.owner().domain_name(), Some("runtime"));
         assert_eq!(EVIDENCE.contract(), CONTRACT);
-        assert_eq!(EVIDENCE.contract_id(), "identity.profile");
+        assert_eq!(EVIDENCE.contract_id(), "runtime.inventory");
         assert_eq!(EVIDENCE.path(), "/v1/profile");
         assert_eq!(EVIDENCE.method(), "GET");
         assert_eq!(EVIDENCE.success_status().get(), 200);
         assert_eq!(EVIDENCE.idempotency(), HttpIdempotency::Idempotent);
         assert_eq!(
             EVIDENCE.auth(),
-            HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead)
+            HttpRouteAuth::Permission(RoutePermissionId::RuntimeInventoryRead)
         );
         assert_eq!(EVIDENCE.resource(), None);
         assert!(EVIDENCE.self_scoped());
@@ -902,7 +897,7 @@ mod tests {
     #[should_panic(expected = "must be absolute")]
     fn relative_path_is_rejected() {
         let _ = HttpRouteEvidence::from_static(
-            HttpContractOwner::domain("identity"),
+            HttpContractOwner::domain("runtime"),
             CONTRACT,
             "v1/profile",
             "GET",
@@ -922,7 +917,7 @@ mod tests {
     #[should_panic(expected = "cannot carry resource scope")]
     fn public_resource_scope_is_rejected() {
         let _ = HttpRouteEvidence::from_static(
-            HttpContractOwner::domain("identity"),
+            HttpContractOwner::domain("runtime"),
             CONTRACT,
             "/v1/profile",
             "GET",

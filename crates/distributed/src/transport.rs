@@ -460,6 +460,8 @@ fn record_dispatch_metrics(mode: TransportMode, outcome: TransportOutcome, secon
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
     use futures::FutureExt as _;
     use std::collections::HashMap;

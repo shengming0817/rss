@@ -1,5 +1,5 @@
 error[E0599]: no method named `clone` found for struct `EventMetadata` in the current scope
-  --> tests/ui/event_metadata_clone_fail.rs:10:22
-   |
-10 |     let _ = metadata.clone();
-   |                      ^^^^^ method not found in `EventMetadata`
+ --> tests/ui/event_metadata_clone_fail.rs:7:22
+  |
+7 |     let _ = metadata.clone();
+  |                      ^^^^^ method not found in `EventMetadata`

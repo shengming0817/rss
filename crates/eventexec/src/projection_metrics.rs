@@ -126,6 +126,7 @@ impl ProjectionMetricScope {
     ///
     /// `pub(crate)` keeps construction inside `eventexec` (bind + same-crate fixtures). External
     /// crates have no constructor.
+    #[cfg(test)]
     pub(crate) const fn mint(
         projection_id: &'static str,
         activation: ProjectionMetricActivation,

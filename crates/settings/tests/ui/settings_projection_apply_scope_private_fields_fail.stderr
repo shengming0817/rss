@@ -1,5 +1,0 @@
-error: cannot construct `SettingsProjectionApplyScope` with struct literal syntax due to private fields
- --> tests/ui/settings_projection_apply_scope_private_fields_fail.rs:4:18
-  |
-4 |     let _scope = SettingsProjectionApplyScope {};
-  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

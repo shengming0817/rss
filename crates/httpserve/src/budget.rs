@@ -19,6 +19,12 @@ use tokio_util::sync::CancellationToken;
 pub struct ServerRequestBudget(NonZeroU64);
 
 impl ServerRequestBudget {
+    /// Default complete-request budget used by the neutral server core.
+    pub const DEFAULT: Self = match NonZeroU64::new(30_000) {
+        Some(millis) => Self(millis),
+        None => unreachable!(),
+    };
+
     /// Construct a budget from a non-zero millisecond count.
     pub const fn from_millis(millis: NonZeroU64) -> Self {
         Self(millis)
@@ -65,19 +71,27 @@ impl RequestControl {
         })
     }
 
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
     #[must_use]
     pub fn deadline(&self) -> rss_request_context::Deadline {
         rss_request_context::Deadline::at(self.deadline)
-    }
-
-    pub(crate) fn cancel(&self) {
-        self.cancellation.cancel();
     }
 
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn for_test() -> Arc<Self> {
         Self::start(ServerRequestBudget::for_test())
+    }
+}
+
+pub(crate) struct CancelRequestOnDrop(pub(crate) Arc<RequestControl>);
+
+impl Drop for CancelRequestOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
@@ -101,13 +115,5 @@ impl rss_request_context::CancellationObserver for RequestControl {
                 }
             }
         })
-    }
-}
-
-pub(crate) struct CancelRequestOnDrop(pub(crate) Arc<RequestControl>);
-
-impl Drop for CancelRequestOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
     }
 }

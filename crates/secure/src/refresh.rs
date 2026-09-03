@@ -4,7 +4,7 @@
 //! 重放检测 / 轮换由消费方（identity `RefreshService`）据摘要查找。crypto 原语留基础层 `secure`
 //! （已持 argon2/aead，base 层 L0 纯计算），域 crate 不做 crypto（域只持摘要 newtype）。
 //!
-//! 安全模型：secret 仅在签发瞬间经 [`OpaqueToken::expose`] 受控出口交客户端（包装成 `authn::RefreshToken`）；
+//! 安全模型：secret 仅在签发瞬间经 [`OpaqueToken::expose`] 受控出口交 consumer；
 //! 服务端永不持久化明文，只持 [`digest`] 的不可逆摘要。攻陷 store 不泄露可用 refresh token（摘要不可逆）。
 //!
 //! ref: ory/fosite handler/oauth2/flow_refresh.go@master（refresh token 摘要持久化 + rotation，概念谱系）
@@ -37,7 +37,7 @@ impl OpaqueToken {
         Self(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
     }
 
-    /// 暴露 secret 串——**受控出口**：仅签发瞬间交客户端 / 包装成 `authn::RefreshToken` 时调用，禁进日志。
+    /// 暴露 secret 串——**受控出口**：仅签发瞬间交 consumer 时调用，禁进日志。
     pub fn expose(&self) -> &str {
         &self.0
     }

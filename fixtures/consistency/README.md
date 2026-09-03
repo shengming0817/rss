@@ -35,7 +35,7 @@ partitionKeyAlias = "aggregate-a"
 tenantAuthority = "valid"
 crashPoint = "after-publish-before-settle"
 expectedInvariant = "outbox-publish-settled-once"
-runner = "postgres-rabbitmq"
+runner = "provider-neutral"
 ```
 
 ## Safety Rules

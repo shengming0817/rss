@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::disallowed_methods)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -5,8 +7,7 @@ use std::time::{Duration, Instant};
 use rss_contract::ContractDescriptor;
 use rss_platform::*;
 use rss_request_context::{
-    Cancellation, CancellationObserver, Deadline, FieldMaskView, ObligationsView, PrincipalKind,
-    PrincipalRef, RequestContextView, RequestId, RowScope,
+    Cancellation, CancellationObserver, Deadline, RequestContextView, RequestId,
 };
 
 struct Inventory;
@@ -24,10 +25,10 @@ impl Handler<Inventory> for InventoryHandler {
     fn handle<'a>(
         &'a self,
         request: u32,
-        context: RequestContextView<'a>,
+        _context: RequestContextView<'a>,
     ) -> HandlerFuture<'a, u32> {
         Box::pin(async move {
-            if context.principal().matches_subject("fail") {
+            if request == u32::MAX - 1 {
                 Err(HandlerError::new(HandlerFailureClass::Internal))
             } else if request == u32::MAX {
                 std::future::pending().await
@@ -137,17 +138,14 @@ fn application(host: Arc<Host>) -> (Dispatcher, TrustedContextMinter) {
 
 fn context<'a>(
     request: &'a RequestId,
-    principal: &'a PrincipalRef,
     cancel: &'a Cancel,
     deadline: Instant,
 ) -> RequestContextView<'a> {
     RequestContextView::new(
         None,
         request,
-        principal,
         Deadline::at(deadline),
         Cancellation::observe(cancel),
-        ObligationsView::new(Some(RowScope::Tenant), FieldMaskView::new(&[])),
     )
 }
 
@@ -156,19 +154,13 @@ async fn dispatches_external_contract_and_closed_outcomes() {
     let host = Arc::new(Host::new(AdmissionState::Ready));
     let (dispatcher, minter) = application(host.clone());
     let request = RequestId::parse("request-1").unwrap();
-    let principal = PrincipalRef::new(PrincipalKind::User, "user-1").unwrap();
     let cancel = Cancel::new(false);
     let output = dispatcher
         .dispatch::<Inventory>(
             &Inventory::DESCRIPTOR,
             minter.admit(
                 41,
-                context(
-                    &request,
-                    &principal,
-                    &cancel,
-                    Instant::now() + Duration::from_secs(1),
-                ),
+                context(&request, &cancel, Instant::now() + Duration::from_secs(1)),
             ),
         )
         .await
@@ -182,12 +174,7 @@ async fn dispatches_external_contract_and_closed_outcomes() {
                 &Inventory::DESCRIPTOR,
                 minter.admit(
                     1,
-                    context(
-                        &request,
-                        &principal,
-                        &cancel,
-                        Instant::now() + Duration::from_secs(1)
-                    )
+                    context(&request, &cancel, Instant::now() + Duration::from_secs(1))
                 )
             )
             .await
@@ -201,12 +188,7 @@ async fn dispatches_external_contract_and_closed_outcomes() {
                 &Inventory::DESCRIPTOR,
                 minter.admit(
                     1,
-                    context(
-                        &request,
-                        &principal,
-                        &cancel,
-                        Instant::now() - Duration::from_secs(1)
-                    )
+                    context(&request, &cancel, Instant::now() - Duration::from_secs(1))
                 )
             )
             .await
@@ -222,12 +204,7 @@ async fn dispatches_external_contract_and_closed_outcomes() {
         &Inventory::DESCRIPTOR,
         minter.admit(
             u32::MAX,
-            context(
-                &request,
-                &principal,
-                &cancel,
-                Instant::now() + Duration::from_secs(1),
-            ),
+            context(&request, &cancel, Instant::now() + Duration::from_secs(1)),
         ),
     );
     let (running, ()) = tokio::join!(running, cancel_during);
@@ -240,12 +217,7 @@ async fn dispatches_external_contract_and_closed_outcomes() {
                 &Inventory::DESCRIPTOR,
                 minter.admit(
                     u32::MAX,
-                    context(
-                        &request,
-                        &principal,
-                        &cancel,
-                        Instant::now() + Duration::from_millis(5),
-                    )
+                    context(&request, &cancel, Instant::now() + Duration::from_millis(5),)
                 ),
             )
             .await
@@ -260,12 +232,7 @@ async fn dispatches_external_contract_and_closed_outcomes() {
                 &Inventory::DESCRIPTOR,
                 minter.admit(
                     1,
-                    context(
-                        &request,
-                        &principal,
-                        &cancel,
-                        Instant::now() + Duration::from_secs(1)
-                    )
+                    context(&request, &cancel, Instant::now() + Duration::from_secs(1))
                 )
             )
             .await
@@ -279,12 +246,7 @@ async fn dispatches_external_contract_and_closed_outcomes() {
                 &Inventory::DESCRIPTOR,
                 minter.admit(
                     1,
-                    context(
-                        &request,
-                        &principal,
-                        &cancel,
-                        Instant::now() + Duration::from_secs(1)
-                    )
+                    context(&request, &cancel, Instant::now() + Duration::from_secs(1))
                 )
             )
             .await
@@ -297,14 +259,11 @@ async fn dispatches_external_contract_and_closed_outcomes() {
 async fn completed_operation_wins_when_termination_is_ready_in_the_same_poll() {
     let (dispatcher, minter) = application(Arc::new(Host::new(AdmissionState::Ready)));
     let request = RequestId::parse("request-race").unwrap();
-    let principal = PrincipalRef::new(PrincipalKind::User, "user-1").unwrap();
     let context = RequestContextView::new(
         None,
         &request,
-        &principal,
         Deadline::at(Instant::now() + Duration::from_secs(1)),
         Cancellation::observe(&ImmediatelyCancelled),
-        ObligationsView::new(Some(RowScope::Tenant), FieldMaskView::new(&[])),
     );
     assert_eq!(
         dispatcher
@@ -321,16 +280,10 @@ async fn admitted_request_is_bound_to_its_application_instance() {
     let (dispatcher, _) = application(Arc::clone(&host));
     let (_, other_minter) = application(host);
     let request = RequestId::parse("request-seal").unwrap();
-    let principal = PrincipalRef::new(PrincipalKind::User, "user-1").unwrap();
     let cancel = Cancel::new(false);
     let admitted = other_minter.admit(
         1,
-        context(
-            &request,
-            &principal,
-            &cancel,
-            Instant::now() + Duration::from_secs(1),
-        ),
+        context(&request, &cancel, Instant::now() + Duration::from_secs(1)),
     );
     assert_eq!(
         dispatcher
@@ -363,15 +316,7 @@ async fn rejects_unknown_mismatch_and_handler_failure() {
     let (dispatcher, minter) = application(host);
     let request = RequestId::parse("request-1").unwrap();
     let cancel = Cancel::new(false);
-    let principal = PrincipalRef::new(PrincipalKind::User, "fail").unwrap();
-    let ctx = || {
-        context(
-            &request,
-            &principal,
-            &cancel,
-            Instant::now() + Duration::from_secs(1),
-        )
-    };
+    let ctx = || context(&request, &cancel, Instant::now() + Duration::from_secs(1));
     assert_eq!(
         dispatcher
             .dispatch::<Unknown>(&Unknown::DESCRIPTOR, minter.admit((), ctx()))
@@ -400,7 +345,7 @@ async fn rejects_unknown_mismatch_and_handler_failure() {
     );
     assert_eq!(
         dispatcher
-            .dispatch::<Inventory>(&Inventory::DESCRIPTOR, minter.admit(1, ctx()))
+            .dispatch::<Inventory>(&Inventory::DESCRIPTOR, minter.admit(u32::MAX - 1, ctx()),)
             .await
             .unwrap(),
         DispatchOutcome::HandlerFailed(HandlerFailureClass::Internal)

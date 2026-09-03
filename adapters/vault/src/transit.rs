@@ -1,62 +1,19 @@
-//! HashiCorp Vault Transit `sign` 调用映射（`POST {addr}/v1/{mount}/sign/{key}` → `diport::Signature`）。
-//!
-//! 请求体 `{"input": base64(message)}`、成功响应 `{"data":{"signature":"vault:vN:<b64>"}}`、错误响应
-//! `{"errors":[...]}`（非 2xx 状态码）形状对标 vaultrs `SignDataRequest`/`SignDataResponse`。
-//! ref: jmgilman/vaultrs vaultrs/src/api/transit/requests.rs@master（`SignDataRequest`：`{mount}/sign/{name}` + base64 `input`）。
+//! HashiCorp Vault Transit 的通用 encrypt/decrypt/rewrap key-provider 映射。
 
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use diport::key_provider::KeyProviderErrorKind;
-use diport::{
-    EncryptOutput, KeyName, KeyProviderError, KeyRef, KeyVersion, RedactedBytes, SignRequest,
-    Signature, SignerError,
-};
+use diport::{EncryptOutput, KeyName, KeyProviderError, KeyRef, KeyVersion, RedactedBytes};
 use secure::{DerivedAad, Plaintext};
-
-/// URL-safe base64 engine（Vault Transit `jws` marshaling 响应编码：`-`/`_` 替换 `+`/`/`，无 padding）。
-/// `DecodePaddingMode::Indifferent`：Vault 响应带或不带 padding 均可解码，健壮对接。
-const BASE64_URL: GeneralPurpose = GeneralPurpose::new(
-    &base64::alphabet::URL_SAFE,
-    GeneralPurposeConfig::new()
-        .with_decode_padding_mode(DecodePaddingMode::Indifferent)
-        .with_encode_padding(false),
-);
 
 /// Vault token header（`X-Vault-Token`）。
 const VAULT_TOKEN_HEADER: &str = "X-Vault-Token";
-/// 失败诊断 `operation` 闭值集（低基数静态标签）：发请求阶段 / 读响应阶段。
-const OP_SIGN_SEND: &str = "sign-send";
-const OP_SIGN_READ: &str = "sign-read";
 const OP_KEY_PROVIDER_SEND: &str = "key-provider-send";
 const OP_KEY_PROVIDER_READ: &str = "key-provider-read";
 /// Vault Transit sentinel：`key_version = 0` means "use latest/current primary" for encrypt/rewrap.
 const LATEST_KEY_VERSION: u32 = 0;
-
-/// `addr` 不是合法 base URL（无法作 Transit 端点基地址）。
-#[derive(Debug, thiserror::Error)]
-#[error("vault address is not a valid base url")]
-struct InvalidAddr;
-
-/// Transit `sign` 非 2xx 响应（auth / policy / key 不存在 / Vault 不可用等）。携带 HTTP status code 作
-/// **内部诊断字段**（`#[derive(Debug)]` 读它供 vault 内日志 / 诊断）：经 [`SignerError`] 包装后 source 在 port
-/// 边界仍 redacted（`DIPORT-ERR-SOURCE-REDACT-01` 不破），status code 不外泄给调用方。状态码不进 `Display`
-/// （const literal）。
-#[derive(Debug, thiserror::Error)]
-#[error("vault transit sign returned non-success status")]
-struct NonSuccessStatus(u16);
-
-/// Transit `sign` 2xx 响应缺 `data.signature`（畸形 / 非签名响应 / `{"errors":[..]}`）。
-#[derive(Debug, thiserror::Error)]
-#[error("vault transit sign response missing signature")]
-struct MissingSignature;
-
-/// `data.signature` 不是合法 Vault Transit tagged 签名（缺 `vault:v<N>:` 前缀 / 版本非数字）。
-#[derive(Debug, thiserror::Error)]
-#[error("vault transit signature is not a valid vault:vN: tagged value")]
-struct MalformedSignature;
 
 /// Transit KeyProvider 响应缺 `data.ciphertext`。
 #[derive(Debug, thiserror::Error)]
@@ -171,15 +128,6 @@ impl KeyProviderOperation {
     }
 }
 
-/// 构造 Transit `sign` 请求体：`input` 按 Vault API 要求使用 STANDARD base64；JWT 签名表示固定为
-/// JWS raw r‖s。显式声明 `jws`，避免依赖 Vault 的 ASN.1 默认值（#1252）。
-pub(crate) fn build_sign_body(message: &[u8]) -> serde_json::Value {
-    serde_json::json!({
-        "input": BASE64.encode(message),
-        "marshaling_algorithm": "jws",
-    })
-}
-
 /// 单一 AAD→Vault context funnel：RSS `DerivedAad` 的 canonical bytes 经 STANDARD base64 编码后放入
 /// Vault Transit `context`。KeyProvider 路径**不**生成 `associated_data` 字段；settings Transit key 必须
 /// `derived=true`，由组合根 wrong-AAD self-check 证明。rewrap 依赖 Vault 对 `context` 的原生支持，保留
@@ -214,29 +162,6 @@ pub(crate) fn build_rewrap_body(ciphertext: &str, aad: &DerivedAad) -> serde_jso
         // Rewrap always targets the current primary.
         "key_version": LATEST_KEY_VERSION,
     })
-}
-
-/// 解析 Transit `sign` 成功响应 `{"data":{"signature":"vault:vN:<b64>"}}` → [`Signature`]（**原始签名字节**，
-/// 符合 `diport::Signature` = 签名结果字节契约）。缺 `data.signature` / `{"data":null}` / `{"errors":[..]}`
-/// → `MissingSignature`；前缀·版本·base64 非法 → `MalformedSignature`（经 [`SignerError`] 脱敏）。
-/// 响应签名固定按 Vault JWS 的 URL-safe base64 解码。
-pub(crate) fn parse_sign_response(body: &[u8]) -> Result<Signature, SignerError> {
-    #[derive(serde::Deserialize)]
-    struct Envelope {
-        // reason: 只反序列化 data.signature；Vault 错误体 `{"errors":[..]}` 的 errors 内容（可能含 policy /
-        // key 名等拓扑信息）刻意不反序列化——杜绝其进入日志 / 错误；非 2xx 已由 sign_impl 提前 reject，
-        // 畸形 2xx（缺 signature / data:null）落 MissingSignature。
-        data: Option<SignData>,
-    }
-    #[derive(serde::Deserialize)]
-    struct SignData {
-        signature: String,
-    }
-    let envelope: Envelope = serde_json::from_slice(body).map_err(SignerError::new)?;
-    match envelope.data {
-        Some(data) => decode_vault_signature(&data.signature),
-        None => Err(SignerError::new(MissingSignature)),
-    }
 }
 
 pub(crate) fn parse_encrypt_response(
@@ -304,22 +229,6 @@ fn parse_ciphertext_response(body: &[u8]) -> Result<(String, u32), KeyProviderEr
     Ok((ciphertext, key_version))
 }
 
-/// Vault Transit `vault:v<N>:<base64url>` → 原始 JWS 签名字节。version 是 Vault 验签元数据，对
-/// provider-agnostic `diport::Signature` 无意义，因此剥离。
-fn decode_vault_signature(tagged: &str) -> Result<Signature, SignerError> {
-    let rest = tagged
-        .strip_prefix("vault:v")
-        .ok_or_else(|| SignerError::new(MalformedSignature))?;
-    let (version, b64) = rest
-        .split_once(':')
-        .ok_or_else(|| SignerError::new(MalformedSignature))?;
-    if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(SignerError::new(MalformedSignature));
-    }
-    let bytes = BASE64_URL.decode(b64).map_err(SignerError::new)?;
-    Ok(Signature::new(bytes))
-}
-
 fn parse_vault_ciphertext_version(tagged: &str) -> Result<KeyVersion, MalformedCiphertext> {
     let rest = tagged.strip_prefix("vault:v").ok_or(MalformedCiphertext)?;
     let (version, b64) = rest.split_once(':').ok_or(MalformedCiphertext)?;
@@ -363,86 +272,6 @@ fn ensure_response_versions_match(
     } else {
         Err(ResponseVersionMismatch)
     }
-}
-
-/// 执行 Transit `sign`：`POST {base}/v1/{mount…}/sign/{key}`，header `X-Vault-Token`，请求级 `timeout`。
-/// `base` 已在构造期校验 scheme（https / 显式 http）。`mount_segments`（构造期按 `/` 拆分校验）逐段 push、`key`
-/// 单段 push——均经 `Url::path_segments_mut` percent-encode（杜绝路径段注入）。`token` / `message` 绝不进 span / 日志。
-/// 请求固定发送 `marshaling_algorithm=jws`，响应签名固定按 URL-safe base64 解码。
-#[tracing::instrument(
-    name = "vault.transit.sign",
-    skip_all,
-    fields(resource = "vault", operation = "sign", key = request.key.as_str(), purpose = request.purpose.as_str())
-)]
-pub(crate) async fn sign_impl(
-    client: &reqwest::Client,
-    base: &reqwest::Url,
-    token: &str,
-    mount_segments: &[String],
-    timeout: Duration,
-    request: SignRequest,
-) -> Result<Signature, SignerError> {
-    let mut url = base.clone();
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|()| SignerError::new(InvalidAddr))?;
-        // pop_if_empty：去掉 base 根路径 "/" 产生的尾空段，避免 `//v1`。mount 已拆好的多段逐段 push（嵌套 mount
-        // `team/transit` → `team/transit` 而非 `team%2Ftransit`，F3）；key 单段 push（防注入，F1 percent-encode）。
-        segments
-            .pop_if_empty()
-            .push("v1")
-            .extend(mount_segments)
-            .push("sign")
-            .push(request.key.as_str());
-    }
-    // reason: serde_json::Value 序列化理论上不失败（无非序列化字段）；用 map_err 而非 expect，
-    // 无需 item-level `#[allow]`。
-    let payload = serde_json::to_vec(&build_sign_body(request.message.as_bytes()))
-        .map_err(SignerError::new)?;
-
-    let response = client
-        .post(url)
-        .header(VAULT_TOKEN_HEADER, token)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        // F4: 请求级 timeout（防注入的 Client 未配 timeout 时无限等待）。
-        .timeout(timeout)
-        .body(payload)
-        .send()
-        .await
-        .map_err(|e| warn_and_wrap(OP_SIGN_SEND, e))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let code = status.as_u16();
-        let (category, security_relevant) = classify_status(code);
-        // #1180 分级：401/403（token / ACL / policy 授权失败）= 安全告警级 → error!（运维须单独告警、与依赖
-        // 抖动区分）；429 限流 / 5xx 依赖不可用 / 其它 4xx → warn!。tracing level 须静态，故按 security_relevant
-        // 在两个 callsite 分流。`category`（4 值闭值集）是低基数告警分组字段;`status` 是原始 HTTP 码（HTTP 语义
-        // 闭集、非无界，仅作诊断而非告警分组键）。二者均非 PII，不打印 endpoint URL / token / 响应体。
-        if security_relevant {
-            tracing::error!(
-                target: "vault",
-                status = code,
-                category,
-                "vault transit sign returned non-success status"
-            );
-        } else {
-            tracing::warn!(
-                target: "vault",
-                status = code,
-                category,
-                "vault transit sign returned non-success status"
-            );
-        }
-        return Err(SignerError::new(NonSuccessStatus(code)));
-    }
-
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| warn_and_wrap(OP_SIGN_READ, e))?;
-    parse_sign_response(&body)
 }
 
 #[tracing::instrument(
@@ -588,19 +417,6 @@ fn log_key_provider_status_warn(operation: KeyProviderOperation, code: u16, cate
     );
 }
 
-/// 记录低基数诊断（reqwest 错误归类为静态类别，**不打印其 `Display`**——杜绝 endpoint URL / 请求详情进日志；
-/// 比泛 adapter 的 `redact_error(Display)` funnel 更保守，契合 secrets-backend 敏感度）后把底层错误包成
-/// [`SignerError`]（PII 边界：原始错误经 `RedactedSource` 不外泄）。`key`/`purpose` 已在 `#[instrument]` span。
-fn warn_and_wrap(operation: &str, err: reqwest::Error) -> SignerError {
-    tracing::warn!(
-        target: "vault",
-        operation = operation,
-        category = classify_reqwest_error(&err),
-        "vault transit sign request failed"
-    );
-    SignerError::new(err)
-}
-
 fn key_provider_warn_and_wrap(
     phase: &str,
     operation: KeyProviderOperation,
@@ -694,9 +510,8 @@ mod tests {
     use secure::{Plaintext, ProtectionContext};
 
     use super::{
-        BASE64, BASE64_URL, build_decrypt_body, build_encrypt_body, build_rewrap_body,
-        build_sign_body, parse_decrypt_response, parse_encrypt_response, parse_rewrap_response,
-        parse_sign_response,
+        BASE64, build_decrypt_body, build_encrypt_body, build_rewrap_body, parse_decrypt_response,
+        parse_encrypt_response, parse_rewrap_response,
     };
 
     #[allow(clippy::expect_used)]
@@ -717,134 +532,6 @@ mod tests {
             body.get("associated_data").is_none(),
             "Vault KeyProvider must use context, not associated_data: {body}"
         );
-    }
-
-    #[test]
-    fn build_sign_body_base64_encodes_input() {
-        // base64("payload") == "cGF5bG9hZA=="（STANDARD，含 padding）。input 始终 STANDARD base64。
-        let body = build_sign_body(b"payload");
-        assert_eq!(body["input"].as_str(), Some("cGF5bG9hZA=="));
-    }
-
-    #[test]
-    fn build_sign_body_empty_message_encodes_empty_input() {
-        let body = build_sign_body(b"");
-        assert_eq!(body["input"].as_str(), Some(""));
-    }
-
-    #[test]
-    fn build_sign_body_binary_bytes_encode_correctly() {
-        // 签名消息可以包含任意二进制字节；Vault input 始终使用 STANDARD base64。
-        let message: &[u8] = &[0x00, 0xFF, 0xAB];
-        let expected = BASE64.encode(message); // 锚定期望 = 同一 STANDARD 引擎输出（"AP+r"）。
-        assert_eq!(expected, "AP+r");
-        assert_eq!(
-            build_sign_body(message)["input"].as_str(),
-            Some(expected.as_str())
-        );
-    }
-
-    #[test]
-    fn build_sign_body_includes_jws_marshaling() {
-        let body = build_sign_body(b"msg");
-        assert_eq!(
-            body["marshaling_algorithm"].as_str(),
-            Some("jws"),
-            "Jws marshaling must send marshaling_algorithm=jws"
-        );
-    }
-
-    #[test]
-    fn build_sign_body_jws_input_is_still_standard_base64() {
-        // JWS 模式下 input 仍为 STANDARD base64；只有响应签名段使用 URL-safe base64。
-        let message: &[u8] = &[0xFB]; // STANDARD: "+w=="; URL_SAFE: "-w"。
-        let body = build_sign_body(message);
-        assert_eq!(
-            body["input"].as_str(),
-            Some("+w=="),
-            "Vault sign input must use STANDARD base64"
-        );
-        assert_eq!(body["marshaling_algorithm"].as_str(), Some("jws"));
-    }
-
-    #[test]
-    fn parse_ok_decodes_tagged_signature_to_raw_bytes() {
-        // base64("rawsig") == "cmF3c2ln"；解码后返回原始字节（剥离 vault:v1: 前缀），符合 diport::Signature 字节契约。
-        let body = br#"{"data":{"signature":"vault:v1:cmF3c2ln"}}"#;
-        assert!(matches!(
-            parse_sign_response(body),
-            Ok(sig) if sig.as_bytes() == b"rawsig"
-        ));
-    }
-
-    #[test]
-    fn parse_jws_decodes_url_safe_base64() {
-        // anti-vacuity：0xFB 在 STANDARD base64 编码为 "+w=="，在 URL_SAFE（无 padding）编码为 "-w"。
-        // `vault:v1:-w` 经固定 JWS 路径（BASE64_URL）解码 → [0xFB]。
-        let url_safe_b64 = BASE64_URL.encode([0xFB_u8]); // "-w"（URL_SAFE，无 padding）
-        assert_eq!(
-            url_safe_b64, "-w",
-            "0xFB must encode to '-w' in url-safe no-pad base64"
-        );
-        let body_str = format!(r#"{{"data":{{"signature":"vault:v1:{url_safe_b64}"}}}}"#);
-        // Jws 路径：成功 decode → [0xFB]
-        assert!(
-            matches!(
-                parse_sign_response(body_str.as_bytes()),
-                Ok(sig) if sig.as_bytes() == [0xFB_u8]
-            ),
-            "Jws path must decode url-safe base64 '-w' to [0xFB]"
-        );
-        // anti-vacuity：相同值不能由 STANDARD base64 解码，证明使用了 URL-safe 引擎。
-        assert!(
-            BASE64.decode(url_safe_b64).is_err(),
-            "STANDARD base64 must reject the URL-safe '-' character"
-        );
-    }
-
-    #[test]
-    fn parse_signature_missing_prefix_is_err() {
-        let body = br#"{"data":{"signature":"cmF3c2ln"}}"#;
-        assert!(parse_sign_response(body).is_err());
-    }
-
-    #[test]
-    fn parse_signature_non_numeric_version_is_err() {
-        let body = br#"{"data":{"signature":"vault:vX:cmF3c2ln"}}"#;
-        assert!(parse_sign_response(body).is_err());
-    }
-
-    #[test]
-    fn parse_signature_invalid_base64_is_err() {
-        // `vault:v1:` 前缀合法、版本数字合法，但 base64 体非法（'!' 不在字母表）→ MalformedSignature/解码错误。
-        let body = br#"{"data":{"signature":"vault:v1:!!!"}}"#;
-        assert!(parse_sign_response(body).is_err());
-    }
-
-    #[test]
-    fn parse_vault_errors_envelope_is_err() {
-        // 非 2xx 体（`{"errors":[..]}`，无 data）→ Err（缺 signature）。
-        let body = br#"{"errors":["permission denied"]}"#;
-        assert!(parse_sign_response(body).is_err());
-    }
-
-    #[test]
-    fn parse_data_null_is_err() {
-        // 显式 `{"data":null}`（与 data 缺失不同形状，但同走 None 分支）→ Err。
-        let body = br#"{"data":null}"#;
-        assert!(parse_sign_response(body).is_err());
-    }
-
-    #[test]
-    fn parse_missing_signature_field_is_err() {
-        // 2xx 但 data 无 signature 字段（畸形）→ Err。
-        let body = br#"{"data":{}}"#;
-        assert!(parse_sign_response(body).is_err());
-    }
-
-    #[test]
-    fn parse_malformed_json_is_err() {
-        assert!(parse_sign_response(b"not json").is_err());
     }
 
     #[test]
@@ -992,150 +679,6 @@ mod tests {
                 "({timeout},{connect},{decode},{request})"
             );
         }
-    }
-}
-
-#[cfg(all(test, feature = "backend"))]
-mod sign_impl_tests {
-    //! `sign_impl` HTTP 编排层 4 分支 + 路径 percent-encode / `X-Vault-Token` header 确定性单测：wiremock
-    //! loopback canned 响应，reqwest 真发请求测真实编排（无 live Vault、不抽 transport trait）。纯函数接缝
-    //! （build_sign_body / parse_sign_response / classify_status）见 `mod tests`。对标 adapters/s3 backend_tests
-    //! 「传输边界 mock、测真实编排」范式。
-    //!
-    //! 4 分支覆盖：① send 失败（连接被拒，端到端经 `warn_and_wrap` → `classify_reqwest_error` connect 路径）
-    //! ② 非 2xx（含 error!/warn! 两个安全分级 callsite） ④ 2xx 成功 → parse_sign_response。③ `bytes()` 读取
-    //! 失败：与 ① 同形（`warn_and_wrap`，仅 OP 常量 OP_SIGN_READ vs OP_SIGN_SEND 不同），wiremock 无法稳定触发
-    //! 响应体读取中断、不为单一分支引第二套机制（优雅简洁），由 ① 经 `warn_and_wrap` 端到端覆盖 + 阅读保障。
-    //! （`classify_reqwest_error` 的类别映射逻辑由 `mod tests::classify_error_kind_*` 表驱动全覆盖。）
-    use std::time::Duration;
-
-    use diport::{KeyId, SignRequest, Signature, SignerError, SigningPurpose};
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    use super::sign_impl;
-
-    // reason: header 可达性验证用占位值（断言 X-Vault-Token 被注入），非真实 token / token 格式规范。
-    const TOKEN: &str = "test-token";
-    const OK_BODY: &str = r#"{"data":{"signature":"vault:v1:cmF3c2ln"}}"#; // base64("rawsig")=="cmF3c2ln"
-
-    // base Url = mock server 地址。expect 的 item-level carve-out 集中此处。
-    #[allow(clippy::expect_used)]
-    fn base_url(server: &MockServer) -> reqwest::Url {
-        reqwest::Url::parse(&server.uri()).expect("mock server uri is a valid base url")
-    }
-
-    fn sign_request(key: &str) -> SignRequest {
-        SignRequest {
-            key: KeyId::new(key),
-            purpose: SigningPurpose::new("unit-test"),
-            message: b"hello-rss".to_vec().into(),
-        }
-    }
-
-    // 固定 mount=["transit"] + timeout=200ms 调 sign_impl（直接传 http base Url；scheme 校验在 profile-specific VaultSigner 构造器，
-    // 非 sign_impl 职责，故无需构造 VaultSigner）。OK_BODY 的值同时是合法 base64url，解码为 "rawsig"。
-    async fn call(server: &MockServer, key: &str) -> Result<Signature, SignerError> {
-        sign_impl(
-            &reqwest::Client::new(),
-            &base_url(server),
-            TOKEN,
-            &["transit".to_string()],
-            Duration::from_millis(200),
-            sign_request(key),
-        )
-        .await
-    }
-
-    // 取唯一一次收到的请求（断言 percent-encode / header 用）。expect carve-out 集中此处。
-    #[allow(clippy::expect_used)]
-    async fn single_request(server: &MockServer) -> wiremock::Request {
-        let mut reqs = server
-            .received_requests()
-            .await
-            .expect("wiremock request recording enabled by default");
-        assert_eq!(reqs.len(), 1, "exactly one request expected");
-        reqs.remove(0)
-    }
-
-    #[tokio::test]
-    async fn sign_2xx_success_decodes_signature() {
-        // Branch 4：2xx → parse_sign_response 剥 vault:v1: 前缀 base64 decode → 原始字节。
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(OK_BODY))
-            .mount(&server)
-            .await;
-        assert!(matches!(call(&server, "my-key").await, Ok(sig) if sig.as_bytes() == b"rawsig"));
-    }
-
-    #[tokio::test]
-    async fn sign_encodes_key_path_segment_and_sends_token_header() {
-        // 安全（F1）：key="../x" 必须 percent-encode 成单段 `..%2Fx`（而非路径穿越 `/v1/transit/x`）;
-        // 且请求带 X-Vault-Token header。catch-all 响应 200，直接 inspect 收到的请求断言真实 wire 形态。
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(OK_BODY))
-            .mount(&server)
-            .await;
-        assert!(call(&server, "../x").await.is_ok());
-        let req = single_request(&server).await;
-        assert_eq!(
-            req.url.path(),
-            "/v1/transit/sign/..%2Fx",
-            "key segment must be percent-encoded (no path traversal)"
-        );
-        assert_eq!(
-            req.headers
-                .get("X-Vault-Token")
-                .and_then(|v| v.to_str().ok()),
-            Some(TOKEN)
-        );
-    }
-
-    #[tokio::test]
-    async fn sign_non_success_statuses_are_err() {
-        // Branch 2：非 2xx → Err（NonSuccessStatus）。覆盖 error!（401/403）+ warn!（429/5xx/4xx）两个安全分级
-        // callsite;分类映射本身由 mod tests::classify_status_* 锁定（错误经 SignerError 脱敏，return 值不暴露
-        // category/level，故分级正确性测在纯函数侧、分支命中测在此）。
-        for status in [400u16, 401, 403, 429, 500, 503] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(status).set_body_string(r#"{"errors":["x"]}"#))
-                .mount(&server)
-                .await;
-            assert!(
-                call(&server, "k").await.is_err(),
-                "status {status} must map to Err"
-            );
-        }
-    }
-
-    // 指向无监听者的本地端口（绑定 :0 取系统分配端口后立即释放）→ 连接必被拒。expect carve-out 集中此处。
-    #[allow(clippy::expect_used)]
-    fn refused_base() -> reqwest::Url {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let port = listener.local_addr().expect("local addr").port();
-        drop(listener); // 释放 → 端口回到未监听态。
-        reqwest::Url::parse(&format!("http://127.0.0.1:{port}/")).expect("valid base url")
-    }
-
-    #[tokio::test]
-    async fn sign_send_connection_refused_is_err() {
-        // Branch 1：send 失败——指向无监听者端口 → 连接被拒 → warn_and_wrap(OP_SIGN_SEND) → Err。确定性、
-        // 无 lingering mock server（无 nextest leaky）;直接覆盖 classify_reqwest_error 的 connect 分支。
-        // F4 请求级 timeout 在 sign_impl 无条件设置（`.timeout(timeout)`），阅读保障——不另起 lingering-server
-        // 超时测试以免 leaky。
-        let result = sign_impl(
-            &reqwest::Client::new(),
-            &refused_base(),
-            TOKEN,
-            &["transit".to_string()],
-            Duration::from_secs(5),
-            sign_request("k"),
-        )
-        .await;
-        assert!(result.is_err());
     }
 }
 

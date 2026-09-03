@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `SagaActivationPermit` in the current scope
- --> tests/ui/workflow_saga_permit_clone_fail.rs:2:24
-  |
-2 |     let _copy = permit.clone();
-  |                        ^^^^^ method not found in `SagaActivationPermit`

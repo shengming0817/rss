@@ -223,7 +223,7 @@ impl L2DrRecoveryPlanDigest {
         &self.0
     }
 
-    /// Return canonical lowercase hexadecimal text for audit correlation.
+    /// Return canonical lowercase hexadecimal text for correlation.
     pub fn to_hex(self) -> String {
         use std::fmt::Write as _;
 
@@ -815,7 +815,7 @@ impl L2DrRecoveryError {
     pub const fn audit_reason(self) -> &'static str {
         match self {
             Self::InvalidOperatorCaller | Self::InvalidOperatorSubject => "operator_authorization",
-            Self::InvalidStartAuditId | Self::StartAuditMismatch => "audit",
+            Self::InvalidStartAuditId | Self::StartAuditMismatch => "observer",
             Self::TenantScopeMismatch => "tenant_scope",
             Self::EpochConflict => "epoch_conflict",
             Self::FactNotFound => "event_missing",
@@ -1252,8 +1252,8 @@ mod tests {
                 L2DrRecoveryError::InvalidOperatorSubject,
                 "operator_authorization",
             ),
-            (L2DrRecoveryError::InvalidStartAuditId, "audit"),
-            (L2DrRecoveryError::StartAuditMismatch, "audit"),
+            (L2DrRecoveryError::InvalidStartAuditId, "observer"),
+            (L2DrRecoveryError::StartAuditMismatch, "observer"),
             (L2DrRecoveryError::TenantScopeMismatch, "tenant_scope"),
             (L2DrRecoveryError::EpochConflict, "epoch_conflict"),
             (L2DrRecoveryError::FactNotFound, "event_missing"),

@@ -88,7 +88,7 @@ pub enum DlqOperatorStartAuditIdError {
 }
 
 impl DlqOperatorStartAuditId {
-    /// Validates an opaque audit correlation identifier.
+    /// Validates an opaque correlation identifier.
     ///
     /// Values must be 1–128 bytes, have no surrounding whitespace, and contain no control
     /// characters. The identifier is redacted from [`Debug`](std::fmt::Debug) output.

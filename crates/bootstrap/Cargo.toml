@@ -27,9 +27,6 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
-# Sealed generated event subscription carriers. This exact Service→Generated edge is restricted by
-# `generated_seam_allows`; bootstrap consumes only registration type vocabulary, never providers.
-generated = { path = "../../generated" }
 # 受控 `bootstrap → httpserve` 边（ADR-009）：route_group 的 listener-typed builder ListenerRouter<L> +
 # finalize_routes 产出的 sealed UnfinalizedRoutes（auth-finalize-before-bind funnel）。裸 axum::Router 不出 httpserve。
 httpserve = { path = "../httpserve" }

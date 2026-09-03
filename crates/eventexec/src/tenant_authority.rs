@@ -354,9 +354,9 @@ mod tests {
     fn binding<'a>(message_id: &'a str) -> TenantAuthorityBinding<'a> {
         TenantAuthorityBinding::new(
             tenant(),
-            "identity",
+            "runtime",
             "contract-session",
-            "identity.session-created",
+            "runtime.fact-recorded",
             message_id,
         )
     }

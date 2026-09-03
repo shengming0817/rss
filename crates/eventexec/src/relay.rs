@@ -509,6 +509,7 @@ fn log_claimed(domain: &str, claimed: usize) {
 /// `target`（低基数 `&'static str`，如 `outbox` / `inbox_receipts`）= 本 loop 驱动的清理目标——
 /// 泛型 store 自身无表身份，故由 spawn 端显式传入并写入每轮成功/失败日志，使多表 sweeper 的日志可归因（#327
 /// review F2）。worker 身份见 [`SweeperWorker::spawn`] 的 `name` 参数（per-target readyz 命名）。
+#[allow(clippy::cognitive_complexity)]
 pub async fn sweeper_loop<S>(
     store: Arc<S>,
     config: SweeperConfig,
@@ -923,6 +924,8 @@ impl diport::ManagedResource for SweeperWorker {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+
     use std::sync::atomic::{AtomicUsize, Ordering as AtomOrd};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1067,7 +1070,7 @@ mod tests {
 
     impl FakeBacklog {
         fn new(sample: BacklogSample) -> Arc<Self> {
-            Self::with_samples(vec![backlog_sample("identity.session-created", sample)])
+            Self::with_samples(vec![backlog_sample("runtime.fact-recorded", sample)])
         }
         fn with_samples(samples: Vec<BacklogMetricSample>) -> Arc<Self> {
             Arc::new(Self { samples, err: None })
@@ -1119,7 +1122,7 @@ mod tests {
     }
 
     fn make_claimed_entry() -> FakeClaim {
-        FakeClaim::new(subject("identity.session-created"))
+        FakeClaim::new(subject("runtime.fact-recorded"))
     }
 
     /// bounded yield：让 spawned worker task 推进，至多 32 次 yield 等到 `want` 状态后返回 true。
@@ -1156,7 +1159,7 @@ mod tests {
     impl FakeStore {
         fn new(entries: Vec<FakeClaim>) -> Arc<Self> {
             Arc::new(Self {
-                domain: dn("identity"),
+                domain: dn("runtime"),
                 claims: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
                 relay_err: None,
@@ -1170,7 +1173,7 @@ mod tests {
             kind: consistency::error::EngineErrorKind,
         ) -> Arc<Self> {
             Arc::new(Self {
-                domain: dn("identity"),
+                domain: dn("runtime"),
                 claims: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
                 relay_err: Some(kind),
@@ -1182,7 +1185,7 @@ mod tests {
         /// relay 成功但返回非-Ack 处置（Requeue/Reject）——测 F4 health 映射。
         fn with_relay_disposition(entries: Vec<FakeClaim>, disposition: Disposition) -> Arc<Self> {
             Arc::new(Self {
-                domain: dn("identity"),
+                domain: dn("runtime"),
                 claims: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
                 relay_err: None,
@@ -1193,7 +1196,7 @@ mod tests {
 
         fn with_claim_err(kind: consistency::error::EngineErrorKind) -> Arc<Self> {
             Arc::new(Self {
-                domain: dn("identity"),
+                domain: dn("runtime"),
                 claims: Mutex::new(vec![]),
                 relay_count: AtomicUsize::new(0),
                 relay_err: None,
@@ -1256,7 +1259,7 @@ mod tests {
     impl ObservedRelayStore {
         fn new(entries: Vec<FakeClaim>) -> Arc<Self> {
             Arc::new(Self {
-                domain: dn("identity"),
+                domain: dn("runtime"),
                 claims: Mutex::new(entries),
                 claim_count: AtomicUsize::new(0),
                 started: AtomicUsize::new(0),
@@ -2208,15 +2211,15 @@ mod tests {
         let sample_a = BacklogSample::new(42, 305);
         let sample_b = BacklogSample::new(8, 509);
         let store = FakeBacklog::with_samples(vec![
-            blocked_backlog_sample("identity.session-created", sample_a, 2),
-            backlog_sample("identity.role-assigned", sample_b),
+            blocked_backlog_sample("runtime.fact-recorded", sample_a, 2),
+            backlog_sample("runtime.fact-updated", sample_b),
         ]);
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
         let mut was_active = false;
         super::sampler_tick(
             &store,
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &health,
             metrics.as_ref(),
@@ -2237,16 +2240,12 @@ mod tests {
     async fn sampler_overflow_fails_closed_for_pending_and_blocked_aggregates() {
         let cases = [
             vec![
-                backlog_sample("identity.session-created", BacklogSample::new(u64::MAX, 1)),
-                backlog_sample("identity.role-assigned", BacklogSample::new(1, 2)),
+                backlog_sample("runtime.fact-recorded", BacklogSample::new(u64::MAX, 1)),
+                backlog_sample("runtime.fact-updated", BacklogSample::new(1, 2)),
             ],
             vec![
-                blocked_backlog_sample(
-                    "identity.session-created",
-                    BacklogSample::new(0, 1),
-                    u64::MAX,
-                ),
-                blocked_backlog_sample("identity.role-assigned", BacklogSample::new(0, 2), 1),
+                blocked_backlog_sample("runtime.fact-recorded", BacklogSample::new(0, 1), u64::MAX),
+                blocked_backlog_sample("runtime.fact-updated", BacklogSample::new(0, 2), 1),
             ],
         ];
 
@@ -2257,7 +2256,7 @@ mod tests {
             let mut was_active = true;
             super::sampler_tick(
                 &store,
-                &[dn("identity")],
+                &[dn("runtime")],
                 &mut was_active,
                 &health,
                 metrics.as_ref(),
@@ -2281,12 +2280,12 @@ mod tests {
         let mut was_active = false;
 
         let first = FakeBacklog::with_samples(vec![backlog_sample(
-            "identity.session-created",
+            "runtime.fact-recorded",
             BacklogSample::new(42, 305),
         )]);
         super::sampler_tick(
             &first,
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &health,
             metrics.as_ref(),
@@ -2296,7 +2295,7 @@ mod tests {
         let second = FakeBacklog::with_samples(vec![]);
         super::sampler_tick(
             &second,
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &health,
             metrics.as_ref(),
@@ -2328,12 +2327,12 @@ mod tests {
         let metrics = CountingMetrics::new();
         let mut was_active = false;
         let active = FakeBacklog::with_samples(vec![backlog_sample(
-            "identity.session-created",
+            "runtime.fact-recorded",
             BacklogSample::new(42, 305),
         )]);
         super::sampler_tick(
             &active,
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &health,
             metrics.as_ref(),
@@ -2341,7 +2340,7 @@ mod tests {
         .await;
         super::sampler_tick(
             &FakeBacklog::with_samples(Vec::new()),
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &health,
             metrics.as_ref(),
@@ -2351,7 +2350,7 @@ mod tests {
 
         super::sampler_tick(
             &Arc::new(StandbyBacklog),
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &health,
             metrics.as_ref(),
@@ -2394,7 +2393,7 @@ mod tests {
         let mut was_active = false;
         super::sampler_tick(
             &Arc::new(StandbyBacklog),
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &starting,
             metrics.as_ref(),
@@ -2406,7 +2405,7 @@ mod tests {
         degraded.mark_degraded();
         super::sampler_tick(
             &Arc::new(StandbyBacklog),
-            &[dn("identity")],
+            &[dn("runtime")],
             &mut was_active,
             &degraded,
             metrics.as_ref(),
@@ -2422,7 +2421,7 @@ mod tests {
         let metrics = CountingMetrics::new();
         let mut was_active = false;
         let active = FakeBacklog::with_samples(vec![backlog_sample(
-            "identity.session-created",
+            "runtime.fact-recorded",
             BacklogSample::new(7, 91),
         )]);
         super::sampler_tick(
@@ -2477,7 +2476,7 @@ mod tests {
     fn retire_before_first_active_sample_emits_unavailable() {
         let metrics = CountingMetrics::new();
         let mut state = super::OutboxSamplerState::default();
-        super::retire_outbox_backlog_metrics(&mut state, &[dn("identity")], metrics.as_ref());
+        super::retire_outbox_backlog_metrics(&mut state, &[dn("runtime")], metrics.as_ref());
         assert_eq!(
             metrics.observations(),
             vec![EventingObservation::OutboxBacklogUnavailable]

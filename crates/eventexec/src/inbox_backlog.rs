@@ -1,7 +1,7 @@
 //! Runtime inbox backlog sampling through the closed Eventing observation seam.
 //!
-//! The selection is derived only from generated subscription specifications. Providers may return
-//! typed tenant/group samples, but the sampler validates every group against that sealed selection
+//! The selection is supplied as provider-neutral consumer groups. Providers may return
+//! typed tenant/group samples, but the sampler validates every group against that selection
 //! before contributing to the single process-level sum/max observation.
 //!
 //! ref: prometheus/client_golang prometheus/gauge.go@main
@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use consistency::{BacklogSample, ConsumerGroup, EngineError};
 use eventing::observability::{EventingEmitter, EventingObservation};
-use generated::event::SubscriptionSpec;
 use rss_request_context::TenantId;
 use tokio_util::sync::CancellationToken;
 
@@ -21,34 +20,29 @@ use crate::WorkerHealth;
 /// Stable readyz probe name for the runtime inbox backlog sampler.
 pub const INBOX_SAMPLER_PROBE: &str = "inbox_sampler";
 
-/// Generated-topology allow-set for one runtime's inbox backlog sampling.
+/// Provider-neutral allow-set for one runtime's inbox backlog sampling.
 #[derive(Debug, Clone)]
 pub struct InboxBacklogSelection {
     groups: Vec<ConsumerGroup>,
 }
 
 impl InboxBacklogSelection {
-    /// Derive a canonical, deduplicated allow-set from generated subscription specifications.
-    pub fn from_generated(specs: &[SubscriptionSpec]) -> Result<Self, InboxBacklogSelectionError> {
-        let mut groups = specs
-            .iter()
-            .map(|spec| {
-                ConsumerGroup::parse(spec.group())
-                    .map_err(|_| InboxBacklogSelectionError::InvalidGeneratedGroup)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+    /// Build a canonical, deduplicated allow-set from neutral consumer groups.
+    #[must_use]
+    pub fn new(groups: impl IntoIterator<Item = ConsumerGroup>) -> Self {
+        let mut groups = groups.into_iter().collect::<Vec<_>>();
         groups.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
         groups.dedup();
-        Ok(Self { groups })
+        Self { groups }
     }
 
-    /// Whether this runtime has any generated consumer group to observe.
+    /// Whether this runtime has any consumer group to observe.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }
 
-    /// Canonical generated group allow-set for the provider query.
+    /// Canonical group allow-set for the provider query.
     #[must_use]
     pub fn groups(&self) -> &[ConsumerGroup] {
         &self.groups
@@ -59,15 +53,6 @@ impl InboxBacklogSelection {
             .binary_search_by(|candidate| candidate.as_str().cmp(group.as_str()))
             .is_ok()
     }
-}
-
-/// Generated subscription selection could not be constructed.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum InboxBacklogSelectionError {
-    /// Generated code contained an invalid consumer group.
-    #[error("generated inbox backlog consumer group is invalid")]
-    InvalidGeneratedGroup,
 }
 
 /// One provider-returned inbox backlog sample.
@@ -121,7 +106,7 @@ pub enum InboxBacklogObservation {
 /// Batch inbox backlog source. Native AFIT keeps the provider statically dispatched.
 #[allow(async_fn_in_trait)]
 pub trait InboxBacklogSource {
-    /// Sample every stale inbox scope admitted by the generated selection in one provider call.
+    /// Sample every stale inbox scope admitted by the selection in one provider call.
     async fn sample_backlog(
         &self,
         selection: &InboxBacklogSelection,
@@ -329,13 +314,10 @@ mod tests {
     use primitives::HealthStatus;
 
     fn selection() -> InboxBacklogSelection {
-        let result = InboxBacklogSelection::from_generated(&[
-            generated::event::settings_v1::SETTINGS_SUBSCRIPTION,
-        ]);
-        let Ok(selection) = result else {
-            unreachable!("static generated selection is valid")
+        let Ok(group) = ConsumerGroup::parse("worker") else {
+            unreachable!("static consumer group is valid")
         };
-        selection
+        InboxBacklogSelection::new([group])
     }
 
     fn tenant() -> TenantId {
@@ -395,9 +377,7 @@ mod tests {
 
     #[test]
     fn config_rejects_empty_selection_and_zero_interval() {
-        let Ok(empty) = InboxBacklogSelection::from_generated(&[]) else {
-            unreachable!("empty generated selection is structurally valid")
-        };
+        let empty = InboxBacklogSelection::new([]);
         assert!(matches!(
             InboxSamplerConfig::new(empty, Duration::from_secs(1)),
             Err(InboxSamplerConfigError::EmptySelection)
@@ -412,17 +392,11 @@ mod tests {
     async fn active_clear_failure_standby_and_recovery_have_closed_semantics() {
         let selection = selection();
         let source = FakeSource::new(vec![
-            Ok(InboxBacklogObservation::Active(vec![sample(
-                "settings.config-version-changed",
-                4,
-            )])),
+            Ok(InboxBacklogObservation::Active(vec![sample("worker", 4)])),
             Err(EngineError::new(EngineErrorKind::Transient)),
             Ok(InboxBacklogObservation::Active(Vec::new())),
             Err(EngineError::new(EngineErrorKind::Transient)),
-            Ok(InboxBacklogObservation::Active(vec![sample(
-                "settings.config-version-changed",
-                2,
-            )])),
+            Ok(InboxBacklogObservation::Active(vec![sample("worker", 2)])),
             Ok(InboxBacklogObservation::Standby),
         ]);
         let metrics = CountingMetrics::default();
@@ -456,12 +430,10 @@ mod tests {
                 .observations
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .iter()
-                .any(|observation| *observation
-                    == EventingObservation::InboxBacklog {
-                        stale_claim_depth: 0,
-                        oldest_stale_claim_age: Duration::ZERO,
-                    })
+                .contains(&EventingObservation::InboxBacklog {
+                    stale_claim_depth: 0,
+                    oldest_stale_claim_age: Duration::ZERO,
+                })
         );
 
         sampler_tick(&source, &selection, &mut was_active, &health, &metrics).await;
@@ -525,8 +497,8 @@ mod tests {
     async fn depth_overflow_emits_only_unavailable_and_latches_invariant() {
         let selection = selection();
         let source = FakeSource::new(vec![Ok(InboxBacklogObservation::Active(vec![
-            sample("identity.session-created", u64::MAX),
-            sample("settings.config-version-changed", 1),
+            sample("runtime.fact-recorded", u64::MAX),
+            sample("runtime.fact-updated", 1),
         ]))]);
         let metrics = CountingMetrics::default();
         let health = WorkerHealth::healthy();
@@ -549,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_scope_fails_closed_without_rejecting_distinct_tenants() {
         let selection = selection();
-        let group = "settings.config-version-changed";
+        let group = "worker";
         let first = sample(group, 1);
         let duplicate = sample(group, 2);
         let other_tenant = {

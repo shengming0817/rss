@@ -877,14 +877,6 @@ mod result_tests {
         }
     }
 
-    struct RoutingDomain;
-
-    impl Domain for RoutingDomain {
-        fn init(&self, reg: &mut crate::Registry) -> Result<(), KernelError> {
-            reg.route_group::<httpserve::Primary>("/test", Ok)
-        }
-    }
-
     struct LabeledProbe(&'static str);
 
     impl HealthProbe for LabeledProbe {
@@ -1000,24 +992,6 @@ mod result_tests {
 
         let output_order: Vec<&str> = output.probes().map(|(name, _)| name.as_str()).collect();
         assert_eq!(output_order, ["first.output", "second.output"]);
-    }
-
-    #[test]
-    fn compose_bindings_records_typed_domain_listener_ownership() -> Result<(), KernelError> {
-        let mut bindings = vec![DomainBinding::new(
-            "identity",
-            Box::new(RoutingDomain),
-            DomainModuleResult::default(),
-        )];
-        let (registry, _) = compose_bindings(&mut bindings)?;
-        assert_eq!(
-            registry.domain_listener_bindings(),
-            vec![crate::DomainListenerBinding {
-                domain: "identity",
-                listener: primitives::ListenerKind::Primary,
-            }]
-        );
-        Ok(())
     }
 
     #[test]

@@ -121,7 +121,7 @@ fn validate_event_metadata_public_source(source: &str) -> Result<()> {
                     "rss_contract::Timepoint".to_owned()
                 ),
                 (
-                    "audit_correlation".to_owned(),
+                    "correlation".to_owned(),
                     "Option<rss_diag_context::CorrelationId>".to_owned(),
                 ),
             ],
@@ -129,10 +129,10 @@ fn validate_event_metadata_public_source(source: &str) -> Result<()> {
     );
 
     let expected_methods = [
-        "fnnew(tenant_id:rss_request_context::TenantId,occurred_at:rss_contract::Timepoint,audit_correlation:Option<rss_diag_context::CorrelationId>,)->Self",
+        "fnnew(tenant_id:rss_request_context::TenantId,occurred_at:rss_contract::Timepoint,correlation:Option<rss_diag_context::CorrelationId>,)->Self",
         "constfntenant_id(&self)->rss_request_context::TenantId",
         "constfnoccurred_at(&self)->rss_contract::Timepoint",
-        "fnaudit_correlation(&self)->Option<&rss_diag_context::CorrelationId>",
+        "fncorrelation(&self)->Option<&rss_diag_context::CorrelationId>",
     ];
     fn mentions_event_metadata(tokens: proc_macro2::TokenStream) -> bool {
         tokens.into_iter().any(|token| match token {
@@ -537,10 +537,9 @@ static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // 的 baseline 是漂移审查，不是 Release API / SemVer 承诺。
 // `diport`（DI-infra 层，非 basis/engine）：持全部安全敏感 DI port（Signer/SecretResolver/Pdp/Revocation/
 // KeyProvider…），以 internal exported-symbol baseline 锁住安全/封装漂移，列入 curated extras（#1470）。
-// `generated` 暴露 contract-derived metadata，作为 PR review 审查材料定点冻结（#1472/#1688）。
 // `runtimeexec` 的 launch/probe/inventory hook 是三个 assembly 的稳定内部接缝（#1795）；冻结其窄公开面，
 // 防止 ShutdownStack、HTTP/provider 类型或第二 executor 意外外泄。
-const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated", "runtimeexec"];
+const CURATED_EXTRA_CRATES: &[&str] = &["diport", "runtimeexec"];
 
 /// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
 /// 编译器即强制回退 rolling `nightly`（其 rustdoc-json 格式随日期漂移 ⇒ baseline 误报）；本 const 经
@@ -2985,18 +2984,18 @@ mod tests {
         pub struct EventMetadata {
             tenant_id: rss_request_context::TenantId,
             occurred_at: rss_contract::Timepoint,
-            audit_correlation: Option<rss_diag_context::CorrelationId>,
+            correlation: Option<rss_diag_context::CorrelationId>,
         }
         impl EventMetadata {
             pub fn new(
                 tenant_id: rss_request_context::TenantId,
                 occurred_at: rss_contract::Timepoint,
-                audit_correlation: Option<rss_diag_context::CorrelationId>,
-            ) -> Self { Self { tenant_id, occurred_at, audit_correlation } }
+                correlation: Option<rss_diag_context::CorrelationId>,
+            ) -> Self { Self { tenant_id, occurred_at, correlation } }
             pub const fn tenant_id(&self) -> rss_request_context::TenantId { self.tenant_id }
             pub const fn occurred_at(&self) -> rss_contract::Timepoint { self.occurred_at }
-            pub fn audit_correlation(&self) -> Option<&rss_diag_context::CorrelationId> {
-                self.audit_correlation.as_ref()
+            pub fn correlation(&self) -> Option<&rss_diag_context::CorrelationId> {
+                self.correlation.as_ref()
             }
         }
     "#;
@@ -3004,8 +3003,8 @@ mod tests {
     #[test]
     fn event_metadata_surface_rejects_extra_field() {
         let source = SYNTHETIC_EVENT_METADATA_SURFACE.replace(
-            "audit_correlation: Option<rss_diag_context::CorrelationId>,",
-            "audit_correlation: Option<rss_diag_context::CorrelationId>, provider_source: String,",
+            "correlation: Option<rss_diag_context::CorrelationId>,",
+            "correlation: Option<rss_diag_context::CorrelationId>, provider_source: String,",
         );
         assert!(validate_event_metadata_public_source(&source).is_err());
     }
@@ -3484,7 +3483,6 @@ mod tests {
             vec![
                 "rss-conformance",
                 "rss-contract",
-                "rss-device-security-contracts",
                 "rss-diag-context",
                 "rss-eventing",
                 "rss-platform",
@@ -3891,7 +3889,6 @@ mod tests {
         );
         assert_eq!(target_crates(None).len(), expected_all.len());
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"assembly-schema"));
-        assert!(target_crates(Some(InternalLayer::Basis)).contains(&"authmint"));
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"sagaauthmint"));
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
@@ -3936,9 +3933,7 @@ mod tests {
 
     #[test]
     fn target_crates_membership_keeps_curated_in_baseline() {
-        assert!(target_crates(None).contains(&"authn"));
         assert!(target_crates(None).contains(&"diport"));
-        assert!(target_crates(None).contains(&"generated"));
         assert!(target_crates(None).contains(&"runtimeexec"));
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
@@ -3947,13 +3942,9 @@ mod tests {
 
     #[test]
     fn target_crates_membership_keeps_curated_out_of_layers() {
-        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"authn"));
-        assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"authn"));
         // diport 是 DI-infra 层，既非 basis 也非 engine——只经 curated extras 入 baseline。
         assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"diport"));
         assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"diport"));
-        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"generated"));
-        assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"generated"));
         assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"runtimeexec"));
         assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"runtimeexec"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
@@ -4011,44 +4002,6 @@ mod tests {
     }
 
     #[test]
-    fn authn_public_api_golden_keeps_verified_token_seal_private() -> anyhow::Result<()> {
-        let baseline = std::fs::read_to_string(baseline_dir()?.join("authn.txt"))?;
-        for required in [
-            "pub struct authn::VerifiedJwt",
-            "pub fn authn::VerifiedJwt::raw(&self) -> &str",
-            "pub struct authn::VerifiedServiceToken",
-            "pub fn authn::VerifiedServiceToken::raw(&self) -> &str",
-            "pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt)",
-            "pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken)",
-            "pub async fn authn::verify_rss_access",
-            "pub async fn authn::verify_federated_access",
-            "pub async fn authn::verify_service_token",
-            "pub struct authn::RssAccessIssueInput",
-            "pub struct authn::VerifiedGrantReceipt",
-            "pub fn authn::VerifiedJwt::grant_receipt(&self)",
-            "pub fn authn::AuthGrant::access_issue_input(&self)",
-        ] {
-            assert!(
-                baseline.contains(required),
-                "authn public-api golden 缺少必要公开项: {required}"
-            );
-        }
-        for forbidden in [
-            "pub fn authn::VerifiedJwt::seal",
-            "pub fn authn::VerifiedServiceToken::seal",
-            "VerifiedJwt::seal",
-            "VerifiedServiceToken::seal",
-            "JwtAccessPrincipal",
-        ] {
-            assert!(
-                !baseline.contains(forbidden),
-                "authn public-api golden 不得暴露私有 mint funnel: {forbidden}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn diport_internal_export_baseline_reexports_send_variant_not_base_trait() -> anyhow::Result<()>
     {
         let baseline = std::fs::read_to_string(baseline_dir()?.join("diport.txt"))?;
@@ -4060,10 +4013,6 @@ mod tests {
             "pub struct diport::EncryptOutput",
             // 方法列在定义路径（cargo-public-api 惯例），非 re-export 路径；parse ⇄ to_token 对称 token 存储面单源。
             "pub fn diport::key_provider::KeyRef::to_token",
-            "pub struct diport::VerifiedAccessGrantFacts",
-            "pub fn diport::pdp::VerifiedClaims::rss_user",
-            "pub enum diport::pdp::VerifiedClaimsView<'a>",
-            "pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>",
         ] {
             assert!(
                 baseline.contains(required),
@@ -4094,107 +4043,6 @@ mod tests {
             assert!(
                 !baseline.contains(forbidden),
                 "diport internal export baseline 不得暴露 key 标识的非常数时间 `==`（ADR-011 §D3）: {forbidden}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn generated_public_api_golden_exposes_generated_metadata_surfaces() -> anyhow::Result<()> {
-        let baseline = std::fs::read_to_string(baseline_dir()?.join("generated.txt"))?;
-        for required in [
-            "pub trait generated::FieldProtectionMetadata",
-            "pub const generated::FieldProtectionMetadata::FIELD_PROTECTIONS: &'static [generated::FieldProtectionSpec]",
-            "impl generated::FieldProtectionMetadata for generated::http::settings_v1::SettingsConfigPublishRequest",
-            "pub const generated::http::settings_v1::SettingsConfigPublishRequest::FIELD_PROTECTIONS: &'static [generated::FieldProtectionSpec]",
-            "pub struct generated::FieldProtectionSpec",
-            "pub generated::FieldProtectionSpec::field_path: &'static str",
-            "pub generated::FieldProtectionSpec::at_rest: generated::ProtectionAtRest",
-            "pub generated::FieldProtectionSpec::mode: core::option::Option<generated::ProtectionMode>",
-            "pub enum generated::ProtectionAadDim",
-            "pub enum generated::ProtectionAtRest",
-            "pub enum generated::ProtectionMode",
-            "pub generated::http::HttpSpec::route: vocab::http::HttpRouteEvidence",
-            "pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker, vocab::http::LocalOnly>",
-            "pub enum generated::http::settings_v4::RouteMarker",
-            "pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>",
-            "pub struct generated::http::LocalTxSpec",
-            "pub generated::http::LocalTxSpec::boundary: vocab::http::LocalTxBoundary",
-            "pub generated::http::LocalTxSpec::tx_model: vocab::http::LocalTxModel",
-            "pub generated::http::LocalTxSpec::retry: vocab::http::LocalTxRetry",
-            "pub generated::http::LocalTxSpec::commit_unknown: vocab::http::LocalTxCommitUnknown",
-            "pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]",
-            "pub const generated::http::LOCAL_ONLY_SPECS: &[generated::http::HttpSpec]",
-            "pub trait generated::http::HttpResponseBinding",
-            "pub const generated::http::identity_v2::device_certificate_policy_put::RESPONSES: &[generated::http::HttpResponseSpec]",
-            "impl generated::http::HttpResponseBinding for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse",
-            "pub enum generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker",
-            "pub enum generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker",
-            "pub enum generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker",
-            "pub enum generated::http::identity_v1::profile::LocalOnlyConformanceMarker",
-            "pub enum generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker",
-            "pub enum generated::http::settings_v4::LocalOnlyConformanceMarker",
-            "pub const generated::http::audit_v1::list_tenant_entries::LOCAL_TX: generated::http::LocalTxSpec",
-            "pub const generated::http::identity_v1::logout::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::logout::RouteMarker>",
-            "pub const generated::http::identity_v1::refresh::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::refresh::RouteMarker>",
-            "pub const generated::http::settings_v2::LOCAL_TX: generated::http::LocalTxSpec",
-            "pub struct generated::command::CommandSpec",
-            "pub trait generated::command::CommandJournal",
-            "pub const fn generated::command::CommandSpec::journal(self) -> generated::command::CommandJournalPolicy",
-            "pub struct generated::event::EventSpec",
-            "pub enum generated::event::PartitionKeyStrategy",
-            "pub enum generated::event::SubscriberReadiness",
-            "pub enum generated::event::SubscriptionDispatchKey",
-            "pub const generated::event::EVENTS: &[generated::event::EventSpec]",
-            "pub const fn generated::event::EventSpec::subscriptions(self) -> &'static [generated::event::SubscriptionSpec]",
-            "pub const fn generated::event::SubscriptionSpec::dispatch(self) -> generated::event::SubscriptionDispatchKey",
-            "pub const fn generated::event::SubscriptionSpec::external_effect_policy(self) -> vocab::ExternalEffectPolicy",
-        ] {
-            assert!(
-                baseline.contains(required),
-                "generated public-api golden 缺少 metadata API: {required}"
-            );
-        }
-        for forbidden in [
-            "diport::",
-            "secure::aead",
-            "secure::Ciphertext",
-            "generated::KeyProvider",
-            "generated::ProtectionContext",
-            "generated::DerivedAad",
-            "generated::ValueTransformer",
-            "generated::KeyRef",
-            "generated::EncryptOutput",
-            "generated::DecryptOutput",
-            "generated::seal",
-            "generated::open",
-            "generated::rewrap",
-            "pub generated::event::SubscriptionSpec::consumer:",
-            "pub generated::event::SubscriptionSpec::group:",
-            "pub generated::event::EventSpec::topic:",
-            "pub generated::command::CommandSpec::topic:",
-            "generated::http::HttpConsistencyLevel",
-            "generated::http::EffectProfile",
-            "generated::http::EffectKind",
-            "generated::http::HttpAuthMode",
-            "generated::http::HttpAuthSpec",
-            "pub generated::http::HttpSpec::contract_id:",
-            "pub generated::http::HttpSpec::contract:",
-            "pub generated::http::HttpSpec::path:",
-            "pub generated::http::HttpSpec::method:",
-            "pub generated::http::HttpSpec::auth:",
-            "pub generated::http::HttpSpec::resource:",
-            "pub generated::http::HttpSpec::self_scoped:",
-            "pub generated::http::HttpSpec::consistency_level:",
-            "pub generated::http::HttpSpec::effect_profile:",
-            "generated::http::LocalTxBoundary",
-            "generated::http::LocalTxModel",
-            "generated::http::LocalTxRetry",
-            "generated::http::LocalTxCommitUnknown",
-        ] {
-            assert!(
-                !baseline.lines().any(|line| line.contains(forbidden)),
-                "generated public-api golden 不得暴露加解密执行面符号: {forbidden}"
             );
         }
         Ok(())

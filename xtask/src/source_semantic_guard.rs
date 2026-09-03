@@ -4,7 +4,6 @@
 //! enforcement boundary and is handled by periodic, non-blocking advisory searches.
 //!
 //! INVARIANT: SOURCE-RUSTDOC-SEMANTICS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::outbox_localonly_and_saga_rustdoc_semantics_reject_legacy_claims", anti_vacuity = "tests::workspace_production_rustdoc_semantics_are_current" } -- production rustdoc must not overstate outbox delivery, claim exactly-once Saga execution, or restore legacy LocalOnly effect semantics.
-//! INVARIANT: TOKEN-PROFILE-RUSTDOC-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::token_profile_rustdoc_contract_rejects_missing_and_legacy_anchors", anti_vacuity = "tests::workspace_token_profile_rustdoc_contract_is_exact" } -- the four profile trust-chain rustdoc carriers retain their typed provider/binding, claim, authn-funnel, and trusted credential boundaries.
 
 use std::path::{Path, PathBuf};
 
@@ -14,45 +13,9 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-const SOURCE_ROOTS: &[&str] = &["crates", "adapters", "generated"];
+const SOURCE_ROOTS: &[&str] = &["crates", "adapters"];
 
-const TOKEN_PROFILE_RUSTDOC_CONTRACTS: &[(&str, &[&[&str]])] = &[
-    (
-        "adapters/oidc/src/lib.rs",
-        &[
-            &["OidcProvider"],
-            &["ProfileBinding"],
-            &["AccessStaticKeySource"],
-            &["JwksKeySource"],
-            &["ServiceTokenKeySource"],
-        ],
-    ),
-    (
-        "adapters/oidc/src/claims.rs",
-        &[
-            &["iat"],
-            &["exp"],
-            &["token_use"],
-            &["maximum lifetime", "最大寿命"],
-            &["tenant"],
-            &["kind"],
-            &["jti"],
-        ],
-    ),
-    (
-        "crates/authn/src/lib.rs",
-        &[
-            &["JwtIssuer"],
-            &["verify_rss_access"],
-            &["verify_federated_access"],
-            &["verify_service_token"],
-        ],
-    ),
-    (
-        "crates/diport/src/pdp.rs",
-        &[&["RawCredential::profile"], &["TokenProfileMarker"]],
-    ),
-];
+const TOKEN_PROFILE_RUSTDOC_CONTRACTS: &[(&str, &[&[&str]])] = &[];
 
 const TOKEN_PROFILE_RUSTDOC_FORBIDDEN: &[&str] = &[
     "`StaticKeySource`",
@@ -673,33 +636,6 @@ mod tests {
     }
 
     #[test]
-    fn token_profile_rustdoc_contract_rejects_missing_and_legacy_anchors() {
-        let path = Path::new("adapters/oidc/src/lib.rs");
-        let green = "//! OidcProvider ProfileBinding AccessStaticKeySource JwksKeySource ServiceTokenKeySource";
-        assert!(scan_token_profile_rustdoc_carrier(path, green).is_empty());
-        assert!(
-            !scan_token_profile_rustdoc_carrier(path, &green.replace("ProfileBinding", "missing"))
-                .is_empty()
-        );
-        assert!(
-            !scan_token_profile_rustdoc_carrier(path, &format!("{green} `StaticKeySource`"))
-                .is_empty()
-        );
-        assert!(
-            !scan_token_profile_rustdoc_carrier(
-                path,
-                "const BAIT: &str = \"OidcProvider ProfileBinding AccessStaticKeySource JwksKeySource ServiceTokenKeySource\";"
-            )
-            .is_empty(),
-            "ordinary source text must not satisfy the rustdoc contract"
-        );
-        assert!(
-            scan_token_profile_rustdoc_carrier(Path::new("docs/rules/example.md"), "legacy prose")
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn rustdoc_semantic_scan_covers_attributes_and_block_docs_only() {
         for rustdoc in [
             "#[doc = \"Outbox guarantees exactly-once delivery\"]",
@@ -739,20 +675,6 @@ mod tests {
             "{summary}"
         );
         assert!(findings.is_empty(), "{findings:?}");
-        Ok(())
-    }
-
-    #[test]
-    fn workspace_token_profile_rustdoc_contract_is_exact() -> Result<()> {
-        let root = crate::workspace_root()?;
-        assert_eq!(TOKEN_PROFILE_RUSTDOC_CONTRACTS.len(), 4);
-        for (carrier, _) in TOKEN_PROFILE_RUSTDOC_CONTRACTS {
-            let content = std::fs::read_to_string(root.join(carrier))?;
-            assert!(
-                scan_token_profile_rustdoc_carrier(Path::new(carrier), &content).is_empty(),
-                "{carrier} rustdoc contract drifted"
-            );
-        }
         Ok(())
     }
 }

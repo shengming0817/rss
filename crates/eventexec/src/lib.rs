@@ -38,15 +38,6 @@ pub use managed_blocking_worker::{
     spawn_on_dedicated_runtime_with_failure_observers,
 };
 
-// 命令分发 runtime：generated seam → reviewed command capability → provider store，命令不再借事件 emitter。
-pub mod command;
-
-// 事件 authoring runtime：generated sealed contract → reviewed event capability；普通 EventEntry
-// 无法转换成该能力。
-pub mod event;
-
-mod worker_control;
-
 pub mod relay;
 pub use relay::{
     OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, OutboxSamplerState,
@@ -64,22 +55,14 @@ pub use relay_config::{
 pub mod inbox_backlog;
 pub use inbox_backlog::{
     INBOX_SAMPLER_PROBE, InboxBacklogObservation, InboxBacklogSample, InboxBacklogSelection,
-    InboxBacklogSelectionError, InboxBacklogSource, InboxSamplerConfig, InboxSamplerConfigError,
-    InboxSamplerState, inbox_backlog_sampler_loop, inbox_backlog_sampler_session,
-    retire_inbox_backlog_metrics,
+    InboxBacklogSource, InboxSamplerConfig, InboxSamplerConfigError, InboxSamplerState,
+    inbox_backlog_sampler_loop, inbox_backlog_sampler_session, retire_inbox_backlog_metrics,
 };
 
 pub mod projection_metrics;
 pub use projection_metrics::{
     MetricsProjectionMetrics, ProjectionMetric, ProjectionMetricActivation, ProjectionMetricScope,
     ProjectionMetrics, ProjectionProcessedOutcome,
-};
-
-mod projection_observation;
-pub use projection_observation::{
-    ProjectionObservationPublisher, ProjectionObservationReader, ProjectionQuarantineReason,
-    ProjectionReasonPosture, ProjectionRetryableReason, ProjectionSelectedGeneration,
-    ProjectionStoppedReason, ProjectionUnavailableReason, ProjectionWorkerStatus,
 };
 
 pub mod dlq;
@@ -123,216 +106,6 @@ mod dlx_archive_cipher;
 pub mod dlx_lifecycle_metrics;
 pub use dlx_lifecycle_metrics::{MetricsRetentionMetrics, RetentionMetrics};
 
-pub mod reconcile;
-pub use reconcile::{
-    AttemptErrorKind, AttemptResult, AttemptScope, AttemptTrigger, Builder as ReconcileBuilder,
-    ClaimedTarget, DeviceCommandAuditProofRestoreError, DurableReconciler,
-    FencedCommandReviewError, OperatorReconcileCapability, RECONCILE_PROBE, ReconcileAttempt,
-    ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight, ReconcileOperatorStore,
-    ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
-    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
-    ReconcileTargetSummary, ReconcileWorker, ReconcileWorkerControl, ReviewedFencedCommand,
-    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
-    TriggerError,
-};
-
-pub mod projection;
-pub use projection::{
-    ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, PROJECTION_WORKER_PROBE,
-    ProjectionDedupeKey, ProjectionExecutionContext, ProjectionHarness, ProjectionId,
-    ProjectionPoisonPolicy, ProjectionProjector, ProjectionPurpose, ProjectionRegistryError,
-    ProjectionRun, ProjectionRunnerConfig, ProjectionRunnerConfigError, ProjectionSelector,
-    ProjectionSelectorError, ProjectionStop, ProjectionStopClass, ProjectionSystemIdentity,
-    ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetDefinition,
-    ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
-    ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome, ProjectionVersion,
-    ProjectionWorkerExit, ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
-    spawn_projection_worker,
-};
-
-mod workflow_runtime;
-pub use workflow_runtime::{
-    ActivatedExecutingProjectionActivation, ActivatedWorkflow, ActivatedWorkflowShape,
-    ActivatedWorkflowsView, ProjectionActivationPermit, ProjectionBackgroundExecutionIssuer,
-    ProjectionCaptureDefinition, ProjectionCaptureView, ProjectionExecutionObservation,
-    ProjectionMaintenanceBinding, ProjectionMaintenanceCapability, ProjectionRuntime,
-    ProjectionRuntimeBinding, ProjectionRuntimeCapability, ProjectionServingEvidence,
-    ProjectionSourceScope, ProjectionTargetEntry, ProjectionTargetView, SagaActivationPermit,
-    SagaRuntimeCapability, SagaRuntimeEntry, SagaRuntimeOperatorTarget, SagaRuntimeSpawner,
-    SagaRuntimeStartTarget, SagaRuntimeView, SagaTerminalRetentionMetrics, WorkflowActivationPlan,
-    WorkflowRuntimeError, WorkflowRuntimePlan,
-};
-
-pub mod saga;
-pub use saga::{
-    SagaActionError, SagaAttemptOutcome, SagaCompensationContext, SagaDefinitionRegistry,
-    SagaDefinitionRegistryBuilder, SagaDefinitionRegistryError, SagaDefinitionRegistryLookupError,
-    SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError, SagaExecutorDeps,
-    SagaExecutorImpl, SagaForwardContext, SagaId, SagaInterruption, SagaOperatorRecoveryOutcome,
-    SagaOperatorService, SagaOutcome, SagaPolicyError, SagaProbeOutcome, SagaStartError,
-    SagaStartPort, SagaStartRequest, SagaStep, SagaSuccessReceiptError, SagaSuccessReference,
-    TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
-};
-
-pub mod saga_worker;
-
-/// Generated saga fixtures exposed only to non-shipped integration harnesses.
-#[cfg(feature = "internal-test-support")]
-pub mod saga_test_support {
-    use consistency::{CompensationOutcome, EngineError, EngineErrorKind};
-    use generated::saga::test_support::test_v1::primary::{
-        CommitStep, Definition, PrepareStep, SagaConformanceCommitReceipt,
-        SagaConformancePrepareReceipt,
-    };
-
-    use super::{
-        SagaAttemptOutcome, SagaCompensationContext, SagaForwardContext, SagaProbeOutcome,
-        SagaStep, TypedSagaActionFactory,
-    };
-
-    pub use generated::saga::test_support::test_v1::{foreign, primary};
-
-    /// Closed execution modes owned by the neutral fixture. Callers may select conformance
-    /// coverage, but cannot inject a definition, action, registry, or failure implementation.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum ConformanceExecution {
-        Complete,
-        RequirePrepareRepair,
-        FailCommit,
-    }
-
-    #[derive(Debug)]
-    struct Prepare {
-        execution: ConformanceExecution,
-    }
-
-    impl SagaStep<PrepareStep> for Prepare {
-        async fn execute(
-            &self,
-            context: SagaForwardContext,
-        ) -> SagaAttemptOutcome<SagaConformancePrepareReceipt> {
-            match self.execution {
-                ConformanceExecution::RequirePrepareRepair => SagaAttemptOutcome::Unknown,
-                ConformanceExecution::Complete | ConformanceExecution::FailCommit => {
-                    SagaAttemptOutcome::Applied(SagaConformancePrepareReceipt {
-                        operation_id: context.saga_id().as_uuid().to_string(),
-                    })
-                }
-            }
-        }
-
-        async fn probe(
-            &self,
-            context: SagaForwardContext,
-        ) -> SagaProbeOutcome<SagaConformancePrepareReceipt> {
-            match self.execution {
-                ConformanceExecution::RequirePrepareRepair => SagaProbeOutcome::Unknown,
-                ConformanceExecution::FailCommit => {
-                    SagaProbeOutcome::Applied(SagaConformancePrepareReceipt {
-                        operation_id: context.saga_id().as_uuid().to_string(),
-                    })
-                }
-                ConformanceExecution::Complete => SagaProbeOutcome::NotApplied,
-            }
-        }
-
-        async fn compensate(
-            &self,
-            context: SagaCompensationContext,
-            receipt: SagaConformancePrepareReceipt,
-        ) -> SagaAttemptOutcome<CompensationOutcome> {
-            if receipt.operation_id == context.saga_id().as_uuid().to_string() {
-                SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
-            } else {
-                SagaAttemptOutcome::Applied(CompensationOutcome::Failed)
-            }
-        }
-
-        async fn probe_compensation(
-            &self,
-            _context: SagaCompensationContext,
-            _receipt: SagaConformancePrepareReceipt,
-        ) -> SagaProbeOutcome<CompensationOutcome> {
-            SagaProbeOutcome::NotApplied
-        }
-    }
-
-    #[derive(Debug)]
-    struct Commit {
-        execution: ConformanceExecution,
-    }
-
-    impl SagaStep<CommitStep> for Commit {
-        async fn execute(
-            &self,
-            context: SagaForwardContext,
-        ) -> SagaAttemptOutcome<SagaConformanceCommitReceipt> {
-            match self.execution {
-                ConformanceExecution::Complete => {
-                    SagaAttemptOutcome::Applied(SagaConformanceCommitReceipt {
-                        operation_id: context.saga_id().as_uuid().to_string(),
-                    })
-                }
-                ConformanceExecution::FailCommit => {
-                    SagaAttemptOutcome::NotApplied(EngineError::new(EngineErrorKind::Permanent))
-                }
-                ConformanceExecution::RequirePrepareRepair => SagaAttemptOutcome::Unknown,
-            }
-        }
-
-        async fn probe(
-            &self,
-            _context: SagaForwardContext,
-        ) -> SagaProbeOutcome<SagaConformanceCommitReceipt> {
-            match self.execution {
-                ConformanceExecution::RequirePrepareRepair => SagaProbeOutcome::Unknown,
-                ConformanceExecution::Complete | ConformanceExecution::FailCommit => {
-                    SagaProbeOutcome::NotApplied
-                }
-            }
-        }
-
-        async fn compensate(
-            &self,
-            _context: SagaCompensationContext,
-            _receipt: SagaConformanceCommitReceipt,
-        ) -> SagaAttemptOutcome<CompensationOutcome> {
-            SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
-        }
-
-        async fn probe_compensation(
-            &self,
-            _context: SagaCompensationContext,
-            _receipt: SagaConformanceCommitReceipt,
-        ) -> SagaProbeOutcome<CompensationOutcome> {
-            SagaProbeOutcome::NotApplied
-        }
-    }
-
-    /// Return the one exact neutral typed factory owned by the conformance fixture.
-    #[must_use]
-    pub fn conformance_factory(
-        execution: ConformanceExecution,
-    ) -> TypedSagaActionFactory<Definition> {
-        TypedSagaActionFactory::<Definition>::builder()
-            .register::<Prepare, _>(move || Prepare { execution })
-            .register::<Commit, _>(move || Commit { execution })
-            .finish()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        #[test]
-        fn canonical_factory_is_bound_to_the_primary_generated_spec() {
-            let factory = super::conformance_factory(super::ConformanceExecution::Complete);
-            assert_eq!(factory.spec(), super::primary::SPEC);
-        }
-    }
-}
-pub use saga_worker::{
-    SAGA_EXECUTOR_PROBE, SagaWorker, SagaWorkerConfig, SagaWorkerRuntime, saga_executor_probe_name,
-};
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -342,7 +115,7 @@ use futures::future::BoxFuture;
 // 消息原语（Message / MessageId / EnvelopeMetadata / MessageStream）随 Subscriber DI port 迁 `diport`
 // （issue #1075，ADR-003 DI port 收敛）；本 crate 经 `diport::Message` 消费（HandlerFn/ConsumerFn 入参）。
 // 统一 delivery envelope（#1160）：`Message::metadata()` 返回的只读元数据从 broker header 透传，
-// handler 经 validated `EventMetadata` 读 tenant/time/audit correlation；raw bag 仅供 transport 边界逐键读取；
+// handler 经 validated `EventMetadata` 读 tenant/time/correlation；raw bag 仅供 transport 边界逐键读取；
 // subjectId / actor 是 persisted-only，不从 broker header 回流。
 use diport::{Message, RedactedSource};
 

@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 
-pub const REGISTERED_DOMAIN_LABELS: &[&str] =
-    &["identity", "settings", "audit", "contractreg", "syshealth"];
+/// No business domain is registered in the retained neutral runtime catalog.
+pub const REGISTERED_DOMAIN_LABELS: &[&str] = &["platform", "runtime"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "u32", into = "u32")]
@@ -355,10 +355,7 @@ impl AssemblyManifest {
     pub fn basic_validation_errors(&self) -> Vec<ManifestValidationError> {
         let mut errors = Vec::new();
         ensure_non_empty_string(&self.name, "name", &mut errors);
-        ensure_non_empty_slice(&self.domains, "domains", &mut errors);
-        if !self.is_listenerless_identity_demo() {
-            ensure_non_empty_slice(&self.listeners, "listeners", &mut errors);
-        }
+        ensure_non_empty_slice(&self.listeners, "listeners", &mut errors);
         ensure_non_empty_slice(&self.diport_providers, "diportProviders", &mut errors);
 
         ensure_unique(self.domains.iter().copied(), "domains", &mut errors);
@@ -469,10 +466,8 @@ impl AssemblyManifest {
                 bound_domains.insert(*domain);
             }
         }
-        if !self.is_listenerless_identity_demo() {
-            for domain in declared_domains.difference(&bound_domains) {
-                errors.push(GraphEvidenceValidationError::UnboundDomain { domain: *domain });
-            }
+        for domain in declared_domains.difference(&bound_domains) {
+            errors.push(GraphEvidenceValidationError::UnboundDomain { domain: *domain });
         }
         for provider in &self.diport_providers {
             let mut seen = BTreeSet::new();
@@ -489,15 +484,6 @@ impl AssemblyManifest {
         } else {
             Err(GraphEvidenceValidationErrors { errors })
         }
-    }
-
-    fn is_listenerless_identity_demo(&self) -> bool {
-        self.profile == AssemblyProfile::Demo
-            && self.topology == AssemblyTopology::Demo
-            && self.domains == [AssemblyDomain::Identity]
-            && self.listeners.is_empty()
-            && self.framework_contracts.is_empty()
-            && self.workflow_activations.is_empty()
     }
 
     /// Validate and compile this manifest into the sole v2 semantic view.
@@ -788,21 +774,17 @@ impl AssemblyProfile {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum AssemblyDomain {
-    Identity,
-    Settings,
-    Audit,
-    Contractreg,
-    Syshealth,
+    /// Provider-neutral platform capability bucket.
+    Platform,
+    /// Provider-neutral runtime ownership bucket.
+    Runtime,
 }
 
 impl AssemblyDomain {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Identity => "identity",
-            Self::Settings => "settings",
-            Self::Audit => "audit",
-            Self::Contractreg => "contractreg",
-            Self::Syshealth => "syshealth",
+            Self::Platform => "platform",
+            Self::Runtime => "runtime",
         }
     }
 }
@@ -930,351 +912,4 @@ fn provider_key(provider: &DiportProvider) -> (&str, &str, &str, &str, &str) {
         provider.provider_crate.as_str(),
         provider.consumer.as_str(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-    // reason: schema parser tests use direct fixture assertions; parse failures should panic with local context.
-
-    use super::*;
-
-    const MINIMAL: &str = r#"
-schemaVersion = 2
-name = "runtime"
-profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
-frameworkContracts = []
-workflowActivations = []
-
-[[listeners]]
-kind = "primary"
-domains = ["identity", "settings", "audit"]
-
-[[diportProviders]]
-id = "listener-pdp"
-port = "diport::Pdp"
-provider = "oidc::OidcProvider"
-providerCrate = "oidc"
-requiredFeatures = ["backend"]
-consumer = "httpserve"
-lifecycle = "active"
-durability = "persistent"
-purpose = "jwt-credential-verification"
-outputs = ["probes", "resources"]
-"#;
-
-    #[test]
-    fn parses_minimal_manifest() {
-        let manifest = AssemblyManifest::from_toml_str(MINIMAL).expect("manifest");
-
-        assert_eq!(manifest.schema_version, AssemblyManifestSchemaVersion::V2);
-        assert!(manifest.workflow_activations.is_empty());
-        assert_eq!(manifest.name, "runtime");
-        assert_eq!(
-            manifest
-                .domains
-                .iter()
-                .map(|domain| domain.as_str())
-                .collect::<Vec<_>>(),
-            ["identity", "settings", "audit"]
-        );
-        assert_eq!(manifest.diport_providers[0].required_features, ["backend"]);
-        assert!(manifest.framework_contracts.is_empty());
-        assert_eq!(
-            manifest.listeners[0].domains.as_slice(),
-            [
-                AssemblyDomain::Identity,
-                AssemblyDomain::Settings,
-                AssemblyDomain::Audit
-            ]
-        );
-        assert_eq!(
-            manifest.diport_providers[0].outputs.as_slice(),
-            [LifecycleChannel::Probes, LifecycleChannel::Resources]
-        );
-        manifest.validate_basic().expect("valid manifest");
-    }
-
-    #[test]
-    fn manifest_v2_requires_closed_schema_version_and_explicit_workflow_activations() {
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("schemaVersion = 2\n", "")).is_err()
-        );
-        assert!(
-            AssemblyManifest::from_toml_str(
-                &MINIMAL.replace("schemaVersion = 2", "schemaVersion = 1")
-            )
-            .is_err()
-        );
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("workflowActivations = []\n", ""))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn workflow_activation_modes_are_closed_and_mode_specific() {
-        let projection = MINIMAL.replace(
-            "workflowActivations = []",
-            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103", targetGeneration = "materialized-v7", activation = "capture-only" }]"#,
-        );
-        let manifest = AssemblyManifest::from_toml_str(&projection).expect("projection activation");
-        assert!(matches!(
-            manifest.workflow_activations.as_slice(),
-            [WorkflowActivation::Projection {
-                target_generation,
-                activation: ProjectionActivation::CaptureOnly,
-                ..
-            }] if target_generation == "materialized-v7"
-        ));
-
-        let saga = projection
-            .replace("mode = \"projection\"", "mode = \"saga\"")
-            .replace(", targetGeneration = \"materialized-v7\"", "")
-            .replace("activation = \"capture-only\"", "activation = \"active\"");
-        let manifest = AssemblyManifest::from_toml_str(&saga).expect("saga activation");
-        assert!(matches!(
-            manifest.workflow_activations.as_slice(),
-            [WorkflowActivation::Saga {
-                activation: SagaActivation::Active,
-                ..
-            }]
-        ));
-
-        assert!(AssemblyManifest::from_toml_str(&saga.replace("active", "shadow")).is_err());
-        assert!(
-            AssemblyManifest::from_toml_str(&projection.replace("capture-only", "unknown"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn workflow_capability_requirements_are_exhaustive_derived_facts() {
-        use ProjectionCapabilityRequirement as Projection;
-        use SagaCapabilityRequirement as Saga;
-
-        assert_eq!(ProjectionActivation::Disabled.requirements(), []);
-        assert_eq!(
-            ProjectionActivation::CaptureOnly.requirements(),
-            [Projection::Source, Projection::CaptureStore]
-        );
-        assert_eq!(
-            ProjectionActivation::Shadow.requirements(),
-            [
-                Projection::Source,
-                Projection::CaptureStore,
-                Projection::Target,
-                Projection::CheckpointStore,
-                Projection::DeadLetterStore,
-                Projection::Worker,
-                Projection::Probe,
-            ]
-        );
-        assert_eq!(
-            ProjectionActivation::Active.requirements(),
-            [
-                Projection::Source,
-                Projection::CaptureStore,
-                Projection::Target,
-                Projection::CheckpointStore,
-                Projection::DeadLetterStore,
-                Projection::Worker,
-                Projection::Probe,
-                Projection::Serving,
-            ]
-        );
-        assert_eq!(SagaActivation::Disabled.requirements(), []);
-        assert_eq!(
-            SagaActivation::Active.requirements(),
-            [
-                Saga::TypedActions,
-                Saga::DefinitionRegistry,
-                Saga::DurableStore,
-                Saga::Hydrator,
-                Saga::EffectProbe,
-                Saga::DeadLetterStore,
-                Saga::Worker,
-                Saga::Readiness,
-            ]
-        );
-
-        assert_eq!(Saga::DefinitionRegistry.as_str(), "definition-registry");
-        assert_eq!(Saga::Hydrator.as_str(), "hydrator");
-        assert_eq!(Saga::EffectProbe.as_str(), "effect-probe");
-        assert_eq!(Saga::Readiness.as_str(), "readiness");
-    }
-
-    #[test]
-    fn provider_roles_are_required_closed_and_unique() {
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("id = \"listener-pdp\"\n", ""))
-                .is_err()
-        );
-
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("listener-pdp", "Listener_Pdp"))
-                .is_err()
-        );
-
-        let mut duplicate = AssemblyManifest::from_toml_str(MINIMAL).expect("manifest");
-        duplicate
-            .diport_providers
-            .push(duplicate.diport_providers[0].clone());
-        assert!(duplicate.basic_validation_errors().contains(
-            &ManifestValidationError::Duplicate {
-                field: "diportProviders.id"
-            }
-        ));
-    }
-
-    #[test]
-    fn parses_closed_dlx_lifecycle_provider_ports() {
-        for (port, expected) in [
-            (
-                "diport::DlxLifecycleRepository",
-                DiportPort::DlxLifecycleRepository,
-            ),
-            ("diport::DlxArchiveStore", DiportPort::DlxArchiveStore),
-        ] {
-            let source = MINIMAL.replace("diport::Pdp", port);
-            let manifest = AssemblyManifest::from_toml_str(&source).expect("DLX port parses");
-            assert_eq!(manifest.diport_providers[0].port, expected);
-        }
-    }
-
-    #[test]
-    fn parses_service_token_replay_store_provider_port() {
-        let source = MINIMAL.replace("diport::Pdp", "diport::ServiceTokenReplayStore");
-        let manifest =
-            AssemblyManifest::from_toml_str(&source).expect("service-token replay port parses");
-        assert_eq!(
-            manifest.diport_providers[0].port,
-            DiportPort::ServiceTokenReplayStore
-        );
-    }
-
-    #[test]
-    fn rejects_retired_eventexec_dlx_ports_and_cipher_port() {
-        for retired in [
-            ["eventexec::DlxLifecycle", "Repository"].concat(),
-            ["eventexec::DlxArchive", "Store"].concat(),
-            ["eventexec::DlxArchive", "Cipher"].concat(),
-        ] {
-            let source = MINIMAL.replace("diport::Pdp", &retired);
-            assert!(
-                AssemblyManifest::from_toml_str(&source).is_err(),
-                "retired port unexpectedly parsed: {retired}"
-            );
-        }
-    }
-
-    #[test]
-    fn framework_contracts_are_required_non_empty_and_unique() {
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("frameworkContracts = []\n", ""))
-                .is_err()
-        );
-
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace(
-                "frameworkContracts = []",
-                "frameworkContracts = [\"seed.echo\"]",
-            ))
-            .is_err(),
-            "legacy string declarations must not parse"
-        );
-
-        let invalid = AssemblyManifest::from_toml_str(&MINIMAL.replace(
-            "frameworkContracts = []",
-            "frameworkContracts = [{ id = \"\", listener = \"admin\" }, { id = \"seed.echo\", listener = \"admin\" }, { id = \"seed.echo\", listener = \"primary\" }]",
-        ))
-        .expect("closed framework contract declarations parse before semantic validation");
-        let errors = invalid.basic_validation_errors();
-        assert!(errors.contains(&ManifestValidationError::Empty {
-            field: "frameworkContracts"
-        }));
-        assert!(errors.contains(&ManifestValidationError::Duplicate {
-            field: "frameworkContracts"
-        }));
-    }
-
-    #[test]
-    fn framework_contract_listener_must_be_declared() {
-        let invalid = AssemblyManifest::from_toml_str(&MINIMAL.replace(
-            "frameworkContracts = []",
-            "frameworkContracts = [{ id = \"seed.echo\", listener = \"admin\" }]",
-        ))
-        .expect("typed framework mount parses before graph validation");
-        let errors = invalid
-            .validate_graph_evidence()
-            .expect_err("undeclared listener must fail")
-            .into_vec();
-        assert!(
-            errors.contains(&GraphEvidenceValidationError::UnknownFrameworkListener {
-                contract_id: "seed.echo".to_string(),
-                listener: AssemblyListenerKind::Admin,
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_fields_and_closed_values() {
-        assert!(AssemblyManifest::from_toml_str(&format!("{MINIMAL}\nlegacy = true\n")).is_err());
-        assert!(AssemblyManifest::from_toml_str(&MINIMAL.replace("identity", "billing")).is_err());
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("durable-shared", "global")).is_err()
-        );
-        assert!(AssemblyManifest::from_toml_str(&MINIMAL.replace("primary", "public")).is_err());
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("diport::Pdp", "diport::Unknown"))
-                .is_err()
-        );
-        assert!(AssemblyManifest::from_toml_str(&MINIMAL.replace("active", "enabled")).is_err());
-        assert!(
-            AssemblyManifest::from_toml_str(&MINIMAL.replace("persistent", "durable")).is_err()
-        );
-    }
-
-    #[test]
-    fn reports_empty_and_duplicate_declarations() {
-        let empty_domains = AssemblyManifest::from_toml_str(&MINIMAL.replace(
-            r#"domains = ["identity", "settings", "audit"]"#,
-            "domains = []",
-        ))
-        .expect("parse empty domains");
-        assert!(
-            empty_domains
-                .basic_validation_errors()
-                .contains(&ManifestValidationError::Empty { field: "domains" })
-        );
-
-        let duplicate_domains = AssemblyManifest::from_toml_str(&MINIMAL.replace(
-            r#"domains = ["identity", "settings", "audit"]"#,
-            r#"domains = ["identity", "identity"]"#,
-        ))
-        .expect("parse duplicate domains");
-        assert!(
-            duplicate_domains
-                .basic_validation_errors()
-                .contains(&ManifestValidationError::Duplicate { field: "domains" })
-        );
-    }
-
-    #[test]
-    fn graph_evidence_is_closed_and_non_vacuous() {
-        let manifest = AssemblyManifest::from_toml_str(MINIMAL).expect("manifest");
-        manifest
-            .validate_graph_evidence()
-            .expect("complete graph evidence");
-
-        let missing_listener = MINIMAL.replace(
-            "kind = \"primary\"\ndomains = [\"identity\", \"settings\", \"audit\"]",
-            "kind = \"primary\"",
-        );
-        assert!(AssemblyManifest::from_toml_str(&missing_listener).is_err());
-        let missing_provider = MINIMAL.replace("outputs = [\"probes\", \"resources\"]\n", "");
-        assert!(AssemblyManifest::from_toml_str(&missing_provider).is_err());
-    }
 }

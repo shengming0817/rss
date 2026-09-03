@@ -7,5 +7,5 @@ error: cannot construct `SagaStartAuthorization` with struct literal syntax due 
 help: you might have meant to use the `issue` associated function
   |
 2 -     let _forged = diport::SagaStartAuthorization {};
-2 +     let _forged = diport::SagaStartAuthorization::issue(_, _, _, _, _);
+2 +     let _forged = diport::SagaStartAuthorization::issue(_, _, _, _);
   |

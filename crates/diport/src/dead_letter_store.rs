@@ -396,10 +396,10 @@ mod smoke {
         DeadLetterRecord::new(
             tenant(),
             "message-1",
-            DeadLetterProvenance::consumer("identity", "audit"),
+            DeadLetterProvenance::consumer("runtime", "observer"),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -480,10 +480,10 @@ mod pii_debug {
         let record = DeadLetterRecord::new(
             tenant(),
             "message-1",
-            DeadLetterProvenance::consumer("identity", "audit"),
+            DeadLetterProvenance::consumer("runtime", "observer"),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             vec![0xDE, 0xAD, 0xBE, 0xEF],
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -493,7 +493,7 @@ mod pii_debug {
         assert!(!dbg.contains("222"), "payload 字节泄漏(0xDE=222): {dbg}");
         assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
-        assert!(dbg.contains("identity"), "domain 应可见: {dbg}");
+        assert!(dbg.contains("runtime"), "domain 应可见: {dbg}");
         assert!(
             dbg.contains("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
             "tenant 应可见: {dbg}"
@@ -533,10 +533,10 @@ mod pii_debug {
         let record = DeadLetterRecord::new(
             tenant(),
             "message-1",
-            DeadLetterProvenance::consumer("identity", "audit"),
+            DeadLetterProvenance::consumer("runtime", "observer"),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -588,10 +588,10 @@ mod tenant_scope {
         let record = DeadLetterRecord::new(
             tenant,
             "msg-tenant-1",
-            DeadLetterProvenance::consumer("identity", "audit"),
+            DeadLetterProvenance::consumer("runtime", "observer"),
             "contract-session",
             "session.created",
-            Some("identity.session.consumer".to_string()),
+            Some("runtime.fact.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
@@ -599,7 +599,7 @@ mod tenant_scope {
         );
         assert_eq!(record.tenant(), tenant);
         assert_eq!(record.message_id(), "msg-tenant-1");
-        assert_eq!(record.consumer_group(), Some("identity.session.consumer"));
+        assert_eq!(record.consumer_group(), Some("runtime.fact.consumer"));
         assert_eq!(record.source(), DeadLetterSource::Consumer);
     }
 }

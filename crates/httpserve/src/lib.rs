@@ -1,196 +1,261 @@
-//! httpserve — RSS HTTP 服务基础设施（listener / route 声明、auth 装配接缝）。
-//!
-//! 路由生命周期的类型层不变式收口在 [`routes`]：listener-typed 注册（[`ListenerRouter<L>`]，#1103
-//! segregation Medium→Hard）+ auth-finalize-before-bind funnel（[`UnfinalizedRoutes`] → [`finalize_auth`]
-//! → [`AuthenticatedRoutes`]，#1113 Hard）。另有 `health` 模块（`healthz` / `readyz` builders）。
-//!
-//! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main（Layer::from_fn 同步语义）；
-//! ref: tokio-rs/axum axum/src/routing/mod.rs@main（`Router<S>` 状态类型表达「缺状态不可 serve」）
+//! Provider-neutral HTTP service core.
 
-mod auth;
-mod auth_audit;
+use futures::FutureExt as _;
+
 mod budget;
 pub mod error;
 pub mod health;
-mod middleware;
 pub mod protect;
 mod real_ip;
-pub mod routes;
 mod server_observation;
 
-pub use auth::{
-    AUTHORIZATION_FINGERPRINT_BYTES, AuditSinkHandle, Authenticated, AuthenticatedAuditEvent,
-    AuthorizationPolicyReference, AuthorizationProvenance, AuthorizationProvenanceAlreadyTaken,
-    AuthorizedSubject, BearerCredentialError, DevicePolicyCandidateBindingKey,
-    DurablePolicyAuthorization, ExtractedBearerCredential, FieldMask, PendingScopeCtx,
-    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationGrant,
-    RouteAuthorizationRequest, RouteAuthorizer, RouteMeta, RouteResource,
-    ServiceTokenTenantBindingError, TenantHeaderError, authorize_subject_for_permission,
-    exact_tenant_header, extract_bearer_credential, service_token_tenant_binding,
-};
-#[cfg(any(test, feature = "test-util"))]
-pub use auth::{NonRssTestScheme, RssAccessRejectMatrixKind};
 pub use budget::{RequestControl, ServerRequestBudget};
-pub use middleware::VerifiedRequestId;
-pub use middleware::{rate_limit, with_client_rate_limit};
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use real_ip::{RealIpLayer, ResolvedClientIp, TrustedProxyConfig, TrustedProxyConfigError};
-pub use routes::{
-    Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker,
-    DeclaredProducerContractHandler, GeneratedEndpoint, GeneratedPrimaryEndpoint, Health, Internal,
-    Listener, ListenerRouter, LocalOnlyAllowedEffect, NonPrimaryListener, Primary,
-    ProducerAssuranceReceipt, ProducerAuthorization, ProducerMarker, ServerService,
-    UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
-    finalize_auth_with_audit_and_authorizer, finalize_health, finalize_primary_auth,
-    finalize_primary_auth_with_audit,
-};
-pub use routes::{HealthRoutes, RateLimitedRoutes};
-#[cfg(any(test, feature = "test-util"))]
-pub use routes::{
-    LocalOnlyMountedRouteProof, LocalOnlyRouteNotMounted, StatelessLocalOnlyMountedRouteProof,
-    prove_local_only_mounted_route_state, prove_stateless_local_only_mounted_route,
-    with_producer_witness_for_test,
-};
-#[cfg(any(test, feature = "test-util"))]
-pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};
 pub use server_observation::{
     ServerObservationListener, ServerObservationPolicy, ServerResponse, ServerResponseCauseKind,
 };
 
-/// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
-/// bind capability 的 `into_server_service` 封为**最外层 request-context middleware**（仅机械
-/// security response-header layers 在其外），ROUTE-REQUESTID-OUTERMOST-01）。
-///
-/// 供组合根叠在 `finalize_auth` 产物**外层**（但 request_id 内层）的中间件——如 #1109 验签桥——读
-/// request 关联 id 入自身 span / 日志（桥运行时 request_id 已就位，落实 #1320「桥可读 requestId」）。
-/// 内层 enforce / handler 仍经请求 extension 直读 [`RouteMeta`] 等；本 accessor 仅为外层中间件提供
-/// 不暴露 `RequestId` newtype 的只读窗口。
-pub fn request_id_str(extensions: &axum::http::Extensions) -> Option<&str> {
-    extensions
-        .get::<middleware::VerifiedRequestId>()
-        .map(middleware::VerifiedRequestId::as_str)
+/// Cloneable request core consumed by a transport adapter.
+#[derive(Clone)]
+#[must_use = "ServerService must be passed to an HTTP transport"]
+pub struct ServerService {
+    router: axum::Router,
+    observation_policy: ServerObservationPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RoutePermission {
-    pub(crate) permission: vocab::RoutePermissionId,
-    pub(crate) scope: RouteResourceScope,
-    pub(crate) tenant_binding: RouteTenantBinding,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RouteTenantBinding {
-    Unrestricted,
-    Ambient,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RouteResourceScope {
-    None,
-    PathParam(&'static str),
-    SelfSubject,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PrimaryRouteAuthz {
-    Permission(RoutePermission),
-    OptOut(primitives::RouteAuthOptOut),
-    ServiceCaller(ServiceCallerPolicy),
-}
-
-/// Exact caller policy for one Internal service-token route.
-///
-/// The caller is a closed typed domain, so a policy is intrinsically non-empty. The contract id
-/// is checked against generated route evidence at mount time and again at authorization time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ServiceCallerPolicy {
-    contract_id: &'static str,
-    caller: vocab::ServiceCallerDomain,
-}
-
-impl ServiceCallerPolicy {
-    pub const fn exact(contract_id: &'static str, caller: vocab::ServiceCallerDomain) -> Self {
+impl ServerService {
+    pub fn new(router: axum::Router, listener: ServerObservationListener) -> Self {
         Self {
-            contract_id,
-            caller,
+            router: seal_router(
+                router,
+                ServerRequestBudget::DEFAULT,
+                ServerObservationPolicy::Enabled(listener),
+            ),
+            observation_policy: ServerObservationPolicy::Enabled(listener),
         }
     }
 
-    pub(crate) fn matches_contract(&self, contract_id: &str) -> bool {
-        self.contract_id == contract_id
+    pub fn health(routes: health::HealthRoutes) -> Self {
+        Self {
+            router: seal_router(
+                routes.0,
+                ServerRequestBudget::DEFAULT,
+                ServerObservationPolicy::Disabled,
+            ),
+            observation_policy: ServerObservationPolicy::Disabled,
+        }
     }
 
-    pub(crate) fn allows(&self, caller: vocab::ServiceCallerDomain) -> bool {
-        self.caller == caller
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_router_for_test(router: axum::Router, _budget: ServerRequestBudget) -> Self {
+        Self {
+            router: seal_router(
+                router,
+                _budget,
+                ServerObservationPolicy::Enabled(ServerObservationListener::Other),
+            ),
+            observation_policy: ServerObservationPolicy::Enabled(ServerObservationListener::Other),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_health_router_for_test(router: axum::Router) -> Self {
+        Self {
+            router: seal_router(
+                router,
+                ServerRequestBudget::DEFAULT,
+                ServerObservationPolicy::Disabled,
+            ),
+            observation_policy: ServerObservationPolicy::Disabled,
+        }
+    }
+
+    #[must_use]
+    pub const fn observation_policy(&self) -> ServerObservationPolicy {
+        self.observation_policy
     }
 }
 
-// 旧 `RouteGroup` struct（接受裸 `axum::Router` 的 register 闭包）已随 ADR-009 typed funnel 退役——
-// 路由组声明面收敛到 `bootstrap::Registry::route_group::<L>`（listener 由类型参数携带）+ 域 crate 经
-// `routes::ListenerRouter<L>` typed mount；裸 `axum::Router` 不再出现在任何 public 路由声明 API（ADR-009 §2.1）。
-
-/// httpserve 本地错误（httpserve **不**依赖 bootstrap，故不用 KernelError；bootstrap 收集时再包装）。
-/// 注：ADR-009 只开**正向** `bootstrap → httpserve` 受控路由类型边；**反向** `httpserve → bootstrap` 仍禁
-/// （layers `route_funnel_allows` 单向放行 + 反例守），故本错误类型保留。
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum RouteGroupError {
-    #[error("duplicate route registration")]
-    DuplicateRoute,
-    #[error(
-        "listener mismatch: registered={registered:?}, conflicting={conflicting:?}, finalized={finalized:?}"
-    )]
-    ListenerMismatch {
-        /// First listener registered in the accumulator, if any.
-        registered: Option<primitives::ListenerKind>,
-        /// A second, incompatible listener observed during group folding, if any.
-        conflicting: Option<primitives::ListenerKind>,
-        /// Listener selected by the auth plan at finalization.
-        finalized: primitives::ListenerKind,
-    },
-    /// The selected listener exposes fixed framework routes that do not support this scheme.
-    #[error("auth scheme {scheme:?} is unsupported for listener {listener:?}")]
-    UnsupportedAuthPlan {
-        /// Listener selected by the auth plan.
-        listener: primitives::ListenerKind,
-        /// Authentication scheme rejected for that listener.
-        scheme: primitives::AuthScheme,
-    },
-    #[error("route registration failed")]
-    RegistrationFailed,
-    #[error("generated mutation route was finalized without process write admission")]
-    MissingWriteAdmission,
-    #[error(
-        "generated route method is invalid or unsupported: contract={contract_id}, method={method}, path={path}"
-    )]
-    InvalidMethod {
-        contract_id: &'static str,
-        method: String,
-        path: &'static str,
-    },
-    #[error(
-        "generated route path is outside its route group: contract={contract_id}, method={method}, path={path}, prefix={prefix}, listener={listener:?}"
-    )]
-    PathOutsideGroup {
-        contract_id: &'static str,
-        method: &'static str,
-        path: &'static str,
-        prefix: &'static str,
-        listener: primitives::ListenerKind,
-    },
-    #[error(
-        "generated route auth is incompatible with its listener: contract={contract_id}, method={method}, path={path}, listener={listener:?}, auth={auth:?}"
-    )]
-    InvalidAuth {
-        contract_id: &'static str,
-        method: &'static str,
-        path: &'static str,
-        listener: primitives::ListenerKind,
-        auth: vocab::HttpRouteAuth,
-    },
-    #[error("service caller policy does not match its route contract")]
-    InvalidServiceCallerPolicy,
+fn seal_router(
+    router: axum::Router,
+    budget: ServerRequestBudget,
+    observation_policy: ServerObservationPolicy,
+) -> axum::Router {
+    let hardening = EdgeHardening::default();
+    let router = router
+        .layer(axum::middleware::from_fn_with_state(
+            hardening.body_limit,
+            body_limit,
+        ))
+        .layer(axum::middleware::from_fn(panic_recovery))
+        .layer(axum::middleware::from_fn_with_state(budget, request_budget));
+    let mut router = match observation_policy {
+        ServerObservationPolicy::Enabled(_) => {
+            router.layer(axum::middleware::from_fn(observation_metadata))
+        }
+        ServerObservationPolicy::Disabled => router,
+    };
+    for header_layer in hardening.headers.response_layers() {
+        router = router.layer(header_layer);
+    }
+    router
 }
 
-// generated endpoint 挂载（`ListenerRouter::mount`）与 auth-finalize funnel（`finalize_auth` /
-// `UnfinalizedRoutes` / `AuthenticatedRoutes`）见 `routes` 模块——typed listener marker + funnel 状态类型。
+async fn body_limit(
+    axum::extract::State(limit): axum::extract::State<BodyLimit>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let declared = request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > limit.bytes() as u64) {
+        return error::payload_too_large("");
+    }
+    let (parts, body) = request.into_parts();
+    let body = http_body_util::Limited::new(body, limit.bytes());
+    next.run(axum::http::Request::from_parts(
+        parts,
+        axum::body::Body::new(body),
+    ))
+    .await
+}
+
+async fn request_budget(
+    axum::extract::State(budget): axum::extract::State<ServerRequestBudget>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let control = RequestControl::start(budget);
+    request.extensions_mut().insert(control.clone());
+    let _cancel_on_drop = budget::CancelRequestOnDrop(control.clone());
+    match tokio::time::timeout_at(control.deadline().instant().into(), next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => mark_response_cause(
+            error::service_unavailable(""),
+            server_observation::ServerResponseCause::timeout(),
+        ),
+    }
+}
+
+async fn observation_metadata(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(server_observation::ServerObservationRoute::from_matched_path);
+    let mut response = next.run(request).await;
+    if let Some(route) = route {
+        response.extensions_mut().insert(route);
+    }
+    response
+}
+
+async fn panic_recovery(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match std::panic::AssertUnwindSafe(next.run(request))
+        .catch_unwind()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => mark_response_cause(
+            error::internal_error(""),
+            server_observation::ServerResponseCause::panic(),
+        ),
+    }
+}
+
+fn mark_response_cause(
+    mut response: axum::response::Response,
+    cause: server_observation::ServerResponseCause,
+) -> axum::response::Response {
+    response.extensions_mut().insert(cause);
+    response
+}
+
+impl tower::Service<axum::extract::Request> for ServerService {
+    type Response = ServerResponse;
+    type Error = core::convert::Infallible;
+    type Future =
+        ServerResponseFuture<<axum::Router as tower::Service<axum::extract::Request>>::Future>;
+
+    fn poll_ready(
+        &mut self,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), Self::Error>> {
+        <axum::Router as tower::Service<axum::extract::Request>>::poll_ready(
+            &mut self.router,
+            context,
+        )
+    }
+
+    fn call(&mut self, request: axum::extract::Request) -> Self::Future {
+        ServerResponseFuture {
+            inner: <axum::Router as tower::Service<axum::extract::Request>>::call(
+                &mut self.router,
+                request,
+            ),
+        }
+    }
+}
+
+pub struct ServerResponseFuture<F> {
+    inner: F,
+}
+
+impl<F> core::future::Future for ServerResponseFuture<F>
+where
+    F: core::future::Future<Output = Result<axum::response::Response, core::convert::Infallible>>
+        + Unpin,
+{
+    type Output = Result<ServerResponse, core::convert::Infallible>;
+
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        core::pin::Pin::new(&mut self.inner)
+            .poll(context)
+            .map(|result| result.map(ServerResponse::from_response))
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: every request component is a static, known-valid test fixture.
+    async fn sealed_service_rejects_declared_oversize_and_adds_security_headers() {
+        let router = axum::Router::new().route("/", axum::routing::post(|| async { "ok" }));
+        let service = ServerService::from_router_for_test(router, ServerRequestBudget::DEFAULT);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(header::CONTENT_LENGTH, BodyLimit::DEFAULT.bytes() + 1)
+            .body(axum::body::Body::empty())
+            .expect("valid request");
+
+        let response = service
+            .oneshot(request)
+            .await
+            .expect("infallible service")
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(response.headers().contains_key("strict-transport-security"));
+    }
+}

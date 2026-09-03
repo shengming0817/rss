@@ -8,7 +8,7 @@ publish = false
 [features]
 default = []
 l2-test-support = []
-internal-test-support = ["generated/test-support"]
+internal-test-support = []
 
 [lints]
 workspace = true
@@ -30,8 +30,6 @@ uuid = { workspace = true, features = ["v4"] }
 tracing = { workspace = true }
 # outbox relay/sweeper 引擎接缝（OutboxRelay/RetentionSweeper/Entry/Disposition）。
 consistency = { path = "../consistency" }
-# Command dispatchers implement the contract-generated CommandEmit/CommandJournal seams.
-generated = { path = "../../generated" }
 # Keyed command idempotency aliases are derived inside the runtime boundary; raw business keys
 # never cross into persistence providers.
 secure = { path = "../secure" }
@@ -75,13 +73,3 @@ tracing-subscriber = { workspace = true }
 trybuild = { workspace = true }
 # 非 Eventing family 的 metrics facade 测试（with_local_recorder + render 断言）；同 adapters/prometheus 范式。
 metrics-exporter-prometheus = { workspace = true }
-
-[[test]]
-name = "projection_target_conformance"
-path = "tests/projection_target_conformance.rs"
-required-features = ["internal-test-support"]
-
-[[test]]
-name = "typed_saga_trybuild"
-path = "tests/typed_saga_trybuild.rs"
-required-features = ["internal-test-support"]

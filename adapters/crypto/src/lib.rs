@@ -2,7 +2,7 @@
 //!
 //! `primitives::crypto` 只放无密钥状态、provider-无关的纯计算 trait（[`primitives::MacVerifier`]）；具体
 //! HMAC backend 属 adapter 层（与 `adapters/oidc` 用 RustCrypto 做 HS256 验签同范式）。本 crate 提供
-//! [`RustCryptoMacVerifier`]，由组合根注入 `audit::ports::AuditChainHasher`（审计 keyed-HMAC 链）等消费点。
+//! [`RustCryptoMacVerifier`]，由 consumer 组合根注入需要 keyed-HMAC 的消费点。
 //!
 //! ref: RustCrypto/MACs hmac/README.md@master（`Hmac<Sha256>` new_from_slice→update→finalize→into_bytes）
 //! ref: RustCrypto/hashes sha2（Sha256/Sha384/Sha512 摘要后端）

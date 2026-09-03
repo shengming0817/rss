@@ -1,5 +1,0 @@
-error[E0599]: no method named `finalize_routes` found for struct `Registry` in the current scope
- --> tests/ui/unadmitted_registry_cannot_finalize_routes.rs:5:22
-  |
-5 |     let _ = registry.finalize_routes();
-  |                      ^^^^^^^^^^^^^^^ method not found in `Registry`

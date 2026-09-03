@@ -1,9 +1,0 @@
-error[E0451]: fields `config_digest` and `_sealed` of struct `ExternalPkiProviderClosure` are private
- --> tests/ui/pki_external_provider_closure_private_fields_fail.rs:5:9
-  |
-4 |     let _ = ExternalPkiProviderClosure {
-  |             -------------------------- in this type
-5 |         config_digest: PkiProviderConfigDigest::new([7; 32]),
-  |         ^^^^^^^^^^^^^ private field
-6 |         _sealed: (),
-  |         ^^^^^^^ private field

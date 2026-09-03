@@ -8,207 +8,23 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（由 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 PR #137 review A1/B1/C1 约束）。
 [dependencies]
-eventing.workspace = true
-rss-contract.workspace = true
-rss-request-context.workspace = true
-postgres-migration-inventory = { path = "../../crates/postgres-migration-inventory" }
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
-secure = { path = "../../crates/secure" }
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-diagctx = { package = "rss-diag-context", path = "../../crates/diagctx", version = "0.1.0" }
 consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-observ = { path = "../../crates/observ", optional = true }
-# emit 侧从当前 tracing span 捕获 W3C traceparent 写 outbox metadata 保留键 `trace`（#1224，fail-open）；
-# 只依赖此 helper、不直接 import otel（otel 收口在 tracewire/adapters-otel）。
-tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0" }
-# 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
-# Durable settings ConsumerTx 接受 domain 注册的窄型 effect，不接 concrete SettingsService。
-bootstrap = { path = "../../crates/bootstrap" }
-# Implements eventexec's DLQ inspection/replay service port (#1214).
-eventexec = { path = "../../crates/eventexec" }
-# Consumes authn-owned sealed projection maintenance receipts at adapter I/O boundaries.
-authn = { path = "../../crates/authn" }
-# adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。
-# PgRoleRepo impl identity::ports::RoleRepo（roles 表 + tenant scope，#1250）——真实 impl（替换原 #[cfg(test)] RoleRepoEdgeProof）。
-identity = { path = "../../crates/identity", optional = true }
-# Device-certificate persistence lowers the canonical policy/condition vocabulary owned by the
-# DeviceLatent service. Keep the edge behind the identity domain feature so inactive adapters do not
-# acquire the service API.
-deviceloop = { path = "../../crates/deviceloop", optional = true }
-# adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml audit wrapper + allows(Adapter,Domain) 放行）。
-# PgAuditRepo impl audit read/write ports（append-only per-tenant keyed-HMAC chain + RLS，#1230）——真实 impl。
-audit = { path = "../../crates/audit", optional = true }
-# adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml settings wrapper + allows(Adapter,Domain) 放行）。
-# PgConfigRepo impl settings::ports::ConfigRepo + ConfigUnitOfWork（co-tx，#1249）——真实 impl（非 edge proof）。
-settings = { path = "../../crates/settings", optional = true }
-# Active HTTP producers carry an unforgeable route authorization into the adapter-owned
-# transaction funnel. The dependency is feature-gated with the two producer domains.
-httpserve = { path = "../../crates/httpserve", optional = true }
-# eventexec 持久化基座（#1116）：连接池 / 事务 / Migrator。features migrate+macros 在 workspace.dependencies 声明。
+futures = { workspace = true }
+rss-request-context.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 sqlx = { workspace = true }
 # Hard witness for RSS's audited SQLx explicit-root exclusivity patch. If the patch/feature is
 # removed, production adapter construction no longer compiles.
 sqlx-core = { workspace = true, features = ["rss-exclusive-explicit-roots"] }
-rustls = { workspace = true }
-rustls-pki-types = { workspace = true }
-# closed exact-lane transaction façade 的 HRTB operation 闭包返回 BoxFuture。
-futures = { workspace = true }
-# 连接 / 迁移成功的结构化日志。
-tracing = { workspace = true }
-# UoW retry metrics facade; recorder is installed by the executable when enabled.
-metrics = { workspace = true }
-# PgError 库错误枚举（：库错误用 thiserror）。
 thiserror = { workspace = true }
-# outbox envelope metadata 序列化（OutboxEnvelope.metadata: serde_json::Value）；
-# 绑 jsonb 时 serde_json::to_string → $N::jsonb（不给 sqlx 加 uuid/json/time feature，全 server-side）。
-serde_json = { workspace = true }
-serde_json_canonicalizer = { workspace = true, optional = true }
-# ABAC policy JSONB codec DTO（adapter-local；identity domain types 不 derive serde）。
-serde = { workspace = true }
-# Saga lease token parsing.
-uuid = { workspace = true }
-# audit_repo cursor encode/decode（base64url URL_SAFE_NO_PAD；语义由 audit owner 解释）。
-base64 = { workspace = true }
-# Stable deployment generation for additive projection-input registration.
-sha2 = { workspace = true }
-# DLX replay plaintext JSON/string buffers are wiped on every success/error path.
-zeroize = { workspace = true }
-# 后台周期 DB liveness 采样 loop（pg_readiness_sampling_loop + PgReadinessSampler worker）。
-tokio = { workspace = true, features = ["rt", "time", "sync"] }
-# CancellationToken（tokio_util::sync::CancellationToken）——adopt 式 worker 两阶段关闭。
-tokio-util = { workspace = true }
+zeroize.workspace = true
 
 [features]
 default = []
-domain-settings = ["dep:settings", "dep:httpserve", "dep:observ"]
-domain-identity = ["dep:identity", "dep:deviceloop", "dep:httpserve", "dep:observ"]
-domain-audit = ["dep:audit", "dep:observ"]
-auth-audit-sink = []
-# 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时薄 façade `src/integration_tests.rs`
-# 与其私有 seam 子树 `src/integration_tests/` 不编译，verify 永远绿）。
-# testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。
-integration = [
-    "test-support",
-    "domain-settings",
-    "domain-identity",
-    "domain-audit",
-    "auth-audit-sink",
-    "eventexec/l2-test-support",
-    "eventexec/internal-test-support",
-    "dep:serde_json_canonicalizer",
-    "testkit/containers",
-]
-# 组合根默认单测专用：只开放 lazy pool 的 capability bundle，不连接数据库、不暴露 pool/store。
-test-support = ["eventexec/l2-test-support", "eventexec/internal-test-support"]
-# Composition 单测专用 proof mint；不进入通用 test-support/integration，避免任何 provider
-# conformance/trybuild 图把测试构造器误当成生产能力。
-consumer-tx-composition-test-support = []
-# Catalog Test targets：LocalEligibility 与资源声明以 `xtask` integration_shards catalog 为准；
-# Cargo `[[test]] required-features` 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
-# RemoteOnly（live PG）：必须声明 `integration` RF。
-[[test]]
-name = "migration_0067_historical_artifact"
-path = "tests/migration_0067_historical_artifact.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0086_hard_cutover"
-path = "tests/migration_0086_hard_cutover.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0087_device_command_fencing"
-path = "tests/migration_0087_device_command_fencing.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0089_saga_operator_control"
-path = "tests/migration_0089_saga_operator_control.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0097_projection_worker_upgrade"
-path = "tests/migration_0097_projection_worker_upgrade.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0098_settings_active_serving_upgrade"
-path = "tests/migration_0098_settings_active_serving_upgrade.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0102_abac_profile_upgrade"
-path = "tests/migration_0102_abac_profile_upgrade.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0103_device_command_expiry"
-path = "tests/migration_0103_device_command_expiry.rs"
-
-[[test]]
-name = "migration_0104_abac_policy_operator_values_upgrade"
-path = "tests/migration_0104_abac_policy_operator_values_upgrade.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0105_projection_generation_upgrade"
-path = "tests/migration_0105_projection_generation_upgrade.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0105_projection_generation"
-path = "tests/migration_0105_projection_generation.rs"
-
-[[test]]
-name = "migration_0109_inbox_backlog_samples"
-path = "tests/migration_0109_inbox_backlog_samples.rs"
-
-[[test]]
-name = "migration_0109_inbox_backlog_samples_live"
-path = "tests/migration_0109_inbox_backlog_samples_live.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "migration_0113_receipt_bound_ready_upgrade"
-path = "tests/migration_0113_receipt_bound_ready_upgrade.rs"
-required-features = ["integration"]
-
-# Affected（无 live PG 资源；默认可构建，不绑 RemoteOnly 调度身份）。
-[[test]]
-name = "migration_0087_device_command_fencing_contract"
-path = "tests/migration_0087_device_command_fencing_contract.rs"
+test-support = []
 
 [dev-dependencies]
-generated = { path = "../../generated" }
-rss_conformance = { package = "rss-conformance", path = "../../crates/conformance", version = "0.1.0" }
-diport = { path = "../../crates/diport", features = ["test-support", "dlq-test-support"] }
-toml = { workspace = true }
-httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
-authn = { path = "../../crates/authn", features = ["test-support"] }
-tokio = { workspace = true, features = ["test-util"] }
-# #2054：OTel 测试脚手架移入 publish=false、dev-only carrier，不进入候选 feature/API 图。
-tracewiretest = { path = "../../crates/tracewiretest" }
-# test-util 提供 tokio::time::advance / start_paused（采样 loop 时间控制单元测试）。
-# 集成测试用唯一 event_id 法（inbox_receipts 去重隔离验证，避免跨轮次清理）。
-uuid = { workspace = true, features = ["v4"] }
-# Local recorder assertions for retry metrics.
-metrics-exporter-prometheus = { workspace = true }
-rcgen = { workspace = true }
-# 会话生命周期集成测试（co-tx t11-t14 + durable find/revoke t20-t22）构造 `ports::Session` 经 `identity::test_support::session`
-# （funnel `Session::new` 为 pub(crate)；test-support feature 仅 dev/test 生效，生产 seal 不变）。同范式见
-# identity 自身 dev-dep `authn = { features = ["test-support"] }`。
-identity = { path = "../../crates/identity", features = ["seed-login", "test-support"] }
-settings = { path = "../../crates/settings", features = ["test-support"] }
-audit = { path = "../../crates/audit", features = ["test-support"] }
-# 集成测试容器 fixture（#1137）：testcontainers self-provision postgres（经 testkit/containers，
-# 仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
-testkit = { path = "../../crates/testkit" }
-# Exact-lane TenantTx 的构造、lifecycle、executor 与 lane-crossing 编译期负向证明。
-trybuild = { workspace = true }
+static_assertions = { workspace = true }

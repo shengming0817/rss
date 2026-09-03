@@ -40,17 +40,16 @@ const INTEGRATION_TEST_CFG: &str = "all(test,feature=\"integration\")";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProviderId {
-    Postgres,
     Amqp,
     S3,
 }
 
 impl ProviderId {
-    const ALL: [Self; 3] = [Self::Postgres, Self::Amqp, Self::S3];
+    const ALL: [Self; 2] = [Self::Amqp, Self::S3];
+    const ACTIVE: [Self; 2] = Self::ALL;
 
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Postgres => "postgres",
             Self::Amqp => "amqp",
             Self::S3 => "s3",
         }
@@ -58,7 +57,6 @@ impl ProviderId {
 
     const fn type_name(self) -> &'static str {
         match self {
-            Self::Postgres => "Postgres",
             Self::Amqp => "Amqp",
             Self::S3 => "S3",
         }
@@ -66,7 +64,6 @@ impl ProviderId {
 
     const fn capabilities(self) -> &'static [CapabilityId] {
         match self {
-            Self::Postgres => &CapabilityId::ALL,
             Self::Amqp => &[
                 CapabilityId::Identity,
                 CapabilityId::Fencing,
@@ -88,18 +85,16 @@ enum CapabilityId {
     Conflict,
     Fencing,
     Budget,
-    CommitAck,
     Ambiguity,
     ArchiveReceipt,
 }
 
 impl CapabilityId {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::Identity,
         Self::Conflict,
         Self::Fencing,
         Self::Budget,
-        Self::CommitAck,
         Self::Ambiguity,
         Self::ArchiveReceipt,
     ];
@@ -110,7 +105,6 @@ impl CapabilityId {
             Self::Conflict => "conflict",
             Self::Fencing => "fencing",
             Self::Budget => "budget",
-            Self::CommitAck => "commit-ack",
             Self::Ambiguity => "ambiguity",
             Self::ArchiveReceipt => "archive-receipt",
         }
@@ -122,7 +116,6 @@ impl CapabilityId {
             Self::Conflict => "Conflict",
             Self::Fencing => "Fencing",
             Self::Budget => "Budget",
-            Self::CommitAck => "CommitAck",
             Self::Ambiguity => "Ambiguity",
             Self::ArchiveReceipt => "ArchiveReceipt",
         }
@@ -134,7 +127,6 @@ impl CapabilityId {
             Self::Conflict => "conflict",
             Self::Fencing => "fencing",
             Self::Budget => "budget",
-            Self::CommitAck => "commit_ack",
             Self::Ambiguity => "ambiguity",
             Self::ArchiveReceipt => "archive_receipt",
         }
@@ -151,15 +143,7 @@ struct OwnerSpec {
     shard: IntegrationShard,
 }
 
-const OWNERS: [OwnerSpec; 3] = [
-    OwnerSpec {
-        provider: ProviderId::Postgres,
-        path: "adapters/postgres/src/integration_tests/provider_conformance_tests.rs",
-        package: "postgres",
-        target: "postgres",
-        kind: TargetKind::Lib,
-        shard: IntegrationShard::PostgresDomain,
-    },
+const OWNERS: [OwnerSpec; 2] = [
     OwnerSpec {
         provider: ProviderId::Amqp,
         path: "adapters/amqp/src/publisher.rs",
@@ -198,10 +182,14 @@ fn run_at(root: &Path, check: bool) -> Result<()> {
 fn validate_catalog(root: &Path) -> Result<ValidatedProviderCatalog> {
     validate_testkit_catalog(root)?;
     let invocations = discover_invocations(root)?;
+    let active_owner_count = OWNERS
+        .iter()
+        .filter(|owner| root.join(owner.path).is_file())
+        .count();
     ensure!(
-        invocations.len() == OWNERS.len(),
+        invocations.len() == active_owner_count,
         "expected exactly {} provider catalog invocations, found {}",
-        OWNERS.len(),
+        active_owner_count,
         invocations.len()
     );
 
@@ -229,9 +217,9 @@ fn validate_catalog(root: &Path) -> Result<ValidatedProviderCatalog> {
         );
     }
 
-    let mut providers = Vec::with_capacity(OWNERS.len());
+    let mut providers = Vec::with_capacity(ProviderId::ACTIVE.len());
     let mut runner_set = BTreeSet::new();
-    for provider in ProviderId::ALL {
+    for provider in ProviderId::ACTIVE {
         let owner = owner(provider);
         validate_shard(root, owner)?;
         let invocation = by_provider
@@ -294,7 +282,7 @@ fn validate_testkit_catalog(root: &Path) -> Result<()> {
 
 fn validate_testkit_catalog_source(source: &str) -> Result<()> {
     let file = syn::parse_file(source).context("parse testkit provider catalog source")?;
-    validate_enum_variants(&file, "ProviderId", &["Postgres", "Amqp", "S3"])?;
+    validate_enum_variants(&file, "ProviderId", &["Amqp", "S3"])?;
     validate_enum_variants(
         &file,
         "CapabilityId",
@@ -303,17 +291,11 @@ fn validate_testkit_catalog_source(source: &str) -> Result<()> {
             "Conflict",
             "Fencing",
             "Budget",
-            "CommitAck",
             "Ambiguity",
             "ArchiveReceipt",
         ],
     )?;
-    validate_impl_const(
-        &file,
-        "ProviderId",
-        "ALL",
-        "[Self::Postgres, Self::Amqp, Self::S3]",
-    )?;
+    validate_impl_const(&file, "ProviderId", "ALL", "[Self::Amqp, Self::S3]")?;
     validate_impl_const(
         &file,
         "CapabilityId",
@@ -323,7 +305,6 @@ fn validate_testkit_catalog_source(source: &str) -> Result<()> {
             Self::Conflict,
             Self::Fencing,
             Self::Budget,
-            Self::CommitAck,
             Self::Ambiguity,
             Self::ArchiveReceipt,
         ]",
@@ -334,7 +315,6 @@ fn validate_testkit_catalog_source(source: &str) -> Result<()> {
         "as_str",
         "{
             match self {
-                Self::Postgres => \"postgres\",
                 Self::Amqp => \"amqp\",
                 Self::S3 => \"s3\",
             }
@@ -350,7 +330,6 @@ fn validate_testkit_catalog_source(source: &str) -> Result<()> {
                 Self::Conflict => \"conflict\",
                 Self::Fencing => \"fencing\",
                 Self::Budget => \"budget\",
-                Self::CommitAck => \"commit-ack\",
                 Self::Ambiguity => \"ambiguity\",
                 Self::ArchiveReceipt => \"archive-receipt\",
             }
@@ -362,7 +341,6 @@ fn validate_testkit_catalog_source(source: &str) -> Result<()> {
         "capabilities",
         "{
             match self {
-                Self::Postgres => &CapabilityId::ALL,
                 Self::Amqp => &[
                     CapabilityId::Identity,
                     CapabilityId::Fencing,
@@ -594,9 +572,8 @@ fn validate_impl_method(
 
 const fn owner(provider: ProviderId) -> OwnerSpec {
     match provider {
-        ProviderId::Postgres => OWNERS[0],
-        ProviderId::Amqp => OWNERS[1],
-        ProviderId::S3 => OWNERS[2],
+        ProviderId::Amqp => OWNERS[0],
+        ProviderId::S3 => OWNERS[1],
     }
 }
 
@@ -636,12 +613,6 @@ fn validate_shard(root: &Path, owner: OwnerSpec) -> Result<()> {
 
 fn validate_carrier_reachability(root: &Path, owner: OwnerSpec) -> Result<()> {
     match owner.provider {
-        ProviderId::Postgres => validate_lib_module(
-            root,
-            "adapters/postgres/src/lib.rs",
-            "integration_tests",
-            INTEGRATION_TEST_CFG,
-        ),
         ProviderId::Amqp => {
             validate_lib_module(
                 root,
@@ -1014,7 +985,6 @@ fn ensure_ident(actual: &Ident, expected: &str) -> syn::Result<()> {
 
 fn parse_provider(ident: &Ident) -> Result<ProviderId> {
     match ident.to_string().as_str() {
-        "postgres" => Ok(ProviderId::Postgres),
         "amqp" => Ok(ProviderId::Amqp),
         "s3" => Ok(ProviderId::S3),
         other => bail!("unknown provider `{other}`"),
@@ -1027,7 +997,7 @@ fn validate_invocation_cfg(provider: ProviderId, attrs: &[Attribute]) -> Result<
             attrs.len() == 1 && cfg_expression(&attrs[0]).as_deref() == Some(INTEGRATION_TEST_CFG),
             "AMQP catalog must use exactly #[cfg(all(test, feature = \"integration\"))]"
         ),
-        ProviderId::Postgres | ProviderId::S3 => ensure!(
+        ProviderId::S3 => ensure!(
             attrs.is_empty(),
             "provider `{}` catalog cannot be conditionally compiled",
             provider.as_str()
@@ -1058,7 +1028,6 @@ fn parse_capability(ident: &Ident) -> Result<CapabilityId> {
         "conflict" => Ok(CapabilityId::Conflict),
         "fencing" => Ok(CapabilityId::Fencing),
         "budget" => Ok(CapabilityId::Budget),
-        "commit_ack" => Ok(CapabilityId::CommitAck),
         "ambiguity" => Ok(CapabilityId::Ambiguity),
         "archive_receipt" => Ok(CapabilityId::ArchiveReceipt),
         other => {
@@ -1225,48 +1194,6 @@ struct BehaviorSpec {
 )]
 fn behavior_spec(provider: ProviderId, capability: CapabilityId) -> BehaviorSpec {
     match (provider, capability) {
-        (ProviderId::Postgres, CapabilityId::Identity) => BehaviorSpec {
-            path: "eventing_conformance_outbox_behavior",
-            operation_anchor: "connect_pg",
-            assertion_anchor: None,
-            trusted_assertion_call: Some("eventconf::assert_outbox_relay_conformance"),
-        },
-        (ProviderId::Postgres, CapabilityId::Conflict) => BehaviorSpec {
-            path: "outbox_append_distinguishes_same_fact_from_conflict_behavior",
-            operation_anchor: "eventing_test_db(&store).test_write",
-            assertion_anchor: Some("OutboxAppendError::Conflict"),
-            trusted_assertion_call: None,
-        },
-        (ProviderId::Postgres, CapabilityId::Fencing) => BehaviorSpec {
-            path: "settle_rejects_stale_lease_token_behavior",
-            operation_anchor: "rss_outbox_settle_published",
-            assertion_anchor: Some("\"lost_lease\""),
-            trusted_assertion_call: None,
-        },
-        (ProviderId::Postgres, CapabilityId::Budget) => BehaviorSpec {
-            path: "insufficient_preflight_budget_never_calls_publisher_behavior",
-            operation_anchor: "outbox.relay",
-            assertion_anchor: Some("*calls.lock().unwrap()"),
-            trusted_assertion_call: None,
-        },
-        (ProviderId::Postgres, CapabilityId::CommitAck) => BehaviorSpec {
-            path: "postgres_consumer_commit_ack_behavior",
-            operation_anchor: "run_consumer_ackable",
-            assertion_anchor: Some("AckAction::Ack"),
-            trusted_assertion_call: None,
-        },
-        (ProviderId::Postgres, CapabilityId::Ambiguity) => BehaviorSpec {
-            path: "relay_ambiguous_retries_with_original_event_id_behavior",
-            operation_anchor: "outbox.relay",
-            assertion_anchor: Some("vec![event_id.clone(),event_id]"),
-            trusted_assertion_call: None,
-        },
-        (ProviderId::Postgres, CapabilityId::ArchiveReceipt) => BehaviorSpec {
-            path: "dlx_verified_receipt_concurrent_cas_behavior",
-            operation_anchor: "rss_dlx_record_archive_receipt",
-            assertion_anchor: Some("outcomes"),
-            trusted_assertion_call: None,
-        },
         (ProviderId::Amqp, CapabilityId::Identity) => BehaviorSpec {
             path: "publisher_transport_replacement_integration_tests::broker_roundtrip_preserves_message_identity_behavior",
             operation_anchor: "publisher.publish",
@@ -1704,17 +1631,15 @@ mod tests {
 
     const TESTKIT_CATALOG_FIXTURE: &str = r#"
         pub enum ProviderId {
-            Postgres,
             Amqp,
             S3,
         }
 
         impl ProviderId {
-            pub const ALL: [Self; 3] = [Self::Postgres, Self::Amqp, Self::S3];
+            pub const ALL: [Self; 2] = [Self::Amqp, Self::S3];
 
             pub const fn as_str(self) -> &'static str {
                 match self {
-                    Self::Postgres => "postgres",
                     Self::Amqp => "amqp",
                     Self::S3 => "s3",
                 }
@@ -1722,7 +1647,6 @@ mod tests {
 
             pub const fn capabilities(self) -> &'static [CapabilityId] {
                 match self {
-                    Self::Postgres => &CapabilityId::ALL,
                     Self::Amqp => &[
                         CapabilityId::Identity,
                         CapabilityId::Fencing,
@@ -1743,18 +1667,16 @@ mod tests {
             Conflict,
             Fencing,
             Budget,
-            CommitAck,
             Ambiguity,
             ArchiveReceipt,
         }
 
         impl CapabilityId {
-            pub const ALL: [Self; 7] = [
+            pub const ALL: [Self; 6] = [
                 Self::Identity,
                 Self::Conflict,
                 Self::Fencing,
                 Self::Budget,
-                Self::CommitAck,
                 Self::Ambiguity,
                 Self::ArchiveReceipt,
             ];
@@ -1765,7 +1687,6 @@ mod tests {
                     Self::Conflict => "conflict",
                     Self::Fencing => "fencing",
                     Self::Budget => "budget",
-                    Self::CommitAck => "commit-ack",
                     Self::Ambiguity => "ambiguity",
                     Self::ArchiveReceipt => "archive-receipt",
                 }
@@ -1773,32 +1694,17 @@ mod tests {
         }
 
         pub mod __catalog {
-            pub enum Postgres {}
             pub enum Amqp {}
             pub enum S3 {}
             pub enum Identity {}
             pub enum Conflict {}
             pub enum Fencing {}
             pub enum Budget {}
-            pub enum CommitAck {}
             pub enum Ambiguity {}
             pub enum ArchiveReceipt {}
 
             mod private {
                 pub trait SealedCompleteSet<Provider> {}
-
-                impl SealedCompleteSet<super::Postgres>
-                    for (
-                        super::Identity,
-                        super::Conflict,
-                        super::Fencing,
-                        super::Budget,
-                        super::CommitAck,
-                        super::Ambiguity,
-                        super::ArchiveReceipt,
-                    )
-                {
-                }
 
                 impl SealedCompleteSet<super::Amqp>
                     for (
@@ -2281,7 +2187,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let expected = ProviderId::ALL
+        let expected = ProviderId::ACTIVE
             .into_iter()
             .map(|provider| {
                 (
@@ -2296,7 +2202,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
-        assert_eq!(catalog.providers.len(), ProviderId::ALL.len());
+        assert_eq!(catalog.providers.len(), ProviderId::ACTIVE.len());
         Ok(())
     }
 }

@@ -259,8 +259,10 @@ fn every_observation_has_exact_metric_identity_and_label_values() {
     }
 }
 
+type CapturedEvent = (String, String, String, BTreeSet<String>);
+
 #[derive(Default)]
-struct CaptureLayer(Arc<Mutex<Vec<(String, String, String, BTreeSet<String>)>>>);
+struct CaptureLayer(Arc<Mutex<Vec<CapturedEvent>>>);
 
 impl<S> Layer<S> for CaptureLayer
 where

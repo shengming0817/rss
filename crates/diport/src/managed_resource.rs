@@ -507,6 +507,8 @@ impl ManagedResource for ManagedTaskRegistration {
 
 #[cfg(test)]
 mod smoke {
+    #![allow(clippy::expect_used)]
+
     //! build smoke：证明 ManagedResource 可 native AFIT impl + 经 `Box<DynManagedResource>`
     //! 动态注入 + move 进 `tokio::spawn`（ShutdownStack panic 隔离的真实形态：Box 仅需 Send，无需 Sync）。
     use super::{

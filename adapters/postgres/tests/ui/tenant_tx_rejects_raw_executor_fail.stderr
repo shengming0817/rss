@@ -1,5 +1,0 @@
-error[E0599]: no method named `executor` found for mutable reference `&mut postgres::tx_boundary_proof::TenantTx<'_, postgres::tx_boundary_proof::ServingWriteLane>` in the current scope
- --> tests/ui/tenant_tx_rejects_raw_executor_fail.rs:4:16
-  |
-4 |     let _ = tx.executor();
-  |                ^^^^^^^^ method not found in `&mut postgres::tx_boundary_proof::TenantTx<'_, postgres::tx_boundary_proof::ServingWriteLane>`

@@ -1,5 +1,0 @@
-error[E0599]: no method named `reconcile_store` found for reference `&PgDeviceLatentOperatorDeps` in the current scope
- --> tests/ui/pg_device_latent_operator_general_maintenance_fail.rs:4:24
-  |
-4 |     let _store = owner.reconcile_store();
-  |                        ^^^^^^^^^^^^^^^ method not found in `&PgDeviceLatentOperatorDeps`

@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `from_tenant_generation` found for struct `SettingsProjectionReadScope` in the current scope
- --> tests/ui/settings_projection_read_scope_private_ctor_fail.rs:5:47
-  |
-5 |     let _scope = SettingsProjectionReadScope::from_tenant_generation(tenant, generation);
-  |                                               ^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `SettingsProjectionReadScope`

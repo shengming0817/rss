@@ -1,7 +1,0 @@
-error[E0277]: the trait bound `AuditListEntriesFrameworkFailure: From<Response<Body>>` is not satisfied
- --> tests/ui/declared_result_rejects_raw_error.rs:7:70
-  |
-7 |     Err((axum::http::StatusCode::IM_A_TEAPOT, "raw").into_response().into())
-  |                                                                      ^^^^ the trait `From<Response<Body>>` is not implemented for `AuditListEntriesFrameworkFailure`
-  |
-  = note: required for `Response<Body>` to implement `Into<AuditListEntriesFrameworkFailure>`

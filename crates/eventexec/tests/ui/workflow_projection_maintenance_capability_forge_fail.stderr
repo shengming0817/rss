@@ -1,5 +1,0 @@
-error: cannot construct `ProjectionMaintenanceCapability` with struct literal syntax due to private fields
- --> tests/ui/workflow_projection_maintenance_capability_forge_fail.rs:2:19
-  |
-2 |     let _forged = eventexec::ProjectionMaintenanceCapability {};
-  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

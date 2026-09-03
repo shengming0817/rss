@@ -12,8 +12,6 @@ pub const POD_IP_ENV: &str = "RSS_DEPLOYMENT_POD_IP";
 pub const PRIMARY_PORT_ENV: &str = "RSS_DEPLOYMENT_PRIMARY_PORT";
 pub const ADMIN_PORT_ENV: &str = "RSS_DEPLOYMENT_ADMIN_PORT";
 pub const HEALTH_PORT_ENV: &str = "RSS_DEPLOYMENT_HEALTH_PORT";
-pub const MTLS_ALLOW_SET_ENV: &str = "RSS_DEPLOYMENT_MTLS_SPIFFE_ALLOW_SET";
-pub const SPIFFE_ENDPOINT_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
 pub const TRUSTED_PROXY_CIDRS_ENV: &str = "RSS_DEPLOYMENT_TRUSTED_PROXY_CIDRS";
 pub const RATE_LIMIT_PER_SECOND_ENV: &str = "RSS_RATE_LIMIT_PER_SECOND";
 pub const RATE_LIMIT_BURST_ENV: &str = "RSS_RATE_LIMIT_BURST";
@@ -112,8 +110,6 @@ pub struct ServingFrontendConfig<P> {
     pub primary_port: u16,
     pub admin_port: u16,
     pub health_port: u16,
-    pub allow_set: authn::MtlsAllowSet,
-    pub spiffe_endpoint: String,
     pub trusted_proxy_config: P,
     pub rate_limit_quota: diport::RateLimitQuota,
 }
@@ -143,11 +139,6 @@ pub fn capture_serving_frontend<P>(
     if health_port == primary_port || health_port == admin_port {
         return Err(FrontendConfigError::Invalid(HEALTH_PORT_ENV));
     }
-    let peers: Vec<String> = serde_json::from_str(&required(&mut read, MTLS_ALLOW_SET_ENV)?)
-        .map_err(|_| FrontendConfigError::Invalid(MTLS_ALLOW_SET_ENV))?;
-    let allow_set = authn::MtlsAllowSet::new(peers)
-        .map_err(|_| FrontendConfigError::Invalid(MTLS_ALLOW_SET_ENV))?;
-    let spiffe_endpoint = required(&mut read, SPIFFE_ENDPOINT_ENV)?;
     let trusted_proxy_raw = optional(&mut read, TRUSTED_PROXY_CIDRS_ENV)?;
     let trusted_proxy_config = parse_trusted_proxy(trusted_proxy_raw.as_deref())?;
     let rate_limit_quota = diport::RateLimitQuota::try_new(
@@ -164,8 +155,6 @@ pub fn capture_serving_frontend<P>(
         primary_port,
         admin_port,
         health_port,
-        allow_set,
-        spiffe_endpoint,
         trusted_proxy_config,
         rate_limit_quota,
     })
@@ -264,6 +253,8 @@ fn port(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
@@ -289,8 +280,6 @@ mod tests {
             (PRIMARY_PORT_ENV, OsString::from("invalid")),
             (ADMIN_PORT_ENV, OsString::from("8081")),
             (HEALTH_PORT_ENV, OsString::from("8083")),
-            (MTLS_ALLOW_SET_ENV, OsString::from("[]")),
-            (SPIFFE_ENDPOINT_ENV, OsString::from("unix:///spire.sock")),
         ]);
         let error = match capture_serving_frontend(|name| values.remove(name), |_| Ok(())) {
             Ok(_) => panic!("invalid port must fail"),

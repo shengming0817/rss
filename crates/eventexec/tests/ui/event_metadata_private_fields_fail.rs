@@ -9,6 +9,6 @@ fn main() {
     let _ = EventMetadata {
         tenant_id: tenant,
         occurred_at,
-        audit_correlation: None,
+        correlation: None,
     };
 }

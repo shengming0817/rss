@@ -190,6 +190,8 @@ impl StateCas {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;

@@ -1869,6 +1869,8 @@ mod classify_tests {
 /// 验证 occurred_at → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
 #[cfg(test)]
 mod build_properties_tests {
+    #![allow(clippy::expect_used)]
+
     use diport::{
         EnvelopeHeader, EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
         KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID,
@@ -2123,6 +2125,8 @@ mod publish_deadline_tests {
 
 #[cfg(test)]
 mod publish_pipeline_red_tests {
+    #![allow(clippy::expect_used)]
+
     use std::convert::Infallible;
     use std::future;
     use std::sync::Arc;
@@ -2949,6 +2953,8 @@ mod publisher_channel_recovery_deadline_tests {
 
 #[cfg(all(test, feature = "integration"))]
 mod publisher_transport_replacement_integration_tests {
+    #![allow(clippy::new_ret_no_self)]
+
     use std::time::Duration;
 
     use anyhow::{Context as _, anyhow};

@@ -60,9 +60,9 @@ fn safe_metadata() -> TestResult<DlxArchiveSafeMetadata> {
     Ok(DlxArchiveSafeMetadata::try_new(
         DlxArchiveSafeMetadataInput {
             message_id: "message-17".to_string(),
-            producer_domain: "identity".to_string(),
-            consumer_domain: Some("audit".to_string()),
-            contract_id: "identity.session-created.v1".to_string(),
+            producer_domain: "runtime".to_string(),
+            consumer_domain: Some("observer".to_string()),
+            contract_id: "runtime.fact-recorded.v1".to_string(),
             topic: "identity.session.created".to_string(),
             consumer_group: Some("audit.projector".to_string()),
             source_kind: diport::DeadLetterSource::Consumer,

@@ -50,10 +50,7 @@ use crate::integration_shards::{
     Scheduling,
 };
 use crate::workspace_root;
-use crate::{
-    archrules, codegen, contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
-    wsdeps,
-};
+use crate::{archrules, layerdeps, wsdeps};
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Stdio;
@@ -111,48 +108,21 @@ enum PublicApiCheckScope {
 /// in-process Rust 门（无外部进程 / 自管子进程）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalCheck {
-    ContractValidate,
-    /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
-    /// active 默认 deny；三个固定 review rules 为 warn，但未确认 fail-closed；against = origin/develop。
-    ContractBreaking,
     LayerDeps,
     WsDepsDrift,
     /// Production Rustdoc semantic and token-profile trust-chain source guard.
     SourceSemanticGuard,
-    /// Saga durable intent/permit/effect/completion and unknown-no-retry AST guard.
-    SagaDurableRecoveryGuard,
-    /// same-ID SQL/Rust closure（OUTBOX-SAME-ID-WINDOW-01）。
-    OutboxSameIdGuard,
-    /// inbox receipt runtime cutover 旧 token 回流守卫（INBOX-RECEIPTS-CUTOVER-01）。
-    InboxCutoverGuard,
     /// ArchRules 派生索引 + 持久化 funnel 语义 closure 门。
     ArchRules,
-    CodegenCheck,
     /// provider declaration ↔ live behavior runner ↔ owner/reachability ↔ typed integration shard.
     ProviderCapabilitiesCheck,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
-    /// 生产代码禁止裸调用 `ContractBinding::from_static`，只能使用 generated `CONTRACT`。
-    ContractBindingGuard,
-    /// tenant 表 RLS/ACL 终态 meta 守卫（TENANCY-RLS-FORCE-01 / TENANCY-PG-READER-ACL-01；内容扫描迁移 SQL，no-compile）。
-    SchemaRlsGuard,
-    /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01；no-compile）。
-    PgTenantTxGuard,
-    /// domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（TENANCY-REPO-SCOPE-SIGNATURE-01）。
-    RepoScopeGuard,
-    /// tenancy/AuthZ/projection closeout reverse self-check（TENANCY-CLOSEOUT-REVERSE-01；no-compile）。
-    TenancyCloseout,
-    /// generated command policy 与生产 provider impl/callsite 集合守卫（COMMAND-IMPL-ALLOWLIST-01）。
-    CommandSymmetry,
     /// Makefile 的 canonical `ci` / `ci-full` executable 入口守卫（CI-LOCAL-ENTRY-01）。
     CiEntryGuard,
-    /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
-    ReconcileOutboxCommandGuard,
     /// 根 `deny.toml` / `clippy.toml` 结构化 defer 完整性 + 经典注解门
     /// （DEFER-GATE-01；只扫描机器拥有的 TOML，no-compile）。
     DeferGate,
-    /// Postgres 无默认、三个单域及 all-features 编译矩阵；由 xtask 自管 cargo 子进程。
-    PostgresFeatureMatrix,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
     /// ci 专用：`public-api internal --check`（internal signature exact-set 漂移审查，见 `publicapi.rs`）。
@@ -194,14 +164,6 @@ impl Step {
         matches!(self.kind, StepKind::Nextest)
             || matches!(self.kind, StepKind::Internal(InternalCheck::Coverage))
     }
-
-    /// 该步对应的 xtask carrier 源文件——仅 in-process 检查（`Internal` / `ToolGatedInternal`）有；
-    /// `CargoBuiltin`（fmt/build/clippy…）与外部 `Tool`（deny/audit/dylint/nextest）非 archrules carrier，返回 `None`。
-    /// 供 gate↔plan 绑定测试遍历（ARCHRULES-GATE-PLAN-BIND-01，#1574）。
-    #[cfg(test)]
-    pub(crate) fn carrier_file(&self) -> Option<&'static str> {
-        self.id.carrier_file()
-    }
 }
 
 /// 缺工具决策（纯函数，INVARIANT VERIFY-TOOL-GATE-01）。
@@ -222,22 +184,6 @@ fn step_fmt() -> Step {
         id: GateId::Fmt,
         args: &["fmt", "--all", "--", "--check"],
         kind: StepKind::Cargo,
-        env: &[],
-    }
-}
-fn step_contract_validate() -> Step {
-    Step {
-        id: GateId::ContractValidate,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::ContractValidate),
-        env: &[],
-    }
-}
-fn step_contract_breaking() -> Step {
-    Step {
-        id: GateId::ContractBreaking,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::ContractBreaking),
         env: &[],
     }
 }
@@ -265,43 +211,11 @@ fn step_source_semantic_guard() -> Step {
         env: &[],
     }
 }
-fn step_saga_durable_recovery_guard() -> Step {
-    Step {
-        id: GateId::SagaDurableRecoveryGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::SagaDurableRecoveryGuard),
-        env: &[],
-    }
-}
-fn step_outbox_same_id_guard() -> Step {
-    Step {
-        id: GateId::OutboxSameIdGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::OutboxSameIdGuard),
-        env: &[],
-    }
-}
-fn step_inbox_cutover_guard() -> Step {
-    Step {
-        id: GateId::InboxCutoverGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::InboxCutoverGuard),
-        env: &[],
-    }
-}
 fn step_archrules() -> Step {
     Step {
         id: GateId::ArchRules,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ArchRules),
-        env: &[],
-    }
-}
-fn step_codegen_check() -> Step {
-    Step {
-        id: GateId::CodegenCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::CodegenCheck),
         env: &[],
     }
 }
@@ -321,67 +235,11 @@ fn step_pdp_allow_guard() -> Step {
         env: &[],
     }
 }
-fn step_contract_binding_guard() -> Step {
-    Step {
-        id: GateId::ContractBindingGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::ContractBindingGuard),
-        env: &[],
-    }
-}
-fn step_schema_rls_guard() -> Step {
-    Step {
-        id: GateId::SchemaRls,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::SchemaRlsGuard),
-        env: &[],
-    }
-}
-fn step_pg_tenant_tx_guard() -> Step {
-    Step {
-        id: GateId::PgTenantTxGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::PgTenantTxGuard),
-        env: &[],
-    }
-}
-fn step_repo_scope_guard() -> Step {
-    Step {
-        id: GateId::RepoScopeGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::RepoScopeGuard),
-        env: &[],
-    }
-}
-fn step_tenancy_closeout() -> Step {
-    Step {
-        id: GateId::TenancyCloseout,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::TenancyCloseout),
-        env: &[],
-    }
-}
-fn step_command_symmetry() -> Step {
-    Step {
-        id: GateId::CommandSymmetry,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::CommandSymmetry),
-        env: &[],
-    }
-}
 fn step_ci_entry_guard() -> Step {
     Step {
         id: GateId::CiEntryGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::CiEntryGuard),
-        env: &[],
-    }
-}
-fn step_reconcile_outbox_command_guard() -> Step {
-    Step {
-        id: GateId::ReconcileOutboxCommandGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::ReconcileOutboxCommandGuard),
         env: &[],
     }
 }
@@ -420,8 +278,7 @@ fn step_deny_advisories() -> Step {
 ///
 /// `--ignore` = cargo-audit 侧 ignore 单源（cwd-无关、机器可见，不依赖 audit.toml 自动发现——已实测 cargo-audit
 /// 不从 cwd 加载 `audit.toml`）。两门 ignore 一致性（deny.toml ⊆ 本 ignore 集）由
-/// `deny_audit_ignore_lists_reconciled` 守。#2139 临时接受 rumqttc 图内五项 advisory；官方修复后必须与
-/// `deny.toml` 同步删除。
+/// `deny_audit_ignore_lists_reconciled` 守。
 ///
 /// **RUSTSEC-2023-0071（rsa Marvin Attack）**：rsa 是 **phantom Cargo.lock 条目**——`cargo audit`（扫 Cargo.lock
 /// 全量）报，但 `cargo deny advisories`（按 feature-resolved 依赖图，all-features）**不**报，且
@@ -430,21 +287,7 @@ fn step_deny_advisories() -> Step {
 fn step_cargo_audit() -> Step {
     Step {
         id: GateId::CargoAudit,
-        args: &[
-            "audit",
-            "--ignore",
-            "RUSTSEC-2023-0071",
-            "--ignore",
-            "RUSTSEC-2025-0134",
-            "--ignore",
-            "RUSTSEC-2026-0049",
-            "--ignore",
-            "RUSTSEC-2026-0098",
-            "--ignore",
-            "RUSTSEC-2026-0099",
-            "--ignore",
-            "RUSTSEC-2026-0104",
-        ],
+        args: &["audit", "--ignore", "RUSTSEC-2023-0071"],
         kind: StepKind::Cargo,
         env: &[],
     }
@@ -515,14 +358,6 @@ fn step_build_workspace() -> Step {
         env: &[],
     }
 }
-fn step_postgres_feature_matrix() -> Step {
-    Step {
-        id: GateId::PostgresFeatureMatrix,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::PostgresFeatureMatrix),
-        env: &[],
-    }
-}
 /// F7 + #1137：postgres/redis/amqp 等集成测试由 Cargo `[[test]] required-features`（catalog
 /// LocalEligibility / INTEGRATION-SHARD-ELIGIBILITY-01）门控，verify 的 build/clippy/nextest 仅
 /// workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep / redis 幂等 /
@@ -536,15 +371,11 @@ fn step_integration_compile() -> Step {
         args: &[
             "test",
             "-p",
-            "postgres",
-            "-p",
             "redis-adapter",
             "-p",
             "amqp",
-            "-p",
-            "mqtt",
             "--features",
-            "integration,mqtt/broker-tests",
+            "integration",
             "--no-run",
         ],
         kind: StepKind::Cargo,
@@ -746,141 +577,6 @@ crate::ci_lanes::gate_catalog!(define_step_dispatch);
 /// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
 fn audit_plan() -> Vec<Step> {
     plan_for(PlanProjection::Lane(GateGroup::Audit))
-}
-
-const CRATES_IO_REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
-
-struct TemporaryAdvisoryException {
-    advisory: &'static str,
-    package: &'static str,
-    allowed_version: &'static str,
-    patched: &'static [&'static str],
-    unaffected: &'static [&'static str],
-}
-
-const TEMPORARY_RUMQTTC_EXCEPTIONS: &[TemporaryAdvisoryException] = &[
-    TemporaryAdvisoryException {
-        advisory: "RUSTSEC-2025-0134",
-        package: "rustls-pemfile",
-        allowed_version: "2.2.0",
-        patched: &[],
-        unaffected: &[],
-    },
-    TemporaryAdvisoryException {
-        advisory: "RUSTSEC-2026-0049",
-        package: "rustls-webpki",
-        allowed_version: "0.102.8",
-        patched: &[">=0.103.10"],
-        unaffected: &["<0.102.0-alpha.0"],
-    },
-    TemporaryAdvisoryException {
-        advisory: "RUSTSEC-2026-0098",
-        package: "rustls-webpki",
-        allowed_version: "0.102.8",
-        patched: &[">=0.103.12, <0.104.0-alpha.1", ">=0.104.0-alpha.6"],
-        unaffected: &[],
-    },
-    TemporaryAdvisoryException {
-        advisory: "RUSTSEC-2026-0099",
-        package: "rustls-webpki",
-        allowed_version: "0.102.8",
-        patched: &[">=0.103.12, <0.104.0-alpha.1", ">=0.104.0-alpha.6"],
-        unaffected: &[],
-    },
-    TemporaryAdvisoryException {
-        advisory: "RUSTSEC-2026-0104",
-        package: "rustls-webpki",
-        allowed_version: "0.102.8",
-        patched: &[">=0.103.13, <0.104.0-alpha.1", ">=0.104.0-alpha.7"],
-        unaffected: &[],
-    },
-];
-
-fn version_matches_any(version: &semver::Version, requirements: &[&str]) -> Result<bool> {
-    requirements.iter().try_fold(false, |matched, requirement| {
-        Ok(matched || semver::VersionReq::parse(requirement)?.matches(version))
-    })
-}
-
-/// #2139 temporary global ignores must match the complete affected PackageId set exactly.
-fn validate_temporary_rumqttc_advisory_source(
-    packages: &[workspacefacts::ResolvedPackageFacts],
-) -> Result<()> {
-    use workspacefacts::ResolvedPackageSource;
-
-    let is_exact = |package: &workspacefacts::ResolvedPackageFacts, name: &str, version: &str| {
-        package.id().name() == name
-            && package.id().version().to_string() == version
-            && package.id().source()
-                == &ResolvedPackageSource::External(CRATES_IO_REGISTRY.to_owned())
-    };
-    for exception in TEMPORARY_RUMQTTC_EXCEPTIONS {
-        let affected = packages
-            .iter()
-            .filter(|package| package.id().name() == exception.package)
-            .map(|package| {
-                let version = package.id().version();
-                let patched = version_matches_any(version, exception.patched)?;
-                let unaffected = version_matches_any(version, exception.unaffected)?;
-                Ok((!patched && !unaffected).then_some(package))
-            })
-            .collect::<Result<Vec<Option<_>>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            affected.len() == 1
-                && is_exact(affected[0], exception.package, exception.allowed_version),
-            "#2139 {} ignore requires affected PackageIds to equal exactly {} {} from crates.io; found {:?}",
-            exception.advisory,
-            exception.package,
-            exception.allowed_version,
-            affected
-                .iter()
-                .map(|package| package.id())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    let rumqttc = packages
-        .iter()
-        .filter(|package| is_exact(package, "rumqttc", "0.25.1"))
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        rumqttc.len() == 1,
-        "#2139 risk acceptance requires exactly rumqttc 0.25.1 from crates.io; found {}",
-        rumqttc.len()
-    );
-    for (name, version) in [("rustls-pemfile", "2.2.0"), ("rustls-webpki", "0.102.8")] {
-        let vulnerable = packages
-            .iter()
-            .filter(|package| is_exact(package, name, version))
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            vulnerable.len() == 1,
-            "#2139 risk acceptance requires exactly {name} {version} from crates.io; found {}",
-            vulnerable.len()
-        );
-        anyhow::ensure!(
-            rumqttc[0]
-                .direct_dependencies()
-                .contains(vulnerable[0].id()),
-            "#2139 risk acceptance is stale: rumqttc no longer depends on {name} {version}"
-        );
-        let parents = packages
-            .iter()
-            .filter(|package| package.direct_dependencies().contains(vulnerable[0].id()))
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            parents.len() == 1 && parents[0].id() == rumqttc[0].id(),
-            "#2139 risk acceptance for {name} {version} escaped its reviewed source; parents={:?}",
-            parents
-                .iter()
-                .map(|package| package.id())
-                .collect::<Vec<_>>()
-        );
-    }
-    Ok(())
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::external_cmd`]
@@ -1152,16 +848,6 @@ fn run_one(
                 .ok_or_else(|| {
                     anyhow::anyhow!("{}: typed cargo subcommand 与 argv 漂移", step.label())
                 })?;
-            if step.id == GateId::CargoAudit {
-                let resolved_packages = command_facts
-                    .get()
-                    .context(command_scope_facts_context(
-                        "#2139 risk-acceptance source guard",
-                    ))?
-                    .resolved_packages()
-                    .context("project resolved package facts for #2139 risk acceptance")?;
-                validate_temporary_rumqttc_advisory_source(&resolved_packages)?;
-            }
             run_step(
                 lane,
                 step.label(),
@@ -1320,22 +1006,10 @@ fn run_internal(
     command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
 ) -> Result<()> {
     match check {
-        InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
-        // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
-        InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
-        InternalCheck::OutboxSameIdGuard => {
-            run_check(&crate::outbox_same_id_guard::OutboxSameIdGuard)
-        }
-        InternalCheck::InboxCutoverGuard => {
-            run_check(&crate::inbox_cutover_guard::InboxCutoverGuard)
-        }
         InternalCheck::SourceSemanticGuard => {
             run_check(&crate::source_semantic_guard::SourceSemanticGuard)
-        }
-        InternalCheck::SagaDurableRecoveryGuard => {
-            run_check(&crate::saga_durable_recovery_guard::SagaDurableRecoveryGuard)
         }
         InternalCheck::ArchRules => {
             let facts = command_facts
@@ -1343,30 +1017,10 @@ fn run_internal(
                 .context(command_scope_facts_context("archrules"))?;
             run_check(&archrules::ArchRules::new(facts))
         }
-        InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::ProviderCapabilitiesCheck => crate::provider_capabilities::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
-        InternalCheck::ContractBindingGuard => {
-            let facts = command_facts
-                .get()
-                .context(command_scope_facts_context("contract-binding-guard"))?;
-            run_check(&crate::contract_binding_guard::ContractBindingGuard::new(
-                root, facts,
-            ))
-        }
-        InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
-        InternalCheck::PgTenantTxGuard => run_check(&crate::pg_tenant_tx_guard::PgTenantTxGuard),
-        InternalCheck::RepoScopeGuard => run_check(&repo_scope_guard::RepoScopeGuard),
-        InternalCheck::TenancyCloseout => run_check(&crate::tenancy_closeout::TenancyCloseout),
-        InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::CiEntryGuard => crate::ci_entry_guard::run(),
-        InternalCheck::ReconcileOutboxCommandGuard => {
-            run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
-        }
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
-        InternalCheck::PostgresFeatureMatrix => {
-            crate::postgres_feature_matrix::run(opts.execution_policy)
-        }
         InternalCheck::Coverage => {
             let scope = if opts.coverage_typed_job {
                 crate::ci_impact::coverage_scope_for_typed_job(root)?
@@ -1595,9 +1249,7 @@ pub(crate) fn run(
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
-        contract_against: contract_against
-            .unwrap_or(contract::breaking::DEFAULT_AGAINST)
-            .to_owned(),
+        contract_against: contract_against.unwrap_or("origin/develop").to_owned(),
         coverage_typed_job: false,
         public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
@@ -1639,7 +1291,7 @@ pub(crate) fn run_remote_preflight(selection: &crate::ci_impact::SelectionPlan) 
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
-        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        contract_against: "origin/develop".to_owned(),
         coverage_typed_job: false,
         public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
@@ -1699,7 +1351,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
         partition: None,
         nextest_lane: crate::nextest::NextestLane::CiCore,
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
-        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        contract_against: "origin/develop".to_owned(),
         coverage_typed_job: false,
         public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
@@ -1896,7 +1548,7 @@ fn run_fixed_gate_job(job: FixedCiJob, selection: &crate::ci_impact::SelectionPl
         partition: None,
         nextest_lane: crate::nextest::NextestLane::CiCore,
         core_test_selection: core_selection_for_fixed_job(selection)?,
-        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        contract_against: "origin/develop".to_owned(),
         coverage_typed_job: false,
         public_api: match selection.public_api_selection() {
             crate::ci_impact::ProjectedPublicApiSelection::None => None,
@@ -1949,14 +1601,7 @@ fn execute_non_producer_integration_group(
     integration: &IntegrationSelection,
     group: IntegrationJobGroup,
 ) -> Result<()> {
-    match group {
-        IntegrationJobGroup::Postgres => {
-            bail!("postgres integration must execute through its typed producer funnel")
-        }
-        IntegrationJobGroup::Transport | IntegrationJobGroup::Runtime => {
-            execute_fixed_integration_shards(integration, group)
-        }
-    }
+    execute_fixed_integration_shards(integration, group)
 }
 
 fn run_fixed_integration_group(
@@ -1968,14 +1613,7 @@ fn run_fixed_integration_group(
         eprintln!("integration-critical/{group}: selection is empty; fixed carrier succeeds");
         return Ok(());
     }
-    match group {
-        IntegrationJobGroup::Postgres => {
-            execute_fixed_integration_shards(&integration, IntegrationJobGroup::Postgres)
-        }
-        IntegrationJobGroup::Transport | IntegrationJobGroup::Runtime => {
-            execute_non_producer_integration_group(&integration, group)
-        }
-    }
+    execute_non_producer_integration_group(&integration, group)
 }
 
 pub(crate) fn run_fixed_job(
@@ -1998,7 +1636,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
-        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        contract_against: "origin/develop".to_owned(),
         coverage_typed_job: false,
         public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
@@ -2142,7 +1780,7 @@ mod tests {
             partition: None,
             nextest_lane: crate::nextest::NextestLane::Verify,
             core_test_selection: crate::nextest::CoreTestSelection::workspace(),
-            contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+            contract_against: "origin/develop".to_owned(),
             coverage_typed_job: false,
             public_api: None,
             execution_policy: crate::cmd::ExecutionPolicy::FailFast,
@@ -2576,48 +2214,16 @@ mod tests {
         ] {
             assert!(!labels(&plan).contains(&"doc-contracts"));
             assert!(labels(&plan).contains(&"source-semantic-guard"));
-            assert!(labels(&plan).contains(&"saga-durable-recovery-guard"));
         }
         let fast = verify_plan(&opts(true, false));
         assert!(!labels(&fast).contains(&"doc-contracts"));
         assert!(!labels(&fast).contains(&"source-semantic-guard"));
-        assert!(!labels(&fast).contains(&"saga-durable-recovery-guard"));
     }
 
     #[test]
     fn verify_plan_matches_registry_membership() -> anyhow::Result<()> {
         let plan = verify_plan(&opts(false, false));
         ensure_plan_has_exact_gate_ids(&plan, registry_gate_ids(|spec| spec.included_in_verify()))?;
-        Ok(())
-    }
-
-    #[test]
-    fn postgres_feature_matrix_is_persistent_compile_gate_but_not_fast() -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("verify", plan_for(PlanProjection::Verify)),
-            ("release-check", plan_for(RELEASE_CHECK)),
-            ("ci-core", plan_for(PlanProjection::Lane(GateGroup::Core))),
-        ] {
-            let step = plan
-                .iter()
-                .find(|step| step.id == GateId::PostgresFeatureMatrix)
-                .ok_or_else(|| anyhow::anyhow!("{name} plan lacks postgres feature matrix"))?;
-            assert!(
-                step.needs_compile(),
-                "{name} must classify matrix as compile"
-            );
-            assert_eq!(step.carrier_file(), None);
-            assert!(matches!(
-                step.kind,
-                StepKind::Internal(InternalCheck::PostgresFeatureMatrix)
-            ));
-        }
-        assert!(
-            !verify_plan(&opts(true, false))
-                .iter()
-                .any(|step| step.id == GateId::PostgresFeatureMatrix),
-            "verify --fast must skip compile gates"
-        );
         Ok(())
     }
 
@@ -2764,7 +2370,7 @@ mod tests {
             .iter_mut()
             .find(|step| step.id == GateId::ProviderCapabilitiesCheck)
             .context("committed verify plan lacks provider capabilities check")?
-            .kind = StepKind::Internal(InternalCheck::CodegenCheck);
+            .kind = StepKind::Internal(InternalCheck::WsDepsDrift);
         assert!(validate_provider_capabilities_gate(&wrong_executor).is_err());
         Ok(())
     }
@@ -2831,9 +2437,6 @@ mod tests {
             "package {} must enable feature {expected_feature}, args={args:?}",
             batch.package
         );
-        if batch.package == integration_shards::LocalFeatureScope::Mqtt.package() {
-            assert_eq!(expected_feature, "broker-tests");
-        }
         match batch.kind {
             integration_shards::TargetKind::Lib => {
                 assert!(args.iter().any(|arg| arg == "--lib"));
@@ -3050,53 +2653,6 @@ mod tests {
             calls.get(),
             0,
             "non-facts labeled plan must keep CommandWorkspaceFacts zero-load"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn command_scope_one_load_across_nextest_and_contract_consumers() -> anyhow::Result<()> {
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        let root = workspace_root()?;
-        let metadata_bytes = {
-            let output = crate::cmd::cargo_cmd(
-                crate::cmd::CargoSubcommand::Metadata,
-                &["--locked", "--all-features", "--format-version", "1"],
-                &[],
-                Some(&root),
-            )
-            .output()
-            .context("execute cargo metadata for one-load fixture bytes")?;
-            anyhow::ensure!(
-                output.status.success(),
-                "cargo metadata failed while preparing one-load fixture bytes (status={}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
-            output.stdout
-        };
-        let calls = Rc::new(Cell::new(0));
-        let counter = Rc::clone(&calls);
-        let injected = metadata_bytes.clone();
-        let command_facts =
-            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
-                counter.set(counter.get() + 1);
-                Ok(injected.clone())
-            });
-
-        crate::nextest::validate_workspace(&root, command_facts.get()?)?;
-        run_internal(
-            InternalCheck::ContractBindingGuard,
-            &opts(false, false),
-            &root,
-            &command_facts,
-        )?;
-        assert_eq!(
-            calls.get(),
-            1,
-            "nextest and contract-binding consumers must share one metadata load"
         );
         Ok(())
     }
@@ -3428,90 +2984,6 @@ mod tests {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
     }
 
-    fn rumqttc_advisory_facts_fixture() -> anyhow::Result<Vec<workspacefacts::ResolvedPackageFacts>>
-    {
-        use workspacefacts::testing::{external_package_id, external_resolved_package};
-
-        let pemfile = external_package_id("rustls-pemfile", "2.2.0", CRATES_IO_REGISTRY)?;
-        let webpki = external_package_id("rustls-webpki", "0.102.8", CRATES_IO_REGISTRY)?;
-        let rumqttc = external_package_id("rumqttc", "0.25.1", CRATES_IO_REGISTRY)?;
-        Ok(vec![
-            external_resolved_package(rumqttc, &[pemfile.clone(), webpki.clone()]),
-            external_resolved_package(pemfile, &[]),
-            external_resolved_package(webpki, &[]),
-        ])
-    }
-
-    #[test]
-    fn temporary_rumqttc_advisory_source_is_exact_and_stale_fail_closed() -> anyhow::Result<()> {
-        use workspacefacts::testing::{external_package_id, external_resolved_package};
-
-        let green = rumqttc_advisory_facts_fixture()?;
-        validate_temporary_rumqttc_advisory_source(&green)?;
-
-        let mut second_version = green.clone();
-        second_version.push(external_resolved_package(
-            external_package_id("rustls-webpki", "0.103.11", CRATES_IO_REGISTRY)?,
-            &[],
-        ));
-        assert!(
-            validate_temporary_rumqttc_advisory_source(&second_version).is_err(),
-            "a second affected version covered by a global advisory ignore must fail closed"
-        );
-
-        let mut second_unmaintained = green.clone();
-        second_unmaintained.push(external_resolved_package(
-            external_package_id("rustls-pemfile", "2.1.3", CRATES_IO_REGISTRY)?,
-            &[],
-        ));
-        assert!(
-            validate_temporary_rumqttc_advisory_source(&second_unmaintained).is_err(),
-            "the unmaintained advisory ignore must reject every additional package version"
-        );
-
-        let mut patched = green.clone();
-        patched.push(external_resolved_package(
-            external_package_id("rustls-webpki", "0.103.13", CRATES_IO_REGISTRY)?,
-            &[],
-        ));
-        validate_temporary_rumqttc_advisory_source(&patched)?;
-
-        let mut second_source = green.clone();
-        second_source.push(external_resolved_package(
-            external_package_id(
-                "rustls-webpki",
-                "0.102.8",
-                "git+https://example.invalid/webpki?rev=bad#deadbeef",
-            )?,
-            &[],
-        ));
-        assert!(
-            validate_temporary_rumqttc_advisory_source(&second_source).is_err(),
-            "the same affected version from another source must fail closed"
-        );
-
-        let webpki = external_package_id("rustls-webpki", "0.102.8", CRATES_IO_REGISTRY)?;
-        let mut second_parent = green.clone();
-        second_parent.push(external_resolved_package(
-            external_package_id("other-client", "1.0.0", CRATES_IO_REGISTRY)?,
-            &[webpki],
-        ));
-        assert!(
-            validate_temporary_rumqttc_advisory_source(&second_parent).is_err(),
-            "an additional parent of the allowed package must fail closed"
-        );
-
-        let stale = green
-            .into_iter()
-            .filter(|package| package.id().name() == "rumqttc")
-            .collect::<Vec<_>>();
-        assert!(
-            validate_temporary_rumqttc_advisory_source(&stale).is_err(),
-            "an upstream-fixed graph must expose stale advisory ignores"
-        );
-        Ok(())
-    }
-
     /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter。
     #[test]
     fn integration_compile_covers_adapters_no_run() {
@@ -3522,7 +2994,7 @@ mod tests {
             ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test)
         );
         assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
-        for p in ["postgres", "redis-adapter", "amqp", "mqtt"] {
+        for p in ["redis-adapter", "amqp"] {
             assert!(step.args.contains(&p), "integration-compile 须覆盖 {p}");
         }
     }
@@ -5143,13 +4615,6 @@ mod tests {
     /// anti-vacuity：构造 deny ⊄ audit 的反例 → 判定返回 false（守卫非恒真）。
     #[test]
     fn deny_audit_ignore_lists_reconciled() -> anyhow::Result<()> {
-        const TEMPORARILY_ACCEPTED_RUMQTTC_ADVISORIES: &[&str] = &[
-            "RUSTSEC-2025-0134",
-            "RUSTSEC-2026-0049",
-            "RUSTSEC-2026-0098",
-            "RUSTSEC-2026-0099",
-            "RUSTSEC-2026-0104",
-        ];
         // 解析 deny.toml `[advisories].ignore`：兼容裸字符串形 `"RUSTSEC-..."` 与结构化形
         // `{ id = "RUSTSEC-...", reason = "..." }`（cargo-deny 0.16+）——否则对结构化条目静默返回空、守卫恒真。
         fn deny_advisory_ignores(toml_src: &str) -> Result<Vec<String>> {
@@ -5190,28 +4655,6 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         let deny = deny_advisory_ignores(&toml_src)?;
         let audit = cargo_audit_ignored_ids();
-        let deny_toml = toml::from_str::<toml::Value>(&toml_src)?;
-        for advisory in TEMPORARILY_ACCEPTED_RUMQTTC_ADVISORIES {
-            let entry = deny_toml["advisories"]["ignore"]
-                .as_array()
-                .and_then(|entries| {
-                    entries.iter().find(|entry| {
-                        entry.get("id").and_then(toml::Value::as_str) == Some(*advisory)
-                    })
-                })
-                .ok_or_else(|| anyhow::anyhow!("deny.toml 缺少 rumqttc 临时风险接受 {advisory}"))?;
-            assert!(
-                entry
-                    .get("reason")
-                    .and_then(toml::Value::as_str)
-                    .is_some_and(|reason| !reason.trim().is_empty()),
-                "deny.toml rumqttc 临时风险接受 {advisory} 必须使用非空 reason 的结构化 ignore"
-            );
-            assert!(
-                audit.contains(advisory),
-                "cargo-audit 侧未同步 rumqttc 临时风险接受 {advisory}"
-            );
-        }
         // anti-vacuity ③：args 解析必须真解析出 cargo-audit 侧 ignore（含已知 phantom rsa）——否则 args 解析
         // 静默失效时 audit=[] 会让「空 deny ⊆ 空 audit」恒真，对账失去意义。锁住 parser 有效。
         assert!(

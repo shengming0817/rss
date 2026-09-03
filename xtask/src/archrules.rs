@@ -66,17 +66,26 @@ impl GovernanceCheck for ArchRules<'_> {
         let root = workspace_root()?;
         let index = build_index(&root, Some(self.facts))?;
         let mut findings = index.findings;
-        findings.extend(validate_matrix(
-            &root,
-            &index.records,
-            &index.hard_admissions,
-            &index.test_evidence,
-        )?);
+        let legacy_funnel_surface =
+            root.join("generated").is_dir() || root.join("adapters/postgres/migrations").is_dir();
+        if legacy_funnel_surface {
+            findings.extend(validate_matrix(
+                &root,
+                &index.records,
+                &index.hard_admissions,
+                &index.test_evidence,
+            )?);
+        }
         findings.extend(application_delivery_boundary_findings(&root)?);
         Ok((
             format!(
-                "{} 条规则索引 + 持久化 funnel 语义校验",
-                index.records.len()
+                "{} 条规则索引 + {}",
+                index.records.len(),
+                if legacy_funnel_surface {
+                    "持久化 funnel 语义校验"
+                } else {
+                    "已移除产品 funnel 不再入场"
+                }
             ),
             findings,
         ))
@@ -6572,19 +6581,9 @@ members = ["rss_demo"]
         let facts = command_facts.get()?;
         let (summary, findings) = ArchRules::new(facts).check()?;
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(summary.ends_with("持久化 funnel 语义校验"), "{summary}");
+        assert!(summary.ends_with("已移除产品 funnel 不再入场"), "{summary}");
         assert!(!summary.contains("行持久化 funnel"), "{summary}");
 
-        let index = build_index(&root, Some(facts))?;
-        let report = render_matrix(&index.records)?;
-        for retired in ["--write", "--check", "文档漂移", "当前行数", "committed"] {
-            assert!(
-                !report.contains(retired),
-                "on-demand report retained presentation gate token {retired}"
-            );
-        }
-        assert!(report.contains("source issue stable-ID"), "{report}");
-        assert!(report.contains("Hard carrier 证明"), "{report}");
         Ok(())
     }
 

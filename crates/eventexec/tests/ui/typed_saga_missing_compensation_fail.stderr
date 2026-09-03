@@ -1,8 +1,0 @@
-error[E0046]: not all trait items implemented, missing: `compensate`, `probe_compensation`
- --> tests/ui/typed_saga_missing_compensation_fail.rs:9:1
-  |
-9 | impl SagaStep<PrepareStep> for Reserve {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `compensate`, `probe_compensation` in implementation
-  |
-  = help: implement the missing item: `fn compensate(&self, _: SagaCompensationContext, _: <PrepareStep as StepMarker>::Receipt) -> impl Future<Output = SagaAttemptOutcome<consistency::saga::CompensationOutcome>> + Send { todo!() }`
-  = help: implement the missing item: `fn probe_compensation(&self, _: SagaCompensationContext, _: <PrepareStep as StepMarker>::Receipt) -> impl Future<Output = SagaProbeOutcome<consistency::saga::CompensationOutcome>> + Send { todo!() }`

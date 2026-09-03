@@ -211,12 +211,12 @@ error[E0080]: evaluation panicked: provider scope drift
     |
 150 |   const SCOPE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     |  _____________________________________^
-151 | |     ProviderRole::ServiceTokenReplayStore,
-152 | |     ProviderRole::ServiceTokenReplayStore.activation(),
-153 | |     DiportPort::ServiceTokenReplayStore,
+151 | |     ProviderRole::ListenerRateLimiter,
+152 | |     ProviderRole::ListenerRateLimiter.activation(),
+153 | |     DiportPort::RateLimiter,
 ...   |
-166 | |     ],
-167 | | );
+162 | |     &[],
+163 | | );
     | |_^ evaluation of `SCOPE` failed inside this call
     |
 note: inside `ProviderCatalogEntry::checked`
@@ -230,16 +230,16 @@ note: inside `ProviderCatalogEntry::checked`
     |         --------------------------------------------------------------------- in this macro invocation
 
 error[E0080]: evaluation panicked: provider failure posture drift
-   --> tests/ui/provider_catalog_checked_matrix.rs:169:47
+   --> tests/ui/provider_catalog_checked_matrix.rs:165:47
     |
-169 |   const FAILURE_POSTURE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+165 |   const FAILURE_POSTURE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     |  _______________________________________________^
-170 | |     ProviderRole::ServiceTokenReplayStore,
-171 | |     ProviderRole::ServiceTokenReplayStore.activation(),
-172 | |     DiportPort::ServiceTokenReplayStore,
+166 | |     ProviderRole::ListenerRateLimiter,
+167 | |     ProviderRole::ListenerRateLimiter.activation(),
+168 | |     DiportPort::RateLimiter,
 ...   |
-185 | |     ],
-186 | | );
+177 | |     &[],
+178 | | );
     | |_^ evaluation of `FAILURE_POSTURE` failed inside this call
     |
 note: inside `ProviderCatalogEntry::checked`

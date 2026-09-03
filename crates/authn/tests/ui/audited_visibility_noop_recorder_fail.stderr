@@ -1,9 +1,0 @@
-error[E0599]: no method named `audited_cross_tenant_visibility` found for reference `&Principal` in the current scope
- --> tests/ui/audited_visibility_noop_recorder_fail.rs:8:10
-  |
-7 |       let _forged = principal
-  |  ___________________-
-8 | |         .audited_cross_tenant_visibility(ctx, clock, audit, |_| async { Ok(()) })
-  | |         -^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&Principal`
-  | |_________|
-  |

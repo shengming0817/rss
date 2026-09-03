@@ -99,8 +99,6 @@
 //! dyn-dispatch 依赖点），与 unsafe 无关。dynosaur exact-pin `=0.3.0`：升级须复测本不变式 + 审 changelog。
 
 pub mod acker;
-pub mod audit_sink;
-mod broker_acceptance;
 pub mod cas_store;
 pub mod checkpoint_store;
 pub mod clock;
@@ -108,7 +106,6 @@ pub mod dead_letter_store;
 pub mod dlx_lifecycle;
 mod effect;
 pub mod envelope;
-pub mod external_csr;
 pub mod fenced_writer;
 pub mod key_provider;
 pub mod leader_elector;
@@ -117,8 +114,6 @@ pub mod managed_resource;
 pub mod metrics_exporter;
 pub mod object_store;
 pub mod outbox_emitter;
-pub mod pdp;
-pub mod pki_artifact;
 pub mod publisher;
 pub mod rate_limiter;
 // provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进跨 crate 导出面）：`pub enum` 错误
@@ -129,7 +124,6 @@ mod redacted;
 // `pub`（经下方 re-export 进跨 crate 导出面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
 mod dlq_operator;
 mod redacted_bytes;
-pub mod revocation_store;
 pub mod saga_durable_store;
 pub mod secret_resolver;
 pub mod signer;
@@ -139,8 +133,6 @@ pub use acker::{
     AckAction, AckError, AckableSubscriber, Acker, Delivery, DeliveryStream, DynAckableSubscriber,
     DynAcker,
 };
-pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
-pub use broker_acceptance::{BrokerAcceptanceMint, BrokerAccepted};
 pub use cas_store::{
     CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, DynCasStore, GlobalCasResource,
     GlobalCasStoreKey,
@@ -177,10 +169,6 @@ pub use envelope::{
     KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
     KEY_TRACE, MessageEnvelope, MetadataError, RESERVED_METADATA_KEYS,
 };
-pub use external_csr::{
-    DynExternalCsrResolver, ExternalCsrError, ExternalCsrEvidence, ExternalCsrRequest,
-    ExternalCsrResolver,
-};
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
     WriteOutcome,
@@ -208,23 +196,6 @@ pub use outbox_emitter::{
     DynOutboxEmitter, EnvelopeCausationId, EnvelopeIdentityError, EnvelopeSubjectId, OpaqueActorId,
     OutboxActor, OutboxEmitError, OutboxEmitErrorKind, OutboxEmitter, OutboxEnvelopeParts,
 };
-pub use pdp::{
-    DynPdp, DynServiceTokenReplayStore, FederatedAccessProfile, JwtSigningBinding, Pdp, PdpError,
-    ProjectionOperatorTokenProfile, RawCredential, RssAccessProfile, SERVICE_TOKEN_TENANT_HEADER,
-    ServiceTokenProfile, ServiceTokenReplayDeadline, ServiceTokenReplayDeadlineError,
-    ServiceTokenReplayDisposition, ServiceTokenReplayKey, ServiceTokenReplayKeyError,
-    ServiceTokenReplayScope, ServiceTokenReplayStore, ServiceTokenReplayStoreError,
-    ServiceTokenTenantBinding, TokenAlgorithm, TokenPolicy, TokenProfile, TokenProfileMarker,
-    VerifiedAccessGrantFacts, VerifiedClaimShapeError, VerifiedClaims, VerifiedClaimsView,
-    VerifiedFederatedPermissions,
-};
-pub use pki_artifact::{
-    ExternalPkiProviderClosure, MAX_PKI_CERT_BYTES, MAX_PKI_CSR_BYTES, MAX_PKI_ISSUER_CERTS,
-    PkiArtifactError, PkiArtifactErrorKind, PkiArtifactRequest, PkiArtifactValueError,
-    PkiAuthorizationReceipt, PkiChainDigest, PkiCommonName, PkiExtendedKeyUsage, PkiPolicyDigest,
-    PkiProviderConfigDigest, PkiRequestGeneration, PkiSan, PkiSanRef, PkiSpkiDigest,
-    VerifiedExternalPkiArtifactEvidence, canonical_pki_chain_artifact,
-};
 pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 pub use rate_limiter::{
     DynRateLimiter, MAX_RATE_LIMIT_QUOTA, RateLimitDecision, RateLimitError, RateLimitKey,
@@ -232,10 +203,6 @@ pub use rate_limiter::{
 };
 pub use redacted::RedactedSource;
 pub use redacted_bytes::RedactedBytes;
-pub use revocation_store::{
-    CertNotAfter, CertNotAfterError, CertScope, CertSerial, CertSerialError, DynRevocationStore,
-    RevocationStore, RevocationStoreError,
-};
 pub use saga_durable_store::{
     DynSagaDurableStore, DynSagaTenantSource, SagaClaimOutcome, SagaClaimRequest,
     SagaCompensationCompletion, SagaCompensationFailure, SagaCompensationIntent,
@@ -295,12 +262,6 @@ pub mod test_support {
         )
     }
 
-    /// Mint provider acceptance for adapter behavior tests without opening a production mint site.
-    #[must_use]
-    pub const fn broker_accepted() -> super::BrokerAccepted {
-        super::broker_acceptance::accepted_for_test()
-    }
-
     pub fn saga_operator_authorization<A: SagaOperatorAction>(
         caller: vocab::ServiceCallerDomain,
         identity: SagaWorkerIdentity,
@@ -324,12 +285,6 @@ pub mod test_support {
         instance: consistency::SagaInstanceRef,
         start_audit_id: SagaStartAuditId,
     ) -> SagaStartAuthorization {
-        SagaStartAuthorization::issue(
-            authmint::SagaStartMint::capability(),
-            caller,
-            identity,
-            instance,
-            start_audit_id,
-        )
+        SagaStartAuthorization::issue(caller, identity, instance, start_audit_id)
     }
 }

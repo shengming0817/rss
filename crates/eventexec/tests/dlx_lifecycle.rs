@@ -44,11 +44,11 @@ fn canonical_archive_envelope_matches_committed_bytes() -> TestResult {
     let tenant = rss_request_context::TenantId::parse("11111111-2222-4333-8444-555555555555")?;
     let metadata = DlxArchiveSafeMetadata::try_new(DlxArchiveSafeMetadataInput {
         message_id: "message-17".to_string(),
-        producer_domain: "identity".to_string(),
-        consumer_domain: Some("audit".to_string()),
-        contract_id: "identity.session-created.v1".to_string(),
-        topic: "identity.session.created".to_string(),
-        consumer_group: Some("audit.projector".to_string()),
+        producer_domain: "runtime".to_string(),
+        consumer_domain: Some("observer".to_string()),
+        contract_id: "runtime.fact-recorded.v1".to_string(),
+        topic: "runtime.fact.recorded".to_string(),
+        consumer_group: Some("runtime.projector".to_string()),
         source_kind: diport::DeadLetterSource::Consumer,
         error_summary: "retry budget exhausted".to_string(),
         num_attempts: 10,
@@ -65,7 +65,7 @@ fn canonical_archive_envelope_matches_committed_bytes() -> TestResult {
     );
     assert_eq!(
         record.encode().expose(),
-        include_bytes!("fixtures/dlx_archive_v1.bin")
+        b"rss-dlx-archive-v1\ndeadLetterId:018f31a8-893d-7a52-8e17-3ca9df50120b\ntenantId:11111111-2222-4333-8444-555555555555\nsourceKind:consumer\nmessageIdHex:6d6573736167652d3137\nproducerDomainHex:72756e74696d65\nconsumerDomainHex:6f62736572766572\ncontractIdHex:72756e74696d652e666163742d7265636f726465642e7631\ntopicHex:72756e74696d652e666163742e7265636f72646564\nconsumerGroupHex:72756e74696d652e70726f6a6563746f72\nerrorSummaryHex:72657472792062756467657420657868617573746564\nnumAttempts:10\nfirstAttemptEpochMicros:1700000000123456\nlastAttemptEpochMicros:1700000100654321\npayloadLength:42\nmetadataDigestSha256:abababababababababababababababababababababababababababababababab\ncapsuleLength:10\ncapsuleHex:63617073756c652d7633\n"
     );
     Ok(())
 }

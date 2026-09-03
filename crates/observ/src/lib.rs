@@ -14,12 +14,10 @@
 //! 等动态 label，也不向 eventexec 反向暴露 runtime implementation。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
 
-mod device_latent;
 mod eventing;
 mod localtx;
 mod telemetry;
 
-pub use device_latent::{DeviceLatentMetric, DeviceLatentObservation};
 pub use eventing::EventingTelemetryEmitter;
 pub use localtx::{LocalTxMetric, LocalTxObservation};
 pub use telemetry::{TelemetryResource, TelemetryResourceError};
@@ -162,6 +160,8 @@ impl MetricLabel for CertLabel {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     #[test]

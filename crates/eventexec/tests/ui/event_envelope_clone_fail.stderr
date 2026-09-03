@@ -1,8 +1,8 @@
 error[E0277]: the trait bound `EventEnvelope<()>: Clone` is not satisfied
- --> tests/ui/event_envelope_clone_fail.rs:6:22
+ --> tests/ui/event_envelope_clone_fail.rs:4:30
   |
-6 |     requires_clone::<EventEnvelope<()>>();
-  |                      ^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `EventEnvelope<()>`
+4 | fn main() { requires_clone::<EventEnvelope<()>>(); }
+  |                              ^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `EventEnvelope<()>`
   |
 note: required by a bound in `requires_clone`
  --> tests/ui/event_envelope_clone_fail.rs:3:22

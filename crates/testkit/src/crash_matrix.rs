@@ -78,25 +78,11 @@ pub enum CrashStatus {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CrashRunner {
+    ProviderNeutral,
     Postgres,
     Rabbitmq,
     PostgresRabbitmq,
     PostgresRedis,
-}
-
-/// Stable Saga identity exported by the declarative fault catalog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SagaFaultCatalogCase {
-    /// Fixture and runner registry identity.
-    pub fixture_id: &'static str,
-    /// Contract identity exercised by the fault.
-    pub contract_id: &'static str,
-    /// Generated sealed contract binding used by the runner.
-    pub generated_contract: &'static str,
-    /// Journey runner function identity.
-    pub runner_symbol: &'static str,
-    /// Independent test identity exposed to the test harness.
-    pub test_symbol: &'static str,
 }
 
 /// Closed execution shape required by a crash fault's real-backend journey runner.
@@ -117,8 +103,7 @@ macro_rules! define_crash_fault_catalog {
         crash_point: $crash_point:literal,
         expected_invariant: $expected_invariant:literal,
         runner: $runner:ident,
-        execution: $execution:ident,
-        saga: $saga:expr $(,)?
+        execution: $execution:ident $(,)?
     } ),+ $(,)?) => {
         /// Closed semantic fault covered by the consistency crash matrix.
         ///
@@ -172,54 +157,31 @@ macro_rules! define_crash_fault_catalog {
                 }
             }
 
-            /// Stable Saga catalog metadata, when this fault is a Saga fault.
-            pub const fn saga_case(self) -> Option<SagaFaultCatalogCase> {
-                match self {
-                    $(
-                        Self::$variant => match $saga {
-                            Some((
-                                fixture_id,
-                                contract_id,
-                                generated_contract,
-                                runner_symbol,
-                                test_symbol,
-                            )) => Some(SagaFaultCatalogCase {
-                                fixture_id,
-                                contract_id,
-                                generated_contract,
-                                runner_symbol,
-                                test_symbol,
-                            }),
-                            None => None,
-                        },
-                    )+
-                }
-            }
         }
     };
 }
 
 define_crash_fault_catalog! {
-    OutboxAfterPublishBeforeSettle => { mechanism: Outbox, crash_point: "after-publish-before-settle", expected_invariant: "outbox-publish-settled-once", runner: PostgresRabbitmq, execution: Normal, saga: None },
-    OutboxTransientPublishFailure => { mechanism: Outbox, crash_point: "during-transient-publish", expected_invariant: "outbox-transient-remains-retryable", runner: Postgres, execution: Normal, saga: None },
-    OutboxConfirmLostChannelClose => { mechanism: Outbox, crash_point: "post-send-close-before-confirm", expected_invariant: "outbox-ambiguous-retry-consumer-effect-once", runner: PostgresRabbitmq, execution: ConfirmLost, saga: None },
-    OutboxPermanentPublishFailure => { mechanism: Outbox, crash_point: "during-permanent-publish", expected_invariant: "outbox-dlx-summary-redacted", runner: Postgres, execution: Normal, saga: None },
-    OutboxStaleLeaseContender => { mechanism: Outbox, crash_point: "stale-contender-settle", expected_invariant: "outbox-stale-lease-settle-rejected", runner: Postgres, execution: StaleContender, saga: None },
-    OutboxLeaseDeadlineExpired => { mechanism: Outbox, crash_point: "deadline-expired-settle", expected_invariant: "outbox-expired-deadline-settle-rejected", runner: Postgres, execution: DeadlineExpired, saga: None },
-    InboxClaimCrashBeforeCommit => { mechanism: Inbox, crash_point: "after-claim-before-commit", expected_invariant: "inbox-stale-claim-reclaimable", runner: Postgres, execution: Normal, saga: None },
-    InboxCommitBeforeAckCrash => { mechanism: Inbox, crash_point: "after-commit-before-ack", expected_invariant: "inbox-redelivery-dedupes-once", runner: PostgresRabbitmq, execution: Normal, saga: None },
-    InboxLeaseLostBeforeCommit => { mechanism: Inbox, crash_point: "lease-lost-before-commit", expected_invariant: "inbox-stale-lease-cannot-commit", runner: Postgres, execution: Normal, saga: None },
-    SagaForwardEffectBeforeCompletion => { mechanism: Saga, crash_point: "effect-before-completion", expected_invariant: "saga-forward-effect-recovers-once", runner: PostgresRedis, execution: Normal, saga: Some(("saga-forward-effect-before-completion", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_forward_effect_before_completion", "saga_forward_effect_before_completion")) },
-    SagaCompensationBeforeJournal => { mechanism: Saga, crash_point: "compensation-before-journal", expected_invariant: "saga-compensation-recovers-once", runner: PostgresRedis, execution: Normal, saga: Some(("saga-compensation-before-journal", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_compensation_before_journal", "saga_compensation_before_journal")) },
-    SagaLeaseLostDuringCall => { mechanism: Saga, crash_point: "lease-lost-during-call", expected_invariant: "saga-stale-effect-worker-fenced", runner: PostgresRedis, execution: Normal, saga: Some(("saga-lease-lost-during-call", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_lease_lost_during_call", "saga_lease_lost_during_call")) },
-    SagaReceiptDuplicateConflict => { mechanism: Saga, crash_point: "receipt-duplicate-conflict", expected_invariant: "saga-receipt-conflict-fails-closed", runner: PostgresRedis, execution: Normal, saga: Some(("saga-receipt-duplicate-conflict", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_receipt_duplicate_conflict", "saga_receipt_duplicate_conflict")) },
-    SagaRetryExhaustion => { mechanism: Saga, crash_point: "retry-exhaustion", expected_invariant: "saga-retry-budget-exhausted", runner: PostgresRedis, execution: Normal, saga: Some(("saga-retry-exhaustion", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_retry_exhaustion", "saga_retry_exhaustion")) },
-    SagaOldDefinitionResume => { mechanism: Saga, crash_point: "old-definition-resume", expected_invariant: "saga-pinned-definition-resumes", runner: PostgresRedis, execution: Normal, saga: Some(("saga-old-definition-resume", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_old_definition_resume", "saga_old_definition_resume")) },
-    SagaTenantFencingIsolation => { mechanism: Saga, crash_point: "tenant-fencing-isolation", expected_invariant: "saga-tenant-fencing-isolated", runner: PostgresRedis, execution: Normal, saga: Some(("saga-tenant-fencing-isolation", "billing.checkout", "generated::saga::billing_v1::CONTRACT", "run_saga_tenant_fencing_isolation", "saga_tenant_fencing_isolation")) },
-    ProjectionAfterApplyBeforeCheckpoint => { mechanism: Projection, crash_point: "after-apply-before-checkpoint", expected_invariant: "projection-replay-idempotent", runner: Postgres, execution: Normal, saga: None },
-    ProjectionStaleCheckpointWriter => { mechanism: Projection, crash_point: "stale-checkpoint-writer", expected_invariant: "projection-stale-writer-rejected", runner: Postgres, execution: Normal, saga: None },
-    ReconcileDispatchBeforeResultRecord => { mechanism: Reconcile, crash_point: "after-dispatch-before-result-record", expected_invariant: "reconcile-dispatch-key-stable", runner: Postgres, execution: Normal, saga: None },
-    ReconcileLeaseLostBeforeWrite => { mechanism: Reconcile, crash_point: "lease-lost-before-write", expected_invariant: "reconcile-stale-writer-rejected", runner: Postgres, execution: Normal, saga: None },
+    OutboxAfterPublishBeforeSettle => { mechanism: Outbox, crash_point: "after-publish-before-settle", expected_invariant: "outbox-publish-settled-once", runner: ProviderNeutral, execution: Normal },
+    OutboxTransientPublishFailure => { mechanism: Outbox, crash_point: "during-transient-publish", expected_invariant: "outbox-transient-remains-retryable", runner: Postgres, execution: Normal },
+    OutboxConfirmLostChannelClose => { mechanism: Outbox, crash_point: "post-send-close-before-confirm", expected_invariant: "outbox-ambiguous-retry-consumer-effect-once", runner: PostgresRabbitmq, execution: ConfirmLost },
+    OutboxPermanentPublishFailure => { mechanism: Outbox, crash_point: "during-permanent-publish", expected_invariant: "outbox-dlx-summary-redacted", runner: Postgres, execution: Normal },
+    OutboxStaleLeaseContender => { mechanism: Outbox, crash_point: "stale-contender-settle", expected_invariant: "outbox-stale-lease-settle-rejected", runner: Postgres, execution: StaleContender },
+    OutboxLeaseDeadlineExpired => { mechanism: Outbox, crash_point: "deadline-expired-settle", expected_invariant: "outbox-expired-deadline-settle-rejected", runner: Postgres, execution: DeadlineExpired },
+    InboxClaimCrashBeforeCommit => { mechanism: Inbox, crash_point: "after-claim-before-commit", expected_invariant: "inbox-stale-claim-reclaimable", runner: Postgres, execution: Normal },
+    InboxCommitBeforeAckCrash => { mechanism: Inbox, crash_point: "after-commit-before-ack", expected_invariant: "inbox-redelivery-dedupes-once", runner: PostgresRabbitmq, execution: Normal },
+    InboxLeaseLostBeforeCommit => { mechanism: Inbox, crash_point: "lease-lost-before-commit", expected_invariant: "inbox-stale-lease-cannot-commit", runner: Postgres, execution: Normal },
+    SagaForwardEffectBeforeCompletion => { mechanism: Saga, crash_point: "effect-before-completion", expected_invariant: "saga-forward-effect-recovers-once", runner: PostgresRedis, execution: Normal },
+    SagaCompensationBeforeJournal => { mechanism: Saga, crash_point: "compensation-before-journal", expected_invariant: "saga-compensation-recovers-once", runner: PostgresRedis, execution: Normal },
+    SagaLeaseLostDuringCall => { mechanism: Saga, crash_point: "lease-lost-during-call", expected_invariant: "saga-stale-effect-worker-fenced", runner: PostgresRedis, execution: Normal },
+    SagaReceiptDuplicateConflict => { mechanism: Saga, crash_point: "receipt-duplicate-conflict", expected_invariant: "saga-receipt-conflict-fails-closed", runner: PostgresRedis, execution: Normal },
+    SagaRetryExhaustion => { mechanism: Saga, crash_point: "retry-exhaustion", expected_invariant: "saga-retry-budget-exhausted", runner: PostgresRedis, execution: Normal },
+    SagaOldDefinitionResume => { mechanism: Saga, crash_point: "old-definition-resume", expected_invariant: "saga-pinned-definition-resumes", runner: PostgresRedis, execution: Normal },
+    SagaTenantFencingIsolation => { mechanism: Saga, crash_point: "tenant-fencing-isolation", expected_invariant: "saga-tenant-fencing-isolated", runner: PostgresRedis, execution: Normal },
+    ProjectionAfterApplyBeforeCheckpoint => { mechanism: Projection, crash_point: "after-apply-before-checkpoint", expected_invariant: "projection-replay-idempotent", runner: Postgres, execution: Normal },
+    ProjectionStaleCheckpointWriter => { mechanism: Projection, crash_point: "stale-checkpoint-writer", expected_invariant: "projection-stale-writer-rejected", runner: Postgres, execution: Normal },
+    ReconcileDispatchBeforeResultRecord => { mechanism: Reconcile, crash_point: "after-dispatch-before-result-record", expected_invariant: "reconcile-dispatch-key-stable", runner: Postgres, execution: Normal },
+    ReconcileLeaseLostBeforeWrite => { mechanism: Reconcile, crash_point: "lease-lost-before-write", expected_invariant: "reconcile-stale-writer-rejected", runner: Postgres, execution: Normal },
 }
 
 /// State of broker tenant authority represented by a fixture.
@@ -802,15 +764,15 @@ title = "publish succeeds before settle crash"
 level = "L2"
 mechanism = "outbox"
 status = "ready"
-domain = "identity"
-contractId = "identity.session-created"
+domain = "runtime"
+contractId = "runtime.fact-recorded"
 tenantAlias = "tenant-a"
 messageAlias = "message-a"
 partitionKeyAlias = "aggregate-a"
 tenantAuthority = "valid"
 crashPoint = "after-publish-before-settle"
 expectedInvariant = "outbox-publish-settled-once"
-runner = "postgres-rabbitmq"
+runner = "provider-neutral"
 "#;
 
     #[test]
@@ -891,19 +853,6 @@ runner = "postgres-rabbitmq"
                 Some(expected)
             );
             assert_eq!(expected.expected_runner(), CrashRunner::PostgresRedis);
-            assert!(matches!(
-                expected.saga_case(),
-                Some(exported)
-                    if exported.fixture_id.starts_with("saga-")
-                        && exported.contract_id == "billing.checkout"
-            ));
         }
-        assert_eq!(
-            CrashFaultSpec::ALL
-                .iter()
-                .filter_map(|spec| spec.saga_case())
-                .count(),
-            cases.len()
-        );
     }
 }

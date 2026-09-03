@@ -24,9 +24,7 @@ pub(crate) enum Resource {
     Postgres,
     Redis,
     Amqp,
-    Mqtt,
     ObjectStorage,
-    Vault,
 }
 
 /// Closed adapter package identities. Adapter source changes are projected through the external
@@ -34,50 +32,37 @@ pub(crate) enum Resource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AdapterPackage {
     Postgres,
-    PostgresMigration,
     Redis,
     Amqp,
-    Mqtt,
     ObjectStorage,
-    Oidc,
     Vault,
 }
 
 impl AdapterPackage {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Postgres,
-        Self::PostgresMigration,
         Self::Redis,
         Self::Amqp,
-        Self::Mqtt,
         Self::ObjectStorage,
-        Self::Oidc,
         Self::Vault,
     ];
 
     pub(crate) const fn package(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
-            Self::PostgresMigration => "postgres-migration",
             Self::Redis => "redis-adapter",
             Self::Amqp => "amqp",
-            Self::Mqtt => "mqtt",
             Self::ObjectStorage => "s3",
-            Self::Oidc => "oidc",
             Self::Vault => "vault",
         }
     }
 
     pub(crate) const fn projection(self) -> AdapterProjection {
         match self {
-            Self::Postgres | Self::PostgresMigration => {
-                AdapterProjection::Resource(Resource::Postgres)
-            }
+            Self::Postgres => AdapterProjection::Resource(Resource::Postgres),
             Self::Redis => AdapterProjection::Resource(Resource::Redis),
             Self::Amqp => AdapterProjection::Resource(Resource::Amqp),
-            Self::Mqtt => AdapterProjection::Resource(Resource::Mqtt),
             Self::ObjectStorage => AdapterProjection::Resource(Resource::ObjectStorage),
-            Self::Oidc => AdapterProjection::SecurityProvider(SecurityProvider::Oidc),
             Self::Vault => AdapterProjection::SecurityProvider(SecurityProvider::Vault),
         }
     }
@@ -106,32 +91,27 @@ impl AdapterProjection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SecurityProvider {
-    Oidc,
     Vault,
 }
 
 impl SecurityProvider {
-    pub(crate) const ALL: [Self; 2] = [Self::Oidc, Self::Vault];
+    pub(crate) const ALL: [Self; 1] = [Self::Vault];
 
     const fn carrier_marker(self) -> Option<ImpactMarker> {
         match self {
-            Self::Oidc => Some(ImpactMarker::OidcProvider),
             Self::Vault => Some(ImpactMarker::VaultProvider),
         }
     }
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Oidc => "security-provider:oidc",
             Self::Vault => "security-provider:vault",
         }
     }
 
     fn expected_critical_carriers(self) -> BTreeSet<IntegrationUnitId> {
-        use IntegrationUnitId as Id;
         match self {
-            Self::Oidc => BTreeSet::new(),
-            Self::Vault => BTreeSet::from([Id::VaultLive]),
+            Self::Vault => BTreeSet::new(),
         }
     }
 }
@@ -141,14 +121,8 @@ impl SecurityProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ImpactMarker {
     PostgresPackage,
-    PostgresMigrationPackage,
-    AuditPackage,
-    AuthnPackage,
-    IdentityPackage,
-    SettingsPackage,
     AmqpPackage,
     EventexecPackage,
-    MqttPackage,
     RedisAdapterPackage,
     HttpdPackage,
     HttpservePackage,
@@ -156,26 +130,16 @@ pub(crate) enum ImpactMarker {
     DistributedPackage,
     ConsistencyPackage,
     S3Package,
-    BillingContract,
     FrameworkContract,
     RuntimeSurface,
-    LocalTxContract,
-    DeviceCertificateCandidate,
-    OidcProvider,
     VaultProvider,
 }
 
 impl ImpactMarker {
-    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 18] = [
+    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 11] = [
         ("postgres", Self::PostgresPackage),
-        ("postgres-migration", Self::PostgresMigrationPackage),
-        ("audit", Self::AuditPackage),
-        ("authn", Self::AuthnPackage),
-        ("identity", Self::IdentityPackage),
-        ("settings", Self::SettingsPackage),
         ("amqp", Self::AmqpPackage),
         ("eventexec", Self::EventexecPackage),
-        ("mqtt", Self::MqttPackage),
         ("redis-adapter", Self::RedisAdapterPackage),
         ("httpd", Self::HttpdPackage),
         ("httpserve", Self::HttpservePackage),
@@ -183,21 +147,14 @@ impl ImpactMarker {
         ("distributed", Self::DistributedPackage),
         ("consistency", Self::ConsistencyPackage),
         ("s3", Self::S3Package),
-        ("billing", Self::BillingContract),
         ("_framework", Self::FrameworkContract),
     ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::PostgresPackage => "package:postgres",
-            Self::PostgresMigrationPackage => "package:postgres-migration",
-            Self::AuditPackage => "package:audit",
-            Self::AuthnPackage => "package:authn",
-            Self::IdentityPackage => "package:identity",
-            Self::SettingsPackage => "package:settings",
             Self::AmqpPackage => "package:amqp",
             Self::EventexecPackage => "package:eventexec",
-            Self::MqttPackage => "package:mqtt",
             Self::RedisAdapterPackage => "package:redis-adapter",
             Self::HttpdPackage => "package:httpd",
             Self::HttpservePackage => "package:httpserve",
@@ -205,12 +162,8 @@ impl ImpactMarker {
             Self::DistributedPackage => "package:distributed",
             Self::ConsistencyPackage => "package:consistency",
             Self::S3Package => "package:s3",
-            Self::BillingContract => "contract:billing",
             Self::FrameworkContract => "contract:_framework",
             Self::RuntimeSurface => "runtime-surface",
-            Self::LocalTxContract => "localtx-contract",
-            Self::DeviceCertificateCandidate => "device-certificate-candidate",
-            Self::OidcProvider => "security-provider:oidc",
             Self::VaultProvider => "security-provider:vault",
         }
     }
@@ -228,9 +181,7 @@ impl Resource {
             Self::Postgres => "postgres",
             Self::Redis => "redis",
             Self::Amqp => "amqp",
-            Self::Mqtt => "mqtt",
             Self::ObjectStorage => "object-storage",
-            Self::Vault => "vault",
         }
     }
 }
@@ -306,23 +257,17 @@ pub(crate) struct IntegrationUnitSpec {
 /// planner from reconstructing feature strings from package names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LocalFeatureScope {
-    Postgres,
-    PostgresMigration,
     RedisAdapter,
     Amqp,
-    Mqtt,
     Testkit,
     S3,
     Vault,
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 8] = [
-        Self::Postgres,
-        Self::PostgresMigration,
+    pub(crate) const ALL: [Self; 5] = [
         Self::RedisAdapter,
         Self::Amqp,
-        Self::Mqtt,
         Self::Testkit,
         Self::S3,
         Self::Vault,
@@ -330,11 +275,8 @@ impl LocalFeatureScope {
 
     pub(crate) const fn package(self) -> &'static str {
         match self {
-            Self::Postgres => "postgres",
-            Self::PostgresMigration => "postgres-migration",
             Self::RedisAdapter => "redis-adapter",
             Self::Amqp => "amqp",
-            Self::Mqtt => "mqtt",
             Self::Testkit => "testkit",
             Self::S3 => "s3",
             Self::Vault => "vault",
@@ -343,24 +285,16 @@ impl LocalFeatureScope {
 
     pub(crate) const fn feature(self) -> &'static str {
         match self {
-            Self::Mqtt => "broker-tests",
-            Self::Postgres
-            | Self::PostgresMigration
-            | Self::RedisAdapter
-            | Self::Amqp
-            | Self::Testkit
-            | Self::S3
-            | Self::Vault => "integration",
+            Self::RedisAdapter | Self::Amqp | Self::Testkit | Self::S3 | Self::Vault => {
+                "integration"
+            }
         }
     }
 
     const fn root(self) -> &'static str {
         match self {
-            Self::Postgres => "adapters/postgres",
-            Self::PostgresMigration => "adapters/postgres-migration",
             Self::RedisAdapter => "adapters/redis",
             Self::Amqp => "adapters/amqp",
-            Self::Mqtt => "adapters/mqtt",
             Self::Testkit => "crates/testkit",
             Self::S3 => "adapters/s3",
             Self::Vault => "adapters/vault",
@@ -673,62 +607,13 @@ pub(crate) fn changed_integration_source(path: &str) -> Option<ChangedIntegratio
 }
 
 integration_shard_catalog! {
-    PostgresDomain => {
-        name: "postgres-domain",
-        local_feature_scopes: [Postgres, PostgresMigration],
-        units: [
-            PostgresLib => ("postgres-lib", IntegrationCritical, "postgres", "postgres", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresPackage, DeviceCertificateCandidate], capabilities: []),
-            PostgresMigrationLib => ("postgres-migration-lib", IntegrationCritical, "postgres-migration", "postgres_migration", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresMigrationPackage], capabilities: []),
-            PostgresFeatureManifest => ("postgres-feature-manifest", ReleaseCheck, "postgres", "feature_manifest", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresDomainFeatureSurfaceTrybuild => ("postgres-domain-feature-surface-trybuild", ReleaseCheck, "postgres", "domain_feature_surface_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigrationOpsContract => ("postgres-migration-ops-contract", ReleaseCheck, "postgres", "migration_ops_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0067HistoricalArtifact => ("postgres-migration-0067-historical-artifact", ReleaseCheck, "postgres", "migration_0067_historical_artifact", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0086HardCutover => ("postgres-migration-0086-hard-cutover", ReleaseCheck, "postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0087DeviceCommandFencing => ("postgres-migration-0087-device-command-fencing", ReleaseCheck, "postgres", "migration_0087_device_command_fencing", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0087DeviceCommandFencingContract => ("postgres-migration-0087-device-command-fencing-contract", ReleaseCheck, "postgres", "migration_0087_device_command_fencing_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0089SagaOperatorControl => ("postgres-migration-0089-saga-operator-control", ReleaseCheck, "postgres", "migration_0089_saga_operator_control", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0090SagaOperatorLane => ("postgres-migration-0090-saga-operator-lane", ReleaseCheck, "postgres", "migration_0090_saga_operator_lane", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0092DeviceCertificateArtifacts => ("postgres-migration-0092-device-certificate-artifacts", ReleaseCheck, "postgres", "migration_0092_device_certificate_artifacts", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0094DeviceIngressUow => ("postgres-migration-0094-device-ingress-uow", ReleaseCheck, "postgres", "migration_0094_device_ingress_uow", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0095DeviceOutbox => ("postgres-migration-0095-device-outbox", ReleaseCheck, "postgres", "migration_0095_device_outbox", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0096DeviceCertificateEnrollment => ("postgres-migration-0096-device-certificate-enrollment", ReleaseCheck, "postgres", "migration_0096_device_certificate_enrollment", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0097ProjectionWorkerLifecycle => ("postgres-migration-0097-projection-worker-lifecycle", ReleaseCheck, "postgres", "migration_0097_projection_worker_lifecycle", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0097ProjectionWorkerUpgrade => ("postgres-migration-0097-projection-worker-upgrade", ReleaseCheck, "postgres", "migration_0097_projection_worker_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0098SettingsActiveServing => ("postgres-migration-0098-settings-active-serving", ReleaseCheck, "postgres", "migration_0098_settings_active_serving", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0098SettingsActiveServingUpgrade => ("postgres-migration-0098-settings-active-serving-upgrade", ReleaseCheck, "postgres", "migration_0098_settings_active_serving_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0099DeviceCredentialAuthority => ("postgres-migration-0099-device-credential-authority", ReleaseCheck, "postgres", "migration_0099_device_credential_authority", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0102AbacProfile => ("postgres-migration-0102-abac-profile", ReleaseCheck, "postgres", "migration_0102_abac_profile", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0102AbacProfileUpgrade => ("postgres-migration-0102-abac-profile-upgrade", ReleaseCheck, "postgres", "migration_0102_abac_profile_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0103DeviceCommandExpiry => ("postgres-migration-0103-device-command-expiry", ReleaseCheck, "postgres", "migration_0103_device_command_expiry", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0104AbacPolicyOperatorValues => ("postgres-migration-0104-abac-policy-operator-values", ReleaseCheck, "postgres", "migration_0104_abac_policy_operator_values", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0104AbacPolicyOperatorValuesUpgrade => ("postgres-migration-0104-abac-policy-operator-values-upgrade", ReleaseCheck, "postgres", "migration_0104_abac_policy_operator_values_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0105ProjectionGeneration => ("postgres-migration-0105-projection-generation", ReleaseCheck, "postgres", "migration_0105_projection_generation", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0105ProjectionGenerationUpgrade => ("postgres-migration-0105-projection-generation-upgrade", ReleaseCheck, "postgres", "migration_0105_projection_generation_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0107ResourceSecurityFactLedger => ("postgres-migration-0107-resource-security-fact-ledger", ReleaseCheck, "postgres", "migration_0107_resource_security_fact_ledger", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0108ProjectionWorkerStatus => ("postgres-migration-0108-projection-worker-status", ReleaseCheck, "postgres", "migration_0108_projection_worker_status", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0109InboxBacklogSamples => ("postgres-migration-0109-inbox-backlog-samples", ReleaseCheck, "postgres", "migration_0109_inbox_backlog_samples", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresMigration0109InboxBacklogSamplesLive => ("postgres-migration-0109-inbox-backlog-samples-live", ReleaseCheck, "postgres", "migration_0109_inbox_backlog_samples_live", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0112DevicePolicyCorrelation => ("postgres-migration-0112-device-policy-correlation", ReleaseCheck, "postgres", "migration_0112_device_policy_correlation", Test, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
-            PostgresMigration0113ReceiptBoundReadyUpgrade => ("postgres-migration-0113-receipt-bound-ready-upgrade", ReleaseCheck, "postgres", "migration_0113_receipt_bound_ready_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [DeviceCertificateCandidate], capabilities: []),
-            PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-        ],
-    },
     EventTransport => {
         name: "event-transport",
-        local_feature_scopes: [Amqp, Mqtt, Testkit],
+        local_feature_scopes: [Amqp, Testkit],
         units: [
             AmqpLib => ("amqp-lib", IntegrationCritical, "amqp", "amqp", Lib, Parallel, Affected, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
             AmqpIntegration => ("amqp-integration", IntegrationCritical, "amqp", "integration", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
-            MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
-            MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
-            MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            MqttSessionSurface => ("mqtt-session-surface", ReleaseCheck, "mqtt", "session_surface", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            MqttTlsConfig => ("mqtt-tls-config", ReleaseCheck, "mqtt", "tls_config", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            TestkitEventingLifecycleT2 => ("testkit-eventing-lifecycle-t2", ReleaseCheck, "testkit", "eventing_lifecycle_t2", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            TestkitMqttMtlsFixture => ("testkit-mqtt-mtls-fixture", ReleaseCheck, "testkit", "mqtt_mtls_fixture", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
-            TestkitMqttOwnershipGate => ("testkit-mqtt-ownership-gate", ReleaseCheck, "testkit", "mqtt_ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            TestkitEventingLifecycleT1 => ("testkit-eventing-lifecycle-t1", ReleaseCheck, "testkit", "eventing_lifecycle_t1", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
         ],
     },
     RuntimeHttpAuth => {
@@ -736,7 +621,6 @@ integration_shard_catalog! {
         local_feature_scopes: [Vault],
         units: [
             VaultLib => ("vault-lib", ReleaseCheck, "vault", "vault", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            VaultLive => ("vault-live", IntegrationCritical, "vault", "live_vault", Test, Serial, RemoteOnly, resources: [Vault], impact_packages: [VaultProvider], capabilities: [Docker]),
         ],
     },
     CdcProjectionSaga => {
@@ -745,11 +629,9 @@ integration_shard_catalog! {
         units: [
             TestkitLib => ("testkit-lib", ReleaseCheck, "testkit", "testkit", Lib, Serial, Affected, resources: [Redis], impact_packages: [], capabilities: []),
             TestkitCrashMatrix => ("testkit-crash-matrix", ReleaseCheck, "testkit", "crash_matrix", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            DeviceCommandConformance => ("device-command-conformance", ReleaseCheck, "testkit", "device_command_conformance", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             TestkitHarness => ("testkit-harness", ReleaseCheck, "testkit", "harness", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             TestkitLocalOnly => ("testkit-local-only", ReleaseCheck, "testkit", "local_only", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             TestkitWait => ("testkit-wait", ReleaseCheck, "testkit", "wait", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            PostgresTestLoginGovernance => ("postgres-test-login-governance", ReleaseCheck, "testkit", "postgres_test_login_governance", Test, Serial, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             ProjectionTargetConformanceTrybuild => ("projection-target-conformance-trybuild", ReleaseCheck, "testkit", "projection_target_conformance_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             ProviderCatalogTrybuild => ("provider-catalog-trybuild", ReleaseCheck, "testkit", "provider_catalog_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             RedisAdapterLib => ("redis-adapter-lib", ReleaseCheck, "redis-adapter", "redis", Lib, Parallel, Affected, resources: [Redis], impact_packages: [], capabilities: []),
@@ -774,6 +656,7 @@ integration_shard_catalog! {
 /// INVARIANT: CI-INTEGRATION-GROUP-01 { level = "Hard", exec = "native-compile", source = "code", native = "IntegrationJobGroup is closed and IntegrationShard::execution_group exhaustively assigns every canonical shard" }.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum IntegrationJobGroup {
+    /// Reserved empty scheduler lane; PostgreSQL conformance is externally owned.
     Postgres,
     Transport,
     Runtime,
@@ -802,7 +685,6 @@ impl IntegrationJobGroup {
 impl IntegrationShard {
     pub(crate) const fn execution_group(self) -> IntegrationJobGroup {
         match self {
-            Self::PostgresDomain => IntegrationJobGroup::Postgres,
             Self::EventTransport | Self::ObjectStorage => IntegrationJobGroup::Transport,
             Self::RuntimeHttpAuth | Self::CdcProjectionSaga => IntegrationJobGroup::Runtime,
         }
@@ -909,7 +791,7 @@ fn validate_integration_unit_catalog(
         if spec
             .resources
             .iter()
-            .any(|resource| matches!(resource, Resource::Mqtt | Resource::ObjectStorage))
+            .any(|resource| matches!(resource, Resource::ObjectStorage))
             && !spec.capabilities.contains(&Capability::Docker)
         {
             bail!(
@@ -1199,9 +1081,7 @@ impl IntegrationShard {
     pub(crate) const fn partition_policy(self) -> PartitionPolicy {
         match self {
             Self::EventTransport | Self::RuntimeHttpAuth => PartitionPolicy::TwoWayHash,
-            Self::PostgresDomain | Self::CdcProjectionSaga | Self::ObjectStorage => {
-                PartitionPolicy::Unpartitioned
-            }
+            Self::CdcProjectionSaga | Self::ObjectStorage => PartitionPolicy::Unpartitioned,
         }
     }
 
@@ -1284,16 +1164,7 @@ pub(crate) fn batches(
         .collect()
 }
 
-const INTEGRATION_PACKAGES: &[&str] = &[
-    "postgres",
-    "postgres-migration",
-    "redis-adapter",
-    "amqp",
-    "mqtt",
-    "testkit",
-    "s3",
-    "vault",
-];
+const INTEGRATION_PACKAGES: &[&str] = &["redis-adapter", "amqp", "testkit", "s3", "vault"];
 
 type TargetId = (String, String, String);
 
@@ -1731,8 +1602,7 @@ pub(crate) fn write_catalog_workspace_fixture(
         for unit in INTEGRATION_UNIT_SPECS.iter().filter(|unit| {
             unit.package == scope.package()
                 && !(matches!(drift, IntegrationCatalogFixtureDrift::Stale)
-                    && unit.id
-                        == IntegrationUnitId::PostgresMigration0107ResourceSecurityFactLedger)
+                    && unit.id == IntegrationUnitId::TestkitHarness)
         }) {
             match unit.kind {
                 TargetKind::Lib => {
@@ -1760,7 +1630,7 @@ pub(crate) fn write_catalog_workspace_fixture(
                 }
             }
         }
-        if scope == LocalFeatureScope::Postgres
+        if scope == LocalFeatureScope::RedisAdapter
             && matches!(drift, IntegrationCatalogFixtureDrift::Unassigned)
         {
             manifest.push_str(
@@ -1797,9 +1667,7 @@ fn external_resource_present_from_lookup(
         Resource::Amqp => nonempty("RSS_AMQP_TEST_URL"),
         // The MQTT T2 always self-provisions the exact mTLS/plugin image; a URL-only external
         // broker cannot prove the fixture's PKI, ACL or assertion contract.
-        Resource::Mqtt => false,
         Resource::ObjectStorage => false,
-        Resource::Vault => false,
     }
 }
 
@@ -1874,9 +1742,9 @@ mod tests {
             critical
         );
 
-        let postgres = critical.unit_ids_for_shard(IntegrationShard::PostgresDomain);
-        assert!(!postgres.is_empty());
-        assert!(postgres.is_subset(critical.unit_ids()));
+        let transport = critical.unit_ids_for_shard(IntegrationShard::EventTransport);
+        assert!(!transport.is_empty());
+        assert!(transport.is_subset(critical.unit_ids()));
         Ok(())
     }
 
@@ -1962,9 +1830,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["postgres", "transport", "runtime"]
         );
+        assert!(IntegrationJobGroup::Postgres.shards().next().is_none());
         assert!(
             IntegrationJobGroup::ALL
                 .into_iter()
+                .filter(|group| *group != IntegrationJobGroup::Postgres)
                 .all(|group| group.shards().next().is_some())
         );
         assert_eq!(flattened.len(), unique.len());
@@ -2002,7 +1872,6 @@ mod tests {
         assert_eq!(
             names,
             [
-                "postgres-domain",
                 "event-transport",
                 "runtime-http-auth",
                 "cdc-projection-saga",
@@ -2017,151 +1886,6 @@ mod tests {
         assert!("unknown".parse::<IntegrationShard>().is_err());
         validate_local_feature_catalog(SHARD_SPECS)?;
         Ok(())
-    }
-
-    #[test]
-    fn postgres_migration_real_backend_carrier_is_unique_serial_and_feature_enabled() {
-        let spec = IntegrationShard::PostgresDomain.spec();
-        assert!(
-            spec.local_feature_scopes
-                .contains(&LocalFeatureScope::PostgresMigration)
-        );
-        let units = spec
-            .units
-            .iter()
-            .filter(|unit| unit.package == "postgres-migration")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            units.len(),
-            1,
-            "operator integration carrier must be unique"
-        );
-        assert_eq!(units[0].target, "postgres_migration");
-        assert_eq!(units[0].kind, TargetKind::Lib);
-        assert_eq!(units[0].scheduling, Scheduling::Serial);
-    }
-
-    #[test]
-    fn migration_0087_fencing_carrier_is_typed_serial_remote_postgres() {
-        let unit = IntegrationUnitId::PostgresMigration0087DeviceCommandFencing.spec();
-        assert_eq!(unit.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(unit.package, "postgres");
-        assert_eq!(unit.target, "migration_0087_device_command_fencing");
-        assert_eq!(unit.kind, TargetKind::Test);
-        assert_eq!(unit.scheduling, Scheduling::Serial);
-        assert_eq!(unit.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(unit.resources, &[Resource::Postgres]);
-    }
-
-    #[test]
-    fn migration_0087_fencing_contract_carrier_is_typed_parallel_affected() {
-        let unit = IntegrationUnitId::PostgresMigration0087DeviceCommandFencingContract.spec();
-        assert_eq!(unit.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(unit.package, "postgres");
-        assert_eq!(
-            unit.target,
-            "migration_0087_device_command_fencing_contract"
-        );
-        assert_eq!(unit.kind, TargetKind::Test);
-        assert_eq!(unit.scheduling, Scheduling::Parallel);
-        assert_eq!(unit.local_eligibility, LocalEligibility::Affected);
-        assert!(unit.resources.is_empty());
-    }
-
-    #[test]
-    fn migration_0089_saga_operator_control_carrier_is_typed_serial_remote_only() {
-        let unit = IntegrationUnitId::PostgresMigration0089SagaOperatorControl.spec();
-        assert_eq!(unit.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(unit.package, "postgres");
-        assert_eq!(unit.target, "migration_0089_saga_operator_control");
-        assert_eq!(unit.kind, TargetKind::Test);
-        assert_eq!(unit.scheduling, Scheduling::Serial);
-        assert_eq!(unit.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(unit.resources, &[Resource::Postgres]);
-    }
-
-    #[test]
-    fn migration_0102_abac_carriers_preserve_static_and_live_execution_boundaries() {
-        let static_profile = IntegrationUnitId::PostgresMigration0102AbacProfile.spec();
-        assert_eq!(static_profile.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(static_profile.package, "postgres");
-        assert_eq!(static_profile.target, "migration_0102_abac_profile");
-        assert_eq!(static_profile.kind, TargetKind::Test);
-        assert_eq!(static_profile.scheduling, Scheduling::Parallel);
-        assert_eq!(static_profile.local_eligibility, LocalEligibility::Affected);
-        assert!(static_profile.resources.is_empty());
-
-        let live_upgrade = IntegrationUnitId::PostgresMigration0102AbacProfileUpgrade.spec();
-        assert_eq!(live_upgrade.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(live_upgrade.package, "postgres");
-        assert_eq!(live_upgrade.target, "migration_0102_abac_profile_upgrade");
-        assert_eq!(live_upgrade.kind, TargetKind::Test);
-        assert_eq!(live_upgrade.scheduling, Scheduling::Serial);
-        assert_eq!(live_upgrade.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
-    }
-
-    #[test]
-    fn migration_0104_abac_value_carriers_preserve_static_and_live_execution_boundaries() {
-        let static_contract =
-            IntegrationUnitId::PostgresMigration0104AbacPolicyOperatorValues.spec();
-        assert_eq!(static_contract.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(static_contract.package, "postgres");
-        assert_eq!(
-            static_contract.target,
-            "migration_0104_abac_policy_operator_values"
-        );
-        assert_eq!(static_contract.kind, TargetKind::Test);
-        assert_eq!(static_contract.scheduling, Scheduling::Parallel);
-        assert_eq!(
-            static_contract.local_eligibility,
-            LocalEligibility::Affected
-        );
-        assert!(static_contract.resources.is_empty());
-
-        let live_upgrade =
-            IntegrationUnitId::PostgresMigration0104AbacPolicyOperatorValuesUpgrade.spec();
-        assert_eq!(live_upgrade.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(live_upgrade.package, "postgres");
-        assert_eq!(
-            live_upgrade.target,
-            "migration_0104_abac_policy_operator_values_upgrade"
-        );
-        assert_eq!(live_upgrade.kind, TargetKind::Test);
-        assert_eq!(live_upgrade.scheduling, Scheduling::Serial);
-        assert_eq!(live_upgrade.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
-    }
-
-    #[test]
-    fn migration_0105_projection_generation_carriers_preserve_execution_boundaries() {
-        let static_contract = IntegrationUnitId::PostgresMigration0105ProjectionGeneration.spec();
-        assert_eq!(static_contract.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(static_contract.package, "postgres");
-        assert_eq!(
-            static_contract.target,
-            "migration_0105_projection_generation"
-        );
-        assert_eq!(static_contract.kind, TargetKind::Test);
-        assert_eq!(static_contract.scheduling, Scheduling::Parallel);
-        assert_eq!(
-            static_contract.local_eligibility,
-            LocalEligibility::Affected
-        );
-        assert!(static_contract.resources.is_empty());
-
-        let live_upgrade =
-            IntegrationUnitId::PostgresMigration0105ProjectionGenerationUpgrade.spec();
-        assert_eq!(live_upgrade.shard, IntegrationShard::PostgresDomain);
-        assert_eq!(live_upgrade.package, "postgres");
-        assert_eq!(
-            live_upgrade.target,
-            "migration_0105_projection_generation_upgrade"
-        );
-        assert_eq!(live_upgrade.kind, TargetKind::Test);
-        assert_eq!(live_upgrade.scheduling, Scheduling::Serial);
-        assert_eq!(live_upgrade.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
     }
 
     #[test]
@@ -2307,8 +2031,8 @@ mod tests {
         local_eligibility: LocalEligibility,
     ) -> IntegrationUnitSpec {
         IntegrationUnitSpec::new(
-            IntegrationUnitId::PostgresFeatureManifest,
-            IntegrationShard::PostgresDomain,
+            IntegrationUnitId::TestkitHarness,
+            IntegrationShard::EventTransport,
             ExecutionProfile::ReleaseCheck,
             package,
             target,
@@ -2425,59 +2149,63 @@ mod tests {
     fn cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift() -> Result<()> {
         let root = eligibility_sandbox()?;
         let remote = eligibility_unit(
-            "postgres",
-            "migration_0086_hard_cutover",
+            "redis-adapter",
+            "integration_remote",
             LocalEligibility::RemoteOnly,
         );
-        let affected = eligibility_unit("postgres", "feature_manifest", LocalEligibility::Affected);
-        let mqtt_remote = eligibility_unit("mqtt", "integration", LocalEligibility::RemoteOnly);
-        let postgres_remote_path = expected_test_src_path(remote.package, remote.target)?;
-        let postgres_affected_path = expected_test_src_path(affected.package, affected.target)?;
-        let mqtt_path = expected_test_src_path(mqtt_remote.package, mqtt_remote.target)?;
-        let postgres_remote_src = postgres_remote_path
+        let affected = eligibility_unit(
+            "redis-adapter",
+            "feature_manifest",
+            LocalEligibility::Affected,
+        );
+        let amqp_remote = eligibility_unit("amqp", "integration", LocalEligibility::RemoteOnly);
+        let feature_remote_path = expected_test_src_path(remote.package, remote.target)?;
+        let feature_affected_path = expected_test_src_path(affected.package, affected.target)?;
+        let amqp_path = expected_test_src_path(amqp_remote.package, amqp_remote.target)?;
+        let feature_remote_src = feature_remote_path
             .to_str()
-            .context("postgres remote test path must be UTF-8")?;
-        let postgres_affected_src = postgres_affected_path
+            .context("feature remote test path must be UTF-8")?;
+        let feature_affected_src = feature_affected_path
             .to_str()
-            .context("postgres affected test path must be UTF-8")?;
-        let mqtt_src = mqtt_path.to_str().context("mqtt test path must be UTF-8")?;
-        let postgres_feature = LocalFeatureScope::for_package(remote.package)
-            .context("postgres scope must exist")?
+            .context("feature affected test path must be UTF-8")?;
+        let amqp_src = amqp_path.to_str().context("amqp test path must be UTF-8")?;
+        let remote_feature = LocalFeatureScope::for_package(remote.package)
+            .context("feature scope must exist")?
             .feature();
-        let mqtt_feature = LocalFeatureScope::for_package(mqtt_remote.package)
-            .context("mqtt scope must exist")?
+        let amqp_feature = LocalFeatureScope::for_package(amqp_remote.package)
+            .context("amqp scope must exist")?
             .feature();
 
         let valid = [
             EligibilityFixture {
                 package: remote.package,
                 name: remote.target,
-                src_path: postgres_remote_src,
-                required_features: &[postgres_feature],
+                src_path: feature_remote_src,
+                required_features: &[remote_feature],
                 test: true,
             },
             EligibilityFixture {
                 package: affected.package,
                 name: affected.target,
-                src_path: postgres_affected_src,
+                src_path: feature_affected_src,
                 required_features: &[],
                 test: true,
             },
             EligibilityFixture {
-                package: mqtt_remote.package,
-                name: mqtt_remote.target,
-                src_path: mqtt_src,
-                required_features: &[mqtt_feature],
+                package: amqp_remote.package,
+                name: amqp_remote.target,
+                src_path: amqp_src,
+                required_features: &[amqp_feature],
                 test: true,
             },
         ];
-        check_eligibility(&root, &valid, &[remote, affected, mqtt_remote])
+        check_eligibility(&root, &valid, &[remote, affected, amqp_remote])
             .context("valid eligibility fixture must pass exact closure")?;
 
         let missing = [EligibilityFixture {
             package: affected.package,
             name: affected.target,
-            src_path: postgres_affected_src,
+            src_path: feature_affected_src,
             required_features: &[],
             test: true,
         }];
@@ -2496,15 +2224,15 @@ mod tests {
                 EligibilityFixture {
                     package: remote.package,
                     name: remote.target,
-                    src_path: postgres_remote_src,
-                    required_features: &[postgres_feature],
+                    src_path: feature_remote_src,
+                    required_features: &[remote_feature],
                     test: true,
                 },
                 EligibilityFixture {
                     package: remote.package,
                     name: remote.target,
                     src_path: "adapters/postgres/tests/alias_duplicate.rs",
-                    required_features: &[postgres_feature],
+                    required_features: &[remote_feature],
                     test: true,
                 },
             ],
@@ -2522,21 +2250,21 @@ mod tests {
             EligibilityFixture {
                 package: remote.package,
                 name: remote.target,
-                src_path: postgres_remote_src,
-                required_features: &[postgres_feature],
+                src_path: feature_remote_src,
+                required_features: &[remote_feature],
                 test: true,
             },
             EligibilityFixture {
                 package: remote.package,
-                name: "migration_0087_device_command_fencing",
-                src_path: postgres_remote_src,
-                required_features: &[postgres_feature],
+                name: "integration_alias",
+                src_path: feature_remote_src,
+                required_features: &[remote_feature],
                 test: true,
             },
         ];
         let alias_unit = eligibility_unit(
-            "postgres",
-            "migration_0087_device_command_fencing",
+            "redis-adapter",
+            "integration_alias",
             LocalEligibility::RemoteOnly,
         );
         let error = eligibility_rejection(
@@ -2551,8 +2279,8 @@ mod tests {
         let wrong_path = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: "adapters/postgres/tests/wrong_name.rs",
-            required_features: &[postgres_feature],
+            src_path: "adapters/redis/tests/wrong_name.rs",
+            required_features: &[remote_feature],
             test: true,
         }];
         let error = eligibility_rejection(
@@ -2567,7 +2295,7 @@ mod tests {
         let missing_features = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: postgres_remote_src,
+            src_path: feature_remote_src,
             required_features: &[],
             test: true,
         }];
@@ -2581,26 +2309,26 @@ mod tests {
         );
 
         let wrong_features = [EligibilityFixture {
-            package: mqtt_remote.package,
-            name: mqtt_remote.target,
-            src_path: mqtt_src,
-            required_features: &["integration"],
+            package: amqp_remote.package,
+            name: amqp_remote.target,
+            src_path: amqp_src,
+            required_features: &["broker-tests"],
             test: true,
         }];
         let error = eligibility_rejection(
-            check_eligibility(&root, &wrong_features, &[mqtt_remote]),
+            check_eligibility(&root, &wrong_features, &[amqp_remote]),
             "RemoteOnly required_features must equal LocalFeatureScope::feature()",
         )?;
         assert!(
-            error.to_string().contains(mqtt_feature),
-            "wrong feature diagnostic must mention typed feature `{mqtt_feature}`: {error}"
+            error.to_string().contains(amqp_feature),
+            "wrong feature diagnostic must mention typed feature `{amqp_feature}`: {error}"
         );
 
         let extra_features = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: postgres_remote_src,
-            required_features: &[postgres_feature, "extra-gate"],
+            src_path: feature_remote_src,
+            required_features: &[remote_feature, "extra-gate"],
             test: true,
         }];
         let error = eligibility_rejection(
@@ -2615,8 +2343,8 @@ mod tests {
         let test_disabled = [EligibilityFixture {
             package: remote.package,
             name: remote.target,
-            src_path: postgres_remote_src,
-            required_features: &[postgres_feature],
+            src_path: feature_remote_src,
+            required_features: &[remote_feature],
             test: false,
         }];
         let error = eligibility_rejection(
@@ -2634,7 +2362,11 @@ mod tests {
     #[test]
     fn cargo_target_eligibility_rejects_crate_level_feature_cfg() -> Result<()> {
         let root = eligibility_sandbox()?;
-        let unit = eligibility_unit("postgres", "feature_manifest", LocalEligibility::Affected);
+        let unit = eligibility_unit(
+            "redis-adapter",
+            "feature_manifest",
+            LocalEligibility::Affected,
+        );
         let src_path = expected_test_src_path(unit.package, unit.target)?;
         let src = src_path
             .to_str()
@@ -2769,8 +2501,8 @@ mod tests {
         let executions = Cell::new(0);
         with_validated_workspace(&success, |validated| {
             for _shard in [
-                IntegrationShard::PostgresDomain,
                 IntegrationShard::EventTransport,
+                IntegrationShard::ObjectStorage,
             ] {
                 assert_eq!(validated.root(), root.as_path());
                 executions.set(executions.get() + 1);
@@ -2803,9 +2535,9 @@ mod tests {
 
     #[test]
     fn local_test_eligibility_is_orthogonal_to_remote_shard_ownership() {
-        assert!(is_remote_only_test_target("mqtt", "integration"));
-        assert!(is_remote_only_test_target("testkit", "mqtt_mtls_fixture"));
-        assert!(!is_remote_only_test_target("mqtt", "ownership_gate"));
+        assert!(is_remote_only_test_target("amqp", "integration"));
+        assert!(is_remote_only_test_target("s3", "integration_object_store"));
+        assert!(!is_remote_only_test_target("testkit", "harness"));
     }
 
     #[test]

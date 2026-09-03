@@ -13,8 +13,6 @@ members = [
   "crates/eventing",
   # Provider-neutral public LocalTx conformance assertions.
   "crates/conformance",
-  # Transport-neutral DTO/schema projection for the six device-security Draft candidates.
-  "crates/devicesecuritycontracts",
   # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）
   "crates/vocab",
   "crates/ids",
@@ -25,11 +23,9 @@ members = [
   "crates/runctx",
   "crates/diagctx",
   # Authenticated production evidence mint capability（AUTH-EVIDENCE-MINT-01 Hard token）
-  "crates/authmint",
   "crates/sagaauthmint",
   "crates/dlqauthmint",
   "crates/requestidmint",
-  "crates/pkiauthmint",
   # Runtime inventory live-evidence mint capability; only assembly-schema declares the receipt
   # signature and runtimeexec holds the mint token.
   "crates/runtimeinventorymint",
@@ -49,45 +45,31 @@ members = [
   "crates/listenerlifecycle",
   # 服务（依赖基础 + 引擎 + DI-infra）
   "crates/httpserve",
-  "crates/authn",
   "crates/bootstrap",
   # provider-independent runtime launch/shutdown kernel shared by assembly roots (#1795).
   "crates/runtimeexec",
   "crates/eventexec",
   "crates/observ",
   "crates/distributed",
-  "crates/deviceloop",
   # 服务层 test-support：HTTP 契约测试脚手架（oneshot harness；经 [dev-dependencies] 被域/组合根消费，不进生产 shipped 图）
   "crates/testkit",
   # 域（依赖基础 + 引擎 + 服务 + generated；互不依赖）
-  "crates/identity",
-  "crates/settings",
-  "crates/audit",
-  "crates/contractreg",
-  "crates/syshealth",
   # adapters（实现基础 / 引擎 / 服务 trait；不被域依赖）
   "adapters/postgres",
-  "crates/postgres-migration-inventory",
-  "adapters/postgres-migration",
   "adapters/redis",
   "adapters/amqp",
-  "adapters/mqtt",
   "adapters/s3",
-  "adapters/oidc",
   "adapters/grpc",
   "adapters/httpd",
   "adapters/otel",
   "adapters/prometheus",
   "adapters/vault",
-  "adapters/softca",
   "adapters/ratelimit",
   # MacVerifier 生产 backend（RustCrypto hmac/sha2；audit keyed-HMAC 链 verifier，#1230）
   "adapters/crypto",
   # in-mem DI port provider（RW-G1 追踪弹验接缝；测试 / demo 注入用，被 journeys 组合根消费）
   "adapters/memory",
   "xtask",
-  # 契约派生（committed，被域依赖）
-  "generated",
 ]
 # 自写 dylint lint workspace（nightly rustc_private，自成独立 workspace）——显式排除，
 # 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
@@ -98,7 +80,6 @@ exclude = ["lints", "vendor/sqlx-core-0.8.6"]
 packages = [
   { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
-  { package = "rss-device-security-contracts", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
   { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental" },
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -147,7 +128,6 @@ repository = "https://github.com/shengming0817/rss"
 # pin 必须被 Cargo.lock 的 resolved 版本满足（或为带注释的 inert 前瞻）——由 `cargo xtask wsdeps-drift` 守（#1185）。
 [workspace.dependencies]
 rss-contract = { path = "crates/contract", version = "0.1.0" }
-rss-device-security-contracts = { path = "crates/devicesecuritycontracts", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }
 eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
@@ -161,7 +141,6 @@ serde_yaml_ng = "0.10"
 serde_path_to_error = "0.1"
 jsonschema = { version = "=0.20.0", default-features = false }
 serde_json_canonicalizer = "=0.3.2"
-regress = "=0.11.1"
 regex = "1"
 thiserror = "2"
 anyhow = "1"
@@ -205,9 +184,6 @@ axum = "0.8"
 http-body = "1"
 http-body-util = "0.1"  # stream-level body cap（Limited wrap，#1106 FIX-1）；axum 0.8 生态同版本
 tower = "0.5"
-spiffe = { version = "0.16.0", default-features = false, features = ["x509-source"] }
-spiffe-rustls = { version = "0.7.0", default-features = false, features = ["ring"] }
-spiffe-rustls-tokio = "0.4.0"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-pki-types = "1"
@@ -229,9 +205,8 @@ tonic = "0.14"
 tonic-health = "0.14"
 prost = "0.14"
 # 持久化（postgres adapter，#1116）
-sqlx = { version = "=0.8.6", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros"] }  # tls-rustls 显式关 openssl 传递路径（与 deny.toml openssl ban 一致）；migrate+macros = Migrator + sqlx::migrate!
-# inventory build-time SoT：与 `sqlx::migrate!` 同源 `resolve_blocking`（仅 build-dep，不进 serving runtime）
-sqlx-core = { version = "=0.8.6", default-features = false, features = ["migrate"] }
+sqlx = { version = "=0.8.6", features = ["runtime-tokio", "tls-rustls", "postgres", "macros"] }
+sqlx-core = { version = "=0.8.6", default-features = false }
 # redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
 # re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
 # testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
@@ -241,13 +216,6 @@ deadpool-redis = { version = "0.23", default-features = false, features = ["rt_t
 # 不启 native-tls / openssl / rustls--aws_lc_rs；deny.toml 兜住 provider 漂移。
 # ref: amqp-rs/lapin Cargo.toml@71d01e2cc3e3221496d11ffcf1f4aaf41532fb9d
 lapin = { version = "4", default-features = false, features = ["default-runtime", "rustls--ring", "rustls-webpki-roots-certs"] }
-# MQTT broker I/O（adapters/mqtt）：生产路径始终编译 MQTT v5（`rumqttc::v5`）+ `mqtts://` mTLS
-# （adapter 侧 `use-rustls-no-provider` + ring）。publish 经 `PublishProperties.correlation_data`
-# 携带 event_id、订阅侧读回填入 `Message.id`，与 amqp `message_id` 传播对称。workspace 默认
-# `default-features=false`；TLS feature 仅由 adapters/mqtt 显式启用。Docker 真 broker 集成测试
-# 走 `broker-tests` feature（非明文 `mqtt://`）。对标 gocell mqtt adapter@paho.mqtt.rust。
-# ref: bytebeamio/rumqtt rumqttc/examples/async_manual_acks_v5.rs@main
-rumqttc = { version = "0.25", default-features = false }
 # 对象存储 provider（adapters/s3，#1011/#1164）：AWS 官方 SDK，对标 gocell s3.ObjectUploader@aws-sdk-go-v2。
 # default-features=false 关默认 HTTPS client；生产 HTTPS connector 由 runtime 组合根显式注入 rustls+ring
 # `aws-smithy-http-client`，明文 HTTP 仅 loopback MinIO/test opt-in。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
@@ -277,17 +245,6 @@ aws-smithy-mocks = "0.2"
 # mock、测真实编排」范式。默认仅明文 HTTP，**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls 均不进树，deny
 # 全绿，同 aws-smithy-mocks 收口理由）。ref: LukeMathWalker/wiremock-rs src/server.rs@main
 wiremock = "0.6"
-# JWT/JWS 验签原语（adapters/oidc，#1195 / 1109-A1）：纯 RustCrypto，对标 RustCrypto + spiffe/rust-spiffe
-# JWT-SVID 验签面。diport::Pdp port 只需「入站 token 验签」（签名 + exp/nbf + iss + aud），非完整 OAuth/OIDC
-# client flow（discovery/PKCE/token 交换 + live JWKS-over-HTTP 拉取留 #1109/T003）。**替换 #1011 的
-# jsonwebtoken 切片**：jsonwebtoken v9 后端 = ring，被迫钉死 =9.3.1（v10 显式后端会拉 rsa〔deny ban,
-# RUSTSEC-2023-0071〕/ aws-lc-sys〔OpenSSL 派生 license 不在 allow-list〕）；且其只能整 crate 拒对称算法
-# （无 service-token HS256 路径）、exp/nbf 隐式取系统时钟（违 rust-standards「Clock 构造器注入」护栏）。
-# RustCrypto 纯 Rust（Apache-2.0/MIT，零新增 ring 面）：ES256（p256 ecdsa，JWT 路径）+ HS256（hmac+sha2,
-# service-token 路径），常数时间比较复用 primitives::crypto::constant_time_eq（CRYPTO-CONST-TIME-01）。
-# ES256 公钥经 SEC1 未压缩点注入（构造器签名跨 JWKS PR 稳定——T003 JWKS x/y 同形）。jsonwebtoken 已从
-# deny.toml ban（防重新引入）。ref: RustCrypto/elliptic-curves p256 + RustCrypto/MACs hmac + spiffe/rust-spiffe
-p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 ipnet = "2.11"
@@ -323,9 +280,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）
-typify = "0.7"
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
-prettyplease = "0.2"
 syn = { version = "2", features = ["full", "parsing"] }
 # securederive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
 # 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。

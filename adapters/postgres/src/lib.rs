@@ -1,616 +1,572 @@
-//! postgres — RSS workspace crate（eventexec 持久化基座；P3/#1116）。See `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
+//! Provider-neutral PostgreSQL consistency adapter.
 //!
-//! sealed-marker [`PgStore`] 持 `sqlx::PgPool`（`pub(crate)`），提供连接池（`connect`）与只读
-//! schema ledger 验证；迁移执行只存在于 operator-only `postgres-migration` crate。外部经
-//! [`PgRuntimeDeps::connect_serving`] 构造；并 impl
-//! `diport::ManagedResource`（关池接入 `bootstrap::ShutdownStack` 逆序编排）。
-//!
-//! port 来源两类：provider-agnostic 基建 port 来自 `diport`（`ManagedResource`…）；**域形** repo port 来自
-//! 所属域 crate（`identity::ports::RoleReadRepo`…，Option 2/ADR-005）。tenant repository 只持 sealed
-//! `TenantDb` exact lane，closure 只获得 tenant-bound `TenantTx` 的 closed store-operation façade，
-//! 无法取得 raw pool / connection / executor 或 commit/rollback 生命周期；生产侧非租户事务由各
-//! owner 的窄 funnel 承载。物理 PostgreSQL transaction capability 不进入 provider-neutral 层。
-//!
-//! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleReadRepo`，经 deny.toml identity wrapper +
-//! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由生产 [`PgRoleRepo`]（impl
-//! `identity::ports::RoleReadRepo`，roles 表 + tenant scope，#1250）承载——替换原 `#[cfg(test)]` `RoleRepoEdgeProof`
-//! 编译证明（body `todo!()`）。同 DIP 内向边另由 [`PgCredentialRepo`]（impl `identity::ports::CredentialRepo`，
-//! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
-//!
-//! INVARIANT: PG-DOMAIN-FEATURES-01 { level = "Hard", exec = "native-compile", source = "code", native = "Cargo optional dependencies and explicit domain features remove inactive domain APIs from the selected package graph" } ——
-//! `domain-settings` / `domain-identity` / `domain-audit` 是无默认值的闭合选择；未启用时对应 dependency、module 与 public API 均不进入 rustc 输入。
+//! RSS never creates or migrates database objects. A provider must implement
+//! [`STORAGE_CONTRACT`] before [`PgRuntime::connect`] succeeds.
 
-#[cfg(feature = "domain-identity")]
-mod account_security_repo;
-#[cfg(feature = "domain-audit")]
-mod audit_repo;
-#[cfg(feature = "auth-audit-sink")]
-mod auth_audit_sink;
-#[cfg(feature = "domain-identity")]
-mod auth_grant_lifecycle;
-#[cfg(feature = "domain-identity")]
-mod auth_grant_provider;
-mod auth_grant_sweeper;
-#[cfg(feature = "domain-identity")]
-mod auth_grant_validator;
-mod bundle;
-mod cas_store;
-mod checkpoint;
-mod command_journal;
-#[cfg(feature = "domain-settings")]
-mod config_repo;
-#[cfg(any(
-    feature = "domain-settings",
-    feature = "domain-audit",
-    feature = "consumer-tx-composition-test-support"
-))]
-mod consumer_tx;
-#[cfg_attr(
-    not(any(
-        feature = "domain-settings",
-        feature = "domain-identity",
-        feature = "domain-audit"
-    )),
-    allow(dead_code, unused_imports)
-)]
-mod cotx;
-#[cfg(feature = "domain-identity")]
-mod credential_repo;
-mod dead_letter;
-mod dead_letter_payload;
-mod delivery_policy;
-#[cfg(feature = "domain-identity")]
-mod device_certificate;
-mod device_certificate_scope;
-#[cfg(feature = "domain-identity")]
-mod device_command;
-#[cfg(feature = "domain-identity")]
-mod device_outbox;
-mod dlq;
-mod dlx_lifecycle;
-mod emitter;
-#[cfg(feature = "domain-identity")]
-mod identity_security_lifecycle;
-mod inbox;
-mod outbox;
-mod outbox_cdc;
-mod outbox_routine;
-#[cfg(feature = "domain-identity")]
-mod policy_repo;
-mod pool;
-mod projection_control;
-mod projection_events;
-#[cfg(feature = "domain-settings")]
-mod projection_worker;
-mod readiness;
-mod reconcile;
-#[cfg(all(test, feature = "integration"))]
-mod reconcile_test_driver;
-#[cfg(feature = "domain-identity")]
-mod refresh_token_store;
-#[cfg(feature = "domain-identity")]
-mod resource_security_fact_repo;
-mod revocation;
-mod revocation_sweeper;
-#[cfg(feature = "domain-identity")]
-mod role_binding_lifecycle;
-#[cfg(feature = "domain-identity")]
-mod role_binding_read_repo;
-#[cfg(feature = "domain-identity")]
-mod role_repo;
-mod saga;
-mod saga_candidates;
-mod saga_receipt_capability;
-mod saga_terminal_sweeper;
-mod schema_ledger;
-#[cfg(feature = "domain-settings")]
-mod secret_repo;
-mod service_token_replay;
-#[cfg(feature = "domain-settings")]
-mod settings_projection;
-#[cfg_attr(
-    not(any(
-        feature = "domain-settings",
-        feature = "domain-identity",
-        feature = "domain-audit"
-    )),
-    allow(dead_code, unused_imports)
-)]
-mod tx_retry;
-
-/// Canonical Settings projection identifier shared by every PostgreSQL adapter seam.
-pub(crate) const SETTINGS_PROJECTION_ID: &str = "settings.config-projection";
-
-/// Integration-only compile-proof surface over the real transaction type identities.
-#[cfg(feature = "integration")]
-#[doc(hidden)]
-pub mod tx_boundary_proof {
-    use futures::future::BoxFuture;
-
-    pub use crate::cotx::eventing::OutboxTx;
-    pub use crate::cotx::identity::{IdentityTx, IdentityWrite};
-    pub use crate::cotx::reconcile::ReconcileTx;
-    pub use crate::cotx::{
-        AuditAdminReadLane, MaintenanceReadLane, MaintenanceWriteLane, ServingReadLane,
-        ServingWriteLane, TenantDb, TenantTx,
-    };
-
-    pub fn require_serving_write_tx(_: &mut TenantTx<'_, ServingWriteLane>) {}
-
-    pub fn require_maintenance_write_tx(_: &mut TenantTx<'_, MaintenanceWriteLane>) {}
-
-    pub fn serving_identity_write<'borrow, 'cap, 'tx>(
-        tx: &'borrow mut IdentityTx<'cap, 'tx, ServingWriteLane>,
-    ) -> IdentityWrite<'borrow, 'tx> {
-        tx.identity()
-    }
-
-    pub fn require_identity_write(_: &mut IdentityWrite<'_, '_>) {}
-
-    pub fn require_identity_operation<F>(_: F)
-    where
-        F: for<'borrow, 'tx> FnOnce(
-            IdentityTx<'borrow, 'tx, ServingWriteLane>,
-        ) -> BoxFuture<'borrow, Result<(), ()>>,
-    {
-    }
-
-    pub fn outbox_operation(_: &mut OutboxTx<'_>) {}
-
-    pub fn reconcile_operation(_: &mut ReconcileTx<'_, ServingWriteLane>) {}
-}
-
-#[cfg(any(test, feature = "test-support"))]
-mod test_migration {
-    use crate::{PgError, PgStore};
-
-    impl PgStore {
-        pub(crate) async fn run_migrations(&self) -> Result<(), PgError> {
-            sqlx::migrate!("./migrations")
-                .run(&self.pool)
-                .await
-                .map_err(PgError::Migrate)
-        }
-    }
-}
-
-#[cfg(feature = "domain-audit")]
-pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
-#[cfg(feature = "auth-audit-sink")]
-pub use auth_audit_sink::PgAuthAuditSink;
-// postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
-#[cfg(feature = "domain-identity")]
-pub use account_security_repo::PgAccountSecurityRepo;
-#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
-pub use bundle::PgDeviceIdentityDraftRuntime;
-#[cfg(feature = "domain-settings")]
-pub use bundle::PgSettingsBundle;
-#[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
-pub use bundle::identity_pseudonym_keys_for_test;
-#[cfg(feature = "domain-identity")]
-pub use bundle::{
-    DeviceLatentInspectionAuditOutcome, PgDeviceLatentInspectionDeps, PgDeviceLatentOperatorDeps,
-    UNVERIFIED_DEVICE_LATENT_OPERATOR,
-};
-pub use bundle::{
-    MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
-    PgL2DrAdmissionState, PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
-    PgProjectionOperatorCapability, PgProjectionOperatorDeps, PgProjectionReplayStores,
-    PgRuntimeDeps, PgRuntimeHandle, PgRuntimeMonitorFactory, PgSagaOperatorDeps,
-    ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
-};
-pub use cas_store::PgCasStore;
-pub use checkpoint::PgCheckpointStore;
-pub use command_journal::PgCommandJournal;
-#[cfg(feature = "domain-settings")]
-pub use config_repo::{
-    ConfigValueCrypto, ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
-    ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, PgConfigRepo,
-    PgConfigValueMaintenance,
-};
-#[cfg(feature = "domain-audit")]
-pub use consumer_tx::PgAuditConsumerTx;
-#[cfg(any(
-    feature = "domain-audit",
-    feature = "domain-settings",
-    feature = "consumer-tx-composition-test-support"
-))]
-pub use consumer_tx::PgConsumerTxCommitProof;
-#[cfg(feature = "domain-settings")]
-pub use consumer_tx::PgSettingsConsumerTx;
-#[cfg(feature = "domain-identity")]
-pub use credential_repo::PgCredentialRepo;
-pub use dead_letter::PgDeadLetterStore;
-pub use dead_letter_payload::DlxPayloadProtector;
-#[cfg(feature = "domain-identity")]
-pub use device_certificate::{PgDeviceCertificateRepository, PgDeviceCertificateStatusStore};
-#[cfg(feature = "domain-identity")]
-pub use device_command::{PgDeviceCommandStore, PgDeviceIngressCommit, PgDeviceIngressCommitProof};
-#[cfg(feature = "domain-identity")]
-pub use device_outbox::{
-    PgBrokerAcceptedDeviceOutbox, PgClaimedDeviceCommand, PgClaimedDeviceIngressReceipt,
-    PgClaimedDeviceOutbox, PgDeviceOutbox, PgDeviceOutboxScope, PgDeviceOutboxSettlement,
-};
-pub use dlq::PgDlqStore;
-pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
-pub use emitter::PgEmitter;
-#[cfg(feature = "domain-identity")]
-pub use identity_security_lifecycle::{
-    PgAccountReactivationLifecycle, PgIdentitySecurityLifecycle,
-};
-pub use outbox::{PgOutbox, PgOutboxMaintenance};
-pub use outbox_cdc::PgOutboxCdcEmitter;
-#[cfg(feature = "domain-identity")]
-pub use policy_repo::{PgPolicyLifecycle, PgPolicyRepo};
-pub use projection_control::{
-    ProjectionControlError, ProjectionPointerPrecondition, ProjectionPointerStatus,
-    ProjectionSwapOutcome, ProjectionSwapRejection,
-};
-#[cfg(feature = "domain-settings")]
-pub(crate) use settings_projection::PgSettingsProjectionApplyStore;
-#[cfg(feature = "domain-settings")]
-pub use settings_projection::{PgActiveProjectionResolver, PgSettingsProjectionReadRepo};
-// Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
-// DB SECURITY DEFINER function 收口（`contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。读路径返回 consistency
-// engine-owned ProjectionEventRecord，不公开 adapter DTO。
-#[cfg(feature = "domain-audit")]
-pub use audit_repo::AuditChainKeyIdentity;
-#[cfg(feature = "domain-identity")]
-pub use auth_grant_lifecycle::PgAuthGrantLifecycle;
-#[cfg(feature = "domain-identity")]
-pub use auth_grant_provider::PgAuthGrantProvider;
-pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
-#[cfg(feature = "domain-identity")]
-pub use auth_grant_validator::PgAuthGrantValidator;
-pub use projection_events::ProjectionEventsError;
-pub use reconcile::{PgMaintenanceReconcileStore, PgReconcileStore};
-#[cfg(feature = "domain-identity")]
-pub use refresh_token_store::PgRefreshTokenStore;
-#[cfg(feature = "domain-identity")]
-pub use resource_security_fact_repo::PgResourceSecurityFactRepo;
-pub use revocation::PgRevocationStore;
-pub use revocation_sweeper::{
-    PgRevocationSweeper, RevocationRetentionBacklog, RevocationRetentionReport,
-    RevocationSweepDeadline,
-};
-#[cfg(feature = "domain-identity")]
-pub use role_binding_lifecycle::PgRoleBindingLifecycle;
-#[cfg(feature = "domain-identity")]
-pub use role_binding_read_repo::PgRoleBindingReadRepo;
-#[cfg(all(test, feature = "integration"))]
-pub(crate) use role_repo::PgRoleDefinitionLifecycle;
-#[cfg(feature = "domain-identity")]
-pub use role_repo::PgRoleRepo;
-pub use saga::{PgSagaDurableStore, PgSagaReceiptProtection};
-pub use saga_terminal_sweeper::{
-    PgSagaTerminalSweeper, SagaTerminalSweepDeadline, SagaTerminalSweepReport,
-};
-#[cfg(feature = "domain-settings")]
-pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
-pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
-
-#[cfg(all(test, feature = "integration"))]
-pub(crate) mod integration_tests;
-
-#[cfg(all(test, feature = "integration"))]
-mod test_pg;
-
-pub use inbox::{PgInboxBacklogSource, PgInboxStore, PgInboxSweeper};
-pub use pool::{
-    PgConfig, PgError, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
-    PgPrivateCa, PgPrivateCaError, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
-    PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
-};
-#[cfg(feature = "domain-settings")]
-pub use pool::{PgProjectionWorkerConfig, PgProjectionWorkerError};
-#[cfg(feature = "domain-settings")]
-pub use projection_worker::PgProjectionWorkerDeps;
-// 两条 monitor loop 保持 `pub(crate)`，仅经 consuming `PgRuntimeMonitorFactory::spawn` 收口。
-pub use readiness::{
-    PgDbReadiness, PgReadinessInterval, PgRlsAttestationInterval, PgRlsReadiness, PgRuntimeMonitor,
-    PgRuntimeMonitorConfig,
-};
 use std::sync::Arc;
+use std::time::Duration;
 
-use diport::{ManagedResource, ShutdownError};
-use sqlx::PgPool;
+use consistency::{
+    ConsumerGroup, EventEntry, IdemKey, LeaseToken, OutboxAppendOutcome, OutboxFactConflict,
+};
+use futures::future::BoxFuture;
+use rss_request_context::TenantId;
+use rustls::RootCertStore;
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject as _;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use sqlx::{PgPool, Row as _};
+use sqlx_core::net::tls::{ExclusiveExplicitRoots, exclusive_explicit_roots};
 
-/// `ManagedResource::name` 稳定标识（日志 / 超时报错用）。
-pub(crate) const PG_STORE_NAME: &str = "postgres";
+const APPLICATION_NAME: &str = "rss-postgres-consistency";
 
-/// PostgreSQL 存储 adapter（sealed-marker）。持 `sqlx::PgPool`（`pub(crate)`，仅 crate 内 repo / tx /
-/// test fixture 取用）。外部经 [`PgRuntimeDeps::connect_serving`](crate::PgRuntimeDeps::connect_serving)
-/// 构造（PG-BUNDLE-FUNNEL-01）；连接与测试迁移 helper 均不对外暴露。
-pub(crate) struct PgStore {
-    pub(crate) pool: PgPool,
+/// Versioned provider-facing storage contract. This is a schema description, not migration DDL.
+pub const STORAGE_CONTRACT: PgStorageContract = PgStorageContract {
+    id: "rss.postgres.consistency.v1",
+    relations: &[
+        "rss_inbox_receipts(tenant_id uuid, consumer_group text, event_id text); unique(tenant_id, consumer_group, event_id)",
+        "rss_outbox(tenant_id uuid, id text, topic text, payload bytea, status text, lease_token text nullable, lease_until timestamptz nullable); unique(tenant_id, id)",
+        "rss_fences(tenant_id uuid, key text, epoch bigint); unique(tenant_id, key)",
+    ],
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgStorageContract {
+    pub id: &'static str,
+    pub relations: &'static [&'static str],
 }
 
-impl ManagedResource for PgStore {
-    fn name(&self) -> &str {
-        PG_STORE_NAME
+/// Password material is redacted and has no `Display` implementation.
+#[derive(Clone)]
+pub struct PgPassword(zeroize::Zeroizing<String>);
+
+impl PgPassword {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(zeroize::Zeroizing::new(secret.into()))
+    }
+}
+
+impl std::fmt::Debug for PgPassword {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PgPassword(<redacted>)")
+    }
+}
+
+/// Validated, non-empty explicit private-CA roots used with `VerifyFull`.
+#[derive(Clone)]
+pub struct PgPrivateCa {
+    pem: Arc<[u8]>,
+    _exclusive_roots: ExclusiveExplicitRoots,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid PostgreSQL private CA PEM")]
+pub struct PgPrivateCaError;
+
+impl PgPrivateCa {
+    pub fn from_pem(pem: Vec<u8>) -> Result<Self, PgPrivateCaError> {
+        let certificates = CertificateDer::pem_slice_iter(&pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| PgPrivateCaError)?;
+        if certificates.is_empty() {
+            return Err(PgPrivateCaError);
+        }
+        let mut roots = RootCertStore::empty();
+        for certificate in certificates {
+            roots
+                .add(certificate.into_owned())
+                .map_err(|_| PgPrivateCaError)?;
+        }
+        Ok(Self {
+            pem: Arc::from(pem),
+            _exclusive_roots: exclusive_explicit_roots(),
+        })
+    }
+}
+
+impl std::fmt::Debug for PgPrivateCa {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PgPrivateCa(<redacted>)")
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PgTlsTrust {
+    PrivateCa(PgPrivateCa),
+    #[cfg(any(test, feature = "test-support"))]
+    PlaintextForTest,
+}
+
+/// Security-closed PostgreSQL pool configuration. Production always uses `VerifyFull`.
+#[derive(Clone, Debug)]
+pub struct PgConfig {
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    password: PgPassword,
+    tls: PgTlsTrust,
+    min_connections: u32,
+    max_connections: u32,
+    acquire_timeout: Duration,
+}
+
+impl PgConfig {
+    #[must_use]
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        username: impl Into<String>,
+        password: PgPassword,
+        private_ca: PgPrivateCa,
+    ) -> Self {
+        Self::new_with_tls(
+            host,
+            port,
+            database,
+            username,
+            password,
+            PgTlsTrust::PrivateCa(private_ca),
+        )
     }
 
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        // reason: graceful 关池（等连接归还后关闭）；sqlx `Pool::close` 不返错，故恒 Ok。
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn new_for_test_plaintext(
+        host: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        username: impl Into<String>,
+        password: PgPassword,
+    ) -> Self {
+        Self::new_with_tls(
+            host,
+            port,
+            database,
+            username,
+            password,
+            PgTlsTrust::PlaintextForTest,
+        )
+    }
+
+    fn new_with_tls(
+        host: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        username: impl Into<String>,
+        password: PgPassword,
+        tls: PgTlsTrust,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            database: database.into(),
+            username: username.into(),
+            password,
+            tls,
+            min_connections: 0,
+            max_connections: 10,
+            acquire_timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[must_use]
+    pub fn with_pool_limits(mut self, min_connections: u32, max_connections: u32) -> Self {
+        self.min_connections = min_connections;
+        self.max_connections = max_connections;
+        self
+    }
+
+    #[must_use]
+    pub fn with_acquire_timeout(mut self, acquire_timeout: Duration) -> Self {
+        self.acquire_timeout = acquire_timeout;
+        self
+    }
+
+    fn validate(&self) -> Result<(), PgError> {
+        if self.host.trim().is_empty()
+            || self.database.trim().is_empty()
+            || self.username.trim().is_empty()
+            || self.password.0.is_empty()
+            || self.port == 0
+        {
+            return Err(PgError::InvalidConnectionConfig);
+        }
+        if self.max_connections == 0 || self.min_connections > self.max_connections {
+            return Err(PgError::InvalidPoolLimits);
+        }
+        if self.acquire_timeout.is_zero() {
+            return Err(PgError::InvalidAcquireTimeout);
+        }
+        Ok(())
+    }
+
+    fn connect_options(&self) -> PgConnectOptions {
+        let options = PgConnectOptions::new()
+            .host(&self.host)
+            .port(self.port)
+            .database(&self.database)
+            .username(&self.username)
+            .password(&self.password.0)
+            .application_name(APPLICATION_NAME);
+        match &self.tls {
+            PgTlsTrust::PrivateCa(ca) => options
+                .ssl_mode(PgSslMode::VerifyFull)
+                .ssl_root_cert_from_pem(ca.pem.to_vec()),
+            #[cfg(any(test, feature = "test-support"))]
+            PgTlsTrust::PlaintextForTest => options.ssl_mode(PgSslMode::Disable),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PgError {
+    #[error("postgres connection configuration is invalid")]
+    InvalidConnectionConfig,
+    #[error("postgres pool limits are invalid")]
+    InvalidPoolLimits,
+    #[error("postgres acquire timeout is invalid")]
+    InvalidAcquireTimeout,
+    #[error("postgres connection failed")]
+    Connect(#[source] sqlx::Error),
+    #[error("postgres storage contract probe failed")]
+    StorageContractProbe(#[source] sqlx::Error),
+    #[error("postgres provider does not implement the required storage contract")]
+    IncompatibleStorageContract,
+    #[error("postgres transaction begin failed")]
+    Begin(#[source] sqlx::Error),
+    #[error("postgres transaction commit outcome is unknown")]
+    CommitUnknown(#[source] sqlx::Error),
+    #[error("postgres transaction rollback failed")]
+    RollbackFailed(#[source] sqlx::Error),
+    #[error("postgres consistency operation failed")]
+    Operation(#[source] sqlx::Error),
+    #[error("postgres consistency value is invalid")]
+    InvalidValue,
+    #[error(transparent)]
+    FactConflict(#[from] OutboxFactConflict),
+}
+
+pub struct PgRuntime {
+    pool: PgPool,
+}
+
+impl PgRuntime {
+    pub async fn connect(config: PgConfig) -> Result<Self, PgError> {
+        config.validate()?;
+        let pool = PgPoolOptions::new()
+            .min_connections(config.min_connections)
+            .max_connections(config.max_connections)
+            .acquire_timeout(config.acquire_timeout)
+            .test_before_acquire(true)
+            .connect_with(config.connect_options())
+            .await
+            .map_err(PgError::Connect)?;
+        if !probe_storage_contract(&pool).await? {
+            pool.close().await;
+            return Err(PgError::IncompatibleStorageContract);
+        }
+        Ok(Self { pool })
+    }
+
+    /// Execute one tenant-bound local transaction. RSS never creates schema in this path.
+    pub async fn local_tx<T, F>(&self, tenant_id: TenantId, operation: F) -> Result<T, PgError>
+    where
+        F: for<'tx> FnOnce(&'tx mut PgLocalTx<'_>) -> BoxFuture<'tx, Result<T, PgError>>,
+    {
+        let mut transaction = self.pool.begin().await.map_err(PgError::Begin)?;
+        let tenant = tenant_id.to_string();
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant)
+            .execute(&mut *transaction)
+            .await
+            .map_err(PgError::Operation)?;
+        let mut transaction = PgLocalTx {
+            transaction,
+            tenant,
+        };
+        match operation(&mut transaction).await {
+            Ok(value) => {
+                transaction
+                    .transaction
+                    .commit()
+                    .await
+                    .map_err(PgError::CommitUnknown)?;
+                Ok(value)
+            }
+            Err(error) => match transaction.transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(source) => Err(PgError::RollbackFailed(source)),
+            },
+        }
+    }
+
+    pub async fn claim_outbox(
+        &self,
+        tenant_id: TenantId,
+        lease_token: LeaseToken,
+        lease_for: Duration,
+        limit: u32,
+    ) -> Result<Vec<PgOutboxClaim>, PgError> {
+        let lease_micros = validate_claim_parameters(lease_for, limit)?;
+        let tenant = tenant_id.to_string();
+        let rows = sqlx::query(
+            "WITH candidates AS (SELECT id FROM rss_outbox WHERE tenant_id = $1::uuid AND \
+             (status = 'pending' OR (status = 'publishing' AND lease_until <= clock_timestamp())) \
+             ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE rss_outbox AS o SET \
+             status = 'publishing', lease_token = $3, lease_until = clock_timestamp() + \
+             ($4::bigint * interval '1 microsecond') FROM candidates WHERE o.tenant_id = $1::uuid \
+             AND o.id = candidates.id RETURNING o.id, o.topic, o.payload, o.lease_until::text",
+        )
+        .bind(&tenant)
+        .bind(i64::from(limit))
+        .bind(lease_token.as_str())
+        .bind(lease_micros)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(PgError::Operation)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(PgOutboxClaim {
+                    tenant_id: tenant.clone(),
+                    id: row.try_get("id").map_err(PgError::Operation)?,
+                    topic: row.try_get("topic").map_err(PgError::Operation)?,
+                    payload: row.try_get("payload").map_err(PgError::Operation)?,
+                    lease_token: lease_token.as_str().into(),
+                    lease_until: row.try_get("lease_until").map_err(PgError::Operation)?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn settle_published(&self, claim: PgOutboxClaim) -> Result<bool, PgError> {
+        let result = sqlx::query("UPDATE rss_outbox SET status = 'published', lease_token = NULL, \
+            lease_until = NULL WHERE tenant_id = $1::uuid AND id = $2 AND status = 'publishing' \
+            AND lease_token = $3 AND lease_until = $4::timestamptz AND lease_until > clock_timestamp()")
+            .bind(claim.tenant_id).bind(claim.id).bind(claim.lease_token).bind(claim.lease_until)
+            .execute(&self.pool).await.map_err(PgError::Operation)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.pool.is_closed()
+    }
+}
+
+async fn probe_storage_contract(pool: &PgPool) -> Result<bool, PgError> {
+    let compatible: bool = sqlx::query_scalar(SCHEMA_PROBE_SQL)
+        .fetch_one(pool)
+        .await
+        .map_err(PgError::StorageContractProbe)?;
+    Ok(compatible)
+}
+
+const SCHEMA_PROBE_SQL: &str = r#"
+WITH required(relation_name, column_name, data_type, nullable) AS (VALUES
+ ('rss_inbox_receipts','tenant_id','uuid',false), ('rss_inbox_receipts','consumer_group','text',false),
+ ('rss_inbox_receipts','event_id','text',false), ('rss_outbox','tenant_id','uuid',false),
+ ('rss_outbox','id','text',false), ('rss_outbox','topic','text',false), ('rss_outbox','payload','bytea',false),
+ ('rss_outbox','status','text',false), ('rss_outbox','lease_token','text',true),
+ ('rss_outbox','lease_until','timestamp with time zone',true), ('rss_fences','tenant_id','uuid',false),
+ ('rss_fences','key','text',false), ('rss_fences','epoch','bigint',false)
+), columns_ok AS (
+ SELECT NOT EXISTS (SELECT 1 FROM required r LEFT JOIN information_schema.columns c
+  ON c.table_schema='public' AND c.table_name=r.relation_name AND c.column_name=r.column_name
+  WHERE c.column_name IS NULL OR c.data_type<>r.data_type OR (c.is_nullable='YES')<>r.nullable) AS ok
+), unique_ok AS (
+ SELECT bool_and(EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('public.'||v.rel)
+  AND i.indisunique AND (SELECT array_agg(a.attname ORDER BY u.ord) FROM unnest(i.indkey) WITH ORDINALITY u(attnum,ord)
+  JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=u.attnum)=v.cols)) AS ok
+ FROM (VALUES ('rss_inbox_receipts',ARRAY['tenant_id','consumer_group','event_id']::name[]),
+  ('rss_outbox',ARRAY['tenant_id','id']::name[]), ('rss_fences',ARRAY['tenant_id','key']::name[])) v(rel,cols)
+) SELECT columns_ok.ok AND unique_ok.ok FROM columns_ok, unique_ok
+"#;
+
+impl diport::ManagedResource for PgRuntime {
+    fn name(&self) -> &str {
+        "postgres"
+    }
+    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
         self.pool.close().await;
-        tracing::info!(target: "postgres", name = PG_STORE_NAME, "postgres pool closed");
         Ok(())
     }
 }
 
-/// `Arc<PgStore>` 的 runtime `ManagedResource` 适配——关停末阶段同步封闭新连接获取。
-///
-/// `Arc` 非 fundamental ⇒ 不能直接 `impl ManagedResource for Arc<PgStore>`（孤儿规则），
-/// 故用 newtype 包装绕孤儿规则。
-///
-/// # 注册顺序
-///
-/// 经组合根 [`bootstrap::ShutdownStack::register_detached`] 注入 `ShutdownStack`；注册顺序须在
-/// listener/sampler **之前**——LIFO 下 pool 最后封闭（listener drain → sampler 停 → pool
-/// admission fence，确保 sampler 不会在已关闭的 pool 上发起 probe）。底层 TLS transport
-/// 随 composition root 的最后一个 pool handle 一并 drop，不属于 runtime drain 的等待边界。
-pub struct PgStoreGuard {
-    store: Arc<PgStore>,
-    name: &'static str,
-    shutdown: PgStoreShutdown,
+pub struct PgLocalTx<'connection> {
+    transaction: sqlx::Transaction<'connection, sqlx::Postgres>,
+    tenant: String,
 }
 
-#[derive(Clone, Copy)]
-enum PgStoreShutdown {
-    RuntimeFence,
-    SetupRollback,
-}
+impl PgLocalTx<'_> {
+    pub async fn try_claim_inbox(
+        &mut self,
+        consumer_group: &ConsumerGroup,
+        event_id: &IdemKey,
+    ) -> Result<PgInboxClaim, PgError> {
+        let result = sqlx::query(
+            "INSERT INTO rss_inbox_receipts (tenant_id, consumer_group, event_id) \
+            VALUES ($1::uuid, $2, $3) ON CONFLICT (tenant_id, consumer_group, event_id) DO NOTHING",
+        )
+        .bind(&self.tenant)
+        .bind(consumer_group.as_str())
+        .bind(event_id.as_str())
+        .execute(&mut *self.transaction)
+        .await
+        .map_err(PgError::Operation)?;
+        Ok(if result.rows_affected() == 1 {
+            PgInboxClaim::Fresh
+        } else {
+            PgInboxClaim::Duplicate
+        })
+    }
 
-impl PgStoreGuard {
-    /// 包装 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard。
-    ///
-    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅经
-    /// [`bundle::PgRuntimeDeps::into_runtime_parts`] 构造，
-    /// 组合根不直接持 `Arc<PgStore>`。
-    pub(crate) fn new(store: Arc<PgStore>) -> Self {
-        Self {
-            store,
-            name: PG_STORE_NAME,
-            shutdown: PgStoreShutdown::RuntimeFence,
+    pub async fn append_outbox(
+        &mut self,
+        entry: &EventEntry,
+    ) -> Result<OutboxAppendOutcome, PgError> {
+        let row = sqlx::query("WITH inserted AS (INSERT INTO rss_outbox \
+            (tenant_id,id,topic,payload,status) VALUES ($1::uuid,$2,$3,$4,'pending') \
+            ON CONFLICT (tenant_id,id) DO NOTHING RETURNING true AS inserted, true AS same_fact) \
+            SELECT inserted,same_fact FROM inserted UNION ALL SELECT false, topic=$3 AND payload=$4 \
+            FROM rss_outbox WHERE tenant_id=$1::uuid AND id=$2 LIMIT 1")
+            .bind(&self.tenant).bind(entry.idem_key().as_str()).bind(entry.topic().as_str()).bind(entry.payload())
+            .fetch_one(&mut *self.transaction).await.map_err(PgError::Operation)?;
+        let inserted: bool = row.try_get("inserted").map_err(PgError::Operation)?;
+        let same_fact: bool = row.try_get("same_fact").map_err(PgError::Operation)?;
+        if inserted {
+            Ok(OutboxAppendOutcome::Inserted)
+        } else if same_fact {
+            Ok(OutboxAppendOutcome::SameFact)
+        } else {
+            Err(OutboxFactConflict.into())
         }
     }
 
-    /// 构造 serving setup transaction 的 rollback owner。
-    ///
-    /// 该 canonical constructor 由 startup transaction 注册；初始化失败仍处于 live executor，
-    /// 因此必须完整等待连接 teardown 后才返回 primary error。
-    pub(crate) fn new_named(store: Arc<PgStore>, name: &'static str) -> Self {
-        Self {
-            store,
-            name,
-            shutdown: PgStoreShutdown::SetupRollback,
-        }
-    }
-
-    /// 构造 runtime shutdown stack 的具名 pool owner，只同步封闭新 acquire。
-    pub(crate) fn new_runtime_named(store: Arc<PgStore>, name: &'static str) -> Self {
-        Self {
-            store,
-            name,
-            shutdown: PgStoreShutdown::RuntimeFence,
-        }
-    }
-
-    fn fence_runtime_pool(&self) {
-        log_pool_close_start(self.name, &self.store.pool);
-        // SQLx marks the pool closed synchronously before returning this future. Runtime shutdown
-        // needs that admission fence, but must not await the optional per-idle-connection TLS
-        // teardown after every application worker has already drained. Remaining pool handles are
-        // dropped with the sealed composition root and close their sockets.
-        drop(self.store.pool.close());
-        tracing::info!(target: "postgres", name = self.name, "postgres pool fenced closed");
-    }
-
-    async fn rollback_setup_pool(&self) {
-        self.store.pool.close().await;
-        tracing::info!(target: "postgres", name = self.name, "postgres setup pool closed");
+    pub async fn advance_fence(&mut self, key: &str, epoch: u64) -> Result<bool, PgError> {
+        let epoch = validate_fence(key, epoch)?;
+        let result = sqlx::query("INSERT INTO rss_fences (tenant_id,key,epoch) VALUES ($1::uuid,$2,$3) \
+            ON CONFLICT (tenant_id,key) DO UPDATE SET epoch=EXCLUDED.epoch WHERE rss_fences.epoch<EXCLUDED.epoch")
+            .bind(&self.tenant).bind(key).bind(epoch).execute(&mut *self.transaction)
+            .await.map_err(PgError::Operation)?;
+        Ok(result.rows_affected() == 1)
     }
 }
 
-impl ManagedResource for PgStoreGuard {
-    fn name(&self) -> &str {
-        self.name
+fn validate_claim_parameters(lease_for: Duration, limit: u32) -> Result<i64, PgError> {
+    if lease_for.is_zero() || limit == 0 {
+        return Err(PgError::InvalidValue);
     }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        match self.shutdown {
-            PgStoreShutdown::RuntimeFence => self.fence_runtime_pool(),
-            PgStoreShutdown::SetupRollback => self.rollback_setup_pool().await,
-        }
-        Ok(())
-    }
+    i64::try_from(lease_for.as_micros()).map_err(|_| PgError::InvalidValue)
 }
 
-fn log_pool_close_start(name: &'static str, pool: &PgPool) {
-    tracing::info!(
-        target: "postgres",
-        name,
-        size = pool.size(),
-        idle = pool.num_idle(),
-        "postgres pool close starting"
-    );
+fn validate_fence(key: &str, epoch: u64) -> Result<i64, PgError> {
+    if key.is_empty() || epoch == 0 {
+        return Err(PgError::InvalidValue);
+    }
+    i64::try_from(epoch).map_err(|_| PgError::InvalidValue)
 }
 
-#[cfg(all(
-    test,
-    feature = "domain-settings",
-    feature = "domain-identity",
-    feature = "domain-audit"
-))]
-mod smoke {
-    //! build smoke：编译期断言冻结的 DI port trait——生产 `PgStore` impl `diport::ManagedResource`；
-    //! adapter→域 DIP 内向边（postgres impl `identity::ports::RoleReadRepo`，命名其 pub 实体 Role/RoleId）由生产
-    //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
-    //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleReadRepo on PgRoleRepo（真实 impl，#1250）+
-    //! InboxStore on PgInboxStore + InboxBacklogSource on PgInboxBacklogSource + SagaDurableStore on PgSagaDurableStore + CasStore on PgCasStore +
-    //! OwnerCheckpointStore on PgCheckpointStore + AuthGrantLifecycle on PgAuthGrantLifecycle（login co-tx + find/close）+
-    //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
-    //! SecretRepo on PgSecretRepo + SecretUnitOfWork on PgSecretUnitOfWork（真实 impl，#1274）+
-    //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
-    //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
-    //! read/write ports on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
-    //! PgAuthGrantSweeper concrete maintenance type（不新增 identity 域端口）；
-    //! 去掉任一即编译失败（anti-vacuity）。
-    //! PG-BUNDLE-DOMAIN-02 support：`caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
-    //! bound（正向）；跨域 accessor 误用的负向 anti-vacuity = `bundle::PgDomainDeps` 的 `compile_fail` doctest。
-    use core::marker::PhantomData;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PgInboxClaim {
+    Fresh,
+    Duplicate,
+}
 
-    fn assert_pg_domain<D: super::PgDomain>(_: PhantomData<D>) {}
-    fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
-    fn assert_role_repo<T: identity::ports::RoleReadRepo>(_: PhantomData<T>) {}
-    #[cfg(feature = "integration")]
-    fn assert_role_definition_lifecycle<T: identity::ports::RoleDefinitionLifecycle>(
-        _: PhantomData<T>,
-    ) {
-    }
-    fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
-    fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
-    fn assert_auth_grant_lifecycle<T: identity::ports::AuthGrantLifecycle>(_: PhantomData<T>) {}
-    fn assert_identity_security_lifecycle<T: identity::ports::IdentitySecurityLifecycle>(
-        _: PhantomData<T>,
-    ) {
-    }
-    fn assert_account_reactivation_lifecycle<T: identity::ports::AccountReactivationLifecycle>(
-        _: PhantomData<T>,
-    ) {
-    }
-    fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
-    fn assert_inbox_backlog<T: eventexec::InboxBacklogSource>(_: PhantomData<T>) {}
-    fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
-    fn assert_retention_sweeper<T: consistency::RetentionSweeper>(_: PhantomData<T>) {}
-    fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
-    fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
-    fn assert_saga_durable_store<T: diport::SagaDurableStore>(_: PhantomData<T>) {}
-    fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
-    fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
-    fn assert_command_journal_store<T: eventexec::command::CommandJournalStore>(_: PhantomData<T>) {
-    }
-    fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
-    fn assert_secret_uow<T: settings::ports::SecretUnitOfWork>(_: PhantomData<T>) {}
-    fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
-    fn assert_audit_repo<T: audit::ports::AuditReadRepo + audit::ports::AuditWriteRepo>(
-        _: PhantomData<T>,
-    ) {
-    }
-    fn assert_send_sync<T: Send + Sync>(_: PhantomData<T>) {}
+/// Move-only receipt carrying the complete lease identity used by settlement CAS.
+pub struct PgOutboxClaim {
+    tenant_id: String,
+    id: String,
+    topic: String,
+    payload: Vec<u8>,
+    lease_token: String,
+    lease_until: String,
+}
 
-    #[test]
-    fn impls_frozen_ports() {
-        assert_managed_resource(PhantomData::<super::PgStore>);
-        // `PgRoleRepo: RoleReadRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
-        assert_role_repo(PhantomData::<super::PgRoleRepo>);
-        #[cfg(feature = "integration")]
-        assert_role_definition_lifecycle(PhantomData::<super::PgRoleDefinitionLifecycle>);
-        // `PgPolicyRepo: PolicyRepo` 真实 impl——tenant-scoped durable ABAC policy store（#1588）。
-        assert_policy_repo(PhantomData::<super::PgPolicyRepo>);
-        // `PgCredentialRepo: CredentialRepo` 真实 impl（非 edge proof）——credentials 表 + 折叠锁定态 +
-        // SELECT FOR UPDATE 原子 RMW（#1316）；类型级 anti-vacuity 只检查 trait 满足、不执行 body。
-        assert_credential_repo(PhantomData::<super::PgCredentialRepo>);
-        // `PgAuthGrantLifecycle: AuthGrantLifecycle` 完整 durable impl；类型级 anti-vacuity
-        // 只检查 trait 满足、不执行 body。
-        assert_auth_grant_lifecycle(PhantomData::<super::PgAuthGrantLifecycle>);
-        assert_identity_security_lifecycle(PhantomData::<super::PgIdentitySecurityLifecycle>);
-        assert_account_reactivation_lifecycle(PhantomData::<super::PgAccountReactivationLifecycle>);
-        // Consumer write path and function-only batch sampler remain distinct capabilities.
-        assert_inbox_store(PhantomData::<super::PgInboxStore>);
-        assert_inbox_backlog(PhantomData::<super::PgInboxBacklogSource>);
-        assert_outbox_backlog(PhantomData::<super::PgOutboxMaintenance>);
-        assert_retention_sweeper(PhantomData::<super::PgOutboxMaintenance>);
-        // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。
-        assert_config_repo(PhantomData::<super::PgConfigRepo>);
-        assert_config_uow(PhantomData::<super::PgConfigRepo>);
-        // Closed durable Saga writer + recovery boundary and checkpoint edge proof.
-        assert_saga_durable_store(PhantomData::<super::PgSagaDurableStore>);
-        assert_cas_store(PhantomData::<super::PgCasStore>);
-        assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
-        assert_command_journal_store(PhantomData::<super::PgCommandJournal>);
-        // secret 读写分槽：read-only repo + mutation UoW（#1274）。
-        assert_secret_repo(PhantomData::<super::PgSecretRepo>);
-        assert_secret_uow(PhantomData::<super::PgSecretUnitOfWork>);
-        // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
-        assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
-        // `PgAuditRepo<TestKeyedHasher>` 真实 read/write impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。
-        // verifier 由 audit::test_support 单源提供，足以证明 trait 满足；不执行 body。
-        assert_audit_repo(PhantomData::<super::PgAuditRepo<audit::test_support::TestKeyedHasher>>);
-        // 真实 durable audit subscriber 的具体类型只能经 policy-bound `into_handler` 激活。
-        assert_send_sync(
-            PhantomData::<super::PgAuditConsumerTx<audit::test_support::TestKeyedHasher>>,
-        );
-        // `PgAuthGrantSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke
-        // 锁住可进入 runtime worker 的形状。
-        assert_send_sync(PhantomData::<super::PgAuthGrantSweeper>);
-        // PG-BUNDLE-DOMAIN-02：三个 per-domain marker 均满足 sealed `PgDomain`（去掉任一 impl 即编译失败）。
-        assert_pg_domain(PhantomData::<super::caps::Settings>);
-        assert_pg_domain(PhantomData::<super::caps::Identity>);
-        assert_pg_domain(PhantomData::<super::caps::Audit>);
+impl PgOutboxClaim {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
     }
-
-    #[test]
-    fn store_name_is_stable() {
-        assert_eq!(super::PG_STORE_NAME, "postgres");
+    #[must_use]
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
     }
 }
 
 #[cfg(test)]
-mod runtime_guard_tests {
-    use super::{PgStore, PgStoreGuard, PgStoreShutdown};
-    use diport::ManagedResource as _;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use std::sync::Arc;
+mod tests {
+    use super::*;
+    use static_assertions::assert_not_impl_any;
 
-    fn lazy_store() -> Arc<PgStore> {
-        let opts = PgConnectOptions::new()
-            .host("127.0.0.1")
-            .port(5999)
-            .database("rss_test")
-            .username("u")
-            .password("p");
-        Arc::new(PgStore {
-            pool: PgPoolOptions::new()
-                .max_connections(1)
-                .connect_lazy_with(opts),
-        })
+    assert_not_impl_any!(PgOutboxClaim: Clone, Copy);
+
+    fn config() -> PgConfig {
+        PgConfig::new_for_test_plaintext("localhost", 5432, "rss", "rss", PgPassword::new("secret"))
     }
 
-    #[tokio::test]
-    async fn constructors_seal_setup_and_runtime_shutdown_modes()
-    -> Result<(), diport::ShutdownError> {
-        let setup = PgStoreGuard::new_named(lazy_store(), "postgres-writer");
-        assert!(matches!(setup.shutdown, PgStoreShutdown::SetupRollback));
-        setup.shutdown().await?;
-
-        let runtime = PgStoreGuard::new_runtime_named(lazy_store(), "postgres-tenant-reader");
-        assert!(matches!(runtime.shutdown, PgStoreShutdown::RuntimeFence));
-        runtime.shutdown().await?;
-        Ok(())
+    #[test]
+    fn production_contract_is_versioned_and_complete() {
+        assert_eq!(STORAGE_CONTRACT.id, "rss.postgres.consistency.v1");
+        assert_eq!(STORAGE_CONTRACT.relations.len(), 3);
+        for identity in ["tenant_id", "lease_until", "unique(tenant_id"] {
+            assert!(
+                STORAGE_CONTRACT
+                    .relations
+                    .iter()
+                    .any(|relation| relation.contains(identity))
+            );
+        }
     }
 
-    /// `PgStoreGuard::shutdown()` 同步封闭 acquire，且重复 shutdown 幂等。
-    ///
-    /// `connect_lazy_with` 不发真实连接，允许精确证明 fence 而不依赖外部 PostgreSQL。
-    #[tokio::test]
-    async fn shutdown_fences_acquire_and_is_idempotent() -> Result<(), diport::ShutdownError> {
-        let store = lazy_store();
-        let guard = PgStoreGuard::new(Arc::clone(&store));
-        assert_eq!(guard.name(), "postgres");
-        assert!(!store.pool.is_closed());
-
-        guard.shutdown().await?;
-
-        assert!(store.pool.is_closed());
+    #[test]
+    fn config_validation_is_database_free() {
         assert!(matches!(
-            store.pool.acquire().await,
-            Err(sqlx::Error::PoolClosed)
+            config().with_pool_limits(2, 1).validate(),
+            Err(PgError::InvalidPoolLimits)
         ));
+        assert!(matches!(
+            config().with_acquire_timeout(Duration::ZERO).validate(),
+            Err(PgError::InvalidAcquireTimeout)
+        ));
+    }
 
-        guard.shutdown().await?;
-        assert!(store.pool.is_closed());
-        Ok(())
+    #[test]
+    fn claim_and_fence_boundaries_reject_invalid_values_without_database() {
+        assert!(matches!(
+            validate_claim_parameters(Duration::ZERO, 1),
+            Err(PgError::InvalidValue)
+        ));
+        assert!(matches!(
+            validate_claim_parameters(Duration::from_secs(1), 0),
+            Err(PgError::InvalidValue)
+        ));
+        assert!(matches!(
+            validate_claim_parameters(Duration::from_secs(u64::MAX), 1),
+            Err(PgError::InvalidValue)
+        ));
+        assert!(matches!(validate_fence("", 1), Err(PgError::InvalidValue)));
+        assert!(matches!(
+            validate_fence("key", 0),
+            Err(PgError::InvalidValue)
+        ));
+        assert!(matches!(
+            validate_fence("key", u64::MAX),
+            Err(PgError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn production_connect_options_force_verify_full() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("PgTlsTrust::PrivateCa(ca) => options.ssl_mode(PgSslMode::VerifyFull)")
+        );
     }
 }

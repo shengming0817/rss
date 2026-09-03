@@ -28,7 +28,7 @@
 //!
 //! - [`refreshstoredeps`]：topology-gated refresh token store 选型——demo 拓扑用 in-mem 替身，
 //!   durable 拓扑用 postgres；[`refreshstoredeps::resolve`] 是纯策略函数，不构造 adapter。
-//!   resolver 仍无组合根消费方；login/refresh 现经 AuthGrant 路径，不经本 resolver。
+//!   resolver 仍无组合根消费方。
 //!
 //! - [`topology`]：部署拓扑词汇单源（[`Topology`] 枚举），被 replaydeps / eventtransport /
 //!   sagaprojectiondeps / refreshstoredeps 等 resolver 共用。
@@ -38,40 +38,21 @@
 //! [`WriteAdmittedRegistry::finalize_routes`]: registry::WriteAdmittedRegistry::finalize_routes
 
 pub mod domain;
-pub mod domaintransport;
 pub mod eventtransport;
-pub mod framework;
 pub mod module;
-pub mod refreshstoredeps;
 pub mod registry;
 pub mod replaydeps;
-pub mod sagaprojectiondeps;
 pub mod shutdown;
 pub mod topology;
 
 pub use domain::{Domain, KernelError, compose};
-pub use domaintransport::{
-    DomainTransportConfig, DomainTransportResolveError, ResolvedDomainTransport,
-};
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
-pub use framework::{
-    FrameworkHttpRoute, FrameworkRoutes, FrameworkServingError, validate_framework_serving,
-};
 pub use module::{
     DomainBinding, DomainLifecycleOutput, DomainModuleResult, ExpectedWorkerInventory,
     WorkerAdmissionLane, WorkerDescriptor, WorkerInventory, WorkerInventoryError,
     WorkerRegistration, WorkerSpec, compose_bindings, drain_binding_outputs,
     validate_worker_inventory, validate_worker_inventory_closed, validate_worker_inventory_exact,
 };
-pub use primitives::ListenerKind;
-pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
-pub use registry::DomainListenerBinding;
-pub use registry::{
-    HealthProbe, HealthReporter, ReconcileSubscriberOwner, Registry, SubscriberBinding,
-    SubscriberCapability, WriteAdmittedRegistry,
-};
+pub use registry::{HealthProbe, HealthReporter, Registry};
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
-pub use sagaprojectiondeps::{
-    PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError,
-};
 pub use topology::Topology;

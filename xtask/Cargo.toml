@@ -13,7 +13,6 @@ assembly-schema = { path = "../crates/assembly-schema" }
 # （Layer::Root），依赖 Engine 层 consistency 合法（layers::allows(Root, Engine)）。
 consistency = { path = "../crates/consistency" }
 rss-contract.workspace = true
-generated = { path = "../generated" }
 observ = { path = "../crates/observ" }
 vocab = { path = "../crates/vocab" }
 workspacefacts = { path = "../crates/workspacefacts" }
@@ -22,12 +21,8 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
-jsonschema = { workspace = true }
 toml = { workspace = true }
-typify = { workspace = true }
-schemars = { workspace = true }
-prettyplease = { workspace = true }
-syn = { workspace = true, features = ["visit", "visit-mut"] }   # visit: CMD-FUNNEL-01；visit-mut: closed schema rewrites
+syn = { workspace = true, features = ["visit"] }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 rustix = { workspace = true }

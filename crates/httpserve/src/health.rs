@@ -141,22 +141,20 @@ where
 /// This is the only production API for mounting health, readiness, and metrics endpoints. Their
 /// paths and methods are fixed inside `httpserve`; callers can only supply the dynamic report and
 /// metrics render functions.
-pub fn routes<R, M>(report: R, render: M) -> crate::UnfinalizedRoutes
+/// Opaque framework-owned health surface. Only this module can mint one.
+pub struct HealthRoutes(pub(crate) axum::Router);
+
+pub fn router<R, M>(report: R, render: M) -> HealthRoutes
 where
     R: Fn() -> HealthReport + Clone + Send + Sync + 'static,
     M: Fn() -> String + Clone + Send + Sync + 'static,
 {
-    let result = crate::UnfinalizedRoutes::empty()
-        .nest_group::<crate::Health, core::convert::Infallible>("/health/v1", move |router| {
-            Ok(router
-                .mount_framework("/healthz", healthz())
-                .mount_framework("/readyz", readyz(report))
-                .mount_framework("/metrics", metrics(render)))
-        });
-    match result {
-        Ok(routes) => routes,
-        Err(never) => match never {},
-    }
+    HealthRoutes(
+        axum::Router::new()
+            .route("/healthz", healthz())
+            .route("/readyz", readyz(report))
+            .route("/metrics", metrics(render)),
+    )
 }
 
 #[cfg(test)]

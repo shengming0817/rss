@@ -213,7 +213,6 @@ fn write_archive_patch_config(
 enum ProofBehavior {
     Conformance,
     Contract,
-    DeviceSecurityContracts,
     Eventing,
     RequestContext,
     Platform,
@@ -226,7 +225,6 @@ impl ProofBehavior {
         match package {
             "rss-conformance" => Ok(Self::Conformance),
             "rss-contract" => Ok(Self::Contract),
-            "rss-device-security-contracts" => Ok(Self::DeviceSecurityContracts),
             "rss-eventing" => Ok(Self::Eventing),
             "rss-request-context" => Ok(Self::RequestContext),
             "rss-platform" => Ok(Self::Platform),
@@ -240,7 +238,6 @@ impl ProofBehavior {
         match self {
             Self::Conformance => "conformance",
             Self::Contract => "contract",
-            Self::DeviceSecurityContracts => "device-security-contracts",
             Self::Eventing => "eventing",
             Self::RequestContext => "request-context",
             Self::Platform => "platform",
@@ -253,7 +250,6 @@ impl ProofBehavior {
         let expected = match self {
             Self::Conformance => conformance_receipt(),
             Self::Contract => contract_receipt(),
-            Self::DeviceSecurityContracts => device_security_contracts_receipt(),
             Self::Eventing => eventing_receipt(),
             Self::RequestContext => request_context_receipt(),
             Self::Platform => platform_receipt(),
@@ -492,29 +488,6 @@ fn contract_receipt() -> serde_json::Value {
         "safeErrorSourceAbsent": true,
         "safeErrorDiagnosticsRedacted": true,
         "hostileInputCompileRejected": true
-    })
-}
-
-fn device_security_contracts_receipt() -> serde_json::Value {
-    json!({
-        "package": "rss-device-security-contracts",
-        "sixModulesConsumed": true,
-        "descriptorsVerified": true,
-        "httpOperationsVerified": true,
-        "schemaBytesAndDigestsVerified": true,
-        "draftLifecycleVerified": true,
-        "policyLineageRequired": true,
-        "policySchemaConstraintsEnforced": true,
-        "policyErrorEnvelopeUniform": true,
-        "statusClosedVariants": true,
-        "commandLineageRequired": true,
-        "ackLineageInjectionRejected": true,
-        "reportLineageInjectionRejected": true,
-        "committedLineageRequired": true,
-        "rejectedLineageInjectionRejected": true,
-        "receiptConversionsConverge": true,
-        "receiptDebugRedacted": true,
-        "nilReceiptRejected": true
     })
 }
 
@@ -1681,10 +1654,6 @@ mod tests {
         for (package, path) in [
             ("rss-conformance", "crates/conformance"),
             ("rss-contract", "crates/contract"),
-            (
-                "rss-device-security-contracts",
-                "crates/devicesecuritycontracts",
-            ),
             ("rss-request-context", "crates/request-context"),
             ("rss-platform", "crates/platform"),
             ("rss-diag-context", "crates/diagctx"),
@@ -1749,10 +1718,6 @@ mod tests {
             BTreeMap::from([
                 ("rss-conformance", ProofBehavior::Conformance),
                 ("rss-contract", ProofBehavior::Contract),
-                (
-                    "rss-device-security-contracts",
-                    ProofBehavior::DeviceSecurityContracts,
-                ),
                 ("rss-diag-context", ProofBehavior::DiagContext),
                 ("rss-eventing", ProofBehavior::Eventing),
                 ("rss-platform", ProofBehavior::Platform),
@@ -1788,20 +1753,6 @@ mod tests {
         assert_eq!(
             projected_surface_dependencies,
             BTreeSet::from(["rss-contract", "rss-request-context"])
-        );
-        let device_security = plans
-            .iter()
-            .find(|plan| plan.package == "rss-device-security-contracts")
-            .expect("device-security plan");
-        let device_security_surface_dependencies = device_security
-            .dependencies
-            .iter()
-            .filter(|dependency| dependency["registry"].is_null())
-            .map(|dependency| dependency["name"].as_str().expect("dependency name"))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            device_security_surface_dependencies,
-            BTreeSet::from(["rss-contract"])
         );
         let eventing = plans
             .iter()
@@ -1842,10 +1793,6 @@ mod tests {
         assert_eq!(
             ProofBehavior::for_package("rss-platform")?,
             ProofBehavior::Platform
-        );
-        assert_eq!(
-            ProofBehavior::for_package("rss-device-security-contracts")?,
-            ProofBehavior::DeviceSecurityContracts
         );
         assert_eq!(
             ProofBehavior::for_package("rss-diag-context")?,
@@ -1891,57 +1838,6 @@ mod tests {
             ProofBehavior::Eventing
                 .validate_receipt(&false_axis)
                 .is_err()
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn device_security_contracts_receipt_requires_every_public_axis() {
-        let green = device_security_contracts_receipt();
-        assert!(
-            ProofBehavior::DeviceSecurityContracts
-                .validate_receipt(&green)
-                .is_ok()
-        );
-        for field in [
-            "package",
-            "sixModulesConsumed",
-            "descriptorsVerified",
-            "httpOperationsVerified",
-            "schemaBytesAndDigestsVerified",
-            "draftLifecycleVerified",
-            "policyLineageRequired",
-            "policySchemaConstraintsEnforced",
-            "policyErrorEnvelopeUniform",
-            "statusClosedVariants",
-            "commandLineageRequired",
-            "ackLineageInjectionRejected",
-            "reportLineageInjectionRejected",
-            "committedLineageRequired",
-            "rejectedLineageInjectionRejected",
-            "receiptConversionsConverge",
-            "receiptDebugRedacted",
-            "nilReceiptRejected",
-        ] {
-            let mut red = green.clone();
-            red.as_object_mut().expect("receipt object").remove(field);
-            assert!(
-                ProofBehavior::DeviceSecurityContracts
-                    .validate_receipt(&red)
-                    .is_err(),
-                "missing {field} must fail"
-            );
-        }
-        let mut false_operation_receipt = green;
-        false_operation_receipt
-            .as_object_mut()
-            .expect("receipt object")
-            .insert("httpOperationsVerified".to_owned(), false.into());
-        assert!(
-            ProofBehavior::DeviceSecurityContracts
-                .validate_receipt(&false_operation_receipt)
-                .is_err(),
-            "false HTTP operation verification must fail"
         );
     }
 

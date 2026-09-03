@@ -1,7 +1,0 @@
-error[E0277]: the trait bound `SettingsProjectionReadScope: From<ProjectionSelector>` is not satisfied
- --> tests/ui/settings_projection_read_scope_selector_fail.rs:5:56
-  |
-5 |     let _scope: SettingsProjectionReadScope = selector.into();
-  |                                                        ^^^^ the trait `From<ProjectionSelector>` is not implemented for `SettingsProjectionReadScope`
-  |
-  = note: required for `ProjectionSelector` to implement `Into<SettingsProjectionReadScope>`

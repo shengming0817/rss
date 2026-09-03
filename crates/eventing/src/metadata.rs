@@ -1,6 +1,6 @@
 //! Closed provider-neutral metadata carried by an event envelope.
 
-/// Canonical tenant, occurrence time, and optional audit correlation for one L2 event.
+/// Canonical tenant, occurrence time, and optional correlation for one L2 event.
 ///
 /// The private representation and complete constructor make partial metadata unrepresentable.
 /// This type deliberately implements neither `Debug` nor `Display`; callers must access each
@@ -8,7 +8,7 @@
 pub struct EventMetadata {
     tenant_id: rss_request_context::TenantId,
     occurred_at: rss_contract::Timepoint,
-    audit_correlation: Option<rss_diag_context::CorrelationId>,
+    correlation: Option<rss_diag_context::CorrelationId>,
 }
 
 impl EventMetadata {
@@ -17,12 +17,12 @@ impl EventMetadata {
     pub fn new(
         tenant_id: rss_request_context::TenantId,
         occurred_at: rss_contract::Timepoint,
-        audit_correlation: Option<rss_diag_context::CorrelationId>,
+        correlation: Option<rss_diag_context::CorrelationId>,
     ) -> Self {
         Self {
             tenant_id,
             occurred_at,
-            audit_correlation,
+            correlation,
         }
     }
 
@@ -38,9 +38,9 @@ impl EventMetadata {
         self.occurred_at
     }
 
-    /// Borrows the optional audit correlation identifier.
+    /// Borrows the optional correlation identifier.
     #[must_use]
-    pub fn audit_correlation(&self) -> Option<&rss_diag_context::CorrelationId> {
-        self.audit_correlation.as_ref()
+    pub fn correlation(&self) -> Option<&rss_diag_context::CorrelationId> {
+        self.correlation.as_ref()
     }
 }

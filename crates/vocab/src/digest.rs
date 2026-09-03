@@ -100,6 +100,8 @@ pub struct CanonicalSha256DigestError;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     const VALID: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

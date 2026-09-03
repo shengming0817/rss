@@ -1,7 +1,0 @@
-error[E0277]: the trait bound `DeviceCertificateSystemProducer: From<&str>` is not satisfied
- --> tests/ui/reconcile_producer_identity_spoof_fail.rs:6:74
-  |
-6 |     let _: DeviceCertificateSystemProducer = "attacker.controlled.actor".into();
-  |                                                                          ^^^^ the trait `From<&str>` is not implemented for `DeviceCertificateSystemProducer`
-  |
-  = note: required for `&str` to implement `Into<DeviceCertificateSystemProducer>`

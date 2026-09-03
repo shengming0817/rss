@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `restore_from_tenant_scoped_join` found for struct `DeviceIngressApplicationLineage` in the current scope
- --> tests/ui/device_ingress_lineage_restore_forge_fail.rs:4:46
-  |
-4 |     let _ = DeviceIngressApplicationLineage::restore_from_tenant_scoped_join;
-  |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `DeviceIngressApplicationLineage`

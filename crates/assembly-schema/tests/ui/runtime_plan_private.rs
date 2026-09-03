@@ -14,17 +14,17 @@ fn forge(
         runtime_plan_fingerprint,
         provider_plans: vec![ProviderPlan {
             id: "pdp".to_owned(),
-            constructor: ProviderConstructor::OidcProvider,
+            constructor: ProviderConstructor::AmqpPublisher,
             outputs: vec![LifecycleChannel::Resources],
         }],
         listener_plans: vec![ListenerPlan {
             id: "primary-main".to_owned(),
             kind: assembly_schema::AssemblyListenerKind::Primary,
             auth: ListenerAuth::RssAccessToken,
-            domains: vec![AssemblyDomain::Identity],
+            domains: vec![AssemblyDomain::Runtime],
         }],
         domain_plans: vec![DomainPlan {
-            id: AssemblyDomain::Identity,
+            id: AssemblyDomain::Runtime,
             lifecycle: vec![
                 DomainLifecyclePhase::Construct,
                 DomainLifecyclePhase::Ready,
@@ -32,7 +32,7 @@ fn forge(
             ],
         }],
         placement_plans: vec![PlacementPlan {
-            domain: AssemblyDomain::Identity,
+            domain: AssemblyDomain::Runtime,
             workload: "runtime".to_owned(),
         }],
         workflow_plans: vec![],

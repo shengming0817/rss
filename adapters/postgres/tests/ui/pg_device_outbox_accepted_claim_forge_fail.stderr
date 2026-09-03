@@ -1,9 +1,0 @@
-error[E0451]: fields `claimed` and `_accepted` of struct `PgBrokerAcceptedDeviceOutbox` are private
- --> tests/ui/pg_device_outbox_accepted_claim_forge_fail.rs:8:9
-  |
-7 |     postgres::PgBrokerAcceptedDeviceOutbox {
-  |     -------------------------------------- in this type
-8 |         claimed: raw_claim,
-  |         ^^^^^^^ private field
-9 |         _accepted: accepted,
-  |         ^^^^^^^^^ private field

@@ -5,8 +5,8 @@ error: cannot construct `ProviderPlan` with struct literal syntax due to private
    |                              ^^^^^^^^^^^^
 16 |             id: "pdp".to_owned(),
    |             -------------------- private field
-17 |             constructor: ProviderConstructor::OidcProvider,
-   |             ---------------------------------------------- private field
+17 |             constructor: ProviderConstructor::AmqpPublisher,
+   |             ----------------------------------------------- private field
 18 |             outputs: vec![LifecycleChannel::Resources],
    |             ------------------------------------------ private field
    |

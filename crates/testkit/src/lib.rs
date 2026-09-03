@@ -3,7 +3,7 @@
 //!
 //! 给 per-contract 契约测试提供可复用 harness：声明式构造请求、
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
-//! generated wire 类型（schema 对齐）/ 解析统一 wire error envelope。
+//! 调用方 wire 类型（schema 对齐）/ 解析统一 wire error envelope。
 //!
 //! ## 有界等待（[`wait`]）
 //!
@@ -17,17 +17,15 @@
 //! (`eventing_conformance` 模块)。Macro token 为 snake_case，稳定 label 为 kebab-case；compile-fail
 //! 负例见 `tests/ui/provider_catalog_*.rs`（经 `tests/provider_catalog_trybuild.rs`）。语义门入口为
 //! `./hack/cargo.sh xtask provider-capabilities --check`；裸命令只生成 ignored target 诊断报告
-//! （语义见 `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
+//! （语义见公开 eventing/conformance API 与 `crates/consistency`）。
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉
 //!   adapter。本 crate 唯一内部 shipped 出边为 `rss-conformance`，其余
 //!   出边为外部 crate（axum/tower/serde…）。
-//! - **不构造 `AuthPlan` / 不挂 `finalize_auth`**——auth 装配是组合根关注点；harness 只驱动调用方已
-//!   组装好的 `Router`。运行期鉴权闸（401/403）的端到端断言见 `httpserve/tests/runtime.rs`。
+//! - 不参与认证装配；harness 只驱动调用方已组装好的 `Router`。
 //!
-//! 用法见 `crates/testkit/tests/harness.rs`（合成 router 演示四维断言）与 `crates/identity/src/login_contract.rs`
-//! （`identity.login` 真实契约样板）。
+//! 用法见 `crates/testkit/tests/harness.rs`（合成 router 演示四维断言）。
 //!
 //! ref: tokio-rs/axum examples/testing/src/main.rs@3f8956dcd007070be5449dd23102b7ee7f2e1b05
 //!   （`fn app() -> Router` + oneshot + JSON body + body 收集 + 反序列化断言的官方惯用形态。
@@ -41,7 +39,6 @@ mod response;
 
 pub mod crash_matrix;
 pub mod local_only;
-pub mod revocation;
 mod wait;
 
 pub use request::ContractRequest;
@@ -58,25 +55,21 @@ mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
     BridgeNetwork, ContainerService, ExternalPgFixture, FixtureError, MinioCredentials,
-    MinioTlsFixture, MqttAssertionFault, MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture,
-    NetworkAttachment, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
-    PgConnParams, PgFixture, PgTlsFixture, RabbitFixture, RabbitTlsFixture, RedisFixture,
-    RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres, env_or_rabbitmq,
-    env_or_redis, integration_container_labels, minio_tls_archive, mosquitto_mtls,
-    mosquitto_mtls_with_assertion_fault, owned_postgres, postgres_tls, rabbitmq_tls, redis_tls,
-    vault_tls,
+    MinioTlsFixture, NetworkAttachment, OwnedPgFixture, OwnedPostgresRequired, PgAppRole,
+    PgAppRoleSpec, PgConnParams, PgFixture, PgTlsFixture, RabbitFixture, RabbitTlsFixture,
+    RedisFixture, RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres,
+    env_or_rabbitmq, env_or_redis, integration_container_labels, minio_tls_archive, owned_postgres,
+    postgres_tls, rabbitmq_tls, redis_tls, vault_tls,
 };
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available
 // without the container feature. Real provider runners remain integration-gated in each adapter.
-pub mod device_command_conformance;
 pub mod eventing_conformance;
 pub mod projection_conformance;
 
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
 // 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。
 #[cfg(feature = "containers")]
-pub mod policy_conformance;
 #[cfg(feature = "containers")]
 pub mod repo_conformance;
 #[cfg(feature = "containers")]
@@ -142,8 +135,7 @@ const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 /// 构造统一 wire error envelope 响应
 /// （`{"error":{"code","message","retryable","details","requestId"}}`）——**test fixture**：
 /// 供契约测试的样板 handler 产出错误响应，单源化
-/// envelope 形状（与 [`WireError`] 解析侧对称，防 drift）。生产 handler 用 generated typed response
-/// envelope，非本 helper。`requestId` 用固定哨兵
+/// envelope 形状（与 [`WireError`] 解析侧对称，防 drift）。`requestId` 用固定哨兵
 /// `"test-rid"`（真实 requestId 由框架注入，见 `httpserve/tests/runtime.rs`）。
 pub fn wire_error_response(
     status: axum::http::StatusCode,

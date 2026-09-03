@@ -17,11 +17,11 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// RSS 本地治理与 codegen 入口（契约 / assembly / CI / verify）。
+/// RSS 本地治理与验证入口。
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
     name = "xtask",
-    about = "RSS 本地治理与 codegen 入口",
+    about = "RSS 本地治理与验证入口",
     arg_required_else_help = true
 )]
 struct Xtask {
@@ -32,12 +32,6 @@ struct Xtask {
 /// 唯一命令 ADT：解析结果与 IO 执行分离。
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum Command {
-    /// 契约 schema → committed `generated/`（`--check` 为 CI 漂移门）。
-    Codegen {
-        /// 只校验 generated 是否与 schema 一致（CI 漂移门）。
-        #[arg(long)]
-        check: bool,
-    },
     /// Build a real `.crate` and prove it from an independent offline local-registry consumer.
     PackageProof {
         /// Atomically export the proven Release Surface as a portable candidate bundle.
@@ -47,9 +41,6 @@ pub(crate) enum Command {
     /// Debezium / CDC connector skeleton。
     #[command(subcommand)]
     CdcConfig(CdcConfigCommand),
-    /// 契约元数据校验与 breaking 检测。
-    #[command(subcommand)]
-    Contract(ContractCommand),
     /// ArchRules 派生索引与 funnel 矩阵。
     #[command(subcommand)]
     Archrules(ArchrulesCommand),
@@ -59,10 +50,6 @@ pub(crate) enum Command {
     WsdepsDrift,
     /// source semantic 守卫。
     SourceSemanticGuard,
-    /// Saga durable recovery 守卫。
-    SagaDurableRecoveryGuard,
-    /// same-ID SQL/Rust 完整闭包门。
-    OutboxSameIdGuard,
     /// L2 provider conformance 语义校验；裸命令按需生成 target 诊断报告。
     ProviderCapabilities {
         #[arg(long)]
@@ -98,18 +85,6 @@ pub(crate) enum Command {
     /// nextest evidence stage / inspect / replay。
     #[command(subcommand)]
     NextestEvidence(NextestEvidenceCommand),
-    /// schema RLS + LocalOnly reader ACL 终态 meta 守卫（合入前无 PG Medium 门）。
-    SchemaRls,
-    /// inbox receipt cutover 旧 token 回流守卫（CI 门）。
-    InboxCutoverGuard,
-    /// Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）。
-    PgTenantTxGuard,
-    /// domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（CI 门）。
-    RepoScopeGuard,
-    /// reconcile scheduler transactional command outbox seam 守卫（CI 门）。
-    ReconcileOutboxCommandGuard,
-    /// tenancy/AuthZ/projection closeout 反向自检（CI 门）。
-    TenancyCloseout,
     /// governed 高风险路径结构化 defer 完整性 + 经典注解治理门（CI 门）。
     DeferGate,
 }
@@ -118,17 +93,6 @@ pub(crate) enum Command {
 pub(crate) enum CdcConfigCommand {
     /// 输出 Debezium PostgreSQL outbox_log CDC connector JSON skeleton。
     Debezium,
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum ContractCommand {
-    /// 契约元数据多规则校验。
-    Validate,
-    /// wire JSON-Schema 跨版本破坏检测。
-    Breaking {
-        #[arg(long)]
-        against: Option<String>,
-    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -309,17 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_codegen_shapes() -> Result<()> {
-        assert_eq!(parse(&["codegen"])?, Command::Codegen { check: false });
-        assert_eq!(
-            parse(&["codegen", "--check"])?,
-            Command::Codegen { check: true }
-        );
-        assert!(parse(&["codegen", "extra"]).is_err());
-        Ok(())
-    }
-
-    #[test]
     fn try_parse_package_proof_export_is_closed() -> Result<()> {
         assert_eq!(
             parse(&["package-proof"])?,
@@ -356,15 +309,7 @@ mod tests {
         for cmd in [
             "layer-deps",
             "wsdeps-drift",
-            "outbox-same-id-guard",
             "source-semantic-guard",
-            "saga-durable-recovery-guard",
-            "schema-rls",
-            "inbox-cutover-guard",
-            "pg-tenant-tx-guard",
-            "repo-scope-guard",
-            "reconcile-outbox-command-guard",
-            "tenancy-closeout",
             "defer-gate",
         ] {
             assert!(parse(&[cmd]).is_ok(), "expected ok: {cmd}");
@@ -390,21 +335,6 @@ mod tests {
             Command::CdcConfig(CdcConfigCommand::Debezium)
         );
         assert!(parse(&["cdc-config"]).is_err());
-        assert_eq!(
-            parse(&["contract", "validate"])?,
-            Command::Contract(ContractCommand::Validate)
-        );
-        assert_eq!(
-            parse(&["contract", "breaking"])?,
-            Command::Contract(ContractCommand::Breaking { against: None })
-        );
-        assert_eq!(
-            parse(&["contract", "breaking", "--against", "HEAD~1"])?,
-            Command::Contract(ContractCommand::Breaking {
-                against: Some("HEAD~1".into()),
-            })
-        );
-        assert!(parse(&["contract", "breaking", "--against"]).is_err());
         Ok(())
     }
 
@@ -673,8 +603,8 @@ mod tests {
     fn try_parse_SECRET_BAIT_never_echoes() -> Result<()> {
         for args in [
             &["SECRET_BAIT"][..],
-            &["codegen", "SECRET_BAIT"][..],
-            &["codegen", "--SECRET_BAIT"][..],
+            &["package-proof", "SECRET_BAIT"][..],
+            &["package-proof", "--SECRET_BAIT"][..],
         ] {
             let error = match parse(args) {
                 Ok(command) => bail!("bait argv parsed as {command:?}"),
@@ -695,7 +625,7 @@ mod tests {
             unknown_sub.contains("unknown subcommand"),
             "subcommand path: {unknown_sub}"
         );
-        let Err(unknown_flag) = parse(&["codegen", "--SECRET_BAIT"]) else {
+        let Err(unknown_flag) = parse(&["package-proof", "--SECRET_BAIT"]) else {
             bail!("unknown flag")
         };
         let unknown_flag = unknown_flag.to_string();
@@ -703,7 +633,7 @@ mod tests {
             unknown_flag.contains("unexpected argument"),
             "flag path: {unknown_flag}"
         );
-        let Err(trailing) = parse(&["codegen", "SECRET_BAIT"]) else {
+        let Err(trailing) = parse(&["package-proof", "SECRET_BAIT"]) else {
             bail!("trailing unknown")
         };
         let trailing = trailing.to_string();

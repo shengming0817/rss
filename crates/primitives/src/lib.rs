@@ -1,4 +1,4 @@
-//! primitives — RSS 引擎层原语（crypto / authplan / healthz / circuitbreaker / DR admission）。
+//! primitives — RSS 引擎层原语（crypto / healthz / circuitbreaker / DR admission）。
 //!
 //! 引擎层 L0：trait 均 sync 静态分发、非 DI port（ADR-004 C1）；值类型字段私有、不 derive serde（C6）。
 //! DI port（`Clock` 位参禁默认系统时钟、`ManagedResource` LIFO，ADR-001/ADR-003）**不在此**——
@@ -7,16 +7,11 @@
 //! ref: sony/gobreaker v2/gobreaker.go@master（circuitbreaker 三态状态机）；
 //! uber-go/fx lifecycle.go@master（healthz 生命周期边界）。
 
-pub mod authplan;
 pub mod circuitbreaker;
 pub mod crypto;
 pub mod dr_admission;
 pub mod healthz;
 
-pub use authplan::{
-    AuthPlan, AuthPlanError, AuthRequirement, AuthScheme, ListenerKind, RequiredScheme,
-    RouteAuthOptOut, resolve_requirement,
-};
 pub use circuitbreaker::{
     BreakerConfig, BreakerConfigError, BreakerEvent, CallOutcome, CircuitCounts, CircuitState,
     allows_request, next_state,
@@ -34,10 +29,6 @@ pub use healthz::{HealthCheck, HealthReport, HealthStatus, ProbeName, ProbeNameE
 #[cfg(test)]
 mod smoke {
     //! build smoke：证明 sync 纯计算 trait 可被泛型静态分发消费 + 闭值集 / 值类型 / 纯函数签名可引用。
-    use crate::authplan::{
-        AuthPlan, AuthRequirement, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut,
-        resolve_requirement,
-    };
     use crate::circuitbreaker::{
         BreakerConfig, BreakerEvent, CallOutcome, CircuitCounts, CircuitState, allows_request,
         next_state,
@@ -93,18 +84,13 @@ mod smoke {
     fn type_and_fn_signatures_are_consumable() {
         let _state: CircuitState = CircuitState::HalfOpen;
         let _event = BreakerEvent::Call(CallOutcome::Success);
-        let _scheme = AuthScheme::NoAuth;
-        let _kind = ListenerKind::Internal;
-        let _opt = RouteAuthOptOut::Public;
         let _sev = HealthStatus::Degraded;
-        let _req = AuthRequirement::Require(RequiredScheme::RssAccessToken);
         let _mac_alg = MacAlgorithm::HmacSha256;
 
         // 函数指针绑定证明签名形状。
         let _f: fn(CircuitState, CircuitCounts, BreakerConfig, BreakerEvent) -> CircuitState =
             next_state;
         let _g: fn(CircuitState, CircuitCounts, BreakerConfig) -> bool = allows_request;
-        let _h: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requirement;
         let _i = _consume_digester::<NoopDigester>;
         let _j = _consume_mac_verifier::<NoopMacVerifier>;
     }

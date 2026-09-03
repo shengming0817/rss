@@ -1,4 +1,4 @@
-error[E0451]: fields `tenant_id`, `occurred_at` and `audit_correlation` of struct `EventMetadata` are private
+error[E0451]: fields `tenant_id`, `occurred_at` and `correlation` of struct `EventMetadata` are private
   --> tests/ui/event_metadata_private_fields_fail.rs:10:9
    |
  9 |     let _ = EventMetadata {
@@ -7,5 +7,5 @@ error[E0451]: fields `tenant_id`, `occurred_at` and `audit_correlation` of struc
    |         ^^^^^^^^^ private field
 11 |         occurred_at,
    |         ^^^^^^^^^^^ private field
-12 |         audit_correlation: None,
-   |         ^^^^^^^^^^^^^^^^^ private field
+12 |         correlation: None,
+   |         ^^^^^^^^^^^ private field

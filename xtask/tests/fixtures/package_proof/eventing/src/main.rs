@@ -58,7 +58,7 @@ fn check_metadata_envelope_roundtrip() -> ProofResult {
     )?;
     ensure(
         actual_metadata
-            .audit_correlation()
+            .correlation()
             .is_some_and(|value| value.as_str() == "package-proof-42"),
         "event correlation did not round-trip",
     )?;

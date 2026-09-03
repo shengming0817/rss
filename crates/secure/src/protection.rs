@@ -227,7 +227,7 @@ fn saga_receipt_aad_bytes(coordinates: SagaReceiptProtectionCoordinates<'_>) -> 
 ///
 /// AAD 的 `open` 时必须从**受信派生上下文**重新派生，绝不回灌 envelope 中存储的 AAD。受信源有两类
 /// （ADR §D2），在 L0 均归约为「提供四维坐标」，故是两个**命名构造器**而非两种类型：
-/// - [`ProtectionContext::authenticated_request`]：已鉴权请求（HTTP/RPC，tenant 由上层从 Principal/JWT 提取）。
+/// - [`ProtectionContext::authenticated_request`]：已鉴权请求（HTTP/RPC，tenant 由上层可信边界提取）。
 /// - [`ProtectionContext::authorized_maintenance`]：经授权维护/迁移（backfill/rewrap/rotation，无 HTTP 请求，
 ///   按记录坐标重派生）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,8 +298,8 @@ impl SagaReceiptProtectionContext {
 }
 
 impl ProtectionContext {
-    /// 受信源 ①：已鉴权请求上下文（tenant 由调用方从 Principal/JWT 提取后传入——`secure` 是 L0，
-    /// 不可见 `authn::Principal`）。
+    /// 受信源 ①：已鉴权请求上下文（tenant 由调用方从可信认证边界提取后传入——`secure` 是 L0，
+    /// 不可见业务 principal）。
     pub fn authenticated_request(
         tenant: TenantId,
         config_key: &str,

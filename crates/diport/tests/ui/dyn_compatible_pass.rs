@@ -3,11 +3,10 @@
 //! (DIPORT-DYN-CONCURRENCY-01 native-compile); `ui_assert_*` trybuild is Medium anti-vacuity —
 //! not a 24-stub matrix here.
 //!
-//! Thin matrix: one `async_send` (Signer) + `async_sync` shared ports (SecretResolver, Pdp).
+//! Thin matrix: one `async_send` (Signer) + one `async_sync` shared port (SecretResolver).
 use diport::{
-    DynPdp, DynSecretResolver, DynSigner, KeyId, Pdp, PdpError, RawCredential, SecretCoordinate,
-    SecretMaterial, SecretResolver, SecretResolverError, SignRequest, Signature, Signer,
-    SignerError, SigningPurpose, VerifiedClaims,
+    DynSecretResolver, DynSigner, KeyId, SecretCoordinate, SecretMaterial, SecretResolver,
+    SecretResolverError, SignRequest, Signature, Signer, SignerError, SigningPurpose,
 };
 use std::sync::Arc;
 use rss_request_context::TenantId;
@@ -37,14 +36,6 @@ impl SecretResolver for OkSecretResolver {
     }
 }
 
-struct OkPdp;
-
-impl Pdp for OkPdp {
-    async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-        Ok(VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")))
-    }
-}
-
 fn main() {
     let _boxed: Box<DynSigner> = DynSigner::new_box(OkSigner);
     let _arced: Arc<DynSigner> = DynSigner::new_arc(OkSigner);
@@ -58,7 +49,4 @@ fn main() {
     let _sr_arced: Arc<DynSecretResolver> = DynSecretResolver::new_arc(OkSecretResolver);
     assert_send_sync::<Arc<DynSecretResolver<'static>>>();
 
-    let _pdp_boxed: Box<DynPdp> = DynPdp::new_box(OkPdp);
-    let _pdp_arced: Arc<DynPdp> = DynPdp::new_arc(OkPdp);
-    assert_send_sync::<Arc<DynPdp<'static>>>();
 }

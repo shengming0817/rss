@@ -19,13 +19,12 @@ serde = { workspace = true }                         # ContractRequest.json 的 
 serde_json = { workspace = true }                    # body 序列化 / 反序列化（schema 对齐 + error envelope 解析）
 toml = { workspace = true }                          # consistency crash matrix fixture DSL（fixture-*.toml）解析
 thiserror = { workspace = true }                     # TestkitError 库错误枚举
-futures = { workspace = true }                       # provider-neutral async revocation conformance join
 # 有界等待（#1495）：`wait` 模块始终可用；time/sync 给 poll + Notify，macros/rt 给单测 runtime。
 tokio = { workspace = true, features = ["time", "sync", "macros", "rt"] }
 # 容器 fixture（#1137，仅 `containers` feature）：testcontainers 起真 pg/redis/rabbitmq；
 # anyhow = FixtureError（测试体 `?` 组合）。默认构建 / 契约 harness 消费方不拉此树。
 testcontainers = { workspace = true, optional = true }
-testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq", "mosquitto", "minio"] }
+testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq", "minio"] }
 anyhow = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
@@ -41,11 +40,6 @@ integration = ["containers"]
 
 # RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
 # 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
-[[test]]
-name = "mqtt_mtls_fixture"
-path = "tests/mqtt_mtls_fixture.rs"
-required-features = ["integration"]
-
 [dev-dependencies]
 eventing.workspace = true                              # public Eventing lifecycle external-crate T2 carrier
 uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度

@@ -2,7 +2,7 @@
 //!
 //! [`BodyLimit`] 控制 Content-Length 检查门限（body_limit 中间件读此值判 413）；
 //! [`SecurityHeaders`] 携一批默认安全响应头，经 [`tower_http::set_header::SetResponseHeaderLayer`]
-//! 在 [`crate::routes::AuthenticatedRoutes::sealed_router`] 中统一叠层。
+//! 在 [`crate::ServerService`] 的封闭构造路径中统一叠层。
 //!
 //! ref: tower-http tower-http/src/set_header/response.rs@master（SetResponseHeaderLayer API）
 
@@ -95,7 +95,7 @@ impl SecurityHeaders {
     ///
     /// 返回 `Vec<SetResponseHeaderLayer<HeaderValue>>`，调用方 for-each `.layer(hl)` 叠在 axum Router。
     /// 所有 layer 类型统一（`M = HeaderValue`），可同类型 Vec 收集。
-    pub(crate) fn response_layers(&self) -> Vec<SetResponseHeaderLayer<HeaderValue>> {
+    pub fn response_layers(&self) -> Vec<SetResponseHeaderLayer<HeaderValue>> {
         let mut layers: Vec<SetResponseHeaderLayer<HeaderValue>> = Vec::with_capacity(8);
 
         layers.push(SetResponseHeaderLayer::overriding(
@@ -137,12 +137,10 @@ impl SecurityHeaders {
 
 /// 边缘防护配置（body-limit + security-headers）。
 ///
-/// 以 [`Default`] 安全值初始化；组合根可经 [`crate::routes::AuthenticatedRoutes::with_edge_hardening`]
-/// 覆盖（如调整 `body_limit`，或显式关闭框架 CORP 策略）。HSTS 的最终 wire 裁决属于
+/// 以 [`Default`] 安全值初始化。HSTS 的最终 wire 裁决属于
 /// 持有真实 transport scheme 的 `httpd` adapter。
 ///
-/// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }——`EdgeHardening` 经 `sealed_router` 唯一 funnel 叠层，
-/// 保证每个 bindable router 都带 body-limit 且 outer 于 auth（结构性 Hard：不经 sealed_router 无法 bind）。
+/// `EdgeHardening` 经 `ServerService` 唯一 funnel 叠层，保证每个 bindable router 都带 body-limit。
 #[derive(Clone, Debug, Default)]
 pub struct EdgeHardening {
     pub body_limit: BodyLimit,

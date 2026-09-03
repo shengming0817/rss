@@ -14,8 +14,6 @@ use std::pin::Pin;
 /// Durable L2 providers covered by the conformance catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProviderId {
-    /// PostgreSQL durable state and transaction provider.
-    Postgres,
     /// AMQP publisher/subscriber provider.
     Amqp,
     /// S3 verified WORM archive provider.
@@ -24,12 +22,11 @@ pub enum ProviderId {
 
 impl ProviderId {
     /// Closed provider universe.
-    pub const ALL: [Self; 3] = [Self::Postgres, Self::Amqp, Self::S3];
+    pub const ALL: [Self; 2] = [Self::Amqp, Self::S3];
 
     /// Stable catalog identifier.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Postgres => "postgres",
             Self::Amqp => "amqp",
             Self::S3 => "s3",
         }
@@ -38,7 +35,6 @@ impl ProviderId {
     /// Exact capability subset applicable to this provider.
     pub const fn capabilities(self) -> &'static [CapabilityId] {
         match self {
-            Self::Postgres => &CapabilityId::ALL,
             Self::Amqp => &[
                 CapabilityId::Identity,
                 CapabilityId::Fencing,
@@ -66,8 +62,6 @@ pub enum CapabilityId {
     /// A single deadline/lease budget is shared across provider stages, and an insufficient
     /// preflight remainder performs no external I/O.
     Budget,
-    /// Broker acknowledgement follows durable commit.
-    CommitAck,
     /// A possibly accepted publish keeps the same identity and retires its transport.
     Ambiguity,
     /// Immutable archive verification produces the only purge-authorizing receipt.
@@ -76,12 +70,11 @@ pub enum CapabilityId {
 
 impl CapabilityId {
     /// Closed capability universe in canonical output order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Identity,
         Self::Conflict,
         Self::Fencing,
         Self::Budget,
-        Self::CommitAck,
         Self::Ambiguity,
         Self::ArchiveReceipt,
     ];
@@ -93,7 +86,6 @@ impl CapabilityId {
             Self::Conflict => "conflict",
             Self::Fencing => "fencing",
             Self::Budget => "budget",
-            Self::CommitAck => "commit-ack",
             Self::Ambiguity => "ambiguity",
             Self::ArchiveReceipt => "archive-receipt",
         }
@@ -104,8 +96,6 @@ impl CapabilityId {
 /// crates; the sealed trait prevents external implementations.
 #[doc(hidden)]
 pub mod __catalog {
-    /// PostgreSQL provider marker.
-    pub enum Postgres {}
     /// AMQP provider marker.
     pub enum Amqp {}
     /// S3 provider marker.
@@ -119,8 +109,6 @@ pub mod __catalog {
     pub enum Fencing {}
     /// Deadline/lease budget capability marker.
     pub enum Budget {}
-    /// Commit-before-ack capability marker.
-    pub enum CommitAck {}
     /// Ambiguous publish capability marker.
     pub enum Ambiguity {}
     /// Verified archive receipt capability marker.
@@ -128,19 +116,6 @@ pub mod __catalog {
 
     mod private {
         pub trait SealedCompleteSet<Provider> {}
-
-        impl SealedCompleteSet<super::Postgres>
-            for (
-                super::Identity,
-                super::Conflict,
-                super::Fencing,
-                super::Budget,
-                super::CommitAck,
-                super::Ambiguity,
-                super::ArchiveReceipt,
-            )
-        {
-        }
 
         impl SealedCompleteSet<super::Amqp>
             for (
@@ -197,14 +172,10 @@ pub mod __catalog {
 /// | `conflict` | `conflict` |
 /// | `fencing` | `fencing` |
 /// | `budget` | `budget` |
-/// | `commit_ack` | `commit-ack` |
 /// | `ambiguity` | `ambiguity` |
 /// | `archive_receipt` | `archive-receipt` |
 #[macro_export]
 macro_rules! provider_conformance_catalog {
-    (@provider postgres) => {
-        $crate::eventing_conformance::__catalog::Postgres
-    };
     (@provider amqp) => {
         $crate::eventing_conformance::__catalog::Amqp
     };
@@ -222,9 +193,6 @@ macro_rules! provider_conformance_catalog {
     };
     (@capability budget) => {
         $crate::eventing_conformance::__catalog::Budget
-    };
-    (@capability commit_ack) => {
-        $crate::eventing_conformance::__catalog::CommitAck
     };
     (@capability ambiguity) => {
         $crate::eventing_conformance::__catalog::Ambiguity

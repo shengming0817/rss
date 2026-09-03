@@ -21,7 +21,7 @@ error[E0061]: this method takes 1 argument but 2 arguments were supplied
    |
 13 |       input.domain(
    |             ^^^^^^
-14 |           AssemblyDomain::Identity,
+14 |           AssemblyDomain::Runtime,
 15 | /         vec![
 16 | |             DomainLifecyclePhase::Construct,
 17 | |             DomainLifecyclePhase::Ready,
@@ -36,11 +36,11 @@ note: method defined here
    |            ^^^^^^
 help: remove the extra argument
    |
-14 -         AssemblyDomain::Identity,
+14 -         AssemblyDomain::Runtime,
 15 -         vec![
 16 -             DomainLifecyclePhase::Construct,
 17 -             DomainLifecyclePhase::Ready,
 18 -             DomainLifecyclePhase::Shutdown,
 19 -         ],
-14 +         AssemblyDomain::Identity,
+14 +         AssemblyDomain::Runtime,
    |

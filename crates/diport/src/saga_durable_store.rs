@@ -125,7 +125,6 @@ pub struct SagaStartAuthorization {
 
 impl SagaStartAuthorization {
     pub fn issue(
-        _mint: authmint::SagaStartMint,
         caller: vocab::ServiceCallerDomain,
         identity: SagaWorkerIdentity,
         instance: SagaInstanceRef,

@@ -5,8 +5,7 @@
 //! - `is_excluded` / `SCAN_EXCLUDED_SEGMENTS`：仅 `pdpallow`、`event_transport_guard`
 //! - `strip_comments`：`pdpallow` + `reconcile_outbox_command_guard`
 //! - `is_crate_internal_integration_test_source`：生产源 classifier 共用的 crate-internal
-//!   integration test path predicate（`pg_tenant_tx_guard` /
-//!   `dlx_lifecycle_funnel` / `command_symmetry` / `producer_assurance` /
+//!   integration test path predicate（`dlx_lifecycle_funnel` / `command_symmetry` / `producer_assurance` /
 //!   `saga_durable_recovery_guard` / `event_transport_guard`）
 //! - `member_dirs` / `rs_files`：多模块共用（含 `command_symmetry`、`pdpallow`、
 //!   `event_transport_guard`、`layerdeps`、`contract_binding_guard`、`runtime_env_guard`、
@@ -54,6 +53,7 @@ pub(crate) fn is_excluded(path: &Path) -> bool {
 /// 不覆盖 crate 根 `tests/`、`test_support`、普通 `*_test(s).rs`——那些由各 guard 本地政策处理。
 ///
 /// AI-robust Hard: `integration_tests/` 下语义名 support 文件仍为 test-only。
+#[cfg(test)]
 pub(crate) fn is_crate_internal_integration_test_source(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())

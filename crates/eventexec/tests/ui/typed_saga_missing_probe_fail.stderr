@@ -1,8 +1,0 @@
-error[E0046]: not all trait items implemented, missing: `probe`, `probe_compensation`
-  --> tests/ui/typed_saga_missing_probe_fail.rs:12:1
-   |
-12 | impl SagaStep<PrepareStep> for MissingProbe {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `probe`, `probe_compensation` in implementation
-   |
-   = help: implement the missing item: `fn probe(&self, _: SagaForwardContext) -> impl Future<Output = SagaProbeOutcome<<PrepareStep as StepMarker>::Receipt>> + Send { todo!() }`
-   = help: implement the missing item: `fn probe_compensation(&self, _: SagaCompensationContext, _: <PrepareStep as StepMarker>::Receipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>> + Send { todo!() }`

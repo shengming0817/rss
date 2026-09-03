@@ -4,29 +4,29 @@
 //!
 //! 设计要点：domain 与 contract_id **不**互相派生（`id` 首段 ≠ `domain`——`_seed` 反例：domain `_seed`、
 //! id `seed.thing-happened`；且 contract `id` 容连字符 [`is_dotted_id`]、`domain` 是 crate-name 形
-//! [`is_safe_segment`]，二者字母表不同）。两字段各自来自 manifest 的对应字段，由 `cargo xtask codegen` 派生为
+//! [`is_safe_segment`]，二者字母表不同）。两字段各自来自 manifest 的对应字段，由 `cargo xtask consumer tooling` 派生为
 //! `pub const CONTRACT: ContractBinding`、golden 字节锁。domain、contract_id、version 与 schema_hash
 //! 收进**单一绑定值**——故 envelope header 不需要在调用点分别 author 这些裸字段。
 //!
-//! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**Medium**）—— generated 的 `CONTRACT` 常量
-//! 同源单一 manifest + golden 字节锁（`cargo xtask codegen --check`）：保证**派生常量**正确、不漂移。上游
+//! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**Medium**）—— static 的 `CONTRACT` 常量
+//! 同源单一 manifest + golden 字节锁（`cargo xtask consumer tooling --check`）：保证**派生常量**正确、不漂移。上游
 //! `xtask/contract/validate.rs` R7（`is_safe_segment` domain / `is_dotted_id` id / `v{N}` version 语法）+
 //! R3（磁盘段 domain/version = manifest domain/version）背书 `from_static` 不在运行期重校验。
 //!
 //! **不是 Hard seal**：[`ContractBinding::from_static`]
 //! 是普通 `pub` 构造器，任意依赖 `vocab` 的 crate 可裸构造任意字段——跨 crate sealing 在 vocab
-//! 基础层不可 Hard 强制。「业务只用 generated `CONTRACT`、不伪造」由 source guard 收口到 generated /
-//! 测试 fixture（`cargo xtask verify` 的 `contract-binding-guard`，Medium）；下游强度：generated 常量正确性 =
+//! 基础层不可 Hard 强制。「业务只用 static `CONTRACT`、不伪造」由 source guard 收口到 static /
+//! 测试 fixture（`cargo xtask verify` 的 `contract-binding-guard`，Medium）；下游强度：static 常量正确性 =
 //! golden（Medium）。
 
 /// 契约绑定（domain + contract_id + version + schema_hash 同源常量）。
 /// 字段私有——只读 accessor 暴露；四字段收进单一值，彼此不可漂移。
 ///
-/// 预期生产 mint 经 [`ContractBinding::from_static`]（`cargo xtask codegen` 从 `contract.toml` 派生为
+/// 预期生产 mint 经 [`ContractBinding::from_static`]（`cargo xtask consumer tooling` 从 `contract.toml` 派生为
 /// `CONTRACT` 常量 + golden 锁）；但 `from_static` 是普通 `pub` 构造器、非 Hard seal（业务伪造面靠
 /// source guard 收口）。INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（Medium，见 mod doc）。
 ///
-/// 仅持 `&'static str`（绑定值来自 codegen 字面量 / 测试字面量，无运行期 mint）⇒ `Copy` + 全 `const fn`
+/// 仅持 `&'static str`（绑定值来自 consumer tooling 字面量 / 测试字面量，无运行期 mint）⇒ `Copy` + 全 `const fn`
 /// accessor：消费方可在 const 上下文复用（如域 crate `const DOMAIN = CONTRACT.domain();` 单源 tracing 标签）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContractBinding {
@@ -53,11 +53,10 @@ impl ContractBinding {
         }
     }
 
-    /// 由 `&'static str`（codegen 字面量）构造——const-evaluable，**不**运行期校验。
+    /// 由 `&'static str` 字面量构造——const-evaluable，**不**运行期校验。
     ///
-    /// 唯一生产 mint 面：`generated::{kind}::{domain}_v1::CONTRACT`（codegen 从 manifest + schema
-    /// 同源派生 + golden 锁）。格式合法性由上游 `xtask/contract/validate.rs`（R7 语法 + R3 路径↔字段一致）
-    /// 静态背书，故此处不重校验（避免无生产调用方的 runtime 校验码）。测试用字面量直构。
+    /// 静态构造面由仓外 consumer 从其契约清单生成或手写；RSS 不持有业务 consumer tooling。
+    /// 格式合法性由 consumer 负责；此处不重复运行期校验。
     #[must_use]
     pub const fn from_static(
         domain: &'static str,
@@ -122,7 +121,7 @@ const fn parse_static_version(value: &str) -> u32 {
     major
 }
 
-/// Generated identity of one event fact, binding its contract columns and broker topic atomically.
+/// Static identity of one event fact, binding its contract columns and broker topic atomically.
 ///
 /// Code generation is the production mint surface. Active producer authorization and typed event
 /// encoding carry this value as one unit, so an entry topic cannot drift from its contract.
@@ -133,28 +132,28 @@ pub struct EventFactBinding {
 }
 
 impl EventFactBinding {
-    /// Construct a generated event fact binding from manifest-derived constants.
+    /// Construct a static event fact binding from manifest-derived constants.
     #[must_use]
     pub const fn from_static(contract: ContractBinding, topic: &'static str) -> Self {
         Self { contract, topic }
     }
 
-    /// Generated contract identity for the fact.
+    /// Static contract identity for the fact.
     #[must_use]
     pub const fn contract(&self) -> ContractBinding {
         self.contract
     }
 
-    /// Generated broker topic for the same fact.
+    /// Static broker topic for the same fact.
     #[must_use]
     pub const fn topic(&self) -> &'static str {
         self.topic
     }
 }
 
-/// Projection workflow input binding generated from `[capabilities.workflow].inputs`.
+/// Projection workflow input binding static from `[capabilities.workflow].inputs`.
 ///
-/// The projection id and input event contract are emitted by `cargo xtask codegen` from the
+/// The projection id and input event contract are emitted by `cargo xtask consumer tooling` from the
 /// contract manifests. Runtime projection writers consume only this static binding surface; they
 /// do not accept handwritten `(contract_id, topic)` registry rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +164,7 @@ pub struct ProjectionInputBinding {
 }
 
 impl ProjectionInputBinding {
-    /// Construct a generated projection input binding from static manifest literals.
+    /// Construct a static projection input binding from static manifest literals.
     #[must_use]
     pub const fn from_static(
         projection_id: &'static str,
@@ -252,7 +251,7 @@ pub enum SagaRetryClass {
     Transient,
 }
 
-/// Generated retry policy. Every field is mandatory in a saga manifest.
+/// Static retry policy. Every field is mandatory in a saga manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SagaRuntimePolicySpec {
     max_attempts: u32,
@@ -264,7 +263,7 @@ pub struct SagaRuntimePolicySpec {
 }
 
 impl SagaRuntimePolicySpec {
-    /// Construct a generated policy from manifest-derived fields.
+    /// Construct a static policy from manifest-derived fields.
     #[must_use]
     pub const fn from_static(
         max_attempts: u32,
@@ -310,7 +309,7 @@ impl SagaRuntimePolicySpec {
     }
 }
 
-/// Static saga step binding generated from `[saga].steps`.
+/// Static saga step binding static from `[saga].steps`.
 ///
 /// The parent saga contract and the step fields are carried as one atom so typed runtime
 /// registration cannot bind a same-shaped step from a different saga contract.
@@ -325,7 +324,7 @@ pub struct SagaStepBinding {
 }
 
 impl SagaStepBinding {
-    /// Construct a generated saga step binding from static manifest literals.
+    /// Construct a static saga step binding from static manifest literals.
     #[must_use]
     pub const fn from_static(
         contract: ContractBinding,
@@ -401,10 +400,10 @@ impl SagaStepBinding {
     }
 }
 
-/// Saga contract binding generated from a saga `contract.toml`.
+/// Saga contract binding static from a saga `contract.toml`.
 ///
 /// `contract`, `policy`, and ordered `steps` are carried as one atom so runtime composition does
-/// not hand-author contract id, runtime policy, or action order independently from the generated
+/// not hand-author contract id, runtime policy, or action order independently from the static
 /// saga contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SagaContractBinding {
@@ -415,7 +414,7 @@ pub struct SagaContractBinding {
 }
 
 impl SagaContractBinding {
-    /// Construct a generated saga binding from static manifest-derived parts.
+    /// Construct a static saga binding from static manifest-derived parts.
     #[must_use]
     pub const fn from_parts(
         contract: ContractBinding,
@@ -443,7 +442,7 @@ impl SagaContractBinding {
         self.policy
     }
 
-    /// Ordered saga step bindings generated from `[saga].steps`.
+    /// Ordered saga step bindings static from `[saga].steps`.
     #[must_use]
     pub const fn steps(&self) -> &'static [SagaStepBinding] {
         self.steps
@@ -491,9 +490,9 @@ mod tests {
 
     #[test]
     fn from_static_exposes_fields_verbatim() {
-        let b = ContractBinding::from_static("identity", "identity.session-created", "v1", HASH);
-        assert_eq!(b.domain(), "identity");
-        assert_eq!(b.contract_id(), "identity.session-created");
+        let b = ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH);
+        assert_eq!(b.domain(), "runtime");
+        assert_eq!(b.contract_id(), "runtime.fact-recorded");
         assert_eq!(b.version(), "v1");
         assert_eq!(b.schema_hash(), HASH);
     }
@@ -513,29 +512,28 @@ mod tests {
     }
 
     #[test]
-    fn settings_binding_round_trips() {
-        let b =
-            ContractBinding::from_static("settings", "settings.config-version-changed", "v2", HASH);
-        assert_eq!(b.domain(), "settings");
-        assert_eq!(b.contract_id(), "settings.config-version-changed");
+    fn platform_binding_round_trips() {
+        let b = ContractBinding::from_static("platform", "platform.fact-updated", "v2", HASH);
+        assert_eq!(b.domain(), "platform");
+        assert_eq!(b.contract_id(), "platform.fact-updated");
         assert_eq!(b.version(), "v2");
     }
 
     #[test]
     fn copy_and_eq_hold() {
-        let a = ContractBinding::from_static("identity", "identity.session-created", "v1", HASH);
+        let a = ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH);
         let b = a; // Copy（四个 &'static str）——同值相等。
         assert_eq!(a, b);
-        let c = ContractBinding::from_static("identity", "identity.other", "v1", HASH);
+        let c = ContractBinding::from_static("runtime", "runtime.other", "v1", HASH);
         assert_ne!(a, c);
     }
 
     #[test]
     fn from_static_is_const_usable() {
-        // const 上下文可用（codegen 以 `pub const CONTRACT: ContractBinding = …from_static(..)` 发射）。
+        // const 上下文可用（consumer tooling 以 `pub const CONTRACT: ContractBinding = …from_static(..)` 发射）。
         const C: ContractBinding =
-            ContractBinding::from_static("identity", "identity.session-created", "v1", HASH);
-        assert_eq!(C.domain(), "identity");
+            ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH);
+        assert_eq!(C.domain(), "runtime");
     }
 
     #[test]
@@ -604,20 +602,20 @@ mod tests {
     }
 
     #[test]
-    fn projection_input_binding_exposes_generated_contract_and_topic() {
+    fn projection_input_binding_exposes_static_contract_and_topic() {
         const B: super::ProjectionInputBinding = super::ProjectionInputBinding::from_static(
-            "audit.session-projection",
-            "identity",
-            "identity.session-created",
+            "runtime.projection",
+            "runtime",
+            "runtime.fact-recorded",
             "v1",
             HASH,
-            "identity.session.created",
+            "runtime.fact.recorded",
         );
-        assert_eq!(B.projection_id(), "audit.session-projection");
-        assert_eq!(B.contract_id(), "identity.session-created");
-        assert_eq!(B.domain(), "identity");
+        assert_eq!(B.projection_id(), "runtime.projection");
+        assert_eq!(B.contract_id(), "runtime.fact-recorded");
+        assert_eq!(B.domain(), "runtime");
         assert_eq!(B.version(), "v1");
         assert_eq!(B.schema_hash(), HASH);
-        assert_eq!(B.topic(), "identity.session.created");
+        assert_eq!(B.topic(), "runtime.fact.recorded");
     }
 }

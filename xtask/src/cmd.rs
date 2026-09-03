@@ -304,7 +304,6 @@ fn cargo_clean_cmd(args: &[&str], env: &[(&str, &str)], cwd: Option<&Path>) -> C
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalProgram {
-    Rustfmt,
     Docker,
     SystemShell,
     Git,
@@ -315,7 +314,6 @@ pub(crate) enum ExternalProgram {
 impl ExternalProgram {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Rustfmt => "rustfmt",
             Self::Docker => "docker",
             Self::SystemShell => "/bin/sh",
             Self::Git => "git",

@@ -1,7 +1,0 @@
-error[E0451]: fields `expected` and `next` of struct `AccountSecurityMutation` are private
- --> tests/ui/account_security_mutation_fields_private_fail.rs:4:39
-  |
-4 |     let _ = AccountSecurityMutation { expected, next };
-  |                                       ^^^^^^^^  ^^^^ private field
-  |                                       |
-  |                                       private field

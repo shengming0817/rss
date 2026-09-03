@@ -370,6 +370,8 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     //! pipeline 行为：OtelError 脱敏 / OtelEndpoint typed 安全边界 / RedactingSpanExporter 导出脱敏。
     //! 确定性，不依赖外部 collector。
     use super::{

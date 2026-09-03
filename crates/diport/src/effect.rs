@@ -217,23 +217,18 @@ macro_rules! classify_ports {
 
 classify_ports! {
     async_sync DynKeyProvider => AuthEffect;
-    async_sync DynPdp => AuthEffect;
     async_sync DynSecretResolver => AuthEffect;
-    async_sync DynServiceTokenReplayStore => AuthEffect;
     async_sync DynSagaDurableStore => WorkflowEffect;
-    async_sync DynExternalCsrResolver => ReadEffect;
 
     async_send DynRateLimiter => AuthEffect;
     async_send DynSigner => AuthEffect;
 
     async_send DynAcker => BusinessWriteEffect;
-    async_send DynAuditSink => BusinessWriteEffect;
     async_send DynCasStore => BusinessWriteEffect;
     async_send DynOwnerCheckpointStore => BusinessWriteEffect;
     async_send DynDeadLetterStore => BusinessWriteEffect;
     async_send DynFencedWriter => BusinessWriteEffect;
     async_send DynObjectStore => BusinessWriteEffect;
-    async_send DynRevocationStore => BusinessWriteEffect;
 
     async_send DynOutboxEmitter => OutboxEffect;
     async_send DynPublisher => OutboxEffect;
@@ -272,9 +267,7 @@ mod tests {
     #[test]
     fn concurrency_buckets_match_classify_ports_tags() {
         assert_bucket::<crate::DynKeyProvider<'static>, AsyncSync>();
-        assert_bucket::<crate::DynPdp<'static>, AsyncSync>();
         assert_bucket::<crate::DynSecretResolver<'static>, AsyncSync>();
-        assert_bucket::<crate::DynServiceTokenReplayStore<'static>, AsyncSync>();
         assert_bucket::<crate::DynSigner<'static>, AsyncSend>();
         assert_bucket::<dyn crate::Clock, SyncObj>();
     }

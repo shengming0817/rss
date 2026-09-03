@@ -2,7 +2,7 @@
 //! 即请求形状 / 鉴权边界 / path 参数 newtype 校验。
 //!
 //! 合成 router 不依赖 httpserve / primitives（合成 401 + envelope 即可验证 helper 行为）——本文件
-//! 证明 harness 工具本身正确；真实契约样板见 `crates/identity/src/login_contract.rs`，运行期 auth 闸
+//! 证明 harness 工具本身正确；运行期鉴权不属于该中立测试工具的职责。
 //! 穷举见 `httpserve/tests/runtime.rs`。
 //!
 //! 全程 in-process（oneshot，确定性、毫秒级），**不** feature-gate（同 httpserve/tests/runtime.rs、journeys）。

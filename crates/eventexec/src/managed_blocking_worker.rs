@@ -238,6 +238,8 @@ impl diport::ManagedResource for ManagedBlockingWorker {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -338,7 +338,7 @@ pub const rss_eventing::lifecycle::SHUTDOWN_BUDGET_MAX: core::time::Duration
 pub mod rss_eventing::metadata
 pub struct rss_eventing::metadata::EventMetadata
 impl rss_eventing::metadata::EventMetadata
-pub fn rss_eventing::metadata::EventMetadata::audit_correlation(&self) -> core::option::Option<&rss_diag_context::ctx::CorrelationId>
+pub fn rss_eventing::metadata::EventMetadata::correlation(&self) -> core::option::Option<&rss_diag_context::ctx::CorrelationId>
 pub fn rss_eventing::metadata::EventMetadata::new(rss_request_context::TenantId, rss_contract::Timepoint, core::option::Option<rss_diag_context::ctx::CorrelationId>) -> Self
 pub const fn rss_eventing::metadata::EventMetadata::occurred_at(&self) -> rss_contract::Timepoint
 pub const fn rss_eventing::metadata::EventMetadata::tenant_id(&self) -> rss_request_context::TenantId
@@ -1130,7 +1130,7 @@ pub const rss_eventing::lifecycle::SHUTDOWN_BUDGET_MAX: core::time::Duration
 pub mod rss_eventing::metadata
 pub struct rss_eventing::metadata::EventMetadata
 impl rss_eventing::metadata::EventMetadata
-pub fn rss_eventing::metadata::EventMetadata::audit_correlation(&self) -> core::option::Option<&rss_diag_context::ctx::CorrelationId>
+pub fn rss_eventing::metadata::EventMetadata::correlation(&self) -> core::option::Option<&rss_diag_context::ctx::CorrelationId>
 pub fn rss_eventing::metadata::EventMetadata::new(rss_request_context::TenantId, rss_contract::Timepoint, core::option::Option<rss_diag_context::ctx::CorrelationId>) -> Self
 pub const fn rss_eventing::metadata::EventMetadata::occurred_at(&self) -> rss_contract::Timepoint
 pub const fn rss_eventing::metadata::EventMetadata::tenant_id(&self) -> rss_request_context::TenantId

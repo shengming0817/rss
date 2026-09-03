@@ -100,11 +100,6 @@ impl EnvelopeSubjectId {
         Self(id.hyphenated().to_string())
     }
 
-    /// 从 canonical [`ids::UserId`] 构造（#1235 Hard：login/PII 字符串在类型层不可进入此入口）。
-    pub fn from_user_id(user_id: ids::UserId) -> Self {
-        Self::from_uuid(user_id.as_uuid())
-    }
-
     /// 借出底层字符串。
     pub fn as_str(&self) -> &str {
         &self.0
@@ -130,11 +125,6 @@ impl OpaqueActorId {
     /// 从 UUID 构造（infallible：hyphenated 形式恒非空且 ≪ 256 bytes）。
     pub fn from_uuid(id: uuid::Uuid) -> Self {
         Self(id.hyphenated().to_string())
-    }
-
-    /// 从 canonical [`ids::UserId`] 构造（#1235 Hard：login/PII 字符串在类型层不可进入此入口）。
-    pub fn from_user_id(user_id: ids::UserId) -> Self {
-        Self::from_uuid(user_id.as_uuid())
     }
 
     /// 借出底层字符串。
@@ -187,67 +177,25 @@ fn parse_opaque_id(raw: String) -> Result<String, EnvelopeIdentityError> {
 /// 最小化 outbox actor view。
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutboxActor {
-    kind: rss_request_context::PrincipalKind,
     actor_id: OpaqueActorId,
-    tenant: Option<rss_request_context::TenantId>,
-    scope: vocab::VisibilityScope,
 }
 
 impl OutboxActor {
-    /// 租户内 actor。`RowScope` 位置参从类型层排除跨租户 `All` 误用。
-    pub fn scoped(
-        kind: rss_request_context::PrincipalKind,
-        actor_id: OpaqueActorId,
-        tenant: rss_request_context::TenantId,
-        scope: rss_request_context::RowScope,
-    ) -> Self {
-        Self {
-            kind,
-            actor_id,
-            tenant: Some(tenant),
-            scope: scope.into(),
-        }
-    }
-
-    /// 系统/service actor。用于没有 human principal 的内部 producer。
-    pub fn service(actor_id: OpaqueActorId) -> Self {
-        Self {
-            kind: rss_request_context::PrincipalKind::Service,
-            actor_id,
-            tenant: None,
-            scope: vocab::VisibilityScope::All,
-        }
-    }
-
-    /// actor kind。
-    pub fn kind(&self) -> rss_request_context::PrincipalKind {
-        self.kind
+    /// Construct a provider-neutral opaque actor.
+    #[must_use]
+    pub const fn new(actor_id: OpaqueActorId) -> Self {
+        Self { actor_id }
     }
 
     /// actor opaque id。
     pub fn actor_id(&self) -> &OpaqueActorId {
         &self.actor_id
     }
-
-    /// actor tenant constraint。
-    pub fn tenant(&self) -> Option<rss_request_context::TenantId> {
-        self.tenant
-    }
-
-    /// actor row scope。
-    pub fn scope(&self) -> vocab::VisibilityScope {
-        self.scope
-    }
 }
 
 impl std::fmt::Debug for OutboxActor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OutboxActor")
-            .field("kind", &self.kind.as_actor_metadata_label())
-            .field("actor_id", &"<redacted>")
-            .field("tenant", &self.tenant)
-            .field("scope", &self.scope.as_label())
-            .finish()
+        f.write_str("OutboxActor(<redacted>)")
     }
 }
 
@@ -256,7 +204,7 @@ impl std::fmt::Debug for OutboxActor {
 /// 仅承载非-reserved、可由业务安全提供的字段：`contract`（[`vocab::ContractBinding`]，domain / contract_id /
 /// version / schema_hash 同源契约归属，#1193/#1618——business 不再裸 string 分别 author，杜绝 envelope header 漂移）、`tenant` 是
 /// typed 租户 scope（adapter 盖章进 reserved `tenantId`）、`subject_id` 是
-/// **opaque** 主体标识（由 `OutboxMetadata` typed funnel 限定，不容完整 Principal / email / 姓名等 PII）、`causation_id` 是可选 opaque
+/// **opaque** 主体标识（由 `OutboxMetadata` typed funnel 限定，不容完整认证对象 / email / 姓名等 PII）、`causation_id` 是可选 opaque
 /// 追因链锚点（persisted-only，不进 broker header / 日志 / metrics）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`
@@ -264,9 +212,7 @@ impl std::fmt::Debug for OutboxActor {
 ///
 /// 字段私有 + 构造器 [`OutboxEnvelopeParts::new`]（input-struct-field-exclusion，**Hard**）：business 不能绕过
 /// 构造器分别 set domain/contract_id 字段，只能给 `(contract, tenant, subject_id)`。`contract` 的**预期**来源是
-/// `generated::event::{domain}_v1::CONTRACT`（契约派生常量 + golden 锁，CONTRACT-BINDING-FUNNEL-01，**Medium**）——
-/// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
-/// 由 `cargo xtask verify` 的 `contract-binding-guard` 收口生产调用站点）。
+/// `rss-contract` 的静态 descriptor。具体业务契约及其生成流程由仓外 consumer 持有。
 ///
 /// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Debug` 仅输出公开契约元数据（`contract` 的 domain / contract_id / version / schema_hash）；
 /// `subject_id` 固定渲染为 `<redacted>`；`partition_key` 只渲染 presence（Some/None），其值经 `PartitionKey`
@@ -274,7 +220,7 @@ impl std::fmt::Debug for OutboxActor {
 /// causation id / 分区键经 `{:?}` 泄漏至日志（回归见 `pii_debug` 单测）。
 #[derive(Clone)]
 pub struct OutboxEnvelopeParts {
-    /// 契约绑定（domain + contract_id + version + schema_hash 同源；`generated::…::CONTRACT`）。
+    /// 静态契约绑定（domain + contract_id + version + schema_hash）。
     contract: vocab::ContractBinding,
     /// 租户标识（canonical UUID；adapter 将其盖章进 reserved `tenantId` envelope）。
     tenant: rss_request_context::TenantId,
@@ -325,7 +271,7 @@ impl OutboxEnvelopeParts {
     ///
     /// `partition_key` 是不透明聚合根路由键；tenant scope 由必填的 [`rss_request_context::TenantId`] 落入 outbox
     /// `tenant_id` 列承载，跨租同 business key 不共享 gate。推荐直接使用稳定 aggregate id；
-    /// 语义见 `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL + `contracts/**/contract.toml`、`generated` 与 `crates/consistency`。
+    /// 语义见 `TenantId` 与 `crates/consistency`；provider 隔离策略由外部 schema owner 实现。
     ///
     /// **⚠ DLX 警示**：队头行一旦进入 DLX（永久错误或重试预算耗尽），会**阻塞该
     /// `(tenant_id, domain, partition_key)` 的所有后继行**，直到运维经 DLQ redrive 解冻队头。
@@ -441,29 +387,23 @@ mod pii_debug {
 
     #[allow(clippy::expect_used)]
     fn actor() -> OutboxActor {
-        OutboxActor::scoped(
-            rss_request_context::PrincipalKind::User,
-            OpaqueActorId::from_opaque("actor-opaque").expect("opaque actor"),
-            tenant(),
-            rss_request_context::RowScope::SelfOnly,
-        )
+        OutboxActor::new(OpaqueActorId::from_opaque("actor-opaque").expect("opaque actor"))
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn from_user_id_matches_hyphenated_uuid_and_redacts_debug() {
+    fn uuid_envelope_ids_are_hyphenated_and_redacted() {
         let raw =
             uuid::Uuid::parse_str("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical uuid");
-        let user_id = ids::UserId::new(raw);
-        let subject = EnvelopeSubjectId::from_user_id(user_id);
-        let actor = OpaqueActorId::from_user_id(user_id);
+        let subject = EnvelopeSubjectId::from_uuid(raw);
+        let actor = OpaqueActorId::from_uuid(raw);
         assert_eq!(subject.as_str(), raw.hyphenated().to_string());
         assert_eq!(actor.as_str(), raw.hyphenated().to_string());
         assert_eq!(EnvelopeSubjectId::from_uuid(raw).as_str(), subject.as_str());
         let dbg = format!("{subject:?}{actor:?}");
         assert!(
             !dbg.contains(raw.hyphenated().to_string().as_str()),
-            "UserId-derived envelope ids must redact Debug: {dbg}"
+            "UUID-derived envelope ids must redact Debug: {dbg}"
         );
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
     }
@@ -476,7 +416,7 @@ mod pii_debug {
             "前提失效：普通字符串 Debug 未携 marker"
         );
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("SECRET-SUBJECT"),
             actor(),
@@ -487,7 +427,7 @@ mod pii_debug {
             "subject_id 泄漏至 Debug: {dbg}"
         );
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
-        assert!(dbg.contains("identity"), "domain 应可见: {dbg}");
+        assert!(dbg.contains("runtime"), "domain 应可见: {dbg}");
     }
 
     // partition_key Debug 脱敏：presence 可见（Some/None），值不泄漏（可能凭据级，F3 #1211 review）。
@@ -498,7 +438,7 @@ mod pii_debug {
         use consistency::PartitionKey;
 
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -515,7 +455,7 @@ mod pii_debug {
 
         // None 路径。
         let parts_none = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -531,7 +471,7 @@ mod pii_debug {
     #[test]
     fn outbox_envelope_parts_debug_redacts_causation_id_value() {
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -578,12 +518,7 @@ mod partition_key_tests {
 
     #[allow(clippy::expect_used)]
     fn actor() -> OutboxActor {
-        OutboxActor::scoped(
-            rss_request_context::PrincipalKind::Admin,
-            OpaqueActorId::from_opaque("actor-admin").expect("opaque actor"),
-            tenant(),
-            rss_request_context::RowScope::Tenant,
-        )
+        OutboxActor::new(OpaqueActorId::from_opaque("actor-admin").expect("opaque actor"))
     }
 
     #[allow(clippy::unwrap_used)]
@@ -592,7 +527,7 @@ mod partition_key_tests {
     fn with_partition_key_roundtrips_through_into_parts() {
         let key = PartitionKey::parse("aggregate-123").unwrap();
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -601,12 +536,7 @@ mod partition_key_tests {
         let (_contract, got_tenant, got_subject, got_actor, pk, causation_id) = parts.into_parts();
         assert_eq!(got_tenant.to_string(), TENANT);
         assert_eq!(got_subject.as_str(), "subj");
-        assert_eq!(got_actor.kind(), rss_request_context::PrincipalKind::Admin);
         assert_eq!(got_actor.actor_id().as_str(), "actor-admin");
-        assert_eq!(
-            got_actor.scope(),
-            rss_request_context::RowScope::Tenant.into()
-        );
         assert!(pk.is_some(), "with_partition_key 后 into_parts 应透出 Some");
         assert_eq!(pk.unwrap().as_str(), "aggregate-123");
         assert!(causation_id.is_none(), "未设 causation_id 时应透出 None");
@@ -615,7 +545,7 @@ mod partition_key_tests {
     #[test]
     fn without_partition_key_into_parts_gives_none() {
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -646,7 +576,7 @@ mod partition_key_tests {
     fn causation_id_roundtrips_through_into_parts() {
         let cause = EnvelopeCausationId::from_opaque("evt-root-1").expect("opaque causation");
         let parts = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subj"),
             actor(),
@@ -690,7 +620,7 @@ mod smoke {
 
     #[allow(clippy::expect_used)]
     fn actor() -> OutboxActor {
-        OutboxActor::service(OpaqueActorId::from_opaque("rss.service").expect("service actor"))
+        OutboxActor::new(OpaqueActorId::from_opaque("rss.service").expect("service actor"))
     }
 
     #[test]
@@ -719,12 +649,12 @@ mod smoke {
     // reason: 测试构造 Entry 需 parse Topic/IdemKey（合法输入恒 Ok）；item-level carve-out。
     fn sample() -> (EventEntry, OutboxEnvelopeParts) {
         let entry = EventEntry::new(
-            EventTopic::parse("identity.session-created").expect("topic"),
+            EventTopic::parse("runtime.fact-recorded").expect("topic"),
             IdemKey::parse("evt-1").expect("idem"),
             OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
         let env = OutboxEnvelopeParts::new(
-            vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH),
+            vocab::ContractBinding::from_static("runtime", "runtime.fact-recorded", "v1", HASH),
             tenant(),
             subject("subject-opaque"),
             actor(),

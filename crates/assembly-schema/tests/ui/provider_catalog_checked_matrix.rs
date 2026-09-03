@@ -148,41 +148,33 @@ const OUTPUTS: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 );
 
 const SCOPE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
-    ProviderRole::ServiceTokenReplayStore,
-    ProviderRole::ServiceTokenReplayStore.activation(),
-    DiportPort::ServiceTokenReplayStore,
-    ProviderConstructor::PostgresServiceTokenReplayStore,
-    ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,
-    "postgres",
-    &[],
-    ProviderConsumer::Oidc,
+    ProviderRole::ListenerRateLimiter,
+    ProviderRole::ListenerRateLimiter.activation(),
+    DiportPort::RateLimiter,
+    ProviderConstructor::RedisRateLimiter,
+    ProviderFactorySymbol::HttpserveRedisRateLimiter,
+    "redis",
+    &["backend"],
+    ProviderConsumer::Httpserve,
     ProviderDurability::Persistent,
     Some(ProviderScope::ProcessLocal),
-    Some(ProviderFailurePosture::FailClosed),
-    &[
-        LifecycleChannel::Probes,
-        LifecycleChannel::Resources,
-        LifecycleChannel::Workers,
-    ],
+    Some(ProviderFailurePosture::FailOpen),
+    &[],
 );
 
 const FAILURE_POSTURE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
-    ProviderRole::ServiceTokenReplayStore,
-    ProviderRole::ServiceTokenReplayStore.activation(),
-    DiportPort::ServiceTokenReplayStore,
-    ProviderConstructor::PostgresServiceTokenReplayStore,
-    ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,
-    "postgres",
-    &[],
-    ProviderConsumer::Oidc,
+    ProviderRole::ListenerRateLimiter,
+    ProviderRole::ListenerRateLimiter.activation(),
+    DiportPort::RateLimiter,
+    ProviderConstructor::RedisRateLimiter,
+    ProviderFactorySymbol::HttpserveRedisRateLimiter,
+    "redis",
+    &["backend"],
+    ProviderConsumer::Httpserve,
     ProviderDurability::Persistent,
     Some(ProviderScope::ClusterGlobal),
-    Some(ProviderFailurePosture::FailOpen),
-    &[
-        LifecycleChannel::Probes,
-        LifecycleChannel::Resources,
-        LifecycleChannel::Workers,
-    ],
+    Some(ProviderFailurePosture::FailClosed),
+    &[],
 );
 
 fn main() {

@@ -8,7 +8,7 @@ The crate deliberately contains no JWT/JWKS verification, provider catalog, proc
 runtime plan, cancellation authority, or inventory publisher. Those remain owned by official
 integrations, RuntimeExec, and the composition root.
 Building an application yields a dispatcher and an instance-bound `TrustedContextMinter`. The
-integration keeps that non-cloneable minter private and uses it only after AuthN/AuthZ. Dispatch
+integration keeps that non-cloneable minter private and uses it only after validating input. Dispatch
 requires the resulting move-only `AdmittedRequest`; callers cannot enter dispatch by assembling an
 authority-free `RequestContextView`, and a capability minted for another application is rejected.
 

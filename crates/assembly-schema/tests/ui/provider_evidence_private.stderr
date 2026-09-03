@@ -3,15 +3,15 @@ error: cannot construct `ProviderCapabilityEvidence` with struct literal syntax 
    |
  7 |     let _ = ProviderCapabilityEvidence {
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
- 8 |         port: DiportPort::Pdp,
-   |         --------------------- private field
- 9 |         constructor: ProviderConstructor::OidcProvider,
-   |         ---------------------------------------------- private field
-10 |         provider_crate: "oidc",
+ 8 |         port: DiportPort::Publisher,
+   |         --------------------------- private field
+ 9 |         constructor: ProviderConstructor::AmqpPublisher,
+   |         ----------------------------------------------- private field
+10 |         provider_crate: "amqp",
    |         ---------------------- private field
 11 |         required_features: &["backend"],
    |         ------------------------------- private field
-12 |         consumer: ProviderConsumer::Httpserve,
+12 |         consumer: ProviderConsumer::Eventexec,
    |         ------------------------------------- private field
 13 |         durability: ProviderDurability::Persistent,
    |         ------------------------------------------ private field

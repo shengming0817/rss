@@ -2,22 +2,11 @@ use super::{
     BoundedFileLogConsumer, CiContainerContext, ContainerAsync, ContainerService, ImageExt, Result,
 };
 use testcontainers::core::{CmdWaitFor, ExecCommand};
-use testcontainers::runners::AsyncBuilder;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerRequest, GenericBuildableImage, GenericImage, Image};
+use testcontainers::{ContainerRequest, Image};
 use tokio::io::AsyncReadExt as _;
 
 use super::{CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES, MINIO_ROOT_PASSWORD, MINIO_WORKLOAD_PASSWORD};
-
-pub(super) async fn build_mosquitto_mtls_image() -> Result<GenericImage> {
-    Ok(
-        GenericBuildableImage::new("rss-mosquitto-mtls-fixture", "2.0.22-v4")
-            .with_dockerfile_string(include_str!("../../fixtures/mqtt/Dockerfile"))
-            .with_data(include_str!("../../fixtures/mqtt/plugin.c"), "plugin.c")
-            .build_image()
-            .await?,
-    )
-}
 
 pub(super) async fn start<I, T>(image: T, service: ContainerService) -> Result<ContainerAsync<I>>
 where

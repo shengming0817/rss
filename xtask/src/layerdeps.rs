@@ -60,9 +60,6 @@
 //!   listenerlifecycle/primitives/rss-platform/runtimeinventorymint/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
 //!   `[dev-dependencies]` 不入该 shipped allowlist 扫描。
-//! INVARIANT: POSTGRES-MIGRATION-CONSUMER-ABSENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_migration_consumer_is_rejected", anti_vacuity = "tests::postgres_migration_zero_consumer_is_green|tests::real_workspace_green" }——
-//!   可执行 migration capability 在仓内不得有 shipped 或 dev consumer；产品 operator 已删除，外部消费者
-//!   不能通过普通分层 wrapper 把该能力重新接入 assembly。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
 
@@ -88,10 +85,6 @@ pub(crate) enum Rule {
     SiblingDomain,
     /// LAYER-DEPS-03：非组合根依赖 adapter（含兄弟 adapter）。
     AdapterScope,
-    /// LAYER-DEPS-04：非域 / 非根依赖 generated。
-    GeneratedScope,
-    /// LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01：bootstrap 引用了 registrar 外的 generated surface。
-    GeneratedBootstrapSurface,
     /// LAYER-DEPS-05：workspace 成员未落任何分层（新增未登记）。
     LayerCoverage,
     /// LAYER-DEPS-06：deny.toml 分层 wrappers 与源分类不一致。
@@ -107,8 +100,6 @@ pub(crate) enum Rule {
     TestSupportInternalShipped,
     /// RUNTIMEEXEC-DEPS-01：runtimeexec 出现 allowlist 外的 shipped direct dependency。
     RuntimeExecDependencyScope,
-    /// POSTGRES-MIGRATION-CONSUMER-ABSENT-01：仓内成员重新消费可执行 migration capability。
-    PostgresMigrationConsumer,
     /// WORKSPACEFACTS-CONFINEMENT-01：workspacefacts/guppy 只能沿精确 tooling funnel 消费。
     WorkspaceFactsConfinement,
     /// EXTERNAL-PKI-PROVIDER-MINT-01：production capability 只能在 Vault 两个私有漏斗调用。
@@ -196,7 +187,6 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(check_eventing_public_dependencies(&shipped_deps));
         findings.extend(check_dev_layer_boundaries(&members, &scan.dev_edges));
         findings.extend(scan.findings);
-        findings.extend(scan_bootstrap_generated_sources(&root)?);
         findings.extend(scan_pkiauthmint_callsites(&root, &members)?);
         findings.extend(check_wrappers(
             &members,
@@ -234,72 +224,19 @@ impl GovernanceCheck for LayerDeps {
     }
 }
 
-const BOOTSTRAP_GENERATED_REGISTRAR_SURFACE: &[&str] = &[
-    "generated::event::EventContract",
-    "generated::event::EventSubscribe",
-    "generated::event::EventSubscription",
-    "generated::event::SubscriptionEffect",
-    "generated::event::SubscriptionExecution",
-];
-
-fn scan_bootstrap_generated_sources(root: &Path) -> Result<Vec<Finding>> {
-    let source_root = root.join("crates/bootstrap/src");
-    let files = rs_files(&source_root)?;
-    if files.is_empty() {
-        return Ok(vec![finding(
-            Rule::GeneratedBootstrapSurface,
-            "crates/bootstrap/src",
-            "bootstrap registrar surface guard 未发现 production Rust source".to_string(),
-        )]);
-    }
-    let mut findings = Vec::new();
-    for path in files {
-        let source = std::fs::read_to_string(&path)
-            .with_context(|| format!("读 bootstrap source 失败: {}", path.display()))?;
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        findings.extend(scan_bootstrap_generated_surface(relative, &source));
-    }
-    Ok(findings)
-}
-
-fn scan_bootstrap_generated_surface(path: &Path, source: &str) -> Vec<Finding> {
-    let Ok(file) = syn::parse_file(source) else {
-        return vec![finding(
-            Rule::GeneratedBootstrapSurface,
-            path.display().to_string(),
-            "bootstrap generated registrar source AST 无法解析".to_string(),
-        )];
-    };
-    let mut visitor = BootstrapGeneratedSurfaceVisitor::default();
-    visitor.visit_file(&file);
-    visitor
-        .forbidden
-        .into_iter()
-        .map(|surface| {
-            finding(
-                Rule::GeneratedBootstrapSurface,
-                path.display().to_string(),
-                format!(
-                    "bootstrap → generated 只允许 sealed subscription registrar vocabulary，禁止 `{surface}`"
-                ),
-            )
-        })
-        .collect()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PkiMintCallsite {
     path: String,
     symbol: String,
 }
 
-/// The capability crate necessarily exposes a public constructor to its approved wrappers, so the
-/// source graph must additionally prove the two production invocations are the private Vault
-/// closure/evidence seals and nothing else. Downstream consumers only use
-/// the resulting move-only carriers and cannot name the mint token.
-///
-/// INVARIANT: EXTERNAL-PKI-PROVIDER-MINT-01 { level = "Medium", exec = "check", source = "code", facet = "production-callsite-exact-set", synthetic_red = "tests::pkiauthmint_callsite_extra_red", anti_vacuity = "tests::pkiauthmint_callsite_exact_green|tests::real_workspace_green" }
 fn scan_pkiauthmint_callsites(root: &Path, members: &[Member]) -> Result<Vec<Finding>> {
+    if !members
+        .iter()
+        .any(|member| member.name == PKIAUTHMINT_CRATE)
+    {
+        return Ok(Vec::new());
+    }
     let mut actual = Vec::new();
     for member in members {
         let source_root = root.join(&member.path).join("src");
@@ -521,135 +458,6 @@ fn collect_pkiauthmint_block_calls(
     }
 }
 
-#[derive(Default)]
-struct BootstrapGeneratedSurfaceVisitor {
-    forbidden: BTreeSet<String>,
-}
-
-impl BootstrapGeneratedSurfaceVisitor {
-    fn inspect(&mut self, path: String) {
-        let path = path.trim_start_matches("::").to_string();
-        if !is_generated_surface(&path) {
-            return;
-        }
-        if !bootstrap_generated_surface_allowed(&path) {
-            self.forbidden.insert(path);
-        }
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for BootstrapGeneratedSurfaceVisitor {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if node.ident == "tests" || has_test_attr(&node.attrs) {
-            return;
-        }
-        syn::visit::visit_item_mod(self, node);
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if has_test_attr(&node.attrs) {
-            return;
-        }
-        syn::visit::visit_item_fn(self, node);
-    }
-
-    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        if has_test_attr(&node.attrs) {
-            return;
-        }
-        collect_use_surfaces(&node.tree, Vec::new(), &mut self.forbidden);
-    }
-
-    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
-        if node.ident == "generated" {
-            self.forbidden
-                .insert("generated::<extern-crate>".to_string());
-        }
-    }
-
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        self.inspect(path.to_token_stream().to_string().replace(' ', ""));
-        syn::visit::visit_path(self, path);
-    }
-}
-
-fn collect_use_surfaces(
-    tree: &syn::UseTree,
-    mut prefix: Vec<String>,
-    forbidden: &mut BTreeSet<String>,
-) {
-    match tree {
-        syn::UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
-            collect_use_surfaces(&path.tree, prefix, forbidden);
-        }
-        syn::UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
-            inspect_use_surface(prefix.join("::"), forbidden);
-        }
-        syn::UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
-            inspect_use_surface(prefix.join("::"), forbidden);
-        }
-        syn::UseTree::Glob(_) => {
-            prefix.push("*".to_string());
-            inspect_use_surface(prefix.join("::"), forbidden);
-        }
-        syn::UseTree::Group(group) => {
-            for item in &group.items {
-                collect_use_surfaces(item, prefix.clone(), forbidden);
-            }
-        }
-    }
-}
-
-fn inspect_use_surface(path: String, forbidden: &mut BTreeSet<String>) {
-    if !is_generated_surface(&path) {
-        return;
-    }
-    if !bootstrap_generated_surface_allowed(&path) {
-        forbidden.insert(path);
-    }
-}
-
-fn is_generated_surface(path: &str) -> bool {
-    path == "generated" || path.starts_with("generated::")
-}
-
-fn bootstrap_generated_surface_allowed(path: &str) -> bool {
-    BOOTSTRAP_GENERATED_REGISTRAR_SURFACE.contains(&path)
-}
-
-fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        if attr.path().is_ident("test") {
-            return true;
-        }
-        if !attr.path().is_ident("cfg") {
-            return false;
-        }
-        attr.parse_args::<syn::Meta>()
-            .is_ok_and(|meta| cfg_predicate_includes_test(&meta))
-    })
-}
-
-/// True only for the bare `test` cfg option (`cfg(test)`, `cfg(any(..., test, ...))`,
-/// `cfg(all(test, ...))`). Feature names that merely contain `"test"` (e.g.
-/// `feature = "test-support"`) must not match — substring scans false-positive those.
-fn cfg_predicate_includes_test(meta: &syn::Meta) -> bool {
-    use syn::parse::Parser as _;
-    match meta {
-        syn::Meta::Path(path) => path.is_ident("test"),
-        syn::Meta::List(list) if list.path.is_ident("any") || list.path.is_ident("all") => {
-            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
-                .parse2(list.tokens.clone())
-                .is_ok_and(|nested| nested.iter().any(cfg_predicate_includes_test))
-        }
-        // `not(test)` is production-facing; never treat as test-only skip.
-        _ => false,
-    }
-}
-
 /// 规则 (a)(b)(c)(d) + LAYER-DEPS-05：分类覆盖 + 每条内部边对照 `layers::allows`。
 pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -679,15 +487,12 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
         };
         // 基础同层横向默认禁，唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）；
         // Service 同层横向默认禁，唯一例外 = 受控 bootstrap → httpserve 路由类型边（LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
-        // Service→Generated 默认禁；仅 eventexec|bootstrap 可分别实现 generated sealed
-        // authoring/runtime 与 event subscription registration seam。
         let provider_bootstrap_forbidden =
             layers::provider_adapter_bootstrap_forbidden(&edge.from, &edge.to);
         if provider_bootstrap_forbidden
             || (!layers::allows(from, to)
                 && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
-                && !layers::route_funnel_allows(&edge.from, &edge.to)
-                && !layers::generated_seam_allows(&edge.from, &edge.to))
+                && !layers::route_funnel_allows(&edge.from, &edge.to))
         {
             let reason = if provider_bootstrap_forbidden {
                 "违反 Redis/S3/Vault provider output 边界（禁止 adapter → bootstrap）".to_string()
@@ -757,13 +562,8 @@ fn check_dev_layer_boundaries(members: &[Member], edges: &[Edge]) -> Vec<Finding
 /// `check_wrappers` stale/反向② 旁路会静默放过其分层依赖违规；② 白名单每个条目须现存且属 DI port 定义层
 /// （DiPort/Domain），由 [`check_confinement_entry`] 守（防白名单本身越层 / typo）。新增 sanctioned 域 crate
 /// 时同步更新本白名单与 `deny.toml` 对应 ban 的 wrappers（二者集合相等，否则 lint 红）。
-const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
-    ("dynosaur", &["diport", "identity", "settings", "audit"]),
-    (
-        "trait-variant",
-        &["diport", "identity", "settings", "audit"],
-    ),
-];
+const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] =
+    &[("dynosaur", &["diport"]), ("trait-variant", &["diport"])];
 
 const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
 const AUTHMINT_CRATE: &str = "authmint";
@@ -773,7 +573,7 @@ const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport"];
 const DLQAUTHMINT_CRATE: &str = "dlqauthmint";
 const DLQAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport"];
 const REQUESTIDMINT_CRATE: &str = "requestidmint";
-const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
+const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve"];
 const PKIAUTHMINT_CRATE: &str = "pkiauthmint";
 const PKIAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "vault"];
 const RUNTIMEINVENTORYMINT_CRATE: &str = "runtimeinventorymint";
@@ -783,7 +583,6 @@ const WORKSPACEFACTS_CONSUMER: &str = "xtask";
 const GUPPY_CRATE: &str = "guppy";
 const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "assembly-schema",
-    "authn",
     "bootstrap",
     "diport",
     "eventexec",
@@ -804,7 +603,6 @@ const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] = &[
     "tracing",
     "zeroize",
 ];
-const POSTGRES_MIGRATION_CRATE: &str = "postgres-migration";
 
 /// LAYER-DEPS-06：deny.toml 分层 wrappers ⟷ 源分类一致性（守 LAYER-WRAP-01 漂移）。
 /// 正向：有真实 shipped/dev 消费者的 Domain/Adapter/Generated 成员须有 ban entry；零消费者
@@ -861,17 +659,8 @@ pub(crate) fn check_wrappers(
     findings.extend(check_requestidmint_wrapper_coverage(members, bans));
     findings.extend(check_pkiauthmint_wrapper_coverage(members, bans));
     findings.extend(check_runtimeinventorymint_wrapper_coverage(members, bans));
-    findings.extend(check_postgres_migration_consumer_absence(
-        members,
-        shipped_edges,
-        dev_edges,
-    ));
     for m in members {
-        if !matches!(
-            m.layer,
-            Some(Layer::Domain | Layer::Adapter | Layer::Generated)
-        ) || m.name == POSTGRES_MIGRATION_CRATE
-        {
+        if !matches!(m.layer, Some(Layer::Domain | Layer::Adapter)) {
             continue;
         }
         let has_source_consumer = shipped_edges
@@ -907,7 +696,7 @@ pub(crate) fn check_wrappers(
         }
         // 反向①：ban 目标须是现存 Domain/Adapter/Generated 成员（否则 stale：已删/未分类/外部误配）。
         let stale = match layer_of.get(b.crate_name.as_str()) {
-            Some(l) => !matches!(l, Layer::Domain | Layer::Adapter | Layer::Generated),
+            Some(l) => !matches!(l, Layer::Domain | Layer::Adapter),
             None => true,
         };
         if stale {
@@ -924,14 +713,7 @@ pub(crate) fn check_wrappers(
         findings.extend(dev_adapter_exclusions(b, banned));
         for w in &b.wrappers {
             match layer_of.get(w.as_str()) {
-                Some(&wl)
-                    if layers::allows(wl, banned)
-                        || layers::generated_seam_allows(w, &b.crate_name)
-                        || (banned == Layer::Generated
-                            && dev_edges
-                                .iter()
-                                .any(|edge| edge.from == *w && edge.to == b.crate_name)) =>
-                {
+                Some(&wl) if layers::allows(wl, banned) => {
                     // ②补强（ADR-005）：adapter→域 wrapper 须有真实 source edge（adapter 实际依赖该域），
                     // 否则空泛放过任意 adapter。仅对 Adapter→Domain 这条 DIP 内向边校验（其它放行边不变）。
                     if wl == Layer::Adapter
@@ -968,31 +750,6 @@ pub(crate) fn check_wrappers(
         }
     }
     findings
-}
-
-fn check_postgres_migration_consumer_absence(
-    members: &[Member],
-    shipped_edges: &[Edge],
-    dev_edges: &[Edge],
-) -> Vec<Finding> {
-    if !members
-        .iter()
-        .any(|member| member.name == POSTGRES_MIGRATION_CRATE)
-    {
-        return Vec::new();
-    }
-    shipped_edges
-        .iter()
-        .chain(dev_edges)
-        .filter(|edge| edge.to == POSTGRES_MIGRATION_CRATE)
-        .map(|edge| {
-            finding(
-                Rule::PostgresMigrationConsumer,
-                edge.from.clone(),
-                "workspace member must not consume the executable postgres-migration capability",
-            )
-        })
-        .collect()
 }
 
 /// `authmint` 是独立 Basis capability token：wrapper 只准 diport（opaque proof mint）与
@@ -1214,8 +971,7 @@ pub(crate) fn check_dlqauthmint_wrapper_coverage(
     findings
 }
 
-/// The HTTP request-id mint is an isolated Basis capability. Only the transport owner may mint
-/// it, and generated response factories may consume it; domains stay out.
+/// The HTTP request-id mint is an isolated Basis capability. Only the transport owner may mint it.
 ///
 /// INVARIANT: HTTP-REQUEST-ID-AUTHORITY-01 { level = "Medium", exec = "check", source = "code", facet = "wrapper-exact-set", synthetic_red = "tests::requestidmint_wrapper_widened_to_domain_red", anti_vacuity = "tests::requestidmint_wrapper_exact_green" }
 pub(crate) fn check_requestidmint_wrapper_coverage(
@@ -1242,10 +998,7 @@ pub(crate) fn check_requestidmint_wrapper_coverage(
         ));
         return findings;
     }
-    for (name, path, layer) in [
-        ("httpserve", "crates/httpserve", Layer::Service),
-        ("generated", "generated", Layer::Generated),
-    ] {
+    for (name, path, layer) in [("httpserve", "crates/httpserve", Layer::Service)] {
         if !members
             .iter()
             .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
@@ -2289,7 +2042,6 @@ fn check_confinement_entry(
 fn violation_rule(from: Layer, to: Layer) -> Rule {
     match (from, to) {
         (_, Layer::Adapter) => Rule::AdapterScope,
-        (_, Layer::Generated) => Rule::GeneratedScope,
         (Layer::Domain, Layer::Domain) => Rule::SiblingDomain,
         _ => Rule::BackPath,
     }
@@ -2776,7 +2528,6 @@ mod tests {
             m("consistency", "crates/consistency", Some(Layer::Engine)),
             m("httpserve", "crates/httpserve", Some(Layer::Service)),
             m("identity", "crates/identity", Some(Layer::Domain)),
-            m("generated", "generated", Some(Layer::Generated)),
         ];
         let edges = vec![
             e("identity", "httpserve"),
@@ -2900,93 +2651,6 @@ eventing_alias = { package = "rss-eventing", path = "crates/eventing", version =
         assert!(!check_eventing_public_dependencies(&[external_name_collision]).is_empty());
     }
 
-    #[test]
-    fn bootstrap_generated_registrar_surface_accepts_exact_vocabulary() {
-        let findings = scan_bootstrap_generated_surface(
-            Path::new("crates/bootstrap/src/registry.rs"),
-            r#"
-            impl generated::event::EventSubscribe for Registry {
-                type Capability = Capability;
-                type Output = Result<(), Error>;
-
-                fn subscribe<S: generated::event::EventSubscription>(
-                    &mut self,
-                    capability: Self::Capability,
-                ) -> Self::Output {
-                    use generated::event::{
-                        EventContract, SubscriptionEffect, SubscriptionExecution,
-                    };
-                    todo!()
-                }
-            }
-            "#,
-        );
-        assert!(findings.is_empty(), "{findings:#?}");
-    }
-
-    #[test]
-    fn bootstrap_generated_registrar_surface_rejects_non_registrar_matrix() {
-        for source in [
-            "fn bad<T: generated::event::EventEmit>() {}",
-            "fn bad<T: ::generated::event::EventEmit>() {}",
-            "fn bad<T: generated::command::CommandJournal>() {}",
-            "fn bad() { let _ = generated::event::EVENTS; }",
-            "use generated::event::identity_v1::session_created;",
-            "use generated::event::*;",
-            "use generated as generated_api;",
-            "use generated::command as generated_command;",
-        ] {
-            let findings = scan_bootstrap_generated_surface(
-                Path::new("crates/bootstrap/src/registry.rs"),
-                source,
-            );
-            assert_eq!(
-                findings.len(),
-                1,
-                "source must fail closed: {source}\n{findings:#?}"
-            );
-            assert_eq!(findings[0].rule, Rule::GeneratedBootstrapSurface);
-        }
-    }
-
-    #[test]
-    fn bootstrap_generated_registrar_surface_ignores_test_only_wrappers() {
-        let findings = scan_bootstrap_generated_surface(
-            Path::new("crates/bootstrap/src/registry.rs"),
-            r#"
-            #[cfg(test)]
-            mod tests {
-                fn fixture() {
-                    generated::event::identity_v1::session_created::subscribe_audit();
-                }
-            }
-
-            #[cfg(any(test, unix))]
-            fn also_test_gated() {
-                generated::event::identity_v1::session_created::subscribe_audit();
-            }
-            "#,
-        );
-        assert!(findings.is_empty(), "{findings:#?}");
-    }
-
-    /// 红：`feature = "test-support"` 不是 `cfg(test)`——不得被 `has_test_attr` 误跳过。
-    #[test]
-    fn bootstrap_generated_registrar_surface_scans_test_support_feature_cfg() {
-        let findings = scan_bootstrap_generated_surface(
-            Path::new("crates/bootstrap/src/registry.rs"),
-            r#"
-            #[cfg(feature = "test-support")]
-            fn forge_helper() {
-                generated::event::identity_v1::session_created::subscribe_audit();
-            }
-            "#,
-        );
-        assert_eq!(findings.len(), 1, "{findings:#?}");
-        assert_eq!(findings[0].rule, Rule::GeneratedBootstrapSurface);
-    }
-
-    /// RUNTIMEEXEC-LAYER-01 anti-vacuity：assembly Root 可消费 runtimeexec，runtimeexec 可向批准下层出边。
     #[test]
     fn check_layers_red_runtimeexec_illegal_inbound_and_outbound() {
         let members = vec![
@@ -3192,7 +2856,6 @@ bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["
             std::fs::write(path, source)?;
         }
         let members = [
-            m("generated", "generated", Some(Layer::Generated)),
             m("feature-bridge", "crates/feature-bridge", Some(Layer::Root)),
             m("consumer", "crates/consumer", Some(Layer::Root)),
         ];
@@ -3464,37 +3127,6 @@ bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["
     }
 
     #[test]
-    fn check_layers_red_generated_scope() {
-        let members = vec![
-            m("httpserve", "crates/httpserve", Some(Layer::Service)),
-            m("generated", "generated", Some(Layer::Generated)),
-        ];
-        let findings = check_layers(&members, &[e("httpserve", "generated")]);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::GeneratedScope);
-    }
-
-    #[test]
-    fn check_layers_green_eventexec_to_generated_command_workflow_seam() {
-        let members = vec![
-            m("eventexec", "crates/eventexec", Some(Layer::Service)),
-            m("generated", "generated", Some(Layer::Generated)),
-        ];
-        assert!(check_layers(&members, &[e("eventexec", "generated")]).is_empty());
-    }
-
-    #[test]
-    fn check_layers_red_other_service_to_generated_remains_closed() {
-        let members = vec![
-            m("authn", "crates/authn", Some(Layer::Service)),
-            m("generated", "generated", Some(Layer::Generated)),
-        ];
-        let findings = check_layers(&members, &[e("authn", "generated")]);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::GeneratedScope);
-    }
-
-    #[test]
     fn check_layers_red_back_path() {
         let members = vec![
             m("secure", "crates/secure", Some(Layer::Basis)),
@@ -3604,7 +3236,6 @@ bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["
             m("diport", "crates/diport", Some(Layer::DiPort)),
             m("identity", "crates/identity", Some(Layer::Domain)),
             m("redis", "adapters/redis", Some(Layer::Adapter)),
-            m("generated", "generated", Some(Layer::Generated)),
         ]
     }
 
@@ -3719,14 +3350,13 @@ bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["
         vec![
             m("requestidmint", "crates/requestidmint", Some(Layer::Basis)),
             m("httpserve", "crates/httpserve", Some(Layer::Service)),
-            m("generated", "generated", Some(Layer::Generated)),
             m("audit", "crates/audit", Some(Layer::Domain)),
         ]
     }
 
     #[test]
     fn requestidmint_wrapper_exact_green() {
-        let bans = vec![ban("requestidmint", &["httpserve", "generated"])];
+        let bans = vec![ban("requestidmint", &["httpserve"])];
         assert!(
             check_requestidmint_wrapper_coverage(&requestidmint_fixture_members(), &bans)
                 .is_empty()
@@ -3917,19 +3547,18 @@ bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["
     fn runtimeexec_direct_dependencies_allowlist_green() {
         let edges = [
             e("runtimeexec", "assembly-schema"),
-            e("runtimeexec", "authn"),
             e("runtimeexec", "bootstrap"),
             e("runtimeexec", "diport"),
             e("runtimeexec", "eventexec"),
             e("runtimeexec", "listenerlifecycle"),
             e("runtimeexec", "primitives"),
             e("runtimeexec", "rss-platform"),
+            e("runtimeexec", "rss-eventing"),
             e("runtimeexec", "runtimeinventorymint"),
             e("runtimeexec", "secure"),
         ];
         let deps = [
             runtime_dep("assembly-schema", true),
-            runtime_dep("authn", true),
             runtime_dep("bootstrap", true),
             runtime_dep("diport", true),
             runtime_dep("eventexec", true),
@@ -4041,10 +3670,6 @@ tracing = { package = "tower", version = "1" }
         let bans = vec![
             ban("identity", &["fixture", "fixture-alt", "xtask"]),
             ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "fixture", "fixture-alt", "xtask"],
-            ),
         ];
         assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]).is_empty());
     }
@@ -4068,46 +3693,11 @@ tracing = { package = "tower", version = "1" }
     }
 
     #[test]
-    fn postgres_migration_zero_consumer_is_green() {
-        let members = vec![m(
-            POSTGRES_MIGRATION_CRATE,
-            "adapters/postgres-migration",
-            Some(Layer::Adapter),
-        )];
-        assert!(check_wrappers(&members, &[], &[], &[]).is_empty());
-    }
-
-    #[test]
-    fn postgres_migration_consumer_is_rejected() {
-        let members = vec![
-            m(
-                POSTGRES_MIGRATION_CRATE,
-                "adapters/postgres-migration",
-                Some(Layer::Adapter),
-            ),
-            m("fixture", "roots/fixture", Some(Layer::Root)),
-        ];
-        let findings = check_wrappers(
-            &members,
-            &[],
-            &[e("fixture", POSTGRES_MIGRATION_CRATE)],
-            &[],
-        );
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::PostgresMigrationConsumer);
-        assert_eq!(findings[0].subject, "fixture");
-    }
-
-    #[test]
     fn check_wrappers_leaves_resolved_parent_exactness_to_cargo_deny() {
         // wrapper 分类合法即可；最终 resolved parent 是否缺失由 cargo-deny 独占证明。
         let bans = vec![
             ban("identity", &["fixture", "fixture-alt"]),
             ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "fixture", "fixture-alt", "xtask"],
-            ),
         ];
         assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]).is_empty());
     }
@@ -4128,17 +3718,6 @@ tracing = { package = "tower", version = "1" }
     }
 
     #[test]
-    fn check_wrappers_does_not_duplicate_missing_generated_parent_proof() {
-        // generated 的 resolved parent 精确性由 cargo-deny 负责。
-        let bans = vec![
-            ban("identity", &["fixture", "fixture-alt", "xtask"]),
-            ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban("generated", &["fixture", "fixture-alt", "xtask"]),
-        ];
-        assert!(check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]).is_empty());
-    }
-
-    #[test]
     fn check_wrappers_red_disallowed_wrapper() {
         // identity（Domain）的 wrappers 含 httpserve（Service）——allows(Service,Domain)=false，过宽开洞。
         let mut members = wrapper_fixture_members();
@@ -4149,10 +3728,6 @@ tracing = { package = "tower", version = "1" }
                 &["fixture", "fixture-alt", "xtask", "httpserve"],
             ),
             ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "fixture", "fixture-alt", "xtask"],
-            ),
         ];
         let findings = check_wrappers(&members, &bans, &[], &[]);
         assert_eq!(findings.len(), 1);
@@ -4161,58 +3736,11 @@ tracing = { package = "tower", version = "1" }
     }
 
     #[test]
-    fn check_wrappers_green_postgres_generated_dev_wrapper() {
-        let mut members = wrapper_fixture_members();
-        members.push(m("postgres", "adapters/postgres", Some(Layer::Adapter)));
-        let bans = vec![
-            ban("identity", &["fixture", "fixture-alt", "xtask"]),
-            ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban("postgres", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "postgres", "fixture", "fixture-alt", "xtask"],
-            ),
-        ];
-        assert!(check_wrappers(&members, &bans, &[], &[e("postgres", "generated")],).is_empty());
-    }
-
-    #[test]
-    fn check_wrappers_rejects_generated_dev_wrapper_without_source_edge() {
-        let members = vec![
-            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
-            m("generated", "generated", Some(Layer::Generated)),
-        ];
-        let bans = vec![ban("postgres", &[]), ban("generated", &["postgres"])];
-        let findings = check_wrappers(&members, &bans, &[], &[]);
-        assert!(
-            findings.iter().any(|finding| {
-                finding.subject == "generated" && finding.detail.contains("postgres")
-            }),
-            "a dev exception requires a real dev source edge: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn check_layers_red_postgres_generated_production_edge_remains_closed() {
-        let members = vec![
-            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
-            m("generated", "generated", Some(Layer::Generated)),
-        ];
-        let findings = check_layers(&members, &[e("postgres", "generated")]);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::GeneratedScope);
-    }
-
-    #[test]
     fn check_wrappers_red_stale_entry() {
         // ghost 不是任何域/adapter/generated 成员 —— stale wrapper。
         let bans = vec![
             ban("identity", &["fixture", "fixture-alt", "xtask"]),
             ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "fixture", "fixture-alt", "xtask"],
-            ),
             ban("ghost", &["fixture", "fixture-alt", "xtask"]),
         ];
         let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]);
@@ -4240,10 +3768,6 @@ tracing = { package = "tower", version = "1" }
             ban("identity", &["fixture", "fixture-alt", "xtask", "postgres"]),
             ban("redis", &["fixture", "fixture-alt", "xtask"]),
             ban("postgres", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "fixture", "fixture-alt", "xtask"],
-            ),
         ];
         let edges = vec![e("postgres", "identity")];
         assert!(check_wrappers(&members, &bans, &edges, &[]).is_empty());
@@ -4256,10 +3780,6 @@ tracing = { package = "tower", version = "1" }
         let bans = vec![
             ban("identity", &["fixture", "fixture-alt", "xtask", "redis"]),
             ban("redis", &["fixture", "fixture-alt", "xtask"]),
-            ban(
-                "generated",
-                &["identity", "fixture", "fixture-alt", "xtask"],
-            ),
         ];
         // 无 redis→identity edge。
         let findings = check_wrappers(&wrapper_fixture_members(), &bans, &[], &[]);
@@ -4273,11 +3793,8 @@ tracing = { package = "tower", version = "1" }
     #[test]
     fn external_confinement_green() {
         let bans = vec![
-            ban("dynosaur", &["diport", "identity", "settings", "audit"]),
-            ban(
-                "trait-variant",
-                &["diport", "identity", "settings", "audit"],
-            ),
+            ban("dynosaur", &["diport"]),
+            ban("trait-variant", &["diport"]),
         ];
         assert!(check_external_confinement(&confinement_fixture_members(), &bans).is_empty());
     }
@@ -4286,11 +3803,8 @@ tracing = { package = "tower", version = "1" }
     #[test]
     fn external_confinement_green_order_insensitive() {
         let bans = vec![
-            ban("dynosaur", &["audit", "settings", "identity", "diport"]),
-            ban(
-                "trait-variant",
-                &["identity", "audit", "settings", "diport"],
-            ),
+            ban("dynosaur", &["diport"]),
+            ban("trait-variant", &["diport"]),
         ];
         assert!(check_external_confinement(&confinement_fixture_members(), &bans).is_empty());
     }
@@ -4298,10 +3812,7 @@ tracing = { package = "tower", version = "1" }
     #[test]
     fn external_confinement_red_ban_deleted() {
         // 删掉 dynosaur ban（保留 trait-variant）→ 正向覆盖报 dynosaur 缺失（防收敛静默失效，F4）。
-        let bans = vec![ban(
-            "trait-variant",
-            &["diport", "identity", "settings", "audit"],
-        )];
+        let bans = vec![ban("trait-variant", &["diport"])];
         let findings = check_external_confinement(&confinement_fixture_members(), &bans);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
@@ -4312,14 +3823,8 @@ tracing = { package = "tower", version = "1" }
     fn external_confinement_red_widened() {
         // 过覆盖（开洞）：wrappers 含白名单外的 crate（server[Root]），DI port 定义点集被破坏。
         let bans = vec![
-            ban(
-                "dynosaur",
-                &["diport", "identity", "settings", "audit", "fixture"],
-            ),
-            ban(
-                "trait-variant",
-                &["diport", "identity", "settings", "audit"],
-            ),
+            ban("dynosaur", &["diport", "fixture"]),
+            ban("trait-variant", &["diport"]),
         ];
         let findings = check_external_confinement(&confinement_fixture_members(), &bans);
         assert_eq!(findings.len(), 1);
@@ -4329,15 +3834,8 @@ tracing = { package = "tower", version = "1" }
 
     #[test]
     fn external_confinement_red_under_covered() {
-        // 欠覆盖：deny.toml 漏列 sanctioned 域 crate（settings）→ 该域的合法 dynosaur 依赖会被 cargo-deny
-        // 误拦。集合不等 → 报 dynosaur（防 deny.toml 与白名单漂移）。
-        let bans = vec![
-            ban("dynosaur", &["diport", "identity"]),
-            ban(
-                "trait-variant",
-                &["diport", "identity", "settings", "audit"],
-            ),
-        ];
+        // 欠覆盖：漏列唯一 DI port owner 会使合法依赖被误拦。
+        let bans = vec![ban("dynosaur", &[]), ban("trait-variant", &["diport"])];
         let findings = check_external_confinement(&confinement_fixture_members(), &bans);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
@@ -4808,7 +4306,6 @@ missing = { path = "../missing-member" }
             m("vocab", "crates/vocab", Some(Layer::Basis)),
             m("httpserve", "crates/httpserve", Some(Layer::Service)),
             m("testkit", "crates/testkit", Some(Layer::Service)),
-            m("generated", "generated", Some(Layer::Generated)),
             m("postgres", "adapters/postgres", Some(Layer::Adapter)),
             m("test-harness", "test-harness", Some(Layer::Root)),
         ];

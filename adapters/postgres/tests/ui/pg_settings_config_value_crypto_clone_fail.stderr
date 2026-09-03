@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `ConfigValueCrypto` in the current scope
- --> tests/ui/pg_settings_config_value_crypto_clone_fail.rs:4:20
-  |
-4 |     let _ = crypto.clone();
-  |                    ^^^^^ method not found in `ConfigValueCrypto`

@@ -10,12 +10,24 @@ help: the trait `http::consistency_sealed::HttpConsistencyClass` is not implemen
 1 | struct ForgedConsistency;
   | ^^^^^^^^^^^^^^^^^^^^^^^^
   = note: `ForgedConsistency` implements similarly named trait `HttpConsistencyClass`, but not `http::consistency_sealed::HttpConsistencyClass`
-  = help: the following other types implement trait `http::consistency_sealed::HttpConsistencyClass`:
-            vocab::http::DeviceLatent
-            vocab::http::LocalOnly
-            vocab::http::LocalTx
-            vocab::http::OutboxFact
-            vocab::http::WorkflowEventual
+help: the following other types implement trait `http::consistency_sealed::HttpConsistencyClass`
+ --> src/http.rs
+  |
+  |               impl consistency_sealed::HttpConsistencyClass for $class {}
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |               |
+  |               `vocab::http::LocalOnly`
+  |               `vocab::http::LocalTx`
+  |               `vocab::http::OutboxFact`
+  |               `vocab::http::WorkflowEventual`
+...
+  | / define_consistency_classes!(
+  | |     LocalOnly => LocalOnly,
+  | |     LocalTx => LocalTx,
+  | |     OutboxFact => OutboxFact,
+  | |     WorkflowEventual => WorkflowEventual,
+  | | );
+  | |_- in this macro invocation
 note: required by a bound in `HttpConsistencyClass`
  --> src/http.rs
   |
@@ -27,4 +39,4 @@ note: required by a bound in `HttpConsistencyClass`
             vocab::http::LocalTx
             vocab::http::OutboxFact
             vocab::http::WorkflowEventual
-            vocab::http::DeviceLatent
+  = note: this error originates in the macro `define_consistency_classes` (in Nightly builds, run with -Z macro-backtrace for more info)

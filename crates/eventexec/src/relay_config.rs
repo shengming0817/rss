@@ -349,7 +349,7 @@ mod tests {
                 "expected DomainInvalid for {domain:?}"
             );
         }
-        for &domain in &["dom", "test_domain", "identity", "domain1", "a_b_c2"] {
+        for &domain in &["dom", "test_domain", "runtime", "domain1", "a_b_c2"] {
             assert!(
                 SamplerConfig::new(vec![domain.into()], Duration::from_secs(15)).is_ok(),
                 "expected Ok for {domain:?}"
@@ -361,14 +361,14 @@ mod tests {
     fn sampler_config_rejects_duplicate_domain() {
         assert!(matches!(
             SamplerConfig::new(
-                vec!["identity".into(), "settings".into(), "identity".into()],
+                vec!["runtime".into(), "runtime".into(), "runtime".into()],
                 Duration::from_secs(15)
             ),
             Err(SamplerConfigError::DomainDuplicate { .. })
         ));
         assert!(
             SamplerConfig::new(
-                vec!["identity".into(), "settings".into()],
+                vec!["runtime".into(), "platform".into()],
                 Duration::from_secs(15)
             )
             .is_ok()
@@ -380,12 +380,12 @@ mod tests {
     // reason: 测试 happy-path 断言已知合法 config，item-level carve-out。
     fn sampler_config_accessors_round_trip() {
         let cfg = SamplerConfig::new(
-            vec!["identity".into(), "settings".into()],
+            vec!["runtime".into(), "platform".into()],
             Duration::from_secs(30),
         )
         .expect("valid config");
         let domain_strs: Vec<&str> = cfg.domains().iter().map(DomainName::as_str).collect();
-        assert_eq!(domain_strs, vec!["identity", "settings"]);
+        assert_eq!(domain_strs, vec!["runtime", "platform"]);
         assert_eq!(cfg.sample_interval(), Duration::from_secs(30));
     }
 

@@ -37,6 +37,7 @@ pub enum ServerObservationPolicy {
 pub(crate) struct ServerObservationRoute(String);
 
 impl ServerObservationRoute {
+    #[allow(dead_code, reason = "reserved for neutral router middleware")]
     pub(crate) fn from_matched_path(path: &axum::extract::MatchedPath) -> Self {
         Self(path.as_str().to_owned())
     }
@@ -58,10 +59,12 @@ pub enum ServerResponseCauseKind {
 pub(crate) struct ServerResponseCause(ServerResponseCauseKind);
 
 impl ServerResponseCause {
+    #[allow(dead_code, reason = "reserved for neutral timeout middleware")]
     pub(crate) const fn timeout() -> Self {
         Self(ServerResponseCauseKind::Timeout)
     }
 
+    #[allow(dead_code, reason = "reserved for neutral panic middleware")]
     pub(crate) const fn panic() -> Self {
         Self(ServerResponseCauseKind::Panic)
     }

@@ -1,7 +1,0 @@
-error[E0451]: field `spiffe_id` of struct `VerifiedMtlsPeer` is private
- --> tests/ui/external_cannot_construct_mtls_peer_fail.rs:7:9
-  |
-6 |     let _ = authn::VerifiedMtlsPeer {
-  |             ----------------------- in this type
-7 |         spiffe_id: id,
-  |         ^^^^^^^^^ private field

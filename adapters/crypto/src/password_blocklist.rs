@@ -165,7 +165,7 @@ fn lower_hex(byte: u8) -> Result<u8, PasswordBlocklistLoadError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::error::Error as _;
     use std::io::{self, Cursor, Read};

@@ -217,28 +217,12 @@ macro_rules! provider_roles {
 }
 
 provider_roles! {
-    DeviceCertificateStore => "device-certificate-store",
-    DeviceCommandStore => "device-command-store",
-    DeviceDraftArtifactSource => "device-draft-artifact-source",
-    DeviceProductionArtifactSource => "device-production-artifact-source",
-    ExternalCsrResolver => "external-csr-resolver",
-    VaultExternalPki => "vault-external-pki",
-    DeviceMqttSession => "device-mqtt-session",
-    DeviceRevocationStore => "device-revocation-store",
     EventPublisher => "event-publisher",
     EventSubscriber => "event-subscriber",
-    IdentitySigner => "identity-signer",
-    SettingsKeyProvider => "settings-key-provider",
-    SettingsSecretResolver => "settings-secret-resolver",
-    ListenerPdp => "listener-pdp",
-    ServiceTokenReplayStore => "service-token-replay-store",
-    AuthAuditSink => "auth-audit-sink",
     ListenerRateLimiter => "listener-rate-limiter",
     DistributedLockStore => "distributed-lock-store",
-    DistributedCasStore => "distributed-cas-store",
     DistributedCasStoreAlternative => "distributed-cas-store-alternative",
     RuntimeObjectStore => "runtime-object-store",
-    DlxLifecycleRepository => "dlx-lifecycle-repository",
     DlxArchiveStore => "dlx-archive-store",
     DlxArchiveKeyProvider => "dlx-archive-key-provider",
     DlxHotKeyProvider => "dlx-hot-key-provider",
@@ -268,12 +252,8 @@ impl PartialOrd for ProviderRole {
 #[repr(u8)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderConsumer {
-    Deviceloop,
     Eventexec,
-    Identity,
-    Settings,
     Httpserve,
-    Oidc,
     Distributed,
     Runtime,
 }
@@ -281,12 +261,8 @@ pub enum ProviderConsumer {
 impl ProviderConsumer {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Deviceloop => "deviceloop",
             Self::Eventexec => "eventexec",
-            Self::Identity => "identity",
-            Self::Settings => "settings",
             Self::Httpserve => "httpserve",
-            Self::Oidc => "oidc",
             Self::Distributed => "distributed",
             Self::Runtime => "runtime",
         }
@@ -316,27 +292,11 @@ macro_rules! provider_factory_symbols {
 }
 
 provider_factory_symbols! {
-    IdentityPostgresDeviceCertificateStore => "identity::postgres-device-certificate-store",
-    IdentityPostgresDeviceCommandStore => "identity::postgres-device-command-store",
-    IdentityDraftArtifactSimulator => "identity::draft-artifact-simulator",
-    IdentityExternalPkiArtifactSource => "identity::external-pki-artifact-source",
-    IdentityExternalCsrResolver => "identity::external-csr-resolver",
-    IdentityVaultExternalPki => "identity::vault-external-pki",
-    IdentityMqttSession => "identity::mqtt-session",
-    DeviceloopPostgresRevocationStore => "deviceloop::postgres-revocation-store",
     EventexecAmqpPublisher => "eventexec::amqp-publisher",
     EventexecAmqpSubscriber => "eventexec::amqp-subscriber",
-    IdentityVaultSigner => "identity::vault-signer",
-    SettingsVaultKeyProvider => "settings::vault-key-provider",
-    SettingsVaultSecretResolver => "settings::vault-secret-resolver",
-    HttpserveOidcPdp => "httpserve::oidc-pdp",
-    OidcPostgresServiceTokenReplayStore => "oidc::postgres-service-token-replay-store",
-    HttpservePostgresAuthAuditSink => "httpserve::postgres-auth-audit-sink",
     HttpserveRedisRateLimiter => "httpserve::redis-rate-limiter",
     DistributedRedisLockStore => "distributed::redis-lock-store",
-    DistributedPostgresCasStore => "distributed::postgres-cas-store",
     RuntimeS3ObjectStore => "runtime::s3-object-store",
-    EventexecPostgresDlxLifecycleRepository => "eventexec::postgres-dlx-lifecycle-repository",
     EventexecS3DlxArchiveStore => "eventexec::s3-dlx-archive-store",
     EventexecVaultArchiveKeyProvider => "eventexec::vault-archive-key-provider",
     EventexecVaultHotKeyProvider => "eventexec::vault-hot-key-provider",
@@ -348,22 +308,6 @@ provider_factory_symbols! {
 )]
 #[repr(u8)]
 pub enum ProviderConstructor {
-    #[serde(rename = "postgres::PgDeviceCertificateRepository")]
-    PostgresDeviceCertificateRepository,
-    #[serde(rename = "postgres::PgDeviceCommandStore")]
-    PostgresDeviceCommandStore,
-    #[serde(rename = "identity_composition::DraftArtifactSimulator")]
-    IdentityDraftArtifactSimulator,
-    #[serde(rename = "identity_composition::ExternalPkiArtifactSource")]
-    IdentityExternalPkiArtifactSource,
-    #[serde(rename = "httpd::SpiffeMtlsExternalCsrResolver")]
-    HttpdSpiffeMtlsExternalCsrResolver,
-    #[serde(rename = "vault::VaultExternalPkiProviderClosure")]
-    VaultExternalPkiProviderClosure,
-    #[serde(rename = "mqtt::MqttSession")]
-    MqttSession,
-    #[serde(rename = "postgres::PgRevocationStore")]
-    PostgresRevocationStore,
     #[serde(rename = "redis::RedisRateLimiter")]
     RedisRateLimiter,
     #[serde(rename = "amqp::AmqpPublisher")]
@@ -374,22 +318,8 @@ pub enum ProviderConstructor {
     RedisLockStore,
     #[serde(rename = "redis::RedisCasStore")]
     RedisCasStore,
-    #[serde(rename = "postgres::PgCasStore")]
-    PostgresCasStore,
-    #[serde(rename = "postgres::PgAuthAuditSink")]
-    PostgresAuthAuditSink,
-    #[serde(rename = "postgres::PgServiceTokenReplayStore")]
-    PostgresServiceTokenReplayStore,
-    #[serde(rename = "postgres::PgDlxLifecycleRepository")]
-    PostgresDlxLifecycleRepository,
-    #[serde(rename = "vault::VaultSigner")]
-    VaultSigner,
     #[serde(rename = "vault::VaultKeyProvider")]
     VaultKeyProvider,
-    #[serde(rename = "vault::VaultSecretResolver")]
-    VaultSecretResolver,
-    #[serde(rename = "oidc::OidcProvider")]
-    OidcProvider,
     #[serde(rename = "s3::S3Store")]
     S3Store,
     #[serde(rename = "s3::VerifiedS3DlxArchiveStore")]
@@ -399,29 +329,12 @@ pub enum ProviderConstructor {
 impl ProviderConstructor {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::PostgresDeviceCertificateRepository => "postgres::PgDeviceCertificateRepository",
-            Self::PostgresDeviceCommandStore => "postgres::PgDeviceCommandStore",
-            Self::IdentityDraftArtifactSimulator => "identity_composition::DraftArtifactSimulator",
-            Self::IdentityExternalPkiArtifactSource => {
-                "identity_composition::ExternalPkiArtifactSource"
-            }
-            Self::HttpdSpiffeMtlsExternalCsrResolver => "httpd::SpiffeMtlsExternalCsrResolver",
-            Self::VaultExternalPkiProviderClosure => "vault::VaultExternalPkiProviderClosure",
-            Self::MqttSession => "mqtt::MqttSession",
-            Self::PostgresRevocationStore => "postgres::PgRevocationStore",
             Self::RedisRateLimiter => "redis::RedisRateLimiter",
             Self::AmqpPublisher => "amqp::AmqpPublisher",
             Self::AmqpSubscriber => "amqp::AmqpSubscriber",
             Self::RedisLockStore => "redis::RedisLockStore",
             Self::RedisCasStore => "redis::RedisCasStore",
-            Self::PostgresCasStore => "postgres::PgCasStore",
-            Self::PostgresAuthAuditSink => "postgres::PgAuthAuditSink",
-            Self::PostgresServiceTokenReplayStore => "postgres::PgServiceTokenReplayStore",
-            Self::PostgresDlxLifecycleRepository => "postgres::PgDlxLifecycleRepository",
-            Self::VaultSigner => "vault::VaultSigner",
             Self::VaultKeyProvider => "vault::VaultKeyProvider",
-            Self::VaultSecretResolver => "vault::VaultSecretResolver",
-            Self::OidcProvider => "oidc::OidcProvider",
             Self::S3Store => "s3::S3Store",
             Self::S3VerifiedDlxArchiveStore => "s3::VerifiedS3DlxArchiveStore",
         }
@@ -431,26 +344,12 @@ impl ProviderConstructor {
     /// identity is validated by the role registry, not by this helper.
     pub const fn port(self) -> DiportPort {
         match self {
-            Self::PostgresDeviceCertificateRepository => DiportPort::CertificateReconcileRepository,
-            Self::PostgresDeviceCommandStore => DiportPort::DeviceCommandStore,
-            Self::IdentityDraftArtifactSimulator => DiportPort::CertificateArtifactSource,
-            Self::IdentityExternalPkiArtifactSource => DiportPort::CertificateArtifactSource,
-            Self::HttpdSpiffeMtlsExternalCsrResolver => DiportPort::ExternalCsrResolver,
-            Self::VaultExternalPkiProviderClosure => DiportPort::ExternalPkiProviderClosure,
-            Self::MqttSession => DiportPort::MqttSession,
-            Self::PostgresRevocationStore => DiportPort::RevocationStore,
             Self::RedisRateLimiter => DiportPort::RateLimiter,
             Self::AmqpPublisher => DiportPort::Publisher,
             Self::AmqpSubscriber => DiportPort::AckableSubscriber,
             Self::RedisLockStore => DiportPort::Lock,
-            Self::RedisCasStore | Self::PostgresCasStore => DiportPort::Cas,
-            Self::PostgresAuthAuditSink => DiportPort::AuditSink,
-            Self::PostgresServiceTokenReplayStore => DiportPort::ServiceTokenReplayStore,
-            Self::PostgresDlxLifecycleRepository => DiportPort::DlxLifecycleRepository,
-            Self::VaultSigner => DiportPort::Signer,
+            Self::RedisCasStore => DiportPort::Cas,
             Self::VaultKeyProvider => DiportPort::KeyProvider,
-            Self::VaultSecretResolver => DiportPort::SecretResolver,
-            Self::OidcProvider => DiportPort::Pdp,
             Self::S3Store => DiportPort::ObjectStore,
             Self::S3VerifiedDlxArchiveStore => DiportPort::DlxArchiveStore,
         }
@@ -464,25 +363,9 @@ impl ProviderConstructor {
             | Self::RedisRateLimiter
             | Self::RedisLockStore
             | Self::RedisCasStore
-            | Self::VaultSigner
             | Self::VaultKeyProvider
-            | Self::VaultSecretResolver
-            | Self::VaultExternalPkiProviderClosure
-            | Self::OidcProvider
             | Self::S3Store
             | Self::S3VerifiedDlxArchiveStore => &["backend"],
-            Self::PostgresAuthAuditSink => &["auth-audit-sink"],
-            Self::PostgresDeviceCertificateRepository | Self::PostgresDeviceCommandStore => {
-                &["domain-identity"]
-            }
-            Self::IdentityDraftArtifactSimulator
-            | Self::IdentityExternalPkiArtifactSource
-            | Self::HttpdSpiffeMtlsExternalCsrResolver
-            | Self::MqttSession
-            | Self::PostgresRevocationStore
-            | Self::PostgresCasStore
-            | Self::PostgresServiceTokenReplayStore
-            | Self::PostgresDlxLifecycleRepository => &[],
         }
     }
 
@@ -492,24 +375,10 @@ impl ProviderConstructor {
 
     pub const fn provider_crate(self) -> &'static str {
         match self {
-            Self::PostgresDeviceCertificateRepository
-            | Self::PostgresDeviceCommandStore
-            | Self::PostgresRevocationStore => "postgres",
-            Self::IdentityDraftArtifactSimulator | Self::IdentityExternalPkiArtifactSource => {
-                "identity-composition"
-            }
-            Self::HttpdSpiffeMtlsExternalCsrResolver => "httpd",
-            Self::VaultExternalPkiProviderClosure => "vault",
-            Self::MqttSession => "mqtt",
             Self::RedisRateLimiter => "redis",
             Self::AmqpPublisher | Self::AmqpSubscriber => "amqp",
             Self::RedisLockStore | Self::RedisCasStore => "redis",
-            Self::PostgresCasStore
-            | Self::PostgresAuthAuditSink
-            | Self::PostgresServiceTokenReplayStore
-            | Self::PostgresDlxLifecycleRepository => "postgres",
-            Self::VaultSigner | Self::VaultKeyProvider | Self::VaultSecretResolver => "vault",
-            Self::OidcProvider => "oidc",
+            Self::VaultKeyProvider => "vault",
             Self::S3Store | Self::S3VerifiedDlxArchiveStore => "s3",
         }
     }
@@ -541,36 +410,12 @@ impl LifecycleChannel {
 )]
 #[repr(u8)]
 pub enum DiportPort {
-    #[serde(rename = "identity::CertificateReconcileRepository")]
-    CertificateReconcileRepository,
-    #[serde(rename = "identity::DeviceCommandStore")]
-    DeviceCommandStore,
-    #[serde(rename = "identity::CertificateArtifactSource")]
-    CertificateArtifactSource,
-    #[serde(rename = "diport::ExternalCsrResolver")]
-    ExternalCsrResolver,
-    #[serde(rename = "diport::ExternalPkiProviderClosure")]
-    ExternalPkiProviderClosure,
-    #[serde(rename = "mqtt::MqttSession")]
-    MqttSession,
-    #[serde(rename = "diport::RevocationStore")]
-    RevocationStore,
     #[serde(rename = "diport::Publisher")]
     Publisher,
     #[serde(rename = "diport::AckableSubscriber")]
     AckableSubscriber,
-    #[serde(rename = "diport::Signer")]
-    Signer,
     #[serde(rename = "diport::KeyProvider")]
     KeyProvider,
-    #[serde(rename = "diport::SecretResolver")]
-    SecretResolver,
-    #[serde(rename = "diport::Pdp")]
-    Pdp,
-    #[serde(rename = "diport::ServiceTokenReplayStore")]
-    ServiceTokenReplayStore,
-    #[serde(rename = "diport::AuditSink")]
-    AuditSink,
     #[serde(rename = "diport::RateLimiter")]
     RateLimiter,
     #[serde(rename = "diport::LockStore")]
@@ -579,8 +424,6 @@ pub enum DiportPort {
     Cas,
     #[serde(rename = "diport::ObjectStore")]
     ObjectStore,
-    #[serde(rename = "diport::DlxLifecycleRepository")]
-    DlxLifecycleRepository,
     #[serde(rename = "diport::DlxArchiveStore")]
     DlxArchiveStore,
 }
@@ -588,26 +431,13 @@ pub enum DiportPort {
 impl DiportPort {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CertificateReconcileRepository => "identity::CertificateReconcileRepository",
-            Self::DeviceCommandStore => "identity::DeviceCommandStore",
-            Self::CertificateArtifactSource => "identity::CertificateArtifactSource",
-            Self::ExternalCsrResolver => "diport::ExternalCsrResolver",
-            Self::ExternalPkiProviderClosure => "diport::ExternalPkiProviderClosure",
-            Self::MqttSession => "mqtt::MqttSession",
-            Self::RevocationStore => "diport::RevocationStore",
             Self::Publisher => "diport::Publisher",
             Self::AckableSubscriber => "diport::AckableSubscriber",
-            Self::Signer => "diport::Signer",
             Self::KeyProvider => "diport::KeyProvider",
-            Self::SecretResolver => "diport::SecretResolver",
-            Self::Pdp => "diport::Pdp",
-            Self::ServiceTokenReplayStore => "diport::ServiceTokenReplayStore",
-            Self::AuditSink => "diport::AuditSink",
             Self::RateLimiter => "diport::RateLimiter",
             Self::Lock => "diport::LockStore",
             Self::Cas => "diport::CasStore",
             Self::ObjectStore => "diport::ObjectStore",
-            Self::DlxLifecycleRepository => "diport::DlxLifecycleRepository",
             Self::DlxArchiveStore => "diport::DlxArchiveStore",
         }
     }
@@ -739,126 +569,6 @@ const W: LifecycleChannel = LifecycleChannel::Workers;
 
 const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     ProviderRoleSpec {
-        role: ProviderRole::DeviceCertificateStore,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::CertificateReconcileRepository,
-        constructor: ProviderConstructor::PostgresDeviceCertificateRepository,
-        provider_crate: "postgres",
-        required_features: &["domain-identity"],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P],
-        factory: Some(ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::DeviceCommandStore,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::DeviceCommandStore,
-        constructor: ProviderConstructor::PostgresDeviceCommandStore,
-        provider_crate: "postgres",
-        required_features: &["domain-identity"],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, W],
-        factory: Some(ProviderFactorySymbol::IdentityPostgresDeviceCommandStore),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::DeviceDraftArtifactSource,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::CertificateArtifactSource,
-        constructor: ProviderConstructor::IdentityDraftArtifactSimulator,
-        provider_crate: "identity-composition",
-        required_features: &[],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[],
-        factory: Some(ProviderFactorySymbol::IdentityDraftArtifactSimulator),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::DeviceProductionArtifactSource,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::CertificateArtifactSource,
-        constructor: ProviderConstructor::IdentityExternalPkiArtifactSource,
-        provider_crate: "identity-composition",
-        required_features: &[],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[],
-        factory: Some(ProviderFactorySymbol::IdentityExternalPkiArtifactSource),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::ExternalCsrResolver,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::ExternalCsrResolver,
-        constructor: ProviderConstructor::HttpdSpiffeMtlsExternalCsrResolver,
-        provider_crate: "httpd",
-        required_features: &[],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R],
-        factory: Some(ProviderFactorySymbol::IdentityExternalCsrResolver),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::VaultExternalPki,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::ExternalPkiProviderClosure,
-        constructor: ProviderConstructor::VaultExternalPkiProviderClosure,
-        provider_crate: "vault",
-        required_features: &["backend"],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R],
-        factory: Some(ProviderFactorySymbol::IdentityVaultExternalPki),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::DeviceMqttSession,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::MqttSession,
-        constructor: ProviderConstructor::MqttSession,
-        provider_crate: "mqtt",
-        required_features: &[],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::IdentityMqttSession),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::DeviceRevocationStore,
-        activation: ProviderActivation::Process,
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::RevocationStore,
-        constructor: ProviderConstructor::PostgresRevocationStore,
-        provider_crate: "postgres",
-        required_features: &[],
-        consumer: ProviderConsumer::Deviceloop,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, W],
-        factory: Some(ProviderFactorySymbol::DeviceloopPostgresRevocationStore),
-    },
-    ProviderRoleSpec {
         role: ProviderRole::EventPublisher,
         activation: ProviderActivation::LocalEventExecution,
         lifecycle: ProviderLifecycle::Active,
@@ -887,96 +597,6 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         failure_posture: None,
         outputs: &[P, R, W],
         factory: Some(ProviderFactorySymbol::EventexecAmqpSubscriber),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::IdentitySigner,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::Signer,
-        constructor: ProviderConstructor::VaultSigner,
-        provider_crate: "vault",
-        required_features: &["backend"],
-        consumer: ProviderConsumer::Identity,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::IdentityVaultSigner),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::SettingsKeyProvider,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Settings),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::KeyProvider,
-        constructor: ProviderConstructor::VaultKeyProvider,
-        provider_crate: "vault",
-        required_features: &["backend"],
-        consumer: ProviderConsumer::Settings,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::SettingsVaultKeyProvider),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::SettingsSecretResolver,
-        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Settings),
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::SecretResolver,
-        constructor: ProviderConstructor::VaultSecretResolver,
-        provider_crate: "vault",
-        required_features: &["backend"],
-        consumer: ProviderConsumer::Settings,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::SettingsVaultSecretResolver),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::ListenerPdp,
-        activation: ProviderActivation::Process,
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::Pdp,
-        constructor: ProviderConstructor::OidcProvider,
-        provider_crate: "oidc",
-        required_features: &["backend"],
-        consumer: ProviderConsumer::Httpserve,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R],
-        factory: Some(ProviderFactorySymbol::HttpserveOidcPdp),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::ServiceTokenReplayStore,
-        activation: ProviderActivation::Process,
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::ServiceTokenReplayStore,
-        constructor: ProviderConstructor::PostgresServiceTokenReplayStore,
-        provider_crate: "postgres",
-        required_features: &[],
-        consumer: ProviderConsumer::Oidc,
-        durability: ProviderDurability::Persistent,
-        scope: Some(ProviderScope::ClusterGlobal),
-        failure_posture: Some(ProviderFailurePosture::FailClosed),
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::AuthAuditSink,
-        activation: ProviderActivation::Process,
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::AuditSink,
-        constructor: ProviderConstructor::PostgresAuthAuditSink,
-        provider_crate: "postgres",
-        required_features: &["auth-audit-sink"],
-        consumer: ProviderConsumer::Httpserve,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::HttpservePostgresAuthAuditSink),
     },
     ProviderRoleSpec {
         role: ProviderRole::ListenerRateLimiter,
@@ -1009,21 +629,6 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         factory: Some(ProviderFactorySymbol::DistributedRedisLockStore),
     },
     ProviderRoleSpec {
-        role: ProviderRole::DistributedCasStore,
-        activation: ProviderActivation::Process,
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::Cas,
-        constructor: ProviderConstructor::PostgresCasStore,
-        provider_crate: "postgres",
-        required_features: &[],
-        consumer: ProviderConsumer::Distributed,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::DistributedPostgresCasStore),
-    },
-    ProviderRoleSpec {
         role: ProviderRole::DistributedCasStoreAlternative,
         activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Draft,
@@ -1052,21 +657,6 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         failure_posture: None,
         outputs: &[R],
         factory: Some(ProviderFactorySymbol::RuntimeS3ObjectStore),
-    },
-    ProviderRoleSpec {
-        role: ProviderRole::DlxLifecycleRepository,
-        activation: ProviderActivation::Process,
-        lifecycle: ProviderLifecycle::Active,
-        port: DiportPort::DlxLifecycleRepository,
-        constructor: ProviderConstructor::PostgresDlxLifecycleRepository,
-        provider_crate: "postgres",
-        required_features: &[],
-        consumer: ProviderConsumer::Eventexec,
-        durability: ProviderDurability::Persistent,
-        scope: None,
-        failure_posture: None,
-        outputs: &[P, R, W],
-        factory: Some(ProviderFactorySymbol::EventexecPostgresDlxLifecycleRepository),
     },
     ProviderRoleSpec {
         role: ProviderRole::DlxArchiveStore,
@@ -1418,156 +1008,5 @@ const fn optional_failure_posture_eq(
         (Some(left), Some(right)) => left as u8 == right as u8,
         (None, None) => true,
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn deviceidentity_pilot_roles_are_active_persistent_and_exact() {
-        let roles = [
-            ProviderRole::DeviceCertificateStore,
-            ProviderRole::DeviceCommandStore,
-            ProviderRole::DeviceRevocationStore,
-            ProviderRole::DeviceDraftArtifactSource,
-            ProviderRole::DeviceProductionArtifactSource,
-            ProviderRole::ExternalCsrResolver,
-            ProviderRole::VaultExternalPki,
-            ProviderRole::DeviceMqttSession,
-        ];
-
-        for role in roles {
-            let spec = provider_role_spec(role);
-            assert_eq!(spec.lifecycle, ProviderLifecycle::Active);
-            assert_eq!(spec.durability, ProviderDurability::Persistent);
-            let expected_consumer = if role == ProviderRole::DeviceRevocationStore {
-                ProviderConsumer::Deviceloop
-            } else {
-                ProviderConsumer::Identity
-            };
-            assert_eq!(spec.consumer, expected_consumer);
-            assert_eq!(
-                spec.activation,
-                if role == ProviderRole::DeviceRevocationStore {
-                    ProviderActivation::Process
-                } else {
-                    ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity)
-                }
-            );
-            assert!(spec.factory.is_some());
-        }
-    }
-
-    #[test]
-    fn registry_has_twenty_four_unique_active_factories_and_one_draft() {
-        assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
-        assert_eq!(
-            PROVIDER_ROLE_SPECS
-                .iter()
-                .map(|spec| spec.role)
-                .collect::<Vec<_>>(),
-            ProviderRole::ALL
-        );
-        let active = PROVIDER_ROLE_SPECS
-            .iter()
-            .filter(|spec| spec.lifecycle == ProviderLifecycle::Active)
-            .count();
-        let drafts = PROVIDER_ROLE_SPECS
-            .iter()
-            .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
-            .count();
-        assert_eq!(active, 24);
-        assert_eq!(drafts, 1);
-        assert_registry_invariants(&PROVIDER_ROLE_SPECS);
-    }
-
-    #[test]
-    fn provider_role_order_is_wire_id_order() {
-        let mut roles = PROVIDER_ROLE_SPECS
-            .iter()
-            .map(|spec| spec.role)
-            .collect::<Vec<_>>();
-        roles.sort();
-        assert!(
-            roles
-                .windows(2)
-                .all(|pair| pair[0].as_str() < pair[1].as_str())
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "provider factory symbols must be unique")]
-    fn duplicate_factory_is_rejected_by_the_registry_guard() {
-        let mut specs = PROVIDER_ROLE_SPECS;
-        specs[2].factory = specs[1].factory;
-        assert_registry_invariants(&specs);
-    }
-
-    #[test]
-    #[should_panic(expected = "active roles require one factory")]
-    fn missing_factory_is_rejected_by_the_registry_guard() {
-        let mut specs = PROVIDER_ROLE_SPECS;
-        specs[1].factory = None;
-        assert_registry_invariants(&specs);
-    }
-
-    #[test]
-    fn dlx_hot_and_archive_key_providers_have_distinct_typed_receipts() {
-        let hot = &PROVIDER_ROLE_SPECS[ProviderRole::DlxHotKeyProvider as usize];
-        let archive = &PROVIDER_ROLE_SPECS[ProviderRole::DlxArchiveKeyProvider as usize];
-
-        assert_eq!(hot.constructor, ProviderConstructor::VaultKeyProvider);
-        assert_eq!(hot.consumer, ProviderConsumer::Eventexec);
-        assert_eq!(
-            hot.outputs,
-            &[
-                LifecycleChannel::Probes,
-                LifecycleChannel::Resources,
-                LifecycleChannel::Workers,
-            ]
-        );
-        assert_eq!(
-            archive.outputs,
-            &[
-                LifecycleChannel::Probes,
-                LifecycleChannel::Resources,
-                LifecycleChannel::Workers,
-            ]
-        );
-        assert_ne!(hot.role, archive.role);
-        assert_ne!(hot.factory, archive.factory);
-    }
-
-    #[test]
-    #[should_panic(expected = "provider factory symbols must be unique")]
-    fn duplicate_dlx_hot_archive_factory_is_rejected() {
-        let mut specs = PROVIDER_ROLE_SPECS;
-        specs[ProviderRole::DlxHotKeyProvider as usize].factory =
-            specs[ProviderRole::DlxArchiveKeyProvider as usize].factory;
-        assert_registry_invariants(&specs);
-    }
-
-    #[test]
-    #[should_panic(expected = "active roles require one factory")]
-    fn missing_dlx_hot_factory_is_rejected() {
-        let mut specs = PROVIDER_ROLE_SPECS;
-        specs[ProviderRole::DlxHotKeyProvider as usize].factory = None;
-        assert_registry_invariants(&specs);
-    }
-
-    #[test]
-    #[should_panic(expected = "provider role features must match its constructor")]
-    fn constructor_feature_drift_is_rejected_by_the_registry_guard() {
-        let mut specs = PROVIDER_ROLE_SPECS;
-        specs[ProviderRole::DistributedLockStore as usize].required_features = &[];
-        assert_registry_invariants(&specs);
-    }
-
-    #[test]
-    #[should_panic(expected = "every provider role requires exactly one registry spec")]
-    fn missing_role_spec_is_rejected_by_the_registry_guard() {
-        assert_registry_invariants(&PROVIDER_ROLE_SPECS[..ProviderRole::COUNT - 1]);
     }
 }

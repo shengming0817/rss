@@ -72,5 +72,3 @@ anyhow = { workspace = true }
 # 集成测试容器 fixture（#1137）：testcontainers self-provision rabbitmq + 建 per-domain vhost（经
 # testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
 testkit = { path = "../../crates/testkit" }
-# 精确 ACL fixture 与发布/订阅测试直接绑定生成契约 topic，避免测试字符串漂移。
-generated = { path = "../../generated" }

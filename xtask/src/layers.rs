@@ -5,7 +5,7 @@
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain），另将精确路径
 //! `crates/runtimeexec` 分类为 RuntimeExec；
-//! `adapters/*` / `xtask` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `xtask` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -20,18 +20,15 @@
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
-/// `diagctx`、`authmint`、`sagaauthmint`、`dlqauthmint`、`requestidmint` 与 `pkiauthmint` capability crates 是**独立根**
+/// `diagctx`、`sagaauthmint`、`dlqauthmint` 与 `requestidmint` capability crates 是**独立根**
 /// （[`ISOLATED_BASIS_CRATES`]）：任何涉及这些 crate 的 base 内边
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
 pub(crate) const BASIS_CRATES: &[&str] = &[
-    "postgres-migration-inventory",
     "rss-diag-context",
-    "authmint",
     "sagaauthmint",
     "dlqauthmint",
     "requestidmint",
-    "pkiauthmint",
     "runtimeinventorymint",
     "vocab",
     "assembly-schema",
@@ -47,11 +44,9 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
 /// （deny.toml wrappers 另收窄持有方）。
 pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &[
     "rss-diag-context",
-    "authmint",
     "sagaauthmint",
     "dlqauthmint",
     "requestidmint",
-    "pkiauthmint",
 ];
 /// 引擎 / 原语层（依赖基础）。
 ///
@@ -63,7 +58,6 @@ pub(crate) const ENGINE_CRATES: &[&str] = &[
     "consistency",
     "primitives",
     "rss-conformance",
-    "rss-device-security-contracts",
     "rss-trace-context",
 ];
 /// Provider-neutral eventing authoring/runtime public seam. The package identity is deliberately
@@ -81,18 +75,16 @@ pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
 /// ban（仅 Domain/Adapter/Generated 需，LAYER-DEPS-06）、无需改 base intra-DAG。
 pub(crate) const SERVICE_CRATES: &[&str] = &[
     "httpserve",
-    "authn",
     "bootstrap",
     "eventexec",
     "listenerlifecycle",
     "observ",
     "distributed",
-    "deviceloop",
     "testkit",
     "tracewiretest",
 ];
 /// 域层（依赖基础 + 引擎 + 服务 + generated；兄弟域互不依赖）。
-pub(crate) const DOMAIN_CRATES: &[&str] = assembly_schema::REGISTERED_DOMAIN_LABELS;
+pub(crate) const DOMAIN_CRATES: &[&str] = &[];
 
 /// dev/test-only adapter（demo / in-mem provider）：**禁生产 bin 依赖**，wrapper consumer 类别只准
 /// [`DEV_ADAPTER_ROOTS`]；真实 parent exact-set 由 cargo-deny 证明（`INVARIANT: LAYER-DEPS-07` { level = "Medium", exec = "check", source = "code" }）。
@@ -146,7 +138,6 @@ pub(crate) enum Layer {
     RuntimeExec,
     Domain,
     Adapter,
-    Generated,
     /// 非发布 tooling/verification facts；仅组合根可消费，自身无 workspace 内部出边。
     Tooling,
     /// 非发布 workspace 根（xtask）：可依赖所有库 crate。
@@ -154,7 +145,7 @@ pub(crate) enum Layer {
 }
 
 /// 按 crate 名 + 成员路径（相对 workspace root，如 `crates/vocab` / `adapters/redis` /
-/// `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
+/// `xtask`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if matches!(
@@ -174,9 +165,6 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     }
     if member_path == "crates/runtimeexec" {
         return (crate_name == "runtimeexec").then_some(Layer::RuntimeExec);
-    }
-    if member_path == "generated" {
-        return Some(Layer::Generated);
     }
     if member_path == "xtask" {
         return Some(Layer::Root);
@@ -213,8 +201,8 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
     use Layer::{
-        Adapter, Basis, DiPort, Domain, Engine, EventingPublic, FoundationPublic, Generated,
-        PlatformPublic, Root, RuntimeExec, Service, Tooling,
+        Adapter, Basis, DiPort, Domain, Engine, EventingPublic, FoundationPublic, PlatformPublic,
+        Root, RuntimeExec, Service, Tooling,
     };
     match from {
         // 分层矩阵允许组合根消费所有库 crate；RuntimeExec 再由 deny.toml 精确 target wrapper 收窄。
@@ -226,8 +214,6 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
         EventingPublic => matches!(to, FoundationPublic | Basis | Engine),
         // workspace facts 只消费外部 guppy/thiserror；任何内部出边均属越界。
         Tooling => false,
-        // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
-        Generated => matches!(to, FoundationPublic | PlatformPublic | Basis),
         // provider-independent runtime 启动内核：只消费基础/引擎/DI-infra/服务；禁具体域、adapter、
         // generated、组合根及兄弟 RuntimeExec。入边由其它各行保持关闭，仅 Root 行放行。
         RuntimeExec => matches!(
@@ -251,14 +237,7 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
         //（域不依赖 adapter——依赖反转方向：adapter→域 单向，见上方 Adapter 行）。
         Domain => matches!(
             to,
-            FoundationPublic
-                | PlatformPublic
-                | EventingPublic
-                | Basis
-                | Engine
-                | DiPort
-                | Service
-                | Generated
+            FoundationPublic | PlatformPublic | EventingPublic | Basis | Engine | DiPort | Service
         ),
         // 服务：基础 + 引擎 + DI-infra（消费 DI port）；禁兄弟服务（§分层 未授予）/ 域 / adapter / generated。
         Service => matches!(
@@ -321,20 +300,6 @@ pub(crate) fn provider_adapter_bootstrap_forbidden(from_crate: &str, to_crate: &
     matches!(from_crate, "redis-adapter" | "s3" | "vault") && to_crate == "bootstrap"
 }
 
-/// Generated authoring/registration seams 的精确 crate edges。
-///
-/// `generated::command::{CommandEmit, CommandJournal}` 接受字段私有、仅 generated 可构造的
-/// `CommandSpec`；`eventexec` 必须实现这些 seam，才能在自身 crate 内构造不可外部伪造的 reviewed DTO。
-/// Workflow runtime 同样只在 `eventexec` 内把 generated definition catalog 与 sealed assembly plan
-/// exact-join。`bootstrap` 仅实现 sealed event subscription registrar，使 raw transport coordinates
-/// 不再出现在 domain callsites。两条边都是类型/可见性 Hard seal 的必要编译边，不是一般
-/// `Service → Generated` 放宽；bootstrap 对 generated 的 production item surface 另由 layerdeps 的
-/// `LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01` exact AST allowlist 收窄。fail-closed：反向或其它
-/// service 一律返回 false。
-pub(crate) fn generated_seam_allows(from_crate: &str, to_crate: &str) -> bool {
-    to_crate == "generated" && matches!(from_crate, "eventexec" | "bootstrap")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,9 +310,7 @@ mod tests {
     #[case("rss-platform", "crates/platform", Some(Layer::PlatformPublic))]
     #[case("runctx", "crates/runctx", Some(Layer::Basis))]
     #[case("rss-diag-context", "crates/diagctx", Some(Layer::Basis))]
-    #[case("authmint", "crates/authmint", Some(Layer::Basis))]
     #[case("requestidmint", "crates/requestidmint", Some(Layer::Basis))]
-    #[case("pkiauthmint", "crates/pkiauthmint", Some(Layer::Basis))]
     #[case("rss-contract", "crates/contract", Some(Layer::FoundationPublic))]
     #[case(
         "rss-request-context",
@@ -360,11 +323,8 @@ mod tests {
     #[case("bootstrap", "crates/bootstrap", Some(Layer::Service))]
     #[case("runtimeexec", "crates/runtimeexec", Some(Layer::RuntimeExec))]
     #[case("testkit", "crates/testkit", Some(Layer::Service))]
-    #[case("identity", "crates/identity", Some(Layer::Domain))]
-    #[case("syshealth", "crates/syshealth", Some(Layer::Domain))]
     #[case("redis", "adapters/redis", Some(Layer::Adapter))]
     #[case("postgres", "adapters/postgres", Some(Layer::Adapter))]
-    #[case("generated", "generated", Some(Layer::Generated))]
     #[case("xtask", "xtask", Some(Layer::Root))]
     #[case("memory", "adapters/memory", Some(Layer::Adapter))]
     #[case("workspacefacts", "crates/workspacefacts", Some(Layer::Tooling))]
@@ -436,10 +396,7 @@ mod tests {
 
     #[test]
     fn domain_crate_registry_is_exact() {
-        assert_eq!(
-            DOMAIN_CRATES,
-            &["identity", "settings", "audit", "contractreg", "syshealth"]
-        );
+        assert!(DOMAIN_CRATES.is_empty());
     }
 
     /// 路径判分类不靠 crate 名——adapter 即使叫 `redis`（与 crates.io 同名）仍按路径归 Adapter。
@@ -474,21 +431,11 @@ mod tests {
     #[case("vocab", "rss-diag-context", false)]
     #[case("rss-diag-context", "vocab", false)]
     #[case("rss-diag-context", "runctx", false)]
-    // authmint 独立根：与 diagctx 对称的 anti-vacuity（AUTH-EVIDENCE-MINT-01 Hard 半段）。
-    #[case("runctx", "authmint", false)]
-    #[case("vocab", "authmint", false)]
-    #[case("authmint", "vocab", false)]
-    #[case("authmint", "runctx", false)]
     // requestidmint 独立根：只能被 deny.toml 指定的上层 wrapper 消费。
     #[case("runctx", "requestidmint", false)]
     #[case("vocab", "requestidmint", false)]
     #[case("requestidmint", "vocab", false)]
     #[case("requestidmint", "runctx", false)]
-    // pkiauthmint 独立根：只能被 exact wrapper 集合命名。
-    #[case("runctx", "pkiauthmint", false)]
-    #[case("vocab", "pkiauthmint", false)]
-    #[case("pkiauthmint", "vocab", false)]
-    #[case("pkiauthmint", "runctx", false)]
     // runtimeinventorymint is a low-rank capability root consumed only by assembly-schema and
     // runtimeexec; the exact consumer set is additionally closed by deny.toml wrappers.
     #[case("assembly-schema", "runtimeinventorymint", true)]
@@ -509,7 +456,6 @@ mod tests {
     // 反向边：禁（httpserve 仍禁依赖 bootstrap）。
     #[case("httpserve", "bootstrap", false)]
     // 其它 Service→Service：本例外不适用（false ⇒ 交回 allows 禁）。
-    #[case("bootstrap", "authn", false)]
     #[case("eventexec", "httpserve", false)]
     // 非 Service 端 / 无关对：false。
     #[case("identity", "httpserve", false)]
@@ -542,21 +488,6 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case("eventexec", "generated", true)]
-    #[case("authn", "generated", false)]
-    #[case("bootstrap", "generated", true)]
-    #[case("observ", "generated", false)]
-    #[case("generated", "eventexec", false)]
-    #[case("eventexec", "eventexec", false)]
-    fn generated_seam_allows_exact_edges_only(
-        #[case] from: &str,
-        #[case] to: &str,
-        #[case] want: bool,
-    ) {
-        assert_eq!(generated_seam_allows(from, to), want);
-    }
-
     #[test]
     fn eventing_public_has_only_the_declared_layer_directions() {
         for consumer in [
@@ -574,7 +505,6 @@ mod tests {
             Layer::PlatformPublic,
             Layer::Basis,
             Layer::Engine,
-            Layer::Generated,
         ] {
             assert!(!allows(lower, Layer::EventingPublic), "{lower:?}");
         }
@@ -586,9 +516,7 @@ mod tests {
     #[case(Layer::Service, Layer::Engine, true)]
     #[case(Layer::Service, Layer::Basis, true)]
     #[case(Layer::Domain, Layer::Service, true)]
-    #[case(Layer::Domain, Layer::Generated, true)]
     #[case(Layer::Adapter, Layer::Service, true)]
-    #[case(Layer::Generated, Layer::Basis, true)]
     // DI-infra 下行授予边：diport 依赖基础+引擎；服务/域/adapter 可依赖 diport。
     #[case(Layer::DiPort, Layer::Basis, true)]
     #[case(Layer::DiPort, Layer::Engine, true)]
@@ -598,7 +526,6 @@ mod tests {
     // Root 全开。
     #[case(Layer::Root, Layer::Domain, true)]
     #[case(Layer::Root, Layer::Adapter, true)]
-    #[case(Layer::Root, Layer::Generated, true)]
     #[case(Layer::Root, Layer::DiPort, true)]
     #[case(Layer::Root, Layer::Tooling, true)]
     // Tooling facts crate 无内部出边，且除 Root 外任何层不得消费。
@@ -615,13 +542,11 @@ mod tests {
     #[case(Layer::RuntimeExec, Layer::Service, true)]
     #[case(Layer::RuntimeExec, Layer::Domain, false)]
     #[case(Layer::RuntimeExec, Layer::Adapter, false)]
-    #[case(Layer::RuntimeExec, Layer::Generated, false)]
     #[case(Layer::RuntimeExec, Layer::Root, false)]
     #[case(Layer::RuntimeExec, Layer::RuntimeExec, false)]
     #[case(Layer::Service, Layer::RuntimeExec, false)]
     #[case(Layer::Domain, Layer::RuntimeExec, false)]
     #[case(Layer::Adapter, Layer::RuntimeExec, false)]
-    #[case(Layer::Generated, Layer::RuntimeExec, false)]
     #[case(Layer::Root, Layer::RuntimeExec, true)]
     // 同层横向依赖：禁（§分层 未授予任一分组同层依赖）。
     #[case(Layer::Basis, Layer::Basis, false)]
@@ -637,20 +562,15 @@ mod tests {
     #[case(Layer::Service, Layer::Domain, false)]
     #[case(Layer::Domain, Layer::Adapter, false)]
     #[case(Layer::Service, Layer::Adapter, false)]
-    #[case(Layer::Service, Layer::Generated, false)]
     // adapter → 域：放行（DIP 内向边——adapter impl 域定义的 repo/service port，Option 2/ADR-005）。
     // 反向 域 → adapter 仍禁（上面 Domain→Adapter=false），依赖反转方向保持。
     #[case(Layer::Adapter, Layer::Domain, true)]
-    #[case(Layer::Adapter, Layer::Generated, false)]
-    #[case(Layer::Generated, Layer::Service, false)]
     // DI-infra back-path / 跨界：禁——diport 不依赖服务及以上；引擎/基础/generated 不依赖 diport。
     #[case(Layer::DiPort, Layer::Service, false)]
     #[case(Layer::DiPort, Layer::Domain, false)]
     #[case(Layer::DiPort, Layer::Adapter, false)]
-    #[case(Layer::DiPort, Layer::Generated, false)]
     #[case(Layer::Engine, Layer::DiPort, false)]
     #[case(Layer::Basis, Layer::DiPort, false)]
-    #[case(Layer::Generated, Layer::DiPort, false)]
     fn allows_matrix(#[case] from: Layer, #[case] to: Layer, #[case] want: bool) {
         assert_eq!(allows(from, to), want);
     }

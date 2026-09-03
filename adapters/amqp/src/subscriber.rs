@@ -967,6 +967,8 @@ impl AckableSubscriber for AmqpSubscriber {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::type_complexity)]
+
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -1021,10 +1023,10 @@ mod tests {
     #[test]
     fn broker_queue_topology_owns_exact_dead_letter_arguments() {
         let topology =
-            BrokerQueueTopology::production("rss.events.settings").expect("valid topic topology");
+            BrokerQueueTopology::production("rss.events.runtime").expect("valid topic topology");
 
-        assert_eq!(topology.source_queue(), "rss.events.settings");
-        assert_eq!(topology.dead_letter_queue(), "rss.events.settings.dlq");
+        assert_eq!(topology.source_queue(), "rss.events.runtime");
+        assert_eq!(topology.dead_letter_queue(), "rss.events.runtime.dlq");
         assert_eq!(
             topology
                 .source_arguments()
@@ -1038,7 +1040,7 @@ mod tests {
                 .inner()
                 .get("x-dead-letter-routing-key"),
             Some(&AMQPValue::LongString(
-                b"rss.events.settings.dlq".to_vec().into()
+                b"rss.events.runtime.dlq".to_vec().into()
             ))
         );
         for (key, value) in [
@@ -1089,7 +1091,7 @@ mod tests {
     #[test]
     fn broker_queue_topology_rejects_empty_or_overlong_names() {
         assert!(BrokerQueueTopology::production("").is_err());
-        assert!(BrokerQueueTopology::production("rss.events.settings.dlq").is_err());
+        assert!(BrokerQueueTopology::production("rss.events.runtime.dlq").is_err());
         assert!(BrokerQueueTopology::production(&"x".repeat(252)).is_err());
         assert!(BrokerQueueTopology::production(&"x".repeat(251)).is_ok());
     }
@@ -1134,10 +1136,10 @@ mod tests {
                 "hidden broker topology and credential text".into(),
             )
             .expect("known AMQP reply code");
-            let topology = BrokerQueueTopology::production("rss.events.settings")
+            let topology = BrokerQueueTopology::production("rss.events.runtime")
                 .expect("valid topic topology");
             let _ = topology_rpc_error(
-                "settings-subscriber",
+                "runtime-subscriber",
                 &topology,
                 BrokerTopologyStage::DeclareSource,
                 lapin::Error::from(lapin::ErrorKind::ProtocolError(error)),
@@ -1152,15 +1154,15 @@ mod tests {
         assert_eq!(target, "amqp");
         assert_eq!(
             fields.get("resource").map(String::as_str),
-            Some("settings-subscriber")
+            Some("runtime-subscriber")
         );
         assert_eq!(
             fields.get("source_queue").map(String::as_str),
-            Some("rss.events.settings")
+            Some("rss.events.runtime")
         );
         assert_eq!(
             fields.get("dead_letter_queue").map(String::as_str),
-            Some("rss.events.settings.dlq")
+            Some("rss.events.runtime.dlq")
         );
         assert_eq!(
             fields.get("message").map(String::as_str),

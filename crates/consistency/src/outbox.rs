@@ -591,7 +591,7 @@ pub fn is_canonical_topic_name(s: &str) -> bool {
 ///
 /// **PII / 凭据边界**：业务选择的 partition key（如 sessionId）可能含**凭据级** bearer 标识
 ///（sessionId 即 bearer token），故 `PartitionKey` 的 `Debug` **脱敏为 `<redacted>`**（同
-/// `identity::SessionId` 范式），不以明文经 `{:?}` 泄漏至日志 / 断言（F3，#1211 review）。定位 stalled
+/// opaque identifier 范式），不以明文经 `{:?}` 泄漏至日志 / 断言（F3，#1211 review）。定位 stalled
 /// partition 经受控 DB 查询（`SELECT partition_key FROM outbox WHERE event_id=…`），非日志明文。
 ///
 /// ref: debezium/debezium debezium-connect-plugins/src/main/java/io/debezium/transforms/outbox/EventRouterConfigDefinition.java
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn event_topic_rejects_command_namespace() {
-        assert!(EventTopic::parse("identity.session-created").is_ok());
+        assert!(EventTopic::parse("runtime.fact-recorded").is_ok());
         assert!(matches!(
             EventTopic::parse("seed.commands.do-thing"),
             Err(EventTopicError::CommandNamespace)
@@ -1196,8 +1196,8 @@ mod tests {
     // reason: 测试 happy-path 断言已知合法输入，item-level carve-out。
     fn outbox_contract_id_accepts_canonical_dotted_and_round_trips() {
         let cases: &[&str] = &[
-            "identity.session-created",
-            "settings.config-version-changed",
+            "runtime.fact-recorded",
+            "runtime.fact-updated",
             "seed.thing-happened",
             "foo",
         ];
@@ -1223,7 +1223,7 @@ mod tests {
             "a..b",
             "Identity.session-created",
             "identity.SessionCreated",
-            "1identity.session-created",
+            "1runtime.fact-recorded",
             "identity._session",
             "identity.session created",
         ] {
@@ -1271,7 +1271,7 @@ mod tests {
     fn metric_samples_expose_scope() {
         let tenant =
             rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
-        let contract_id = OutboxContractId::parse("identity.session-created").unwrap();
+        let contract_id = OutboxContractId::parse("runtime.fact-recorded").unwrap();
         let subject = OutboxMetricSubject::new(tenant, contract_id.clone());
         assert_eq!(subject.tenant_id(), tenant);
         assert_eq!(subject.contract_id(), &contract_id);
@@ -1379,7 +1379,7 @@ mod tests {
         assert_ne!(a1, b);
     }
 
-    // PartitionKey Debug 脱敏：明文值不得经 {:?} 泄漏（F3，#1211 review；同 SessionId 范式）。
+    // PartitionKey Debug 脱敏：明文值不得经 {:?} 泄漏（F3，#1211 review）。
     #[test]
     #[allow(clippy::unwrap_used)]
     // reason: 测试已知非空输入。
@@ -1400,9 +1400,9 @@ mod tests {
         OutboxFactIdentity::new(
             "evt-1739",
             "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "identity",
-            "identity.session-created",
-            "identity.session-created",
+            "runtime",
+            "runtime.fact-recorded",
+            "runtime.fact-recorded",
             "v1",
             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             payload,
@@ -1604,9 +1604,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-other",
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "identity",
-                "identity.session-created",
-                "identity.session-created",
+                "platform",
+                "runtime.fact-recorded",
+                "runtime.fact-recorded",
                 "v1",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 b"payload",
@@ -1618,9 +1618,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-1739",
                 "00000000-0000-4000-8000-000000000abc",
-                "identity",
-                "identity.session-created",
-                "identity.session-created",
+                "runtime",
+                "runtime.fact-recorded",
+                "runtime.fact-recorded",
                 "v1",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 b"payload",
@@ -1632,9 +1632,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-1739",
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "settings",
-                "identity.session-created",
-                "identity.session-created",
+                "platform",
+                "runtime.fact-recorded",
+                "runtime.fact-recorded",
                 "v1",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 b"payload",
@@ -1646,9 +1646,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-1739",
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "identity",
-                "identity.other",
-                "identity.session-created",
+                "runtime",
+                "runtime.other",
+                "runtime.fact-recorded",
                 "v1",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 b"payload",
@@ -1660,9 +1660,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-1739",
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "identity",
-                "identity.session-created",
-                "identity.other",
+                "runtime",
+                "runtime.fact-recorded",
+                "runtime.other",
                 "v1",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 b"payload",
@@ -1674,9 +1674,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-1739",
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "identity",
-                "identity.session-created",
-                "identity.session-created",
+                "runtime",
+                "runtime.fact-recorded",
+                "runtime.fact-recorded",
                 "v2",
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 b"payload",
@@ -1688,9 +1688,9 @@ mod tests {
             OutboxFactIdentity::new(
                 "evt-1739",
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                "identity",
-                "identity.session-created",
-                "identity.session-created",
+                "runtime",
+                "runtime.fact-recorded",
+                "runtime.fact-recorded",
                 "v1",
                 "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 b"payload",

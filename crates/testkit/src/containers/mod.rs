@@ -42,7 +42,6 @@ type Result<T> = std::result::Result<T, FixtureError>;
 /// 容器内固定端口（modules 镜像默认暴露端口）。
 const PUBLISHED_PORT_MAX_ATTEMPTS: u32 = 3;
 const PUBLISHED_PORT_RETRY_BACKOFF_MS: u64 = 100;
-const MQTTS_PORT: u16 = 8883;
 const MINIO_PORT: u16 = 9000;
 static BRIDGE_NETWORK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -610,17 +609,12 @@ mod tls;
 use tls::*;
 
 mod minio;
-mod mqtt;
 mod postgres;
 mod rabbitmq;
 mod redis;
 mod vault;
 
 pub use minio::{MinioCredentials, MinioTlsFixture, minio_tls_archive};
-pub use mqtt::{
-    MqttAssertionFault, MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, mosquitto_mtls,
-    mosquitto_mtls_with_assertion_fault,
-};
 pub use postgres::{
     ExternalPgFixture, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
     PgConnParams, PgFixture, PgTlsFixture, env_or_postgres, owned_postgres, postgres_tls,

@@ -1,5 +1,0 @@
-error[E0599]: no associated function or constant named `setup` found for struct `PgRuntimeDeps` in the current scope
- --> tests/ui/pg_runtime_setup_plain_read_config_fail.rs:9:33
-  |
-9 |     let _setup = PgRuntimeDeps::setup(
-  |                                 ^^^^^ associated function or constant not found in `PgRuntimeDeps`

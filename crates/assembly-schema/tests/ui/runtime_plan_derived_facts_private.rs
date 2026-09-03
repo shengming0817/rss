@@ -8,10 +8,10 @@ fn main() {
         "primary-main",
         AssemblyListenerKind::Primary,
         ListenerAuth::RssAccessToken,
-        vec![AssemblyDomain::Identity],
+        vec![AssemblyDomain::Runtime],
     );
     input.domain(
-        AssemblyDomain::Identity,
+        AssemblyDomain::Runtime,
         vec![
             DomainLifecyclePhase::Construct,
             DomainLifecyclePhase::Ready,

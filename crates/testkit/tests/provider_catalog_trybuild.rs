@@ -11,19 +11,9 @@ fn provider_capability_catalog_is_closed_and_provider_specific() {
             "conflict",
             "fencing",
             "budget",
-            "commit-ack",
             "ambiguity",
             "archive-receipt",
         ]
-    );
-    assert_eq!(
-        ProviderId::Postgres
-            .capabilities()
-            .iter()
-            .copied()
-            .map(CapabilityId::as_str)
-            .collect::<Vec<_>>(),
-        CapabilityId::ALL.map(CapabilityId::as_str)
     );
     assert_eq!(
         ProviderId::Amqp.capabilities(),

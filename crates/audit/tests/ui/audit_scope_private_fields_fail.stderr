@@ -1,7 +1,0 @@
-error[E0451]: fields `tenant` and `_seal` of struct `TenantRepoScope` are private
- --> tests/ui/audit_scope_private_fields_fail.rs:6:36
-  |
-6 |     let _scope = TenantRepoScope { tenant, _seal: () };
-  |                                    ^^^^^^  ^^^^^ private field
-  |                                    |
-  |                                    private field

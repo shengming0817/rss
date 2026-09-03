@@ -1,5 +1,0 @@
-error[E0616]: field `handle` of struct `ConfigValueCrypto` is private
- --> tests/ui/pg_settings_config_value_crypto_fields_private_fail.rs:4:20
-  |
-4 |     let _ = crypto.handle;
-  |                    ^^^^^^ private field

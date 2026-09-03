@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::cognitive_complexity)]
 // reason: protocol fixtures should fail at the exact local assertion when their frozen bytes drift.
 
 use assembly_schema::{
@@ -95,19 +95,19 @@ fn expanded_unsigned() -> Value {
     let mut unsigned = runtime_vector()["unsigned"].clone();
     unsigned["providerPlans"] = json!([
         {"id":"a-provider","constructor":"amqp::AmqpPublisher","activation":{"kind":"localEventExecution"},"outputs":["probes"]},
-        {"id":"z-provider","constructor":"oidc::OidcProvider","activation":{"kind":"process"},"outputs":["workers"]}
+        {"id":"z-provider","constructor":"amqp::AmqpSubscriber","activation":{"kind":"process"},"outputs":["workers"]}
     ]);
     unsigned["listenerPlans"] = json!([
-        {"id":"admin-main","kind":"admin","auth":"rssAccessToken","domains":["identity"]},
-        {"id":"primary-main","kind":"primary","auth":"rssAccessToken","domains":["settings"]}
+        {"id":"admin-main","kind":"admin","auth":"rssAccessToken","domains":["runtime"]},
+        {"id":"primary-main","kind":"primary","auth":"rssAccessToken","domains":["platform"]}
     ]);
     unsigned["domainPlans"] = json!([
-        {"id":"identity","lifecycle":["construct","ready","shutdown"]},
-        {"id":"settings","lifecycle":["construct","ready","shutdown"]}
+        {"id":"platform","lifecycle":["construct","ready","shutdown"]},
+        {"id":"runtime","lifecycle":["construct","ready","shutdown"]}
     ]);
     unsigned["placementPlans"] = json!([
-        {"domain":"identity","workload":"runtime"},
-        {"domain":"settings","workload":"runtime"}
+        {"domain":"platform","workload":"runtime"},
+        {"domain":"runtime","workload":"runtime"}
     ]);
     unsigned
 }
@@ -202,18 +202,18 @@ fn runtime_plan_reader_accepts_the_shared_closed_vector() {
         vector["unsigned"]["assemblyFingerprint"].clone()
     );
     assert_eq!(wire["runtimePlanFingerprint"], vector["expected"].clone());
-    assert_eq!(wire["providerPlans"][0]["id"], "pdp");
+    assert_eq!(wire["providerPlans"][0]["id"], "event-publisher");
     assert_eq!(
         wire["providerPlans"][0]["constructor"],
-        "oidc::OidcProvider"
+        "amqp::AmqpPublisher"
     );
     assert_eq!(wire["listenerPlans"][0]["id"], "health-main");
     assert_eq!(wire["listenerPlans"][1]["id"], "primary-main");
-    assert_eq!(wire["domainPlans"][0]["id"], "identity");
+    assert_eq!(wire["domainPlans"][0]["id"], "runtime");
     assert_eq!(wire["placementPlans"][0]["workload"], "runtime");
     assert_eq!(wire["workflowPlans"].as_array().map(Vec::len), Some(2));
-    assert_eq!(wire["workflowPlans"][0]["id"], "identity.account-view");
-    assert_eq!(wire["workflowPlans"][1]["id"], "settings.bootstrap");
+    assert_eq!(wire["workflowPlans"][0]["id"], "platform.projection");
+    assert_eq!(wire["workflowPlans"][1]["id"], "runtime.workflow");
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn runtime_plan_reader_is_closed_and_fails_on_bad_version_enum_or_digest() {
     unknown_provider["providerPlans"][0]
         .as_object_mut()
         .unwrap()
-        .insert("port".to_owned(), json!("diport::Pdp"));
+        .insert("port".to_owned(), json!("diport::Publisher"));
 
     let mut unknown_activation = valid.clone();
     unknown_activation["providerPlans"][0]["activation"]
@@ -319,11 +319,11 @@ fn runtime_plan_reader_rejects_complete_negative_matrix() {
     }
 
     let mut dangling_listener = runtime_vector()["unsigned"].clone();
-    dangling_listener["listenerPlans"][0]["domains"] = json!(["settings"]);
+    dangling_listener["listenerPlans"][1]["domains"] = json!(["platform"]);
     assert_reader_rejects(seal_unsigned(dangling_listener), "dangling reference");
 
     let mut dangling_placement = runtime_vector()["unsigned"].clone();
-    dangling_placement["placementPlans"][0]["domain"] = json!("settings");
+    dangling_placement["placementPlans"][0]["domain"] = json!("platform");
     assert_reader_rejects(seal_unsigned(dangling_placement), "dangling reference");
 
     let mut reverse_listeners = expanded_unsigned();
@@ -421,7 +421,7 @@ fn runtime_plan_fingerprint_covers_every_unsigned_fact_but_not_itself() {
         }),
         ("provider constructor", {
             let mut value = unsigned.clone();
-            value["providerPlans"][0]["constructor"] = json!("amqp::AmqpPublisher");
+            value["providerPlans"][0]["constructor"] = json!("amqp::AmqpSubscriber");
             value
         }),
         ("provider outputs", {
@@ -446,12 +446,12 @@ fn runtime_plan_fingerprint_covers_every_unsigned_fact_but_not_itself() {
         }),
         ("listener domains", {
             let mut value = unsigned.clone();
-            value["listenerPlans"][0]["domains"] = json!(["settings"]);
+            value["listenerPlans"][0]["domains"] = json!(["platform"]);
             value
         }),
         ("domain id", {
             let mut value = unsigned.clone();
-            value["domainPlans"][0]["id"] = json!("settings");
+            value["domainPlans"][0]["id"] = json!("platform");
             value
         }),
         ("domain lifecycle", {
@@ -467,7 +467,7 @@ fn runtime_plan_fingerprint_covers_every_unsigned_fact_but_not_itself() {
         }),
         ("placement domain", {
             let mut value = unsigned.clone();
-            value["placementPlans"][0]["domain"] = json!("settings");
+            value["placementPlans"][0]["domain"] = json!("platform");
             value
         }),
         ("workflow mode", {
@@ -477,7 +477,7 @@ fn runtime_plan_fingerprint_covers_every_unsigned_fact_but_not_itself() {
         }),
         ("workflow id", {
             let mut value = unsigned.clone();
-            value["workflowPlans"][0]["id"] = json!("identity.account-view-canary");
+            value["workflowPlans"][0]["id"] = json!("platform.projection-canary");
             value
         }),
         ("workflow definition version", {
@@ -554,7 +554,7 @@ fn runtime_plan_reader_detects_semantics_preserving_fingerprint_mutations() {
         }),
         ("listener domains", {
             let mut value = expanded.clone();
-            value["listenerPlans"][0]["domains"] = json!(["identity", "settings"]);
+            value["listenerPlans"][0]["domains"] = json!(["runtime", "platform"]);
             value
         }),
         ("domain order", {
@@ -589,7 +589,7 @@ fn runtime_plan_reader_detects_semantics_preserving_fingerprint_mutations() {
         "id": "internal-main",
         "kind": "internal",
         "auth": "mtls",
-        "domains": ["identity"]
+        "domains": ["runtime"]
     });
     let mut changed_auth = seal_unsigned(internal);
     changed_auth["listenerPlans"][0]["auth"] = json!("serviceToken");
@@ -745,7 +745,7 @@ fn runtime_plan_v3_freezes_closed_workflow_activation_states_without_capability_
         let mut unsigned = runtime_vector()["unsigned"].clone();
         unsigned["workflowPlans"] = json!([{
             "mode": "projection",
-            "id": "identity.account-view",
+            "id": "platform.projection",
             "definitionVersion": "v1",
             "definitionSchemaDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "targetGeneration": "materialized-v7",
@@ -768,7 +768,7 @@ fn runtime_plan_v3_freezes_closed_workflow_activation_states_without_capability_
         let mut unsigned = runtime_vector()["unsigned"].clone();
         unsigned["workflowPlans"] = json!([{
             "mode": "saga",
-            "id": "identity.recovery",
+            "id": "runtime.recovery",
             "definitionVersion": "v1",
             "definitionSchemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "activation": activation
@@ -787,7 +787,7 @@ fn runtime_plan_v3_freezes_closed_workflow_activation_states_without_capability_
         let mut unsigned = runtime_vector()["unsigned"].clone();
         let mut workflow = json!({
             "mode": mode,
-            "id": "identity.invalid-state",
+            "id": "runtime.invalid-state",
             "definitionVersion": "v1",
             "definitionSchemaDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "activation": activation

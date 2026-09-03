@@ -1232,26 +1232,26 @@ mod tests {
 schemaVersion = 2
 name = "runtime-plan-fixture"
 profile = "demo"
-domains = ["contractreg"]
+domains = ["runtime"]
 topology = "demo"
 frameworkContracts = []
 workflowActivations = []
 
 [[listeners]]
 kind = "primary"
-domains = ["contractreg"]
+domains = ["runtime"]
 
 [[diportProviders]]
-id = "device-revocation-store"
-port = "diport::RevocationStore"
-provider = "postgres::PgRevocationStore"
-providerCrate = "postgres"
-requiredFeatures = []
-consumer = "deviceloop"
+id = "event-publisher"
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
-purpose = "active-fixture"
-outputs = ["probes", "workers"]
+purpose = "event-publish"
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store-alternative"

@@ -1,5 +1,0 @@
-error[E0616]: field `events` of struct `PgProjectionReplayStores` is private
- --> tests/ui/pg_projection_replay_fields_private_fail.rs:4:20
-  |
-4 |     let _ = stores.events;
-  |                    ^^^^^^ private field

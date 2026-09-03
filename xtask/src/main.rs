@@ -1,4 +1,4 @@
-//! xtask — RSS 治理 / codegen 入口。见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。
+//! xtask — RSS 治理与验证入口。见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。
 //!
 //! 命令目录以 clap `--help` / [`cli`] 为单源；此处不维护长命令清单。
 
@@ -12,37 +12,22 @@ mod ci_lanes;
 mod cli;
 mod cmd;
 pub(crate) use cmd::nextest;
-mod codegen;
-mod command_symmetry;
-mod contract;
-mod contract_binding_guard;
 mod coverage;
 mod defergate;
 mod diagnostic;
 mod diffcov;
 mod execution_profiles;
 mod generated_file;
-mod inbox_cutover_guard;
 mod integration_shards;
 mod layerdeps;
 mod layers;
-mod outbox_same_id_guard;
 mod package_proof;
-mod pathsafe;
 mod pdpallow;
-mod pg_tenant_tx_guard;
-mod postgres_feature_matrix;
 mod provider_capabilities;
 mod publicapi;
-mod reconcile_outbox_command_guard;
 mod release_surface;
-mod repo_scope_guard;
-mod saga_durable_recovery_guard;
-mod schema_rls;
 mod source_semantic_guard;
 mod src_scan;
-mod tenancy_closeout;
-mod tenant_migration_tables;
 #[cfg(test)]
 mod testutil;
 mod verify;
@@ -50,9 +35,7 @@ mod workspace_facts;
 mod wsdeps;
 
 use anyhow::Result;
-use cli::{
-    ArchrulesCommand, CdcConfigCommand, CiCommand, Command, ContractCommand, NextestEvidenceCommand,
-};
+use cli::{ArchrulesCommand, CdcConfigCommand, CiCommand, Command, NextestEvidenceCommand};
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
@@ -61,19 +44,10 @@ fn main() -> Result<()> {
 
 fn dispatch(command: Command) -> Result<()> {
     match command {
-        Command::Codegen { check } => codegen::run(check),
         Command::PackageProof {
             export_candidate_bundle,
         } => package_proof::run_command(export_candidate_bundle.as_deref()),
         Command::CdcConfig(CdcConfigCommand::Debezium) => cdc_config::run_debezium(),
-        Command::Contract(ContractCommand::Validate) => {
-            diagnostic::run_check(&contract::validate::ContractValidate)
-        }
-        Command::Contract(ContractCommand::Breaking { against }) => {
-            let against =
-                against.unwrap_or_else(|| contract::breaking::DEFAULT_AGAINST.to_string());
-            contract::breaking::run(&against)
-        }
         Command::Archrules(ArchrulesCommand::List) => {
             let root = workspace_root()?;
             let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -93,12 +67,6 @@ fn dispatch(command: Command) -> Result<()> {
         Command::WsdepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
         Command::SourceSemanticGuard => {
             diagnostic::run_check(&source_semantic_guard::SourceSemanticGuard)
-        }
-        Command::SagaDurableRecoveryGuard => {
-            diagnostic::run_check(&saga_durable_recovery_guard::SagaDurableRecoveryGuard)
-        }
-        Command::OutboxSameIdGuard => {
-            diagnostic::run_check(&outbox_same_id_guard::OutboxSameIdGuard)
         }
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
@@ -146,16 +114,6 @@ fn dispatch(command: Command) -> Result<()> {
         Command::NextestEvidence(NextestEvidenceCommand::Replay { sidecar }) => {
             nextest::replay(&sidecar, &workspace_root()?)
         }
-        Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
-        Command::InboxCutoverGuard => {
-            diagnostic::run_check(&inbox_cutover_guard::InboxCutoverGuard)
-        }
-        Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
-        Command::RepoScopeGuard => diagnostic::run_check(&repo_scope_guard::RepoScopeGuard),
-        Command::ReconcileOutboxCommandGuard => {
-            diagnostic::run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
-        }
-        Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
     }
 }
