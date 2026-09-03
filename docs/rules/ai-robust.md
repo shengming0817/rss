@@ -18,7 +18,7 @@ RSS 的 AI-robust 治理保护安全、正确性、兼容性和生产运行不�
 | 级别 | 定义 | 典型载体 |
 |------|------|----------|
 | **Hard** | 违规不可表达，或修改必然导致 production consumer 编译、构建或构造失败 | Cargo 图、visibility、private field、newtype、sealed trait、typestate、必填构造器、被 production target 编译的 generated Rust |
-| **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy/Dylint、cargo-deny、type-aware gate、bootstrap guard、provider conformance |
+| **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy、cargo-deny、type-aware test、bootstrap guard、provider conformance |
 | **Soft** | 面向设计与 review 的说明 | 文档、注释、命名与 review guidance |
 
 关键约束采用 Hard 或 Medium；可由类型和依赖图表达的约束采用 Hard。
@@ -72,7 +72,7 @@ Hard/Medium/Soft 表示 enforcement 强度；T1/T2 表示仓内验证深度，�
 2. Rust 类型系统：newtype、sealed trait、private field、typestate、必填构造器、typed function choice；
 3. schema/marker 单源与 deterministic codegen/golden；
 4. Cargo/rustc/clippy/cargo-deny；
-5. 既有共享 Dylint 或 type-aware gate；
+5. 既有共享 Clippy、cargo-deny 或 type-aware test；
 6. provider conformance 与真实后端 T2；
 7. 外部 consumer 编译与 conformance；
 8. library runtime fail-fast。
@@ -149,7 +149,7 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 - 可见性/newtype/sealed/必填构造器：固定构造入口和可信状态。
 - typed function/state choice：不同语义使用不同 API 与类型。
 - schema/codegen/golden：声明源派生 wire DTO、marker 与 binding。
-- serde 边界：wire 字段由 schema/golden 固定，domain derive policy 由 Dylint 承载。
+- serde 边界：wire 字段由 schema/golden 与 owner crate tests 固定。
 
 lint id 使用 `rss_{rule}`；独立治理测试使用稳定规则名；carrier rustdoc/test 头使用
 `INVARIANT: <THEME>-<RULE>-NN`。type-aware governance carrier 配置 synthetic red case 与 anti-vacuity。

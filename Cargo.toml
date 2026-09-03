@@ -1,6 +1,5 @@
-# RSS 扁平 Cargo workspace（骨架）。
-# 结构树 / 分层 / 命名单一事实源：`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
-# 分层强制：crate 依赖图（Hard，编译期）+ deny.toml wrappers（Medium，CI）。见 deny.toml。
+# RSS 扁平 Cargo workspace。Cargo manifests own the dependency graph; deny.toml adds supply-chain
+# and selected wrapper constraints.
 [workspace]
 resolver = "2"
 members = [
@@ -13,7 +12,7 @@ members = [
   "crates/eventing",
   # Provider-neutral public LocalTx conformance assertions.
   "crates/conformance",
-  # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）
+  # 基础（仅 std + 外部 crate）
   "crates/vocab",
   "crates/ids",
   # secure 的字段级脱敏 derive（#[derive(Redact)]）proc-macro；intra-base DAG 低于 secure（secure → securederive 前向边）
@@ -69,11 +68,12 @@ members = [
   "adapters/crypto",
   # in-mem DI port provider（RW-G1 追踪弹验接缝；测试 / demo 注入用，被 journeys 组合根消费）
   "adapters/memory",
-  "xtask",
+  # Live provider tests are ordinary reverse-dependency workspace packages.
+  "tests/amqp-integration",
+  "tests/redis-integration",
+  "tests/s3-integration",
 ]
-# 自写 dylint lint workspace（nightly rustc_private，自成独立 workspace）——显式排除，
-# 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
-exclude = ["lints", "vendor/sqlx-core-0.8.6"]
+exclude = ["vendor/sqlx-core-0.8.6"]
 
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
@@ -87,36 +87,6 @@ packages = [
   { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
 
-# 自写 dylint lint 注册入口；对 cargo build/test/check 惰性（仅 `cargo dylint` 读取），
-# 配合 exclude 使 stable 构建永不触碰 lints/ 的 nightly 工具链。
-# 运行：`cargo dylint --all`（须 `cargo install cargo-dylint dylint-link`）。见 lints/。
-[workspace.metadata.dylint]
-libraries = [
-  { path = "lints/rss_domain_no_serialize" },
-  { path = "lints/rss_spawn_missing_scope" },
-  { path = "lints/rss_crosstenant_callsite" },
-  { path = "lints/rss_operator_authorization_callsite" },
-  { path = "lints/rss_diport_impl_allowlist" },
-  { path = "lints/rss_principal_facet_impl_allowlist" },
-  { path = "lints/rss_authplan_callsite" },
-  { path = "lints/rss_raw_credential_callsite" },
-  { path = "lints/rss_authenticated_callsite" },
-  { path = "lints/rss_handler_local_principal_authz" },
-  { path = "lints/rss_diport_error_debug_redacted" },
-  { path = "lints/rss_diport_dto_debug_redacted" },
-  { path = "lints/rss_pdp_impl_adapter_only" },
-  { path = "lints/rss_projection_append_only" },
-  { path = "lints/rss_partition_serial_allowlist" },
-  { path = "lints/rss_diport_envelope_reserved_writer" },
-  { path = "lints/rss_redact_debug_required" },
-  { path = "lints/rss_adapter_no_business_fsm" },
-  { path = "lints/rss_test_no_bare_sleep" },
-  { path = "lints/rss_instrument_err_level" },
-  { path = "lints/rss_diagctx_auth_source" },
-  { path = "lints/rss_contract_schema_parse_funnel" },
-  { path = "lints/rss_managed_task_owner" },
-]
-
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
@@ -125,7 +95,7 @@ repository = "https://github.com/shengming0817/rss"
 
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。
-# pin 必须被 Cargo.lock 的 resolved 版本满足（或为带注释的 inert 前瞻）——由 `cargo xtask wsdeps-drift` 守（#1185）。
+# CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
 rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
@@ -137,17 +107,12 @@ tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken（toki
 tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（adapters/grpc serve_with_incoming_shutdown：自绑 listener 读回 ephemeral 端口供测试）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10"
 serde_path_to_error = "0.1"
 jsonschema = { version = "=0.20.0", default-features = false }
 serde_json_canonicalizer = "=0.3.2"
 regex = "1"
 thiserror = "2"
 anyhow = "1"
-# CLI derive（#2000）：xtask 与 operator 命令表层；不自研 argv parser。
-# default-features = false：去掉 color / suggestions，缩小依赖面；derive 路径仍需 std+help+usage+error-context。
-# ref: clap-rs/clap examples/derive_ref @clap_derive-v4.5；范式对照 rust-analyzer xtask/xflags。
-clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
@@ -275,36 +240,27 @@ x509-parser = "0.18"
 # ref: metrics-rs/metrics metrics-exporter-prometheus/src/exporter/builder.rs@metrics-exporter-prometheus-v0.18.3
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
-# SemVer 由 xtask release-surface/wsdeps 与 workspacefacts 消费；time parsing 由 secure 的 typed redaction
-# 字段支持消费。两者均 MIT OR Apache-2.0（deny.toml allow-list 内），统一在 workspace 钉版本。
+# SemVer 由 workspacefacts 消费；time parsing 由 secure 的 typed redaction 字段支持消费。
 semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
-# 契约 codegen（xtask 专用；generated crate 不引入这些——见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
 syn = { version = "2", features = ["full", "parsing"] }
 # securederive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
 # 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-rustix = { version = "1.1.4", features = ["fs"] }
 toml = "0.8"
-# Release API leakage proof consumes the same structured rustdoc projection as the pinned
-# cargo-public-api CLI. Keep the library exact-pinned so token semantics cannot drift independently.
-public-api = { version = "=0.52.0", default-features = false }
-rustdoc-types = "=0.57.4"
 # Cargo workspace 图事实（#1994）：pre-1.0 exact pin；仅 workspacefacts 直接消费。
 guppy = { version = "=0.17.26", default-features = false }
 # 测试
 rstest = "0.24"
 static_assertions = "1.1.0"
 trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
-# ref: dtolnay/trybuild src/expand.rs@1.0.117（pattern expansion 同上游使用 glob）
-glob = "0.3"     # xtask trybuild pattern 投影复用 trybuild 自身的匹配语义
 mockall = "0.13"
 insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员）
 # testcontainers 真集成（#1137，crates/testkit `containers` feature）：起真 postgres/redis/rabbitmq 容器。
-# 仅经 testkit `containers` feature + 各 adapter/journeys 的 `integration` feature 传递激活（默认构建 / verify
-# 不拉此树）。docker 为运行期依赖（编译不需）；CI 集成 lane（#1145）提供 docker。ref: testcontainers/testcontainers-rs-modules-community
+# 仅经 testkit `containers` feature + 各 adapter 的 `integration` feature 传递激活（默认构建不拉此树）。
+# docker 为运行期依赖（编译不需）；独立 integration test package 自持容器。ref: testcontainers/testcontainers-rs-modules-community
 testcontainers = "0.27"
 testcontainers-modules = "0.15"
 

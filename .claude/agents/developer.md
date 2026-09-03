@@ -85,7 +85,7 @@ tools:
 - HTTP 错误响应格式 `{"error": {"code","message","details"}}`
 - EventBus consumer 订阅声明来自 `Cargo.toml [dependencies]` + `contract.toml`、派生到 `generated`，不得靠注释合规
 
-> RSS workspace 成员与分层以 Cargo metadata、`xtask/src/layers.rs` 和 `deny.toml` 为事实源；本文件不复制结构表。
+> RSS workspace 成员与依赖图以 Cargo metadata 为事实源；`deny.toml` 补充敏感 wrapper 约束。
 
 升级判据：单条任务若实际影响超出 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API / 需改 `deny.toml` 分层） → 立即停止，回报调用方升级处理。
 

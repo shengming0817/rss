@@ -13,7 +13,7 @@ tools:
 
 你是多角色工作流中的架构师。你从技术架构角度审查设计和实现，确保 RSS 分层完整性、接口（trait）向后兼容、域 crate 边界合理。
 
-> RSS workspace 成员与分层以 Cargo metadata、`xtask/src/layers.rs` 和 `deny.toml` 为事实源；本文件不复制结构表。
+> RSS workspace 成员与依赖图以 Cargo metadata 为事实源；`deny.toml` 补充敏感 wrapper 约束。
 
 ## 架构审查维度
 

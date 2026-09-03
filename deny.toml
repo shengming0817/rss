@@ -1,16 +1,8 @@
-# RSS cargo-deny：supply-chain 策略 + 分层强制（Medium 载体）。
-# 分层强制分级（见 plan / `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）：
-#   Hard① crate 依赖图：未声明就 import 不到。
-#   Hard② cargo 无环：下层依赖上层会闭环 → cargo 拒绝。
-#   Medium 本文件 wrappers：按 all-features resolved graph 精确列出受管 target 的真实 direct parents；
-#     verify 固定以 `cargo deny check -D unused-wrapper` 同时拒绝缺失、未匹配和过期 wrapper。
-#   Medium `cargo xtask layer-deps`（source-centric，接入 verify）：读各成员 Cargo.toml [dependencies]，
-#     按 §分层 矩阵全覆盖（含本 wrappers 表达不了的「无 back-path 基础/引擎→上层」反向边），
-#     并守有真实 source consumer 的受管 target 必须有 ban、wrapper 类别与特殊 capability exact-set；
-#     不复制 cargo-deny 的 resolved parent 集合证明。免疫裸名×crates.io 命名冲突。
-#   下列 wrappers 是分层 defense-in-depth（与 layer-deps 并存）。adapter package 名须与其依赖的同名
+# RSS cargo-deny supply-chain policy plus selected direct-parent wrapper constraints.
+# Cargo/rustc owns declared dependency validity and cycle rejection. Adapter package names must
+# differ from same-named crates.io packages:
 #     crates.io crate **不同**（如 redis adapter 的 package = `redis-adapter`，`[lib] name = "redis"` 保留裸导入），
-#     否则 bare-name ban 会误伤传递引入的同名外部 crate。详见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`。
+#     否则 bare-name ban 会误伤传递引入的同名外部 crate。
 [graph]
 all-features = true
 
@@ -18,10 +10,8 @@ all-features = true
 yanked = "deny"
 # advisories 门双轨（issue #1133）：`cargo deny check advisories` 与 `cargo audit` 同查 RustSec、互为独立
 # 第二实现（防御纵深）。二者各有独立 ignore 机制：本 `ignore`（按 feature-resolved 依赖图）vs cargo-audit 的
-# `--ignore`（在 xtask `step_cargo_audit`，扫 Cargo.lock 全量——会多报 phantom 条目，如 rsa RUSTSEC-2023-0071）。
-# 不变式（守卫 `deny_audit_ignore_lists_reconciled`，xtask/src/verify.rs，Medium）：**本 ignore ⊆ cargo-audit
-# --ignore**——deny 接受的任一**图内** advisory 必须同步到 cargo-audit 侧，否则 deny 绿而 audit 红（一过一红、
-# 阻断合入）。反向 audit 可多 ignore（phantom-only，deny 图里没有，无需在此 ignore）。
+# `--ignore`（Makefile 中 cargo-audit 扫 Cargo.lock 全量，会多报 phantom 条目，如 rsa
+# RUSTSEC-2023-0071）。本列表仍只覆盖 feature-resolved dependency graph。
 ignore = []
 
 [licenses]
@@ -53,7 +43,7 @@ allow-wildcard-paths = true    # 但放行内部 workspace path 依赖（无版�
 deny = [
   # 供应链 phantom 守卫（issue #1133）：rsa 当前是 phantom Cargo.lock 条目（经 sqlx-mysql，mysql feature 未启用 ⇒
   # `cargo tree -i rsa --all-features --target all` 为空、不编译进产物），其 RUSTSEC-2023-0071（Marvin Attack、
-  # 无修复版本）在 cargo-audit 侧 `--ignore`（见 xtask `step_cargo_audit`）。本 ban 是把「phantom 论证」从 Soft
+  # 无修复版本）在 cargo-audit 侧 `--ignore`。本 ban 是把「phantom 论证」从 Soft
   # 升 Medium 的**机器守卫**：rsa 一旦进入 feature-resolved 依赖图（如有人启用 mysql feature），`deny check bans`
   # 即非零退出——强制显式决策（移除本 ban + 修复/重新评估漏洞 + 同步 cargo-audit --ignore）。图外时本 ban 为 no-op。
   { crate = "rsa" },
@@ -65,8 +55,7 @@ deny = [
   # Adapter 厚薄纪律（ADR-023 / #1494）：禁 FSM 框架 `statig` 进入依赖图——业务生命周期状态机只属
   # domain/引擎（consistency/deviceloop/…），adapters 仅薄委托。图外时本 ban 为 no-op；一旦 adapters
   # （或其它 crate）引入即 `deny check bans` 失败。INVARIANT: ADAPTER-THIN-FSM-01 { level = "Medium",
-  # exec = "check", source = "config" }。AST 过渡表形态由 Medium dylint `rss_adapter_no_business_fsm`
-  # （ADAPTER-NO-BUSINESS-FSM-01）双保险。
+  # exec = "check", source = "config" }。
   { crate = "statig" },
   # 外部禁用（provider 收敛）
   { crate = "native-tls", use-instead = "rustls" },
@@ -84,19 +73,15 @@ deny = [
   #   port 多点定义后「单一依赖点」前提失效；provider-agnostic vs 域形 port 的 category line 见 ADR-005）。
   # 注：实测 dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（无 unsafe 例外），
   #   故本 wrapper 是「DI port 定义点集中」架构守卫（Medium），非 unsafe 收敛——放宽白名单零安全代价。
-  # ⚠ wrappers 须与 xtask `EXTERNAL_CONFINEMENT_WRAPPERS` 白名单**集合相等**（DIPORT-MACRO-CONFINE-02 守：
-  #   漏列→域的合法 dynosaur 依赖被误拦；多列→开洞）。新增 sanctioned 域 crate 时同步两侧。
-  # port-trait impl-sealing（谁可 impl）：cargo-deny 限「依赖」非「impl」。diport impl-site allowlist 由
-  #   dylint 自写 lint `rss_diport_impl_allowlist`（AST 级，Medium，INVARIANT DIPORT-IMPL-ALLOWLIST-01）
-  #   承载；adapter→域 impl 域 repo port 经分层 wrapper（见下 identity 行加 postgres）+ source edge 校验放行。
+  # Cargo-deny constrains dependency parents, not Rust impl sites.
   { crate = "dynosaur", wrappers = ["diport"] },
   { crate = "trait-variant", wrappers = ["diport"] },
-  # WORKSPACEFACTS-CONFINEMENT-01：唯一 shipped tooling facts 链路 xtask → workspacefacts → guppy；
-  # dev 图只准 xtask 与 workspacefacts 自测消费，禁止生产 crate 消费或 xtask 绕过 façade 依赖 guppy。
-  { crate = "workspacefacts", wrappers = ["workspacefacts", "xtask"] },
+  # WORKSPACEFACTS-CONFINEMENT-01：workspacefacts is retained as a standalone metadata façade;
+  # its test-support self edge is the only current workspace parent.
+  { crate = "workspacefacts", wrappers = ["workspacefacts"] },
   { crate = "guppy", wrappers = ["workspacefacts"] },
   # 分层（target-centric wrappers）：只列 all-features 最终图中的真实 direct parents。
-  # 集合相等由 cargo-deny 独占证明；layer-deps 只守 source 分层、wrapper 类别和特殊安全边界。
+  # `cargo deny check -D unused-wrapper` rejects stale wrapper entries.
   # adapter→domain wrapper 仍必须有 shipped source edge。
   # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 可持有。
   { crate = "sagaauthmint", wrappers = ["diport"] },
@@ -108,14 +93,9 @@ deny = [
   # constructor; runtimeexec mints full-plan receipts and live observations.
   { crate = "runtimeinventorymint", wrappers = ["assembly-schema", "runtimeexec"] },
   # 注：testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层 test-support 库，
-  # 不在此 ban——其「只准 [dev-dependencies] 消费」由 xtask layers.rs TEST_SUPPORT_CRATES + layer-deps
-  # LAYER-DEPS-08（check_test_support_confinement：任一 shipped 边指向 testkit 即报）守，testcontainers 树经
-  # `containers` feature + dev-dep-only 不进产物。
+  # 不在此 ban；integration packages only enable containers through dev-dependencies.
 ]
 
-# 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml
-# exclude），故下列 sources 策略**不覆盖** `lints/` 的依赖——其唯一 git 源 `clippy_utils`
-# （rust-lang 官方 rust-clippy，rev 与 nightly 配对）经人工审核，见 lints/README.md。
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

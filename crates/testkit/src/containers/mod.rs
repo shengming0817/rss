@@ -19,15 +19,10 @@
 //! ref: testcontainers/testcontainers-rs-modules-community modules/{postgres,redis,rabbitmq}
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use testcontainers::ImageExt;
-use testcontainers::core::logs::LogFrame;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage};
 use url::Url;
@@ -98,13 +93,7 @@ pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     let seq = BRIDGE_NETWORK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = format!("{prefix}-{}-{seq}", std::process::id());
     let mut command = tokio::process::Command::new("docker");
-    command.args(["network", "create", "--driver", "bridge"]);
-    if let Some(context) = CiContainerContext::from_env()? {
-        for (key, value) in bridge_network_labels(&context) {
-            command.args(["--label", &format!("{key}={value}")]);
-        }
-    }
-    command.arg(&name);
+    command.args(["network", "create", "--driver", "bridge", &name]);
     let output = command
         .output()
         .await
@@ -116,32 +105,6 @@ pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
         ));
     }
     Ok(BridgeNetwork { name })
-}
-
-fn bridge_network_labels(context: &CiContainerContext) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("io.rss.integration.managed".to_string(), "true".to_string()),
-        (
-            "io.rss.integration.scope".to_string(),
-            context.scope.clone(),
-        ),
-        (
-            "io.rss.integration.shard".to_string(),
-            context.shard.clone(),
-        ),
-        (
-            "io.rss.integration.partition".to_string(),
-            context.partition.clone(),
-        ),
-        (
-            "io.rss.integration.resource-kind".to_string(),
-            "network".to_string(),
-        ),
-        (
-            "io.rss.integration.service".to_string(),
-            "bridge".to_string(),
-        ),
-    ])
 }
 
 fn validate_network_attachment(attachment: NetworkAttachment<'_>) -> Result<()> {
@@ -233,331 +196,13 @@ const MINIO_POLICY_NAME: &str = "rss-test-archive";
 const RABBITMQCTL_MAX_ATTEMPTS: u32 = 12;
 const RABBITMQCTL_BACKOFF_MS: u64 = 500;
 
-const CI_SCOPE_ENV: &str = "RSS_CI_CONTAINER_SCOPE";
-const CI_SHARD_ENV: &str = "RSS_CI_INTEGRATION_SHARD";
-const CI_PARTITION_ENV: &str = "RSS_CI_INTEGRATION_PARTITION";
-const CI_LOG_DIR_ENV: &str = "RSS_CI_CONTAINER_LOG_DIR";
-const CI_CONTEXT_KEYS: &[&str] = &[CI_SCOPE_ENV, CI_SHARD_ENV, CI_PARTITION_ENV, CI_LOG_DIR_ENV];
-
-const CONTAINER_LOG_LIMIT_BYTES: usize = 1024 * 1024;
-const CONTAINER_LOG_TRUNCATION_MARKER: &[u8] = b"\n[rss-testkit: log truncated]\n";
 const CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
-static CONTAINER_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug)]
-struct CiContainerContext {
-    scope: String,
-    shard: String,
-    partition: String,
-    log_dir: PathBuf,
-}
-
-impl CiContainerContext {
-    fn from_env() -> Result<Option<Self>> {
-        let values = environment_snapshot(CI_CONTEXT_KEYS)?;
-        Self::from_lookup(|key| values.get(key).cloned())
-    }
-
-    fn from_lookup<F>(lookup: F) -> Result<Option<Self>>
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        let values: BTreeMap<&str, Option<String>> = CI_CONTEXT_KEYS
-            .iter()
-            .copied()
-            .map(|key| (key, lookup(key)))
-            .collect();
-        if values.values().all(Option::is_none) {
-            return Ok(None);
-        }
-
-        let missing: Vec<&str> = values
-            .iter()
-            .filter_map(|(key, value)| value.is_none().then_some(*key))
-            .collect();
-        if !missing.is_empty() {
-            return Err(anyhow::anyhow!(
-                "integration container context 不完整，缺少：{}",
-                missing.join(", ")
-            ));
-        }
-
-        let required = |key| {
-            values
-                .get(key)
-                .and_then(Option::as_deref)
-                .ok_or_else(|| anyhow::anyhow!("integration container context 缺少 {key}"))
-        };
-        let scope = required(CI_SCOPE_ENV)?;
-        if !is_safe_label_token(scope) {
-            return Err(anyhow::anyhow!(
-                "{CI_SCOPE_ENV} 含非法字符，须为非空 ASCII 字母数字/./_/-"
-            ));
-        }
-        let shard = required(CI_SHARD_ENV)?;
-        if !is_canonical_shard(shard) {
-            return Err(anyhow::anyhow!(
-                "{CI_SHARD_ENV} 不是 canonical shard，须为小写字母数字及单个 '-' 分隔"
-            ));
-        }
-        let partition = required(CI_PARTITION_ENV)?;
-        if !is_canonical_partition(partition) {
-            return Err(anyhow::anyhow!(
-                "{CI_PARTITION_ENV} 不是 canonical partition（须为 unpartitioned、1/2 或 2/2）"
-            ));
-        }
-        let log_dir = PathBuf::from(required(CI_LOG_DIR_ENV)?);
-        if !log_dir.is_absolute()
-            || log_dir
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(anyhow::anyhow!("{CI_LOG_DIR_ENV} 须为不含 '..' 的绝对路径"));
-        }
-
-        Ok(Some(Self {
-            scope: scope.to_string(),
-            shard: shard.to_string(),
-            partition: partition.to_string(),
-            log_dir,
-        }))
-    }
-}
 
 fn is_safe_label_token(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn is_canonical_shard(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && !value.contains("--")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-fn is_canonical_partition(value: &str) -> bool {
-    matches!(value, "unpartitioned" | "1/2" | "2/2")
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ContainerService {
-    Postgres,
-    Redis,
-    RabbitMq,
-    Mosquitto,
-    Minio,
-    Vault,
-    Server,
-}
-
-impl ContainerService {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Postgres => "postgres",
-            Self::Redis => "redis",
-            Self::RabbitMq => "rabbitmq",
-            Self::Mosquitto => "mosquitto",
-            Self::Minio => "minio",
-            Self::Vault => "vault",
-            Self::Server => "server",
-        }
-    }
-
-    fn labels(self, context: &CiContainerContext) -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("io.rss.integration.managed".to_string(), "true".to_string()),
-            (
-                "io.rss.integration.scope".to_string(),
-                context.scope.clone(),
-            ),
-            (
-                "io.rss.integration.shard".to_string(),
-                context.shard.clone(),
-            ),
-            (
-                "io.rss.integration.partition".to_string(),
-                context.partition.clone(),
-            ),
-            (
-                "io.rss.integration.service".to_string(),
-                self.name().to_string(),
-            ),
-        ])
-    }
-}
-
-/// Returns the exact repository integration ownership labels for a self-provisioned container.
-/// Local runs without CI lifecycle context remain unmanaged; partial context fails closed.
-pub fn integration_container_labels(
-    service: ContainerService,
-) -> Result<Option<BTreeMap<String, String>>> {
-    Ok(CiContainerContext::from_env()?.map(|context| service.labels(&context)))
-}
-
-#[derive(Clone)]
-struct BoundedFileLogConsumer {
-    #[cfg(test)]
-    path: PathBuf,
-    state: Arc<Mutex<BoundedLogState>>,
-}
-
-struct BoundedLogState {
-    file: File,
-    status: File,
-    written: usize,
-    truncated: bool,
-    writer_failed: bool,
-}
-
-impl BoundedFileLogConsumer {
-    fn new(log_dir: &Path, service: ContainerService) -> Result<Self> {
-        Self::new_with_sequence(log_dir, service, &CONTAINER_LOG_SEQUENCE)
-    }
-
-    fn new_with_sequence(
-        log_dir: &Path,
-        service: ContainerService,
-        sequence_source: &AtomicU64,
-    ) -> Result<Self> {
-        let metadata = std::fs::symlink_metadata(log_dir).map_err(|error| {
-            anyhow::anyhow!(
-                "integration container log directory {} 不存在或不可访问（须先执行 lifecycle prepare）: {error}",
-                log_dir.display()
-            )
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(anyhow::anyhow!(
-                "integration container log directory {} 须为非 symlink 目录",
-                log_dir.display()
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(anyhow::anyhow!(
-                    "integration container log directory {} 权限须为 private（group/other 位必须为 0）",
-                    log_dir.display()
-                ));
-            }
-        }
-        loop {
-            let sequence = sequence_source.fetch_add(1, Ordering::Relaxed);
-            let path = log_dir.join(format!(
-                "{}-{}-{sequence}.log",
-                service.name(),
-                std::process::id()
-            ));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => {
-                    let status_path = path.with_extension("status");
-                    let status = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create_new(true)
-                        .open(&status_path)
-                        .and_then(|mut status| {
-                            status.write_all(b"ok\n")?;
-                            status.flush()?;
-                            Ok(status)
-                        });
-                    let status = match status {
-                        Ok(status) => status,
-                        Err(error) => {
-                            drop(file);
-                            let _ = std::fs::remove_file(&path);
-                            return Err(error.into());
-                        }
-                    };
-                    return Ok(Self {
-                        #[cfg(test)]
-                        path,
-                        state: Arc::new(Mutex::new(BoundedLogState {
-                            file,
-                            status,
-                            written: 0,
-                            truncated: false,
-                            writer_failed: false,
-                        })),
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn write_frame(&self, frame: &LogFrame) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| anyhow::anyhow!("container log mutex poisoned: {error}"))?;
-        if state.truncated || state.writer_failed {
-            return Ok(());
-        }
-
-        if let Err(error) = state.write_frame(frame) {
-            state.writer_failed = true;
-            let status_error = state.persist_status(b"writer-error\n").err();
-            return match status_error {
-                Some(status_error) => Err(anyhow::anyhow!(
-                    "container log write failed: {error}; persisting writer-error status also failed: {status_error}"
-                )),
-                None => Err(error.into()),
-            };
-        }
-        Ok(())
-    }
-}
-
-impl BoundedLogState {
-    fn persist_status(&mut self, token: &[u8]) -> std::io::Result<()> {
-        self.status.set_len(0)?;
-        self.status.seek(SeekFrom::Start(0))?;
-        self.status.write_all(token)?;
-        self.status.flush()
-    }
-
-    fn write_frame(&mut self, frame: &LogFrame) -> std::io::Result<()> {
-        let prefix: &[u8] = match frame {
-            LogFrame::StdOut(_) => b"[stdout] ",
-            LogFrame::StdErr(_) => b"[stderr] ",
-        };
-        let bytes = frame.bytes();
-        let frame_size = prefix.len().saturating_add(bytes.len());
-        let payload_limit = CONTAINER_LOG_LIMIT_BYTES - CONTAINER_LOG_TRUNCATION_MARKER.len();
-        if self.written.saturating_add(frame_size) <= payload_limit {
-            self.file.write_all(prefix)?;
-            self.file.write_all(bytes)?;
-            self.written += frame_size;
-            self.file.flush()?;
-            return Ok(());
-        }
-
-        let payload_budget = payload_limit.saturating_sub(self.written);
-        let prefix_bytes = prefix.len().min(payload_budget);
-        self.file.write_all(&prefix[..prefix_bytes])?;
-        let body_budget = payload_budget - prefix_bytes;
-        self.file
-            .write_all(&bytes[..bytes.len().min(body_budget)])?;
-        self.file.write_all(CONTAINER_LOG_TRUNCATION_MARKER)?;
-        self.written += payload_budget + CONTAINER_LOG_TRUNCATION_MARKER.len();
-        self.truncated = true;
-        self.file.flush()?;
-        Ok(())
-    }
 }
 
 fn environment_snapshot(keys: &[&str]) -> Result<BTreeMap<String, String>> {

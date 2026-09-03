@@ -106,7 +106,7 @@ impl SecretCoordinate {
 /// **零信任 PII 边界（类型层 Hard）**：
 /// - `#[derive(zeroize::ZeroizeOnDrop)]`——drop 时自动清零，材料不在栈 / 堆上残留。
 /// - **不** derive `Clone`——无所有权逃逸路径，调用栈外不可持有副本。
-/// - **不** derive serde——永不序列化到 wire / 日志（`rss_domain_no_serialize` dylint 守护）。
+/// - **不** derive serde——永不序列化到 wire / 日志。
 /// - **`#[derive(secure::Redact)]`**（`#[redact(sensitivity = secret)]` → `Fixed`）派生 `Debug` 渲染
 ///   `SecretMaterial(<redacted>)`——tracing / 日志采集不得经 `{:?}` 泄漏（#1360 替换手写 `Debug`）。
 /// - `expose(&self) -> &[u8]`——唯一受控借出路径，无 `into_vec` / `as_string` / `Display` owned 逃逸。

@@ -1,8 +1,0 @@
-[package]
-name = "rss-request-context-package-proof"
-version = "0.0.0"
-edition = "2024"
-publish = false
-[workspace]
-[dependencies]
-release_package = { package = "__RELEASE_PACKAGE__", version = "=__RELEASE_VERSION__", registry = "local" }

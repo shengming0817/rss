@@ -2,4 +2,4 @@
 #
 # 参与 contract 但不属于域模型的外部系统（如受管设备、外部 IdP、CA）在此登记。
 # 由后续单元随 contract 扇出闭环填充；本骨架单元仅占位，暂无 actor。
-# 单一事实源：`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。
+# 当前唯一事实源是 Cargo manifests 与仍适用的 deny.toml wrapper 规则。

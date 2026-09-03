@@ -32,29 +32,21 @@ base64 = { workspace = true, optional = true }
 [features]
 default = []
 backend = ["dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
-integration = ["backend", "testkit/containers"]
+integration = ["backend"]
 
-# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
-# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
 [[test]]
 name = "dlx_archive_store"
 path = "tests/dlx_archive_store.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "integration_object_store"
-path = "tests/integration_object_store.rs"
-required-features = ["integration"]
+required-features = ["backend"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
 # 本 crate 直接组装 aws-smithy-mocks 的 HTTP 1.x client/interceptor，避免 SDK test-util 经
-# legacy-test-util 拉入 hyper 0.14 / h2 0.3；受管 ObjectStorage shard 的 MinIO capability test
+# legacy-test-util 拉入 hyper 0.14 / h2 0.3；s3-integration package 的 MinIO capability test
 # 消费 production adapter 的 private-CA typed factory，不复制 TLS connector。
 aws-smithy-mocks = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # 测试复用 production SDK feature 闭包；确定性 defaults 与 mock HTTP client 由测试私有 helper 注入。
 aws-sdk-s3 = { workspace = true }
-testkit = { path = "../../crates/testkit" }
 vocab = { path = "../../crates/vocab" }

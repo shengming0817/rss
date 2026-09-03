@@ -1,0 +1,22 @@
+[package]
+name = "redis-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+consistency = { path = "../../crates/consistency" }
+deadpool-redis = { workspace = true }
+diport = { path = "../../crates/diport" }
+redis-adapter = { path = "../../adapters/redis", features = ["integration"] }
+rss-request-context = { workspace = true }
+secure = { path = "../../crates/secure" }
+sha2 = { workspace = true }
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { workspace = true, features = ["v4"] }
+vocab = { path = "../../crates/vocab" }
+
+[lints]
+workspace = true

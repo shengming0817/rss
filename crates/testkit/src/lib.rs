@@ -1,5 +1,5 @@
-//! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）+ L2 provider
-//! conformance catalog 宏入口。
+//! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）与可复用
+//! provider-neutral conformance assertions。
 //!
 //! 给 per-contract 契约测试提供可复用 harness：声明式构造请求、
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
@@ -10,14 +10,6 @@
 //! 测试里有界等待走值携带 API：无错误 ready-signal 用 [`await_map`]，fallible probe 用
 //! [`await_try`]，重 probe 用对应的 `*_every` 自定义间隔，`Notify` 用 [`await_notified`]；固定延时
 //! **必须**用 [`await_delay`]。禁止用永远返回 `None` 的 probe 伪装固定 sleep。
-//!
-//! ## L2 provider conformance catalog
-//!
-//! Adapter owners enroll exact capability wrappers with [`provider_conformance_catalog!`]
-//! (`eventing_conformance` 模块)。Macro token 为 snake_case，稳定 label 为 kebab-case；compile-fail
-//! 负例见 `tests/ui/provider_catalog_*.rs`（经 `tests/provider_catalog_trybuild.rs`）。语义门入口为
-//! `./hack/cargo.sh xtask provider-capabilities --check`；裸命令只生成 ignored target 诊断报告
-//! （语义见公开 eventing/conformance API 与 `crates/consistency`）。
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉
@@ -54,12 +46,12 @@ pub use wait::{await_delay, await_map, await_notified, await_try, await_try_ever
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    BridgeNetwork, ContainerService, ExternalPgFixture, FixtureError, MinioCredentials,
-    MinioTlsFixture, NetworkAttachment, OwnedPgFixture, OwnedPostgresRequired, PgAppRole,
-    PgAppRoleSpec, PgConnParams, PgFixture, PgTlsFixture, RabbitFixture, RabbitTlsFixture,
-    RedisFixture, RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres,
-    env_or_rabbitmq, env_or_redis, integration_container_labels, minio_tls_archive, owned_postgres,
-    postgres_tls, rabbitmq_tls, redis_tls, vault_tls,
+    BridgeNetwork, ExternalPgFixture, FixtureError, MinioCredentials, MinioTlsFixture,
+    NetworkAttachment, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
+    PgConnParams, PgFixture, PgTlsFixture, RabbitFixture, RabbitTlsFixture, RedisFixture,
+    RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres, env_or_rabbitmq,
+    env_or_redis, minio_tls_archive, owned_postgres, postgres_tls, rabbitmq_tls, redis_tls,
+    vault_tls,
 };
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available

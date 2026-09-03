@@ -1,11 +1,11 @@
 //! diport —— DI 端口层（DI-infra）：可替换 provider 的依赖注入 port trait 单源。
 //!
-//! 分层位置：基础 / 引擎 **之上**、服务 / 域 / adapter **之下**（被它们消费）——`xtask`
-//! `layers.rs` 的 `Layer::DiPort`。依赖基础 + 引擎；不依赖服务 / 域 / adapter（无 back-path）。
+//! 分层位置：基础 / 引擎 **之上**、服务 / 域 / adapter **之下**（被它们消费）。依赖基础 + 引擎；
+//! 不依赖服务 / 域 / adapter（无 back-path）。
 //! 跨域通信单源仍是 contract；DI infra port ≠ 跨域 wire，本 crate 不放 wire 类型（ADR-003 §6 偏离 2）。
 //! 产品面定位：本 crate 是 `publish = false` 的 **Internal Provider Contract**，不是 Platform Public /
 //! Release API。这里的 `pub` 只服务 workspace 内 official adapter、服务/域与组合根的跨 crate 实现和消费；
-//! official adapter 直接实现这些 internal seams，并由静态 composition root 经封闭 provider catalog 构造。
+//! official adapter 直接实现这些 internal seams，并由静态 composition root 构造。
 //! 未来 capability-specific 第三方 SPI 必须由真实独立 provider/consumer 经单独 scope/ADR/PBI 接纳后建立，
 //! 再通过 typed bridge 接入本层；本 crate 不因该未来路径承担外部 SemVer 承诺。
 //!
@@ -83,11 +83,9 @@
 //! `deny.toml` wrapper 收敛的是 **dynosaur/trait-variant 宏依赖**（只准 `diport` 依赖 ⇒ DI port
 //! 只在 `diport` 定义，DIPORT-MACRO-CONFINE-01）——它**不**约束「谁可 **impl** port trait」：
 //! cargo-deny 只能限依赖、不能限 impl 站点，且域 crate 也合法依赖 `diport`（为**消费**端口而非 impl）。
-//! 故 provider port 的 impl-site allowlist（限 production impl 到 adapter / 组合根）改由 dylint 自写 lint
-//! `rss_diport_impl_allowlist` 承载（AST 级，Medium，INVARIANT DIPORT-IMPL-ALLOWLIST-01）：非
-//! adapter / 组合根路径下 impl provider port trait 即报。`ManagedResource` / `ManagedResourceLocal` 是同置于
-//! 本 crate 的 lifecycle seam，adapter resource、服务 worker 与 runtime wrapper 均可实现，不属于该限制。
-//! 二者互补——cargo-deny 守**定义面**，dylint 守 provider port 的**impl 面**。#1060 / #1153 闭环。
+//! 当前没有自定义 impl-site lint；实现站点由 Cargo dependency visibility、类型测试与 review 约束。
+//! `ManagedResource` / `ManagedResourceLocal` 是同置于本 crate 的 lifecycle seam，adapter resource、服务
+//! worker 与 runtime wrapper 均可实现。
 //!
 //! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!

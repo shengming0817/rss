@@ -1,4 +1,4 @@
-//! Synthetic Cargo metadata JSON builders shared by façade and xtask tests.
+//! Synthetic Cargo metadata JSON builders for façade tests.
 
 use crate::{ResolvedPackageFacts, ResolvedPackageId, ResolvedPackageSource};
 use serde_json::{Value, json};

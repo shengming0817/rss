@@ -1,13 +1,2 @@
-# Cargo 仓库级配置。
-# build.target-dir：direct Cargo 的 worktree-local 默认值（linked worktree 各自一份，
-# 不共享可变构建产物）。受控入口 `hack/cargo.sh` 默认改走 N 槽租约池；
-# `RSS_TARGET_POOL_N=off` 时回落到本配置。
-# ref: https://doc.rust-lang.org/cargo/reference/config.html#buildtarget-dir
 [build]
-target-dir = ".cache/cargo-target"
-
-# alias：让文档承诺的 `cargo xtask ...` 治理入口可直接执行（否则 cargo 报 `no such command: xtask`）。
-# 单一事实源：xtask/src/main.rs 子命令 + contracts/README.md。
-# ref: https://doc.rust-lang.org/cargo/reference/config.html#alias
-[alias]
-xtask = "run -p xtask --"
+target-dir = "target"

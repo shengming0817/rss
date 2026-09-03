@@ -10,7 +10,7 @@ workspace = true
 
 # adapter 实现 DI-infra port（diport：ManagedResource 始终）。W 阶段真身只用 diport（必填）+
 # backend 门控的 tonic 后端；G0 stub 预连的基础/引擎 crate（vocab/ids/secure/…）本切片不用，
-# 已裁——按 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`，不预连全层」（cargo-udeps 守）。
+# 已裁；不预连全层（cargo-udeps 守）。
 [dependencies]
 diport = { path = "../../crates/diport" }
 # gRPC server scaffold（plaintext，无 TLS）；`serve_with_token` 默认拒绝 non-loopback，

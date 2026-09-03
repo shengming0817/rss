@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 # adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
-# 不预连全服务层（由 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 PR #137 review A1/B1/C1 约束）。
+# 不预连全服务层；依赖面由 Cargo manifest 与 deny.toml 约束。
 [dependencies]
 eventing.workspace = true
 vocab = { path = "../../crates/vocab" }
@@ -24,8 +24,8 @@ diport = { path = "../../crates/diport" }
 # Subscriber::subscribe 签名需 CancellationToken（fallback + 真实 impl 都用），取消即流终止。
 tokio-util = { workspace = true }
 # 真实 broker I/O：lapin（AMQP client）+ futures（Consumer Stream 适配 take_until/filter_map）
-# + tracing（redacted 连接日志）。仅 `backend` feature 编译——默认 build / verify 不拉 broker
-# 客户端树（保持轻量，azure 无 CI ⇒ verify 是唯一 gate）。ref: lapin examples/pubsub.rs@main
+# + tracing（redacted 连接日志）。仅 `backend` feature 编译——默认 build 不拉 broker
+# 客户端树；独立 amqp-integration package 承载 live broker proof。ref: lapin examples/pubsub.rs@main
 lapin = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
@@ -44,16 +44,8 @@ backend = ["dep:lapin", "dep:rustls-pki-types", "dep:futures", "dep:tracing", "d
 # Deterministic post-send fault barrier + bounded reconnect readiness for cross-crate integration evidence.
 # Deliberately excludes container fixtures so runtime integration can enable this seam without pulling testcontainers.
 integration-test-support = ["backend"]
-# 集成测试需真实 AMQP broker（Cargo `[[test]] required-features = ["integration"]`，nextest 按名串行）；
-# testkit/containers 经此传递激活 testcontainers（self-provision rabbitmq + per-domain vhost，无需手工预置）。
-integration = ["integration-test-support", "testkit/containers"]
-
-# RemoteOnly catalog Test targets：Cargo `[[test]] required-features` 是 eligibility 唯一 owner
-# （INTEGRATION-SHARD-ELIGIBILITY-01）。
-[[test]]
-name = "integration"
-path = "tests/integration.rs"
-required-features = ["integration"]
+# Live tests are owned by tests/amqp-integration, which enables this existing feature directly.
+integration = ["integration-test-support"]
 
 [dev-dependencies]
 eventexec = { path = "../../crates/eventexec", features = ["l2-test-support"] }
@@ -69,6 +61,3 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # 集成测试用 anyhow（FixtureError = anyhow::Error，ok_or_else 等需要 anyhow! 宏）。
 anyhow = { workspace = true }
-# 集成测试容器 fixture（#1137）：testcontainers self-provision rabbitmq + 建 per-domain vhost（经
-# testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
-testkit = { path = "../../crates/testkit" }

@@ -4,25 +4,25 @@
 //!
 //! 设计要点：domain 与 contract_id **不**互相派生（`id` 首段 ≠ `domain`——`_seed` 反例：domain `_seed`、
 //! id `seed.thing-happened`；且 contract `id` 容连字符 [`is_dotted_id`]、`domain` 是 crate-name 形
-//! [`is_safe_segment`]，二者字母表不同）。两字段各自来自 manifest 的对应字段，由 `cargo xtask consumer tooling` 派生为
+//! [`is_safe_segment`]，二者字母表不同）。两字段各自来自 manifest 的对应字段，并固化为
 //! `pub const CONTRACT: ContractBinding`、golden 字节锁。domain、contract_id、version 与 schema_hash
 //! 收进**单一绑定值**——故 envelope header 不需要在调用点分别 author 这些裸字段。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（**Medium**）—— static 的 `CONTRACT` 常量
-//! 同源单一 manifest + golden 字节锁（`cargo xtask consumer tooling --check`）：保证**派生常量**正确、不漂移。上游
-//! `xtask/contract/validate.rs` R7（`is_safe_segment` domain / `is_dotted_id` id / `v{N}` version 语法）+
+//! 同源单一 manifest + owner crate 测试：保证**派生常量**正确、不漂移。字段语法由
+//! `is_safe_segment` domain / `is_dotted_id` id / `v{N}` version 谓词定义，
 //! R3（磁盘段 domain/version = manifest domain/version）背书 `from_static` 不在运行期重校验。
 //!
 //! **不是 Hard seal**：[`ContractBinding::from_static`]
 //! 是普通 `pub` 构造器，任意依赖 `vocab` 的 crate 可裸构造任意字段——跨 crate sealing 在 vocab
 //! 基础层不可 Hard 强制。「业务只用 static `CONTRACT`、不伪造」由 source guard 收口到 static /
-//! 测试 fixture（`cargo xtask verify` 的 `contract-binding-guard`，Medium）；下游强度：static 常量正确性 =
+//! 测试 fixture；下游强度：static 常量正确性 =
 //! golden（Medium）。
 
 /// 契约绑定（domain + contract_id + version + schema_hash 同源常量）。
 /// 字段私有——只读 accessor 暴露；四字段收进单一值，彼此不可漂移。
 ///
-/// 预期生产 mint 经 [`ContractBinding::from_static`]（`cargo xtask consumer tooling` 从 `contract.toml` 派生为
+/// 预期生产 mint 经 [`ContractBinding::from_static`]（从 `contract.toml` 派生为
 /// `CONTRACT` 常量 + golden 锁）；但 `from_static` 是普通 `pub` 构造器、非 Hard seal（业务伪造面靠
 /// source guard 收口）。INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（Medium，见 mod doc）。
 ///
@@ -153,7 +153,7 @@ impl EventFactBinding {
 
 /// Projection workflow input binding static from `[capabilities.workflow].inputs`.
 ///
-/// The projection id and input event contract are emitted by `cargo xtask consumer tooling` from the
+/// The projection id and input event contract are derived from the
 /// contract manifests. Runtime projection writers consume only this static binding surface; they
 /// do not accept handwritten `(contract_id, topic)` registry rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

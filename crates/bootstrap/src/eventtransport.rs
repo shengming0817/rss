@@ -7,8 +7,8 @@
 //!
 //! `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 早期措辞设想在本模块的 `BrokerKind` match 里直接构造 `MemBus` / `AmqpPublisher`，
 //! 并把「in-mem bus 仅 demo 可达」的 sealing 落在 bootstrap（Hard）。但 **bootstrap 是服务层 crate**，
-//! `deny.toml`（`amqp` wrappers=[server,rss,xtask,journeys]；`memory` wrappers=[journeys,xtask]）+
-//! `cargo xtask layer-deps` + cargo 依赖图三道门**禁止 bootstrap 依赖 adapters**。故本 resolver 是
+//! `deny.toml` 的当前 adapter wrapper 约束 +
+//! Cargo 依赖图禁止 bootstrap 依赖 adapters。故本 resolver 是
 //! **纯策略函数**：做拓扑选型 + fail-closed 校验 + 凭据 redaction，返回已校验的 [`ResolvedTransport`]
 //! 决策；组合根 `match` 该决策再构造具体 adapter，并在**组合根层**持有 in-mem sealing。
 //!

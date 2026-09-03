@@ -65,6 +65,6 @@ crate-level。新增或删除 carve-out 必须同步修改 ADR registry 和 lint
 
 1. 注册到 `vocab` 前缀所有权集合或外部 crate 注册入口。
 2. 更新 prefix golden。
-3. 通过 `cargo xtask` 前缀所有权治理测试（Medium）。
+3. 通过 `vocab` 的前缀所有权测试。
 
 in-repo 域 crate mint 新前缀时，平台 registry 也必须更新；单靠域 crate 注册入口不满足静态扫描。

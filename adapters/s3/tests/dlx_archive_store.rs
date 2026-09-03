@@ -1,7 +1,6 @@
 //! MinIO / S3 DLX archive store coverage (mock client).
 //!
-//! Cargo `[[test]] required-features = ["integration"]` is the sole eligibility owner;
-//! `integration` transitively enables `backend`.
+//! The adapter-owned test target is gated directly by the `backend` feature.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -715,26 +714,22 @@ async fn verified_get_maps_no_such_key_to_none() {
     ));
 }
 
-testkit::provider_conformance_catalog! {
-    provider: s3,
-    error: provider_conformance_cases::CaseError,
-    capabilities: {
-        identity => {
-            #[tokio::test]
-            verified_get_validates_checksum_and_restores_key_ref
-                => provider_conformance_cases::identity
-        },
-        conflict => {
-            #[tokio::test]
-            lifecycle_rejects_same_identity_with_different_canonical_facts
-                => provider_conformance_cases::conflict
-        },
-        archive_receipt => {
-            #[tokio::test]
-            lifecycle_records_opaque_verified_receipt_before_purge
-                => provider_conformance_cases::archive_receipt
-        },
-    }
+#[tokio::test]
+async fn verified_get_validates_checksum_and_restores_key_ref()
+-> Result<(), provider_conformance_cases::CaseError> {
+    provider_conformance_cases::identity().await
+}
+
+#[tokio::test]
+async fn lifecycle_rejects_same_identity_with_different_canonical_facts()
+-> Result<(), provider_conformance_cases::CaseError> {
+    provider_conformance_cases::conflict().await
+}
+
+#[tokio::test]
+async fn lifecycle_records_opaque_verified_receipt_before_purge()
+-> Result<(), provider_conformance_cases::CaseError> {
+    provider_conformance_cases::archive_receipt().await
 }
 
 mod provider_conformance_cases {

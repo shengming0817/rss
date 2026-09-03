@@ -27,8 +27,7 @@ pub struct PromExporter {
 /// 唯一现实失败模式 = 进程级 `metrics` global recorder 已被装过（重复 install）：默认 `PrometheusBuilder`
 /// 无自定义 bucket / quantile，build 不会失败，只剩 set-global 冲突。**不内嵌上游 `BuildError` 作 source**
 /// ——本错误是 adapter-local 构造错误（无 provider PII，同 s3 `EmptyBucket`），非 diport **port** error；
-/// `rss_diport_error_debug_redacted`（脱敏 dylint）仅扫 `diport` crate、不覆盖 adapter，内嵌 raw source 反
-/// 成 Debug 脱敏盲区。故只留 curated 静态消息，fail-fast 返回 `Err`、不丢失失败语义。
+/// 内嵌 raw source 会形成 Debug 脱敏盲区，故只留 curated 静态消息，fail-fast 返回 `Err`、不丢失失败语义。
 #[cfg(feature = "backend")]
 #[derive(Debug, thiserror::Error)]
 #[error("prometheus recorder already installed (global metrics recorder is set once per process)")]

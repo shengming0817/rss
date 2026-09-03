@@ -5,10 +5,9 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt as _};
 use testcontainers_modules::redis::REDIS_PORT;
 
 use super::{
-    ContainerService, NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS,
-    PUBLISHED_PORT_RETRY_BACKOFF_MS, Result, attach_network, copied_tls_image,
-    force_remove_named_container, process_external_value, retry_published_port_resolution, runtime,
-    tls_material, validate_redis_url,
+    NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS, PUBLISHED_PORT_RETRY_BACKOFF_MS, Result,
+    attach_network, copied_tls_image, force_remove_named_container, process_external_value,
+    retry_published_port_resolution, runtime, tls_material, validate_redis_url,
 };
 
 const REDISS_PORT: u16 = 6379;
@@ -49,7 +48,7 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
         let image = GenericImage::new("redis", "7.4-alpine")
             .with_exposed_port(REDIS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
-        let container = runtime::start(image, ContainerService::Redis).await?;
+        let container = runtime::start(image).await?;
         let host = container.get_host().await?;
         match container.get_host_port_ipv4(REDIS_PORT).await {
             Ok(port) => {
@@ -115,7 +114,7 @@ pub async fn redis_tls(attachment: NetworkAttachment<'_>) -> Result<RedisTlsFixt
             ]),
             attachment,
         )?;
-        let container = runtime::start(request, ContainerService::Redis).await?;
+        let container = runtime::start(request).await?;
         let host = container.get_host().await?;
         match container.get_host_port_ipv4(REDISS_PORT).await {
             Ok(port) => {

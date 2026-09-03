@@ -1,6 +1,6 @@
 use super::{
-    ContainerAsync, ContainerService, GenericImage, ImageExt, IntoContainerPort, NetworkAttachment,
-    Result, WaitFor, attach_network, runtime, vault_dev_tls_san_flags, wait_published_port,
+    ContainerAsync, GenericImage, ImageExt, IntoContainerPort, NetworkAttachment, Result, WaitFor,
+    attach_network, runtime, vault_dev_tls_san_flags, wait_published_port,
 };
 
 const VAULT_PORT: u16 = 8200;
@@ -62,7 +62,7 @@ pub async fn vault_tls(attachment: NetworkAttachment<'_>) -> Result<VaultTlsFixt
         image.with_cmd(["sh".to_owned(), "-c".to_owned(), startup]),
         attachment,
     )?;
-    let container = runtime::start(request, ContainerService::Vault).await?;
+    let container = runtime::start(request).await?;
     let host = container.get_host().await?.to_string();
     let port = wait_published_port(
         &container,

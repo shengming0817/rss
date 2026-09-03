@@ -1,9 +1,8 @@
 //! `AckAction → broker 结算模式`的 **feature-agnostic** 映射（不依赖 lapin）。
 //!
 //! 抽出此层的动机：`AckAction → broker ack/nack(requeue)` 是 at-least-once 正确性的关键映射，但
-//! `BasicNackOptions` 是 lapin 类型、仅 `integration` feature 可用——若映射直接绑 lapin，则其测试只能
-//! 在 integration build 跑、**不进默认 `cargo xtask verify` gate**（无 docker ⇒ 集成测试不实跑 ⇒ 该映射
-//! 零 gate 覆盖）。本模块用 feature-agnostic 的 [`SettleMode`] 中间表示承载映射逻辑 + 表驱动测试（默认
+//! `BasicNackOptions` 是 lapin 类型、仅 `integration` feature 可用——若映射直接绑 lapin，则默认测试
+//! 不会覆盖。本模块用 feature-agnostic 的 [`SettleMode`] 中间表示承载映射逻辑 + 表驱动测试（默认
 //! build 可测）；`integration` 下的 `AmqpAcker` 再把 [`SettleMode`] 翻成 lapin `basic_ack`/`basic_nack`。
 //!
 //! ref: rabbitmq docs/confirms（basic.ack / basic.nack(requeue)）
@@ -33,8 +32,7 @@ pub(crate) fn settle_mode(action: AckAction) -> SettleMode {
 
 #[cfg(test)]
 mod tests {
-    //! at-least-once 关键映射表驱动测试——**默认 build 可跑**（不依赖 lapin / integration feature），
-    //! 进 `cargo xtask verify` gate。
+    //! at-least-once 关键映射表驱动测试——默认 build 可跑（不依赖 lapin / integration feature）。
     use super::{SettleMode, settle_mode};
     use diport::AckAction;
 

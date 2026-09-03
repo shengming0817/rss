@@ -594,7 +594,7 @@ impl SerialInOrderGuarantor for SerialInOrder {}
 ///
 /// **NOT sealed**——真实 adapter（`adapters/postgres`，外部 crate）须能 impl 来铸造 witness。这层 open 是
 /// witness「真实性」的 **Medium** 边界（类型系统看不进 SQL head-of-partition gating，「此投递串行」是
-/// 实现的语义属性、非结构属性）：哪些类型可 impl 由 dylint `rss_partition_serial_allowlist`（AST 级，
+/// 实现的语义属性、非结构属性）：调用方必须显式选择串行策略（
 /// 仅放行 allowlist adapter/组合根类型，INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）守，`#[cfg(test)]`
 /// 测试 fake 豁免。**in-memory 非串行 fake 禁止 impl 本 trait**。
 ///
@@ -938,7 +938,7 @@ mod tests {
     // 编译过即证「门禁可被串行 source 满足」+「witness 是 Copy（喂 harness 后仍可复用）」。
     #[test]
     fn serial_in_order_witness_mints_from_partition_serial_source() {
-        // 测试 fake：声明自己串行（#[cfg(test)] 豁免 allowlist dylint）。
+        // 测试 fake：显式声明自己串行。
         struct SerialSrc;
         impl super::PartitionSerialDelivery for SerialSrc {}
 

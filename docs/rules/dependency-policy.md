@@ -43,8 +43,8 @@
 
 | 条件 | 权威 carrier |
 |------|--------------|
-| 使用方直接声明依赖并符合 crate 分层 | Cargo manifest/rustc、`layer-deps` |
-| workspace 外部 version pin 与 lock 对齐 | `[workspace.dependencies]`、`Cargo.lock`、`wsdeps-drift` |
+| 使用方直接声明依赖并形成合法无环图 | Cargo manifest/rustc |
+| workspace 外部 version pin 与 lock 对齐 | `[workspace.dependencies]`、`Cargo.lock`、`--locked` |
 | license、advisory 与 source policy | `deny.toml`、`cargo deny` |
 
 ### 临时 advisory 风险接受
@@ -74,10 +74,9 @@
 
 adapter 与 composition root 持有上游 API；domain 与公开 contract 暴露 RSS 语义。
 
-Tooling 的 Cargo facts 遵循同一边界：catalog / feature selection 经 guppy `PackageGraph` /
-`CargoSet`；declaration-granularity dependency provenance 经同一 `cargo metadata` JSON 的私有
-`serde_json` raw 投影（不经 Guppy `PackageLink` 折叠）；公开边界仍为 owned DTO，`xtask` 不持有
-graph / parser，只持有具体 forbidden policy，也不解析 `cargo tree` 文本。
+Tooling 的 Cargo facts 遵循同一边界：复用 `workspacefacts` 时，catalog / feature selection 经 guppy
+`PackageGraph` / `CargoSet`，declaration-granularity provenance 经同一 `cargo metadata` JSON 的私有 raw
+投影；轻量 CI selector 直接消费标准 `cargo metadata` schema，只输出 package reverse closure。
 
 ## Port / trait
 

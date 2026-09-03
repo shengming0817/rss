@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [features]
-# 暴露 synthetic cargo metadata JSON builder，供 façade 自测与 xtask 消费方 anti-vacuity 夹具单源。
+# 暴露 synthetic cargo metadata JSON builder，供 façade 自测。
 test-support = []
 
 [dependencies]

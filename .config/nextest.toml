@@ -6,39 +6,18 @@ fail-fast = true
 slow-timeout = { period = "60s", terminate-after = 3 }
 leak-timeout = "200ms"
 
-[profile.ci-core]
-fail-fast = false
-retries = 0
-flaky-result = "fail"
-slow-timeout = { period = "120s", terminate-after = 2 }
-leak-timeout = "200ms"
-final-status-level = "slow"
-
-[profile.ci-core.junit]
-path = "junit.xml"
-
-# 真集成 lane profile（#1137，`cargo xtask ci-integration --shard <name>`）：
-# testcontainers self-provision 容器冷启动（尤其 rabbitmq-management ~250MB 首拉）可超默认 60s slow-timeout，
-# 故放宽到 300s；fail-fast=false 让当前 shard 的其它测试继续产出故障证据。
-# 危险 target 的串行批次只由 xtask integration shard registry 派生，并在 CLI 传 `--test-threads 1`；
-# 本 profile 不维护第二份调度 selector。
-[profile.integration]
-slow-timeout = { period = "300s", terminate-after = 2 }
-leak-timeout = "200ms"
-fail-fast = false
-retries = 0
-flaky-result = "fail"
-
-[profile.integration.junit]
-path = "junit.xml"
-
 [test-groups.trybuild]
+max-threads = 1
+
+[test-groups.integration]
 max-threads = 1
 
 [[profile.default.overrides]]
 filter = 'binary(/(^trybuild$|_trybuild$)/)'
 test-group = "trybuild"
 
-[[profile.ci-core.overrides]]
-filter = 'binary(/(^trybuild$|_trybuild$)/)'
-test-group = "trybuild"
+[[profile.default.overrides]]
+filter = 'package(/-integration$/)'
+test-group = "integration"
+retries = 1
+slow-timeout = { period = "300s", terminate-after = 1 }

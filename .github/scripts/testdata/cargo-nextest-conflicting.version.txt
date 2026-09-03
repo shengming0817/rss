@@ -1,5 +1,0 @@
-cargo-nextest 0.9.137 (75ddba7e9 2026-05-26)
-release: 0.9.136
-commit-hash: 75ddba7e911b44c5c0700dac0415d824403de9bd
-commit-date: 2026-05-26
-host: x86_64-unknown-linux-gnu

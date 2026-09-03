@@ -1,6 +1,0 @@
-# dylint lint crate 用 dylint-link 作 linker：把 cdylib 输出重命名为驱动按 `lib<name>@<toolchain>.dylib`
-# 加载所需的工具链后缀名。仅在 cwd 位于 lints/ 子树时被 cargo 发现（层级查找不下降进 lints/），
-# 故不影响根 stable workspace 构建。dylint-link 经 `cargo install dylint-link` 提供。
-# ref: dylint internal/template/.cargo/config.toml@v6.0.1
-[target.'cfg(all())']
-rustflags = ["-C", "linker=dylint-link"]

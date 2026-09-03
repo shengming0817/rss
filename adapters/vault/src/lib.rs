@@ -1,4 +1,4 @@
-//! vault adapter —— RSS workspace（Transit 与 caller-owned CSR PKI transport）。See `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`.
+//! vault adapter —— RSS workspace（Transit 与 caller-owned CSR PKI transport）。See `Cargo.toml` and `deny.toml`.
 //!
 //! `VaultSigner` / `VaultKeyProvider`（sealed-marker）：
 //! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-12）。

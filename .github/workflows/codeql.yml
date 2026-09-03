@@ -7,12 +7,7 @@
 # 激活前置（org 一次性，仓库无法代办）：GitHub 启用 code scanning（private 仓需 GitHub Advanced
 # Security）。未启用前 workflow committed 但不产 alert。
 #
-# 守卫：xtask 治理测试 `github_codeql_workflow_present` / `codeql_workflow_well_formed`
-# （INVARIANT SAST-CODEQL-PRESENT-01，Medium）防 workflow 被静默删除 / 禁用。
-#
-# action 钉版：用 major-tag `@v4`（非 commit-SHA）——first-party GitHub org（actions/ + github/）+ TLS 信任，token
-# 权限收窄（见下 permissions）；`@v4` 自动收 v4.x 补丁让 SAST query 保持新鲜（本仓无 renovate/dependabot ⇒ 冻结 SHA
-# 反致 query 陈旧、削弱扫描）。与 CI 工具钉版同属 #1145 供应链硬化子项（review #281 F-B2）。
+# action 固定到已审计的 v4 commit；升级通过显式 PR 完成。
 #
 # ref: github/codeql-action README.md@main（v4 latest major + languages:rust / build-mode:none）
 # ref: actions/starter-workflows code-scanning/codeql.yml@main（advanced setup 样板：init → analyze + security-events:write）
@@ -38,17 +33,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
           languages: rust
           build-mode: none
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
           category: "/language:rust"

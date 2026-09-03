@@ -16,4 +16,4 @@
 
 ## Test plan
 
-- [ ] `make ci CI_BASE=<remote>/develop` 10 分钟有界本地通过（只分析已提交差异；重型门 `DEFERRED` 到 develop/release 或显式 full，不追加 `make ci-full`）
+- [ ] `make ci CI_BASE=<remote>/develop` 在调用方 10 分钟预算内通过（unknown/global/异常输入会 fail-full）

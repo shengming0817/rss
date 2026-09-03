@@ -6,6 +6,11 @@ on:
   push:
     branches: [develop]
   workflow_dispatch:
+    inputs:
+      baseline:
+        description: Earlier Git revision used for SemVer comparison
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,169 +20,36 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  preflight:
-    name: preflight
+  cargo:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      selection: ${{ steps.select.outputs.selection }}
     steps:
-      - name: Initialize bounded preflight budget
-        id: preflight-budget
-        run: echo "deadline-epoch=$(( $(date +%s) + 540 ))" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout preflight revision
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: ${{ github.sha }}
-
-      - name: Setup preflight cache
-        id: preflight-setup
-        uses: ./.github/actions/setup-rss-ci
+      - name: Install pinned Rust toolchains
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --component clippy --component llvm-tools-preview
+          rustup default 1.96.0
+      - name: Install pinned Cargo tools
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
         with:
-          lane: preflight
-          compiler-partition: preflight
-          toolchain: 1.96.0
-          nightly: ""
-          download-cache-epoch: v7
-          tool-cache-epoch: v4
-          compiler-cache-epoch: v4
-
-      - name: Build preflight orchestrator once
-        run: cargo build --locked -p xtask
-
-      - name: Select fixed CI work
-        id: select
+          tool: cargo-nextest@0.9.137,cargo-semver-checks@0.49.0,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9
+          fallback: none
+      - name: Run package-selected checks
+        if: ${{ github.event_name == 'pull_request' }}
+        run: make ci CI_BASE=${{ github.event.pull_request.base.sha }}
+      - name: Run full workspace checks after develop push
+        if: ${{ github.event_name == 'push' }}
+        run: make ci-full CI_BASE=${{ github.event.before }}
+      - name: Run manually requested full workspace checks
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
-          RSS_CI_FORCE_FULL: ${{ vars.RSS_CI_FORCE_FULL }}
+          REQUESTED_BASELINE: ${{ inputs.baseline }}
         run: |
           set -euo pipefail
-          "$CARGO_TARGET_DIR/debug/xtask" ci plan \
-            --event-path "$GITHUB_EVENT_PATH" \
-            --policy .config/ci-impact.toml \
-            --output "$RUNNER_TEMP/ci-selection.json" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Run bounded compile and governance preflight
-        id: preflight-run
-        env:
-          RSS_PREFLIGHT_DEADLINE_EPOCH: ${{ steps.preflight-budget.outputs.deadline-epoch }}
-          RSS_SELECTION: ${{ steps.select.outputs.selection }}
-        run: |
-          set -euo pipefail
-          remaining=$(( RSS_PREFLIGHT_DEADLINE_EPOCH - $(date +%s) ))
-          [ "$remaining" -gt 0 ] || { echo 'preflight budget exhausted before executor start' >&2; exit 1; }
-          timeout --signal=TERM --kill-after=15s "${remaining}s" \
-            "$CARGO_TARGET_DIR/debug/xtask" ci preflight --selection "$RSS_SELECTION"
-
-      - name: Finalize preflight caches
-        id: preflight-finalize
-        if: ${{ always() && !cancelled() && steps.preflight-setup.outcome == 'success' }}
-        continue-on-error: true
-        uses: ./.github/actions/finalize-rss-ci
-        with:
-          cache-context: ${{ steps.preflight-setup.outputs.cache-context }}
-          execution-outcome: ${{ steps.preflight-run.outcome }}
-          save-eligible: ${{ steps.preflight-run.outcome == 'success' || steps.preflight-run.outcome == 'failure' }}
-
-  check:
-    name: check
-    needs: preflight
-    uses: ./.github/workflows/rss-rust-job.yml
-    with:
-      job: check
-      selection: ${{ needs.preflight.outputs.selection }}
-      source-revision: ${{ github.sha }}
-
-  test-affected:
-    name: test-affected
-    needs: preflight
-    uses: ./.github/workflows/rss-rust-job.yml
-    with:
-      job: test-affected
-      selection: ${{ needs.preflight.outputs.selection }}
-      source-revision: ${{ github.sha }}
-
-  integration-postgres:
-    name: integration / postgres
-    needs: preflight
-    uses: ./.github/workflows/rss-rust-job.yml
-    with:
-      job: integration-critical
-      integration-group: postgres
-      selection: ${{ needs.preflight.outputs.selection }}
-      source-revision: ${{ github.sha }}
-
-  integration-transport:
-    name: integration / transport
-    needs: preflight
-    uses: ./.github/workflows/rss-rust-job.yml
-    with:
-      job: integration-critical
-      integration-group: transport
-      selection: ${{ needs.preflight.outputs.selection }}
-      source-revision: ${{ github.sha }}
-
-  integration-runtime:
-    name: integration / runtime
-    needs: preflight
-    uses: ./.github/workflows/rss-rust-job.yml
-    with:
-      job: integration-critical
-      integration-group: runtime
-      selection: ${{ needs.preflight.outputs.selection }}
-      source-revision: ${{ github.sha }}
-
-  integration-critical:
-    name: integration-critical
-    if: ${{ always() }}
-    needs: [integration-postgres, integration-transport, integration-runtime]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every integration group to succeed
-        id: integration-result-gate
-        env:
-          POSTGRES_RESULT: ${{ needs.integration-postgres.result }}
-          TRANSPORT_RESULT: ${{ needs.integration-transport.result }}
-          RUNTIME_RESULT: ${{ needs.integration-runtime.result }}
-        run: |
-          set -euo pipefail
-          failed=false
-          for dependency in \
-            "postgres=$POSTGRES_RESULT" \
-            "transport=$TRANSPORT_RESULT" \
-            "runtime=$RUNTIME_RESULT"; do
-            printf '%s\n' "$dependency"
-            case "$dependency" in *=success) ;; *) failed=true ;; esac
-          done
-          [ "$failed" = false ]
-
-  ci-gate:
-    name: ci-gate
-    if: ${{ always() }}
-    needs: [preflight, check, test-affected, integration-critical]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every fixed result to succeed
-        id: fixed-job-gate
-        env:
-          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
-          CHECK_RESULT: ${{ needs.check.result }}
-          TEST_RESULT: ${{ needs.test-affected.result }}
-          INTEGRATION_RESULT: ${{ needs.integration-critical.result }}
-        run: |
-          set -euo pipefail
-          failed=false
-          for dependency in \
-            "preflight=$PREFLIGHT_RESULT" \
-            "check=$CHECK_RESULT" \
-            "test-affected=$TEST_RESULT" \
-            "integration-critical=$INTEGRATION_RESULT"; do
-            printf '%s\n' "$dependency"
-            case "$dependency" in *=success) ;; *) failed=true ;; esac
-          done
-          [ "$failed" = false ]
+          baseline="$(/usr/bin/git rev-parse --verify "$REQUESTED_BASELINE^{commit}")"
+          [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
+          make ci-full CI_BASE="$baseline"

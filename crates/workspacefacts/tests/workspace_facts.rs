@@ -1706,8 +1706,8 @@ fn load_shipped_workspace_facts() -> Result<(PathBuf, WorkspaceFacts), Box<dyn E
 }
 
 #[test]
-fn shipped_workspace_graph_projects_xtask_dependency_on_workspacefacts()
--> Result<(), Box<dyn Error>> {
+fn shipped_workspace_graph_projects_integration_reverse_dependencies() -> Result<(), Box<dyn Error>>
+{
     let (_root, facts) = load_shipped_workspace_facts()?;
     let catalog = facts.workspace_packages();
     assert!(
@@ -1720,54 +1720,21 @@ fn shipped_workspace_graph_projects_xtask_dependency_on_workspacefacts()
             .any(|pkg| pkg.key().as_str() == "workspacefacts"),
         "anti-vacuous: workspacefacts must appear in shipped catalog"
     );
-    assert!(
-        catalog.iter().any(|pkg| pkg.key().as_str() == "xtask"),
-        "anti-vacuous: preferred shipped consumer xtask must be a workspace member"
-    );
+    for package in ["amqp-integration", "redis-integration", "s3-integration"] {
+        assert!(
+            catalog.iter().any(|entry| entry.key().as_str() == package),
+            "integration package {package} must be a workspace member"
+        );
+    }
+    assert!(!catalog.iter().any(|pkg| pkg.key().as_str() == "xtask"));
 
-    let xtask = facts.package_key("xtask")?;
-    let deps = facts.direct_dependencies_for(&xtask)?;
+    let amqp = facts.package_key("amqp")?;
+    let closure = facts.reverse_workspace_closure(&BTreeSet::from([amqp]))?;
     assert!(
-        !deps.is_empty(),
-        "anti-vacuous: xtask must declare direct dependencies"
-    );
-    let workspacefacts_dep = deps
-        .iter()
-        .find(|dep| {
-            dep.resolved().map(PackageKey::as_str) == Some("workspacefacts")
-                || dep.name() == "workspacefacts"
-        })
-        .ok_or_else(|| {
-            format!(
-                "xtask direct dependencies must project workspacefacts; got: {:?}",
-                deps.iter()
-                    .map(|dep| {
-                        (
-                            dep.name(),
-                            dep.kind(),
-                            dep.resolved().map(PackageKey::as_str),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            )
-        })?;
-    assert_eq!(
-        workspacefacts_dep.resolved().map(PackageKey::as_str),
-        Some("workspacefacts"),
-        "workspacefacts declaration must resolve in shipped graph"
-    );
-    assert!(
-        matches!(
-            workspacefacts_dep.source(),
-            DependencySource::Workspace { .. }
-        ),
-        "workspacefacts must project as workspace source, got {:?}",
-        workspacefacts_dep.source()
-    );
-    let xtask_root = facts.repo_relative_root_for(&xtask)?;
-    assert!(
-        !xtask_root.as_os_str().is_empty() || catalog.iter().any(|pkg| pkg.key() == &xtask),
-        "repo_relative_root_for(xtask) must succeed for shipped member"
+        closure
+            .iter()
+            .any(|package| package.as_str() == "amqp-integration"),
+        "adapter changes must select their live integration package"
     );
     Ok(())
 }

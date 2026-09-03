@@ -1,6 +1,6 @@
 # package 名 `redis-adapter`：deadpool-redis 传递引入 crates.io `redis`，若 package 也叫 `redis` 则
 # `cargo -p redis` 与传递 `redis` package-id 歧义。`[lib] name = "redis"` 保留裸导入面（`use redis::…`，
-# 按 `Cargo.toml`、`xtask/src/layers.rs` 与 `deny.toml` 的 package 约定，package-id 用 `-adapter` 后缀消歧。
+# 按 Cargo/deny package identity 约定，package-id 用 `-adapter` 后缀消歧。
 [package]
 name = "redis-adapter"
 version.workspace = true
@@ -33,32 +33,11 @@ tokio = { workspace = true, features = ["time"], optional = true }
 [features]
 default = []
 backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror", "dep:vocab", "dep:sha2", "dep:tokio"]
-# 集成测试需真实 redis 后端（Cargo `[[test]] required-features = ["integration"]`，nextest 按名串行）；
-# testkit/containers 经此传递激活 testcontainers（self-provision 容器，无需手工预置）。
-integration = ["backend", "testkit/containers"]
-
-# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
-# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
-[[test]]
-name = "integration_claimer"
-path = "tests/integration_claimer.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "integration_saga_effect_fixture"
-path = "tests/integration_saga_effect_fixture.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "integration_rate_limit"
-path = "tests/integration_rate_limit.rs"
-required-features = ["integration"]
+# Live tests are owned by tests/redis-integration, which enables this existing feature directly.
+integration = ["backend"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time"] }
 rstest = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 vocab = { path = "../../crates/vocab" }
-# 集成测试容器 fixture（#1137）：testcontainers self-provision redis（经 testkit/containers，
-# 仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
-testkit = { path = "../../crates/testkit" }

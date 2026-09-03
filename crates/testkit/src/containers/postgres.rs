@@ -6,8 +6,8 @@ use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage, ImageExt a
 use testcontainers_modules::postgres::Postgres;
 
 use super::{
-    ContainerService, NetworkAttachment, Result, attach_network, copied_tls_image,
-    environment_snapshot, non_empty_external_value, process_external_value, runtime, tls_material,
+    NetworkAttachment, Result, attach_network, copied_tls_image, environment_snapshot,
+    non_empty_external_value, process_external_value, runtime, tls_material,
 };
 
 const PG_PORT: u16 = 5432;
@@ -429,7 +429,7 @@ async fn start_owned_postgres() -> Result<OwnedPgFixture> {
         .with_user(PG_USER)
         .with_password(PG_PASSWORD)
         .with_tag("16-alpine");
-    let container = runtime::start(image, ContainerService::Postgres).await?;
+    let container = runtime::start(image).await?;
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(PG_PORT).await?;
     let endpoint = PgEndpoint {
@@ -514,7 +514,7 @@ pub async fn postgres_tls(attachment: NetworkAttachment<'_>) -> Result<PgTlsFixt
             .with_cmd(["/rss-tls/start-postgres.sh"]),
         attachment,
     )?;
-    let container = runtime::start(request, ContainerService::Postgres).await?;
+    let container = runtime::start(request).await?;
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(PG_PORT).await?;
     Ok(PgTlsFixture {

@@ -645,7 +645,7 @@ impl WorkspaceFacts {
     /// Return the strict positive Release Surface declaration, if the root workspace declares it.
     ///
     /// Invalid governance metadata is retained as a typed error instead of preventing unrelated
-    /// Cargo facts from loading, so the canonical xtask gate can emit a structured finding.
+    /// Cargo facts from loading, so consumers can report a typed release-selection error.
     pub fn release_selection(&self) -> Result<Option<&ReleaseSelection>, ReleaseSelectionError> {
         match &self.release_selection {
             Ok(selection) => Ok(selection.as_ref()),

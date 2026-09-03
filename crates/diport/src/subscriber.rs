@@ -37,9 +37,8 @@ impl MessageId {
 ///
 /// 不暴露 Ack/Nack——由框架据 `eventexec::Disposition` 驱动。`metadata` 是统一 delivery envelope
 /// （[`EnvelopeMetadata`]）：transport-safe reserved key（trace / correlation / occurredAt / tenantId /
-/// tenantAuthority）由 adapter subscriber 从 broker header 经 [`EnvelopeMetadata::insert_wire_pair`] 透传
-/// （来源已 sealed），业务不得伪造（writer 两层强度见 [`EnvelopeMetadata`] rustdoc + dylint
-/// DIPORT-ENVELOPE-WIRE-WRITER-01）。
+/// tenantAuthority）由 internal adapter subscriber 从 broker header 经
+/// [`EnvelopeMetadata::insert_wire_pair`] 透传；业务 free-form 写入口仍拒绝 reserved key。
 /// 三个字段均私有，只能经构造器写入、经只读 accessor 借出；消费侧无法整体替换或清空 adapter 注入的
 /// reserved metadata。该 visibility 边界是 Hard owner，trybuild 仅作防回退证明。
 /// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：`payload`（消息体，可能含 PII）经 [`RedactedBytes`] 持有
@@ -279,7 +278,7 @@ mod smoke {
     #[test]
     fn message_with_metadata_carries_envelope() {
         use crate::envelope::{EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT};
-        // adapter subscriber 从 broker header 透传 reserved key（来源已 sealed，走 insert_wire_pair）。
+        // internal adapter subscriber 从 broker header 透传 reserved key。
         let mut md = EnvelopeMetadata::empty();
         md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_CORRELATION, "corr-3");

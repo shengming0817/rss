@@ -11,9 +11,7 @@ workspace = true
 [features]
 # 测试支撑：暴露 `test_support::app_ctx` 供下游 crate（如 authn）单测构造 `AppCtx`。
 # 生产构建不启用（消费方仅经 `[dev-dependencies]` 开启）⇒ 测试 facet impl 不进生产构建。
-# 伪造门（只有 authn 能 impl `PrincipalFacet` ⇒ 造 `AppCtx`）由 dylint `rss_principal_facet_impl_allowlist`
-# 守（Medium，#1105）；本 feature 下 `test_support::app_ctx` 是 pub 构造旁路——只准 dev-dep 启用，由 xtask
-# `layer-deps` 的 LAYER-DEPS-09 机器守（shipped 依赖表启用 `runctx/test-support` 即报，Medium）。
+# 本 feature 下 `test_support::app_ctx` 是 pub 测试构造旁路；生产依赖不得启用。
 test-support = []
 
 [dependencies]
@@ -24,7 +22,7 @@ rss-request-context.workspace = true
 tokio = { workspace = true }
 thiserror = { workspace = true }
 # intra-base sanctioned 边（ADR-002 §D3）：AppCtx 的 tenant payload 收敛为具体 vocab::tenant::TenantId。
-# base 层 DAG：vocab ◁ ids ◁ secure ◁ support ◁ runctx（`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。
+# base 层 DAG：vocab ◁ ids ◁ secure ◁ support ◁ runctx。
 vocab = { path = "../vocab" }
 # RequestCtx 的字段级 Debug 脱敏 derive（tenant + Arc<dyn PrincipalFacet> payload 均 `#[redact(sensitivity = internal)]`）。
 secure = { path = "../secure" }

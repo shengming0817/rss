@@ -393,7 +393,7 @@ enum HandleInner {
 /// Requeue 摘要恒为 `&'static str` const（来自构造器内 `EngineErrorKind::message()`）。
 ///
 /// **闭合值集**（非 `#[non_exhaustive]`）：结算协议三态固定；下游必须穷尽 match，新增变体强制编译失败
-/// （对齐 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps` 值集冻结 Hard / `std::ops::ControlFlow`）。
+/// （值集由类型层冻结，语义对齐 `std::ops::ControlFlow`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
     /// 成功：无错误摘要。
@@ -1105,7 +1105,7 @@ mod tests {
         );
     }
 
-    // canonical dotted 接受（文法单源，xtask is_dotted_id 反向 delegate 此处；含单段 foo）+ as_str 往返。
+    // canonical dotted 接受（文法单源；含单段 foo）+ as_str 往返。
     #[test]
     #[allow(clippy::unwrap_used)]
     // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out。
@@ -1134,7 +1134,7 @@ mod tests {
         assert!(matches!(EventTopic::parse(""), Err(EventTopicError::Empty)));
     }
 
-    // 非 canonical dotted → Format（文法单源拒绝集，xtask is_dotted_id 同源：空段/大写/段首数字-连字符/下划线/空格）。
+    // 非 canonical dotted → Format（文法单源拒绝集：空段/大写/段首数字-连字符/下划线/空格）。
     #[test]
     fn topic_parse_rejects_format() {
         let cases: &[&str] = &[
@@ -1238,7 +1238,7 @@ mod tests {
     }
 
     // 私有文法谓词独立语义（`parse` 已前置拒空，此处守 helper 独立调用时空串短路 false 分支，
-    // 文法分支全覆盖；本谓词是 xtask `is_dotted_id` 反向 delegate 的单源被委托方）。
+    // 文法分支全覆盖；本谓词是 dotted id 的单一实现。
     #[test]
     fn is_canonical_dotted_standalone() {
         assert!(!super::is_canonical_topic_name(""));

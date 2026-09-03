@@ -8,19 +8,19 @@ release catalog、schema 与 Cargo facts 派生，文档不复制。
 - 轴 A：Rust Release API/SemVer。只有 catalog 接纳且有真实 external consumer 的 package/symbol 受保护。
 - 轴 B：wire/contract compatibility。只要 persisted、networked 或跨版本消费，schema/manifest identity 受保护。
 - 两轴正交：internal Rust breaking 不必升 wire version；wire breaking 不能靠 Rust SemVer 掩盖。
-- internal `pub`、public-api baseline、Markdown、同名 carrier 或历史发布不自动建立当前承诺。
+- internal `pub`、Markdown、同名 carrier 或历史发布不自动建立当前承诺。
 
 ## Rust Release API
 
-- catalog、Cargo package identity、default/all-features public-api baseline、package proof 与 external consumer 必须同
-  revision 闭合；selected、planned 与 executed package 集合必须精确相等。
+- catalog、Cargo package identity、package proof 与 external consumer 必须同 revision 闭合；candidate workflow
+  只验证明确选中的 Release Surface，不把所有 technically publishable package 自动提升为发布候选。
 - 删除或改签受保护 symbol 按 SemVer/breaking policy 处理；未接纳 internal package 可直接 breaking refactor。
 - package rename、facade、re-export 或 shim 不得隐式延续旧 identity；replacement 原子切 consumer 并删旧路径。
 - Foundation/common primitive 只能有一个 owner。提升时 canonical owner 新建 private-representation/closed-value
   public type，consumer 直接切换并删除重叠 internal generic type；不得保留 alias、deprecated re-export、
   `From`/`TryFrom`、feature flag、双路径或 convenience facade。
 - public owner projection 以 typed rustdoc source identity 判定。来自另一 owner 的 `pub use` 是新兼容路径；未知
-  owner、类型泄漏、baseline 缺失/漂移或 package proof 不完整均 fail-closed。
+  owner、类型泄漏或 package proof 不完整均 fail-closed。首次发布后以已发布版本或 release tag 做 SemVer baseline。
 - package 版本、publish eligibility、MSRV、source revision 和 publish closure 从 Cargo metadata、release catalog 与
   package artifact 派生；文档、binary/image 存在或 registry 可用性快照都不能选择 Release Surface。
 
@@ -67,4 +67,4 @@ review-only acknowledgement 与 intentional breaking authorization 正交：前�
 ## Carrier
 
 - Hard：schema/manifest、closed enums、generated binding、Cargo/visibility 与 actual external consumer compilation。
-- Medium：breaking comparison、public-api/release-surface/package proof、deprecation residual scan 与 migration integration。
+- Medium：breaking comparison、package proof、deprecation residual scan 与 migration integration。

@@ -1,4 +1,4 @@
-# 工具生成的 UI 测试 golden（dylint compiletest_rs / trybuild）：末尾 blank line 是 rustc
+# 工具生成的 trybuild UI 测试 golden：末尾 blank line 是 rustc
 # "N warnings emitted\n\n" 渲染的固有产物。compiletest_rs 逐字节比较 `actual == expected`
 # （不 trim 尾部换行，见 compiletest_rs runtest.rs `compare_output`），删除该 blank 即破坏 golden
 # 精确匹配 → UI 测试红。故对这些工具产物豁免 git 空白检查（`git diff --check` / `git apply

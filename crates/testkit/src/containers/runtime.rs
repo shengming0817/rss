@@ -1,6 +1,4 @@
-use super::{
-    BoundedFileLogConsumer, CiContainerContext, ContainerAsync, ContainerService, ImageExt, Result,
-};
+use super::{ContainerAsync, Result};
 use testcontainers::core::{CmdWaitFor, ExecCommand};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerRequest, Image};
@@ -8,36 +6,12 @@ use tokio::io::AsyncReadExt as _;
 
 use super::{CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES, MINIO_ROOT_PASSWORD, MINIO_WORKLOAD_PASSWORD};
 
-pub(super) async fn start<I, T>(image: T, service: ContainerService) -> Result<ContainerAsync<I>>
+pub(super) async fn start<I, T>(image: T) -> Result<ContainerAsync<I>>
 where
     I: Image,
     T: Into<ContainerRequest<I>> + Send,
 {
-    start_with_context(image, service, CiContainerContext::from_env()?).await
-}
-
-pub(super) async fn start_with_context<I, T>(
-    image: T,
-    service: ContainerService,
-    context: Option<CiContainerContext>,
-) -> Result<ContainerAsync<I>>
-where
-    I: Image,
-    T: Into<ContainerRequest<I>> + Send,
-{
-    let Some(context) = context else {
-        return Ok(image.start().await?);
-    };
-    let consumer = BoundedFileLogConsumer::new(&context.log_dir, service)?;
-    let request = image
-        .into()
-        .with_labels(service.labels(&context))
-        .with_log_consumer(move |frame: &testcontainers::core::logs::LogFrame| {
-            if let Err(error) = consumer.write_frame(frame) {
-                eprintln!("failed to persist integration container log: {error}");
-            }
-        });
-    Ok(request.start().await?)
+    Ok(image.start().await?)
 }
 
 pub(super) async fn run_container_command<I: Image>(

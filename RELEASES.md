@@ -32,7 +32,7 @@ owners. Names observed as available earlier are not reservations. After publicat
 ## Release Candidate closeout
 
 A listed maintainer may approve an exact source revision as a Release Candidate only after reading
-the package identity and version from Cargo metadata, validating the Release API baseline, and
+the package identity and version from Cargo metadata, reviewing the candidate's current public API, and
 running the owning specification's same-revision package and external-consumer proof. The approval
 record identifies every approved package, version, source revision, archive digest, consumer
 revision, and intended registry owner. Packages exercised by an aggregate proof but omitted from
@@ -41,7 +41,7 @@ that tuple are not approved.
 Same-revision digests, command results, and the maintainer decision belong in the issue or pull
 request review record. They must not be copied into the repository as a receipt registry or current
 status list. The reviewed version notes remain in [CHANGELOG.md](CHANGELOG.md), while Cargo metadata,
-Release API baselines, maintainer identity, and this policy remain their respective stable owners.
+published versions or release tags, maintainer identity, and this policy remain their stable owners.
 RC approval does not create a tag, reserve a registry name, upload a package, or change registry
 ownership; publication retains the separate manual checks above.
 
@@ -87,13 +87,13 @@ changelog、不可变源码 revision、所属规格要求的 canonical package/r
 
 ## Release Candidate closeout
 
-列名维护者只有在从 Cargo metadata 回读 package identity/version、验证 Release API baseline，并运行所属规格的
+列名维护者只有在从 Cargo metadata 回读 package identity/version、审查 candidate 当前 public API，并运行所属规格的
 same-revision package 与外部 consumer proof 后，才能批准一个精确 source revision 成为 Release Candidate。批准记录
 必须逐项列出获批 package、version、source revision、archive digest、consumer revision 与预期 registry owner；
 aggregate proof 即使执行了其它 package，只要未进入该 tuple，就不构成对它们的批准。
 
 same-revision digest、命令结果与维护者裁决只进入 issue 或 PR review 记录，不得复制进仓库形成 receipt registry 或
-当前状态清单。受 review 的版本说明归 [CHANGELOG.md](CHANGELOG.md)，Cargo metadata、Release API baseline、维护者身份
+当前状态清单。受 review 的版本说明归 [CHANGELOG.md](CHANGELOG.md)，Cargo metadata、已发布版本或 release tag、维护者身份
 与本文分别保持各自稳定 owner。RC 批准不创建 tag、不保留 registry 名称、不上传 package，也不改变 registry owner；
 实际发布仍须单独完成上文的人工检查。
 

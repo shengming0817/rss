@@ -24,7 +24,7 @@ all unchanged-file hashes, the exclusive-root unit tests, and the forbidden nati
 union. Run it from the repository root with:
 
 ```bash
-./hack/cargo.sh test -p postgres --test feature_manifest \
+cargo test --locked -p postgres --test feature_manifest \
   exclusive_root_vendor -- --nocapture
 ```
 

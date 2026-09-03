@@ -5,7 +5,7 @@
 ## 分层依赖（crate 图 + deny.toml 编译期强制）
 
 依赖矩阵由 typed layer catalog 持有，本文件不复制。Rust 语言层要点：cargo 拒绝循环依赖；禁依赖用
-`cargo-deny`、多余 / 未声明用 `cargo-udeps`、外部 API 面用 `cargo public-api` 守。
+`cargo-deny`，已发布外部 API 面用 `cargo-semver-checks` 守。
 
 ## DDD 分层（crate 内 module）
 
@@ -32,13 +32,14 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - DB 字段 snake_case。
 - JSON、query、path、event header 字段 camelCase（`#[serde(rename_all = "camelCase")]`）。
 - 错误使用 `vocab`(error) + `thiserror`。
-- mock 放 `#[cfg(test)]` 模块或 `mockall`；域 crate 单测的 `[dev-dependencies]` 不依赖兄弟域或平台 adapter crate，该边界由 `cargo xtask layer-deps` 的 dev 规则子集机器强制。
-- 集成测试用 `tests/` 目录 + Cargo `[[test]] required-features`（经 `LocalFeatureScope`）作为 eligibility 唯一 owner；禁止同轴 crate-level `#[cfg(feature = …)]` 双门。调度语义见 `docs/ops/202607111214-1730-integration-shards.md`（INTEGRATION-SHARD-ELIGIBILITY-01）。
+- mock 放 `#[cfg(test)]` 模块或 `mockall`；crate 的 dependency/dev-dependency 边界由 Cargo manifest 显式声明。
+- 真实 provider 集成测试放在 `tests/*-integration` 的 `publish=false` workspace package；该 package
+  直接依赖被测 adapter、testkit，并显式启用 adapter 的现有 integration feature。Cargo 反向依赖图
+  自然负责选择，不维护 provider catalog、lane 或 shard 表。
 
 ## 覆盖率
 
-- 引擎与基础 crate（`consistency` / `primitives` / `vocab` / `ids`）≥ 90%。
-- 新增或修改代码 ≥ 80%（`cargo-llvm-cov`）。
+- 完整 workspace 行覆盖率 ≥ 80%（`cargo-llvm-cov`）。
 - handler 用 `axum::http` / `tower::ServiceExt::oneshot` 覆盖参数校验、鉴权、错误码。
 
 ## 数据库迁移

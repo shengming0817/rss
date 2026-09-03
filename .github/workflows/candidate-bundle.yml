@@ -1,4 +1,4 @@
-name: RSS candidate bundle
+name: RSS candidate package proof
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  candidate-bundle:
-    name: candidate-bundle
+  candidate-package-proof:
+    name: candidate-package-proof
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
@@ -33,62 +33,71 @@ jobs:
           rustc --version --verbose
           cargo --version --verbose
 
-      - name: Prove and export candidate bundle
+      - name: Package the explicitly approved Release Surface
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/rss-candidate-target
-          RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
           set -euo pipefail
-          ./hack/cargo.sh xtask package-proof \
-            --export-candidate-bundle "$RSS_BUNDLE_PATH"
+          metadata="$RUNNER_TEMP/rss-candidate-metadata.json"
+          cargo metadata --locked --no-deps --format-version 1 > "$metadata"
+          jq -e '.metadata["release-surface"].packages as $packages | ($packages | length) > 0 and (($packages | map(.package) | unique | length) == ($packages | length))' "$metadata" >/dev/null
+          packages="$(jq -er '.metadata["release-surface"].packages[].package' "$metadata")"
+          test -n "$packages"
 
-      - name: Validate bundle identity before upload
-        env:
-          RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
-        run: |
-          set -euo pipefail
-          manifest="$RSS_BUNDLE_PATH/candidate-bundle.json"
-          jq -e --arg revision "$GITHUB_SHA" '
-            .schemaVersion == 1 and
-            .rssRevision == $revision and
-            (.packages | type == "array" and length > 0) and
-            all(.packages[];
-              (.name | test("^rss-[a-z0-9]+(-[a-z0-9]+)*$")) and
-              (.version | test("^[0-9A-Za-z.+-]+$")) and
-              (.checksum | test("^[0-9a-f]{64}$")))
-          ' "$manifest" >/dev/null
-          jq -r '.packages[] | [.name, .version, .checksum] | @tsv' "$manifest" |
-          while IFS=$'\t' read -r package version checksum; do
-            archive="$RSS_BUNDLE_PATH/registry/crates/$package/$version/download"
-            test -f "$archive"
-            test "$(sha256sum "$archive" | awk '{print $1}')" = "$checksum"
+          package_args=()
+          : > "$RSS_PACKAGE_PROOF.packages.tsv"
+          while IFS= read -r package; do
+            count="$(jq --arg package "$package" '[.packages[] | select(.name == $package)] | length' "$metadata")"
+            test "$count" = 1
+            version="$(jq -er --arg package "$package" '.packages[] | select(.name == $package) | .version' "$metadata")"
+            version_line="$(jq -er --arg package "$package" '.metadata["release-surface"].packages[] | select(.package == $package) | .["version-line"]' "$metadata")"
+            [[ "$version" == "$version_line".* ]]
+            printf '%s\t%s\t%s\n' "$package" "$version" "$GITHUB_SHA" >> "$RSS_PACKAGE_PROOF.packages.tsv"
+            package_args+=(--package "$package")
+          done <<< "$packages"
+
+          for profile in default no-default all-features; do
+            target="$RUNNER_TEMP/rss-candidate-$profile"
+            case "$profile" in
+              default) cargo package --locked --no-metadata --target-dir "$target" "${package_args[@]}" ;;
+              no-default) cargo package --locked --no-metadata --no-default-features --target-dir "$target" "${package_args[@]}" ;;
+              all-features) cargo package --locked --no-metadata --all-features --target-dir "$target" "${package_args[@]}" ;;
+            esac
           done
 
-      - name: Upload immutable candidate bundle
+          mkdir -p "$RSS_PACKAGE_PROOF"
+          cp "$RUNNER_TEMP/rss-candidate-default/package/"*.crate "$RSS_PACKAGE_PROOF/"
+          cp "$RSS_PACKAGE_PROOF.packages.tsv" "$RSS_PACKAGE_PROOF/packages.tsv"
+          (cd "$RSS_PACKAGE_PROOF" && sha256sum -- *.crate > SHA256SUMS)
+          while IFS=$'\t' read -r package version revision; do
+            test "$revision" = "$GITHUB_SHA"
+            test -f "$RSS_PACKAGE_PROOF/$package-$version.crate"
+          done < "$RSS_PACKAGE_PROOF/packages.tsv"
+
+      - name: Upload immutable package proof
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rss-candidate-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rss-candidate-bundle
+          name: rss-candidate-package-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rss-candidate-package-proof
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
-      - name: Publish traceable bundle summary
+      - name: Publish traceable package summary
         env:
-          RSS_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
-          RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          set -euo pipefail
-          manifest="$RSS_BUNDLE_PATH/candidate-bundle.json"
-          [[ "$RSS_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           {
-            echo '## RSS candidate bundle'
+            echo "## RSS candidate packages"
             echo
-            echo "- RSS revision: \`$GITHUB_SHA\`"
-            echo "- Producer run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
-            echo "- Artifact: \`rss-candidate-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\`"
-            echo "- Artifact digest: \`$RSS_ARTIFACT_DIGEST\`"
-            echo '- Release Surface packages:'
-            jq -r '.packages[] | "  - `\(.name)@\(.version)` — `\(.checksum)`"' "$manifest"
+            echo "Source revision: \`$GITHUB_SHA\`"
+            echo
+            echo '| Package | Version | SHA-256 |'
+            echo '|---|---:|---|'
+            while IFS=$'\t' read -r package version _revision; do
+              digest="$(awk -v archive="$package-$version.crate" '$2 == archive { print $1 }' "$RSS_PACKAGE_PROOF/SHA256SUMS")"
+              test -n "$digest"
+              echo "| \`$package\` | \`$version\` | \`$digest\` |"
+            done < "$RSS_PACKAGE_PROOF/packages.tsv"
           } >> "$GITHUB_STEP_SUMMARY"

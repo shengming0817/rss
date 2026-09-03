@@ -59,7 +59,7 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 | `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/consistency` `crates/eventexec` `crates/deviceloop` `adapters/amqpadapter` `adapters/mqttadapter` `adapters/softca` |
 | `area-data` | Config 热更新 + 持久化/加密 + 分布式锁 | `crates/settings` `crates/secure` `crates/support` `crates/distributed` `adapters/pgadapter` `adapters/redisadapter` `adapters/vaultadapter` `adapters/s3adapter` |
 | `area-observability` | Metrics / Tracing / Logging | `crates/observ` `crates/audit` `adapters/oteladapter` `adapters/promadapter` |
-| `area-tooling` | 分层治理/crate 依赖图 + deny.toml + codegen/工具链 | `xtask/` `deny.toml` `clippy.toml` `contracts/`（治理） |
+| `area-tooling` | Cargo package 选择 + deny.toml + 标准工具链 | `hack/ci-impact.py` `deny.toml` `clippy.toml` |
 | `area-cross` | 跨 ≥4 领域 / 无明确归属 | `crates/vocab` `crates/syshealth` + 跨 ≥4 域 |
 
 ### 2.2 type-XX（类型，1 个，8 选）
@@ -115,7 +115,7 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 
 **架构/去重/抽象命中信号**（任一即命中 → P3 升 P2、P2 升 P1，P1 维持）：type ∈ {arch-opt/refactor/debt} 且描述含
 *统一/合并/拆分/抽象/converge/unify/dedup/single source/funnel/sealed/Hard 升级* ；或触及 `crates/primitives` / `crates/consistency` 等多个核心 crate /
-crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI-robust Soft→Hard / Funnel 双向锁未闭合；或影响 ≥3 领域。
+crate 依赖图·deny.toml·clippy typed funnel / ≥3 crate；或 AI-robust Soft→Hard 未闭合；或影响 ≥3 领域。
 
 **触发型例外**：`flag-cond` 风格触发型条目，若其守护的 invariant 已被 Medium clippy lint/cargo-deny/governance 守住（CI 绿），
 架构信号升级**封顶 P2**。**反向降级**：纯 feat/bug 触发型无业务推动、或"推测性/无 benchmark/待审视"无明确 outcome
@@ -126,7 +126,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 | 级 | 文件域 | 类型加载 | 典型 |
 |----|--------|---------|------|
 | **Cx1** | 单文件 / 同文件 ≤3 处 | 不需类型推导 | 改字面量、补 rustdoc、加单测 |
-| **Cx2** | 同 crate ≤5 文件 | 可能需 clippy/dylint lint / deny.toml 单条 | 加方法、抽 helper、补 governance 守卫单条 |
+| **Cx2** | 同 crate ≤5 文件 | 可能需 clippy / deny.toml 单条 | 加方法、抽 helper、补 governance 守卫单条 |
 | **Cx3** | 跨 crate 5–15 文件 | 需 sealed trait / 类型系统强制 | trait 扩字段 + 多实现同步、funnel 双向锁、ADR amendment |
 | **Cx4** | ≥15 文件 / ≥3 领域 | 跨 crate 类型变更 + build.rs/proc-macro codegen | trait ctx 透传、域 crate 接口重构、codegen 链路改造 |
 
@@ -200,7 +200,8 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
-> 本地 canonical `make ci` 只承担 10 分钟有界 affected preflight；unknown 本地忽略并留痕，workspace/feature/integration/coverage/public-api/dylint/audit/container 等重型全量门由 develop/release 或显式 full 承接。`make ci-full` 仅人工诊断，任何 skill/template 不得把它追加为 PR 默认完成条件。
+> 本地 canonical `make ci` 执行 Cargo package reverse closure；unknown/global/异常输入 fail-full。
+> 10 分钟预算由调用方承担，完整 workspace 门由 develop/release 或显式 `make ci-full` 承接。
 > **IN_SCOPE Cx3/Cx4 批量处置门**：ship/fix 切触发 label 前，先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由：属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。如果存在这类 finding，**只发起一次批量处置请求**，用户可全盘采纳建议，或按 finding ID 覆盖个别项；没有 IN_SCOPE Cx3/Cx4 时不发起沟通。**判 defer 后自动建 issue 跟踪（机器可判定 artifact，不再二次确认）**，与 OOS artifact-before-trigger 同序；全部 deferred issue 已建方可切 label。
 > **输出纪律**（ship/review/fix/check 各阶段共用单源）：每阶段**窗口完整打印是主输出、PR 评论是无损留痕，两者都做缺一不可**——评论是 `/fix` 与再审（codex / `/pr-review`）提取 findings 的唯一来源（每条带 `file:line`、无损详表入 `<details>`，无损约定见 `pr-comment.md`）。skill 不重述此纪律，引用本条。
 > 评论格式模板单源 = `.github/project-template/pr-comment.md`。

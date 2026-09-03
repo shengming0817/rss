@@ -20,8 +20,8 @@ const MAX_OPERATOR_SUBJECT_BYTES: usize = 128;
 ///
 /// Authentication and exact tenant/action authorization must succeed before this zero-sized token
 /// is issued. Construction of [`AuthorizedL2DrRecoveryPlan`] consumes it so apply cannot be
-/// expressed without a capability-bearing authorized plan. Production issuing callsites are locked
-/// by `rss_operator_authorization_callsite` to the reviewed runtime wrapper.
+/// expressed without a capability-bearing authorized plan. There is currently no production mint;
+/// the constructors below exist only for this module's deterministic model tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperatorL2DrRecoveryCapability {
     _seal: (),
@@ -29,7 +29,8 @@ pub struct OperatorL2DrRecoveryCapability {
 
 impl OperatorL2DrRecoveryCapability {
     /// Issue after service-principal authentication and exact tenant/action authorization.
-    pub fn issue_for_authorized_operator() -> Self {
+    #[cfg(test)]
+    fn issue_for_authorized_operator() -> Self {
         Self { _seal: () }
     }
 }
@@ -416,7 +417,8 @@ pub struct L2DrRecoveryDurableStartProof {
 
 impl L2DrRecoveryDurableStartProof {
     /// Mint proof only after the provider has committed the exact start audit row.
-    pub fn from_store(
+    #[cfg(test)]
+    fn from_store(
         caller: vocab::ServiceCallerDomain,
         operator_subject: L2DrRecoveryOperatorSubject,
         tenant: rss_request_context::TenantId,
@@ -457,7 +459,8 @@ pub struct AuthorizedL2DrRecoveryPlan {
 
 impl AuthorizedL2DrRecoveryPlan {
     /// Consume the exact durable-start proof and authorization capability.
-    pub fn from_authenticated_and_authorized(
+    #[cfg(test)]
+    fn from_authenticated_and_authorized(
         plan: L2DrRecoveryPlan,
         proof: L2DrRecoveryDurableStartProof,
         capability: OperatorL2DrRecoveryCapability,

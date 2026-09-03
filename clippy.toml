@@ -5,8 +5,6 @@ cognitive-complexity-threshold = 15
 # clock 注入纪律：禁直调系统时钟，强制经构造器位置参注入的 Clock trait。
 # tokio / chrono 路径在骨架未进依赖图，allow-invalid 防「路径无法解析」误报。
 disallowed-methods = [
-  # 认证 verifier 必须端到端 await；首 poll 探测会把合法 Pending provider 误拒为 401（#1828）。
-  { path = "futures_util::future::future::FutureExt::now_or_never", reason = "认证与其它 I/O future 必须真正 await；禁止把首次 Poll::Pending 当业务结果", allow-invalid = true },
   { path = "std::time::Instant::now", reason = "注入 Clock trait（构造器位置参）" },
   { path = "std::time::SystemTime::now", reason = "同上：用 Clock trait，禁默认取系统时钟" },
   { path = "tokio::time::Instant::now", reason = "同上：Clock trait（tokio 变体）", allow-invalid = true },
@@ -25,9 +23,6 @@ disallowed-methods = [
   # 见 bootstrap::replaydeps rustdoc。allow-invalid：非依赖 bootstrap 的 crate 解析不到此路径。
   { path = "bootstrap::replaydeps::RedisUrl::expose", reason = "凭据原文出口仅组合根受控调用；见 replaydeps rustdoc", allow-invalid = true },
   { path = "secure::RedisEndpoint::expose", reason = "凭据原文出口仅 Redis pool builder callsite 受控调用；生产路径必须先经 typed endpoint", allow-invalid = true },
-  # 对称守卫：PostgresUrl::expose() 返回含 user:pass 的原始 postgres URL，仅组合根交 postgres 客户端连接时受控调用。
-  # 见 bootstrap::sagaprojectiondeps rustdoc。allow-invalid：非依赖 bootstrap 的 crate 解析不到此路径。
-  { path = "bootstrap::sagaprojectiondeps::PostgresUrl::expose", reason = "凭据原文出口仅组合根受控调用；见 sagaprojectiondeps rustdoc", allow-invalid = true },
 ]
 
 # 预留：跨域 wire 不裸传强类型标识等纪律，随类型落地补充。

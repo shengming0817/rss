@@ -25,7 +25,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Remove `secure::Sensitivity` without an alias, shim, conversion, or dual API; redaction
   mechanisms remain owned by `secure`.
 - Keep registries, generated catalogs, runtime bindings and admission authority outside the package.
-- Set MSRV to Rust 1.96 with no default features. This is the initial 0.1 Release API baseline;
+- Set MSRV to Rust 1.96 with no default features. This is the initial 0.1 public API;
   there is no Foundation facade, compatibility re-export, alias, shim, or alternate owner path.
 
 ### rss-request-context 0.1.0
@@ -46,7 +46,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
   identity, tenant, authentication, or authorization source.
 - Set MSRV to Rust 1.96 with no default features. The normal direct dependencies are limited to
   Tokio task-local runtime support and `thiserror`.
-- This is the initial Release API baseline; there is no earlier published version, compatibility
+- This is the initial public API; there is no earlier published version, compatibility
   shim, or migration path.
 
 ### rss-trace-context 0.1.0
@@ -57,5 +57,5 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
   OpenTelemetry SDK errors, or SDK types through the public API.
 - Set MSRV to Rust 1.96 with no default features and keep exporter, subscriber, and test helpers out
   of the published dependency and feature surface.
-- This is the initial Release API baseline; there is no earlier published version, compatibility
+- This is the initial public API; there is no earlier published version, compatibility
   shim, or migration path.

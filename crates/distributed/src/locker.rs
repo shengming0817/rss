@@ -115,7 +115,7 @@ mod tests {
     /// FakeLockStore 内部 map 类型别名（规避 clippy::type_complexity）：key → (当前持有 token（None=空闲）, 已发最高 token)。
     type LockState = HashMap<String, (Option<vocab::Epoch>, u64)>;
 
-    /// 内联 FakeLockStore（per-key 单调 token 互斥）——仅在 #[cfg(test)] 子树，不被 dylint impl-allowlist 扫描。
+    /// 内联 FakeLockStore（per-key 单调 token 互斥）——仅在 #[cfg(test)] 子树。
     /// 克隆共享同一底座（`Arc<Mutex>`），供测试持一份调 `evict` 模拟过期、另一份注入 facade。
     #[derive(Clone, Default)]
     struct FakeLockStore {

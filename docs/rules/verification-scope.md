@@ -16,7 +16,7 @@
 
 ## 默认选择
 
-- 普通 PR 运行 affected T1 与必要 T2；分析失败可扩大 affected scope，但不得自动升级 full。
+- 普通 PR 运行 affected T1 与必要 T2；rename/copy、全局输入、未知路径或分析异常必须 fail-full。
 - 完整 conformance、fault/recovery、coverage 与 performance 属于 develop/release 或显式 full。
 - committed AssemblyLock/RuntimePlan 的 repository raw-byte drift 属于 candidate/release final-HEAD identity
   验证；普通 PR 依赖 assembly build-time repository verification 与 RuntimePlan bound parse。

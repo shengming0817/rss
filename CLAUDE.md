@@ -29,16 +29,14 @@ domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的�
 - `clippy.toml` — `disallowed-methods`/`disallowed-types`（clock / panic / import 纪律）
 - `rust-toolchain.toml` / `.config/nextest.toml` — 工具链固定 / 进程隔离测试
 
-要点：库 crate 扁平放在 `crates/`；feature 是域 crate 内的子单元。精确 member、package kind 与层级只从
-Cargo metadata 和 `xtask/src/layers.rs` 派生，不在协作文档复制。
+要点：库 crate 扁平放在 `crates/`；feature 是 crate 内的子单元。精确 member、package kind 与依赖关系
+只从 Cargo metadata 派生，不在协作文档复制。
 
-### 依赖规则（crate 图 + typed policy）
+### 依赖规则（crate 图 + standard policy）
 
 - 稳定方向为 Foundation → Engine → DI-infra → Service → Domain → Adapter/Composition。
 - 兄弟域互不依赖，跨域只经 contract；domain 不依赖 adapter。
-- `SharedRuntimeDeps` 只含共享基础设施/provider value object，具体允许根由
-  `xtask/runtime-deps-guard.toml` 与 `cargo xtask runtime-deps guard` 强制。
-- Cargo/rustc、`deny.toml`、`cargo xtask layer-deps`、`cargo-udeps` 与 `cargo public-api` 是真实 carrier。
+- Cargo/rustc、`deny.toml`、Clippy 与 `cargo-semver-checks` 是当前真实 carrier。
 
 ### 域 crate 开发规则
 
@@ -59,13 +57,15 @@ Cargo metadata 和 `xtask/src/layers.rs` 派生，不在协作文档复制。
 - 日志 / 追踪用 `tracing`（结构化字段 + span）
 - DB 字段 `snake_case`，JSON/Query/Path `camelCase`（serde rename）
 - clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
-- 新增/修改代码覆盖率 ≥ 80%，引擎与基础 crate（`consistency` / `primitives` / `vocab` / `ids`）≥ 90%（表驱动 `#[test]` / `rstest`）
+- workspace 行覆盖率 ≥ 80%（表驱动 `#[test]` / `rstest`）
 - `cargo fmt` + `cargo clippy -- -D warnings` 必须干净
 
 ## 修改代码前
 
 1. 先 `Read` 目标文件，`Grep` 搜索已有实现
-2. 编辑循环按改动类型运行最小复现测试；收尾统一运行 `make ci CI_BASE=<remote>/develop`，它是 10 分钟有界 affected preflight，只选择反向依赖 check、直接影响包 test/clippy 与定向治理测试；feature/integration/workspace 全量重门交 develop/release 或显式 `ci full`。`make ci-full` 仅供人工诊断，不是 PR 默认完成条件
+2. 编辑循环按改动类型运行最小复现测试；收尾统一运行 `make ci CI_BASE=<remote>/develop`。它按 Cargo
+   reverse dependency closure 选择 package，并运行标准 check/nextest/clippy；影响分析异常保守回退
+   `make ci-full`。10 分钟预算由调用方承担，`make ci-full` 仍是 develop/release 或人工显式入口
 3. 只改需要改的
 
 ## AI-robust 治理章程

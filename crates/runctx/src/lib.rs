@@ -42,6 +42,6 @@ pub use ctx::{AppCtx, RequestCtx};
 pub use local::{MissingCtx, scope, try_current, try_with};
 
 // 测试支撑（`test-support` feature）：下游 crate 单测经 `runctx::test_support::app_ctx` 构造 `AppCtx`。
-// 生产构建不启用此 feature ⇒ 不进生产 API 面（`cargo public-api` 默认无此 feature）。
+// 生产构建不启用此 feature，因此不进入默认公开 API 面。
 #[cfg(feature = "test-support")]
 pub use ctx::test_support;

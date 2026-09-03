@@ -3,7 +3,7 @@ use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage, ImageExt a
 
 use super::runtime::{run_container_command, run_container_command_output};
 use super::{
-    ContainerService, MINIO_ARCHIVE_BUCKET, MINIO_NEIGHBOR_BUCKET, MINIO_POLICY_NAME, MINIO_PORT,
+    MINIO_ARCHIVE_BUCKET, MINIO_NEIGHBOR_BUCKET, MINIO_POLICY_NAME, MINIO_PORT,
     MINIO_ROOT_PASSWORD, MINIO_ROOT_USER, MINIO_WORKLOAD_PASSWORD, MINIO_WORKLOAD_USER,
     NetworkAttachment, Result, attach_network, runtime, tls_material,
 };
@@ -157,7 +157,7 @@ pub async fn minio_tls_archive(attachment: NetworkAttachment<'_>) -> Result<Mini
             ]),
         attachment,
     )?;
-    let container = runtime::start(request, ContainerService::Minio).await?;
+    let container = runtime::start(request).await?;
     run_container_command(
         &container,
         "configure admin alias",

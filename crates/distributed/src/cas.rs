@@ -196,7 +196,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// 内联 FakeCasStore（etcd-revision 逻辑）——仅在 #[cfg(test)] 子树，不被 dylint impl-allowlist 扫描。
+    /// 内联 FakeCasStore（etcd-revision 逻辑）——仅在 #[cfg(test)] 子树。
     #[derive(Default)]
     struct FakeCasStore {
         state: Mutex<HashMap<String, (Vec<u8>, vocab::Epoch)>>,

@@ -4272,7 +4272,7 @@ mod tests {
     // 端到端（review #298 F#2）：Message 带 broker 透传的 KEY_TRACE → run_consumer → handle_fresh 读
     // msg.metadata().get(KEY_TRACE) → build_consume_span 还原 → `.instrument` → handler 内 trace_id 与
     // producer 一致。覆盖「键名 + instrument 接线」整链（build_consume_span 直测覆盖不到 handle_fresh 取值/挂载）。
-    // `insert_wire_pair` 在 #[cfg(test)] 子树调用：dylint rss_diport_envelope_reserved_writer 默认不扫 test，合规。
+    // `insert_wire_pair` 在 #[cfg(test)] 子树调用，只构造受控 wire fixture。
     // reason(unwrap/expect): 测试断言——采样 span capture 恒 Some、runtime build / Mutex lock 测试期不失败。
     #[allow(clippy::unwrap_used, clippy::expect_used)]
     #[test]

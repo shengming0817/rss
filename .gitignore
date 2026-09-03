@@ -1,7 +1,5 @@
 # Rust / Cargo
 /target/
-# 自写 dylint lint workspace 的构建产物（嵌套 workspace，根 /target/ 锚定不覆盖）
-lints/target/
 **/*.rs.bk
 *.pdb
 # Cargo.lock 提交（本仓库产出 binary：assemblies/ 与 bins/），故不忽略。
@@ -62,7 +60,6 @@ worktrees/
 docs/notes/
 
 # Generated（选择性提交）
-# generated/ 由 `cargo xtask` 重新生成；具体提交策略见该目录 README
 bak/
 
 # 本地镜像脚本（个人用，不入库）

@@ -9,8 +9,8 @@ use url::{Host, Url};
 
 use super::runtime::run_container_command;
 use super::{
-    ContainerService, NetworkAttachment, RABBITMQCTL_BACKOFF_MS, RABBITMQCTL_MAX_ATTEMPTS, Result,
-    attach_network, copied_tls_image, process_external_value, runtime, tls_material,
+    NetworkAttachment, RABBITMQCTL_BACKOFF_MS, RABBITMQCTL_MAX_ATTEMPTS, Result, attach_network,
+    copied_tls_image, process_external_value, runtime, tls_material,
 };
 
 const AMQP_PORT: u16 = 5672;
@@ -257,7 +257,7 @@ pub async fn env_or_rabbitmq() -> Result<RabbitFixture> {
     let image = GenericImage::new("rabbitmq", "3.13.6-management-alpine")
         .with_exposed_port(AMQP_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Server startup complete"));
-    let container = runtime::start(image, ContainerService::RabbitMq).await?;
+    let container = runtime::start(image).await?;
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(AMQP_PORT).await?;
     Ok(RabbitFixture {
@@ -603,7 +603,7 @@ pub async fn rabbitmq_tls(
             .with_copy_to("/etc/rabbitmq/rabbitmq.conf", config.into_bytes()),
         attachment,
     )?;
-    let container = runtime::start(request, ContainerService::RabbitMq).await?;
+    let container = runtime::start(request).await?;
     run_rabbitmqctl(&container, &["await_startup"]).await?;
     run_rabbitmqctl(&container, &["add_vhost", TLS_VHOST]).await?;
     provision_adjacent_rabbit_queue(&container, &adjacent_queue).await?;

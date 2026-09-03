@@ -38,8 +38,7 @@ default = []
 containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:url", "dep:sqlx", "dep:rcgen"]
 integration = ["containers"]
 
-# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
-# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
+# Live provider tests 由独立 integration workspace package 直接依赖本 feature；本 crate 不维护 test catalog。
 [dev-dependencies]
 eventing.workspace = true                              # public Eventing lifecycle external-crate T2 carrier
 uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度

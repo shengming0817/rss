@@ -94,7 +94,7 @@ pub enum CrashExecutionKind {
     DeadlineExpired,
 }
 
-// Stable declarative input consumed by the testkit compiler and the xtask governance reader. Keep
+// Stable declarative input consumed by the testkit compiler. Keep
 // this invocation data-only: implementation-specific Saga functions and evidence fields do not
 // belong to the catalog protocol.
 macro_rules! define_crash_fault_catalog {

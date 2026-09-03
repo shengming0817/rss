@@ -5,8 +5,8 @@
 //!
 //! # 为什么 resolver 返回**决策**而非**构造好的 adapter**
 //!
-//! `bootstrap` 是服务层 crate，`deny.toml`（`memory` wrappers=[journeys,xtask]）+
-//! `cargo xtask layer-deps` + cargo 依赖图三道门**禁止 bootstrap 依赖 adapters**。故本 resolver 是
+//! `bootstrap` 是服务层 crate，`deny.toml` 的当前 wrapper 约束 +
+//! Cargo 依赖图禁止 bootstrap 依赖 adapters。故本 resolver 是
 //! **纯策略函数**：做拓扑选型 + fail-closed 校验 + 凭据 redaction，返回已校验的 [`ResolvedIdempotency`]
 //! 决策；组合根 `match` 该决策再构造具体 adapter，并在**组合根层**持有 in-mem sealing。
 //!
