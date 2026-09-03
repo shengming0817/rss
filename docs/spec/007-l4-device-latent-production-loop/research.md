@@ -77,7 +77,7 @@ The device credential carries exactly one URI SAN `urn:rss:mqtt-device:v1:{tenan
 
 Downlink PUBACK yields only the non-copyable `BrokerAccepted` transport capability. It does not mean device acknowledgement,
 durable ingress or application receipt. #1902 owns the standalone transport, authentication, session and broker proof; #1903
-owns durable ingress and post-commit receipt; #1908 owns only cross-boundary broker/backpressure/ingress hazards. ADR-028
+owns durable ingress and post-commit receipt. ADR-028
 hands typed candidate construction, provider seams and component lifecycle to future T1/T2 implementation; designated
 binary/image process startup/readiness/restart/drain and activation wait for a hardening-authorized T3 owner.
 

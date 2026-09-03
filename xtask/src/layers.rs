@@ -5,7 +5,7 @@
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain），另将精确路径
 //! `crates/runtimeexec` 分类为 RuntimeExec；
-//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `composition/*` / `examples/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `composition/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -116,13 +116,12 @@ pub(crate) fn is_proc_macro(name: &str) -> bool {
     PROC_MACRO_CRATES.contains(&name)
 }
 
-/// test-support 库（HTTP 契约测试 harness 与可编程外部设备 actor）：保持各自既有分层供 classify，但
+/// test-support 库（HTTP 契约测试 harness）：保持各自既有分层供 classify，但
 /// **只准经 `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（`Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`）。机器守由 layerdeps
 /// [`check_test_support_confinement`](crate::layerdeps::check_test_support_confinement)（INVARIANT:
 /// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区。该规则只消费 `shipped_edges`，故任一指向本集成员的
-/// shipped 内部边即误用；独立 dev bucket 仅应用 LAYER-DEPS-02/03。`iotdevice` 仍是 Example 层外部
-/// actor，不因 test-support 身份获得特殊层。
-pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit", "tracewiretest", "iotdevice"];
+/// shipped 内部边即误用；独立 dev bucket 仅应用 LAYER-DEPS-02/03。
+pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit", "tracewiretest"];
 
 /// 该 crate 是否 test-support 库（只准 dev-dependency 消费，见 [`TEST_SUPPORT_CRATES`]）。
 pub(crate) fn is_test_support(name: &str) -> bool {
@@ -150,8 +149,6 @@ pub(crate) enum Layer {
     Generated,
     /// 非发布 tooling/verification facts；仅组合根可消费，自身无 workspace 内部出边。
     Tooling,
-    /// 示例包（examples）：只准依赖基础 / 引擎 / DI-infra / 服务，不准直接依赖域 / adapter / generated。
-    Example,
     /// 组合根（bins / xtask / assemblies / composition / journeys）：可依赖所有库 crate。
     Root,
 }
@@ -191,9 +188,6 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     {
         return Some(Layer::Root);
     }
-    if member_path.starts_with("examples/") {
-        return Some(Layer::Example);
-    }
     if member_path.starts_with("adapters/") {
         return Some(Layer::Adapter);
     }
@@ -226,8 +220,8 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
     use Layer::{
-        Adapter, Basis, DiPort, Domain, Engine, EventingPublic, Example, FoundationPublic,
-        Generated, PlatformPublic, Root, RuntimeExec, Service, Tooling,
+        Adapter, Basis, DiPort, Domain, Engine, EventingPublic, FoundationPublic, Generated,
+        PlatformPublic, Root, RuntimeExec, Service, Tooling,
     };
     match from {
         // 分层矩阵允许组合根消费所有库 crate；RuntimeExec 再由 deny.toml 精确 target wrapper 收窄。
@@ -239,11 +233,6 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
         EventingPublic => matches!(to, FoundationPublic | Basis | Engine),
         // workspace facts 只消费外部 guppy/thiserror；任何内部出边均属越界。
         Tooling => false,
-        // 示例包可演示 provider-agnostic 服务模型；禁止直接装配域/adapters/generated。
-        Example => matches!(
-            to,
-            FoundationPublic | PlatformPublic | EventingPublic | Basis | Engine | DiPort | Service
-        ),
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
         Generated => matches!(to, FoundationPublic | PlatformPublic | Basis),
         // provider-independent runtime 启动内核：只消费基础/引擎/DI-infra/服务；禁具体域、adapter、
@@ -385,7 +374,6 @@ mod tests {
     #[case("generated", "generated", Some(Layer::Generated))]
     #[case("server", "bins/server", Some(Layer::Root))]
     #[case("rss", "bins/rss", Some(Layer::Root))]
-    #[case("iotdevice", "examples/iotdevice", Some(Layer::Example))]
     #[case("xtask", "xtask", Some(Layer::Root))]
     #[case("journeys", "journeys", Some(Layer::Root))]
     #[case("journeys-fault-matrix", "journeys-fault-matrix", Some(Layer::Root))]
@@ -428,23 +416,15 @@ mod tests {
     }
 
     #[test]
-    fn test_support_catalog_is_exact_without_reclassifying_iotdevice() {
-        assert_eq!(
-            TEST_SUPPORT_CRATES,
-            &["testkit", "tracewiretest", "iotdevice"]
-        );
+    fn test_support_catalog_is_exact() {
+        assert_eq!(TEST_SUPPORT_CRATES, &["testkit", "tracewiretest"]);
         assert!(is_test_support("testkit"));
         assert!(is_test_support("tracewiretest"));
-        assert!(is_test_support("iotdevice"));
         assert!(!is_test_support("identity"));
         assert_eq!(classify("testkit", "crates/testkit"), Some(Layer::Service));
         assert_eq!(
             classify("tracewiretest", "crates/tracewiretest"),
             Some(Layer::Service)
-        );
-        assert_eq!(
-            classify("iotdevice", "examples/iotdevice"),
-            Some(Layer::Example)
         );
     }
 
@@ -596,7 +576,6 @@ mod tests {
             Layer::Domain,
             Layer::Adapter,
             Layer::RuntimeExec,
-            Layer::Example,
             Layer::Root,
         ] {
             assert!(allows(consumer, Layer::EventingPublic), "{consumer:?}");
@@ -654,16 +633,7 @@ mod tests {
     #[case(Layer::Domain, Layer::RuntimeExec, false)]
     #[case(Layer::Adapter, Layer::RuntimeExec, false)]
     #[case(Layer::Generated, Layer::RuntimeExec, false)]
-    #[case(Layer::Example, Layer::RuntimeExec, false)]
     #[case(Layer::Root, Layer::RuntimeExec, true)]
-    // Example 收窄：可依赖 provider-agnostic 服务模型，不可直接依赖域 / adapter / generated。
-    #[case(Layer::Example, Layer::Basis, true)]
-    #[case(Layer::Example, Layer::Engine, true)]
-    #[case(Layer::Example, Layer::DiPort, true)]
-    #[case(Layer::Example, Layer::Service, true)]
-    #[case(Layer::Example, Layer::Domain, false)]
-    #[case(Layer::Example, Layer::Adapter, false)]
-    #[case(Layer::Example, Layer::Generated, false)]
     // 同层横向依赖：禁（§分层 未授予任一分组同层依赖）。
     #[case(Layer::Basis, Layer::Basis, false)]
     #[case(Layer::Engine, Layer::Engine, false)]

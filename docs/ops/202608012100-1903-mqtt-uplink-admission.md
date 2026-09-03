@@ -39,10 +39,6 @@ session down. The pilot records the continue path as
 event and does not imply successful PUBACK. This contract does not add metric labels, dashboard
 panels, or alerts.
 
-#1908's two remote Docker/PostgreSQL/MQTT join filters are registered as `ReleaseCheck`. Develop,
-release, or an explicit full execution owns their evidence; PR and Adaptive CI do not select this T2
-carrier. The checked-in quickstart command remains the manual diagnostic entry point.
-
 ## Dashboard
 
 Use one diagnostic panel:

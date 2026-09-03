@@ -33,8 +33,7 @@ The current persistent revocation store remains RSS's sole decision-side revocat
 The Mosquitto v5 plugin is part of that transport trust boundary. It derives the only device principal from the peer certificate's unique URI SAN `urn:rss:mqtt-device:v1:{tenant}:{device}:{generation}`, verifies that principal against the exact uplink topic and rejects client-supplied reserved assertion properties. It then signs principal, topic, correlation, payload digest, QoS and retain with a broker-only Ed25519 key. RSS receives only the public verification key and can mint `AuthenticatedDeviceDelivery` only after exact policy and signature verification. Topic and payload coordinates can constrain the credential-derived principal but can never construct or override it.
 
 The downlink PUBACK capability is named `BrokerAccepted` to preserve FR-022: it proves broker acceptance only. #1902 does
-not create a device ACK or an application receipt, does not own #1903's durable ingress transaction, does not absorb #1908's
-broker/backpressure-plus-ingress join hazards, and does not satisfy ADR-028's future assembly-level provider closure,
+not create a device ACK or an application receipt, does not own #1903's durable ingress transaction, and does not satisfy ADR-028's future assembly-level provider closure,
 typed candidate construction or component-lifecycle requirements, much less the later designated-process T3 join.
 
 Inbound success PUBACK remains gated by the non-forgeable authenticated delivery capability. MQTT
@@ -63,7 +62,6 @@ Closure extends existing typed registry/code generation, validation, CI-impact a
 | Application receipt follows durable commit | #1903 | Typed transaction outcome and receipt funnel (Hard); crash/duplicate/saturation tests (Medium) |
 | Draft pilot composition cannot omit or substitute its declared providers | #1904 | Compile-only assembly manifest/code generation and required provider types (Hard); no startup, readiness, drain, binary, image, or production artifact claim |
 | Metrics and operator inspection are closed, authorized and redacted | #1905 | Closed enums and typed read permission (Hard); authorization/redaction tests (Medium) |
-| Draft simulator converges only after the matching report | #1906 | Production-ineligible simulator and typed journey seams (Hard); offline/reconnect/ACK-await-report/post-commit-receipt journey (T2 Medium) |
 | Independent PostgreSQL/worker joins (authorized-artifact return vs lease takeover; postcommit crash before attempt-result/lease release) | #1907 | Existing generation/epoch/sealed-artifact/transaction-funnel Hard owners reused; real PostgreSQL + deterministic barrier + worker/artifact-return and real-worker postcommit abort then second-worker LeaseReclaim-to-terminal-result tests (Medium); T3 owner=N/A |
 | L4 closure does not become a parallel gate | #1909 | Existing typed registry/codegen exact-set (Hard); verify/CI-impact synthetic-red tests (Medium) |
 

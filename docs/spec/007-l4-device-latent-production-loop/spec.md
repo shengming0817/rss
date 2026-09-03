@@ -89,7 +89,6 @@ closure is T1/T2 and does not itself authorize contract activation or T3.
 - **FR-018:** Retry scheduling MUST support exact-target wake and periodic resynchronization so a lost wake cannot permanently strand a target.
 - **FR-019:** Execution MUST have bounded concurrency and at most one active attempt for a target.
 - **FR-020:** Reconcile action and typed command outbox publication MUST retain the same transaction and lease-CAS boundary.
-- **FR-020a:** Once a current command is durably `received`, an ACK-triggered reconcile wake MUST await its report instead of issuing or superseding a same-generation command. The exact received command generation and fence remain the report authority even if the reconcile lease advances; no other stale fence gains authority.
 
 ### Device ingress and transport
 
@@ -106,7 +105,6 @@ closure is T1/T2 and does not itself authorize contract activation or T3.
 - **FR-028:** Metrics MUST use crate-owned closed labels and MUST NOT label by tenant, device, command, artifact, or other unbounded identity.
 - **FR-029:** Automatic repair and fenced command supersession MUST remain internal loop transitions and MUST NOT be presented as operator resync, quarantine, unquarantine, cancel, supersede, or delete APIs.
 - **FR-030:** The existing PostgreSQL model keyed by `(tenant_id, device_id, serial)` with `not_after` MUST remain the sole RSS decision-side revocation projection/cache/lookup; External PKI MUST remain the lifecycle/publication authority, and this feature MUST NOT introduce a parallel RSS revocation table or identity.
-- **FR-031:** A simulator-backed pilot MUST keep every proposal contract draft and its simulator artifacts production-ineligible.
 - **FR-032:** A future candidate assembly MUST require persistent state providers and secure transport providers; absence MUST fail typed construction or provider-seam/component readiness without fallback. This T1/T2 requirement MUST NOT claim designated binary/image process startup or readiness.
 - **FR-033:** Policy PUT MUST require a UUID `idempotencyKey` bound to authenticated tenant and path device. New acceptance and identical canonical replay MUST return the same `200` accepted result; expected-generation conflict or key reuse with different canonical input MUST return `409`; a hidden cross-tenant device MUST be indistinguishable from absence at `404`.
 - **FR-034:** Policy validity MUST be between 300 and 31,536,000 seconds, renew-before MUST be between 60 and 31,535,999 seconds, and `renewBeforeSeconds` MUST be strictly less than `validitySeconds`.
@@ -131,9 +129,7 @@ closure is T1/T2 and does not itself authorize contract activation or T3.
 - **NFR-008:** Future candidate components MUST expose T2 disable and bounded-drain semantics while retaining durable facts, receipts, audit, and evidence. Designated binary/image process disable/drain/restart and any later contract activation/rollback lifecycle are governed by ADR-028's separately authorized T3 and MUST NOT be inferred from this component requirement.
 - **NFR-009:** Contract ID, topic, schema hash, transport coordinate, command envelope identity, and event envelope identity MUST be supplied only by generated sealed seams, not callers.
 - **NFR-010:** Candidate assembly dependencies MUST be unrepresentable by plaintext, simulator, missing-provider, or in-memory provider variants.
-- **NFR-011:** One canonical simulator journey MUST prove the cross-capability sequence offline, reconnect, newest command, ACK without convergence, matching report convergence, and post-commit application receipt; it MUST NOT duplicate the primary proofs of the individual capabilities.
 - **NFR-012:** PostgreSQL fault evidence MUST cover only cross-transaction, cross-worker, or crash-boundary join hazards not already owned by a single capability proof, and MUST map each hazard to one observable assertion and one primary owner.
-- **NFR-013:** MQTT fault evidence MUST cover only broker-session, backpressure, or durable-ingress join hazards not already owned by a single transport or ingress proof, and MUST map each hazard to one observable assertion and one primary owner.
 
 Every implementation claim above must have one lowest-sufficient canonical Hard or Medium carrier at its assigned owner. Independent transaction, network, restart, concurrency, or drain hazards require a behavioral Medium proof; constraints made unrepresentable by a Hard carrier do not require a duplicate behavioral proof. A claim that cannot meet this policy is narrowed or deferred rather than treated as proven by prose.
 

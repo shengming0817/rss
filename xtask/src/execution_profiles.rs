@@ -29,11 +29,8 @@ pub(crate) enum DeviceLatentEvidenceId {
     InspectionAuthorization,
     InspectionRedaction,
     InspectionZeroWriteAudit,
-    SimulatorConvergence,
     LeaseTakeover,
     PostcommitReclaim,
-    BrokerDisconnect,
-    SaturationReconnect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,13 +102,6 @@ device_latent_evidence_catalog! {
         "adapters/postgres/src/integration_tests/device_certificate_tests.rs",
         "integration_tests::device_certificate_tests::device_latent_operator_audit_is_fixed_identifier_free_and_business_zero_write"
     ),
-    SimulatorConvergence => (
-        1906,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::DeviceCertificateConvergenceJourney),
-        "journeys/tests/device_certificate_convergence_journey.rs",
-        "offline_device_reconnects_and_converges_only_after_matching_report"
-    ),
     LeaseTakeover => (
         1907,
         T2,
@@ -125,20 +115,6 @@ device_latent_evidence_catalog! {
         ExecutionUnitId::Integration(IntegrationUnitId::PostgresLib),
         "adapters/postgres/src/integration_tests/device_certificate_tests.rs",
         "integration_tests::device_certificate_tests::postcommit_worker_crash_reclaim_keeps_command_singular_and_exposes_interrupted_attempt"
-    ),
-    BrokerDisconnect => (
-        1908,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::MqttBackpressureFaultJourney),
-        "journeys/tests/mqtt_backpressure_fault_journey.rs",
-        "broker_delivery_disconnect_before_ingress_commit_replays_to_one_canonical_receipt"
-    ),
-    SaturationReconnect => (
-        1908,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::MqttBackpressureFaultJourney),
-        "journeys/tests/mqtt_backpressure_fault_journey.rs",
-        "saturated_ingress_persistent_session_reconnect_reaches_one_canonical_outcome"
     ),
 }
 
@@ -326,7 +302,7 @@ mod tests {
                 .iter()
                 .map(|spec| spec.issue)
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([1904, 1905, 1906, 1907, 1908])
+            std::collections::BTreeSet::from([1904, 1905, 1907])
         );
         assert!(specs.iter().all(|spec| matches!(
             spec.tier,

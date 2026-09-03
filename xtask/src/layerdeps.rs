@@ -32,11 +32,10 @@
 //! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::check_wrappers_red_missing_ban_entry|tests::check_wrappers_red_disallowed_wrapper|tests::check_wrappers_rejects_generated_dev_wrapper_without_source_edge", anti_vacuity = "tests::check_wrappers_requires_only_actual_consumers|tests::check_wrappers_allows_zero_consumer_target_without_ban|tests::real_workspace_passes" }—— 有真实 source consumer 的受管 target 必须有 deny ban，wrapper 必须符合源码分层和特殊边界；普通 resolved parent exact-set 由 cargo-deny 独占证明。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
-//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit`、`tracewiretest` 与 `iotdevice`）只准经
+//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit` 与 `tracewiretest`）只准经
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。该规则只接收 `shipped_edges`，故**任一**指向
 //!   test-support 成员的 shipped 内部边即误用；补 `allows` 矩阵盲区
-//!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
-//!   分类也不会自行阻止 root/其它允许边把 iotdevice 带入 shipped 图）。
+//!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
 //! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_internal_testsupport_feature_closure_is_shipped|tests::red_generated_testsupport_direct_alias_and_forwarding_are_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies|tests::red_runtimeexec_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
 //!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped feature 闭包
 //!   （成员默认 feature + `[dependencies]`/`[build-dependencies]`/`[target.*]` activation）启用。闭包解析
@@ -3203,7 +3202,7 @@ eventing_alias = { package = "rss-eventing", path = "crates/eventing", version =
     /// LAYER-DEPS-08 anti-vacuity（绿）：test-support 仅经 dev-dep 消费 ⇒ shipped `edges` 无指向它们的边。
     #[test]
     fn check_test_support_confinement_green_no_shipped_edge() {
-        // identity→testkit、httpd→tracewiretest 与 journeys→iotdevice 均为 dev-dep，不入 shipped edges。
+        // identity→testkit 与 httpd→tracewiretest 均为 dev-dep，不入 shipped edges。
         let edges = vec![e("identity", "httpserve"), e("identity", "generated")];
         assert!(check_test_support_confinement(&edges).is_empty());
     }
@@ -3214,9 +3213,8 @@ eventing_alias = { package = "rss-eventing", path = "crates/eventing", version =
         let findings = check_test_support_confinement(&[
             e("identity", "testkit"),
             e("httpd", "tracewiretest"),
-            e("deviceidentity", "iotdevice"),
         ]);
-        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -3232,9 +3230,8 @@ eventing_alias = { package = "rss-eventing", path = "crates/eventing", version =
             e("testkit", "vocab"),
             e("testkit", "consistency"),
             e("tracewiretest", "tracewire"),
-            e("iotdevice", "mqtt"),
         ]);
-        assert_eq!(findings.len(), 4, "{findings:?}");
+        assert_eq!(findings.len(), 3, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -3711,7 +3708,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "bad-eventexec",
                 "[dependencies]",
                 "eventexec",
-                &["test-support"],
+                &["internal-test-support"],
             ),
         ]);
         assert_eq!(findings.len(), 7, "{findings:?}");

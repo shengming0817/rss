@@ -2,7 +2,7 @@
 
 - **状态**：Accepted（#1587：TENANCY-10 open-source authz parity matrix and boundary ADR）
 - **日期**：2026-07-02
-- **关联**：Feature #1576 · PBI #1587 · ADR-006（内置 typed authplan / OPA 取舍）· `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL · `docs/guides/202607090202-1596-tenancy-consumer-migration.md`
+- **关联**：Feature #1576 · PBI #1587 · ADR-006（内置 typed authplan / OPA 取舍）· `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL
 - **归属**：framework / tenancy / authorization governance
 - **AI-robust 评级**：Medium（`cargo xtask tenancy-closeout` 锁本 ADR、规则引用、矩阵维度与误导表述）
 
@@ -67,7 +67,7 @@ This ADR is a documentation boundary, so true type-system Hard enforcement is no
 carrier is Medium:
 
 - `cargo xtask tenancy-closeout` requires this ADR file, the matrix frameworks, the matrix dimensions, and the explicit boundary claims.
-- The same gate requires `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL, ADR-006, and `docs/guides/202607090202-1596-tenancy-consumer-migration.md` to stay linked.
+- The same gate requires `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL and ADR-006 to stay linked.
 - The same gate rejects selected misleading compatibility phrases in governed #1587 docs.
 
 ## 6. 对标证据（ref）

@@ -76,7 +76,6 @@ rss/
 ├── assemblies/           # ★ 物理打包（assembly.toml）
 ├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml
 ├── fixtures/             # ★ 测试夹具（fixture-*.toml）
-├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
 ├── xtask/                # codegen + golden + 契约/一致性治理校验（替代 tools/ + hack/ + Makefile）
 ├── generated/            # 契约派生的 committed crate（一等审查材料）；其余 codegen 走 build.rs OUT_DIR + insta
 └── actors.toml           # 外部 Actor 注册（参与 contract 但不属于域模型的系统）

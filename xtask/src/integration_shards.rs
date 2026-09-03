@@ -154,7 +154,6 @@ pub(crate) enum ImpactMarker {
     DeviceIdentityPackage,
     SettingsOnlyPackage,
     IdentityAuditPackage,
-    IotDevicePackage,
     SettingsPackage,
     AmqpPackage,
     EventexecPackage,
@@ -177,7 +176,7 @@ pub(crate) enum ImpactMarker {
 }
 
 impl ImpactMarker {
-    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 24] = [
+    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 23] = [
         ("postgres", Self::PostgresPackage),
         ("postgres-migration", Self::PostgresMigrationPackage),
         ("audit", Self::AuditPackage),
@@ -187,7 +186,6 @@ impl ImpactMarker {
         ("deviceidentity", Self::DeviceIdentityPackage),
         ("settingsonly", Self::SettingsOnlyPackage),
         ("identityaudit", Self::IdentityAuditPackage),
-        ("iotdevice", Self::IotDevicePackage),
         ("settings", Self::SettingsPackage),
         ("amqp", Self::AmqpPackage),
         ("eventexec", Self::EventexecPackage),
@@ -215,7 +213,6 @@ impl ImpactMarker {
             Self::DeviceIdentityPackage => "package:deviceidentity",
             Self::SettingsOnlyPackage => "package:settingsonly",
             Self::IdentityAuditPackage => "package:identityaudit",
-            Self::IotDevicePackage => "package:iotdevice",
             Self::SettingsPackage => "package:settings",
             Self::AmqpPackage => "package:amqp",
             Self::EventexecPackage => "package:eventexec",
@@ -704,11 +701,8 @@ pub(crate) enum ChangedIntegrationSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SharedJourneySource {
     Common,
-    DeviceCertificateConvergence,
-    DeviceMtlsPgHarness,
     LocalTxValidation,
     IdentityAuditFixture,
-    MqttBackpressureFault,
     RuntimeComposeFixture,
     SettingsOnlyProductionArtifact,
 }
@@ -720,13 +714,10 @@ struct SharedJourneyRelation {
 }
 
 impl SharedJourneySource {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 5] = [
         Self::Common,
-        Self::DeviceCertificateConvergence,
-        Self::DeviceMtlsPgHarness,
         Self::LocalTxValidation,
         Self::IdentityAuditFixture,
-        Self::MqttBackpressureFault,
         Self::RuntimeComposeFixture,
         Self::SettingsOnlyProductionArtifact,
     ];
@@ -734,13 +725,8 @@ impl SharedJourneySource {
     const fn path(self) -> &'static str {
         match self {
             Self::Common => "journeys/tests/common/mod.rs",
-            Self::DeviceCertificateConvergence => {
-                "journeys/tests/support/device_certificate_convergence.rs"
-            }
-            Self::DeviceMtlsPgHarness => "journeys/tests/support/device_mtls_pg_harness.rs",
             Self::LocalTxValidation => "journeys/tests/support/localtx_validation.rs",
             Self::IdentityAuditFixture => "journeys/tests/support/identityaudit_fixture.rs",
-            Self::MqttBackpressureFault => "journeys/tests/support/mqtt_backpressure_fault.rs",
             Self::RuntimeComposeFixture => "journeys/tests/support/runtime_compose_fixture.rs",
             Self::SettingsOnlyProductionArtifact => {
                 "journeys/tests/support/settingsonly_production_artifact.rs"
@@ -761,10 +747,6 @@ impl SharedJourneySource {
                 ],
                 has_release_consumer: true,
             },
-            Self::DeviceCertificateConvergence => SharedJourneyRelation {
-                critical_carriers: &[IntegrationUnitId::DeviceCertificateConvergenceJourney],
-                has_release_consumer: false,
-            },
             Self::LocalTxValidation => SharedJourneyRelation {
                 critical_carriers: &[
                     IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
@@ -772,12 +754,7 @@ impl SharedJourneySource {
                 ],
                 has_release_consumer: false,
             },
-            Self::DeviceMtlsPgHarness => SharedJourneyRelation {
-                critical_carriers: &[IntegrationUnitId::DeviceCertificateConvergenceJourney],
-                has_release_consumer: true,
-            },
             Self::IdentityAuditFixture
-            | Self::MqttBackpressureFault
             | Self::RuntimeComposeFixture
             | Self::SettingsOnlyProductionArtifact => SharedJourneyRelation {
                 critical_carriers: &[],
@@ -944,8 +921,6 @@ integration_shard_catalog! {
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
             DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             DeviceIdentityRuntimeImageAcceptance => ("deviceidentity-runtime-image-acceptance", ReleaseCheck, "deviceidentity", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [DeviceIdentityPackage, DeviceCertificateCandidate], capabilities: [Docker]),
-            DeviceCertificateConvergenceJourney => ("device-certificate-convergence-journey", IntegrationCritical, "journeys", "device_certificate_convergence_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [IotDevicePackage, IdentityCompositionPackage, DeviceIdentityPackage, EventexecPackage, IdentityPackage, MqttPackage, PostgresPackage, DeviceCertificateCandidate], capabilities: [Docker]),
-            MqttBackpressureFaultJourney => ("mqtt-backpressure-fault-journey", ReleaseCheck, "journeys", "mqtt_backpressure_fault_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [DeviceCertificateCandidate], capabilities: [Docker]),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -2258,116 +2233,6 @@ mod tests {
         assert!(unit_requires_docker(IntegrationUnitId::PostgresLib.spec()));
     }
 
-    #[test]
-    fn device_certificate_convergence_is_one_exact_critical_pg_mqtt_docker_journey() {
-        let spec = IntegrationUnitId::DeviceCertificateConvergenceJourney.spec();
-        assert_eq!(spec.shard, IntegrationShard::EventTransport);
-        assert_eq!(spec.primary_owner, ExecutionProfile::IntegrationCritical);
-        assert_eq!(spec.package, "journeys");
-        assert_eq!(spec.target, "device_certificate_convergence_journey");
-        assert_eq!(spec.kind, TargetKind::Test);
-        assert_eq!(spec.scheduling, Scheduling::Serial);
-        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Mqtt]);
-        assert_eq!(
-            spec.impact_markers,
-            &[
-                ImpactMarker::IotDevicePackage,
-                ImpactMarker::IdentityCompositionPackage,
-                ImpactMarker::DeviceIdentityPackage,
-                ImpactMarker::EventexecPackage,
-                ImpactMarker::IdentityPackage,
-                ImpactMarker::MqttPackage,
-                ImpactMarker::PostgresPackage,
-                ImpactMarker::DeviceCertificateCandidate,
-            ]
-        );
-        assert_eq!(
-            IntegrationUnitId::DeviceCertificateConvergenceJourney
-                .capability_labels()
-                .collect::<Vec<_>>(),
-            ["docker"]
-        );
-        assert_eq!(
-            critical_units_for_targets([("journeys", "device_certificate_convergence_journey")]),
-            BTreeSet::from([IntegrationUnitId::DeviceCertificateConvergenceJourney])
-        );
-        assert_eq!(
-            changed_integration_source("journeys/tests/device_certificate_convergence_journey.rs"),
-            Some(ChangedIntegrationSource::Exact(BTreeSet::from([
-                IntegrationUnitId::DeviceCertificateConvergenceJourney,
-            ])))
-        );
-        assert_eq!(
-            IntegrationUnitId::ALL
-                .into_iter()
-                .filter(|id| {
-                    let candidate = id.spec();
-                    candidate.package == "journeys"
-                        && candidate.target == "device_certificate_convergence_journey"
-                })
-                .count(),
-            1,
-            "device certificate convergence must have one canonical registry owner"
-        );
-    }
-
-    #[test]
-    fn mqtt_backpressure_fault_declares_release_check_pg_mqtt_docker_topology() {
-        let id = IntegrationUnitId::MqttBackpressureFaultJourney;
-        let spec = id.spec();
-        assert_eq!(id.as_str(), "mqtt-backpressure-fault-journey");
-        assert_eq!(spec.shard, IntegrationShard::EventTransport);
-        assert_eq!(spec.primary_owner, ExecutionProfile::ReleaseCheck);
-        assert_eq!(spec.package, "journeys");
-        assert_eq!(spec.target, "mqtt_backpressure_fault_journey");
-        assert_eq!(spec.kind, TargetKind::Test);
-        assert_eq!(spec.scheduling, Scheduling::Serial);
-        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Mqtt]);
-        assert_eq!(
-            spec.impact_markers,
-            &[ImpactMarker::DeviceCertificateCandidate]
-        );
-        assert_eq!(id.capability_labels().collect::<Vec<_>>(), ["docker"]);
-    }
-
-    #[test]
-    fn mqtt_backpressure_fault_has_one_release_check_registry_owner() -> Result<()> {
-        let id = IntegrationUnitId::MqttBackpressureFaultJourney;
-        assert_eq!(
-            "mqtt-backpressure-fault-journey".parse::<IntegrationUnitId>()?,
-            id
-        );
-        assert!(
-            critical_units_for_targets([("journeys", "mqtt_backpressure_fault_journey")])
-                .is_empty()
-        );
-        assert_eq!(
-            changed_integration_source("journeys/tests/mqtt_backpressure_fault_journey.rs"),
-            Some(ChangedIntegrationSource::ReleaseCheck)
-        );
-        assert_eq!(
-            changed_integration_source("journeys/tests/support/mqtt_backpressure_fault.rs"),
-            Some(ChangedIntegrationSource::ReleaseCheck)
-        );
-
-        assert_release_check_only(id)?;
-        assert_eq!(
-            IntegrationUnitId::ALL
-                .into_iter()
-                .filter(|candidate| {
-                    let candidate = candidate.spec();
-                    candidate.package == "journeys"
-                        && candidate.target == "mqtt_backpressure_fault_journey"
-                })
-                .count(),
-            1,
-            "mqtt backpressure fault must have one canonical registry owner"
-        );
-        Ok(())
-    }
-
     fn assert_release_check_only(id: IntegrationUnitId) -> Result<()> {
         let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
         assert!(!critical.unit_ids().contains(&id));
@@ -2491,7 +2356,6 @@ mod tests {
             mqtt,
             BTreeSet::from([
                 IntegrationUnitId::MqttIntegration,
-                IntegrationUnitId::DeviceCertificateConvergenceJourney,
                 IntegrationUnitId::EventTransportDurableE2e,
             ])
         );
@@ -2511,21 +2375,6 @@ mod tests {
             BTreeSet::from([IntegrationUnitId::MqttIntegration]),
             "same-named targets in different packages must not alias"
         );
-        assert_eq!(
-            critical_units_for_markers(&BTreeSet::from([ImpactMarker::DeviceIdentityPackage])),
-            BTreeSet::from([IntegrationUnitId::DeviceCertificateConvergenceJourney]),
-            "deviceidentity source impact must select its one canonical T2 carrier"
-        );
-        for marker in [
-            ImpactMarker::IotDevicePackage,
-            ImpactMarker::IdentityCompositionPackage,
-        ] {
-            assert_eq!(
-                critical_units_for_markers(&BTreeSet::from([marker])),
-                BTreeSet::from([IntegrationUnitId::DeviceCertificateConvergenceJourney]),
-                "simulator and composition changes must select the canonical convergence journey"
-            );
-        }
         Ok(())
     }
 
@@ -2543,10 +2392,6 @@ mod tests {
                 Id::AuditListTenantEntriesLocalTxJourney,
                 Id::SettingsSecretPublishLocalTxJourney,
             ])))
-        );
-        assert_eq!(
-            changed_integration_source("journeys/tests/support/mqtt_backpressure_fault.rs"),
-            Some(ChangedIntegrationSource::ReleaseCheck)
         );
         assert_eq!(
             changed_integration_source("journeys/tests/support/unregistered.rs"),
@@ -2729,35 +2574,7 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            discovered["journeys/tests/support/device_mtls_pg_harness.rs"],
-            (
-                BTreeSet::from([IntegrationUnitId::DeviceCertificateConvergenceJourney]),
-                true,
-            ),
-            "nested support edges must discover both critical and release consumers"
-        );
         assert_eq!(discovered, declared);
-
-        let mut missing_nested_edge = declared.clone();
-        missing_nested_edge
-            .get_mut("journeys/tests/support/device_mtls_pg_harness.rs")
-            .context("registered nested harness must exist")?
-            .0
-            .clear();
-        assert_ne!(
-            discovered, missing_nested_edge,
-            "removing the nested critical edge must be a synthetic red"
-        );
-        let mut missing_release_edge = declared.clone();
-        missing_release_edge
-            .get_mut("journeys/tests/support/device_mtls_pg_harness.rs")
-            .context("registered nested harness must exist")?
-            .1 = false;
-        assert_ne!(
-            discovered, missing_release_edge,
-            "removing the nested release-only edge must be a synthetic red"
-        );
 
         let support_files = std::fs::read_dir(tests.join("support"))?
             .filter_map(|entry| match entry {
@@ -2800,7 +2617,6 @@ mod tests {
                     Id::IdentityRefreshProducerTransactionJourney,
                     Id::SettingsSecretPublishLocalTxJourney,
                     Id::SettingsSecretE2e,
-                    Id::DeviceCertificateConvergenceJourney,
                     Id::IdentityLoginAuditDurableJourney,
                     Id::EventTransportDurableE2e,
                     Id::ConfigsReadyE2e,
@@ -2827,10 +2643,7 @@ mod tests {
                     Id::EventTransportDurableE2e,
                 ]),
             ),
-            (
-                Resource::Mqtt,
-                BTreeSet::from([Id::MqttIntegration, Id::DeviceCertificateConvergenceJourney]),
-            ),
+            (Resource::Mqtt, BTreeSet::from([Id::MqttIntegration])),
             (
                 Resource::ObjectStorage,
                 BTreeSet::from([Id::IntegrationObjectStore]),
@@ -3374,8 +3187,6 @@ mod tests {
             ("runtime", "settings_secret_e2e"),
             ("amqp", "integration"),
             ("mqtt", "integration"),
-            ("journeys", "device_certificate_convergence_journey"),
-            ("journeys", "mqtt_backpressure_fault_journey"),
             ("deviceidentity", "runtime_image_acceptance"),
             ("journeys", "amqp_consumer_at_least_once_journey"),
             ("journeys", "identity_login_audit_durable_journey"),

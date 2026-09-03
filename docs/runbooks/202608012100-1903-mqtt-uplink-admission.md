@@ -38,8 +38,7 @@ not page by itself.
   recovered session remains live while awaiting same-envelope replay, not that settlement succeeded.
 - If pressure is legitimate sustained load, collect queue service time and capacity evidence before
   changing the bound. #1903 does not authorize a generic MQTT DLT/requeue platform, and this runbook
-  does not add metric labels, dashboard panels, or paging alerts. #1908 H2 observes adapter queue /
-  receive-window capacity via test-support; it does not claim this counter or `TrySendError::Full`.
+  does not add metric labels, dashboard panels, or paging alerts.
 
 ## Escalation
 

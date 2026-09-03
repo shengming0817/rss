@@ -109,7 +109,7 @@ This document groups executable work by implementation PBI. Requirements are own
 - [x] Keep all six proposal contracts draft and outside assembly activation; the canonical contract set remains owned by [contracts/contract-set.md](./contracts/contract-set.md).
 - [x] Classify the pilot `compile-only` with no binary, listener, image, configuration carrier, health inventory, journey, or other deployable artifact claim.
 
-This PBI closes static library composition and bounded worker-control observation only. The programmable convergence journey remains #1906 and broker/backpressure fault joins remain #1908. Production candidate integration, readiness/drain, and activation are outside this completed plan and follow ADR-028's independent handoff.
+This PBI closes static library composition and bounded worker-control observation only. Production candidate integration, readiness/drain, and activation are outside this completed plan and follow ADR-028's independent handoff.
 
 ## #1905 — Operations, metrics, and inspection
 
@@ -119,26 +119,12 @@ This PBI closes static library composition and bounded worker-control observatio
 - [x] Keep status, logs, traces, metrics, audit, and CLI output payload-free and redacted.
 - [x] Prove cross-tenant inspection denial, redaction, and label closure at their canonical owners.
 
-## #1906 — Programmable device simulator and journeys
-
-- [x] Provide only the deterministic simulator controls needed for the canonical offline-to-convergence join journey; component semantics remain proven by their earlier T1/T2 owners.
-- [x] Own one canonical journey hazard: offline device → reconnect → latest generation/epoch command → ACK without convergence → matching report → application receipt only after durable commit.
-- [x] Assert the journey observes no readiness at ACK, exactly the matching reported generation at readiness, and no application receipt before its commit boundary.
-- [x] Keep simulator artifacts and receipts explicitly production-ineligible and document the reproducible local command without introducing a delivery projection.
-
 ## #1907 — PostgreSQL and scheduler fault evidence
 
 - [x] Freeze the exact set of independent PostgreSQL joins from NFR-012, excluding every single-capability hazard already owned by #1898 or #1900, and record each as `hazard → lowest sufficient layer → unique owner → observable assertion`.
 - [x] Authorized-artifact return racing lease takeover/worker restart → T2 → #1907 `authorized_artifact_return_loses_to_lease_takeover_without_stale_command` → the stale return is zero-write against the current holder snapshot and appends no lost-epoch command, while the current holder emits exactly one command at the current generation and epoch.
 - [x] Crash after action/command-outbox commit but before attempt-result recording or lease release → T2 → #1907 `postcommit_worker_crash_reclaim_keeps_command_singular_and_exposes_interrupted_attempt` → the first real worker aborts postcommit; after lease expiry a second real worker completes one LeaseReclaim reconcile through a terminal attempt_result; the crash-epoch action/command/outbox write set stays strictly singular and the interrupted attempt stays result-less; the reclaim epoch exposes exactly one LeaseReclaim attempt/result without duplicating that crash-epoch write set; do not replay #1900 supersede.
-- [x] Use deterministic barriers and current persistence/outbox seams; reference #1898/#1900/#1901/#1906 component proofs instead of replaying their desired/wake atomicity, restart-backoff, lost-wake, fenced-command transaction, supersede, sealed-artifact, or journey T2 cases.
-
-## #1908 — MQTT and backpressure fault evidence
-
-- [x] Freeze the exact set of independent broker/session/backpressure joins from NFR-013, excluding every single-capability hazard already owned by #1902 or #1903, and record each as `hazard → lowest sufficient layer → unique owner → observable assertion`.
-- [x] Broker acknowledgement followed by disconnect before application commit → real MQTT broker plus durable ingress (T2) → `mqtt_backpressure_fault_journey::broker_delivery_disconnect_before_ingress_commit_replays_to_one_canonical_receipt` → no application receipt exists before commit and replay yields one canonical committed receipt.
-- [x] Saturated ingress followed by persistent-session reconnect → bounded subscriber plus real broker and durable ingress (T2) → `mqtt_backpressure_fault_journey::saturated_ingress_persistent_session_reconnect_reaches_one_canonical_outcome` → test-support observes the adapter bounded queue / receive window at capacity (`SameEnvelopeReplayAttempts::MAX` retains extra broker-accepted same-envelope publishes); does not claim `TrySendError::Full` or the `queue_full` metric; after old-session close, same-endpoint `session_present=true` replay yields exactly one canonical committed receipt with no premature receipt.
-- [x] Reuse #1902/#1903 component evidence for credentials, ACL, certificate lifecycle, sequence, duplicate, and redaction behavior; use deterministic barriers rather than sleep-only assertions.
+- [x] Use deterministic barriers and current persistence/outbox seams; reference #1898/#1900/#1901 component proofs instead of replaying their desired/wake atomicity, restart-backoff, lost-wake, fenced-command transaction, supersede, or sealed-artifact cases.
 
 ## #1909 — Existing verification-path closure
 

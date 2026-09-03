@@ -3430,21 +3430,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iotdevice"
-version = "0.0.0"
-dependencies = [
- "rumqttc",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "static_assertions",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3553,8 +3538,6 @@ dependencies = [
  "bootstrap",
  "consistency",
  "crypto-adapter",
- "deviceidentity",
- "deviceloop",
  "diport",
  "distributed",
  "eventexec",
@@ -3562,14 +3545,11 @@ dependencies = [
  "generated",
  "httpserve",
  "identity",
- "identity-composition",
  "identityaudit",
  "ids",
- "iotdevice",
  "memory",
  "metrics",
  "metrics-exporter-prometheus",
- "mqtt",
  "oidc",
  "p256",
  "postgres",
@@ -6871,15 +6851,6 @@ dependencies = [
  "futures-io",
  "p12-keystore",
  "rustls-connector",
-]
-
-[[package]]
-name = "tenancyconsumer"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "httpserve",
- "vocab",
 ]
 
 [[package]]

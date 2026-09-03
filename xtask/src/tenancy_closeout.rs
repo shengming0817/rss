@@ -42,9 +42,6 @@ const TENANCY_DYLINTS: &[&str] = &[
 ];
 
 const REGISTRY_FILES: &[&str] = &["Cargo.toml", "lints/Cargo.toml"];
-const TENANCY_CONSUMER_EXAMPLE_PATH: &str = "examples/tenancy-consumer/src/main.rs";
-const TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH: &str =
-    "xtask/tests/tenancy_closeout_generated_specs.rs";
 const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
 
 /// Code carriers bind governance facts to **code/config** only.
@@ -55,12 +52,6 @@ const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
 /// `PgStore::verify_rls_capability`, `TENANCY-PG-CATALOG-PROOF-01` /
 /// `TENANCY-PG-BEHAVIOR-PROOF-01`, the tenancy dylints, and the projection chain checks below).
 const REQUIRED_CODE_CARRIERS: &[RequiredCodeCarrier] = &[
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: "Cargo.toml",
-        needle: "\"examples/tenancy-consumer\"",
-        detail: "tenancy consumer example must be a workspace member",
-    },
     RequiredCodeCarrier {
         rule: Rule::CodeCarrier,
         path: AUTH_E2E_TEST_PATH,
@@ -108,30 +99,6 @@ const REQUIRED_CODE_CARRIERS: &[RequiredCodeCarrier] = &[
         path: AUTH_E2E_TEST_PATH,
         needle: "body, SCOPE_MISSING",
         detail: "runtime auth e2e must assert mTLS does not establish ambient tenant scope",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH,
-        needle: "generated::http::identity_v1::login::SPEC",
-        detail: "tenancy closeout generated-spec smoke test must compile against generated login spec",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: TENANCY_CONSUMER_EXAMPLE_PATH,
-        needle: "GeneratedPrimaryEndpoint::new",
-        detail: "consumer example must compile against generated Primary endpoint wiring",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: TENANCY_CONSUMER_EXAMPLE_PATH,
-        needle: "evidence.self_scoped()",
-        detail: "consumer example must read generated self-scoped route evidence",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: TENANCY_CONSUMER_EXAMPLE_PATH,
-        needle: "ProjectionField::AuditActor",
-        detail: "consumer example must compile against projection field vocabulary",
     },
 ];
 
@@ -894,23 +861,21 @@ members = [
     fn rust_source_required_code_carrier_ignores_line_comment_only() {
         let carrier = RequiredCodeCarrier {
             rule: Rule::CodeCarrier,
-            path: TENANCY_CONSUMER_EXAMPLE_PATH,
-            needle: "GeneratedPrimaryEndpoint::new",
+            path: AUTH_E2E_TEST_PATH,
+            needle: "VerifiedMtlsPeer",
             detail: "must exist",
         };
         let findings = scan_required_code_carrier(
             &carrier,
             r#"
 fn main() {
-    // GeneratedPrimaryEndpoint::new
+    // VerifiedMtlsPeer
 }
 "#,
         );
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
-            findings[0]
-                .subject
-                .contains("GeneratedPrimaryEndpoint::new"),
+            findings[0].subject.contains("VerifiedMtlsPeer"),
             "{findings:?}"
         );
     }

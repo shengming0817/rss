@@ -92,20 +92,11 @@ cargo test -p deviceidentity --bin deviceidentity-server
 #   cargo test -p deviceidentity --features artifact-acceptance --test runtime_image_acceptance \
 #   deviceidentity_runtime_image_is_a_content_addressed_candidate
 
-# #1906 T2 programmable simulator convergence journey (production-ineligible draft artifacts)
-./hack/cargo.sh nextest run -p journeys --features integration --test device_certificate_convergence_journey
-
 # #1907 T2 PostgreSQL/worker join hazards (authorized-artifact return vs lease takeover; postcommit crash/reclaim)
 ./hack/cargo.sh nextest run -p postgres --features integration -E 'test(authorized_artifact_return_loses_to_lease_takeover_without_stale_command) | test(postcommit_worker_crash_reclaim_keeps_command_singular_and_exposes_interrupted_attempt)' --retries 0
-
-# #1908 T2 MQTT broker/backpressure plus durable-ingress join journey
-# ReleaseCheck evidence runs on develop/release or explicit full; PR and Adaptive CI do not run this remote carrier.
-# (both filters: broker_delivery_disconnect_before_ingress_commit_replays_to_one_canonical_receipt
-# and saturated_ingress_persistent_session_reconnect_reaches_one_canonical_outcome)
-./hack/cargo.sh nextest run -p journeys --features integration --test mqtt_backpressure_fault_journey
 ```
 
-The #2117 target is a production candidate, not a supported artifact or activated profile. Its six proposal contracts remain Draft. The image test proves only a caller-supplied content address, nonroot user, fixed ENTRYPOINT, bundled schema and `--help`; it does not launch the service or prove registry provenance. The #1906 simulator remains test-support-only and production-ineligible. The #1907/#1908 commands retain their existing T2 ownership and do not become T3.
+The #2117 target is a production candidate, not a supported artifact or activated profile. Its six proposal contracts remain Draft. The image test proves only a caller-supplied content address, nonroot user, fixed ENTRYPOINT, bundled schema and `--help`; it does not launch the service or prove registry provenance. The #1907 command retains its existing T2 ownership and does not become T3.
 
 ## No activation command
 

@@ -3613,7 +3613,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "bins/",
         "composition/",
         "crates/",
-        "examples/",
         "generated/",
         "journeys/",
         "journeys-fault-matrix/",
@@ -3694,7 +3693,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "composition/audit/",
         "composition/identity/",
         "composition/settings/",
-        "examples/tenancy-consumer/",
     ];
     const TENANCY_CARRIERS: &[&str] = &[
         "xtask/src/pg_tenant_tx_guard.rs",
@@ -3702,7 +3700,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/tenancy_closeout.rs",
         "Cargo.toml",
         "lints/Cargo.toml",
-        "xtask/tests/tenancy_closeout_generated_specs.rs",
         "assemblies/runtime/tests/auth_e2e.rs",
     ];
     const TENANCY_GOVERNANCE_PREFIXES: &[&str] = &["lints/"];
@@ -6025,10 +6022,6 @@ externalPathPrefixes = [".external-tool/"]
             ("composition/identity/src/lib.rs", Domain::Consistency),
             ("lints/src/lib.rs", Domain::TenancyPostgres),
             ("lints/Cargo.toml", Domain::TenancyPostgres),
-            (
-                "xtask/tests/tenancy_closeout_generated_specs.rs",
-                Domain::TenancyPostgres,
-            ),
         ] {
             assert!(
                 local_impact_domains(path).contains(&expected),
@@ -6097,10 +6090,6 @@ externalPathPrefixes = [".external-tool/"]
                     Domain::ContractBinding,
                     Domain::CommandSymmetry,
                 ]),
-            ),
-            (
-                "examples/iotdevice/Cargo.toml",
-                BTreeSet::from([Domain::AssemblyGeneration, Domain::ContractBinding]),
             ),
             (
                 "docs/rules/example.md",
@@ -7346,27 +7335,16 @@ externalPathPrefixes = [".external-tool/"]
         let root = crate::workspace_root()?;
         let command_facts = CommandWorkspaceFacts::new(&root);
         let facts = command_facts.get()?;
-        let convergence = IntegrationUnitId::DeviceCertificateConvergenceJourney;
         for (package, path, expected) in [
             (
                 "mqtt",
                 "adapters/mqtt/src/lib.rs",
-                BTreeSet::from([IntegrationUnitId::MqttIntegration, convergence]),
-            ),
-            (
-                "iotdevice",
-                "examples/iotdevice/src/lib.rs",
-                BTreeSet::from([convergence]),
-            ),
-            (
-                "identity-composition",
-                "composition/identity/src/lib.rs",
-                BTreeSet::from([convergence]),
+                BTreeSet::from([IntegrationUnitId::MqttIntegration]),
             ),
             (
                 "deviceidentity",
                 "assemblies/deviceidentity/src/lib.rs",
-                BTreeSet::from([IntegrationUnitId::PostgresLib, convergence]),
+                BTreeSet::from([IntegrationUnitId::PostgresLib]),
             ),
         ] {
             let impact = impact_with_facts(
@@ -7851,16 +7829,9 @@ externalPathPrefixes = [".external-tool/"]
             bail!("device-certificate candidate must remain selectively planned");
         };
 
-        assert_eq!(
-            impact.integration_units,
-            BTreeSet::from([Id::PostgresLib, Id::DeviceCertificateConvergenceJourney])
-        );
+        assert_eq!(impact.integration_units, BTreeSet::from([Id::PostgresLib]));
         assert!(impact.packages.contains_key("observ"));
-        for release_only in [
-            Id::DeviceIdentityLib,
-            Id::RuntimeLib,
-            Id::MqttBackpressureFaultJourney,
-        ] {
+        for release_only in [Id::DeviceIdentityLib, Id::RuntimeLib] {
             assert!(!impact.integration_units.contains(&release_only));
             assert_eq!(
                 release_only.spec().primary_owner,
@@ -7912,7 +7883,7 @@ externalPathPrefixes = [".external-tool/"]
             .collect::<BTreeSet<_>>();
 
         assert!(candidate_paths.len() > 6);
-        assert_eq!(evidence_paths.len(), 6);
+        assert_eq!(evidence_paths.len(), 4);
         assert!(device_latent_candidate_impact_path(
             "generated/src/device_certificate.rs"
         ));
@@ -7932,14 +7903,8 @@ externalPathPrefixes = [".external-tool/"]
             };
             assert_eq!(
                 impact.integration_units,
-                BTreeSet::from([Id::PostgresLib, Id::DeviceCertificateConvergenceJourney]),
+                BTreeSet::from([Id::PostgresLib]),
                 "unexpected PR-critical projection for {path}"
-            );
-            assert!(
-                !impact
-                    .integration_units
-                    .contains(&Id::MqttBackpressureFaultJourney),
-                "ReleaseCheck-only MQTT evidence leaked for {path}"
             );
         }
         for path in evidence_paths {
@@ -8316,10 +8281,6 @@ externalPathPrefixes = [".external-tool/"]
         assert!(
             package_has_test_targets(facts, "grpc")?,
             "grpc lib unit tests must retain package-scoped execution"
-        );
-        assert!(
-            package_has_test_targets(facts, "iotdevice")?,
-            "iotdevice is a library test-support actor with package-scoped tests"
         );
         Ok(())
     }

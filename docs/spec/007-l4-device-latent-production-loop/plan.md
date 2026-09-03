@@ -11,8 +11,8 @@ Wave 1: #1893 || #1894
 Wave 2: #1895 || #1896
 Wave 3: #1897 || #1902
 Wave 4: #1898 -> #1899 -> #1900 -> #1901 -> #1903 -> #1904
-Wave 5: #1905 || #1906
-Wave 6: #1907 -> #1908 -> #1909
+Wave 5: #1905
+Wave 6: #1907 -> #1909
 Future handoff: ADR-028 candidate integration -> separately authorized hardening/T3 activation
 ```
 
@@ -51,9 +51,7 @@ Changed-line ranges are design and review budgets. They help keep a PBI cohesive
 | #1903 | 1,700–1,990 |
 | #1904 | 1,700–1,990 |
 | #1905 | 1,550–1,850 |
-| #1906 | 1,600–1,900 |
 | #1907 | 1,700–1,990 |
-| #1908 | 1,700–1,990 |
 | #1909 | 1,450–1,800 |
 
 Exceeding a range prompts scope and ownership review, not an automated failure. Splitting is appropriate only when it preserves one semantic owner and does not create compatibility layers or duplicate proofs.

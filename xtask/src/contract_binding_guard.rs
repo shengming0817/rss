@@ -1831,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_sources_covers_nested_examples_and_direct_journey_roots() -> anyhow::Result<()> {
+    fn scan_sources_covers_workspace_compositions_and_direct_journey_roots() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!(
             "rss-contract-binding-roots-{}-{}",
             std::process::id(),
@@ -1856,7 +1856,6 @@ mod tests {
             }
         "#;
         for relative in [
-            "examples/demo/src/lib.rs",
             "composition/settings/src/lib.rs",
             "journeys/src/lib.rs",
             "journeys-fault-matrix/src/lib.rs",
@@ -1873,30 +1872,23 @@ mod tests {
         }
         let facts = facts_for_packages(
             &root,
-            &[
-                (
-                    "examples-demo",
-                    "examples/demo",
-                    &[("examples-demo", "lib")],
-                ),
-                (
-                    "composition-settings",
-                    "composition/settings",
-                    &[("composition-settings", "lib")],
-                ),
-            ],
+            &[(
+                "composition-settings",
+                "composition/settings",
+                &[("composition-settings", "lib")],
+            )],
         )?;
 
         let result = scan_sources(&root, &facts);
         std::fs::remove_dir_all(&root)?;
         let (scanned, findings) = result?;
         assert_eq!(
-            scanned, 4,
+            scanned, 3,
             "all workspace members and direct production root shapes must be scanned"
         );
         assert_eq!(
             findings.len(),
-            4,
+            3,
             "each synthetic root must trip the provenance guard: {findings:?}"
         );
         Ok(())
@@ -1909,8 +1901,6 @@ mod tests {
         let facts = command_facts.get()?;
         let roots = production_source_roots(&root, facts)?;
         for relative in [
-            "examples/tenancy-consumer",
-            "examples/iotdevice",
             "composition/identity",
             "composition/settings",
             "composition/audit",
