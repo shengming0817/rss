@@ -5,24 +5,23 @@ release catalog、schema 与 Cargo facts 派生，文档不复制。
 
 ## 两个兼容轴
 
-- 轴 A：Rust Release API/SemVer。只有 catalog 接纳且有真实 external consumer 的 package/symbol 受保护。
+- 轴 A：Rust Release API/SemVer。
 - 轴 B：wire/contract compatibility。只要 persisted、networked 或跨版本消费，schema/manifest identity 受保护。
 - 两轴正交：internal Rust breaking 不必升 wire version；wire breaking 不能靠 Rust SemVer 掩盖。
 - internal `pub`、Markdown、同名 carrier 或历史发布不自动建立当前承诺。
 
 ## Rust Release API
 
-- catalog、Cargo package identity、package proof 与 external consumer 必须同 revision 闭合；candidate workflow
-  只验证明确选中的 Release Surface，不把所有 technically publishable package 自动提升为发布候选。
+- 首次发布前冻结已接纳的 major/minor 版本线，版本更新只修改 patch；改变版本线需要独立架构决策。该阶段的
+  public API replacement 不要求兼容或 minor bump。
+- 首次发布后各 crate 独立遵循 SemVer：1.0 前的 breaking public API change 至少升级 minor，1.0 起升级 major。
 - 删除或改签受保护 symbol 按 SemVer/breaking policy 处理；未接纳 internal package 可直接 breaking refactor。
 - package rename、facade、re-export 或 shim 不得隐式延续旧 identity；replacement 原子切 consumer 并删旧路径。
 - Foundation/common primitive 只能有一个 owner。提升时 canonical owner 新建 private-representation/closed-value
   public type，consumer 直接切换并删除重叠 internal generic type；不得保留 alias、deprecated re-export、
   `From`/`TryFrom`、feature flag、双路径或 convenience facade。
 - public owner projection 以 typed rustdoc source identity 判定。来自另一 owner 的 `pub use` 是新兼容路径；未知
-  owner、类型泄漏或 package proof 不完整均 fail-closed。首次发布后以已发布版本或 release tag 做 SemVer baseline。
-- package 版本、publish eligibility、MSRV、source revision 和 publish closure 从 Cargo metadata、release catalog 与
-  package artifact 派生；文档、binary/image 存在或 registry 可用性快照都不能选择 Release Surface。
+  owner 或类型泄漏均 fail-closed。首次发布后以已发布版本或 release tag 做 SemVer baseline。
 
 ## Wire breaking
 
@@ -45,7 +44,8 @@ review-only acknowledgement 与 intentional breaking authorization 正交：前�
 
 ## Deprecation 与删除
 
-- deprecation 记录 owner、replacement、consumer set、最早删除条件与 migration evidence。
+- deprecation 在 changelog 记录 owner、replacement、consumer set、最早删除条件与 migration evidence；1.0 起至少保留
+  一个 minor release（安全或正确性风险除外），1.0 前删除仍需匹配 SemVer bump 与 migration notes。
 - 删除前必须证明 active mounts/subscribers、persisted state、generated binding 与 external consumers 均已迁移。
 - replacement first-green 后同一交付切 canonical pointer 并删除旧 target/schema/binding；不留 alias/shim/双读。
 - 没有 successor 的退役需要产品承诺退出依据与 final no-residual proof。
@@ -66,5 +66,5 @@ review-only acknowledgement 与 intentional breaking authorization 正交：前�
 
 ## Carrier
 
-- Hard：schema/manifest、closed enums、generated binding、Cargo/visibility 与 actual external consumer compilation。
-- Medium：breaking comparison、package proof、deprecation residual scan 与 migration integration。
+- Hard：schema/manifest、closed enums、generated binding 与 Cargo/visibility。
+- Medium：breaking comparison、deprecation residual scan 与 migration integration。

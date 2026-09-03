@@ -1,7 +1,7 @@
 # RSS 项目能力与范围
 
-本文是能力处置与项目边界的规划真源，不是运行证据或 Markdown enforcement carrier。精确 package、target、
-依赖边与发布集合只由 Cargo facts、发布证明和真实消费者确认。
+本文是能力处置与项目边界的规划真源，不是运行证据或 Markdown enforcement carrier。精确 package、target 与
+依赖边由 Cargo facts 派生；Release Surface 由维护者依据职责、公共 API 和闭合 package 事实明确接纳。
 
 ## 项目目标
 
@@ -9,7 +9,7 @@ RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace�
 运行算法与 conformance 语义，不拥有消费方业务、provider 实现、应用装配或生产交付。
 
 最终仓库只保留公共一致性语义所需的 library crates、最低充分 T1/T2、发布证明、法律文件和使用这些 crate 所必需的
-最小文档。当前目录或依赖存在不构成保留依据；最终 package 集合必须由职责唯一性、闭合依赖和真实外部消费者共同确认。
+最小文档。当前目录或依赖存在不构成保留依据；最终 package 集合由职责唯一性、Cargo 闭合依赖和维护者接纳确认。
 
 ## 处置状态
 
@@ -17,11 +17,11 @@ RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace�
 |---|---|---|
 | Evolve | provider-neutral 消息一致性核心 | 收敛公共语义、依赖方向、可消费性与正确性 |
 | Complete | 已接纳的公共 primitive 或 conformance 尚缺最低充分闭环 | 只完成既定 T1/T2 与发布闭环，不扩展产品面 |
-| Freeze | 已发布且仍有真实消费者的旧公共承诺 | 仅兼容、安全、弃用与退出；不得成为内部旧实现的保留理由 |
+| Freeze | 已发布且尚未按弃用/退出规则终止的旧公共承诺 | 仅兼容、安全、弃用与退出；不得成为内部旧实现的保留理由 |
 | External | 事实和生命周期由消费方、provider 或交付系统拥有 | RSS 不实现；只消费成熟上游或由外部消费者通过公共 crate 集成 |
 
-未发布、无真实外部消费者的仓内 `pub`、internal crate、测试便利或历史治理载体不属于 Freeze，可以在 owner 切换时
-直接删除。External 能力不得以 archive、legacy、plugin、compatibility façade 或改名后的内部副本继续留在 RSS。
+未发布的仓内 `pub`、internal crate、测试便利或历史治理载体不属于 Freeze，可以在 owner 切换时直接删除。
+External 能力不得以 archive、legacy、plugin、compatibility façade 或改名后的内部副本继续留在 RSS。
 
 ## 核心能力
 
@@ -31,7 +31,7 @@ RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace�
 | 消息一致性 | LocalTx、Outbox/Inbox、幂等、settlement/ambiguity、lease/fencing、bounded retry 与窄 transaction/store port | 业务 Saga、projection、reconcile、command workflow 与领域状态机 |
 | 公共运行算法 | provider-neutral 处理顺序、ACK-after-commit、取消、bounded drain 与 settlement callback | 进程启动、配置、listener、health/readiness、assembly 与部署生命周期 |
 | Conformance | 黑盒、provider-neutral 的公共不变量 assertion 与最低充分 T1/T2 | provider fixture/driver、数据库或 broker 管理、产品 journey、T3 与 evidence 平台 |
-| 发布 | 独立 package、SemVer、文档、registry candidate 与外部消费证明 | 应用 binary/image、生产 profile、部署、迁移、运营与 release control plane |
+| 发布 | 独立 package、SemVer、文档、Release Surface、registry candidate 与人工发布 | 应用 binary/image、生产 profile、部署、迁移、运营与 release control plane |
 
 ## 仓库边界
 
@@ -48,17 +48,19 @@ RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace�
 ## 公共消费边界
 
 - internal `pub`、workspace package、路径依赖或 generated artifact 不自动成为 Release API。
-- 公共面只包含发布集合接纳、真实 workspace 外 consumer 可编译、SemVer/breaking proof 和 package artifact 闭合的能力。
+- Release Surface 明确接纳与 package artifact 闭合共同选择公共 package；Release API 兼容性归
+  `api-versioning.md`。
 - Core 不依赖 provider 或消费方；conformance 不拥有 provider 实现或测试基础设施。
 - 候选 crate 可以拥有其公共算法签名和 conformance 所必需的最小 semantic trait/callback；不得借此引入通用 Provider SPI、
   registry、动态发现、client、配置、生命周期、选择逻辑或具体实现。
-- package 数量、名称和依赖 DAG 由最终 Cargo metadata 与消费者证据确认，不能从既有目录、临时抽取路径或本文反推。
+- package 数量、名称和依赖 DAG 由职责边界、最终 Cargo metadata 与维护者接纳确认，不能从既有目录、临时抽取路径
+  或本文反推。
 
 ## 验证边界
 
 - T1 证明类型、状态机、API 与 package 不变量；T2 只覆盖公共语义无法由 T1 观察的 provider-neutral seam。
 - T3、production profile、binary/image、deployment 与产品级 recovery 不属于 RSS。
-- 结构边界最终由 Cargo metadata、target kind、依赖图、package proof、真实外部 consumer 和 tracked-path audit 验证。
+- 结构边界最终由 Cargo metadata、target kind、依赖图、package proof 和 tracked-path audit 验证。
 - Markdown 只记录范围与决策，不充当 package inventory、删除完成证明或运行 receipt。
 
 ## 能力准入
@@ -67,7 +69,7 @@ RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace�
 
 1. 是否唯一属于公共消息一致性语义，而不是应用、领域、provider、环境或交付事实？
 2. 是否存在稳定 owner，且不能直接使用成熟上游或更小的现有公共类型？
-3. 是否被最终候选的公开 API 直接需要，并有真实外部消费者？
+3. 是否被最终候选的公开 API 或明确的跨仓使用场景直接需要？
 4. 是否能在不依赖 workspace path、internal crate、业务 generated 类型或未发布 package 的情况下独立打包和消费？
 5. 是否有最低充分 Hard/Medium carrier、SemVer owner 与删除路径？
 
