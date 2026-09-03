@@ -61,14 +61,7 @@ pub(crate) fn collect(
     producers: &BTreeMap<String, &GovernedContract>,
 ) -> Result<BTreeMap<String, ProducerExecutionProjection>> {
     let mut refresh_commit_files = Vec::new();
-    for directory in [
-        "adapters",
-        "assemblies",
-        "bins",
-        "composition",
-        "crates",
-        "examples",
-    ] {
+    for directory in ["adapters", "assemblies", "composition", "crates"] {
         refresh_commit_files.extend(production_rs_files(root, &root.join(directory))?);
     }
     ensure_exact_refresh_commit_ack_mints(&refresh_commit_files)?;

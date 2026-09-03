@@ -18,9 +18,8 @@ pub(crate) const OUTBOX_SWEEPER: &str = "settingsonly_outbox_sweeper";
 pub(crate) const DR_ADMISSION: &str = "settingsonly_dr_admission";
 pub(crate) const SETTINGS_PROJECTION_WORKER: &str = "projection_worker:settings.config-projection";
 
-/// Exact required-probe closure of the production SettingsOnly assembly.
-/// Compiled only for unit tests and the `test-support` façade (artifact acceptance).
-#[cfg(any(test, feature = "test-support"))]
+/// Unit-test inventory for keeping required probe names non-empty and unique.
+#[cfg(test)]
 pub(crate) const PRODUCTION_REQUIRED_PROBES: &[&str] = &[
     RLS,
     settings_composition::CONFIGS_READY_PROBE_NAME,

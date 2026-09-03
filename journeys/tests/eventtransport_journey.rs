@@ -2,7 +2,7 @@
 //!
 //! 兑现 issue #1119 的两个治理点（resolver 单测在 bootstrap，本 journey 验**决策→构造**接缝在 dev root）：
 //! - **TOPO-INMEM-SEAL-01（dev root 落地）**：`MemBus` 只在 `ResolvedTransport::Demo` 臂构造——经
-//!   [`resolve_demo_bus`] 的 match 绑定到已校验决策；非 Demo 决策不可达此构造。生产 bin（`bins/server`）
+//!   [`resolve_demo_bus`] 的 match 绑定到已校验决策；非 Demo 决策不可达此构造。production assembly
 //!   经 cargo-deny 连 `memory` 都依赖不到（更强 Hard），故 sealing 在两端都成立。
 //! - **TOPO-FAILCLOSED-01（root 边界）**：durable 拓扑缺 broker URL ⇒ `resolve` 返 `Err`，组合根
 //!   fail-fast 拒绝启动，绝不降级回 in-mem（见 [`durable_topology_fails_closed_without_broker`]）。

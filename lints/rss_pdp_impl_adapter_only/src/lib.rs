@@ -70,7 +70,7 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Example
     /// ```ignore
-    /// // bins/server（组合根，非 adapters）：
+    /// // assemblies/runtime（组合根，非 adapters）：
     /// struct AllowAll;
     /// impl diport::Pdp for AllowAll { /* 恒返回伪 VerifiedClaims */ } // 触发
     /// ```

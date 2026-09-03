@@ -414,7 +414,7 @@ struct Program {
 
 fn production_sources(root: &Path) -> Result<Vec<(std::path::PathBuf, String)>> {
     let mut paths = Vec::new();
-    for source_root in ["crates", "adapters", "assemblies", "bins"] {
+    for source_root in ["crates", "adapters", "assemblies"] {
         paths.extend(crate::src_scan::rs_files(&root.join(source_root))?);
     }
     paths.sort();
@@ -1786,7 +1786,7 @@ mod tests {
     #[test]
     fn integration_test_subtree_is_excluded_from_production_sources() -> Result<()> {
         let fixture = TempRoot::new("integration-test-subtree")?;
-        for source_root in ["crates", "adapters", "assemblies", "bins"] {
+        for source_root in ["crates", "adapters", "assemblies"] {
             std::fs::create_dir_all(fixture.path.join(source_root))?;
         }
         let support = fixture

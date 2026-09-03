@@ -2,10 +2,7 @@
 //!
 //! The crate's own dev-dependency enables `test-util`, so a normal trybuild case cannot prove the
 //! default graph. This test checks an isolated, default-features-only consumer with a dedicated,
-//! reusable target directory. `cargo xtask verify` separately runs `shipped-feature-guard` against
-//! the actual `server` and `rss` roots, catching feature unification and printing its dependency
-//! chain. The residual feature-gated test surface remains a Medium guard; its complete absence
-//! from both shipped graphs is the Hard boundary.
+//! reusable target directory. The residual feature-gated test surface remains a Medium guard.
 //!
 //! This is the isolated default-feature compile evidence for `ROUTE-MOUNT-NOBYPASS-01`.
 

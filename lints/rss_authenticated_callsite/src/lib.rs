@@ -45,7 +45,7 @@ use rustc_span::Span;
 /// 组合根（assembly / bin）的验签桥在凭据校验通过后构造 `Authenticated` 并经外层 `.layer()` 注入，是唯一合法构造点。
 /// 当前生产 runtime 与 identityaudit 验签桥构造 access/mTLS 与 service-token evidence；
 /// allowlist 精确覆盖列明 `auth_bridge` 与 `operator::{projection,dlq,settings}` nested def-path。
-/// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
+/// assemblies/runtime → package name "runtime"（单一 library 组合根）。
 /// 定义 crate `httpserve` 不入 allowlist：其生产代码不构造 `Authenticated`（仅 `#[cfg(test)]` 调，不被扫）。
 const ALLOWED_AUTHENTICATED_MINT_FUNCTIONS: &[(&str, &str, &str)] = &[
     ("runtime", "allow_evidence", "auth_bridge::allow_evidence"),

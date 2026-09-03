@@ -1105,6 +1105,42 @@ mod tests {
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
     use std::collections::BTreeSet;
 
+    struct TestBlocklist {
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl TestBlocklist {
+        fn create() -> std::io::Result<Self> {
+            let root = std::env::temp_dir().join(format!(
+                "rss-identityaudit-blocklist-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(&root)?;
+            let path = root.join("password-blocklist.sha256");
+            if let Err(error) = std::fs::write(
+                &path,
+                b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
+            ) {
+                let _ = std::fs::remove_dir(&root);
+                return Err(error);
+            }
+            Ok(Self { root, path })
+        }
+    }
+
+    impl Drop for TestBlocklist {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
     #[tokio::test]
     async fn redis_probe_conjoins_provider_flag_with_terminal_task_status() -> anyhow::Result<()> {
         let ready = Arc::new(AtomicBool::new(true));
@@ -1761,11 +1797,11 @@ mod tests {
 
     #[test]
     fn identity_builder_loads_the_declared_blocklist_and_ttls() -> anyhow::Result<()> {
-        let blocklist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../deploy/password-blocklist.demo.sha256");
+        let blocklist = TestBlocklist::create()?;
         let document = include_str!("../identityaudit.example.toml").replace(
             "/run/rss/password-blocklist.sha256",
             blocklist
+                .path
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("blocklist path is not UTF-8"))?,
         );

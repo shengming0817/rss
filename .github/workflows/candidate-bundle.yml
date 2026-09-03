@@ -33,7 +33,7 @@ jobs:
           rustc --version --verbose
           cargo --version --verbose
 
-      - name: Verify final-HEAD assembly artifacts
+      - name: Verify final-HEAD assembly identity
         run: |
           set -euo pipefail
           ./hack/cargo.sh xtask assembly lock check

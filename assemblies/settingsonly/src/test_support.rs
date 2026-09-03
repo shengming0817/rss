@@ -8,12 +8,6 @@ use anyhow::Context as _;
 
 use crate::{auth_bridge, listeners, runtime};
 
-/// Exact production readiness closure used by artifact acceptance.
-#[must_use]
-pub const fn production_required_probe_names() -> &'static [&'static str] {
-    crate::readiness::PRODUCTION_REQUIRED_PROBES
-}
-
 pub struct FixtureConfig {
     primary: SocketAddr,
     health: SocketAddr,

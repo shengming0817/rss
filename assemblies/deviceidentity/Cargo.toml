@@ -17,17 +17,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-artifact-acceptance = ["test-support"]
 test-support = ["identity-composition/test-support"]
-
-[[bin]]
-name = "deviceidentity-server"
-path = "src/main.rs"
-
-[[test]]
-name = "runtime_image_acceptance"
-path = "tests/runtime_image_acceptance.rs"
-required-features = ["artifact-acceptance"]
 
 [dependencies]
 eventing.workspace = true
@@ -62,7 +52,6 @@ url = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
-tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
 toml = { workspace = true }
 zeroize = { workspace = true }

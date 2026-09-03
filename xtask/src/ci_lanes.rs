@@ -279,17 +279,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            AssemblyArtifactsCheck => (step_assembly_artifacts_check, Some("xtask/src/assembly_artifacts.rs"),
-                gate(
-                        GateId::AssemblyArtifactsCheck,
-                        "assembly-artifacts-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             AssemblyModulesCheck => (step_assembly_modules_check, Some("xtask/src/assembly_codegen.rs"),
                 gate(
                         GateId::AssemblyModulesCheck,
@@ -349,17 +338,6 @@ macro_rules! gate_catalog {
                 gate(
                         GateId::LayerDeps,
                         "layer-deps",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            ShippedFeatureGuard => (step_shipped_feature_guard, Some("xtask/src/shipped_feature_guard.rs"),
-                gate(
-                        GateId::ShippedFeatureGuard,
-                        "shipped-feature-guard",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -929,7 +907,6 @@ impl GateId {
             | Self::AssemblyValidate
             | Self::ContractBreaking
             | Self::LayerDeps
-            | Self::ShippedFeatureGuard
             | Self::WsDepsDrift
             | Self::CiEntryGuard
             | Self::DeferGate => Policy::Always,
@@ -943,9 +920,9 @@ impl GateId {
             | Self::OutboxSameIdGuard
             | Self::ReconcileOutboxCommandGuard => Policy::OnImpact(Domain::RuntimeEventing),
 
-            Self::AssemblyArtifactsCheck
-            | Self::AssemblyModulesCheck
-            | Self::AssemblyProvidersCheck => Policy::OnImpact(Domain::AssemblyGeneration),
+            Self::AssemblyModulesCheck | Self::AssemblyProvidersCheck => {
+                Policy::OnImpact(Domain::AssemblyGeneration)
+            }
 
             Self::AssemblyLockCheck | Self::AssemblyRuntimePlanCheck => Policy::FullOnly,
 
@@ -1400,7 +1377,6 @@ mod tests {
                 "assembly-validate",
                 "layer-deps",
                 "wsdeps-drift",
-                "shipped-feature-guard",
                 "ci-entry-guard",
                 "defer-gate",
             ])
@@ -1416,7 +1392,6 @@ mod tests {
                 "inbox-cutover-guard",
                 "outbox-same-id-guard",
                 "reconcile-outbox-command-guard",
-                "assembly-artifacts-check",
                 "assembly-modules-check",
                 "assembly-providers-check",
                 "consistency-fixtures",
@@ -1456,11 +1431,7 @@ mod tests {
             ),
             (
                 LocalImpactDomain::AssemblyGeneration,
-                &[
-                    "assembly-artifacts-check",
-                    "assembly-modules-check",
-                    "assembly-providers-check",
-                ],
+                &["assembly-modules-check", "assembly-providers-check"],
             ),
             (
                 LocalImpactDomain::Consistency,

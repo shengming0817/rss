@@ -21,9 +21,7 @@ const WORKSPACE_SOURCE_ROOTS: &[&str] = &[
     "adapters",
     "assemblies",
     "composition",
-    "bins",
     "journeys",
-    "examples",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

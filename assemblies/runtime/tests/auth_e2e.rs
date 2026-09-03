@@ -8,7 +8,7 @@
 //!
 //! 本批不断言 handler 读完整 `Principal`（属 W，评审 F3）——只断言证据注入放行（200）。
 //!
-//! NOTE: `bins/rss` 与 `bins/server` 已成薄壳（#1309）；验签桥逻辑现集中在 `assemblies/runtime`。
+//! NOTE: 验签桥逻辑集中在 `assemblies/runtime`。
 
 use std::collections::HashSet;
 use std::future::Future;

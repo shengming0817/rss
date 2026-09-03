@@ -18,11 +18,9 @@ const SOURCE_ROOTS: &[&str] = &[
     "crates",
     "adapters",
     "assemblies",
-    "bins",
     "generated",
     "journeys",
     "journeys-fault-matrix",
-    "examples",
 ];
 
 const TOKEN_PROFILE_RUSTDOC_CONTRACTS: &[(&str, &[&[&str]])] = &[

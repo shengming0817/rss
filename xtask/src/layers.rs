@@ -5,7 +5,7 @@
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain），另将精确路径
 //! `crates/runtimeexec` 分类为 RuntimeExec；
-//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `composition/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `xtask` / `assemblies/*` / `composition/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -149,12 +149,12 @@ pub(crate) enum Layer {
     Generated,
     /// 非发布 tooling/verification facts；仅组合根可消费，自身无 workspace 内部出边。
     Tooling,
-    /// 组合根（bins / xtask / assemblies / composition / journeys）：可依赖所有库 crate。
+    /// 组合根（xtask / assemblies / composition / journeys）：可依赖所有库 crate。
     Root,
 }
 
 /// 按 crate 名 + 成员路径（相对 workspace root，如 `crates/vocab` / `adapters/redis` /
-/// `bins/server` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
+/// `assemblies/runtime` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if matches!(
@@ -179,7 +179,6 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
         return Some(Layer::Generated);
     }
     if member_path == "xtask"
-        || member_path.starts_with("bins/")
         || member_path.starts_with("assemblies/")
         || member_path.starts_with("composition/")
         || member_path == "journeys"
@@ -372,8 +371,6 @@ mod tests {
     #[case("redis", "adapters/redis", Some(Layer::Adapter))]
     #[case("postgres", "adapters/postgres", Some(Layer::Adapter))]
     #[case("generated", "generated", Some(Layer::Generated))]
-    #[case("server", "bins/server", Some(Layer::Root))]
-    #[case("rss", "bins/rss", Some(Layer::Root))]
     #[case("xtask", "xtask", Some(Layer::Root))]
     #[case("journeys", "journeys", Some(Layer::Root))]
     #[case("journeys-fault-matrix", "journeys-fault-matrix", Some(Layer::Root))]

@@ -700,9 +700,9 @@ impl HardAdmissionIndex {
         records: &[RuleRecord],
         facts: &WorkspaceFacts,
     ) -> Result<Self> {
-        let shipped_features = shipped_production_features(root, facts)?;
+        let production_features = assembly_library_features(root, facts)?;
         Ok(Self {
-            production_owners: hard_owner_index(root, records, Some(&shipped_features))?,
+            production_owners: hard_owner_index(root, records, Some(&production_features))?,
         })
     }
 
@@ -1798,18 +1798,22 @@ impl ProductionCfgContext {
     }
 }
 
-fn shipped_production_features(
+fn assembly_library_features(
     root: &Path,
     facts: &WorkspaceFacts,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let platform = CargoPlatform::build_target()
-        .context("archrules: resolve canonical production build platform")?;
+        .context("archrules: resolve canonical assembly library build platform")?;
     let platforms = BuildPlatforms::new(platform.clone(), platform);
     let mut features = BTreeMap::<String, BTreeSet<String>>::new();
-    for package in crate::shipped_feature_guard::production_root_packages(root)? {
+    for target in crate::assembly_governance::discover_targets(root)?
+        .into_iter()
+        .filter(|target| target.has_manifest() && target.has_cargo_manifest())
+    {
+        let package = target.name();
         let root_package = facts
-            .package_key(&package)
-            .with_context(|| format!("archrules: shipped package `{package}` missing"))?;
+            .package_key(package)
+            .with_context(|| format!("archrules: assembly package `{package}` missing"))?;
         let build = facts
             .resolve_build(BuildSelection::new(
                 root_package,
@@ -1818,7 +1822,7 @@ fn shipped_production_features(
                 platforms.clone(),
                 BTreeSet::new(),
             ))
-            .with_context(|| format!("archrules: resolve shipped build `{package}`"))?;
+            .with_context(|| format!("archrules: resolve assembly library build `{package}`"))?;
         for feature in build.enabled_features(BuildSide::Target) {
             features
                 .entry(feature.package().as_str().to_string())
@@ -3323,7 +3327,7 @@ fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
 fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
     let trybuild = trybuild_fixtures(root)?;
     let mut reachable_by_manifest = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
-    for base in ["crates", "adapters", "assemblies", "bins", "journeys"] {
+    for base in ["crates", "adapters", "assemblies", "journeys"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
@@ -3553,7 +3557,7 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
             ));
         }
     }
-    for base in ["crates", "adapters", "assemblies", "bins", "journeys"] {
+    for base in ["crates", "adapters", "assemblies", "journeys"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
@@ -4690,7 +4694,7 @@ fn trybuild_fixtures(root: &Path) -> Result<TrybuildFixtures> {
     let mut fixtures = TrybuildFixtures::default();
     let mut declared_ui_dirs = BTreeSet::new();
     let mut declared_compile_fail = BTreeSet::new();
-    for base in ["crates", "adapters", "assemblies", "bins", "journeys"] {
+    for base in ["crates", "adapters", "assemblies", "journeys"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;

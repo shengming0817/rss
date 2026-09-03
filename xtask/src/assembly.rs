@@ -27,7 +27,7 @@ use workspacefacts::{
 #[cfg(test)]
 use crate::assembly_governance::AssemblyFixtureBuilder;
 use crate::assembly_governance::{
-    AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly, load_artifact_declaration,
+    AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly,
 };
 use crate::contract::GovernedContract;
 use crate::contract::governance::ContractGovernanceIr;
@@ -72,8 +72,7 @@ pub(crate) enum Rule {
     ReleasePackageMetadata,
     /// Candidate normal/build workspace path dependencies must form an exact, versioned publish closure.
     ReleasePublishClosure,
-    /// Official profile selection must explicitly join the designated supported artifact.
-    ReleaseSurfaceProfile,
+    /// Application profile artifacts are outside the library release surface.
     /// `assemblies/*/Cargo.toml` 必须有同目录 `assembly.toml`。
     MissingManifest,
     /// manifest 声明的 active domain 必须是 assembly crate 的直接 normal dependency。
@@ -187,29 +186,16 @@ impl GovernanceCheck for AssemblyValidate<'_> {
         crate::assembly_governance::validate_source_funnel(self.root)?;
         let ir = AssemblyGovernanceIr::<Core>::load(self.root)?;
         let (count, mut findings) = validate_governed_root(self.root, self.facts, &ir)?;
-        let artifact_projections = if crate::release_surface::requires_artifact_join(self.facts) {
-            let joined = ir.join_artifacts(load_artifact_declaration(self.root)?)?;
-            crate::release_surface::project_artifacts(&joined)
-        } else {
-            Vec::new()
-        };
-        let (surface, release_findings) =
-            crate::release_surface::validate(self.facts, &artifact_projections);
+        let (surface, release_findings) = crate::release_surface::validate(self.facts);
         findings.extend(release_findings);
-        let (release_package_count, profile_artifact_count, observed_summary) = surface
+        let (release_package_count, observed_summary) = surface
             .as_ref()
-            .map(|surface| {
-                (
-                    surface.packages().len(),
-                    surface.profile_artifacts().len(),
-                    surface.observed_summary(),
-                )
-            })
-            .unwrap_or_else(|| (0, 0, "release surface rejected".to_owned()));
+            .map(|surface| (surface.packages().len(), surface.observed_summary()))
+            .unwrap_or_else(|| (0, "release surface rejected".to_owned()));
         Ok((
             format!(
-                "{count} assembly 声明、{} release package 与 {} profile artifact 全部通过；{}",
-                release_package_count, profile_artifact_count, observed_summary
+                "{count} assembly 声明与 {} release package 全部通过；{}",
+                release_package_count, observed_summary
             ),
             findings,
         ))
@@ -1756,94 +1742,6 @@ fn validate_identityaudit_manifest_boundary(a: &GovernedAssembly, findings: &mut
     }
 }
 
-pub(crate) fn schema_objects_are_closed(value: &serde_json::Value) -> bool {
-    let Some(schema) = value.as_object() else {
-        return value == &serde_json::Value::Bool(false);
-    };
-    if schema.len() == 1
-        && schema
-            .get("$ref")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|reference| reference.starts_with("#/definitions/"))
-    {
-        return true;
-    }
-    let can_accept_object = match schema.get("type") {
-        Some(serde_json::Value::String(kind)) => kind == "object",
-        Some(serde_json::Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
-        Some(_) => true,
-        None => true,
-    };
-    if can_accept_object
-        && schema.get("additionalProperties") != Some(&serde_json::Value::Bool(false))
-    {
-        return false;
-    }
-
-    // `not` cannot widen the instance set, so it cannot introduce an open object carrier.
-    for keyword in [
-        "if",
-        "then",
-        "else",
-        "contains",
-        "propertyNames",
-        "additionalItems",
-    ] {
-        if schema
-            .get(keyword)
-            .is_some_and(|child| !schema_objects_are_closed(child))
-        {
-            return false;
-        }
-    }
-    if let Some(items) = schema.get("items") {
-        let closed = items.as_array().map_or_else(
-            || schema_objects_are_closed(items),
-            |items| items.iter().all(schema_objects_are_closed),
-        );
-        if !closed {
-            return false;
-        }
-    }
-    for keyword in ["allOf", "anyOf", "oneOf"] {
-        if schema.get(keyword).is_some_and(|children| {
-            children
-                .as_array()
-                .is_none_or(|children| !children.iter().all(schema_objects_are_closed))
-        }) {
-            return false;
-        }
-    }
-    for keyword in [
-        "properties",
-        "patternProperties",
-        "definitions",
-        "$defs",
-        "dependentSchemas",
-    ] {
-        if schema.get(keyword).is_some_and(|children| {
-            children
-                .as_object()
-                .is_none_or(|children| !children.values().all(schema_objects_are_closed))
-        }) {
-            return false;
-        }
-    }
-    if let Some(dependencies) = schema.get("dependencies") {
-        let Some(dependencies) = dependencies.as_object() else {
-            return false;
-        };
-        if !dependencies
-            .values()
-            .filter(|dependency| !dependency.is_array())
-            .all(schema_objects_are_closed)
-        {
-            return false;
-        }
-    }
-    true
-}
-
 fn is_test_attribute(attribute: &syn::Attribute) -> bool {
     let segments = attribute
         .path()
@@ -1857,53 +1755,6 @@ fn is_test_attribute(attribute: &syn::Attribute) -> bool {
 
 fn is_conditional_attribute(attribute: &syn::Attribute) -> bool {
     attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
-}
-
-pub(crate) struct DockerStage<'a> {
-    pub(crate) base: &'a str,
-    pub(crate) name: &'a str,
-    pub(crate) instructions: Vec<&'a str>,
-}
-
-pub(crate) fn docker_stages(source: &str) -> Vec<DockerStage<'_>> {
-    let mut stages = Vec::new();
-    for line in source.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(from) = docker_instruction_arguments(line, "FROM") {
-            let mut parts = from.split_whitespace();
-            let (Some(base), Some(as_keyword), Some(name), None) =
-                (parts.next(), parts.next(), parts.next(), parts.next())
-            else {
-                continue;
-            };
-            if !as_keyword.eq_ignore_ascii_case("AS") {
-                continue;
-            }
-            stages.push(DockerStage {
-                base,
-                name,
-                instructions: Vec::new(),
-            });
-        } else if let Some(stage) = stages.last_mut() {
-            stage.instructions.push(line);
-        }
-    }
-    stages
-}
-
-pub(crate) fn docker_instruction_arguments<'a>(
-    instruction: &'a str,
-    expected: &str,
-) -> Option<&'a str> {
-    let keyword_end = instruction
-        .find(char::is_whitespace)
-        .unwrap_or(instruction.len());
-    let (keyword, arguments) = instruction.split_at(keyword_end);
-    keyword
-        .eq_ignore_ascii_case(expected)
-        .then(|| arguments.trim_start())
 }
 
 struct CriticalProviderSpec {
@@ -6216,9 +6067,8 @@ mod tests {
         );
         assert!(
             summary.contains("release package")
-                && summary.contains("profile artifact")
                 && summary.contains("release packages=[")
-                && summary.contains("profile artifacts=["),
+                && summary.contains("publish order=["),
             "canonical assembly executor lost its Release Surface carrier: {summary}"
         );
         Ok(())
@@ -6720,7 +6570,7 @@ outputs = ["probes", "workers"]
         r#"
 schemaVersion = 2
 name = "runtime"
-profile = "demo"
+profile = "production"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
 frameworkContracts = []
@@ -7125,22 +6975,6 @@ domains = []
         )
     }
 
-    fn deviceidentity_pilot_manifest(name: &str, providers: &str) -> String {
-        format!(
-            r#"
-schemaVersion = 2
-name = "{name}"
-profile = "demo"
-domains = ["identity"]
-topology = "demo"
-frameworkContracts = []
-workflowActivations = []
-listeners = []
-{providers}
-"#
-        )
-    }
-
     const CAPABILITY_CARGO_FULL: &str = r#"[package]
 name = "runtime"
 
@@ -7215,75 +7049,6 @@ purpose = "http-auth-decision-audit"
 outputs = ["probes", "resources", "workers"]
 "#;
 
-    const DEVICEIDENTITY_PILOT_PROVIDERS: &str = r#"
-[[diportProviders]]
-id = "device-certificate-store"
-port = "identity::CertificateReconcileRepository"
-provider = "postgres::PgDeviceCertificateRepository"
-providerCrate = "postgres"
-requiredFeatures = ["domain-identity"]
-consumer = "identity"
-lifecycle = "active"
-durability = "persistent"
-purpose = "draft-device-certificate-persistence"
-outputs = ["probes"]
-
-[[diportProviders]]
-id = "device-command-store"
-port = "identity::DeviceCommandStore"
-provider = "postgres::PgDeviceCommandStore"
-providerCrate = "postgres"
-requiredFeatures = ["domain-identity"]
-consumer = "identity"
-lifecycle = "active"
-durability = "persistent"
-purpose = "draft-device-command-and-outbox-persistence"
-outputs = ["probes", "workers"]
-
-[[diportProviders]]
-id = "device-draft-artifact-source"
-port = "identity::CertificateArtifactSource"
-provider = "identity_composition::DraftArtifactSimulator"
-providerCrate = "identity-composition"
-consumer = "identity"
-lifecycle = "active"
-durability = "persistent"
-purpose = "production-ineligible-deterministic-artifacts"
-outputs = []
-
-[[diportProviders]]
-id = "device-mqtt-session"
-port = "mqtt::MqttSession"
-provider = "mqtt::MqttSession"
-providerCrate = "mqtt"
-consumer = "identity"
-lifecycle = "active"
-durability = "persistent"
-purpose = "authenticated-persistent-device-transport"
-outputs = ["probes", "resources", "workers"]
-
-[[diportProviders]]
-id = "device-revocation-store"
-port = "diport::RevocationStore"
-provider = "postgres::PgRevocationStore"
-providerCrate = "postgres"
-consumer = "deviceloop"
-lifecycle = "active"
-durability = "persistent"
-purpose = "device-certificate-revocation"
-outputs = ["probes", "workers"]
-"#;
-
-    const DEVICEIDENTITY_PILOT_CARGO: &str = r#"[package]
-name = "deviceidentity"
-
-[dependencies]
-identity = { path = "../../crates/identity" }
-postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
-identity-composition = { path = "../../composition/identity" }
-mqtt = { path = "../../adapters/mqtt" }
-"#;
-
     /// Registry-valid stub that does not satisfy domain required capabilities (Vault/Signer/...).
     const CAPABILITY_STUB_RATE_LIMITER: &str = r#"
 [[diportProviders]]
@@ -7316,6 +7081,9 @@ outputs = ["probes", "resources", "workers"]
     const IDENTITYAUDIT_MANIFEST: &str =
         include_str!("../../assemblies/identityaudit/assembly.toml");
     const IDENTITYAUDIT_CARGO: &str = include_str!("../../assemblies/identityaudit/Cargo.toml");
+    const DEVICEIDENTITY_MANIFEST: &str =
+        include_str!("../../assemblies/deviceidentity/assembly.toml");
+    const DEVICEIDENTITY_CARGO: &str = include_str!("../../assemblies/deviceidentity/Cargo.toml");
     const SETTINGSONLY_MANIFEST: &str = include_str!("../../assemblies/settingsonly/assembly.toml");
     const SETTINGSONLY_CARGO: &str = include_str!("../../assemblies/settingsonly/Cargo.toml");
 
@@ -7433,63 +7201,52 @@ outputs = ["probes", "resources", "workers"]
 
     #[test]
     fn deviceidentity_pilot_capability_closure_is_exact_and_non_vacuous() -> anyhow::Result<()> {
-        let manifest =
-            deviceidentity_pilot_manifest("deviceidentity", DEVICEIDENTITY_PILOT_PROVIDERS);
-        let findings = required_capability_findings(&manifest, DEVICEIDENTITY_PILOT_CARGO)?;
+        let findings = required_capability_findings(DEVICEIDENTITY_MANIFEST, DEVICEIDENTITY_CARGO)?;
         assert!(findings.is_empty(), "green pilot closure: {findings:?}");
 
-        for role in [
-            "device-certificate-store",
-            "device-command-store",
-            "device-draft-artifact-source",
-            "device-mqtt-session",
-            "device-revocation-store",
-        ] {
+        for role in DEVICEIDENTITY_PILOT_ROLES.iter().map(|role| role.as_str()) {
             let needle = format!("[[diportProviders]]\nid = \"{role}\"");
-            let start = DEVICEIDENTITY_PILOT_PROVIDERS
+            let start = DEVICEIDENTITY_MANIFEST
                 .find(&needle)
                 .with_context(|| format!("pilot fixture omitted provider role `{role}`"))?;
-            let remainder = &DEVICEIDENTITY_PILOT_PROVIDERS[start + needle.len()..];
+            let remainder = &DEVICEIDENTITY_MANIFEST[start + needle.len()..];
             let end = remainder
                 .find("\n[[diportProviders]]")
-                .map_or(DEVICEIDENTITY_PILOT_PROVIDERS.len(), |offset| {
+                .map_or(DEVICEIDENTITY_MANIFEST.len(), |offset| {
                     start + needle.len() + offset
                 });
-            let mut providers = DEVICEIDENTITY_PILOT_PROVIDERS.to_owned();
-            providers.replace_range(start..end, "");
-            let manifest = deviceidentity_pilot_manifest("deviceidentity", &providers);
-            let findings = required_capability_findings(&manifest, DEVICEIDENTITY_PILOT_CARGO)?;
+            let mut manifest = DEVICEIDENTITY_MANIFEST.to_owned();
+            manifest.replace_range(start..end, "");
+            let findings = required_capability_findings(&manifest, DEVICEIDENTITY_CARGO)?;
             assert_required_capability(&findings, "deviceidentity", role);
         }
         Ok(())
     }
 
     #[test]
-    fn deviceidentity_pilot_shape_rejects_listener_framework_and_workflow_drift_but_not_name()
+    fn deviceidentity_pilot_shape_rejects_name_listener_framework_and_workflow_drift()
     -> anyhow::Result<()> {
-        let wrong_name =
-            deviceidentity_pilot_manifest("identity-pilot-alias", DEVICEIDENTITY_PILOT_PROVIDERS);
-        let wrong_name_cargo = DEVICEIDENTITY_PILOT_CARGO.replace(
+        let wrong_name = DEVICEIDENTITY_MANIFEST.replace(
+            "name = \"deviceidentity\"",
+            "name = \"identity-pilot-alias\"",
+        );
+        let wrong_name_cargo = DEVICEIDENTITY_CARGO.replace(
             "name = \"deviceidentity\"",
             "name = \"identity-pilot-alias\"",
         );
         let findings = required_capability_findings(&wrong_name, &wrong_name_cargo)?;
         assert!(
-            findings.is_empty(),
-            "pilot shape must not depend on the assembly name: {findings:?}"
+            !findings.is_empty(),
+            "renamed pilot must leave the closed shape"
         );
 
-        let listener = r#"
-[[listeners]]
-kind = "primary"
-domains = ["identity"]
-"#;
-        let wrong_listener = wrong_name.replace("listeners = []", listener);
-        let wrong_framework = wrong_listener.replace(
+        let base = DEVICEIDENTITY_MANIFEST;
+        let wrong_listener = base.replace("kind = \"health\"", "kind = \"admin\"");
+        let wrong_framework = base.replace(
             "frameworkContracts = []",
             "frameworkContracts = [{ id = \"seed.echo\", listener = \"primary\" }]",
         );
-        let wrong_workflow = wrong_listener.replace(
+        let wrong_workflow = base.replace(
             "workflowActivations = []",
             r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", targetGeneration = "v3", activation = "capture-only" }]"#,
         );
@@ -7501,7 +7258,7 @@ domains = ["identity"]
             let manifest = AssemblyManifest::from_toml_str(&manifest)?.canonicalize_v2()?;
             assert!(
                 !is_deviceidentity_pilot_manifest_shape(&manifest),
-                "{drift} drift must leave the listenerless pilot shape"
+                "{drift} drift must leave the deviceidentity pilot shape"
             );
         }
         Ok(())

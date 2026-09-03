@@ -63,7 +63,7 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | Gap | Current status | Follow-up |
 |---|---|---|
 | Inbox backlog depth / age | Runtime exports global `inbox_stale_claim_depth` and `inbox_oldest_stale_claim_age_seconds` from the active maintenance owner on the independent `RSS_INBOX_SAMPLE_INTERVAL_MS` cadence; failure/ownership loss writes NaN. | No shared panel or alert authorized. |
-| Projection replay duration | #2010 exports long-lived active worker lag, checkpoint freshness, apply failure, Projection DLQ backlog and throughput on the `bind_active` scrape path. Shadow series remain dormant until an assembly binds shadow. The one-shot replay CLI intentionally does not emit worker metrics or a duration family. | N/A；不在 #2010 范围内 |
+| Projection replay duration | #2010 exports library worker lag, checkpoint freshness, apply failure, Projection DLQ backlog and throughput on the `bind_active` recorder path. Shadow series remain dormant until an assembly binds shadow. | N/A；不在 #2010 范围内 |
 
 Do not synthesize these signals with ad hoc SQL dashboard panels. Inbox backlog now has a runtime
 Prometheus carrier, but #1683 does not authorize a shared panel, alert, SLO or threshold. Any such
@@ -73,14 +73,11 @@ consumer remains deployment-local and outside the shared ops contract.
 
 | Signal | Existing carrier | Shared dashboard status |
 |---|---|---|
-| DLQ redrive outcome | `dlq_redrive_total{kind,outcome}` is an operator mutation counter. A one-shot `rss dlq` process does not provide a stable Prometheus scrape target; long-term evidence is `dlq.maintenance` audit/log plus relay/consumer metrics. | Omitted from the shared `/health/v1/metrics` dashboard. A deployment-local recorder panel may exist outside this contract. |
-| Reconcile results | `reconcile_total{result}` is emitted by the `eventexec` reconcile worker library when an owning runtime wires that worker with a recorder. | Omitted until the server/runtime assembly exposes a reconcile worker metric on its Health listener. |
+| DLQ redrive outcome | `dlq_redrive_total{kind,outcome}` is an external-consumer mutation counter; long-term evidence is `dlq.maintenance` audit/log plus relay/consumer metrics. | Omitted from the shared library metric contract. |
+| Reconcile results | `reconcile_total{result}` is emitted by the `eventexec` reconcile worker library when an external consumer wires that worker with a recorder. | Omitted from the shared library metric contract. |
 
 ## Drilldown Links
 
-- Runbook index: `docs/runbooks/202607082104-1642-consistency-ops-runbook-index.md`
-- Outbox / inbox redrive: `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md`
-- Projection replay / swap: `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md`
 - Outbox / consumer / saga alert rules: `docs/ops/outbox-relay-alerts.rules.yaml`
 - Cross-domain transport alert rules: `docs/ops/transport-dispatch-alerts.rules.yaml`
 - LocalTx unsafe settlement rules: `docs/ops/localtx-alerts.rules.yaml`

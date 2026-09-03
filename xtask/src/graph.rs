@@ -1174,7 +1174,7 @@ mod tests {
     ) -> anyhow::Result<crate::assembly_governance::AssemblyFixtureRepository> {
         let root = crate::assembly_governance::AssemblyFixtureRepository::create()?;
         let workspace = crate::workspace_root()?;
-        for name in ["identityaudit", "runtime", "settingsonly"] {
+        for name in ["deviceidentity", "identityaudit", "runtime", "settingsonly"] {
             let target = root.join("assemblies").join(name);
             std::fs::create_dir_all(&target)?;
             std::fs::copy(

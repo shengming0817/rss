@@ -1,4 +1,4 @@
-//! runtime — RSS 生产组合根（Root 层，#1309 抽离自 bins 双写）：从配置构造生产验签 provider，按 listener 装配
+//! runtime — RSS library 组合根（Root 层）：从配置构造验签 provider，按 listener 装配
 //! `finalize_routes → finalize_auth → .layer(verify_bridge)` 的认证接线接缝，并驱动运行时入口
 //! （tokio 运行时 + per-listener socket bind + `axum::serve` + 信号优雅关停 + generated domain wiring，#1320）。
 //!
@@ -13,16 +13,10 @@
 //!   本地测试路径。
 //!
 //! 安全同批门（ADR-006 §5）：依赖图引真 verifier（`oidc` backend）、不引 stub Pdp（`memory` 经 deny.toml 禁
-//! server/rss/runtime；bins 生产 `src/` 无内联 `impl diport::Pdp`，`rss_pdp_impl_adapter_only` dylint 守 +
+//! runtime；`rss_pdp_impl_adapter_only` dylint 守 +
 //! `cargo xtask verify` 的 pdp-allow 计数门守逃生门用量）。`OidcProvider` 必填 `VerifierConfig` + `Box<dyn Clock>`
 //! ⇒ 无 key/clock 不可构造（编译期守）。
 //!
-//! INVARIANT: BINS-AUTH-SYNC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard, #1309) — `bins/server` 是 serving-only thin entry；`bins/rss` 先
-//! dispatch 显式 operator CLI（0067 reader-lane migration、audit ledger verify、settings ConfigValue maintenance、projection/DLQ/
-//! reconcile-target maintenance），未知参数 fail-closed，未命中 CLI 时再调用同一份 `runtime::run()` serving 组合根。auth wiring
-//! 一致性由「单一 `run()` 源」编译期保证，原
-//! xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
-
 pub mod auth_bridge;
 mod config;
 #[cfg(test)]

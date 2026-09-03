@@ -6,7 +6,6 @@
 
 mod archrules;
 mod assembly;
-mod assembly_artifacts;
 mod assembly_codegen;
 mod assembly_governance;
 mod assembly_lock;
@@ -66,7 +65,6 @@ mod runtime_env_guard;
 mod runtime_root_guard;
 mod saga_durable_recovery_guard;
 mod schema_rls;
-mod shipped_feature_guard;
 mod source_semantic_guard;
 mod src_scan;
 mod tenancy_closeout;
@@ -79,9 +77,9 @@ mod wsdeps;
 
 use anyhow::{Context, Result};
 use cli::{
-    ArchrulesCommand, AssemblyArtifactsCommand, AssemblyCommand, CdcConfigCommand, CiCommand,
-    Command, ConsistencyCommand, ContractCommand, GraphCommand, LocaltxCommand,
-    NextestEvidenceCommand, RuntimeDepsCommand, RuntimeEnvCommand, RuntimeRootCommand,
+    ArchrulesCommand, AssemblyCommand, CdcConfigCommand, CiCommand, Command, ConsistencyCommand,
+    ContractCommand, GraphCommand, LocaltxCommand, NextestEvidenceCommand, RuntimeDepsCommand,
+    RuntimeEnvCommand, RuntimeRootCommand,
 };
 pub(crate) use report_format::ReportFormat;
 use std::path::{Path, PathBuf};
@@ -112,20 +110,6 @@ fn dispatch(command: Command) -> Result<()> {
                 .get()
                 .context("assembly validate: load command-scoped workspace facts")?;
             diagnostic::run_check(&assembly::AssemblyValidate::new(&root, facts))
-        }
-        Command::Assembly(AssemblyCommand::Artifacts(AssemblyArtifactsCommand::Check)) => {
-            let root = workspace_root()?;
-            let prepared = assembly_artifacts::prepare(&root)?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = match command_facts.get() {
-                Ok(facts) => facts,
-                Err(error) => {
-                    assembly_artifacts::report_workspace_facts_failure();
-                    return Err(error)
-                        .context("assembly artifacts: load command-scoped workspace facts");
-                }
-            };
-            assembly_artifacts::run_prepared(&root, facts, prepared)
         }
         Command::Assembly(AssemblyCommand::GenerateModules { check }) => {
             assembly_codegen::run(check)

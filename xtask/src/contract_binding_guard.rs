@@ -2815,7 +2815,7 @@ mod tests {
 
         let mut production = [DeviceLatentEvidenceId::DraftPilotComposition.spec()];
         production[0].owner = ExecutionUnitId::Integration(
-            crate::integration_shards::IntegrationUnitId::ProductionRuntimeJourney,
+            crate::integration_shards::IntegrationUnitId::RuntimeInventoryJourney,
         );
         let findings = validate_device_latent_evidence(&root, facts, &production)?;
         assert!(findings.iter().any(|finding| {

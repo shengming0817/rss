@@ -4,7 +4,7 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 结构
 
-扁平 workspace：`crates/`（库 crate，分基础/引擎/服务/域四层）、`adapters/`、`bins/`、`xtask/`、`generated/`。
+扁平 workspace：`crates/`（库 crate，分基础/引擎/服务/域四层）、`adapters/`、`assemblies/`、`xtask/`、`generated/`。
 完整结构树 / 分层 / 命名的**单一事实源**见 `Cargo.toml`、`xtask/src/layers.rs`、`deny.toml` 与 `cargo xtask layer-deps`；
 最高协作规范见 [`CLAUDE.md`](CLAUDE.md)。分层由 crate 依赖图（编译期）+ `deny.toml` wrappers 强制。
 
@@ -18,7 +18,33 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 - [行为准则](CODE_OF_CONDUCT.md) / [Code of Conduct](CODE_OF_CONDUCT.md)
 - [MIT License](LICENSE)
 
-## 构建与本地验证
+## Library consumer quickstart
+
+正向 Release Surface 由 [`Cargo.toml`](Cargo.toml) 的 Cargo metadata 持有，未选 package 默认 internal。
+入选只表示 package 具备候选发布资格，并不表示已经发布到 registry；实际发布状态与人工发布流程以
+[`RELEASES.md`](RELEASES.md) 为准。首次 registry 发布前，可从仓库 checkout 通过 path dependency 试用：
+
+```toml
+[dependencies]
+rss-contract = { path = "../rss/crates/contract" }
+```
+
+```rust
+use rss_contract::{ContractId, ContractVersion};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let id = ContractId::parse("example.message-created")?;
+    let version = ContractVersion::parse("v1")?;
+    assert_eq!(id.as_str(), "example.message-created");
+    assert_eq!(version.major(), 1);
+    Ok(())
+}
+```
+
+该 package 的完整边界与 API 示例见 [`rss-contract` README](crates/contract/README.md)；其它候选 package
+从 `Cargo.toml` 的 Release Surface 选择进入各自 package README，避免在根文档复制一份会漂移的 inventory。
+
+## 贡献者构建与本地验证
 
 gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `ExecutionProfile`：`check`、`test`、
 `integration-critical`、`release-check`；前三者只选择自己的 primary owner，`release-check` 是全部 owner
@@ -133,25 +159,14 @@ cargo deny check -D unused-wrapper                     # 分层闭集 + license 
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
 
-本仓库交付边界是可重复构建的 OCI 镜像、`Dockerfile`、本地 `docker compose` 演示栈，
-以及应用自身的 RuntimePlan、typed 配置、health/readiness 和 SIGTERM drain 契约。
-生产调度、流量、secret projection、replica/resource policy 和 release provenance 由外部 delivery
-系统拥有；该系统应消费不可变镜像并尊重本仓公开的配置、探针和终止语义，不将编排事实反向注入应用启动。
-运行 inventory 可成对报告启动方声明的 source revision 与 image digest，但不在进程内验证 OCI/SLSA
-provenance，也不把这些声明并入 RuntimePlan、workload 或 deployment fingerprint。
-
-`runtime::operator::*` 是 operator 命令的唯一 Rust API 路径；binary 的 serving、错误报告与进程 panic
-边界只使用 `runtime::{prepare_runtime, run, shutdown_runtime, report_process_error,
-install_redacted_panic_hook, activate_structured_panic_observation}`，不得直接依赖 `runtimeexec`。共享时钟与审计 sink 只从
-`runtime::support::{SystemClock, TracingAuthAuditSink}` 导入。旧 root operator/support 路径没有 alias 或兼容 shim；
-`runtime-root guard` 只允许 crate root 包含外置 module 声明与 import/re-export；启动、
-关停与错误报告实现必须留在私有 lifecycle owner，不使用 LOC 或当前数量 golden。
+本仓库交付 provider-neutral library package，不交付产品进程、应用镜像或部署资产。`assemblies/` 保留为
+library composition 与 typed RuntimePlan 的验证边界；外部消费者自行拥有进程入口、交付系统和运行环境。
 
 `providers_gen.rs` 是每个 assembly crate 内部编译的 provider constructor catalog，不是外部
 SDK/API，也不读取环境、配置或 secret。它只收 active provider，并通过闭合 role、consumer、factory
 symbol 与 `ProviderCatalogEntry::checked` 绑定 canonical registry evidence；现有 `modules_gen.rs`
 继续承载 live output composition，不能作为 catalog fallback。普通 PR 聚合顺序止于
-`assembly validate → artifacts check → modules check → providers check`；candidate/release final HEAD 再按
+`assembly validate → modules check → providers check`；candidate/release final HEAD 再按
 `lock check → runtime-plan check` 收口 repository identity。lock 过期仍由各 assembly `build.rs` 的
 repository verification fail-closed，RuntimePlan fixture 仍通过 manifest + verified lock bound parse；
 assembly graph 仅由按需 presentation 命令构建，不注册独立 gate。live provider dispatch、

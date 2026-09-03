@@ -127,9 +127,9 @@ fn noop_domain_transport() -> Arc<dyn distributed::HttpContractTransport> {
 
 fn test_password_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
     Arc::new(
-        crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
-            "../../../deploy/password-blocklist.demo.sha256"
-        )))
+        crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
+            b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
+        ))
         .unwrap_or_else(|_| unreachable!()),
     )
 }

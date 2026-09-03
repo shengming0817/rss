@@ -9,8 +9,8 @@ use workspacefacts::testing::{
 };
 use workspacefacts::{
     ApiStability, DependencyKind, DependencyResolution, DependencySource, GitDependencyReq,
-    OfficialProfile, PackageKey, PublicApiOwner, PublishPolicy, ResolvedPackageSource, TargetKind,
-    WorkspaceFacts, WorkspaceFactsError,
+    PackageKey, PublicApiOwner, PublishPolicy, ResolvedPackageSource, TargetKind, WorkspaceFacts,
+    WorkspaceFactsError,
 };
 
 fn synthetic_metadata() -> String {
@@ -677,12 +677,7 @@ fn release_selection_is_strict_typed_and_distinguishes_absent_from_empty()
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "standalone-component",
-                "api-stability": "experimental",
-                "profiles": ["core", "eventing"]
-            }],
-            "profile-artifacts": [{
-                "profile": "core",
-                "assembly": "runtime"
+                "api-stability": "experimental"
             }]
         }
     });
@@ -701,58 +696,28 @@ fn release_selection_is_strict_typed_and_distinguishes_absent_from_empty()
         PublicApiOwner::StandaloneComponent
     );
     assert_eq!(package.api_stability(), ApiStability::Experimental);
-    assert_eq!(
-        package.profiles(),
-        &[OfficialProfile::Core, OfficialProfile::Eventing]
-    );
-    assert_eq!(selection.profile_artifacts().len(), 1);
-    assert_eq!(
-        selection.profile_artifacts()[0].profile(),
-        OfficialProfile::Core
-    );
-    assert_eq!(selection.profile_artifacts()[0].assembly(), "runtime");
-
     let invalid_cases = [
         json!({
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "secret-bait",
-                "api-stability": "stable",
-                "profiles": []
-            }],
-            "profile-artifacts": []
+                "api-stability": "stable"
+            }]
         }),
         json!({
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "platform-public",
-                "api-stability": "secret-bait",
-                "profiles": []
-            }],
-            "profile-artifacts": []
+                "api-stability": "secret-bait"
+            }]
         }),
         json!({
             "packages": [{
                 "package": "consumer",
                 "public-api-owner": "platform-public",
                 "api-stability": "stable",
-                "profiles": ["secret-bait"]
-            }],
-            "profile-artifacts": []
-        }),
-        json!({
-            "packages": [],
-            "profile-artifacts": [{"profile": "secret-bait", "assembly": "runtime"}]
-        }),
-        json!({
-            "packages": [{
-                "package": "consumer",
-                "public-api-owner": "platform-public",
-                "api-stability": "stable",
-                "profiles": [],
                 "release-status": "secret-bait"
-            }],
-            "profile-artifacts": []
+            }]
         }),
     ];
     for selection in invalid_cases {

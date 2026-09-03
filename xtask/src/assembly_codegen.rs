@@ -2105,12 +2105,14 @@ domains = [{domains}]
     fn test_root(prefix: &str) -> Result<PathBuf> {
         let root = crate::testutil::unique_tmp(prefix);
         let workspace = crate::workspace_root()?;
-        for name in ["identityaudit", "runtime", "settingsonly"] {
+        for name in ["deviceidentity", "identityaudit", "runtime", "settingsonly"] {
             let target = root.join("assemblies").join(name);
             fs::create_dir_all(&target)?;
             let source = workspace.join("assemblies").join(name);
             fs::copy(source.join("Cargo.toml"), target.join("Cargo.toml"))?;
-            if name != "runtime" {
+            if name == "deviceidentity" {
+                fs::copy(source.join("assembly.toml"), target.join("assembly.toml"))?;
+            } else if name != "runtime" {
                 let domains = if name == "identityaudit" {
                     r#""identity", "audit""#
                 } else {
@@ -2646,7 +2648,7 @@ domains = [{domains}]
     fn provider_fixture_root(name: &str) -> Result<PathBuf> {
         let root = crate::testutil::unique_tmp(&format!("assembly-provider-codegen-{name}"));
         let workspace = crate::workspace_root()?;
-        for assembly in ["identityaudit", "runtime", "settingsonly"] {
+        for assembly in ["deviceidentity", "identityaudit", "runtime", "settingsonly"] {
             let assembly_dir = root.join("assemblies").join(assembly);
             fs::create_dir_all(&assembly_dir)?;
             fs::copy(

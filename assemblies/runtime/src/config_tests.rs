@@ -15,8 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{
     AccessPrincipalKind, CapturedConfigValue, ProjectionOperatorTokenConfig,
     RuntimeConfigCaptureError, RuntimeConfigKey, RuntimeConfigSnapshot, RuntimeConfigSource,
-    RuntimeServingConfig, ServiceTokenConfig, ServingConfigMapper, TokenProfilesConfig,
-    WorkerRuntimeConfig,
+    RuntimeServingConfig, ServingConfigMapper, TokenProfilesConfig, WorkerRuntimeConfig,
 };
 
 const PROJECTION_OPERATOR_TEST_BUNDLE: &str = r#"{
@@ -1393,62 +1392,6 @@ fn token_profiles_from(
     TokenProfilesConfig::from_snapshot(snapshot.view())
 }
 
-fn service_token_config_from(
-    values: impl IntoIterator<Item = (String, String)>,
-) -> anyhow::Result<ServiceTokenConfig> {
-    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
-        values
-            .into_iter()
-            .map(|(key, value)| (key, FakeValue::Present(value))),
-    ))
-    .expect("capture service-token config");
-    ServiceTokenConfig::from_snapshot(snapshot.view())
-}
-
-fn service_token_env_example_values() -> Vec<(String, String)> {
-    const PREFIX: &str = "RSS_SERVICE_TOKEN_";
-    include_str!("../../../deploy/.env.example")
-        .lines()
-        .filter_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            key.starts_with(PREFIX)
-                .then(|| (key.to_owned(), value.to_owned()))
-        })
-        .collect()
-}
-
-fn service_token_env_example_values_with_test_secret() -> Vec<(String, String)> {
-    let mut values = service_token_env_example_values();
-    values.push((
-        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL".to_owned(),
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x5a_u8; 32]),
-    ));
-    values
-}
-
-#[test]
-fn auth_grant_and_refresh_ttl_are_paired_in_deploy_and_ops_contracts() {
-    let env_example = include_str!("../../../deploy/.env.example");
-    let value = |key: &str| {
-        env_example.lines().find_map(|line| {
-            let (candidate, value) = line.split_once('=')?;
-            (candidate == key).then_some(value)
-        })
-    };
-    let auth_grant_ttl = value("RSS_IDENTITY_AUTH_GRANT_TTL_SECS")
-        .expect("deploy example must set the AuthGrant TTL")
-        .parse::<u64>()
-        .expect("AuthGrant TTL example must be seconds");
-    let refresh_ttl = value("RSS_REFRESH_TTL_SECS")
-        .expect("deploy example must set the refresh TTL")
-        .parse::<u64>()
-        .expect("refresh TTL example must be seconds");
-    assert!(
-        auth_grant_ttl >= refresh_ttl,
-        "deploy example must satisfy AuthGrant TTL >= refresh TTL"
-    );
-}
-
 static CONFIG_TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn unique_config_temp_dir(name: &str) -> std::path::PathBuf {
@@ -1499,31 +1442,6 @@ impl diport::Clock for ConfigTestClock {
     fn now(&self) -> std::time::SystemTime {
         self.0
     }
-}
-
-#[test]
-fn deploy_env_example_service_token_namespace_satisfies_the_production_parser() {
-    let values = service_token_env_example_values_with_test_secret();
-    assert_eq!(values.len(), 4, "fixture must contain the closed namespace");
-    service_token_config_from(values)
-        .expect("deploy service-token fixture must be production-valid");
-}
-
-#[test]
-fn deploy_env_example_service_token_secret_contract_rejects_31_bytes() {
-    let mut values = service_token_env_example_values_with_test_secret();
-    replace_serving_value(
-        &mut values,
-        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x5a_u8; 31]),
-    );
-    let error = service_token_config_from(values)
-        .err()
-        .expect("31-byte HS256 key must reject");
-    assert!(
-        error.to_string().contains("32..=128 bytes"),
-        "unexpected error: {error}"
-    );
 }
 
 #[cfg(unix)]

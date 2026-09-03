@@ -23,7 +23,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`claim`(原子租约相)/`publish`(同批即时并发中继的 wall time + adapter 内 settle 相) |
 | `outbox_same_id_window_expired_total` | Counter | `domain`,`contract_id`,`tenant_id`,`phase` | broker publish 前 DB preflight | phase=`automatic`/`redrive` 的绝对 same-ID deadline 到期；不调用 broker，行 settle 到 DLX |
 | `outbox_relay_settlement_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`operation`,`reason` | postgres settlement funnel | operation=`published|retry|dlx|same_id_expiry_dlx`；reason=`timeout|expired|lost_lease|storage|payload_protection|invariant` |
-| `dlq_redrive_total` | Counter | `kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` / `resolve-expired-outbox` | operator mutation 结果；一次性 CLI 发射，长期告警看 audit/log |
+| `dlq_redrive_total` | Counter | `kind`,`outcome` | external consumer maintenance | consumer-owned mutation 结果；长期告警看 audit/log |
 | `consumer_dlx_skip_total` | Counter | `reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为闭集 |
 | `consumer_dlx_write_total` | Counter | `outcome` | consumer app DLX store wrapper | outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
 | `consumer_subscribe_retry_total` | Counter | `outcome` | ackable subscribe 监督循环 | outcome=`subscribe_error`/`stream_end`；禁止 topic/error text 入 label |

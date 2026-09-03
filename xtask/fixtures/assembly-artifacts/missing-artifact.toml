@@ -1,7 +1,0 @@
-schemaVersion = 1
-[[assemblies]]
-name = "demo"
-lifecycle = "supported"
-[assemblies.binary]
-package = "demo"
-target = "demo-server"

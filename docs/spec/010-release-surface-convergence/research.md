@@ -2,13 +2,9 @@
 
 ## 权威来源
 
-- [`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md) 拥有产品面、官方 profile
-  候选/激活语义、Provider 三层边界与实施顺序。
-- ADR-024 拥有 Evolve/Complete/Freeze/External、公共消费边界、验证深度和
-  no-new-work closeout 规则。
+- [`project-scope`](../../rules/project-scope.md) 拥有 library 产品边界与 External 能力划分。
 - cargo xtask contract breaking / cargo public-api 拥有 Release API 与 internal Rust API、轴 A 与轴 B 的版本语义。
-- Cargo manifests 拥有 package、依赖、版本、MSRV 与 publish 事实；assembly/profile manifests 拥有装配与 profile
-  事实；`assemblies/artifacts.toml` 拥有当前 artifact 指针。
+- Cargo manifests 拥有 package、依赖、版本、MSRV 与 publish 事实；assembly manifests 拥有 library 装配事实。
 - PR 728 已确认 `diport` 是 `publish = false` 的 Internal Provider Contract，internal public-api baseline 不自动产生
   Release API 或 SemVer。
 

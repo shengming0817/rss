@@ -3610,7 +3610,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
     const WORKSPACE_MEMBER_PREFIXES: &[&str] = &[
         "adapters/",
         "assemblies/",
-        "bins/",
         "composition/",
         "crates/",
         "generated/",
@@ -3641,7 +3640,7 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/runtime-deps-guard.toml",
     ];
     const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] =
-        &["crates/", "adapters/", "assemblies/", "bins/", "journeys/"];
+        &["crates/", "adapters/", "assemblies/", "journeys/"];
     const RUNTIME_DOC_PREFIXES: &[&str] = &["docs/rules/"];
     const OUTBOX_SAME_ID_CARRIER_PREFIXES: &[&str] = &[
         "lints/rss_operator_authorization_callsite/",
@@ -3652,19 +3651,15 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "generated/",
         "contracts/",
         "crates/assembly-schema/",
-        "deploy/",
         "journeys/",
         "journeys-fault-matrix/",
     ];
     const ASSEMBLY_CARRIERS: &[&str] = &[
-        "xtask/src/assembly_artifacts.rs",
         "xtask/src/assembly_codegen.rs",
         "xtask/src/assembly_lock.rs",
         "xtask/src/assembly_runtime_plan.rs",
         "xtask/src/graph.rs",
         ".gitattributes",
-        ".dockerignore",
-        "Dockerfile",
     ];
     const CONSISTENCY_PREFIXES: &[&str] = &[
         "crates/consistency/",
@@ -3709,8 +3704,8 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "journeys/",
         "journeys-fault-matrix/",
     ];
-    const PDP_RUST_PREFIXES: &[&str] = &["crates/", "assemblies/", "bins/"];
-    const COMMAND_RUST_PREFIXES: &[&str] = &["crates/", "adapters/", "assemblies/", "bins/"];
+    const PDP_RUST_PREFIXES: &[&str] = &["crates/", "assemblies/"];
+    const COMMAND_RUST_PREFIXES: &[&str] = &["crates/", "adapters/", "assemblies/"];
     const COMMAND_PREFIXES: &[&str] =
         &["contracts/command/", "generated/src/command/", "journeys/"];
 
@@ -3892,7 +3887,7 @@ fn path_package(path: &str) -> Option<String> {
     let parts = path.split('/').collect::<Vec<_>>();
     match parts.as_slice() {
         [
-            "crates" | "adapters" | "bins" | "assemblies" | "composition" | "examples",
+            "crates" | "adapters" | "assemblies" | "composition" | "examples",
             name,
             ..,
         ] => Some(if *name == "redis" && parts[0] == "adapters" {
@@ -6096,15 +6091,6 @@ externalPathPrefixes = [".external-tool/"]
                 BTreeSet::from([Domain::RuntimeEventing]),
             ),
             (
-                "deploy/docker-compose.yml",
-                BTreeSet::from([Domain::AssemblyGeneration]),
-            ),
-            (
-                ".dockerignore",
-                BTreeSet::from([Domain::AssemblyGeneration]),
-            ),
-            ("Dockerfile", BTreeSet::from([Domain::AssemblyGeneration])),
-            (
                 "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
                 BTreeSet::from([Domain::RuntimeEventing, Domain::TenancyPostgres]),
             ),
@@ -6341,18 +6327,6 @@ externalPathPrefixes = [".external-tool/"]
         assert!(!steps.iter().any(|step| matches!(step,
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
                 if packages == &["mqtt"] && name == "integration"
-        )));
-        assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
-                if packages == &["identityaudit"] && name == "artifact_acceptance"
-        )));
-        assert!(!steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
-                if packages == &["identityaudit"] && name == "runtime_image_acceptance"
-        )));
-        assert!(!steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
-                if packages == &["deviceidentity"] && name == "runtime_image_acceptance"
         )));
         for step in &steps {
             if let LocalStep::Packages {
@@ -8391,7 +8365,7 @@ externalPathPrefixes = [".external-tool/"]
         // Basename matching must not widen nested README into docs-only.
         for (path, expect_docs) in [
             ("adapters/postgres/migrations/README.md", false),
-            ("deploy/demo-tls/README.md", false),
+            ("unowned/nested/README.md", false),
         ] {
             assert_eq!(
                 documentation(path),
@@ -8425,7 +8399,7 @@ externalPathPrefixes = [".external-tool/"]
 
         let unknown = impact_with_facts(
             Path::new("/workspace"),
-            &[DiffEntry::modified("deploy/demo-tls/README.md")],
+            &[DiffEntry::modified("unowned/nested/README.md")],
             &facts,
             UNKNOWN_REVISION,
         )?;
@@ -8434,12 +8408,12 @@ externalPathPrefixes = [".external-tool/"]
         };
         assert!(
             !unknown_selective.documentation,
-            "deploy/demo-tls/README.md must not become docs-only"
+            "unowned/nested/README.md must not become docs-only"
         );
         assert!(
             unknown_selective
                 .unknown_paths
-                .contains("deploy/demo-tls/README.md"),
+                .contains("unowned/nested/README.md"),
             "unowned nested README remains fail-closed unknown"
         );
         assert_eq!(

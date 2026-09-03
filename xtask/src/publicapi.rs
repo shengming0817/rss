@@ -19,6 +19,7 @@
 
 use crate::layers::{BASIS_CRATES, ENGINE_CRATES, EVENTING_PUBLIC_CRATES};
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
@@ -657,17 +658,7 @@ impl BaselineCatalog {
     fn derive(root: &Path, facts: &WorkspaceFacts) -> Result<Self> {
         crate::workspace_facts::validate_command_funnel(root)?;
         crate::assembly_governance::validate_source_funnel(root)?;
-        let ir = crate::assembly_governance::AssemblyGovernanceIr::<
-            crate::assembly_governance::Core,
-        >::load(root)?;
-        let artifacts = if crate::release_surface::requires_artifact_join(facts) {
-            let joined =
-                ir.join_artifacts(crate::assembly_governance::load_artifact_declaration(root)?)?;
-            crate::release_surface::project_artifacts(&joined)
-        } else {
-            Vec::new()
-        };
-        let (surface, findings) = crate::release_surface::validate(facts, &artifacts);
+        let (surface, findings) = crate::release_surface::validate(facts);
         if !findings.is_empty() {
             let details = findings
                 .iter()
@@ -1959,18 +1950,10 @@ pub(crate) fn validated_release_surface(
     root: &Path,
     facts: &WorkspaceFacts,
 ) -> Result<crate::release_surface::ReleaseSurface> {
-    let ir =
-        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
-            root,
-        )?;
-    let artifacts = if crate::release_surface::requires_artifact_join(facts) {
-        let joined =
-            ir.join_artifacts(crate::assembly_governance::load_artifact_declaration(root)?)?;
-        crate::release_surface::project_artifacts(&joined)
-    } else {
-        Vec::new()
-    };
-    let (surface, findings) = crate::release_surface::validate(facts, &artifacts);
+    crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+        root,
+    )?;
+    let (surface, findings) = crate::release_surface::validate(facts);
     if !findings.is_empty() {
         bail!(
             "validated Release Surface 失败:\n{}",
@@ -2022,7 +2005,11 @@ fn release_packages_at(root: &Path, revision: &str) -> Result<BTreeMap<String, O
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let manifest = String::from_utf8(output.stdout)?
+    release_packages_from_manifest(&String::from_utf8(output.stdout)?)
+}
+
+fn release_packages_from_manifest(manifest: &str) -> Result<BTreeMap<String, Option<String>>> {
+    let manifest = manifest
         .parse::<toml::Value>()
         .context("解析 base Cargo.toml 失败")?;
     let metadata = manifest
@@ -2031,25 +2018,90 @@ fn release_packages_at(root: &Path, revision: &str) -> Result<BTreeMap<String, O
         .cloned()
         .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
     let metadata = serde_json::to_value(metadata).context("投影 base workspace.metadata 失败")?;
-    let selection = workspacefacts::parse_release_selection(&metadata)
-        .map_err(anyhow::Error::new)?
+    let raw_selection = metadata
+        .get("release-surface")
         .context("base Cargo.toml 缺 workspace.metadata.release-surface")?;
     let mut packages = BTreeMap::new();
-    for package in selection.packages() {
-        if packages
-            .insert(
+
+    if raw_selection.get("profile-artifacts").is_some() {
+        let legacy = deserialize_legacy_release_selection_v1(raw_selection)?;
+        for package in legacy.packages {
+            let LegacyReleasePackageSelectionV1 {
+                package,
+                version_line,
+                ..
+            } = package;
+            insert_release_package(&mut packages, package, version_line)?;
+        }
+    } else {
+        let selection = workspacefacts::parse_release_selection(&metadata)
+            .map_err(anyhow::Error::new)?
+            .context("base Cargo.toml 缺 workspace.metadata.release-surface")?;
+        for package in selection.packages() {
+            insert_release_package(
+                &mut packages,
                 package.package().to_owned(),
                 package.version_line().map(str::to_owned),
-            )
-            .is_some()
-        {
-            bail!(
-                "base Cargo.toml Release Surface 重复选择 package `{}`",
-                package.package()
-            );
+            )?;
         }
     }
     Ok(packages)
+}
+
+fn insert_release_package(
+    packages: &mut BTreeMap<String, Option<String>>,
+    package: String,
+    version_line: Option<String>,
+) -> Result<()> {
+    if packages.insert(package.clone(), version_line).is_some() {
+        bail!("base Cargo.toml Release Surface 重复选择 package `{package}`");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum LegacyOfficialProfileV1 {
+    Core,
+    Eventing,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyReleasePackageSelectionV1 {
+    package: String,
+    #[serde(default, rename = "version-line")]
+    version_line: Option<String>,
+    #[serde(rename = "public-api-owner")]
+    _public_api_owner: workspacefacts::PublicApiOwner,
+    #[serde(rename = "api-stability")]
+    _api_stability: workspacefacts::ApiStability,
+    #[serde(rename = "profiles")]
+    _profiles: Vec<LegacyOfficialProfileV1>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyReleaseProfileArtifactSelectionV1 {
+    #[serde(rename = "profile")]
+    _profile: LegacyOfficialProfileV1,
+    #[serde(rename = "assembly")]
+    _assembly: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyReleaseSelectionV1 {
+    packages: Vec<LegacyReleasePackageSelectionV1>,
+    #[serde(rename = "profile-artifacts")]
+    _profile_artifacts: Vec<LegacyReleaseProfileArtifactSelectionV1>,
+}
+
+fn deserialize_legacy_release_selection_v1(
+    selection: &serde_json::Value,
+) -> Result<LegacyReleaseSelectionV1> {
+    serde_json::from_value(selection.clone())
+        .context("解析 base Cargo.toml legacy v1 Release Surface 失败")
 }
 
 #[derive(Debug)]
@@ -3226,10 +3278,8 @@ mod tests {
                     "package": "alpha-release",
                     "version-line": "0.1",
                     "public-api-owner": "standalone-component",
-                    "api-stability": "experimental",
-                    "profiles": []
-                }],
-                "profile-artifacts": []
+                    "api-stability": "experimental"
+                }]
             }
         });
         Ok(WorkspaceFacts::from_metadata_json(
@@ -3293,10 +3343,9 @@ mod tests {
         metadata["metadata"] = json!({
             "release-surface": {
                 "packages": [
-                    {"package":"alpha-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
-                    {"package":"beta-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
-                ],
-                "profile-artifacts": []
+                    {"package":"alpha-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable"},
+                    {"package":"beta-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable"}
+                ]
             }
         });
         Ok(WorkspaceFacts::from_metadata_json(
@@ -3397,7 +3446,7 @@ mod tests {
     #[test]
     fn validated_nonempty_surface_flows_into_release_owner_catalog() -> Result<()> {
         let facts = facts_with_nonempty_release_surface()?;
-        let (surface, findings) = crate::release_surface::validate(&facts, &[]);
+        let (surface, findings) = crate::release_surface::validate(&facts);
         assert!(findings.is_empty(), "{findings:?}");
         let surface = surface.context("synthetic surface must validate")?;
         let catalog = BaselineCatalog::from_release_surface(&facts, &surface)?;
@@ -4545,6 +4594,59 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     }
 
     #[test]
+    fn historical_release_selection_projects_packages_from_retired_profile_schema() -> Result<()> {
+        let manifest = r#"
+            [workspace.metadata.release-surface]
+            packages = [
+              { package = "alpha", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = ["core"] },
+              { package = "beta", public-api-owner = "foundation-public", api-stability = "stable", profiles = [] },
+            ]
+            profile-artifacts = [
+              { profile = "core", assembly = "runtime" },
+            ]
+        "#;
+
+        let packages = release_packages_from_manifest(manifest)?;
+        assert_eq!(
+            packages,
+            BTreeMap::from([
+                ("alpha".to_owned(), Some("0.1".to_owned())),
+                ("beta".to_owned(), None),
+            ])
+        );
+        let current = BTreeSet::from(["alpha".to_owned(), "gamma".to_owned()]);
+        let delta = ReleaseSelectionDelta::derive(
+            &current,
+            &packages.keys().cloned().collect::<BTreeSet<_>>(),
+        );
+        assert_eq!(delta.semver_packages, vec!["alpha"]);
+        assert_eq!(delta.first_release_packages, vec!["gamma"]);
+        assert_eq!(delta.removed_packages, vec!["beta"]);
+        Ok(())
+    }
+
+    #[test]
+    fn historical_release_selection_rejects_unknown_legacy_fields() -> Result<()> {
+        let manifest = r#"
+            [workspace.metadata.release-surface]
+            packages = [
+              { package = "alpha", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [], unexpected = true },
+            ]
+            profile-artifacts = []
+        "#;
+
+        let error = match release_packages_from_manifest(manifest) {
+            Ok(_) => bail!("legacy package fields must remain closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("legacy v1 Release Surface"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn prepublication_version_line_is_bound_to_the_merge_base() {
         assert_eq!(
             changed_frozen_version_line(Some("0.3"), "0.4"),
@@ -4761,7 +4863,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
         let facts = command_facts.get()?;
-        let (surface, findings) = crate::release_surface::validate(facts, &[]);
+        let (surface, findings) = crate::release_surface::validate(facts);
         assert!(findings.is_empty(), "{findings:?}");
         surface.context("real Release Surface missing")
     }
@@ -5286,7 +5388,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         use public_api::tokens::Token::{Identifier, Symbol, Type};
 
         let facts = facts_with_nonempty_release_surface()?;
-        let (surface, findings) = crate::release_surface::validate(&facts, &[]);
+        let (surface, findings) = crate::release_surface::validate(&facts);
         assert!(
             findings.is_empty(),
             "synthetic Release Surface must be valid: {findings:?}"
@@ -5365,7 +5467,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     #[test]
     fn checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection() -> Result<()> {
         let facts = facts_with_nonempty_release_surface()?;
-        let (surface, validation) = crate::release_surface::validate(&facts, &[]);
+        let (surface, validation) = crate::release_surface::validate(&facts);
         assert!(validation.is_empty(), "{validation:?}");
         let surface = surface.context("synthetic Release Surface missing")?;
         let fixture =
@@ -5403,7 +5505,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     #[test]
     fn checked_in_rustdoc_fixture_filters_only_external_blanket_impl_noise() -> Result<()> {
         let facts = facts_with_nonempty_release_surface()?;
-        let (surface, validation) = crate::release_surface::validate(&facts, &[]);
+        let (surface, validation) = crate::release_surface::validate(&facts);
         assert!(validation.is_empty(), "{validation:?}");
         let surface = surface.context("synthetic Release Surface missing")?;
         let fixture = crate::workspace_root()?
@@ -5569,7 +5671,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         use public_api::tokens::Token::{Identifier, Symbol, Type};
 
         let facts = facts_with_selected_renamed_dependency()?;
-        let (surface, validation) = crate::release_surface::validate(&facts, &[]);
+        let (surface, validation) = crate::release_surface::validate(&facts);
         assert!(validation.is_empty(), "{validation:?}");
         let surface = surface.context("synthetic selected dependency surface missing")?;
         let items = BTreeMap::from([

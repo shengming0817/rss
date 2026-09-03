@@ -51,22 +51,10 @@ const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.selftest.sh");
 const SERVICE_TOKEN_REPLAY_ADAPTER: &str = include_str!("../src/service_token_replay.rs");
-const READER_PROVISIONING: &str =
-    include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
-const PROJECTION_ROLE_PROVISIONING: &str =
-    include_str!("../../../deploy/postgres-upgrade/provision-projection-roles.sh");
-const SAGA_OPERATOR_ROLE_PROVISIONING: &str =
-    include_str!("../../../deploy/postgres-upgrade/provision-saga-operator-role.sh");
 const L2_DR_RECOVERY_MIGRATION: &str =
     include_str!("../migrations/0100_install_l2_dr_recovery.sql");
-const L2_DR_RECOVERY_ROLE_PROVISIONING: &str =
-    include_str!("../../../deploy/postgres-upgrade/provision-l2-dr-recovery-roles.sh");
 const PROJECTION_CORRECTNESS_RESIDUALS_MIGRATION: &str =
     include_str!("../migrations/0101_projection_correctness_residuals.sql");
-const READER_UPGRADE_SMOKE: &str =
-    include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
-const POSTGRES_ROLE_INIT: &str =
-    include_str!("../../../deploy/postgres-init/001-create-app-role.sh");
 
 const SETTINGS_PROJECTION_GENERATION_COLUMNS: &[&str] = &[
     "tenant_id",
@@ -624,7 +612,6 @@ fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
 
     for required in [
         "rss-postgres-projection-source-reader",
-        "deploy/postgres-upgrade/provision-projection-roles.sh",
         "WHEN proc.proname = 'rss_service_token_replay_check_and_record'",
         "THEN 'rss_service_token_replay_owner'",
         "NOT owner_role.rolcanlogin",
@@ -1140,7 +1127,6 @@ fn saga_durable_recovery_runbook_carries_executable_hard_cutover_probes() {
         "'rss-postgres-migrator'",
         "SELECT count(*) = 0 AS no_conflicting_saga_locks",
         "'public.saga_step_receipts'::regclass",
-        "rss postgres migrate-all",
         "SELECT max(version) = 86 AS exact_post_0086_ledger",
         "('saga_instances', 'operator_reason', 'text', 'YES')",
         "('saga_journal', 'attempt', 'integer', 'NO')",
@@ -1226,43 +1212,6 @@ fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() -> Resu
     );
     assert!(!normalized.contains("FOR UPDATE SKIP LOCKED"));
     Ok(())
-}
-
-#[test]
-fn postgres_role_init_keeps_file_passwords_out_of_psql_argv_and_unsets_them() {
-    for forbidden in [
-        "--set app_password=",
-        "--set read_password=",
-        "--set projection_reader_password=",
-        "--set projection_operator_password=",
-        "--set dlx_archiver_password=",
-        "--set dlx_verifier_password=",
-        "--set dlx_purger_password=",
-    ] {
-        assert!(
-            !POSTGRES_ROLE_INIT.contains(forbidden),
-            "argv secret: {forbidden}"
-        );
-    }
-    for required in [
-        "\\getenv app_password RSS_INIT_APP_PASSWORD",
-        "\\getenv read_password RSS_INIT_READ_PASSWORD",
-        "\\getenv projection_reader_password RSS_INIT_PROJECTION_READER_PASSWORD",
-        "\\getenv projection_operator_password RSS_INIT_PROJECTION_OPERATOR_PASSWORD",
-        "\\getenv dlx_archiver_password RSS_INIT_DLX_ARCHIVER_PASSWORD",
-        "\\getenv dlx_verifier_password RSS_INIT_DLX_VERIFIER_PASSWORD",
-        "\\getenv dlx_purger_password RSS_INIT_DLX_PURGER_PASSWORD",
-        "trap clear_init_passwords EXIT",
-        "clear_init_passwords\ntrap - EXIT",
-        "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "ALTER ROLE rss_projection_reader LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "ALTER ROLE rss_projection_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-    ] {
-        assert!(
-            POSTGRES_ROLE_INIT.contains(required),
-            "missing secret cleanup: {required}"
-        );
-    }
 }
 
 #[test]
@@ -1509,135 +1458,6 @@ fn service_token_replay_store_is_async_fixed_shape_and_least_privilege() {
 }
 
 #[test]
-fn reader_provisioning_disables_inherited_xtrace_before_secret_expansion() {
-    assert!(
-        matches!(
-            (
-                READER_PROVISIONING.find("set +x"),
-                READER_PROVISIONING.find("${RSS_PG_")
-            ),
-            (Some(disable_xtrace), Some(first_secret_expansion))
-                if disable_xtrace < first_secret_expansion
-        ),
-        "set +x must exist and execute before any credential-bearing shell expansion"
-    );
-    assert!(!READER_PROVISIONING.contains("set -x"));
-    for required in [
-        "ALTER ROLE rss_app_read SET default_transaction_read_only = 'on'",
-        "ALTER ROLE rss_app_read SET search_path = pg_catalog, public",
-        "current_setting('lo_compat_privileges')",
-        "rss_app_read:on:pg_catalog, public:off",
-    ] {
-        assert!(
-            READER_PROVISIONING.contains(required),
-            "reader credential provisioning must preserve the startup-gate role settings: {required}"
-        );
-    }
-}
-
-#[test]
-fn projection_role_provisioning_is_file_only_atomic_and_exact() {
-    assert!(
-        matches!(
-            (
-                PROJECTION_ROLE_PROVISIONING.find("set +x"),
-                PROJECTION_ROLE_PROVISIONING.find("${RSS_PG_")
-            ),
-            (Some(disable_xtrace), Some(first_secret_expansion))
-                if disable_xtrace < first_secret_expansion
-        ),
-        "set +x must precede every credential-bearing shell expansion"
-    );
-    for forbidden in [
-        "--set projection_reader_password=",
-        "--set projection_operator_password=",
-        "set -x",
-        "GRANT rss_projection_reader",
-        "GRANT rss_projection_operator",
-    ] {
-        assert!(
-            !PROJECTION_ROLE_PROVISIONING.contains(forbidden),
-            "projection provisioning exposes a forbidden surface: {forbidden}"
-        );
-    }
-    for required in [
-        "\\getenv projection_reader_password RSS_PROVISION_PROJECTION_READER_PASSWORD",
-        "\\getenv projection_operator_password RSS_PROVISION_PROJECTION_OPERATOR_PASSWORD",
-        "BEGIN;",
-        "COMMIT;",
-        "ALTER ROLE rss_projection_reader LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "ALTER ROLE rss_projection_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "ALTER ROLE rss_projection_reader SET default_transaction_read_only = 'on'",
-        "ALTER ROLE rss_projection_reader SET search_path = pg_catalog, public",
-        "ALTER ROLE rss_projection_operator SET search_path = pg_catalog, public",
-        "current_setting('lo_compat_privileges')",
-        "rss_projection_reader:on:pg_catalog, public:off",
-        "rss_projection_operator:off:pg_catalog, public:off",
-    ] {
-        assert!(
-            PROJECTION_ROLE_PROVISIONING.contains(required),
-            "projection credential provisioning omits exact gate state: {required}"
-        );
-    }
-}
-
-#[test]
-fn saga_operator_role_provisioning_is_file_only_atomic_and_exact() {
-    assert!(
-        matches!(
-            (
-                SAGA_OPERATOR_ROLE_PROVISIONING.find("set +x"),
-                SAGA_OPERATOR_ROLE_PROVISIONING.find("${RSS_PG_")
-            ),
-            (Some(disable_xtrace), Some(first_secret_expansion))
-                if disable_xtrace < first_secret_expansion
-        ),
-        "set +x must precede every Saga credential-bearing shell expansion"
-    );
-    for forbidden in [
-        "--set saga_operator_password=",
-        "set -x",
-        "GRANT rss_saga_operator",
-    ] {
-        assert!(
-            !SAGA_OPERATOR_ROLE_PROVISIONING.contains(forbidden),
-            "Saga operator provisioning exposes a forbidden surface: {forbidden}"
-        );
-    }
-    for required in [
-        "\\getenv saga_operator_password RSS_PROVISION_SAGA_OPERATOR_PASSWORD",
-        "BEGIN;",
-        "COMMIT;",
-        "ALTER ROLE rss_saga_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "ALTER ROLE rss_saga_operator SET search_path = pg_catalog, public",
-        "current_setting('lo_compat_privileges')",
-        "rss_saga_operator:off:pg_catalog, public:off",
-    ] {
-        assert!(
-            SAGA_OPERATOR_ROLE_PROVISIONING.contains(required),
-            "Saga operator credential provisioning omits exact gate state: {required}"
-        );
-    }
-
-    for required in [
-        "RSS_PG_SAGA_OPERATOR_USERNAME",
-        "RSS_PG_SAGA_OPERATOR_PASSWORD_FILE",
-        "CREATE ROLE rss_saga_operator LOGIN PASSWORD %L",
-        "ALTER ROLE rss_saga_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "GRANT CONNECT ON DATABASE %I TO rss_saga_operator",
-    ] {
-        assert!(
-            POSTGRES_ROLE_INIT.contains(required),
-            "fresh-install Saga operator provisioning omits `{required}`"
-        );
-    }
-    assert!(
-        READER_UPGRADE_SMOKE.contains("provision-saga-operator-role.sh"),
-        "retained-volume smoke must execute Saga operator credential provisioning"
-    );
-}
-
-#[test]
 fn l2_dr_recovery_migration_isolates_start_proof_and_acl() {
     let normalized = L2_DR_RECOVERY_MIGRATION
         .split_whitespace()
@@ -1685,69 +1505,6 @@ fn l2_dr_recovery_migration_isolates_start_proof_and_acl() {
     }
 }
 
-#[test]
-fn l2_dr_recovery_role_provisioning_is_file_only_fail_closed_and_exact() {
-    assert!(
-        matches!(
-            (
-                L2_DR_RECOVERY_ROLE_PROVISIONING.find("set +x"),
-                L2_DR_RECOVERY_ROLE_PROVISIONING.find("${RSS_PG_")
-            ),
-            (Some(disable_xtrace), Some(first_secret_expansion))
-                if disable_xtrace < first_secret_expansion
-        ),
-        "set +x must precede every L2 DR credential-bearing shell expansion"
-    );
-    for forbidden in [
-        "--set l2_dr_recovery_",
-        "set -x",
-        "GRANT rss_l2_dr_recovery_auditor",
-        "GRANT rss_l2_dr_recovery_executor",
-        "ALTER ROLE rss_l2_dr_recovery_owner LOGIN",
-        "--set l2_dr_auditor_password=",
-    ] {
-        assert!(
-            !L2_DR_RECOVERY_ROLE_PROVISIONING.contains(forbidden),
-            "L2 DR provisioning exposes a forbidden surface: {forbidden}"
-        );
-    }
-    for required in [
-        "\\getenv l2_dr_recovery_auditor_password RSS_PROVISION_L2_DR_RECOVERY_AUDITOR_PASSWORD",
-        "\\getenv l2_dr_recovery_executor_password RSS_PROVISION_L2_DR_RECOVERY_EXECUTOR_PASSWORD",
-        "BEGIN;",
-        "COMMIT;",
-        "is absent; apply migration 0100 before provisioning credentials",
-        "has role membership; refuse credential provisioning",
-        "ALTER ROLE rss_l2_dr_recovery_auditor LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "ALTER ROLE rss_l2_dr_recovery_executor LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
-        "expected=\"${verify_role_name}:${verify_role_name}:true:false:false:false:false:false:false:off:pg_catalog, public:off\"",
-        "verify_role rss_l2_dr_recovery_auditor",
-        "verify_role rss_l2_dr_recovery_executor",
-    ] {
-        assert!(
-            L2_DR_RECOVERY_ROLE_PROVISIONING.contains(required),
-            "L2 DR credential provisioning omits exact gate state: {required}"
-        );
-    }
-    assert!(
-        READER_UPGRADE_SMOKE.contains("provision-l2-dr-recovery-roles.sh"),
-        "retained-volume smoke must execute L2 DR credential provisioning"
-    );
-    for required in [
-        "rss_l2_dr_recovery_owner:false:true",
-        "provision must fail when L2 DR roles are absent",
-        "provision must fail when L2 DR role membership has drifted",
-        "rss_l2_dr_recovery_auditor_absent",
-        "GRANT rss_app TO rss_l2_dr_recovery_auditor",
-        "106:true:48:106",
-        "passed through 0106",
-    ] {
-        assert!(
-            READER_UPGRADE_SMOKE.contains(required),
-            "retained-volume smoke omits L2 DR fail-closed/owner gate `{required}`"
-        );
-    }
-}
 #[test]
 fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
     for required in [
@@ -1809,42 +1566,6 @@ fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
         assert!(
             !LOCALONLY_READ_ROLE.contains(forbidden),
             "0067 exposes a forbidden reader capability or fallback: {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn reader_upgrade_smoke_uses_real_sqlx_ledger_and_forward_only_cli_with_bounded_startup() {
-    for required in [
-        "rev-list --topo-order HEAD",
-        "0084_persist_reconcile_wake_and_device_policy_operations.sql",
-        "0085_projection_privilege_boundaries.sql",
-        "git clone --quiet --shared --no-checkout",
-        "checkout --quiet --detach",
-        "predecessor_registry=",
-        "84:true:48:84",
-        "RSS_PG_DATABASE_URL_FILE=",
-        "RSS_PG_MIGRATOR_PASSWORD_FILE=",
-        "postgres migrate-all",
-        "SELECT max(version)",
-        "docker inspect",
-        "deadline=",
-    ] {
-        assert!(
-            READER_UPGRADE_SMOKE.contains(required),
-            "retained-volume smoke omits release-path evidence: {required}"
-        );
-    }
-    for forbidden in [
-        "sed -n",
-        "0067_localonly_read_role.sql",
-        "for migration in",
-        "until owner_psql",
-        "bootstrap_reader_upgrade_smoke_predecessor",
-    ] {
-        assert!(
-            !READER_UPGRADE_SMOKE.contains(forbidden),
-            "retained-volume smoke must not replay migration SQL or wait forever: {forbidden}"
         );
     }
 }

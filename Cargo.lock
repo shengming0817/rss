@@ -1873,7 +1873,6 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
- "tracing-subscriber",
  "url",
  "vault",
  "vocab",
@@ -3359,7 +3358,6 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "vault",
@@ -5301,17 +5299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rss"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "postgres-migration",
- "runtime",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rss-conformance"
 version = "0.1.0"
 dependencies = [
@@ -6107,15 +6094,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "server"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "runtime",
- "tokio",
-]
-
-[[package]]
 name = "settings"
 version = "0.0.0"
 dependencies = [
@@ -6222,7 +6200,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "vault",
  "vocab",

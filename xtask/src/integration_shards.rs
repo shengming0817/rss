@@ -4,7 +4,7 @@
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets|source_and_security_provider_relations_reject_catalog_drift", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets|shared_journey_relations_match_independently_discovered_module_edges|source_and_security_provider_relations_are_closed_and_non_vacuous" }.
 //! INVARIANT: INTEGRATION-SHARD-ELIGIBILITY-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift|cargo_target_eligibility_rejects_crate_level_feature_cfg", anti_vacuity = "catalog_test_and_remote_only_sets_are_non_vacuous|workspace_cargo_target_eligibility_matches_local_feature_scope" }.
-//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift|identityaudit_runtime_resource_closure_rejects_missing_duplicate_and_extra", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique|identityaudit_runtime_resource_closure_is_exact_and_non_vacuous" }.
+//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
 
 #[cfg(test)]
 use crate::workspace_root;
@@ -382,8 +382,7 @@ impl LocalFeatureScope {
     pub(crate) const fn feature(self) -> &'static str {
         match self {
             Self::Mqtt => "broker-tests",
-            Self::DeviceIdentity => "artifact-acceptance",
-            Self::IdentityAudit => "artifact-acceptance",
+            Self::DeviceIdentity | Self::IdentityAudit => "test-support",
             Self::Postgres
             | Self::PostgresMigration
             | Self::RedisAdapter
@@ -702,9 +701,6 @@ pub(crate) enum ChangedIntegrationSource {
 enum SharedJourneySource {
     Common,
     LocalTxValidation,
-    IdentityAuditFixture,
-    RuntimeComposeFixture,
-    SettingsOnlyProductionArtifact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -714,23 +710,12 @@ struct SharedJourneyRelation {
 }
 
 impl SharedJourneySource {
-    const ALL: [Self; 5] = [
-        Self::Common,
-        Self::LocalTxValidation,
-        Self::IdentityAuditFixture,
-        Self::RuntimeComposeFixture,
-        Self::SettingsOnlyProductionArtifact,
-    ];
+    const ALL: [Self; 2] = [Self::Common, Self::LocalTxValidation];
 
     const fn path(self) -> &'static str {
         match self {
             Self::Common => "journeys/tests/common/mod.rs",
             Self::LocalTxValidation => "journeys/tests/support/localtx_validation.rs",
-            Self::IdentityAuditFixture => "journeys/tests/support/identityaudit_fixture.rs",
-            Self::RuntimeComposeFixture => "journeys/tests/support/runtime_compose_fixture.rs",
-            Self::SettingsOnlyProductionArtifact => {
-                "journeys/tests/support/settingsonly_production_artifact.rs"
-            }
         }
     }
 
@@ -753,12 +738,6 @@ impl SharedJourneySource {
                     IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
                 ],
                 has_release_consumer: false,
-            },
-            Self::IdentityAuditFixture
-            | Self::RuntimeComposeFixture
-            | Self::SettingsOnlyProductionArtifact => SharedJourneyRelation {
-                critical_carriers: &[],
-                has_release_consumer: true,
             },
         }
     }
@@ -920,7 +899,6 @@ integration_shard_catalog! {
             MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
             DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
-            DeviceIdentityRuntimeImageAcceptance => ("deviceidentity-runtime-image-acceptance", ReleaseCheck, "deviceidentity", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [DeviceIdentityPackage, DeviceCertificateCandidate], capabilities: [Docker]),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -933,7 +911,6 @@ integration_shard_catalog! {
             EventTransportJourney => ("event-transport-journey", ReleaseCheck, "journeys", "eventtransport_journey", Test, Parallel, Affected, resources: [Postgres, Redis, Amqp, Mqtt], impact_packages: [], capabilities: [Docker]),
             IdentityLoginAuditDurableJourney => ("identity-login-audit-durable-journey", IntegrationCritical, "journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, EventexecPackage, IdentityPackage, PostgresPackage], capabilities: []),
             IdentityLoginAuditJourney => ("identity-login-audit-journey", ReleaseCheck, "journeys", "identity_login_audit_journey", Test, Parallel, Affected, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
-            IdentityAuditRuntimeJourney => ("identity-audit-runtime-journey", ReleaseCheck, "journeys", "identityaudit_runtime", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [IdentityAuditPackage], capabilities: []),
             EventTransportDurableE2e => ("event-transport-durable-e2e", IntegrationCritical, "runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [AmqpPackage, EventexecPackage, MqttPackage, PostgresPackage, RedisAdapterPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
         ],
     },
@@ -945,8 +922,6 @@ integration_shard_catalog! {
             SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
             SettingsOnlyLib => ("settings-only-lib", ReleaseCheck, "settingsonly", "settingsonly", Lib, Serial, Affected, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
             IdentityAuditLib => ("identity-audit-lib", ReleaseCheck, "identityaudit", "identityaudit", Lib, Serial, Affected, resources: [], impact_packages: [IdentityAuditPackage], capabilities: []),
-            IdentityAuditArtifactAcceptance => ("identity-audit-artifact-acceptance", ReleaseCheck, "identityaudit", "artifact_acceptance", Test, Parallel, Affected, resources: [], impact_packages: [IdentityAuditPackage], capabilities: []),
-            IdentityAuditRuntimeImageAcceptance => ("identity-audit-runtime-image-acceptance", ReleaseCheck, "identityaudit", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [IdentityAuditPackage], capabilities: [Docker]),
             RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             VaultLib => ("vault-lib", ReleaseCheck, "vault", "vault", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             VaultLive => ("vault-live", IntegrationCritical, "vault", "live_vault", Test, Serial, RemoteOnly, resources: [Vault], impact_packages: [VaultProvider], capabilities: [Docker]),
@@ -1011,10 +986,7 @@ integration_shard_catalog! {
         name: "production-runtime",
         local_feature_scopes: [Journeys],
         units: [
-            SettingsOnlyProductionArtifact => ("settings-only-production-artifact", ReleaseCheck, "journeys", "settingsonly_production_artifact", Test, Serial, RemoteOnly, resources: [], impact_packages: [SettingsOnlyPackage], capabilities: [Docker]),
-            TwoReplicaRuntimeJourney => ("two-replica-runtime-journey", ReleaseCheck, "journeys", "two_replica_runtime", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
-            ProductionRuntimeJourney => ("production-runtime-journey", ReleaseCheck, "journeys", "production_runtime", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
-            RuntimeInventoryJourney => ("runtime-inventory-journey", ReleaseCheck, "journeys", "runtime_inventory", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
+            RuntimeInventoryJourney => ("runtime-inventory-journey", ReleaseCheck, "journeys", "runtime_inventory", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: []),
         ],
     },
 }
@@ -1178,14 +1150,6 @@ fn validate_integration_unit_catalog(
         {
             bail!(
                 "integration unit {:?} requires a hermetic Docker-backed resource without Docker capability",
-                spec.id
-            );
-        }
-        if spec.shard == IntegrationShard::ProductionRuntime
-            && !spec.capabilities.contains(&Capability::Docker)
-        {
-            bail!(
-                "production-runtime unit {:?} must declare Docker capability",
                 spec.id
             );
         }
@@ -2749,54 +2713,6 @@ mod tests {
         Ok(())
     }
 
-    fn validate_identityaudit_runtime_resource_closure(resources: &[Resource]) -> Result<()> {
-        let expected = [Resource::Postgres, Resource::Redis, Resource::Amqp];
-        if resources.is_empty() {
-            bail!("IdentityAudit runtime resource closure must be non-empty");
-        }
-        if resources != expected {
-            bail!(
-                "IdentityAudit runtime resource closure must be exactly {expected:?}, got {resources:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_runtime_resource_closure_is_exact_and_non_vacuous() -> Result<()> {
-        validate_identityaudit_runtime_resource_closure(
-            IntegrationUnitId::IdentityAuditRuntimeJourney
-                .spec()
-                .resources,
-        )
-    }
-
-    #[test]
-    fn identityaudit_runtime_resource_closure_rejects_missing_duplicate_and_extra() {
-        assert!(
-            validate_identityaudit_runtime_resource_closure(&[Resource::Postgres, Resource::Amqp])
-                .is_err()
-        );
-        assert!(
-            validate_identityaudit_runtime_resource_closure(&[
-                Resource::Postgres,
-                Resource::Redis,
-                Resource::Amqp,
-                Resource::Mqtt,
-            ])
-            .is_err()
-        );
-
-        let mut duplicate = INTEGRATION_UNIT_SPECS.to_vec();
-        duplicate[IntegrationUnitId::IdentityAuditRuntimeJourney as usize].resources = &[
-            Resource::Postgres,
-            Resource::Redis,
-            Resource::Redis,
-            Resource::Amqp,
-        ];
-        assert!(validate_integration_unit_catalog(&duplicate, SHARD_SPECS).is_err());
-    }
-
     #[test]
     fn release_check_covers_the_catalog_and_critical_is_a_true_subset() {
         let release = projected_integration_units(ExecutionProfile::ReleaseCheck)
@@ -2911,22 +2827,11 @@ mod tests {
     fn local_feature_scope_catalog_is_non_vacuous_and_rejects_omissions() -> Result<()> {
         assert_eq!(LocalFeatureScope::ALL.len(), INTEGRATION_PACKAGES.len());
         assert_eq!(LocalFeatureScope::Mqtt.feature(), "broker-tests");
-        assert_eq!(
-            LocalFeatureScope::DeviceIdentity.package(),
-            "deviceidentity"
-        );
-        assert_eq!(
-            LocalFeatureScope::DeviceIdentity.feature(),
-            "artifact-acceptance"
-        );
-        assert_eq!(
-            LocalFeatureScope::DeviceIdentity.root(),
-            "assemblies/deviceidentity"
-        );
         assert!(LocalFeatureScope::ALL.into_iter().all(|scope| match scope {
             LocalFeatureScope::Mqtt => scope.feature() == "broker-tests",
-            LocalFeatureScope::DeviceIdentity => scope.feature() == "artifact-acceptance",
-            LocalFeatureScope::IdentityAudit => scope.feature() == "artifact-acceptance",
+            LocalFeatureScope::DeviceIdentity | LocalFeatureScope::IdentityAudit => {
+                scope.feature() == "test-support"
+            }
             _ => scope.feature() == "integration",
         }));
         validate_local_feature_catalog(SHARD_SPECS)?;
@@ -3187,14 +3092,11 @@ mod tests {
             ("runtime", "settings_secret_e2e"),
             ("amqp", "integration"),
             ("mqtt", "integration"),
-            ("deviceidentity", "runtime_image_acceptance"),
             ("journeys", "amqp_consumer_at_least_once_journey"),
             ("journeys", "identity_login_audit_durable_journey"),
-            ("journeys", "identityaudit_runtime"),
             ("runtime", "event_transport_durable_e2e"),
             ("settingsonly", "settingsonly"),
             ("identityaudit", "identityaudit"),
-            ("identityaudit", "runtime_image_acceptance"),
             ("runtime", "runtime"),
             ("runtime", "configs_ready_e2e"),
             ("runtime", "identity_login_wire_e2e"),
@@ -3212,8 +3114,6 @@ mod tests {
             ("runtime", "settings_config_publish_durable_e2e"),
             ("journeys", "saga_runtime_provider_integration"),
             ("s3", "integration_object_store"),
-            ("journeys", "settingsonly_production_artifact"),
-            ("journeys", "two_replica_runtime"),
             ("vault", "live_vault"),
         ]);
         let actual_serial: BTreeSet<_> = all_units()
@@ -3402,7 +3302,7 @@ mod tests {
             assert_eq!(release.resources_for_shard(shard), resources.to_vec());
             assert!(!shard.spec().units.is_empty());
         }
-        assert!(release.requires_docker_for_shard(IntegrationShard::ProductionRuntime));
+        assert!(!release.requires_docker_for_shard(IntegrationShard::ProductionRuntime));
         assert!(release.requires_docker_for_shard(IntegrationShard::CdcProjectionSaga));
 
         let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
@@ -4230,7 +4130,6 @@ mod tests {
             "runtime",
             "auth_bridge_structure"
         ));
-        assert!(is_remote_only_test_target("journeys", "production_runtime"));
         assert!(!is_remote_only_test_target(
             "xtask",
             "consistency_report_cli"
@@ -4259,46 +4158,6 @@ mod tests {
         assert_eq!(live.package, "s3");
         assert_eq!(live.kind, TargetKind::Test);
         assert_eq!(live.scheduling, Scheduling::Serial);
-    }
-
-    #[test]
-    fn production_runtime_shard_owns_one_serial_two_replica_target() {
-        let spec = IntegrationShard::ProductionRuntime.spec();
-        assert!(
-            IntegrationSelection::release_check()
-                .resources_for_shard(spec.shard)
-                .is_empty(),
-            "journey self-provisions Docker resources"
-        );
-        let matches = spec
-            .units
-            .iter()
-            .filter(|unit| {
-                unit.package == "journeys"
-                    && unit.target == "two_replica_runtime"
-                    && unit.kind == TargetKind::Test
-                    && unit.scheduling == Scheduling::Serial
-            })
-            .count();
-        assert_eq!(matches, 1);
-        let production_artifacts = spec
-            .units
-            .iter()
-            .filter(|unit| {
-                unit.package == "journeys"
-                    && unit.target == "settingsonly_production_artifact"
-                    && unit.kind == TargetKind::Test
-                    && unit.scheduling == Scheduling::Serial
-            })
-            .count();
-        assert_eq!(
-            production_artifacts, 1,
-            "SettingsOnly production artifact carrier must be unique and serial"
-        );
-        assert_eq!(
-            IntegrationShard::ProductionRuntime.partition_policy(),
-            PartitionPolicy::Unpartitioned
-        );
     }
 
     #[test]

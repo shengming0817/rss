@@ -169,9 +169,6 @@ pub(crate) enum ContractCommand {
 pub(crate) enum AssemblyCommand {
     /// 校验 assembly manifest、Cargo closure 与 production governance residual。
     Validate,
-    /// assembly lifecycle 与应用 artifact exact closure。
-    #[command(subcommand)]
-    Artifacts(AssemblyArtifactsCommand),
     /// assembly.toml domains → committed modules_gen.rs。
     GenerateModules {
         #[arg(long)]
@@ -190,12 +187,6 @@ pub(crate) enum AssemblyCommand {
     /// 全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门。
     #[command(subcommand)]
     Lock(AssemblyLockAction),
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum AssemblyArtifactsCommand {
-    /// assembly lifecycle 与应用 artifact exact closure 门。
-    Check,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -545,11 +536,6 @@ mod tests {
             parse(&["assembly", "validate"])?,
             Command::Assembly(AssemblyCommand::Validate)
         );
-        assert_eq!(
-            parse(&["assembly", "artifacts", "check"])?,
-            Command::Assembly(AssemblyCommand::Artifacts(AssemblyArtifactsCommand::Check))
-        );
-        assert!(parse(&["assembly", "artifacts"]).is_err());
         assert_eq!(
             parse(&["assembly", "generate-modules", "--check"])?,
             Command::Assembly(AssemblyCommand::GenerateModules { check: true })

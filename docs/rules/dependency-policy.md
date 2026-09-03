@@ -46,7 +46,6 @@
 | 使用方直接声明依赖并符合 crate 分层 | Cargo manifest/rustc、`layer-deps` |
 | workspace 外部 version pin 与 lock 对齐 | `[workspace.dependencies]`、`Cargo.lock`、`wsdeps-drift` |
 | license、advisory 与 source policy | `deny.toml`、`cargo deny` |
-| `server`/`rss` shipped binary 的已登记 feature policy | `WorkspaceFacts` CargoSet root selection、`shipped-feature-guard` |
 
 ### 临时 advisory 风险接受
 

@@ -8,7 +8,7 @@ Cargo metadata 与 `xtask/src/layers.rs` 派生；文档不复制可变清单。
 - `crates/` 只放扁平库 crate；bounded context 是域 crate，feature 是域内模块。
 - `adapters/` 实现上层 port；域与服务不得反向依赖 adapter。
 - `contracts/` 是 wire 声明源，`generated/` 是确定性派生物；手写代码不得修改 generated 输出。
-- `assemblies/`、`bins/` 与 `xtask/` 是组合根或工具入口，可依赖所需下层库，但不得成为领域事实 owner。
+- `assemblies/` 是 library composition root，`xtask/` 是治理工具入口；二者可依赖所需下层库，但不得成为领域事实 owner。
 - 目录移动不改变依赖权限；权限只由 Cargo 图、visibility 与 typed policy 决定。
 
 ## 依赖方向

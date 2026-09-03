@@ -17,7 +17,7 @@
 //! activation requirements。因此本模块不声明 omitted/disabled 已在当前 runtime 路径获得零副作用。
 //!
 //! `Demo` 路径的 in-mem 构造只能在 journeys / xtask 组合根进行（`deny.toml` `memory` wrapper 限定）；
-//! 生产 `bins/server` 的 `Demo` 路径须特殊决策（TOPO-INMEM-SEAL-01）。
+//! production assembly 的 `Demo` 路径须特殊决策（TOPO-INMEM-SEAL-01）。
 //!
 //! # 为什么 resolver 返回**决策**而非**构造好的 adapter**
 //!

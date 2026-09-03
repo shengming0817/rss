@@ -41,7 +41,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 | `consistency-fault` | Postgres、Redis、AMQP | 以 catalog `ConsistencyFault` units 为准 |
 | `cdc-projection-saga` | Postgres | 以 catalog `CdcProjectionSaga` units 为准 |
 | `object-storage` | MinIO / S3-compatible object storage | 以 catalog `ObjectStorage` units 为准 |
-| `production-runtime` | Docker | 以 catalog `ProductionRuntime` units 为准 |
+| `production-runtime` | 无外部资源 | 以 catalog `ProductionRuntime` units 为准 |
 
 表中具体 `package:target`、串并行与 RemoteOnly/Affected 身份一律读
 `xtask/src/integration_shards.rs` catalog；运维只需记住资源集合与「先 serial 后 parallel」批次序。
@@ -97,12 +97,6 @@ test-support 编译边界声明同一 typed feature，但不能声明其它或�
 
 `s3:integration_object_store` 由 `object-storage` shard 强制执行；测试默认自建 MinIO，并在每轮创建启用
 versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不存在 standalone 旁路。
-
-`journeys:settingsonly_production_artifact` 对应 typed execution unit
-`SettingsOnlyProductionArtifact`，只在 `ProductionRuntime` 的 Serial batch 运行；四条 exact case 及其 artifact
-selector 的闭合映射由代码 gate 证明，本文不承担 enforcement。该 shard 继续使用既有
-`production-runtime` 的 900 秒 runner timeout 和 develop/release 或显式 full 路由；本次 carrier 替换不新增 workflow、
-scheduler 或 CI 路径。
 
 MQTT production code 默认编译；`broker-tests` 只打开 Docker-backed T2，不控制 runtime 实现。typed shard
 catalog 为 `mqtt:integration` 精确启用 `mqtt/broker-tests`，其它 package 继续使用各自的 `integration`

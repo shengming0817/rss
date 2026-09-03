@@ -40,30 +40,30 @@ Hard admission 是 fail-closed 的语义判定：必须能从 Cargo production t
 - README 文案和手工 expected count；
 - 无 consumer 的未来 API；
 - 通用 CI、构建编排和研发控制平台；
-- domain × provider × assembly × binary × fault 测试笛卡尔积；
+- domain × provider × assembly × fault 测试笛卡尔积；
 - 已删除私有 API 的 compile-fail 墓碑；重新引入会恢复真实安全或一致性绕过时，按对应 invariant 保留。
 
 迁移期 carrier 记录 owner、目标 hazard、替代载体和删除条件；目标 invariant 被稳定载体覆盖后移除。
 
 ## 证据层
 
-Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度，两轴不得互相推导。
+Hard/Medium/Soft 表示 enforcement 强度；T1/T2 表示仓内验证深度，两轴不得互相推导。
 
 - **T1**：Cargo、类型、schema/codegen、compile-fail、组件属性和状态机。
 - **T2**：consumer/provider conformance、真实 DB/Broker/identity seam、事务与接缝故障。
-- **T3**：production assembly、进程/config/provider join、启动/重启/排空和 operator recovery。
+- **External**：产品进程、应用镜像、部署、production join、启动/重启/排空和 operator recovery 由外部消费者证明，不是仓内 T3 carrier。
 
-每个 invariant 选择覆盖目标失效模式的最低充分层。T1、T2、T3 分别证明其独有风险。
+每个仓内 invariant 选择覆盖目标失效模式的最低充分 T1/T2；外部产品风险不由仓内证据代证。
 
 ## 实施前判定
 
 新增或修改 enforcement 前确定：
 
-1. 稳定风险属于架构依赖与可见性、契约与兼容性、安全/租户/evidence、一致性状态转换或 Runtime/production posture。
+1. 稳定风险属于架构依赖与可见性、契约与兼容性、安全/租户/evidence、一致性状态转换或 library runtime posture。
 2. Cargo、类型、schema、codegen 与既有 canonical proof 的覆盖边界。
 3. truth owner、risk owner、canonical target 与诊断对象。
-4. 最低充分的 Hard/Medium 和 T1/T2/T3。
-5. carrier replacement、合并或独立 production hazard。
+4. 最低充分的 Hard/Medium 和 T1/T2。
+5. carrier replacement、合并或外部产品 hazard 的边界。
 6. 能力范围、依赖准入与门预算的一致性。
 
 ## 载体选择
@@ -74,8 +74,8 @@ Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度，两轴
 4. Cargo/rustc/clippy/cargo-deny；
 5. 既有共享 Dylint 或 type-aware gate；
 6. provider conformance 与真实后端 T2；
-7. production join T3；
-8. runtime fail-fast。
+7. 外部 consumer 编译与 conformance；
+8. library runtime fail-fast。
 
 机器 metadata 与 Rust source/rustdoc carrier 配置 synthetic red case 与 anti-vacuity。Hard 化后的投影从权威来源派生；
 文件路径参与 semantic evidence identity，诊断行号不参与 identity、排序或 equality。按需生成的展示报告不是
@@ -117,7 +117,7 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 - Verified Principal、TenantContext、DeviceCredential 与 receipt 使用私有构造或 sealed 类型。
 - auth、tenant 和 credential 作为必填 typed input 进入执行路径。
 - RLS/ACL、tenant transaction、revocation/replay 与 negative authorization 使用 T1/T2 证明。
-- production identity/provider join 使用最低充分 T3 证明。
+- assembly library 的 identity/provider closure 使用最低充分 T2；production join 属于 External。
 
 ### 一致性、事务与 fencing
 
@@ -126,19 +126,19 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 - stale writer、lease loss、commit unknown、DLQ/recovery 使用独立 fault oracle。
 - active L3/L4 value stream 使用 restart 与 operator recovery 证明。
 
-### Runtime 与 production posture
+### Library runtime 与 consumer posture
 
 - runtime phase 接收 typed configuration snapshot。
-- production provider、AssemblyLock、RuntimePlan、generated binding 与 inventory 保持同一 identity chain。
+- assembly provider、AssemblyLock、RuntimePlan、generated binding 与 inventory 保持同一 identity chain。
 - lifecycle output 表达 startup rollback、readiness、drain、shutdown 与 restart。
-- provider capability/durability 和 production image/runtime join 使用 T2/T3 证明。
+- provider capability/durability 使用 T2 证明；产品 image/runtime join 由 External consumer 负责。
 
 ## Proof 收敛
 
 - 一个事实对应一个权威声明源，其它 artifact 由该声明源派生。
-- 一个 invariant 对应一个 canonical owner；T1/T2/T3 分别覆盖独立风险。
+- 一个 invariant 对应一个 canonical owner；T1/T2 分别覆盖独立仓内风险。
 - 回归测试绑定可复发行为；类型封闭后移除对应 source-shape regression。
-- integration evidence 进入显式 canonical target，并携带环境与 product assertion 结果。
+- integration evidence 进入显式 canonical target，并携带环境与 provider/library assertion 结果。
 - fault matrix 按独立 failure mode 组织。
 - public-api/SemVer 保护明确公开面。
 - proof replacement 先验证 candidate，再切换 selector/owner 并移除旧路径。

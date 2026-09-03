@@ -220,9 +220,9 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
 
     let fixture = build_settings_wire_fixture(
         Arc::new(crypto::load_password_blocklist_from_reader(
-            std::io::Cursor::new(include_bytes!(
-                "../../../deploy/password-blocklist.demo.sha256"
-            )),
+            std::io::Cursor::new(
+                b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
+            ),
         )?),
         pg.handle(),
         redis,

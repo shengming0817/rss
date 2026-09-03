@@ -8,7 +8,7 @@
 
 This specification freezes the intended capability semantics for RSS's first device-latent certificate convergence loop. It
 does not activate a contract or production path. Candidate product identity, public waist, external consumer and activation
-handoff are owned by [ADR-028](../../architecture/202608120423-028-device-security-candidate-scope.md).
+handoff is outside the repository boundary defined by [project-scope](../../rules/project-scope.md).
 
 ## User stories
 

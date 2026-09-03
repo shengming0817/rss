@@ -16,14 +16,10 @@
 #   make audit        供应链漏洞刷新 lane（与 security-audit.yml 的每日 UTC schedule 使用同一 typed audit plan）：
 #                     inner plan 只有 advisory-scoped `deny check advisories` + cargo-audit，
 #                     不包含 workspace 编译 gate；外层 Cargo 启动器边界同上。
-#   make docker-build server 多阶段镜像构建（#1134）：cargo-chef + distroless/cc:nonroot → rss-server:dev。
-#   make docker-smoke 容器冒烟验收（#1134，**docker-gated**）：build → compose up → /readyz 200 → 非 root /
-#                     只读 rootfs 断言 → down -v。逻辑在 deploy/smoke.sh（机器可判定 acceptance harness）。
-#
 # CI 架构与运维状态见 docs/ops/202606231530-001-ci-lane.md；精确门集与缺工具策略见
 # xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci ci-full cargo-selftest audit docker-build docker-smoke postgres-reader-upgrade-smoke
+.PHONY: verify verify-fast ci ci-full cargo-selftest audit
 
 RSS_CARGO ?= ./hack/cargo.sh
 CI_BASE ?= origin/develop
@@ -47,12 +43,3 @@ cargo-selftest:
 
 audit:
 	$(RSS_CARGO) xtask ci audit
-
-docker-build:
-	docker build -t rss-server:dev .
-
-docker-smoke:
-	RSS_SMOKE_MODE=developer ./deploy/smoke.sh
-
-postgres-reader-upgrade-smoke:
-	./deploy/postgres-upgrade/smoke-retained-volume.sh

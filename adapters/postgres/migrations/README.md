@@ -16,7 +16,7 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
   `{version}_{description}`，`version` 须能 parse 为正整数。**全局唯一**由
   `postgres-migration-inventory` build-time Hard 门守（`resolve_blocking` 派生 + 相邻 version 查重 +
   目录内每个 `.sql` 必须被 resolve；INVARIANT `POSTGRES-MIGRATION-INVENTORY-01`）——两文件同序号即编译红
-  （sqlx 按 `version` 键迁移，重号会让 `rss postgres migrate-all` 在任意 fresh DB 上失败，#1134 / #1998）。
+  （sqlx 按 `version` 键迁移，重号会让 `external consumer migration runner` 在任意 fresh DB 上失败，#1134 / #1998）。
   不要求从 `0001` 起连续无缺号。
 - `动词_对象`：如 `create_outbox`、`add_lease_token_to_outbox`。下划线在 sqlx 展示时转空格。
 - 例：`0003_create_outbox.sql`、`0016_add_seq_and_partition_to_outbox.sql`。
@@ -69,14 +69,14 @@ bootstrap 无表权限，UPDATE/DELETE/TRUNCATE 均不可执行。随后用 tena
 用 revision 1→2、exact replay、旧 revision/跳号冲突做 apply smoke test。
 
 这是 forward-only 原子 hard cut，没有 down migration。若 postflight 失败，只能停止新 artifact，使用迁移前整体
-备份与旧 artifact 一起恢复；禁止只还原旧表或同时运行新旧 binary/双路径。
+备份与旧 artifact 一起恢复；禁止只还原旧表或同时运行新旧消费者版本/双路径。
 
 ## 只增不改
 
 已提交的迁移文件**只增不改**；sqlx migration ledger checksum 在运行期拒绝改写。例外须 ADR 说明。
 
 机器守卫：sqlx 在 `_sqlx_migrations` 表记每个已应用迁移的 `checksum`；改动已应用文件的内容会在下次
-`rss postgres migrate-all` 触发 `VersionMismatch` 报错（Medium，运行期 fail-fast）。改顺序 / 删文件触发 `VersionMissing`。
+`external consumer migration runner` 触发 `VersionMismatch` 报错（Medium，运行期 fail-fast）。改顺序 / 删文件触发 `VersionMissing`。
 
 > **例外（#1134，pre-GA append-only carve-out）**：本次把 4 对历史重复序号（旧 `0002`/`0008`/`0009`/`0013`，
 > 各两文件同号）整体重编为唯一连续 `0001`–`0018`。依据：pre-GA 无外部消费方、无已部署 DB（`_sqlx_migrations`
@@ -184,7 +184,7 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
 由于 PostgreSQL 没有针对单一角色的 ACL DENY，`0067` 同时撤销当前数据库的 PUBLIC TEMPORARY，并把该权限
 显式回授既有 writer `rss_app`；reader 只获 CONNECT，因此不改变 writer 行为，也不让 PUBLIC TEMP 绕过 reader
 的精确数据库权限门。
-存量库由待发布镜像的 `rss postgres migrate-all` forward-only migration Job 在 serving phase 前推进至
+存量库由外部消费者版本的 `external consumer migration runner` forward-only migration Job 在 serving phase 前推进至
 当前 HEAD；reader 密码随后 provision。旧的 0067 专用 reader-lane 命令已删除，不保留版本特判入口。
 
 ### 0068 service-token replay store 破坏性切换
@@ -193,8 +193,8 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
 `SHA-256(issuer, audience, verified kid, jti)` digest。不存在兼容视图、双写或旧表读取。
 旧行缺少 issuer/audience/kid，无法安全转换；只要旧表仍有未过期行，迁移就以固定错误失败并完整回滚。
 
-这是 non-rolling、forward-only cutover。唯一受支持的迁移入口是待发布镜像中的
-`rss postgres migrate-all` migration Job；serving 进程绝不执行迁移，只读核验 ledger 精确等于 HEAD。
+这是 non-rolling、forward-only cutover。唯一受支持的迁移入口是外部消费者版本中的
+`external consumer migration runner` migration Job；serving 进程绝不执行迁移，只读核验 ledger 精确等于 HEAD。
 不得用旧镜像、maintenance CLI 或手工 `psql -f` 替代。按以下顺序执行：
 
 1. **停止旧世界**：停止签发旧 operator token，等待其最长 TTL 到期；随后把所有旧 runtime 实例缩容到
@@ -215,7 +215,7 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
       AND held.granted;
    ```
 
-3. **唯一 migration runner**：只启动 1 个待发布镜像的 `rss postgres migrate-all` Job，不并行启动第二个实例或任何
+3. **唯一 migration runner**：只启动 1 个外部消费者版本的 `external consumer migration runner` Job，不并行启动第二个实例或任何
    maintenance CLI。等待 Job 完成；migration 非零退出即进入步骤 7，
    不得继续扩容。
 4. **迁移后 catalog / ACL 探针**：仍以 migrator 凭据确认 ledger 为 `68`、旧表消失、新表存在；两个函数
@@ -258,12 +258,12 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
    ```
 
 6. **只启动新世界**：确认 singleton 的 `/readyz` 响应 healthy，且
-   `service_token_replay_sweeper` probe 已注册并 healthy；保留该实例，再逐步扩容同一待发布镜像。迁移成功后
-   严禁重启旧 binary 或旧 CLI。
+   `service_token_replay_sweeper` probe 已注册并 healthy；保留该实例，再逐步扩容同一外部消费者版本。迁移成功后
+   严禁重启旧消费者版本 或旧 CLI。
 7. **失败恢复**：若 singleton 在提交 `0068` 前退出，只在重新执行步骤 2 并确认 ledger 仍为 `67`、旧表存在、
    新表不存在后，才可恢复旧实例和旧 token 签发；保留失败日志并修正 active row/lock 等前置条件后重试。
-   若 ledger 已为 `68`，这是已提交的 forward-only 状态：不得启动旧 binary；修复新版本的启动配置，重启同一
-   待发布镜像并重新执行步骤 4–6。
+   若 ledger 已为 `68`，这是已提交的 forward-only 状态：不得启动旧消费者版本；修复新版本的启动配置，重启同一
+   外部消费者版本并重新执行步骤 4–6。
 
 认证热路径只可执行固定函数 `rss_service_token_replay_check_and_record(bytea, timestamptz)`，以单条
 `INSERT ... ON CONFLICT DO NOTHING` 原子消费。`rss_app` 没有新表的直接权限。过期清理必须由独立维护任务
@@ -279,19 +279,19 @@ out-of-band 注入。runtime 还会用显式 `BEGIN READ ONLY`，并在 mint rea
 一对一，credential save 可以在同一事务内按 credential→security 顺序写入，但缺失 state、跨主体 rebind
 或单独删除 state 都无法提交。status、epoch、version 与时间顺序同时由 closed CHECK/NOT NULL 固定。
 
-这是 non-rolling、forward-only cutover：执行 migration 前必须停止仍会单表写 credential 的旧 binary；
+这是 non-rolling、forward-only cutover：执行 migration 前必须停止仍会单表写 credential 的旧消费者版本；
 迁移成功后只能启动在同一 writer 事务内共同写入 credential/security 的新 binary，不提供 trigger、默认
 state、双写或自动补行 fallback。表启用并强制 RLS，policy 使用 canonical
 `NULLIF(current_setting('rss.tenant_id', true), '')::uuid`；`rss_app` 仅获 SELECT/INSERT/UPDATE，
 `rss_app_read` 仅获 SELECT，两者都没有 security DELETE。
 
-既有 refresh family 无法可靠反推出签发时的 authentication epoch。切换前必须在旧 binary 仍运行时通过正常
+既有 refresh family 无法可靠反推出签发时的 authentication epoch。切换前必须在旧消费者版本 仍运行时通过正常
 撤销流程把所有 `status='active'` legacy family 置为 revoked，再停止 writer。迁移锁定 `refresh_tokens` 后
 若仍有 active 行就 fail-closed；通过门后在同一事务删除已 consumed/revoked 的无 epoch 历史行，再增加非负、
 非空 `authn_epoch_at_issue`。它不会用当前 account epoch 猜测回填，也不保留 legacy decoder；新 binary 的
 初始签发和每次轮换都继承该 family epoch。
 
-唯一正式 runner 是待发布镜像的 `rss postgres migrate-all` Job；不得使用旧 binary、maintenance CLI、手工
+唯一正式 runner 是外部消费者版本的 `external consumer migration runner` Job；不得使用旧消费者版本、maintenance CLI、手工
 `psql -f` 或通用迁移脚本。按以下 non-rolling runbook 执行：
 
 1. **停止旧 writer 并做迁移前探针。** 将全部旧 runtime 缩容到 0。用 migrator 凭据确认 ledger 为 `68`，
@@ -334,7 +334,7 @@ state、双写或自动补行 fallback。表启用并强制 RLS，policy 使用 
    docs/ops/0069-account-security-capacity-gate.selftest.sh
    ```
 
-3. **运行 singleton。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job；`0069` 内置
+3. **运行 singleton。** 只启动一个外部消费者版本的 `external consumer migration runner` Job；`0069` 内置
    `lock_timeout=5s`、`statement_timeout=5min`，任一超时或 migration 非零退出都不得继续扩容。运行期间若 data、`pg_wal`、archive 或 replica 指标越过
    gate receipt 的预算，立即停止扩容流程并等待该事务按 timeout 回滚；不得把已失效的 preflight 当作授权。
 4. **迁移后验证。** 仍以 migrator 凭据确认 `_sqlx_migrations=69`，credential/security 缺失计数为 0，
@@ -374,8 +374,8 @@ state、双写或自动补行 fallback。表启用并强制 RLS，policy 使用 
    ```
 
 5. **恢复分支。** 若 singleton 在提交 `0069` 前失败，只在重跑步骤 1–2 并确认 ledger 仍为 `68` 后修复锁或
-   容量前置条件并重跑；需要恢复服务时只能恢复旧 binary。若 ledger 已为 `69`，禁止启动旧 binary：完成
-   步骤 4 的 catalog/ACL/缺失-state 验证后，只能修复新版本启动配置并启动同一待发布镜像。
+   容量前置条件并重跑；需要恢复服务时只能恢复旧消费者版本。若 ledger 已为 `69`，禁止启动旧消费者版本：完成
+   步骤 4 的 catalog/ACL/缺失-state 验证后，只能修复新版本启动配置并启动同一外部消费者版本。
 
 `0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
 tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
@@ -481,7 +481,7 @@ retention 只按 `published_at` 的 partial index 清理，DLX 继续保留供�
 
 ### 0057 breaking cutover runbook
 
-1. 先停止全部旧 relay 实例；旧 binary 依赖的 poll/acquire 与 settle overload 会被删除，禁止新旧版本滚动混跑。
+1. 先停止全部旧 relay 实例；旧消费者版本 依赖的 poll/acquire 与 settle overload 会被删除，禁止新旧版本滚动混跑。
 2. 确认 `outbox <= 10 GiB`、无长事务持锁，维护窗口可覆盖 publishing deadline 回填、terminal token 清理、CHECK 与 partial index 替换。migration 以 5 秒 lock timeout / 5 分钟 statement timeout fail-fast。
 3. 运行唯一正式 migration runner；若发现 `publishing` 行缺 token 则终止，不伪造所有权。失败后只做新的 forward-only 修复，不恢复旧函数。
 4. 在 0057 cutover 当时验证 `rss_app` 仅有新 claim/settle/redrive/backlog 函数 EXECUTE，旧 poll/acquire 及旧
@@ -534,8 +534,8 @@ claim/publish-preflight/mark-DLX 与零参数 inbox sweep；`rss_outbox_redrive(
 
 ### 0060 breaking cutover runbook（一次性、无兼容路径）
 
-1. **冻结旧执行面。** 停止全部旧 relay；停止并清点仍可执行 `rss dlq redrive-outbox` 的旧 CLI、cron 与 job。
-   禁止新旧 binary 滚动混跑，因为 0060 会替换 claim/preflight/mark-DLX 与 inbox sweep 函数签名/语义。
+1. **冻结旧执行面。** 停止全部旧 relay；停止并清点仍可执行 `external consumer redrive` 的旧 CLI、cron 与 job。
+   禁止新旧消费者版本 滚动混跑，因为 0060 会替换 claim/preflight/mark-DLX 与 inbox sweep 函数签名/语义。
 2. **历史 DLX inventory。** 用 DB owner 的只读受控 session 导出历史 outbox DLX 的 tenant、event id、domain、
    contract id、`dlx_at` 与状态计数，保存到受控审计存储并记录 checksum/时间窗；不导出 payload/metadata，
    不写入普通日志、PR 或工单。该 inventory 是 cutover 后人工恢复决策的依据，不是 redrive allowlist。
@@ -557,10 +557,9 @@ claim/publish-preflight/mark-DLX 与零参数 inbox sweep；`rss_outbox_redrive(
 
 #### 0060 可执行容量门与中止门
 
-容量、exact WAL archive、replica NULL lag、libpq owner credential、SQLx advisory-lock runner 身份以及
-0060/0061 transaction watchdog 的完整执行说明，单一维护在
-`docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` 的「0060 breaking rollout」章节。执行值只由
-`docs/ops/0060-outbox-capacity-gate.sh` 持有；本 migration ledger 不复制阈值、命令或取消查询。
+容量、exact WAL archive、replica NULL lag、libpq owner credential 与 SQLx advisory-lock runner
+身份的执行值只由 `docs/ops/0060-outbox-capacity-gate.sh` 持有；本 migration ledger 不复制阈值、
+命令或取消查询。产品 rollout 与 operator 编排由外部消费者负责。
 
 ### 0064 breaking relay-budget cutover（一次性、禁止滚动混跑）
 
@@ -570,7 +569,7 @@ operational ceiling 以及
 `required_budget_ms < lease_ttl_ms`；claim 用配置 TTL 铸造 lease，preflight 用数据库时钟要求剩余 lease
 严格大于 required budget。该迁移不提供默认别名、兼容 shim 或双路径。
 
-1. 停止全部旧 relay，并确认没有旧 binary、job 或 CLI 仍会调用两项旧签名；禁止新旧版本滚动混跑。
+1. 停止全部旧 relay，并确认没有旧消费者版本、job 或 CLI 仍会调用两项旧签名；禁止新旧版本滚动混跑。
 2. 由唯一正式 migration runner 执行 0064。失败时保持 relay 停止，只允许 forward-only 修复，不修改历史迁移。
 3. 验证新签名
    `rss_outbox_claim_batch(text,bigint,bigint,bigint)` 与
@@ -592,9 +591,9 @@ deadline 设置的 `SET LOCAL statement_timeout/lock_timeout` 统一治理。部
 
 `0066` 以同签名破坏式替换 published/retry/DLX 三个 settlement 函数：旧 `bigint`/optional-row
 返回语义被 PostgreSQL enum `settled | expired | lost_lease` 完全取代，不提供 overload、别名、shim 或双路径。
-旧 binary 会按旧形状解码新返回值，因此绝对禁止新旧 relay 滚动混跑。
+旧消费者版本 会按旧形状解码新返回值，因此绝对禁止新旧 relay 滚动混跑。
 
-1. 停止全部 relay，等待当前 publish/settlement 任务退出，并确认没有旧 binary、job 或 CLI 持续调用三个
+1. 停止全部 relay，等待当前 publish/settlement 任务退出，并确认没有旧消费者版本、job 或 CLI 持续调用三个
    settlement 签名；记录仍为 `publishing` 的行数作为 cutover inventory，不导出 payload、metadata、token
    或 deadline。
 2. 由唯一正式 migration runner 执行 0066。5 秒内无法取得 DDL 锁或 5 分钟内无法完成时保持 relay 停止；
@@ -605,7 +604,7 @@ deadline 设置的 `SET LOCAL statement_timeout/lock_timeout` 统一治理。部
 4. 在受控事务中用 stale token、当前未过期 token 和已过期当前 token 各探测一次，分别确认
    `lost_lease`、`settled`、`expired`；回滚探测事务并确认 outbox/dead-letter 状态未改变。
 5. 只有 catalog、ACL、闭值探测全部通过才启动新 binary。若启动失败，撤销本次启动并保持 relay 停止；
-   数据库保持 0066，旧 binary 不得连接已迁移 schema。只允许部署修复后的 0066-compatible binary；
+   数据库保持 0066，旧消费者版本 不得连接已迁移 schema。只允许部署修复后的 0066-compatible binary；
    需要 schema 修正时提交新的 forward migration，不得恢复旧返回语义。
 
 ### 0062/0063 dead-letter lifecycle breaking cutover
@@ -636,7 +635,7 @@ runtime/env 无 retention 或 batch override。published outbox sweep 同迁移�
 
 ### 0062/0063 breaking cutover runbook
 
-1. 停止旧 binary 与所有旧 retention worker，确认 `dead_letter` 为空。若非空，停止 rollout；不得用 inventory
+1. 停止旧消费者版本 与所有旧 retention worker，确认 `dead_letter` 为空。若非空，停止 rollout；不得用 inventory
    digest、row count、临时函数或直接 DELETE 继续。先另提 forward migration，完成完整加密行导出与 restore drill。
 2. 部署前创建独立 archive bucket、COMPLIANCE Object Lock 与生命周期删除策略，并 provision 独立 S3/Vault
    workload identity 与 archiver/verifier/purger 三个 PG 凭据。不要复用 serving credentials。
@@ -658,9 +657,9 @@ policy。legacy global `saga_journal` 若非空则 fail-fast，不做隐式 back
 `0070` 将 pre-GA `sessions` 与独立 refresh family 一次性切换为 `auth_grants` 聚合根。旧行无法证明
 `tenant + user UUID + authentication epoch + root status` 的完整绑定，迁移因此在阻断旧 writer 后清空
 `refresh_tokens` 并直接删除 `sessions` 表、旧清理函数与旧 maintenance role；不在 `DROP TABLE` 前做冗余的
-session 行级 DELETE，也不回填、不保留 nullable 绑定、view、trigger、alias、双读写或旧 binary 兼容。
+session 行级 DELETE，也不回填、不保留 nullable 绑定、view、trigger、alias、双读写或旧消费者版本 兼容。
 
-1. **停止旧 binary 并做迁移前探针。** 停止全部旧 binary，禁止滚动混跑；停止 API、worker 与任何仍写
+1. **停止旧消费者版本 并做迁移前探针。** 停止全部旧消费者版本，禁止滚动混跑；停止 API、worker 与任何仍写
    `sessions`/`refresh_tokens` 或调用旧 session sweep 的 job。用正式 migrator 凭据确认
    `_sqlx_migrations` 必须为 `69`，并保存 session/refresh 行数与 relation bytes 的受控 inventory；
    inventory 只用于证明切换范围及事务回滚完整性，不用于回填。确认两个旧表没有 serving session、长事务或
@@ -792,11 +791,11 @@ session 行级 DELETE，也不回填、不保留 nullable 绑定、view、trigge
 6. **只启动新世界。** 只有 capacity receipt、ledger、catalog、约束、RLS/ACL 和真实事务探针全部通过才启动
    新 binary。
    启动后 login 必须通过同一事务同时产生 AuthGrant、初始 refresh 与 outbox；任一对象缺失即停止 rollout。
-   不得连接旧 binary、重建 `sessions`、恢复旧 sweep 名称或手工补造绑定。
+   不得连接旧消费者版本、重建 `sessions`、恢复旧 sweep 名称或手工补造绑定。
 7. **按 ledger 恢复。** 若迁移或 singleton 在提交前失败且 ledger 仍为 `69`，保持新 binary 停止，重复
    步骤 1–2，并确认 session/refresh 行数与 relation inventory 未因失败减少；修复锁、空间、archive 或
-   replica 前置条件后重跑唯一迁移。只有 ledger=69、旧 schema 完整且确需恢复服务时才可恢复旧 binary。
-   若 ledger 已为 `70`，这是已提交的 forward-only 状态：绝不能启动旧 binary；重复步骤 4–5，修复新
+   replica 前置条件后重跑唯一迁移。只有 ledger=69、旧 schema 完整且确需恢复服务时才可恢复旧消费者版本。
+   若 ledger 已为 `70`，这是已提交的 forward-only 状态：绝不能启动旧消费者版本；重复步骤 4–5，修复新
    binary 的启动配置后只启动 0070-compatible 版本。需要 schema 修正时提交新的 forward migration，不修改
    0070，也不从备份恢复 `sessions` 或已失效 refresh。
 
@@ -824,7 +823,7 @@ age。两者由独立 NOLOGIN/BYPASSRLS owner 固定 search path；删除单批�
 
 1. **先应用 additive migration，保持撤销入口关闭。** 唯一 migration runner 完成后核验
    `SELECT max(version) FROM public._sqlx_migrations` 为 `72`；此时不得让新 binary 接受撤销流量。
-2. **quiesce 撤销入口并停止全部旧 binary。** 禁止旧/新 generation 滚动混跑；先禁用旧 workload/controller/job 的自动重启，
+2. **quiesce 撤销入口并停止全部旧消费者版本。** 禁止旧/新 generation 滚动混跑；先禁用旧 workload/controller/job 的自动重启，
    再从部署平台导出 `OLD_REVOCATION_GENERATION` 的完整进程
    inventory，断言 `EXPECTED_OLD_REPLICAS=0`。该 inventory 必须覆盖常驻 workload、一次性 job 和定时
    controller；任一旧进程仍可重启即停止 rollout。
@@ -852,17 +851,17 @@ age。两者由独立 NOLOGIN/BYPASSRLS owner 固定 search path；删除单批�
    以及 `1000 + 1 + 0` retention 证据，并再次证明旧 process inventory 为 `0`。新连接此时会复用上述
    静态 lane 名，故不得再用静态 `application_name` 区分旧/新 generation；启动后的代际证据只来自已
    禁用自动重启的部署 inventory。
-6. **最后开放撤销流量。** 只有上述证据完整后才解除 quiesce；开放后持续禁止旧 binary 回池。
+6. **最后开放撤销流量。** 只有上述证据完整后才解除 quiesce；开放后持续禁止旧消费者版本 回池。
 7. **执行 rollback fence。** 记录
    `SELECT count(*) AS persisted_revocations FROM public.certificate_revocations`；一旦新 binary 接受首个
-   撤销写入（计数或审计证据非零），严禁回退到读取进程内 ledger 的旧 binary。若 capability gate、ACL
+   撤销写入（计数或审计证据非零），严禁回退到读取进程内 ledger 的旧消费者版本。若 capability gate、ACL
    或函数探针失败，保持流量停止并提交新的前向修复 migration；不得修改 `0072`、增加双读/双写或恢复
    SoftCA assembly fallback。
 
 ### 0073 audit-chain key pin
 
 `0073` 把 Audit 链唯一支持的 HMAC key generation 固定为 `key_id=1`，并以数据库持久 sentinel tag
-拒绝错误 key。该 migration 会删除 `audit_entries.key_id` 的数据库默认值；旧 binary 不显式写入该列，
+拒绝错误 key。该 migration 会删除 `audit_entries.key_id` 的数据库默认值；旧消费者版本 不显式写入该列，
 因此 rollout 必须是 forward-only、non-rolling hard cutover，禁止旧/新 writer 混跑：
 
 1. **迁移前停止全部旧 audit writer。** 先关闭 Primary/Admin 入站并禁用旧 workload、job、controller 的
@@ -876,7 +875,7 @@ age。两者由独立 NOLOGIN/BYPASSRLS owner 固定 search path；删除单批�
    成功，错误 key 必须在 listener 接流量前失败。
 4. **按 ledger 执行失败恢复。** 若 runner 失败且 ledger 仍为 72，确认 transaction 已完整回滚后可修复
    前置条件并重跑；确需恢复服务时只允许恢复旧 generation。若 ledger 已为 73，这是已提交的新世界，
-   不得启动旧 binary；保持流量关闭，修复新 binary 的 secret/config 或提交新的前向修复 migration，
+   不得启动旧消费者版本；保持流量关闭，修复新 binary 的 secret/config 或提交新的前向修复 migration，
    不得写 down migration、兼容默认值、双写或跳过 durable key probe。
 
 ## Append-only 表（REVOKE 强制）
@@ -903,7 +902,7 @@ forward-only 不写 `.down.sql`；当前 pre-GA 无自动 retention 策略或分
 ### 0076 删除无消费者的 credential-security target mapping
 
 `0076` 删除 `credential_security_target_mappings`。这是 intentional、non-rolling、forward-only cutover：先停止
-仍会写入该表的旧 binary，运行唯一 migration runner，再启动只写 projection 与 OutboxFact 的新 binary。表内
+仍会写入该表的旧消费者版本，运行唯一 migration runner，再启动只写 projection 与 OutboxFact 的新 binary。表内
 数据没有生产消费者，也不是撤销或审计真源，因此不迁移、不归档、不保留兼容 view。回滚只能提交新的 forward
 migration；不得修改 `0071` 或 `0076`。
 
@@ -911,7 +910,7 @@ migration；不得修改 `0071` 或 `0076`。
 
 ## 调用时机与行为
 
-- **时机**：先运行 migration phase 的 `rss postgres migrate-all` Job，成功后才允许 serving phase。
+- **时机**：先运行 migration phase 的 `external consumer migration runner` Job，成功后才允许 serving phase。
 - **失败传播**：migration Job 与 serving ledger probe 都 **fail closed**；前者失败不发布，后者发现 stale、超前、失败或 checksum 漂移即拒绝启动。
 - **多实例并发**：operator 使用 SQLx advisory lock；重复 Job 只会在同一精确 ledger 上幂等收敛。
 - **编译期内嵌**：仅 `postgres-migration` crate 内嵌 SQL；共享 typed inventory carrier 单次生成 version/checksum facts。
@@ -943,9 +942,9 @@ writer 的 `account-security → refresh-family → auth-grant` 顺序相反。�
 grant_id)` 选择候选，再按 refresh id 稳定取得 family 锁并显式删除 children，最后重新验证 root 已过期后
 删除 root。并发 sweeper 或 writer 已处理目标时收敛为零行，不扩大到其他 family。
 
-这是 forward-only、non-rolling hard cutover。旧 binary 停止且连接排空后由唯一 migration runner 应用；
+这是 forward-only、non-rolling hard cutover。旧消费者版本 停止且连接排空后由唯一 migration runner 应用；
 ledger 到达 `79` 后只启动采用同一锁序的新 binary。若迁移失败且 ledger 未推进，确认事务完整回滚后重试；
-若 ledger 已到 `79`，不得回退旧 binary 或修改历史 migration，只能提交新的前向修复。
+若 ledger 已到 `79`，不得回退旧消费者版本 或修改历史 migration，只能提交新的前向修复。
 
 ### 0081 设备证书 desired/reported/condition 权威状态
 
@@ -1042,7 +1041,7 @@ rollout 顺序固定如下：
       );
    ```
 
-2. **运行唯一 migration runner。** 只启动一个新镜像的 `rss postgres migrate-all` Job；不得并行启动
+2. **运行唯一 migration runner。** 只启动一个新消费者版本的 `external consumer migration runner` Job；不得并行启动
    serving binary、第二个 migration Job 或 maintenance CLI。
 3. **执行 postflight。** Job 成功退出后仍以 migrator 凭据复制执行下列 catalog probe。ledger、RLS 与 ACL
    查询中的布尔列必须全部为 `true`；trigger 查询必须精确返回两个启用、deferred、initially-deferred 的
@@ -1107,7 +1106,7 @@ rollout 顺序固定如下：
 
 4. **只启动新世界。** postflight 全部通过后才启动新 binary，并保持 Saga workload disabled；Saga 的
    production activation 必须等待 #1925/#1926。迁移失败且 ledger 仍为 `82` 时保持新 binary 停止，重新
-   执行 preflight、修正前置条件后重跑；ledger 已为 `83` 时不得回退旧 binary、修改 `0083` 或写 down
+   执行 preflight、修正前置条件后重跑；ledger 已为 `83` 时不得回退旧消费者版本、修改 `0083` 或写 down
    migration，只能新建前向修复。
 
 ### 0084 Durable reconcile wake 与 device policy acceptance
@@ -1184,14 +1183,14 @@ GROUP BY operation.oid;
 `migration_0084_live_guard_freezes_target_identity_and_wake_regression` 与
 `device_certificate_schema_rls_and_acl_are_closed` 承载。通过后才启动新 binary。任何 preflight、lock timeout、held-lease
 检查失败时必须先核对 commit 边界。若 ledger 仍为 `83` 且确认 `0084` 的 DDL 全部回滚，可临时恢复旧
-binary，且仅用于按旧协议 reclaim/release held lease；drain 完成后必须再次停止旧 binary、禁止自动重启并
-验证 held lease 为零，再由唯一 runner 重试。若 ledger 已为 `84`，绝不能启动旧 binary，只能保持新 binary
+binary，且仅用于按旧协议 reclaim/release held lease；drain 完成后必须再次停止旧消费者版本、禁止自动重启并
+验证 held lease 为零，再由唯一 runner 重试。若 ledger 已为 `84`，绝不能启动旧消费者版本，只能保持新 binary
 停止并做前向修复；不得修改历史 migration、增加 down migration、兼容视图、双写或 fallback。
 
 ### 0085 Projection 凭据边界破坏性切换
 
 `0085` 删除无 scope 的 `rss_read_projection_events(bigint, integer)`、旧五参 registry 函数和
-`rss_projection_events_runtime` BYPASSRLS owner，不提供 alias、dual grant、backfill 或旧 binary fallback。
+`rss_projection_events_runtime` BYPASSRLS owner，不提供 alias、dual grant、backfill 或旧消费者版本 fallback。
 registry identity 原地扩为 generation + projection id + definition version/schema digest + source domain +
 contract/version/schema/topic；因此迁移只接受空 `projection_input_bindings`。当前无历史部署、Projection
 production activation 关闭，采用 non-rolling fresh cutover。
@@ -1227,17 +1226,9 @@ production activation 关闭，采用 non-rolling fresh cutover。
       );
    ```
 
-2. **运行唯一 runner，再 provision/rotate 精确 LOGIN 角色。** 只运行一个新镜像的
-   `rss postgres migrate-all` Job。fresh cluster 由 `deploy/postgres-init/001-create-app-role.sh` 预置登录凭据；
-   retained volume 在 ledger 到 85 后必须运行
-   `deploy/postgres-upgrade/provision-projection-roles.sh`。后者从三个绝对 password files 读取 migrator、
-   reader、operator secret，在一个事务内把两角色收敛为 LOGIN、NOSUPERUSER、NOBYPASSRLS、NOCREATEDB、
-   NOCREATEROLE、NOREPLICATION、NOINHERIT，再用两个新凭据分别直连验证。密码不进入 argv/SQL 文件。
-
-   轮换必须先 stage 两个新 password file，再执行同一脚本；脚本成功后切换 Projection CLI secret mounts，
-   等旧 reader/operator pool 排空后销毁旧文件。PostgreSQL 固定角色不支持双密码：若新凭据直连验证失败，
-   Projection CLI 保持停止，并立即用上一个版本的两个 password file 重跑脚本恢复登录密码；不得恢复
-   migrator 复用、旧函数或宽权限兼容 grant。
+2. **由外部 consumer 的迁移系统运行唯一 runner。** RSS library 不交付数据库角色 provisioning、credential
+   rotation 或 migration CLI。消费方必须在 ledger 到 85 后，以独立 LOGIN 角色落实 NOSUPERUSER、NOBYPASSRLS、
+   NOCREATEDB、NOCREATEROLE、NOREPLICATION、NOINHERIT，并用各自凭据直连验证；密码不得进入 argv 或 SQL 文件。
 
 3. **执行 postflight。** ledger 与所有布尔列必须为 true；function 查询必须精确返回 8 行（reader 1、
    operator 7，其中包含 token replay），不得手工补 grant。
@@ -1308,14 +1299,14 @@ production activation 关闭，采用 non-rolling fresh cutover。
 
 4. **只启动新世界。** 先验证一个新 CLI 的两个 exact capability gate，再启动新 serving binary。迁移失败且
    ledger 仍为 `84` 时保持新世界停止，修正 empty-registry/会话/role 前置条件后重跑。ledger 已为 `85` 时
-   不得启动旧 binary、恢复旧函数/角色或写 down migration；只能修正新配置或新增前向迁移。数据库级回滚
+   不得启动旧消费者版本、恢复旧函数/角色或写 down migration；只能修正新配置或新增前向迁移。数据库级回滚
    仅允许恢复迁移前的完整备份，并与旧 artifact 一起整体恢复。
 
 ### 0086 Saga durable recovery 单一写入边界
 
 `0086` 是 pre-activation、non-rolling hard cutover。它把 Saga instance、lease、append-only journal、
 protected receipt 与 journal cursor 收进同一个 durable recovery model，并破坏式替换旧 status、journal
-transition、约束、trigger 与 serving ACL。旧 binary 不理解新增 attempt/effect-key、operator reason 与
+transition、约束、trigger 与 serving ACL。旧消费者版本 不理解新增 attempt/effect-key、operator reason 与
 compensation cause，也不能满足新的 exact-intent 约束；因此旧/new writer 或 worker 绝不能滚动混跑。
 
 写入权限同时硬切到 NOLOGIN/BYPASSRLS、无 membership 的 `rss_saga_writer`。它只拥有四张 Saga 表的
@@ -1334,7 +1325,7 @@ tenant discovery 同步切换为 runnable-only keyset 页：只索引可 claim �
    或 migration 的旧 workload、job 与 controller，禁用自动重启并保存旧 generation process inventory；
    inventory 必须证明旧副本、一次性 Job 与定时任务均为零。新 binary、serving pool 与 migration Job 此时
    同样保持停止。
-2. **执行连接、ledger 与空表 preflight。** 用待发布镜像配置的 migrator 凭据取得下列只读快照；每个布尔值
+2. **执行连接、ledger 与空表 preflight。** 用外部消费者版本配置的 migrator 凭据取得下列只读快照；每个布尔值
    必须为 `true`。除当前 preflight 会话外，五个静态 PostgreSQL lane 必须全部排空；三张 Saga durable 表
    必须同时为空。任一结果不满足即中止，不得删除业务行、绕过检查或手工执行部分 DDL。
 
@@ -1373,7 +1364,7 @@ tenant discovery 同步切换为 runnable-only keyset 页：只索引可 claim �
       );
    ```
 
-3. **运行唯一 migration runner。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job。运行期间不得
+3. **运行唯一 migration runner。** 只启动一个外部消费者版本的 `external consumer migration runner` Job。运行期间不得
    启动 serving binary、第二个 migration Job、Saga worker 或 maintenance CLI；Job 非零退出即进入步骤 5。
 4. **执行 ledger、catalog、trigger、ACL 与函数 postflight。** Job 成功后仍以 migrator 凭据执行下列探针；
    所有布尔值必须为 `true`。约束查询必须找到全部 expected 行，trigger 查询必须找到一个普通 terminal
@@ -1533,7 +1524,7 @@ tenant discovery 同步切换为 runnable-only keyset 页：只索引可 claim �
 5. **按 ledger fail closed。** migration 失败且 ledger 仍为 `85` 时，保持所有 binary/worker 停止，证明
    `operator_reason` 与 journal `attempt` 列仍不存在、旧 trigger/constraint 仍完整，确认事务没有部分 DDL，
    然后重新执行步骤 1–3；非空表只能由产生数据的 owner 显式处置，不得由 rollout 自动删除。ledger 已为
-   `86` 时视为 Saga 新世界已经提交：禁止启动旧 binary、修改 `0086`、写 down migration 或恢复旧
+   `86` 时视为 Saga 新世界已经提交：禁止启动旧消费者版本、修改 `0086`、写 down migration 或恢复旧
    status/ACL；postflight、启动配置或 schema 缺陷只能由 0086-compatible 新 binary 或新的 forward-only
    migration 修正。
 
@@ -1569,7 +1560,7 @@ tenant discovery 同步切换为 runnable-only keyset 页：只索引可 claim �
    ```
 
 6. **只启动新 binary。** 只有部署 inventory、ledger=86、全部 postflight 与新 binary 的 startup capability
-   gate 同时通过，才允许启动 Saga worker 并开放 workload。后续任何失败保持旧 binary 永久隔离，不恢复
+   gate 同时通过，才允许启动 Saga worker 并开放 workload。后续任何失败保持旧消费者版本 永久隔离，不恢复
    legacy writer、runtime lock、独立 checkpoint 或拆分 store。
 
 ### 0087 Device command generation/epoch fencing 破坏性切换
@@ -1629,8 +1620,8 @@ target → lease → desired 加锁，再触碰 command row；`rss_app_read` 不
           AND lease.epoch >= reported.fence_epoch) IS NOT TRUE;
    ```
 
-3. **唯一 runner。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job；不得并行运行第二个 migrator、
-   旧 binary、ingress 或 maintenance CLI。非零退出立即保持 drain，不得扩容。
+3. **唯一 runner。** 只启动一个外部消费者版本的 `external consumer migration runner` Job；不得并行运行第二个 migrator、
+   旧消费者版本、ingress 或 maintenance CLI。非零退出立即保持 drain，不得扩容。
 4. **Postflight。** 确认 ledger 精确为 `87`，两个新 unique index 均 valid，command/reported trigger 指向
    新函数，receipt disposition constraint 含 `device_rejected`（设备明确拒绝）以及
    `rejected`（服务端 authority 拒绝）、`stale_generation/stale_fence/stale_sequence`，且 trigger
@@ -1653,7 +1644,7 @@ target → lease → desired 加锁，再触碰 command row；`rss_app_read` 不
 
 5. **失败与重试。** ledger 仍为 `86` 时，确认新 index/trigger 没有部分落地，修复 preflight 所揭示的 owner
    数据或完成正常 drain，再从步骤 2 重试。ledger 已为 `87` 即视为新世界提交：严禁 down migration、修改
-   `0087` checksum、恢复旧 binary 或旧 wire；缺陷只能由 0087-compatible binary 或新的 forward-only migration
+   `0087` checksum、恢复旧消费者版本 或旧 wire；缺陷只能由 0087-compatible binary 或新的 forward-only migration
     修正。全部 postflight 和新 binary startup gate 通过后，才逐步恢复 serving/reconcile/ingress。
 
 
@@ -1789,7 +1780,7 @@ wait、tenant fairness、throughput、业务事务延迟与 X01 替换阈值。
    任一值为空、replica 数量/状态不符、lag 或 estimate 越界、空间不足，或剩余窗口不足以覆盖演练最大 migration
    时长加 postflight/abort 预算，都保持全体缩容并中止。不得新增脚本、把该 receipt 写成 T3 carrier，或以扩大
    `lock_timeout`/`statement_timeout` 代替重新批准窗口。
-3. **运行唯一 migration runner。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job；运行前再次执行步骤
+3. **运行唯一 migration runner。** 只启动一个外部消费者版本的 `external consumer migration runner` Job；运行前再次执行步骤
    1 的 session/lock 查询，结果仍须全 true。失败时不得手工执行部分 index/function/grant，也不得修改 0088、
    写 down migration 或启动任何 frozen lane。
 4. **执行 ledger、index、函数与权限 postflight。** ledger 必须精确为 `87`；index 查询必须恰好返回一行且
@@ -1851,7 +1842,7 @@ wait、tenant fairness、throughput、业务事务延迟与 X01 替换阈值。
 
 5. **按 ledger fail closed。** migration 失败且 ledger 仍为 `87` 时，保持新旧 Projection reader/control
    全部停止，确认函数、index 与 grant 没有部分提交后修正阻塞并由唯一 runner 重试。ledger 已为 `88` 时禁止
-   启动旧 binary、恢复分页求尾、增加兼容函数或回改 0088；只允许修正新配置、新 binary，或增加新的
+   启动旧消费者版本、恢复分页求尾、增加兼容函数或回改 0088；只允许修正新配置、新 binary，或增加新的
    forward-only migration。
 6. **只启动 0088-compatible binary。** startup exact capability、full-scope negative、valid-empty `NULL`、
    concurrent commit-order 与 100,000-row buffer regression 全部通过后，才允许恢复 Projection CLI/worker。
@@ -1862,7 +1853,7 @@ wait、tenant fairness、throughput、业务事务延迟与 X01 替换阈值。
 `0089` 在已完成 `0088` 的数据库上安装 Saga start authorization、unresolved observation 与
 retry-compensation/terminate CAS transition ledger。迁移是 forward-only、non-rolling；执行前必须停止 serving、
 Saga worker、operator CLI 与其他 migrator，并确认 `saga_instances`、`saga_operator_decisions` 为空。只允许一个新
-artifact migrator 执行。失败且 ledger 仍为 `88` 时保持 drain 后重试；ledger 已为 `89` 时不得恢复旧 binary 或修改
+artifact migrator 执行。失败且 ledger 仍为 `88` 时保持 drain 后重试；ledger 已为 `89` 时不得恢复旧消费者版本 或修改
 迁移 checksum。
 
 Postflight 必须确认 ledger=89、`saga_operator_transitions` 及其 RLS/index 存在，retry/terminate 函数由
@@ -1871,9 +1862,9 @@ table。
 
 ### 0090 Saga operator credential cutover
 
-`0090` 创建永久 NOLOGIN 的 `rss_saga_operator_owner` 与 function-only `rss_saga_operator` credential。部署须通过
-`deploy/postgres-upgrade/provision-saga-operator-role.sh` 注入 file-only secret；禁止 argv/环境明文密码、role
-membership 或 owned object。启用 operator 前必须确认 ledger=90、credential 仅有 `_sqlx_migrations` SELECT，且
+`0090` 创建永久 NOLOGIN 的 `rss_saga_operator_owner` 与 function-only `rss_saga_operator` credential。外部 consumer
+负责注入和轮换 credential；禁止 argv/环境明文密码、role membership 或 owned object。启用 operator 前必须确认
+ledger=90、credential 仅有 `_sqlx_migrations` SELECT，且
 四个函数权限精确如下：
 
 ```sql
@@ -1931,19 +1922,19 @@ raw payload 或 JSON；serving writer 与 `rss_projection_operator` 仅有 EXECU
 `search_path=pg_catalog, pg_temp`，只接受调用方已经设置且与参数精确一致的 transaction-local
 `rss.tenant_id`；unset/empty/mismatch 一律以 `P1902` fail closed。receipt duplicate/conflict、
 persistent LSN order、current row、receipt 与 high-water 在同一 statement transaction 内完成。ledger=93 后禁止启动
-仍执行 0091 原始表 SQL 的旧 binary，也不得增加兼容函数、raw-write grant、dual-write 或 fallback。
+仍执行 0091 原始表 SQL 的旧消费者版本，也不得增加兼容函数、raw-write grant、dual-write 或 fallback。
 
 这是 non-rolling hard cut，部署顺序固定如下：
 
 1. **Quiesce / drain**：停止所有旧 serving writer、Projection replay/operator 和 Settings maintenance，确认
    `pg_stat_activity` 不再有旧 `rss-postgres-writer` / `rss-postgres-projection-operator` 会话；ledger 必须精确为 92。
-2. **唯一 migrator**：只运行一个待发布镜像的 `rss postgres migrate-all` Job。迁移失败或超时即停止，禁止启动
+2. **唯一 migrator**：只运行一个外部消费者版本的 `external consumer migration runner` Job。迁移失败或超时即停止，禁止启动
    serving/operator，也禁止手工补 grant 或直接执行函数 DDL。
 3. **Postflight**：确认 ledger=93；函数 owner 属性与 `search_path` 精确；app/operator 只有函数 EXECUTE、三张表
    无 raw write；reader/PUBLIC 无 EXECUTE。分别以 app/operator 在回滚事务中验证 unset/mismatch 均 `P1902`、match
    可 `applied`。
-4. **恢复边界**：若 ledger 仍为 92 且 catalog 确认 0093 全部回滚，才可恢复旧 binary；若 ledger 已为 93，严禁
-   恢复旧 binary，只能修正新镜像/凭据并重做 postflight 后逐步启动同一新版本。正式 shadow worker 激活仍由 #1920
+4. **恢复边界**：若 ledger 仍为 92 且 catalog 确认 0093 全部回滚，才可恢复旧消费者版本；若 ledger 已为 93，严禁
+   恢复旧消费者版本，只能修正新消费者版本/凭据并重做 postflight 后逐步启动同一新版本。正式 shadow worker 激活仍由 #1920
    负责，serving promotion 仍由 #1921 负责。
 
 ### 0094 Durable device ingress UoW hard cut
@@ -1979,11 +1970,11 @@ binary。postflight 必须确认旧函数 `to_regprocedure(...) IS NULL`、两�
 
 执行协议（所有探针使用 migration owner 连接；`rss_app` smoke test 单独注明）：
 
-1. drain 所有旧 binary，按部署约定的 `application_name` 查询 `pg_stat_activity`，直到旧 writer session 为零；
+1. drain 所有旧消费者版本，按部署约定的 `application_name` 查询 `pg_stat_activity`，直到旧 writer session 为零；
    在迁移窗口保持旧 deployment scale=0，禁止滚动混跑。
 2. 只允许一个 migration Job 取得部署锁；执行前确认
    `SELECT max(version) FROM _sqlx_migrations WHERE success` 为 `93`，否则停止。
-3. 运行 0094。提交前失败可终止 Job、恢复旧 deployment 并重试；一旦 0094 提交，严禁恢复旧 binary，
+3. 运行 0094。提交前失败可终止 Job、恢复旧 deployment 并重试；一旦 0094 提交，严禁恢复旧消费者版本，
    只能修复并启动兼容 0094 的 binary。
 4. postflight 查询 `pg_proc`/`pg_roles` 验证两个新函数 owner 为
    `rss_device_command_funnel_owner`（NOLOGIN、NOBYPASSRLS），旧函数的 `to_regprocedure` 为 NULL；用
@@ -2008,10 +1999,10 @@ artifact receipt 与 command 新增 closed `artifact_eligibility`，只允许 `d
 持久化 artifact 并复制 eligibility 到 command；`rss_app` 继续没有 command/artifact 表的 raw INSERT/UPDATE
 权限。
 
-唯一 runner 是待发布镜像的 singleton `rss postgres migrate-all` Job。提交后 ledger 必须精确为 `95`，旧
+唯一 runner 是外部消费者版本的 singleton `external consumer migration runner` Job。提交后 ledger 必须精确为 `95`，旧
 append/install 签名必须不存在，draft/production wrapper 与新 install 签名 owner/ACL 必须精确，私有 core
 对 `rss_app`、`rss_app_read`、PUBLIC 均不可执行，两个 eligibility 列必须 NOT NULL 且带 closed CHECK。提交后
-不得恢复旧 binary；失败且 ledger 仍为 `94`、catalog 无部分对象时，修正阻塞后由同一新镜像重试。
+不得恢复旧消费者版本；失败且 ledger 仍为 `94`、catalog 无部分对象时，修正阻塞后由同一新消费者版本重试。
 
 ### 0096 DeviceLatent certificate reconcile enrollment
 
@@ -2082,7 +2073,7 @@ generation 数据。
    operator 三个 login role 的 exact fixed-function ACL/owner/body fingerprint；login role 不得获得 raw relation 权限。
 4. 注册新 definition/input generation，分别 replay 候选 generation 到 source 尾部；未 swap 前 Settings v3 query 必须
    fail-closed，不能 fallback 到 manifest generation、latest row 或 Settings v4。
-5. `rss projections` 必须从 SettingsOnly 同一 sealed manifest/lock 派生 maintenance target（通用 runtime
+5. `external projection operator` 必须从 SettingsOnly 同一 sealed manifest/lock 派生 maintenance target（通用 runtime
    assembly 保持 disabled，且不启动第二套 worker）。用 `status` 核对 identity 与三组 high-water，再以
    `--expect-unset` 执行首次 swap。启动 active
    SettingsOnly worker/serving 后验证 request/batch snapshot、逐 tenant quarantine 和 readiness；回滚时先 replay 旧
@@ -2109,14 +2100,14 @@ generation/fence 的 `received` 命令时，才继续使用该命令原 fence �
 执行协议固定如下（数据库探针使用 migration owner；行为 smoke test 使用 `rss_app` 并最终回滚）：
 
 1. **Drain 旧世界。** 停止 certificate command relay 与 device ingress worker，先等所有在途 publish/settlement、
-   ingress transaction 和 transport settlement 退出，再关闭旧 binary 的 MQTT client。确认 broker 上属于旧
+   ingress transaction 和 transport settlement 退出，再关闭旧消费者版本 的 MQTT client。确认 broker 上属于旧
    deployment 的 MQTT connection 与 session in-flight 数均为零，同时保留 persistent session/offline queue；保持旧
    deployment scale=0，禁止自动重启或滚动混跑。不得删除 durable command、receipt、Outbox 或 broker session 数据
    来伪造 drain。
 2. **Preflight。** 用只读探针确认 `SELECT max(version) FROM public._sqlx_migrations WHERE success` 精确为 `98`；
    按部署 inventory 核对旧 relay/ingress/MQTT connection 数均为零，并确认没有旧 writer transaction 或会阻塞两个
    ingress funnel replacement 的锁。任一不满足即中止，保持新 binary 未启动。
-3. **Singleton migrator。** 只启动一个待发布、0099-compatible 镜像的 `rss postgres migrate-all` Job；不得并行
+3. **Singleton migrator。** 只启动一个待发布、0099-compatible 镜像的 `external consumer migration runner` Job；不得并行
    启动第二个 migrator、serving、relay、ingress worker 或 maintenance CLI。Job 非零退出或 migration timeout 后不得
    扩容，也不得手工执行 0099 DDL、补 grant 或修改 0094。
 4. **Catalog / ACL postflight。** 确认 ledger 精确为 `99`；四个被替换函数均为 `SECURITY DEFINER`/trigger 的预期
@@ -2128,12 +2119,12 @@ generation/fence 的 `received` 命令时，才继续使用该命令原 fence �
    还必须验证 credential generation 为 `NULL`/`0`/负数或 scope proof 为 `NULL` 时返回 SQLSTATE `42501`；错误
    transport scope、旧 desired generation、以及没有精确 `received` command 的旧 fence 分别 fail closed。最后
    `ROLLBACK`，不得留下探针 command、reported state、receipt 或 Outbox。
-6. **启动新世界。** 只有 ledger、catalog、ACL 和行为探针全部通过，才启动同一待发布镜像的 singleton，确认
-   PostgreSQL、MQTT 与 device-ingress readiness 健康后，再逐步扩容 relay/ingress。迁移提交后严禁恢复旧 binary、
+6. **启动新世界。** 只有 ledger、catalog、ACL 和行为探针全部通过，才启动同一外部消费者版本的 singleton，确认
+   PostgreSQL、MQTT 与 device-ingress readiness 健康后，再逐步扩容 relay/ingress。迁移提交后严禁恢复旧消费者版本、
    旧 CLI 或旧 MQTT client session owner。
 7. **恢复边界。** 若 migrator 在提交 0099 前退出，只在重新 drain 并确认 ledger 仍为 `98`、四个函数仍是 0098
    之前的 device-funnel catalog、且不存在 0099 部分对象后，才可恢复旧 deployment；修正锁/容量等前置条件后必须从步骤 1 重来。若 ledger
-   已为 `99`，这是已提交的 forward-only 状态：不得回退函数、篡改 ledger 或启动旧世界，只能修复新镜像/凭据，重做
+   已为 `99`，这是已提交的 forward-only 状态：不得回退函数、篡改 ledger 或启动旧世界，只能修复新消费者版本/凭据，重做
    步骤 4–6。
 
 ### 0101 Projection correctness residuals（audit correlation + worker observation）
@@ -2187,7 +2178,7 @@ lock / catalog precondition，也禁止手写部分 DDL。
       );
    ```
 
-2. **运行唯一 runner。** 只运行一个待发布镜像的 `rss postgres migrate-all` Job。不得手工
+2. **运行唯一 runner。** 只运行一个外部消费者版本的 `external consumer migration runner` Job。不得手工
    `psql -f` 部分 migration、跳过 `0101`、或并行第二 migrator。失败且 ledger 仍为 `100` 时保持
    新世界停止，确认事务完整回滚、会话仍排空后重跑同一 Job。
 
@@ -2251,15 +2242,15 @@ lock / catalog precondition，也禁止手写部分 DDL。
 
 5. **forward-only 恢复边界。** 迁移失败且 ledger 仍为 `100` 时：保持新世界停止，重新 drain 上述
    application name 会话，确认七参仍在、九参/observe 仍不存在后，修正前置条件并重跑同一
-   `rss postgres migrate-all` Job；不得手写 `DROP`/`CREATE` 补洞。ledger 已为 `101` 且
-   `success` 时，这是已提交的 forward-only 状态：不得启动旧 binary、恢复七参 overload、给
+   `external consumer migration runner` Job；不得手写 `DROP`/`CREATE` 补洞。ledger 已为 `101` 且
+   `success` 时，这是已提交的 forward-only 状态：不得启动旧消费者版本、恢复七参 overload、给
    `rss_projection_worker` 授 raw relation，或改写 `0101` / 历史 `0085`/`0097` checksum；缺陷只能由
-   0101-compatible 新镜像或新的前向迁移修复。数据库级回滚仅允许恢复迁移前的完整备份，并与旧
+   0101-compatible 新消费者版本或新的前向迁移修复。数据库级回滚仅允许恢复迁移前的完整备份，并与旧
    artifact 一起整体恢复。
 
 ### 0102 Common ABAC Profile（typed values + closed operators）
 
-`0102` 是 `/api/v1` 与数据库同时切换的 forward-only hard cut，禁止滚动升级、双读或旧 binary
+`0102` 是 `/api/v1` 与数据库同时切换的 forward-only hard cut，禁止滚动升级、双读或旧消费者版本
 回连。迁移只自动转换能够证明语义等价的旧 `eq`、`ne`、`like`、`eqAttr`；发现旧 `gt`/`lt`、
 畸形规则或超限属性值会在任何写入前失败，并列出需要人工改写的 policy id。迁移不猜测数值类型，
 也不删除 policy 或 resource attribute。
@@ -2283,7 +2274,7 @@ lock / catalog precondition，也禁止手写部分 DDL。
           pg_total_relation_size('public.resource_attributes') AS attribute_bytes;
    ```
 
-2. 运行唯一的 `rss postgres migrate-all` Job。`0102` 自带 5 秒 lock timeout、5 分钟 statement
+2. 运行唯一的 `external consumer migration runner` Job。`0102` 自带 5 秒 lock timeout、5 分钟 statement
    timeout，并在 preflight 前以 `ACCESS EXCLUSIVE` 同时冻结两张表。
 3. 若 ledger 仍为 `101`，修正迁移报告的数据并重跑；不得手工跳过或局部执行 `0102`。
 4. 以下 postflight 全部通过后，只部署理解 RSS Common ABAC Profile 的新实例；不得恢复旧实例：
@@ -2337,7 +2328,7 @@ hard cut：取得 `ACCESS EXCLUSIVE` 后，用即将安装的 versioned validato
 
    审计查询只有在临时事务中先执行 0104 的函数定义时可用；标准流程应直接运行 migration，并以其
    fail-closed 坐标报告为准，禁止把函数从 migration 拆出后永久安装。
-2. 运行唯一的 `rss postgres migrate-all` Job。迁移自带 5 秒 lock timeout 与 5 分钟 statement
+2. 运行唯一的 `external consumer migration runner` Job。迁移自带 5 秒 lock timeout 与 5 分钟 statement
    timeout。失败时 ledger 仍为 103，函数与 CHECK 均回滚；按完整、已 review 的 policy 文档通过管理面
    重写。若 malformed 文档无法 hydrate，只能在备份与审计记录下精确替换整份文档或先停用后修复。
 3. 修复全部坐标后重跑同一 migration，并执行 postflight：
@@ -2382,7 +2373,7 @@ ledger，新增规范化 policy basis 与 desired-generation lineage。policy ac
 
 1. 这是 non-rolling hard cut。停止 serving/reconcile 写，确认无 held device-certificate lease、无相关写会话，
    且 ledger 精确为 109。旧 desired/operation 必须为空；迁移遇到旧行会在任何 DDL 前失败，不删除旧行、
-   不补造 principal/policy/evaluation lineage，也不提供旧 binary overload。
+   不补造 principal/policy/evaluation lineage，也不提供旧消费者版本 overload。
 2. 迁移后确认 accept funnel 仅剩一个新签名；accept 与 rotation 均由
    `rss_device_certificate_funnel_owner` 持有、`SECURITY DEFINER`、固定 `pg_catalog, pg_temp` search path。
    PUBLIC/reader 无 EXECUTE；serving writer 仅能 EXECUTE。
@@ -2390,7 +2381,7 @@ ledger，新增规范化 policy basis 与 desired-generation lineage。policy ac
    SELECT/DML；generation-lineage 可 tenant-scoped SELECT，但仅 NOLOGIN funnel owner 可写。用 tenant A/B/
    空 tenant 验证隔离，并验证 identical replay 的 receipt/generation/xmin/wake 均不变。
 4. 这是 forward-only 原子迁移。postflight 失败时停止新 binary，只能用迁移前完整备份与旧 artifact 整体
-   恢复；禁止局部还原、双写、兼容 view、匿名 receipt 或新旧 binary 并行。
+   恢复；禁止局部还原、双写、兼容 view、匿名 receipt 或新旧消费者版本 并行。
 
 ### 0111 Certificate artifact receipt lineage binding
 
@@ -2418,7 +2409,7 @@ lineage。artifact append funnel 同时核验 held lease、current desired gener
    迁移会以 `ACCESS EXCLUSIVE` 锁冻结 operation、desired、condition 与 reconcile authority 表，任何未排空
    的旧实例都可能使 5 秒 lock timeout 原子失败。
 2. postflight 确认 operation 两列 `NOT NULL`、request/correlation 与 User-only CHECK 生效，并且 accept
-   function 只有 21 参数的新签名；随后只启动携带 0112 ledger/capability receipt 的 binary。旧 binary 因
+   function 只有 21 参数的新签名；随后只启动携带 0112 ledger/capability receipt 的 binary。旧消费者版本 因
    exact ledger mismatch 必须继续保持停止。
 3. accepted operation 可与 auth audit 通过 request/correlation 关联；identical replay 保留首次 operation
    evidence，本次请求只产生自己的 auth audit attempt。
@@ -2445,7 +2436,7 @@ generation。projection generation 覆盖全体输入，因此 audit 的 `identi
 active pointer、checkpoint、dedupe 和 projection rows，但不删除 source log 或 input binding registry。
 
 1. 停止 Settings projection worker/operator 与读取流量，备份数据库，并确认 ledger 精确为 104。
-2. 运行唯一的 `rss postgres migrate-all` Job。迁移以 5 秒 lock timeout 获取派生状态表的
+2. 运行唯一的 `external consumer migration runner` Job。迁移以 5 秒 lock timeout 获取派生状态表的
    `ACCESS EXCLUSIVE` 锁，并在同一事务中静态重装 6 个 generation-pinned 函数。
 3. 新 binary 通过 migration lane 注册当前 generated input bindings，worker 完整重放并由 operator
    原子提升新 generation 后再恢复读取流量。不得手工恢复旧 pointer 或旧 generation。

@@ -177,7 +177,7 @@ impl ShutdownStack {
 
 ### 4.1 消费侧接线范式（P2 落地，本 spike 仅冻结接缝）
 
-组合根（`bins/server` / `assemblies`）按依赖顺序注册，信号到达时驱动：
+assembly 组合根按依赖顺序注册，生命周期 owner 驱动：
 
 ```text
 // 注册（先注册 = 被依赖 = 最后关）：

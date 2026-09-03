@@ -40,7 +40,7 @@ Consequently, #1898 is limited to durable wake-version and failure-streak extens
 
 - #2117 upgrades the artifact catalog atomically to schema v2 and registers the existing `deviceidentity` identity as a candidate, not supported/canonical.
 - The candidate uses PostgreSQL, read-only SPIFFE-mTLS External CSR resolution, Vault `/sign`, federated OIDC, authenticated persistent MQTT, PostgreSQL auth audit and Redis cluster-global pre-auth limiting. Resolver/pre-sign unavailable is retryable; post-dispatch signing uncertainty remains outcome-unknown quarantine.
-- `deviceidentity-server` and Docker target `deviceidentity-runtime` now exist. This proves repository-owned content-addressable artifact shape only; delivery owns registry provenance, publication and environment selection.
+- At this dated baseline, `deviceidentity-server` and Docker target `deviceidentity-runtime` existed as candidate-delivery evidence. #2242 subsequently removed both with the repository-owned product delivery surface; this statement is provenance, not a current entrypoint.
 - Migration `0113` atomically upgrades the existing certificate `Ready=True` proof function to the receipt-bound command schema. It adds no table, column, role or compatibility overload; desired, artifact and command receipt identity are checked in the same transaction.
 - The two HTTP routes are mounted only inside the candidate while all six public contracts remain Draft. There is no T3 selector, production acceptance evidence or profile activation.
 - Framework comparison references are the official `rust-spiffe` X509 source, `vaultrs` PKI sign request and `kube-rs` controller lifecycle sources recorded in `docs/references/framework-comparison.md`.

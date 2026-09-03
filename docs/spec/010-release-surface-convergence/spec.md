@@ -6,26 +6,25 @@
 
 ## 背景
 
-[`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md) 已定义 RSS 的产品面，
-ADR-024 已定义公共消费边界，
+[`project-scope`](../../rules/project-scope.md) 已定义 RSS 的 library 产品面与公共消费边界，
 cargo xtask contract breaking / cargo public-api 已区分 Release API 与仓内 Rust `pub`。当前缺口不是为每个
 workspace package 追加产品声明，而是建立一个最小、正向且可派生的 Release Surface，使发布承诺只覆盖明确进入
-发布闭包的 artifact 与 API。
+发布闭包的 package 与 API。
 
 ## 目标
 
-1. 定义正向显式 Release Surface：只有被发布集合选中的 package、profile artifact 与 API 才获得版本承诺；
+1. 定义正向显式 Release Surface：只有被发布集合选中的 package 与 API 才获得版本承诺；
    未被选中的 package 默认 internal，无需逐项声明。
 2. 固化当前已接纳的两条通用公共窄腰：Plain Rust consumer 使用 Standalone Component waist，企业应用使用
    Platform Application waist。Official Integration、Internal Provider Contract 与 composition detail 位于窄腰之后；
-   未来 capability-specific extension 仍须通过 ADR-024 规定的独立条件提升流程。
+   未来 capability-specific extension 仍须满足 `project-scope` 的能力准入条件，并由 Cargo facts 与真实外部消费者证明。
 3. 分离 internal exported-symbol drift 与 Release API/SemVer 语义，并为后续 PBI 提供唯一依赖顺序和证明边界。
 
 ## 用户场景与独立验收
 
 ### US1 — 维护者可以回答本次发布了什么
 
-发布集合只列实际发布项，并与 Cargo package/publish 事实及 assembly/profile metadata 校验。新增 internal package
+发布集合只列实际发布项，并与 Cargo package/publish 事实校验。新增 internal package
 不会要求维护者同步更新一份全 workspace 产品清单。
 
 独立验收：未被发布集合选中的 package 保持 internal；缺失或冲突的已选发布事实由既有事实读取链 fail-closed。
@@ -45,8 +44,8 @@ Plain Rust consumer 不依赖 Platform runtime；Platform application consumer �
 ## 功能需求
 
 - **FR-001**：Release Surface 必须采用正向发布集合；未列 package 必须默认 internal。
-- **FR-002**：发布集合必须与 Cargo manifest、assembly/profile metadata 和 ADR-024 校验或派生，不得复制全
-  workspace inventory、当前数量或顺序。
+- **FR-002**：发布集合必须由 Cargo manifest 声明，并经 `workspacefacts` 与既有 release-check typed carrier
+  校验或派生，不得复制全 workspace inventory、当前数量或顺序。
 - **FR-003**：Standalone Component waist 与 Platform Application waist 必须是当前已接纳的两类通用公共 Rust
   消费入口；真实独立 provider/consumer、owner、SemVer/支持责任、typed bridge 与 conformance 齐备后，仍可经独立
   scope/ADR/PBI 接纳 capability-specific extension contract。
@@ -64,7 +63,7 @@ Plain Rust consumer 不依赖 Platform runtime；Platform application consumer �
 - 不创建逐 package 产品面、发布状态或支持状态 metadata。
 - 不在本规格 PR 中创建 release model、TOML/JSON schema、gate、crate、façade 或生成物。
 - 不公开通用第三方 Provider SPI、动态插件、provider registry、service locator 或 marketplace。
-- 不修改 official profile 状态，不新增 T3 owner、carrier、selector 或 production artifact。
+- 不定义应用 artifact、production profile、T3 owner、carrier 或 selector；这些能力位于 library Release Surface 之外。
 - 不为废弃草案建立目录别名、双写或兼容读取路径。
 
 ## 成功标准

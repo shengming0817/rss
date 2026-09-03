@@ -32,7 +32,7 @@
 | 文件 | Canonical owner |
 |---|---|
 | [`project-scope.md`](project-scope.md) | Evolve/Complete/Freeze/External 与能力边界 |
-| [`verification-scope.md`](verification-scope.md) | T1–T3、GA trigger 与 production acceptance |
+| [`verification-scope.md`](verification-scope.md) | library T1/T2 验证边界与外部消费证明 |
 | [`architecture.md`](architecture.md) | 架构风格、命名与 owner 总图 |
 | [`workspace-architecture.md`](workspace-architecture.md) | workspace 职责与分层 |
 | [`ai-robust.md`](ai-robust.md) | Hard/Medium/Soft 与 carrier 选择 |

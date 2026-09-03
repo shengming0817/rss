@@ -13,7 +13,7 @@
 //! in-mem sealing。
 //!
 //! sealing 的实际归属与强度（主守卫是生产侧）：
-//! - 生产 bin（`bins/server` / `bins/rss`）经 cargo-deny **连 `memory` 都依赖不到** ⇒ in-mem refresh
+//! - production assembly 经 cargo-deny **连 `memory` 都依赖不到** ⇒ in-mem refresh
 //!   store 类型层不可命名（**Hard**，比「bootstrap 内 sealing」更强；这是 in-mem 生产不可达的主守卫）。
 //! - dev root（`journeys` / `examples`）合法依赖 `memory`，in-mem 仅经 `match
 //!   ResolvedRefreshStore::Demo` 臂构造——**决策绑定纪律（Medium）**：`match` 把构造收束到已校验

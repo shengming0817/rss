@@ -29,7 +29,7 @@ RSS 保留 GoCell 的 **domain-native 治理**（原 GoCell 称 cell-native，�
 | 原 "Slice" | 域 crate 内 **feature 模块** | 不再是 crate；intra-crate 用 `pub(crate)` 封装 |
 | Contract | `contracts/{kind}/{domain}/{version}/` 的 `contract.toml` + `*.schema.json` 声明源 | typify/xtask 派生 Rust 进 `generated/` crate；跨边界唯一 wire 载体 |
 | Contract 归属 | `owner` = 域 crate 名 / `_framework`（sentinel） | provider-agnostic 中立契约归框架 |
-| Assembly | `assemblies/{name}/` 的 `assembly.toml`（+ `bins/server` / bin crate） | 依赖闭包 = 物理打包 |
+| Assembly | `assemblies/{name}/` 的 `assembly.toml` + library crate | 依赖闭包 = library composition |
 | 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 | 与 wire 语义同源（决策 #1）；不放域 crate manifest |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
@@ -81,8 +81,8 @@ rss/
 └── actors.toml           # 外部 Actor 注册（参与 contract 但不属于域模型的系统）
 ```
 
-命名规约：crate 名一律 **concat 无 dash、不加 `rss-` 前缀**——路径已表达分层与归属，产品名 `rss` 只保留在
-`bins/rss` 一处。仅当扁平 `crates/` 里和外部依赖 crate 真重名又缺路径语境时才加限定：`httpserve`（避开
+命名规约：内部 crate 名一律 **concat 无 dash、不加 `rss-` 前缀**——路径已表达分层与归属。
+仅当扁平 `crates/` 里和外部依赖 crate 真重名又缺路径语境时才加限定：`httpserve`（避开
 `http`）、`authn`（避开 `auth`）、`settings`（避开 `config`）；`adapters/` 下用裸后端名，与自身依赖同名的
 （`redis`/`prometheus`）在 `Cargo.toml` 用 `package = "..."` 重命名外部依赖即可，不污染 crate 名。
 
@@ -102,7 +102,7 @@ rss/
 | redaction/aead/cookie/pathsafe | `secure` |
 | cert lifecycle·signing(L4) | `deviceloop` |
 | `crates/cells/{cell}`（accesscore/configcore/auditcore/registrycore/syscore） | 域 crate `identity`/`settings`/`audit`/`contractreg`/`syshealth`；slice→域 crate 内 feature 模块 |
-| `crates/cmd/{name}` | `bins/rss`(运行时 CLI) + `xtask`(治理/codegen 校验) + `bins/server`(部署) |
+| `crates/cmd/{name}` | `xtask`（仅治理/codegen 校验）；产品运行命令不属于 workspace |
 | `crates/adapters/{name}` / `adapter-*` 前缀 | `adapters/{name}`（根级，裸后端名，无前缀） |
 | `crates/generated/` | `generated/`（根级 committed crate） |
 | Contract = crate `contract-{kind}-{domain}-v{N}` | `contracts/{kind}/{domain}/{version}/contract.toml + *.schema.json` 声明源 → 派生进 `generated/` crate |
@@ -179,8 +179,8 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
 - **组合根 / `module()`**：当前 `bootstrap` 已落私有字段 `DomainBinding`、`DomainBinding::new` 与受控
   `compose_bindings(&mut Vec<DomainBinding>)`；只有 compose 成功才返回只含 probes/resources/workers 的聚合 output，
   失败保持 bindings/outputs 原样。runtime 的 settings/identity/audit 已有返回 `DomainBinding` 的 `module()`；live
-  generated list 与 `compose_bindings` 已由 #1672 接入 live runtime；typed route/subscriber capability 在 `Registry` 中一次性交接。adapter↔域绑定在 `bins/server` /
-  assembly 用构造器注入完成（无独立 cellmodules 层）。GoCell 的 `cellmodules/{eventtransport,replaydeps,sagaprojectiondeps}`
+  generated list 与 `compose_bindings` 已由 #1672 接入 live runtime；typed route/subscriber capability 在 `Registry` 中一次性交接。adapter↔域绑定在
+  assembly library 用构造器注入完成（无独立 cellmodules 层）。GoCell 的 `cellmodules/{eventtransport,replaydeps,sagaprojectiondeps}`
   等 topology-gated resolver 内联为 `bootstrap` 子模块（按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖）。
 - **Init fail-fast**：`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`；必填依赖走构造器必填参数
   （编译期）；init 内不做 I/O、不 spawn task。

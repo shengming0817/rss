@@ -7,7 +7,6 @@ set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 gate="$root/docs/ops/0060-outbox-capacity-gate.sh"
-runbook="$root/docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md"
 readme="$root/adapters/postgres/migrations/README.md"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rss-0060-capacity-selftest.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
@@ -39,7 +38,6 @@ require_literal "$gate" ': "${PGPASSFILE:?set PGPASSFILE to the DB-owner passwor
 require_literal "$gate" 'passfile_mode=$(file_mode "$PGPASSFILE")'
 require_literal "$gate" 'psql -XAtq -v ON_ERROR_STOP=1 -c "$1"'
 forbid_literal "$gate" 'DATABASE_URL'
-forbid_literal "$runbook" 'DB_OWNER_URL'
 forbid_literal "$readme" 'DB_OWNER_URL'
 
 # A NULL time lag is unknown unless the standby is byte-exact and replied
@@ -58,7 +56,6 @@ forbid_literal "$gate" '[ "$last_archived_wal" = "$target_wal" ]'
 require_literal "$gate" 'if archive_target_present; then'
 forbid_literal "$gate" 'archived_after -gt archived_before'
 forbid_literal "$gate" 'idle no-op'
-forbid_literal "$runbook" '完全没有 WAL 活动'
 wal_probe_line=$(grep -nF -- "pg_logical_emit_message(false, 'rss.0060-capacity-gate', 'archive-probe')" "$gate" | cut -d: -f1)
 wal_target_line=$(grep -nF -- 'target_wal=$(pg "SELECT pg_walfile_name(pg_switch_wal())")' "$gate" | cut -d: -f1)
 if [ "$wal_probe_line" -ge "$wal_target_line" ]; then
@@ -167,11 +164,9 @@ fi
 printf '%s\n' "$reset_output" | grep -Fq 'pg_stat_archiver statistics reset' \
   || fail "statistics reset did not fail closed"
 
-# The operator runbook owns explanation; the migration ledger is a thin link.
-require_literal "$runbook" 'REMOTE_ARCHIVE_PROBE'
-require_literal "$runbook" "locktype = 'advisory'"
-require_literal "$runbook" 'xact_start'
-require_literal "$readme" 'docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md'
+# The executable gate owns its inputs; the migration ledger remains a thin link.
+require_literal "$gate" 'REMOTE_ARCHIVE_PROBE'
+require_literal "$readme" 'docs/ops/0060-outbox-capacity-gate.sh'
 forbid_literal "$readme" '| data + `pg_wal` + local archive/spool 共盘 | 57 GiB |'
 forbid_literal "$readme" 'REMOTE_ARCHIVE_FREE_BYTES'
 forbid_literal "$readme" 'MIGRATION_PID'

@@ -94,8 +94,6 @@ members = [
   "assemblies/settingsonly",
   "assemblies/identityaudit",
   "assemblies/deviceidentity",
-  "bins/server",
-  "bins/rss",
   "xtask",
   # 验收 journey 组合根（demo 组装根 + 端到端集成测试；RW-G1 追踪弹）
   "journeys",
@@ -108,19 +106,18 @@ members = [
 # 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
 exclude = ["lints", "vendor/sqlx-core-0.8.6"]
 
-# Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
+# Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
-  { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
-  { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
-  { package = "rss-device-security-contracts", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
-  { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
-  { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
-  { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
-  { package = "rss-eventing", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
-  { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
+  { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
+  { package = "rss-device-security-contracts", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
+  { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental" },
+  { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-eventing", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
-profile-artifacts = []
 
 # 自写 dylint lint 注册入口；对 cargo build/test/check 惰性（仅 `cargo dylint` 读取），
 # 配合 exclude 使 stable 构建永不触碰 lints/ 的 nightly 工具链。

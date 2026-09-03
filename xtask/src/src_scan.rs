@@ -225,7 +225,7 @@ mod tests {
             "/workspace/generated"
         )));
         assert!(is_excluded(&std::path::PathBuf::from("/workspace/xtask")));
-        // lints/ 在 workspace 根（非 crates/bins/ 下），不会被 member_dirs 枚举到；
+        // lints/ 在 workspace 根（非 crates/ 下），不会被 member_dirs 枚举到；
         // 但 "lints" 在排除列表中，若 member_dirs 结果含此段则会被跳过。
         assert!(is_excluded(&std::path::PathBuf::from("/workspace/lints")));
         // 非排除路径不在列表中。
@@ -233,7 +233,7 @@ mod tests {
             "/workspace/crates/identity"
         )));
         assert!(!is_excluded(&std::path::PathBuf::from(
-            "/workspace/bins/rss-server"
+            "/workspace/tools/app"
         )));
     }
 

@@ -54,8 +54,7 @@ use crate::workspace_root;
 use crate::{
     archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
     contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
-    runtime_assembly_residual, runtime_deps_guard, runtime_env_guard, runtime_root_guard,
-    shipped_feature_guard, wsdeps,
+    runtime_assembly_residual, runtime_deps_guard, runtime_env_guard, runtime_root_guard, wsdeps,
 };
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -117,8 +116,6 @@ enum InternalCheck {
     ContractValidate,
     /// assembly-level DI provider 声明校验（RevocationStore active provider 必须持久）。
     AssemblyValidate,
-    /// assembly lifecycle 与应用 artifact exact closure 门（#1798）。
-    AssemblyArtifactsCheck,
     /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
     AssemblyModulesCheck,
     /// assembly.toml providers → committed providers_gen.rs 漂移门（ASSEMBLY-PROVIDERS-CODEGEN-01）。
@@ -131,8 +128,6 @@ enum InternalCheck {
     /// active 默认 deny；三个固定 review rules 为 warn，但未确认 fail-closed；against = origin/develop。
     ContractBreaking,
     LayerDeps,
-    /// server/rss 的 WorkspaceFacts CargoSet root selection 禁止启用登记的非生产 features。
-    ShippedFeatureGuard,
     WsDepsDrift,
     /// Production Rustdoc semantic and token-profile trust-chain source guard.
     SourceSemanticGuard,
@@ -282,14 +277,6 @@ fn step_assembly_validate() -> Step {
         env: &[],
     }
 }
-fn step_assembly_artifacts_check() -> Step {
-    Step {
-        id: GateId::AssemblyArtifactsCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyArtifactsCheck),
-        env: &[],
-    }
-}
 fn step_assembly_modules_check() -> Step {
     Step {
         id: GateId::AssemblyModulesCheck,
@@ -335,14 +322,6 @@ fn step_layer_deps() -> Step {
         id: GateId::LayerDeps,
         args: &[],
         kind: StepKind::Internal(InternalCheck::LayerDeps),
-        env: &[],
-    }
-}
-fn step_shipped_feature_guard() -> Step {
-    Step {
-        id: GateId::ShippedFeatureGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::ShippedFeatureGuard),
         env: &[],
     }
 }
@@ -1095,161 +1074,10 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-const IDENTITYAUDIT_ACCEPTANCE_IMAGE_ENV: &str = "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE";
-const IDENTITYAUDIT_ACCEPTANCE_IMAGE: &str = "rss-identityaudit:artifact-acceptance";
-const DEVICEIDENTITY_ACCEPTANCE_IMAGE_ENV: &str = "RSS_DEVICEIDENTITY_ACCEPTANCE_IMAGE";
-const DEVICEIDENTITY_ACCEPTANCE_IMAGE: &str = "rss-deviceidentity:artifact-acceptance";
-const IDENTITYAUDIT_SERVER_BUILD_ARGS: &[&str] = &[
-    "--locked",
-    "-p",
-    "identityaudit",
-    "--bin",
-    "identityaudit-server",
-    "--features",
-    "test-support",
-];
-const IDENTITYAUDIT_IMAGE_BUILD_ARGS: &[&str] = &[
-    "build",
-    "--target",
-    "identityaudit-runtime",
-    "--tag",
-    IDENTITYAUDIT_ACCEPTANCE_IMAGE,
-    ".",
-];
-const INTEGRATION_ENV: &[(&str, &str)] = &[
-    (
-        "RSS_AUDIT_CHAIN_KEY_B64URL",
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    ),
-    (
-        IDENTITYAUDIT_ACCEPTANCE_IMAGE_ENV,
-        IDENTITYAUDIT_ACCEPTANCE_IMAGE,
-    ),
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IntegrationProvisioning {
-    IdentityAuditServerBinary,
-    IdentityAuditRuntimeImage,
-    DeviceIdentityRuntimeImage,
-}
-
-fn integration_provisioning(
-    batch: &integration_shards::ShardBatch,
-) -> Vec<IntegrationProvisioning> {
-    let mut plan = Vec::new();
-    if batch
-        .unit_ids
-        .contains(&integration_shards::IntegrationUnitId::IdentityAuditRuntimeJourney)
-    {
-        plan.push(IntegrationProvisioning::IdentityAuditServerBinary);
-    }
-    if batch
-        .unit_ids
-        .contains(&integration_shards::IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
-    {
-        plan.push(IntegrationProvisioning::IdentityAuditRuntimeImage);
-    }
-    if batch
-        .unit_ids
-        .contains(&integration_shards::IntegrationUnitId::DeviceIdentityRuntimeImageAcceptance)
-    {
-        plan.push(IntegrationProvisioning::DeviceIdentityRuntimeImage);
-    }
-    plan
-}
-
-fn provision_integration_batch(
-    batch: &integration_shards::ShardBatch,
-    root: &Path,
-) -> Result<Option<String>> {
-    let mut deviceidentity_image = None;
-    for provisioning in integration_provisioning(batch) {
-        let (status, failure) = match provisioning {
-            IntegrationProvisioning::IdentityAuditServerBinary => (
-                crate::cmd::cargo_cmd(
-                    crate::cmd::CargoSubcommand::Build,
-                    IDENTITYAUDIT_SERVER_BUILD_ARGS,
-                    &[],
-                    Some(root),
-                )
-                .status()
-                .context("build identityaudit-server for runtime journey")?,
-                "identityaudit-server build failed",
-            ),
-            IntegrationProvisioning::IdentityAuditRuntimeImage => (
-                crate::cmd::external_cmd(
-                    crate::cmd::ExternalProgram::Docker,
-                    IDENTITYAUDIT_IMAGE_BUILD_ARGS,
-                    &[],
-                    Some(root),
-                )
-                .status()
-                .context("build identityaudit runtime acceptance image")?,
-                "identityaudit runtime acceptance image build failed",
-            ),
-            IntegrationProvisioning::DeviceIdentityRuntimeImage => {
-                let revision = crate::cmd::source_revision(root)?;
-                let revision_arg = format!("GIT_SHA={revision}");
-                let args = [
-                    "build",
-                    "--target",
-                    "deviceidentity-runtime",
-                    "--tag",
-                    DEVICEIDENTITY_ACCEPTANCE_IMAGE,
-                    "--build-arg",
-                    revision_arg.as_str(),
-                    "--build-arg",
-                    "BUILD_DATE=1970-01-01T00:00:00Z",
-                    ".",
-                ];
-                let status = crate::cmd::external_cmd(
-                    crate::cmd::ExternalProgram::Docker,
-                    &args,
-                    &[],
-                    Some(root),
-                )
-                .status()
-                .context("build deviceidentity runtime acceptance image")?;
-                if status.success() {
-                    let output = crate::cmd::external_cmd(
-                        crate::cmd::ExternalProgram::Docker,
-                        &[
-                            "image",
-                            "inspect",
-                            DEVICEIDENTITY_ACCEPTANCE_IMAGE,
-                            "--format",
-                            "{{.Id}}",
-                        ],
-                        &[],
-                        Some(root),
-                    )
-                    .output()
-                    .context("resolve deviceidentity acceptance image digest")?;
-                    anyhow::ensure!(output.status.success(), "docker image digest lookup failed");
-                    let image = String::from_utf8(output.stdout)
-                        .context("docker image digest was not UTF-8")?
-                        .trim()
-                        .to_owned();
-                    anyhow::ensure!(
-                        image.strip_prefix("sha256:").is_some_and(|digest| {
-                            digest.len() == 64
-                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        }),
-                        "docker returned an invalid content-addressed image ID"
-                    );
-                    deviceidentity_image = Some(image);
-                }
-                (
-                    status,
-                    "deviceidentity runtime acceptance image build failed",
-                )
-            }
-        };
-        anyhow::ensure!(status.success(), failure);
-    }
-    Ok(deviceidentity_image)
-}
+const INTEGRATION_ENV: &[(&str, &str)] = &[(
+    "RSS_AUDIT_CHAIN_KEY_B64URL",
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+)];
 
 fn run_integration_batch(
     selection: &IntegrationSelection,
@@ -1257,13 +1085,8 @@ fn run_integration_batch(
     partition: Option<crate::nextest::HashPartition>,
     root: &Path,
 ) -> Result<()> {
-    let deviceidentity_image = provision_integration_batch(batch, root)?;
-    let mut environment = INTEGRATION_ENV.to_vec();
-    if let Some(image) = deviceidentity_image.as_deref() {
-        environment.push((DEVICEIDENTITY_ACCEPTANCE_IMAGE_ENV, image));
-    }
     crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
-        .run(root, &environment)
+        .run(root, INTEGRATION_ENV)
 }
 
 fn run_integration_batches(
@@ -1697,11 +1520,6 @@ fn run_internal(
                 .get()
                 .context(command_scope_facts_context("assembly-validate"))?,
         )),
-        InternalCheck::AssemblyArtifactsCheck => run_assembly_artifacts_check(
-            root,
-            command_facts,
-            crate::assembly_artifacts::report_workspace_facts_failure,
-        ),
         InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
         InternalCheck::AssemblyProvidersCheck => crate::assembly_codegen::run_providers(true),
         InternalCheck::AssemblyLockCheck => assembly_lock::run(
@@ -1715,12 +1533,6 @@ fn run_internal(
         // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
         InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
-        InternalCheck::ShippedFeatureGuard => {
-            let facts = command_facts
-                .get()
-                .context(command_scope_facts_context("shipped-feature-guard"))?;
-            run_check(&shipped_feature_guard::ShippedFeatureGuard::new(facts))
-        }
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::PromtoolRules => crate::promtool::run(),
         InternalCheck::OutboxSameIdGuard => {
@@ -1825,22 +1637,6 @@ fn run_internal(
                 opts.allow_missing_tools,
             )?;
             crate::package_proof::run(root, facts, &surface, None)
-        }
-    }
-}
-
-fn run_assembly_artifacts_check(
-    root: &Path,
-    command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
-    report_facts_failure: impl FnOnce(),
-) -> Result<()> {
-    let prepared = crate::assembly_artifacts::prepare(root)?;
-    match command_facts.get() {
-        Ok(facts) => crate::assembly_artifacts::run_prepared(root, facts, prepared),
-        Err(error) => {
-            report_facts_failure();
-            Err(anyhow::Error::msg(error.to_string()))
-                .context(command_scope_facts_context("assembly-artifacts-check"))
         }
     }
 }
@@ -2517,115 +2313,6 @@ mod tests {
     #[test]
     fn deny_gate_fails_on_unused_wrappers() {
         assert_eq!(step_deny().args, &["deny", "check", "-D", "unused-wrapper"]);
-    }
-
-    #[test]
-    fn identityaudit_runtime_image_batch_has_exact_provisioning_and_environment() -> Result<()> {
-        let selection = IntegrationSelection::release_check();
-        let batch = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
-            .into_iter()
-            .find(|batch| {
-                batch
-                    .unit_ids
-                    .contains(&IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
-            })
-            .context("runtime image batch must remain in the release-check plan")?;
-
-        assert_eq!(batch.package, "identityaudit");
-        assert_eq!(batch.feature, "artifact-acceptance");
-        assert_eq!(batch.targets, ["runtime_image_acceptance"]);
-        assert_eq!(
-            IDENTITYAUDIT_IMAGE_BUILD_ARGS,
-            [
-                "build",
-                "--target",
-                "identityaudit-runtime",
-                "--tag",
-                "rss-identityaudit:artifact-acceptance",
-                ".",
-            ]
-        );
-        assert!(INTEGRATION_ENV.contains(&(
-            "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE",
-            "rss-identityaudit:artifact-acceptance"
-        )));
-        Ok(())
-    }
-
-    #[test]
-    fn deviceidentity_runtime_image_batch_has_runner_owned_provisioning() -> Result<()> {
-        let selection = IntegrationSelection::release_check();
-        let batch = integration_shards::batches(&selection, IntegrationShard::EventTransport)
-            .into_iter()
-            .find(|batch| {
-                batch
-                    .unit_ids
-                    .contains(&IntegrationUnitId::DeviceIdentityRuntimeImageAcceptance)
-            })
-            .context("deviceidentity runtime image batch must remain in release-check")?;
-        assert_eq!(
-            integration_provisioning(&batch),
-            [IntegrationProvisioning::DeviceIdentityRuntimeImage]
-        );
-        assert_eq!(batch.package, "deviceidentity");
-        assert_eq!(batch.targets, ["runtime_image_acceptance"]);
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_provisioning_plan_is_exact_and_excludes_unrelated_batches() -> Result<()> {
-        let selection = IntegrationSelection::release_check();
-        let journey = integration_shards::batches(&selection, IntegrationShard::EventTransport)
-            .into_iter()
-            .find(|batch| {
-                batch
-                    .unit_ids
-                    .contains(&IntegrationUnitId::IdentityAuditRuntimeJourney)
-            })
-            .context("identityaudit runtime journey must remain in the release-check plan")?;
-        assert_eq!(
-            integration_provisioning(&journey),
-            [IntegrationProvisioning::IdentityAuditServerBinary]
-        );
-        assert_eq!(journey.package, "journeys");
-        assert_eq!(journey.feature, "integration");
-        assert!(journey.targets.contains(&"identityaudit_runtime"));
-        assert_eq!(
-            IDENTITYAUDIT_SERVER_BUILD_ARGS,
-            [
-                "--locked",
-                "-p",
-                "identityaudit",
-                "--bin",
-                "identityaudit-server",
-                "--features",
-                "test-support"
-            ]
-        );
-
-        let image = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
-            .into_iter()
-            .find(|batch| {
-                batch
-                    .unit_ids
-                    .contains(&IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
-            })
-            .context("identityaudit runtime image must remain in the release-check plan")?;
-        assert_eq!(
-            integration_provisioning(&image),
-            [IntegrationProvisioning::IdentityAuditRuntimeImage]
-        );
-
-        let unrelated = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
-            .into_iter()
-            .find(|batch| {
-                batch
-                    .unit_ids
-                    .contains(&IntegrationUnitId::IdentityAuditLib)
-            })
-            .context("identityaudit library batch must remain in the release-check plan")?;
-        assert!(integration_provisioning(&unrelated).is_empty());
-        Ok(())
     }
 
     #[test]
@@ -3492,19 +3179,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn shipped_feature_guard_is_shared_by_verify_and_ci() {
-        for (lane, plan) in [
-            ("verify", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(RELEASE_CHECK)),
-        ] {
-            assert!(
-                labels(&plan).contains(&"shipped-feature-guard"),
-                "{lane} must check the actual server/rss feature graph"
-            );
-        }
-    }
-
     fn runtime_env_guard_membership_is_exact(plan: &[Step]) -> bool {
         let members = plan
             .iter()
@@ -3766,7 +3440,7 @@ mod tests {
     }
 
     #[test]
-    fn assembly_modules_codegen_is_no_compile_internal_gate_after_artifacts_in_all_lanes()
+    fn assembly_modules_codegen_is_no_compile_internal_gate_after_validate_in_all_lanes()
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
@@ -3777,16 +3451,11 @@ mod tests {
                 .iter()
                 .position(|label| *label == "assembly-validate")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-validate"))?;
-            let artifacts = labels
-                .iter()
-                .position(|label| *label == "assembly-artifacts-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-artifacts-check"))?;
             let codegen = labels
                 .iter()
                 .position(|label| *label == "assembly-modules-check")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-modules-check"))?;
-            assert_eq!(artifacts, validate + 1, "{name} artifact order drift");
-            assert_eq!(codegen, artifacts + 1, "{name} lane order drift");
+            assert_eq!(codegen, validate + 1, "{name} lane order drift");
             assert!(
                 !plan[codegen].needs_compile(),
                 "{name} gate must be no-compile"
@@ -3800,92 +3469,6 @@ mod tests {
                 StepKind::Internal(InternalCheck::AssemblyModulesCheck)
             ));
         }
-        Ok(())
-    }
-
-    fn validate_assembly_artifacts_gate(plan: &[Step]) -> anyhow::Result<()> {
-        let positions = [
-            GateId::AssemblyValidate,
-            GateId::AssemblyArtifactsCheck,
-            GateId::AssemblyModulesCheck,
-            GateId::AssemblyProvidersCheck,
-        ]
-        .map(|id| {
-            let members = plan
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.id == id).then_some(index))
-                .collect::<Vec<_>>();
-            anyhow::ensure!(
-                members.len() == 1,
-                "expected exactly one {id:?}, got {members:?}"
-            );
-            Ok::<usize, anyhow::Error>(members[0])
-        })
-        .into_iter()
-        .collect::<anyhow::Result<Vec<_>>>()?;
-        anyhow::ensure!(
-            positions.windows(2).all(|pair| pair[1] == pair[0] + 1),
-            "assembly closure order drift: {positions:?}"
-        );
-        let artifact = &plan[positions[1]];
-        anyhow::ensure!(!artifact.needs_compile(), "artifact gate compiled");
-        anyhow::ensure!(
-            artifact.carrier_file() == Some("xtask/src/assembly_artifacts.rs"),
-            "artifact carrier drift"
-        );
-        anyhow::ensure!(
-            matches!(
-                artifact.kind,
-                StepKind::Internal(InternalCheck::AssemblyArtifactsCheck)
-            ),
-            "artifact executor drift"
-        );
-        anyhow::ensure!(
-            artifact.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && artifact.id.spec().included_in_verify()
-                && artifact
-                    .id
-                    .spec()
-                    .included_in_profile(ExecutionProfile::ReleaseCheck)
-                && artifact.id.spec().tool() == ToolRequirement::InProcess,
-            "artifact typed membership drift"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_artifacts_gate_is_typed_once_and_orders_the_assembly_closure() -> anyhow::Result<()>
-    {
-        for (name, plan) in [
-            ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
-            ("release-check", plan_for(RELEASE_CHECK)),
-        ] {
-            validate_assembly_artifacts_gate(&plan).with_context(|| format!("{name} plan"))?;
-        }
-
-        let real = plan_for(PlanProjection::Verify);
-        let mut omitted = real.clone();
-        omitted.retain(|step| step.id != GateId::AssemblyArtifactsCheck);
-        assert!(validate_assembly_artifacts_gate(&omitted).is_err());
-
-        let mut duplicated = real.clone();
-        let duplicate = real
-            .iter()
-            .find(|step| step.id == GateId::AssemblyArtifactsCheck)
-            .context("committed verify plan lacks artifact check")?
-            .clone();
-        duplicated.push(duplicate);
-        assert!(validate_assembly_artifacts_gate(&duplicated).is_err());
-
-        let mut wrong_executor = real;
-        wrong_executor
-            .iter_mut()
-            .find(|step| step.id == GateId::AssemblyArtifactsCheck)
-            .context("committed fast plan lacks artifact check")?
-            .kind = StepKind::Internal(InternalCheck::AssemblyValidate);
-        assert!(validate_assembly_artifacts_gate(&wrong_executor).is_err());
         Ok(())
     }
 
@@ -4709,7 +4292,6 @@ mod tests {
 
         for check in [
             InternalCheck::AssemblyValidate,
-            InternalCheck::AssemblyArtifactsCheck,
             InternalCheck::AssemblyLockCheck,
         ] {
             run_internal(check, &opts(false, false), &root, &command_facts)?;
@@ -4719,34 +4301,7 @@ mod tests {
     }
 
     #[test]
-    fn assembly_artifacts_metadata_failure_runs_stable_failure_reporter() -> anyhow::Result<()> {
-        use std::cell::Cell;
-
-        let root = workspace_root()?;
-        let command_facts =
-            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, |_| {
-                Err("synthetic metadata failure".to_owned())
-            });
-        let reported = Cell::new(false);
-        let Err(error) = run_assembly_artifacts_check(&root, &command_facts, || reported.set(true))
-        else {
-            bail!("metadata failure must fail the aggregate artifact check")
-        };
-        assert!(
-            reported.get(),
-            "metadata failure must emit the stable FAILED view"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("assembly-artifacts-check: load command-scoped workspace facts")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn command_scope_one_load_across_nextest_shipped_and_contract_consumers() -> anyhow::Result<()>
-    {
+    fn command_scope_one_load_across_nextest_and_contract_consumers() -> anyhow::Result<()> {
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -4779,12 +4334,6 @@ mod tests {
 
         crate::nextest::validate_workspace(&root, command_facts.get()?)?;
         run_internal(
-            InternalCheck::ShippedFeatureGuard,
-            &opts(false, false),
-            &root,
-            &command_facts,
-        )?;
-        run_internal(
             InternalCheck::ContractBindingGuard,
             &opts(false, false),
             &root,
@@ -4793,7 +4342,7 @@ mod tests {
         assert_eq!(
             calls.get(),
             1,
-            "nextest / shipped-feature / contract-binding consumers must share one metadata load"
+            "nextest and contract-binding consumers must share one metadata load"
         );
         Ok(())
     }

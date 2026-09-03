@@ -1,7 +1,6 @@
 //! `cargo xtask ci full` / ReleaseCheck 模式下固定 `test-affected` Job 的覆盖率门 —— 跑**一次**
 //! `cargo llvm-cov nextest`（Packages：`-p`；Workspace：`--workspace`）+ `--features testkit/containers`
-//! （出 export JSON，**兼作 nextest 门**：测试必须全绿，并留下 profdata）；Workspace 路径再向同一
-//! profdata 追加 IdentityAudit Journey supplement，最后评**两子门**。feature 参数由
+//! （出 export JSON，**兼作 nextest 门**：测试必须全绿，并留下 profdata），最后评**两子门**。feature 参数由
 //! [`crate::nextest::NextestInvocation::for_coverage`] 的 typed registry 单源构造，确保
 //! feature-gated conformance 代码也被插桩：
 //!
@@ -16,8 +15,7 @@
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
 //! 插桩跑），只在完整本地 CI 或 typed 远端 coverage job 内调用。issue #1132 验收
 //! 「cargo nextest run --workspace + cargo llvm-cov 阈值门（引擎/基础 ≥90%）」由本**一步**同时兑现——
-//! core 测试兼作 nextest 门与基础覆盖采集；Workspace 下 IdentityAudit supplement 只运行精确 binary，并用
-//! testcontainers 自供 Postgres/RabbitMQ/Redis，覆盖生产 provider/eventing/listener/drain 路径。
+//! core 测试兼作 nextest 门与基础覆盖采集。
 //!
 //! 无 ratchet 例外：所有 STRICT crate 均守默认 90% 行覆盖率下限。历史 `consistency` 85% 例外已随
 //! inbox 行为模型与覆盖率补强移除。
@@ -90,7 +88,7 @@ struct Shortfall {
 }
 
 /// 把绝对文件名归属到 workspace crate 名：找**路径组件** `crates`，取紧随的下一段为 crate 名。非
-/// `crates/` 路径（`adapters/` / `bins/` / `generated` / …）→ `None`。用组件级匹配（非裸 substring
+/// `crates/` 路径（`adapters/` / `assemblies/` / `generated` / …）→ `None`。用组件级匹配（非裸 substring
 /// `split("crates/")`）以免 `…/extracrates/vocab/…` 误归属（review #206 A2/A3）。
 fn crate_of_file(filename: &str) -> Option<&str> {
     let mut comps = filename.split('/');
@@ -164,7 +162,6 @@ fn render_failures(failing: &[Shortfall]) -> String {
 
 /// ci 覆盖率门：跑 llvm-cov nextest（= nextest 门，留 profdata）→ 评**两子门**（任一红即 ci 非零退出）：
 /// ① 绝对地板（export JSON；Packages 下条件评 StrictTouched）；② per-diff 增量（复用同一 profdata 出 lcov）。
-/// Workspace 路径额外追加 IdentityAudit Journey supplement（`--no-clean`）。
 pub(crate) fn run(
     scope: CoverageScope,
     execution_policy: crate::cmd::ExecutionPolicy,
@@ -173,9 +170,6 @@ pub(crate) fn run(
     let root = workspace_root()?;
     let json = run_llvm_cov(&root, &scope, execution_policy)?;
     evaluate_strict_floor(&json, &scope)?;
-    if matches!(scope, CoverageScope::Workspace { .. }) {
-        run_identityaudit_supplement(&root, execution_policy)?;
-    }
     // ② per-diff 增量门：复用 nextest 跑测试留下的 profdata 出 lcov（不重跑测试），本 PR 新增/修改可执行行
     //    ≥80%（COVERAGE-DIFF-FLOOR-01，见 crate::diffcov）。
     let lcov = lcov_report(&root)?;
@@ -214,24 +208,6 @@ fn evaluate_strict_floor(json: &str, scope: &CoverageScope) -> Result<()> {
         strict.join(", ")
     );
     Ok(())
-}
-
-fn run_identityaudit_supplement(
-    root: &Path,
-    execution_policy: crate::cmd::ExecutionPolicy,
-) -> Result<()> {
-    let out = coverage_output_path(
-        &coverage_report_dir(root),
-        "xtask-ci-coverage-identityaudit-supplement.lcov",
-    )?;
-    let out_str = out
-        .strip_prefix(root)
-        .context("IdentityAudit supplement 输出必须位于 workspace 内")?
-        .to_str()
-        .context("IdentityAudit supplement 输出路径非法 UTF-8")?;
-    crate::nextest::NextestInvocation::for_identityaudit_coverage(out_str)?
-        .with_execution_policy(execution_policy)
-        .run(root, &[])
 }
 
 /// 跑 `cargo llvm-cov nextest`（Packages：`-p`；Workspace：`--workspace`）+ features；
@@ -437,7 +413,7 @@ mod tests {
         );
         assert_eq!(crate_of_file("/repo/adapters/redis/src/lib.rs"), None);
         assert_eq!(crate_of_file("/repo/generated/src/http.rs"), None);
-        assert_eq!(crate_of_file("/repo/bins/server/src/main.rs"), None);
+        assert_eq!(crate_of_file("/repo/tools/app/src/main.rs"), None);
         // 组件级匹配 anti-false-positive（review #206 A2/A3）：`crates` 作为非独立路径组件不误归属。
         assert_eq!(crate_of_file("/repo/extracrates/vocab/src/lib.rs"), None);
         assert_eq!(crate_of_file("/repo/my_crates/vocab/lib.rs"), None);

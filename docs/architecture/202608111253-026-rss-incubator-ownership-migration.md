@@ -11,8 +11,8 @@ RSS 当前通过 `.gitmodules`、`consumers/standalone` gitlink、固定外仓 U
 workspace、lock、metadata 和升级命令的校验，拥有 standalone external consumer 的源码拓扑。这曾为首批
 Standalone Component 建立真实跨包消费证据，但也把下游产品 workspace 的构建与安全责任反向纳入 RSS。
 
-[`ADR-024`](202608012034-024-enterprise-framework-product-surface.md) 已将 Reference Extension 定位为未来第一方
-外部 consumer，并要求迁出时通过独立迁移决策记录目标仓、版本边界、consumer build、release ownership 和回退方式。
+[`project-scope`](../rules/project-scope.md) 已将 Reference Extension 定位为外部 consumer，并要求迁出时通过
+独立迁移决策记录目标仓、版本边界、consumer build、release ownership 和回退方式。
 本 ADR 接纳该外部孵化仓边界以及 standalone consumer proof 的切换契约；它不授权迁移现有 Reference Extension
 assembly、domain 或 contract。
 

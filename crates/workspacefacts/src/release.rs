@@ -23,24 +23,6 @@ pub enum ApiStability {
     Stable,
 }
 
-/// Official profiles currently admitted by ADR-024 for Release Surface selection.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
-#[serde(rename_all = "kebab-case")]
-pub enum OfficialProfile {
-    Core,
-    Eventing,
-}
-
-impl OfficialProfile {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Core => "core",
-            Self::Eventing => "eventing",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ReleasePackageSelection {
@@ -49,7 +31,6 @@ pub struct ReleasePackageSelection {
     version_line: Option<String>,
     public_api_owner: PublicApiOwner,
     api_stability: ApiStability,
-    profiles: Vec<OfficialProfile>,
 }
 
 impl ReleasePackageSelection {
@@ -72,30 +53,6 @@ impl ReleasePackageSelection {
     pub const fn api_stability(&self) -> ApiStability {
         self.api_stability
     }
-
-    #[must_use]
-    pub fn profiles(&self) -> &[OfficialProfile] {
-        &self.profiles
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct ReleaseProfileArtifactSelection {
-    profile: OfficialProfile,
-    assembly: String,
-}
-
-impl ReleaseProfileArtifactSelection {
-    #[must_use]
-    pub const fn profile(&self) -> OfficialProfile {
-        self.profile
-    }
-
-    #[must_use]
-    pub fn assembly(&self) -> &str {
-        &self.assembly
-    }
 }
 
 /// Positive selection only: anything absent remains internal.
@@ -103,18 +60,12 @@ impl ReleaseProfileArtifactSelection {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ReleaseSelection {
     packages: Vec<ReleasePackageSelection>,
-    profile_artifacts: Vec<ReleaseProfileArtifactSelection>,
 }
 
 impl ReleaseSelection {
     #[must_use]
     pub fn packages(&self) -> &[ReleasePackageSelection] {
         &self.packages
-    }
-
-    #[must_use]
-    pub fn profile_artifacts(&self) -> &[ReleaseProfileArtifactSelection] {
-        &self.profile_artifacts
     }
 }
 

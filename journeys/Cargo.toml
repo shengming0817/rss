@@ -61,21 +61,6 @@ path = "tests/settingsonly_runtime.rs"
 required-features = ["integration"]
 
 [[test]]
-name = "settingsonly_production_artifact"
-path = "tests/settingsonly_production_artifact.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "identityaudit_runtime"
-path = "tests/identityaudit_runtime.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "production_runtime"
-path = "tests/production_runtime.rs"
-required-features = ["integration"]
-
-[[test]]
 name = "saga_runtime_provider_integration"
 path = "tests/saga_runtime_provider_integration.rs"
 required-features = ["integration"]
@@ -83,11 +68,6 @@ required-features = ["integration"]
 [[test]]
 name = "runtime_inventory"
 path = "tests/runtime_inventory.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "two_replica_runtime"
-path = "tests/two_replica_runtime.rs"
 required-features = ["integration"]
 
 # journey 集成测试组装根：组合根可依赖所有库 crate（deny.toml wrappers 已含 journeys）。

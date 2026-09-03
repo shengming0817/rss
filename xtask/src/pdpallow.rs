@@ -1,17 +1,17 @@
-//! `pdp-allow-guard` —— crates/bins/assemblies 生产 src 内 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门**计数门**（治理 lint）。
+//! `pdp-allow-guard` —— crates/assemblies 生产 src 内 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门**计数门**（治理 lint）。
 //!
 //! INVARIANT: PDP-ALLOW-CONFINE-01 { level = "Medium", exec = "check", source = "code" }（T004.6 / #1198 / ADR-006 §5 信任根二次门）
 //!
 //! 背景：dylint `rss_pdp_impl_adapter_only`（PDP-IMPL-ADAPTER-ONLY-01）守「`diport::Pdp` 仅 adapter 可 impl」，
-//! 但其 item-level 逃生门 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...` 可在 bins / assemblies 生产 src 内**抑制**该
+//! 但其 item-level 逃生门 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...` 可在 assemblies 生产 src 内**抑制**该
 //! lint，从而内联一个 always-allow `impl Pdp` 旁路真验签。azure 无 CI ⇒ `cargo xtask verify` 是唯一实际 gate，
-//! 该逃生门若被滥用无任何机器二次门（评审 F20）。本计数门补足：扫 `crates/*/src/**` + `bins/*/src/**` + `assemblies/*/src/**` 生产源，**任一**
+//! 该逃生门若被滥用无任何机器二次门（评审 F20）。本计数门补足：扫 `crates/*/src/**` + `assemblies/*/src/**` 生产源，**任一**
 //! `#[allow(...rss_pdp_impl_adapter_only...)]` 用量即 fail（count 必须为 0），与 dylint 同源 fail-closed。
 //!
 //! 判定面（评审 F4 强化——comment-stripped + 属性 span，不引 regex）：先 string-aware 去 `//` 行注释 +
 //! `/* */` 块注释（杜绝 doc / 注释里 `allow(...lint...)` 示例误判），再对每个 `allow(` **或 `expect(`** 找配对
 //! `)`、span 内含 lint 名 ⇒ 逃生门用量。覆盖：① **多行属性**（`allow(` 与 lint 名跨行）；② **`expect`**
-//! （`expect` 同样抑制 lint）；③ **范围扩至 `crates/*` + `bins/*` + `assemblies/*` 生产 `src/`**（dylint 适用全面——非 adapter
+//! （`expect` 同样抑制 lint）；③ **范围覆盖 `crates/*` + `assemblies/*` 生产 `src/`**（dylint 适用全面——非 adapter
 //! 的任一 crate `impl Pdp` 都会触 dylint，逃生门可在任一处抑制）。`adapters/*`（合法 Pdp impl 站点）不扫；
 //! `*/tests/`（集成测试）非 `src/`、不扫——test 替身合法（与 dylint 默认不扫 `#[cfg(test)]` 一致）。
 //!
@@ -31,15 +31,15 @@ use crate::src_scan::{is_excluded, member_dirs, rs_files, strip_comments};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-/// pdp-allow 扫描根：`crates/*` + `bins/*` + `assemblies/*` 的 `src/`。`adapters/*`（**合法** `impl Pdp` 站点）**不在内**——
+/// pdp-allow 扫描根：`crates/*` + `assemblies/*` 的 `src/`。`adapters/*`（**合法** `impl Pdp` 站点）**不在内**——
 /// 故与 `command_symmetry` 的更宽根集不同源（#1124 review F5：根集随各 invariant 边界，不共享）。
 /// `assemblies/runtime` 是信任根迁入点（#1309），若那里滥用逃生门须被此门抓住。
-const PDP_SCAN_ROOTS: &[&str] = &["crates", "bins", "assemblies"];
+const PDP_SCAN_ROOTS: &[&str] = &["crates", "assemblies"];
 
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
-    /// PDP-ALLOW-CONFINE-01：bins 生产 src 内出现 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门。
+    /// PDP-ALLOW-CONFINE-01：非 adapter 生产 src 内出现 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门。
     ProdEscapeHatch,
 }
 
@@ -56,11 +56,11 @@ impl GovernanceCheck for PdpAllowGuard {
     fn check(&self) -> Result<(String, Vec<Finding>)> {
         let root = crate::workspace_root()?;
         let (scanned, findings) = scan_sources(&root)?;
-        // canary：crates/* + bins/* + assemblies/* 生产 src 数十个 .rs；扫到过少疑似结构异常 / 路径漂移，静默通过会让门形同
+        // canary：crates/* + assemblies/* 生产 src 数十个 .rs；扫到过少疑似结构异常 / 路径漂移，静默通过会让门形同
         // 虚设。下界显著低于实际，仅捕「扫到几乎为空」的灾难，不误伤正常增减。
         if scanned < 10 {
             bail!(
-                "pdp-allow-guard: 仅扫到 {scanned} 个生产 src 文件，疑似 crates/bins/assemblies 结构异常"
+                "pdp-allow-guard: 仅扫到 {scanned} 个生产 src 文件，疑似 crates/assemblies 结构异常"
             );
         }
         let summary = format!(
@@ -101,7 +101,7 @@ fn escape_hatch_lines(content: &str) -> Vec<usize> {
     lines
 }
 
-/// 扫 `crates/*/src/**` + `bins/*/src/**` + `assemblies/*/src/**`（生产源）的逃生门用量，返回 `(扫描文件数, findings)`。
+/// 扫 `crates/*/src/**` + `assemblies/*/src/**`（生产源）的逃生门用量，返回 `(扫描文件数, findings)`。
 fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let mut findings = Vec::new();
     let mut scanned = 0usize;
@@ -185,7 +185,7 @@ mod tests {
         assert!(escape_hatch_lines("const X: &str = \"rss_pdp_impl_adapter_only\";\n").is_empty());
     }
 
-    /// 绿向工作区门：真 crates/* + bins/* + assemblies/* 生产 src 0 逃生门用量（接 `cargo xtask verify` 机器门）。
+    /// 绿向工作区门：真 crates/* + assemblies/* 生产 src 0 逃生门用量（接 `cargo xtask verify` 机器门）。
     #[test]
     #[allow(clippy::expect_used)]
     fn real_sources_have_no_escape_hatch() {

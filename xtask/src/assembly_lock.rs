@@ -504,7 +504,7 @@ mod tests {
         anyhow::ensure!(findings.is_empty(), "fixture findings: {findings:?}");
         run_fixture_root!(&fixture.root, AssemblyLockAction::Generate)?;
         let first = on_disk_locks(&fixture.root)?;
-        assert_eq!(first.len(), 3);
+        assert_eq!(first.len(), 4);
 
         run_fixture_root!(&fixture.root, AssemblyLockAction::Generate)?;
         assert_eq!(first, on_disk_locks(&fixture.root)?);
@@ -563,7 +563,7 @@ mod tests {
             (
                 "contract-semantics",
                 mutate_contract_semantics as FixtureMutation,
-                &["identityaudit", "runtime"] as &[&str],
+                &["deviceidentity", "identityaudit", "runtime"] as &[&str],
             ),
             (
                 "contract-schema",
@@ -1064,7 +1064,7 @@ mod tests {
             let root = fs::canonicalize(root)?;
             let source = crate::workspace_root()?;
             copy_tree(&source.join("contracts"), &root.join("contracts"))?;
-            for assembly in ["identityaudit", "runtime", "settingsonly"] {
+            for assembly in ["deviceidentity", "identityaudit", "runtime", "settingsonly"] {
                 let source_dir = source.join("assemblies").join(assembly);
                 let target_dir = root.join("assemblies").join(assembly);
                 copy_tree(&source_dir, &target_dir)?;

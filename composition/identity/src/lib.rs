@@ -478,7 +478,7 @@ pub mod test_support {
     /// Returns an error if the embedded non-empty blocklist fixture is malformed.
     pub fn deps() -> anyhow::Result<IdentityModuleDeps<TestSigner>> {
         let blocklist = crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
-            include_bytes!("../../../deploy/password-blocklist.demo.sha256"),
+            b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
         ))?;
         Ok(IdentityModuleDeps::new(
             postgres::PgRuntimeHandle::for_module_test().for_domain(),

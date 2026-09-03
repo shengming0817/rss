@@ -93,7 +93,7 @@ const BYPASS_FORBIDDEN: &[&str] = &[
     "spawn_consumer_ackable_tx_subscriber(",
     "pg.infra().inbox(",
 ];
-const BYPASS_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies", "bins"];
+const BYPASS_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies"];
 const BYPASS_LEAF_CRATES: &[&str] = &["journeys"];
 const BYPASS_ALLOWED_PATHS: &[&str] = &[
     TARGET,
@@ -6982,7 +6982,7 @@ fn eventing_observability_closure_findings(root: &Path) -> Result<Vec<Finding<Ru
         &observation_variants,
     ));
 
-    for member in ["crates", "adapters", "composition", "assemblies", "bins"] {
+    for member in ["crates", "adapters", "composition", "assemblies"] {
         let base = root.join(member);
         if !base.exists() {
             continue;

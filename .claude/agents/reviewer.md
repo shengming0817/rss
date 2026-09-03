@@ -26,7 +26,7 @@ tools:
 ## 审查维度
 
 ### 1. 架构合规
-RSS 扁平分层依赖方向（`deny.toml` / crate 图 / cargo-deny）、域 crate 聚合边界、底座 trait/公共 API 稳定性（`cargo public-api` / `cargo-semver-checks`）、adapters/Xadapter trait 实现、bins/server 组合根装配职责、一致性级别标注、跨域 contract 版本语义
+RSS 扁平分层依赖方向（`deny.toml` / crate 图 / cargo-deny）、域 crate 聚合边界、底座 trait/公共 API 稳定性（`cargo public-api` / `cargo-semver-checks`）、adapters/Xadapter trait 实现、assembly library composition 职责、一致性级别标注、跨域 contract 版本语义
 
 ### 2. 安全/权限
 JWT 中间件覆盖、`/internal/v1/` 调用方声明与鉴权、数据暴露风险（敏感字段持久化边界）、输入校验/SQL 注入/XSS、生产配置安全（无 localhost 回退/noop publisher）

@@ -111,11 +111,5 @@ last-good，并降低对应的 `rss_access_token_jwks_ready` 或 `federated_acce
 并要求重新认证；mint、verify、runtime config 与 listener binding 不允许拆分发布，也不允许旧私有
 MAC 与新标准 JWS 双读。运维与测试 **不得**依赖 archived old token 样本做 canary 或负向证据。
 
-回滚只能整体回滚 binary 与配置，不得在新 binary 中恢复 alias、deprecated shim、非标准 signing
-input 或双读。
-
-具体停流、基于最后签发 token 的 `exp` 与验签/时钟余量排空、readiness/canary 验证和整体回滚步骤以
-[Security Production Closeout](../ops/security-production-closeout.md#atomic-service-token-standard-jws-cutover)
-（#1997 service-token 专节）与
-[Atomic Token Profile Cutover](../ops/security-production-closeout.md#atomic-token-profile-cutover)
-为运维单源。
+外部消费者不得恢复 alias、deprecated shim、非标准 signing input 或双读。产品部署、停流、
+readiness/canary 与回滚由消费者仓库负责，不是 RSS library 的交付面。

@@ -1,6 +1,6 @@
 //! Typed repository assembly source shared by xtask governance consumers.
 //!
-//! INVARIANT: ASSEMBLY-PRODUCTION-IDENTITY-RATCHET-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::production_profile_and_lifecycle_cannot_be_downgraded_together", anti_vacuity = "tests::real_workspace_core_is_closed" } -- the closed production identity set is exactly equal to manifests carrying the production profile.
+//! INVARIANT: ASSEMBLY-PRODUCTION-IDENTITY-RATCHET-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::fixture_wrong_profile_is_rejected_by_the_real_global_ratchet", anti_vacuity = "tests::real_workspace_core_is_closed" } -- the closed production identity set is exactly equal to manifests carrying the production profile.
 //! INVARIANT: ASSEMBLY-GOVERNANCE-SOURCE-FUNNEL-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::source_funnel_rejects_parallel_manifest_readers", anti_vacuity = "tests::real_workspace_has_one_governance_source_owner" } -- non-test xtask code may only discover or parse assembly governance sources through this module.
 
 use anyhow::{Context, Result, bail};
@@ -10,13 +10,9 @@ use assembly_schema::{
 };
 use assembly_schema::{AssemblyProfile, RepositoryAssemblyManifestV2};
 use quote::ToTokens as _;
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
-
-pub(crate) const ARTIFACT_MATRIX_PATH: &str = "assemblies/artifacts.toml";
-const MAX_ARTIFACT_MATRIX_BYTES: u64 = 4 * 1024 * 1024;
 
 macro_rules! production_assembly_ids {
     ($($variant:ident => $name:literal),+ $(,)?) => {
@@ -524,200 +520,15 @@ impl std::ops::Deref for ProductionAssembly<'_> {
 mod phase {
     pub(crate) trait Sealed {}
     pub(crate) struct Core;
-    pub(crate) struct ArtifactsJoined {
-        pub(crate) artifacts: Vec<super::GovernedArtifact>,
-    }
     impl Sealed for Core {}
-    impl Sealed for ArtifactsJoined {}
 }
 
-pub(crate) use phase::{ArtifactsJoined, Core};
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactMatrixDeclaration {
-    #[serde(rename = "schemaVersion")]
-    pub(crate) schema_version: u32,
-    pub(crate) assemblies: Vec<ArtifactDeclaration>,
-}
-
-pub(crate) fn load_artifact_declaration(root: &Path) -> Result<ArtifactMatrixDeclaration> {
-    let path = root.join(ARTIFACT_MATRIX_PATH);
-    let metadata = std::fs::symlink_metadata(&path)
-        .with_context(|| format!("检查 {} 失败", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("assembly artifact matrix 必须是无符号链接的普通文件")
-    }
-    if metadata.len() > MAX_ARTIFACT_MATRIX_BYTES {
-        bail!("assembly artifact matrix 超过大小上限")
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    let source =
-        std::str::from_utf8(&bytes).with_context(|| format!("{} 不是 UTF-8", path.display()))?;
-    parse_artifact_declaration(source)
-}
-
-pub(crate) fn parse_artifact_declaration(source: &str) -> Result<ArtifactMatrixDeclaration> {
-    toml::from_str(source).map_err(|error: toml::de::Error| {
-        let category = if error.message().starts_with("unknown field")
-            || error.message().starts_with("missing field")
-            || error.message().starts_with("invalid type")
-        {
-            "data"
-        } else {
-            "syntax"
-        };
-        let (line, column) = error.span().map_or((1, 1), |span| {
-            let prefix = &source.as_bytes()[..span.start.min(source.len())];
-            let line = prefix.iter().filter(|byte| **byte == b'\n').count() + 1;
-            let column = prefix
-                .iter()
-                .rposition(|byte| *byte == b'\n')
-                .map_or(prefix.len() + 1, |offset| prefix.len() - offset);
-            (line, column)
-        });
-        anyhow::anyhow!(
-            "artifact matrix TOML rejected ({category} at line {line}, column {column})"
-        )
-    })
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactDeclaration {
-    pub(crate) name: String,
-    pub(crate) lifecycle: DeclaredLifecycle,
-    #[serde(default)]
-    pub(crate) reason: Option<String>,
-    #[serde(default)]
-    pub(crate) binary: Option<ArtifactBinary>,
-    #[serde(default)]
-    pub(crate) image: Option<ArtifactImage>,
-    #[serde(default, rename = "configSchema")]
-    pub(crate) config_schema: Option<ArtifactConfigSchema>,
-    #[serde(default, rename = "healthInventory")]
-    pub(crate) health_inventory: Option<ArtifactHealthInventory>,
-    #[serde(default)]
-    pub(crate) journey: Option<JourneyCarrier>,
-    #[serde(default)]
-    pub(crate) acceptance: Option<AcceptanceCarrier>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum DeclaredLifecycle {
-    Candidate,
-    Supported,
-    CompileOnly,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactBinary {
-    pub(crate) package: String,
-    pub(crate) target: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactImage {
-    pub(crate) dockerfile: String,
-    pub(crate) target: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum ArtifactConfigSchema {
-    JsonSchema { path: String },
-    TypedEnvCatalog { path: String },
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactHealthInventory {
-    pub(crate) owner: HealthOwner,
-    pub(crate) listener: HealthListener,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub(crate) enum HealthOwner {
-    #[serde(rename = "runtimeexec")]
-    Runtimeexec,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub(crate) enum HealthListener {
-    #[serde(rename = "health")]
-    Health,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum JourneyCarrier {
-    CargoTest {
-        package: String,
-        target: String,
-        test: String,
-    },
-    ComposeSmokeV1 {
-        path: String,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum AcceptanceCarrier {
-    CargoTest {
-        package: String,
-        target: String,
-        test: String,
-    },
-}
-
-#[derive(Debug)]
-pub(crate) struct CandidateArtifacts {
-    pub(crate) binary: ArtifactBinary,
-    pub(crate) image: ArtifactImage,
-    pub(crate) config_schema: ArtifactConfigSchema,
-    pub(crate) health_inventory: ArtifactHealthInventory,
-    pub(crate) acceptance: AcceptanceCarrier,
-}
-
-#[derive(Debug)]
-pub(crate) struct SupportedArtifacts {
-    pub(crate) binary: ArtifactBinary,
-    pub(crate) image: ArtifactImage,
-    pub(crate) config_schema: ArtifactConfigSchema,
-    pub(crate) health_inventory: ArtifactHealthInventory,
-    pub(crate) journey: JourneyCarrier,
-}
-
-#[derive(Debug)]
-pub(crate) struct CompileOnlyReason(String);
-
-impl CompileOnlyReason {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum ArtifactLifecycle {
-    Candidate(CandidateArtifacts),
-    Supported(SupportedArtifacts),
-    CompileOnly(CompileOnlyReason),
-}
-
-#[derive(Debug)]
-pub(crate) struct GovernedArtifact {
-    pub(crate) id: AssemblyId,
-    pub(crate) lifecycle: ArtifactLifecycle,
-}
+pub(crate) use phase::Core;
 
 pub(crate) struct AssemblyGovernanceIr<Phase: phase::Sealed> {
     targets: Vec<AssemblyTarget>,
     assemblies: Vec<GovernedAssembly>,
-    phase: Phase,
+    _phase: Phase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -795,7 +606,7 @@ impl AssemblyGovernanceIr<Core> {
         Ok(Self {
             targets,
             assemblies,
-            phase: Core,
+            _phase: Core,
         })
     }
 
@@ -817,7 +628,7 @@ impl AssemblyGovernanceIr<Core> {
         Ok(Some(Self {
             targets: vec![target],
             assemblies: assembly.into_iter().collect(),
-            phase: Core,
+            _phase: Core,
         }))
     }
 
@@ -831,253 +642,9 @@ impl AssemblyGovernanceIr<Core> {
         Ok(Self {
             targets,
             assemblies,
-            phase: Core,
+            _phase: Core,
         })
     }
-
-    pub(crate) fn join_artifacts(
-        self,
-        declaration: ArtifactMatrixDeclaration,
-    ) -> Result<AssemblyGovernanceIr<ArtifactsJoined>> {
-        let mut diagnostics = Vec::new();
-        if declaration.schema_version != 2 {
-            diagnostics.push("artifact matrix schemaVersion 必须严格为 2".to_owned());
-        }
-        let universe = self
-            .targets
-            .iter()
-            .map(|target| target.name().to_owned())
-            .collect::<BTreeSet<_>>();
-        let mut declared = BTreeSet::new();
-        let mut declared_lifecycles = BTreeMap::new();
-        let mut artifacts = Vec::with_capacity(declaration.assemblies.len());
-        for row in declaration.assemblies {
-            if !declared.insert(row.name.clone()) {
-                diagnostics.push(format!("artifact matrix assembly `{}` 重复声明", row.name));
-            }
-            if !universe.contains(&row.name) {
-                diagnostics.push(format!("artifact matrix 含幽灵 assembly `{}`", row.name));
-            }
-            declared_lifecycles
-                .entry(row.name.clone())
-                .or_insert(row.lifecycle);
-            if let Some(artifact) = promote_artifact(row, &mut diagnostics) {
-                artifacts.push(artifact);
-            }
-        }
-        let missing = universe.difference(&declared).cloned().collect::<Vec<_>>();
-        if !missing.is_empty() {
-            diagnostics.push(format!(
-                "artifact matrix 缺少 lifecycle/artifact 声明: {missing:?}"
-            ));
-        }
-        for id in ProductionAssemblyId::VALUES {
-            match declared_lifecycles.get(id.as_str()) {
-                None => diagnostics.push(format!("production artifact `{}` 缺失", id.as_str())),
-                Some(DeclaredLifecycle::CompileOnly) => diagnostics.push(format!(
-                    "production assembly `{}` 禁止降级为 compile-only",
-                    id.as_str()
-                )),
-                Some(DeclaredLifecycle::Candidate | DeclaredLifecycle::Supported) => {}
-            }
-        }
-        if !diagnostics.is_empty() {
-            bail!(
-                "artifact matrix governance diagnostics:\n{}",
-                diagnostics.join("\n")
-            )
-        }
-        Ok(AssemblyGovernanceIr {
-            targets: self.targets,
-            assemblies: self.assemblies,
-            phase: ArtifactsJoined { artifacts },
-        })
-    }
-}
-
-fn promote_artifact(
-    row: ArtifactDeclaration,
-    diagnostics: &mut Vec<String>,
-) -> Option<GovernedArtifact> {
-    let name = row.name;
-    let lifecycle = match row.lifecycle {
-        DeclaredLifecycle::Candidate => {
-            if row.reason.is_some() {
-                diagnostics.push(format!("candidate `{name}` 禁止 reason 字段"));
-            }
-            if row.journey.is_some() {
-                diagnostics.push(format!("candidate `{name}` 禁止 journey 字段"));
-            }
-            let binary =
-                require_artifact_field(&name, "candidate", "binary", row.binary, diagnostics);
-            let image = require_artifact_field(&name, "candidate", "image", row.image, diagnostics);
-            let config_schema = require_artifact_field(
-                &name,
-                "candidate",
-                "configSchema",
-                row.config_schema,
-                diagnostics,
-            );
-            let health_inventory = require_artifact_field(
-                &name,
-                "candidate",
-                "healthInventory",
-                row.health_inventory,
-                diagnostics,
-            );
-            let acceptance = require_artifact_field(
-                &name,
-                "candidate",
-                "acceptance",
-                row.acceptance,
-                diagnostics,
-            )
-            .and_then(
-                |acceptance| match validate_acceptance_carrier(&acceptance) {
-                    Ok(()) => Some(acceptance),
-                    Err(error) => {
-                        diagnostics.push(format!("candidate `{name}` {error}"));
-                        None
-                    }
-                },
-            );
-            match (binary, image, config_schema, health_inventory, acceptance) {
-                (
-                    Some(binary),
-                    Some(image),
-                    Some(config_schema),
-                    Some(health_inventory),
-                    Some(acceptance),
-                ) => Some(ArtifactLifecycle::Candidate(CandidateArtifacts {
-                    binary,
-                    image,
-                    config_schema,
-                    health_inventory,
-                    acceptance,
-                })),
-                _ => None,
-            }
-        }
-        DeclaredLifecycle::Supported => {
-            if row.reason.is_some() {
-                diagnostics.push(format!("supported `{name}` 禁止 reason 字段"));
-            }
-            if row.acceptance.is_some() {
-                diagnostics.push(format!("supported `{name}` 禁止 acceptance 字段"));
-            }
-            let binary =
-                require_artifact_field(&name, "supported", "binary", row.binary, diagnostics);
-            let image = require_artifact_field(&name, "supported", "image", row.image, diagnostics);
-            let config_schema = require_artifact_field(
-                &name,
-                "supported",
-                "configSchema",
-                row.config_schema,
-                diagnostics,
-            );
-            let health_inventory = require_artifact_field(
-                &name,
-                "supported",
-                "healthInventory",
-                row.health_inventory,
-                diagnostics,
-            );
-            let journey =
-                require_artifact_field(&name, "supported", "journey", row.journey, diagnostics)
-                    .and_then(|journey| match validate_journey_carrier(&journey) {
-                        Ok(()) => Some(journey),
-                        Err(error) => {
-                            diagnostics.push(format!("supported `{name}` {error}"));
-                            None
-                        }
-                    });
-            match (binary, image, config_schema, health_inventory, journey) {
-                (
-                    Some(binary),
-                    Some(image),
-                    Some(config_schema),
-                    Some(health_inventory),
-                    Some(journey),
-                ) => Some(ArtifactLifecycle::Supported(SupportedArtifacts {
-                    binary,
-                    image,
-                    config_schema,
-                    health_inventory,
-                    journey,
-                })),
-                _ => None,
-            }
-        }
-        DeclaredLifecycle::CompileOnly => {
-            if row.binary.is_some()
-                || row.image.is_some()
-                || row.config_schema.is_some()
-                || row.health_inventory.is_some()
-                || row.journey.is_some()
-                || row.acceptance.is_some()
-            {
-                diagnostics.push(format!(
-                    "compile-only `{name}` 禁止携带 deployable artifact 字段"
-                ));
-            }
-            match row.reason {
-                Some(reason) if !reason.trim().is_empty() => {
-                    Some(ArtifactLifecycle::CompileOnly(CompileOnlyReason(reason)))
-                }
-                _ => {
-                    diagnostics.push(format!("compile-only `{name}` reason 必须非空"));
-                    None
-                }
-            }
-        }
-    }?;
-    Some(GovernedArtifact {
-        id: AssemblyId(name),
-        lifecycle,
-    })
-}
-
-fn require_artifact_field<T>(
-    name: &str,
-    lifecycle: &str,
-    field: &str,
-    value: Option<T>,
-    diagnostics: &mut Vec<String>,
-) -> Option<T> {
-    if value.is_none() {
-        diagnostics.push(format!("{lifecycle} `{name}` 缺少 {field}"));
-    }
-    value
-}
-
-fn validate_acceptance_carrier(acceptance: &AcceptanceCarrier) -> Result<()> {
-    let AcceptanceCarrier::CargoTest {
-        package,
-        target,
-        test,
-    } = acceptance;
-    if let Some((field, _)) = [("package", package), ("target", target), ("test", test)]
-        .into_iter()
-        .find(|(_, value)| value.trim().is_empty())
-    {
-        bail!("acceptance `{field}` 必须非空")
-    }
-    Ok(())
-}
-
-fn validate_journey_carrier(journey: &JourneyCarrier) -> Result<()> {
-    let fields: &[(&str, &str)] = match journey {
-        JourneyCarrier::CargoTest {
-            package,
-            target,
-            test,
-        } => &[("package", package), ("target", target), ("test", test)],
-        JourneyCarrier::ComposeSmokeV1 { path } => &[("path", path)],
-    };
-    if let Some((field, _)) = fields.iter().find(|(_, value)| value.trim().is_empty()) {
-        bail!("supported journey `{field}` 必须非空")
-    }
-    Ok(())
 }
 
 pub(crate) fn validate_source_funnel(root: &Path) -> Result<()> {
@@ -1218,8 +785,7 @@ impl SourceFlow {
             && components
                 .last()
                 .is_some_and(|component| *component == "assemblies");
-        let governance_source = normalized == "assemblies/artifacts.toml"
-            || (under_assemblies && normalized.ends_with("/assembly.toml"));
+        let governance_source = under_assemblies && normalized.ends_with("/assembly.toml");
         Self {
             text: Some(value),
             under_assemblies,
@@ -1372,8 +938,8 @@ impl SourceFunnelVisitor {
                 || normalized.starts_with("assemblies/")
                 || argument.under_assemblies;
             joined.assemblies_root = normalized == "assemblies" && !receiver.under_assemblies;
-            joined.governance_source |= normalized == "assemblies/artifacts.toml"
-                || (receiver.under_assemblies && normalized == "assembly.toml")
+            joined.governance_source |= (receiver.under_assemblies
+                && normalized == "assembly.toml")
                 || argument.governance_source;
         } else {
             joined.under_assemblies |= argument.under_assemblies;
@@ -1612,12 +1178,6 @@ impl<Phase: phase::Sealed> AssemblyGovernanceIr<Phase> {
     }
 }
 
-impl AssemblyGovernanceIr<ArtifactsJoined> {
-    pub(crate) fn artifacts(&self) -> &[GovernedArtifact] {
-        &self.phase.artifacts
-    }
-}
-
 pub(crate) fn discover_targets(root: &Path) -> Result<Vec<AssemblyTarget>> {
     let assemblies_root = root.join("assemblies");
     let metadata = match std::fs::symlink_metadata(&assemblies_root) {
@@ -1754,76 +1314,6 @@ fn relative_label(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn artifact_matrix_accepts_candidate_with_acceptance_but_without_journey() -> Result<()> {
-        let declaration = parse_artifact_declaration(
-            r#"
-schemaVersion = 2
-
-[[assemblies]]
-name = "deviceidentity"
-lifecycle = "candidate"
-
-[assemblies.binary]
-package = "deviceidentity"
-target = "deviceidentity-server"
-
-[assemblies.image]
-dockerfile = "Dockerfile"
-target = "deviceidentity-runtime"
-
-[assemblies.configSchema]
-kind = "json-schema"
-path = "assemblies/deviceidentity/config.schema.json"
-
-[assemblies.healthInventory]
-owner = "runtimeexec"
-listener = "health"
-
-[assemblies.acceptance]
-kind = "cargo-test"
-package = "deviceidentity"
-target = "runtime_image_acceptance"
-test = "deviceidentity_runtime_image_is_a_content_addressed_candidate"
-"#,
-        )?;
-        assert_eq!(declaration.schema_version, 2);
-        assert_eq!(declaration.assemblies.len(), 1);
-        Ok(())
-    }
-
-    fn real_matrix() -> Result<ArtifactMatrixDeclaration> {
-        let root = crate::workspace_root()?;
-        Ok(toml::from_str(&std::fs::read_to_string(
-            root.join("assemblies/artifacts.toml"),
-        )?)?)
-    }
-
-    fn ratchet_fixture() -> Result<(AssemblyFixtureRepository, ArtifactMatrixDeclaration)> {
-        let workspace = crate::workspace_root()?;
-        let repository = AssemblyFixtureBuilder::production_universe()?
-            .workspace_assembly(&workspace, "settingsonly", "sourcecheck")?
-            .profile("sourcecheck", AssemblyProfile::Demo)?
-            .build()?;
-
-        let mut matrix = real_matrix()?;
-        matrix
-            .assemblies
-            .retain(|row| ProductionAssemblyId::from_name(&row.name).is_some());
-        matrix.assemblies.push(ArtifactDeclaration {
-            name: "sourcecheck".to_owned(),
-            lifecycle: DeclaredLifecycle::CompileOnly,
-            reason: Some("compile-time governance utility".to_owned()),
-            binary: None,
-            image: None,
-            config_schema: None,
-            health_inventory: None,
-            journey: None,
-            acceptance: None,
-        });
-        Ok((repository, matrix))
-    }
 
     #[test]
     fn real_workspace_core_is_closed() -> Result<()> {
@@ -1993,160 +1483,6 @@ test = "deviceidentity_runtime_image_is_a_content_addressed_candidate"
     }
 
     #[test]
-    fn artifact_join_rejects_missing_ghost_duplicate_and_production_downgrade() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let mut missing = real_matrix()?;
-        missing.assemblies.pop();
-        assert!(
-            AssemblyGovernanceIr::<Core>::load(&root)?
-                .join_artifacts(missing)
-                .err()
-                .context("missing row was accepted")?
-                .to_string()
-                .contains("缺少")
-        );
-
-        let mut ghost = real_matrix()?;
-        ghost.assemblies[0].name = "ghost".to_owned();
-        assert!(
-            AssemblyGovernanceIr::<Core>::load(&root)?
-                .join_artifacts(ghost)
-                .err()
-                .context("ghost row was accepted")?
-                .to_string()
-                .contains("幽灵")
-        );
-
-        let mut duplicate = real_matrix()?;
-        duplicate.assemblies.push(duplicate.assemblies[0].clone());
-        assert!(
-            AssemblyGovernanceIr::<Core>::load(&root)?
-                .join_artifacts(duplicate)
-                .err()
-                .context("duplicate row was accepted")?
-                .to_string()
-                .contains("重复")
-        );
-
-        let mut downgraded = real_matrix()?;
-        let row = downgraded
-            .assemblies
-            .iter_mut()
-            .find(|row| row.name == "settingsonly")
-            .context("settingsonly artifact row")?;
-        row.lifecycle = DeclaredLifecycle::CompileOnly;
-        row.reason = Some("synthetic downgrade".to_owned());
-        row.binary = None;
-        row.image = None;
-        row.config_schema = None;
-        row.health_inventory = None;
-        row.journey = None;
-        assert!(
-            AssemblyGovernanceIr::<Core>::load(&root)?
-                .join_artifacts(downgraded)
-                .err()
-                .context("production downgrade was accepted")?
-                .to_string()
-                .contains("禁止降级")
-        );
-
-        for blank in ["", "  "] {
-            let mut matrix = real_matrix()?;
-            let journey = matrix
-                .assemblies
-                .iter_mut()
-                .find(|row| row.name == "settingsonly")
-                .and_then(|row| row.journey.as_mut())
-                .context("settingsonly journey")?;
-            let JourneyCarrier::CargoTest { test, .. } = journey else {
-                bail!("settingsonly journey fixture must be cargo-test")
-            };
-            *test = blank.to_owned();
-            assert!(
-                AssemblyGovernanceIr::<Core>::load(&root)?
-                    .join_artifacts(matrix)
-                    .err()
-                    .context("blank journey was accepted")?
-                    .to_string()
-                    .contains("必须非空")
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn artifact_join_reports_schema_bijection_and_lifecycle_diagnostics_together() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let mut matrix = real_matrix()?;
-        matrix.schema_version = 2;
-        matrix.assemblies.pop();
-        matrix.assemblies.push(matrix.assemblies[0].clone());
-        matrix.assemblies.push(ArtifactDeclaration {
-            name: "ghost".to_owned(),
-            lifecycle: DeclaredLifecycle::CompileOnly,
-            reason: Some(" ".to_owned()),
-            binary: Some(ArtifactBinary {
-                package: "ghost".to_owned(),
-                target: "ghost".to_owned(),
-            }),
-            image: None,
-            config_schema: None,
-            health_inventory: None,
-            journey: None,
-            acceptance: None,
-        });
-
-        let diagnostic = AssemblyGovernanceIr::<Core>::load(&root)?
-            .join_artifacts(matrix)
-            .err()
-            .context("invalid matrix was promoted")?
-            .to_string();
-        for expected in [
-            "schemaVersion",
-            "重复声明",
-            "幽灵",
-            "缺少 lifecycle/artifact 声明",
-            "禁止携带 deployable",
-            "reason 必须非空",
-        ] {
-            assert!(
-                diagnostic.contains(expected),
-                "missing `{expected}` from aggregate diagnostic: {diagnostic}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_profile_and_lifecycle_cannot_be_downgraded_together() -> Result<()> {
-        let repository = AssemblyFixtureBuilder::production_universe()?
-            .profile("settingsonly", AssemblyProfile::Demo)?
-            .build()?;
-        let mut matrix = real_matrix()?;
-        let row = matrix
-            .assemblies
-            .iter_mut()
-            .find(|row| row.name == "settingsonly")
-            .context("settingsonly artifact row")?;
-        row.lifecycle = DeclaredLifecycle::CompileOnly;
-        row.reason = Some("paired downgrade".to_owned());
-        row.binary = None;
-        row.image = None;
-        row.config_schema = None;
-        row.health_inventory = None;
-        row.journey = None;
-        assert!(
-            AssemblyGovernanceIr::<Core>::load(repository.path())
-                .and_then(|core| core.join_artifacts(matrix))
-                .err()
-                .context("paired profile/lifecycle downgrade was accepted")?
-                .to_string()
-                .contains("settingsonly")
-        );
-        Ok(())
-    }
-
-    #[test]
     fn fixture_wrong_profile_is_rejected_by_the_real_global_ratchet() -> Result<()> {
         let repository = AssemblyFixtureBuilder::production_universe()?
             .profile("settingsonly", AssemblyProfile::Demo)?
@@ -2309,18 +1645,6 @@ test = "deviceidentity_runtime_image_is_a_content_addressed_candidate"
         assert_eq!(std::fs::read_to_string(runtime_cargo)?, cargo_sentinel);
         assert_eq!(std::fs::read(settings_manifest)?, manifest_sentinel);
         assert!(settings_cargo.is_file());
-        Ok(())
-    }
-
-    #[test]
-    fn newly_discovered_compile_only_assembly_joins_without_a_second_registry() -> Result<()> {
-        let (repository, matrix) = ratchet_fixture()?;
-        let joined =
-            AssemblyGovernanceIr::<Core>::load(repository.path())?.join_artifacts(matrix)?;
-        assert!(joined.artifacts().iter().any(|artifact| {
-            artifact.id.as_str() == "sourcecheck"
-                && matches!(artifact.lifecycle, ArtifactLifecycle::CompileOnly(_))
-        }));
         Ok(())
     }
 

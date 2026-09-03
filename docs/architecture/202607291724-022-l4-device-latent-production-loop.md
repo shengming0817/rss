@@ -3,8 +3,8 @@
 - Status: Accepted
 - Date: 2026-07-29
 - Last amended: 2026-08-12 by
-  [ADR-028](202608120423-028-device-security-candidate-scope.md)
-- Scope: #1892 and implemented T1/T2 PBIs #1893–#1909; candidate product/activation handoff is owned by ADR-028
+  [project-scope](../rules/project-scope.md)
+- Scope: #1892 and implemented T1/T2 PBIs #1893–#1909; product activation handoff is external
 
 ## Context
 

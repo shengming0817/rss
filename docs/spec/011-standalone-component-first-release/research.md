@@ -2,8 +2,7 @@
 
 ## 当前事实
 
-- 产品面与候选/激活语义由 [`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md)
-  拥有；公共消费和发布范围由 ADR-024 拥有。
+- library 产品边界、公共消费和发布范围由 [`project-scope`](../../rules/project-scope.md) 拥有。
 - [`Spec 010`](../010-release-surface-convergence/research.md) 已决定未进入正向发布集合的 package 默认 internal。
 - `rss-diag-context` 与 `rss-trace-context` 已完成最终窄腰，并以 crates.io-only eligibility 进入 Release Surface；
   candidate eligibility 不构成 RC、published 或支持承诺。

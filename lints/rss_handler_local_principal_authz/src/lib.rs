@@ -50,7 +50,7 @@ use rustc_span::Span;
 
 /// 仅这些 crate 可读取 `Authenticated` tenant / principal kind / self subject——单一 greppable 真源，扩项须治理评审。
 /// `httpserve` route gate 负责把认证证据升级为 `AuthorizedSubject`；runtime 组合根保留审计链路读取权。
-/// assemblies/runtime → package name "runtime"（#1309 单一组合根；薄 bin bins/server、bins/rss 已移出）。
+/// assemblies/runtime → package name "runtime"（单一 library 组合根）。
 /// `httpserve` 本身定义 `Authenticated`，并在 route gate 内构造授权请求，合法豁免。
 const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve", "runtime"];
 const PRINCIPAL_BRANCH_ALLOWED_CRATES: &[&str] = &["httpserve", "generated"];

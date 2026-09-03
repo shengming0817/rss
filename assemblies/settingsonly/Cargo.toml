@@ -15,10 +15,6 @@ assembly-schema = { path = "../../crates/assembly-schema" }
 name = "settingsonly"
 path = "src/lib.rs"
 
-[[bin]]
-name = "settingsonly-server"
-path = "src/main.rs"
-
 [features]
 default = []
 integration = ["testkit/containers"]
@@ -73,7 +69,6 @@ tokio-util = { workspace = true }
 toml = { workspace = true }
 ratelimit = { path = "../../adapters/ratelimit", optional = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 vocab = { path = "../../crates/vocab" }
 zeroize = { workspace = true }

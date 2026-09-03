@@ -15,7 +15,7 @@ workspace = true
 test-support = []
 
 # bootstrap 属服务层，按 `Cargo.toml`、`xtask/src/layers.rs` 与 `deny.toml` 连接基础+引擎+diport。
-# 一般不依赖兄弟服务（resolver 等由组合根 bins/server / assembly 注入，不在此预连，PR #137 review F1）；
+# 一般不依赖兄弟服务（resolver 等由 assembly 注入，不在此预连，PR #137 review F1）；
 # **受控例外**：依赖 httpserve 的**编译期路由类型词汇**（ListenerRouter<L> / UnfinalizedRoutes，typed
 # route funnel #1113/#1103），经 ADR-009 sanction 的 `bootstrap → httpserve` 边（layers.rs route_funnel_allows，
 # INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01）。F1 的「不向兄弟服务要 runtime provider」原则不变——本边仅取类型词汇。

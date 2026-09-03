@@ -46,6 +46,40 @@ use tokio_util::sync::CancellationToken;
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+struct TestBlocklist {
+    root: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
+impl TestBlocklist {
+    fn create() -> std::io::Result<Self> {
+        let root =
+            std::env::temp_dir().join(format!("rss-runtime-blocklist-{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&root)?;
+        let path = root.join("password-blocklist.sha256");
+        if let Err(error) = std::fs::write(
+            &path,
+            b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
+        ) {
+            let _ = std::fs::remove_dir(&root);
+            return Err(error);
+        }
+        Ok(Self { root, path })
+    }
+}
+
+impl Drop for TestBlocklist {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 #[test]
 fn pre_runtime_process_error_is_one_safe_line() {
     let error = anyhow::anyhow!("failed\nnext\rline postgres://user:SECRET_BAIT@db/rss");
@@ -1070,9 +1104,9 @@ fn test_identity_domain_with_audit_role(
         FailingIdentitySecurityLifecycle,
         FailingIdentitySecurityLifecycle,
         secure::PasswordPolicy::new(Arc::new(
-            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
-                "../../../deploy/password-blocklist.demo.sha256"
-            )))
+            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
+                b"sha256:2e2b24f8ee40bb847fe85bb23336a39ef5948e6b49d897419ced68766b16967a\n",
+            ))
             .expect("embedded runtime test blocklist"),
         )),
         Box::new(SystemClock),
@@ -1976,13 +2010,12 @@ async fn build_trace_export_uses_the_captured_endpoint_mapping() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
+    let blocklist = TestBlocklist::create().expect("write hermetic blocklist");
+    let blocklist_path = blocklist.path.to_str().expect("temporary path is UTF-8");
     let snapshot = crate::config::test_snapshot(&[
         (
             domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deploy/password-blocklist.demo.sha256"
-            ),
+            blocklist_path,
         ),
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),

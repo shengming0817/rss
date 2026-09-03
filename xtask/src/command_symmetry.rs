@@ -35,7 +35,7 @@ pub(crate) enum Rule {
 }
 
 const COMMAND_GEN_DIR: &str = "generated/src/command";
-const SOURCE_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies", "bins"];
+const SOURCE_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies"];
 const SOURCE_LEAF_ROOTS: &[&str] = &["journeys"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -414,7 +414,7 @@ fn is_composition_root_source(path: &Path) -> bool {
         .collect::<Vec<_>>();
     components
         .windows(3)
-        .any(|window| matches!(window[0], "assemblies" | "bins") && window[2] == "src")
+        .any(|window| window[0] == "assemblies" && window[2] == "src")
 }
 
 fn call_allowed(site: &CallSite) -> bool {

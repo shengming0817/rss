@@ -27,10 +27,6 @@ bash hack/automation/issue-labels.sh validate --labels "$LABELS"
 bash hack/automation/forge.sh issue-create "[<ID>] ..." <填好的 backlog.md> "$LABELS"
 ```
 
-**Production acceptance issue**：任何新增、扩展、替换或重新声明 T3 carrier，或切换 production assembly
-artifact journey 的 backlog，必须保留并填完 `backlog.md` 的 evidence-plan 段。字段、最低充分层和
-carrier transition 必须记录唯一 profile/artifact/hazard、same-head T1/T2/T3 receipt 与原子切换，不建立文档路径依赖。
-
 **新建 epic / feature**（容器层）：见 §1.1 三层映射。Epic / Feature 按当前流程在 Azure Boards UI 手工建（脚本化时 `issue-create` 第 4 参传 Work Item Type，body 读 `epic.md` / `feature.md`）；子任务经 `forge.sh subissue-link` 关联原生父子关系。容器不贴 `cx` / `type`（跨多 PR、无单一 diff）。
 
 ---
@@ -63,7 +59,7 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 | `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/consistency` `crates/eventexec` `crates/deviceloop` `adapters/amqpadapter` `adapters/mqttadapter` `adapters/softca` |
 | `area-data` | Config 热更新 + 持久化/加密 + 分布式锁 | `crates/settings` `crates/secure` `crates/support` `crates/distributed` `adapters/pgadapter` `adapters/redisadapter` `adapters/vaultadapter` `adapters/s3adapter` |
 | `area-observability` | Metrics / Tracing / Logging | `crates/observ` `crates/audit` `adapters/oteladapter` `adapters/promadapter` |
-| `area-tooling` | 分层治理/crate 依赖图 + deny.toml + codegen/工具链 | `xtask/` `bins/rss` `deny.toml` `clippy.toml` `contracts/`（治理） |
+| `area-tooling` | 分层治理/crate 依赖图 + deny.toml + codegen/工具链 | `xtask/` `deny.toml` `clippy.toml` `contracts/`（治理） |
 | `area-cross` | 跨 ≥4 领域 / 无明确归属 | `crates/vocab` `crates/syshealth` + 跨 ≥4 域 |
 
 ### 2.2 type-XX（类型，1 个，8 选）
@@ -205,13 +201,6 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
 > 本地 canonical `make ci` 只承担 10 分钟有界 affected preflight；unknown 本地忽略并留痕，workspace/feature/integration/coverage/public-api/dylint/audit/container 等重型全量门由 develop/release 或显式 full 承接。`make ci-full` 仅人工诊断，任何 skill/template 不得把它追加为 PR 默认完成条件。
-> **Production acceptance evidence review gate**：相关 PR 从 `in-progress` 切到 `needs-review-again` 前，必须在 PR body
-> 完整留下 final-HEAD lower-layer receipts、每个 T3 assertion 的唯一 production join hazard 和独立复现入口、
-> candidate 在 activation、owner/assertion 更新或 replacement cutover 前先绿的回执，以及所选 change kind 的
-> final-HEAD transition。replacement 还必须证明实际 canonical selector 已切换、旧 carrier 已同交付删除且无
-> 双路径；artifact journey replacement 必须包含 `assemblies/artifacts.toml` 指针修改。后续提交使回执不再对应
-> final HEAD 时，必须更新回执后才能进入 `ready`。这是 review evidence，不扩展 `rss-pr-meta`、不读取 Markdown
-> 标题或 checkbox 作为机器门，也不让 skill/xtask 调度测试；现有 `assembly artifacts check` 仍只守最终静态闭值事实。
 > **IN_SCOPE Cx3/Cx4 批量处置门**：ship/fix 切触发 label 前，先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由：属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。如果存在这类 finding，**只发起一次批量处置请求**，用户可全盘采纳建议，或按 finding ID 覆盖个别项；没有 IN_SCOPE Cx3/Cx4 时不发起沟通。**判 defer 后自动建 issue 跟踪（机器可判定 artifact，不再二次确认）**，与 OOS artifact-before-trigger 同序；全部 deferred issue 已建方可切 label。
 > **输出纪律**（ship/review/fix/check 各阶段共用单源）：每阶段**窗口完整打印是主输出、PR 评论是无损留痕，两者都做缺一不可**——评论是 `/fix` 与再审（codex / `/pr-review`）提取 findings 的唯一来源（每条带 `file:line`、无损详表入 `<details>`，无损约定见 `pr-comment.md`）。skill 不重述此纪律，引用本条。
 > 评论格式模板单源 = `.github/project-template/pr-comment.md`。

@@ -400,7 +400,7 @@ impl SessionService {
 ### 4.4 组合根装配 + 逆序关闭（无 async Drop）
 
 ```rust
-// bins/server/src/main.rs  （forbid(unsafe_code) 不变）
+// external consumer composition root（forbid(unsafe_code) 不变）
 // CAUTION: new_box / from_box 是 dynosaur pre-1.0（=0.3.x）API，升级前先查 changelog（§8 风险 3）
 let store = DynUserStore::new_box(PgUserStore(pool));        // dynosaur v0.3 API：new_box
 let clock = DynClock::new_box(SystemClock);                  // prod clock 只在组合根构造

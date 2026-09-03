@@ -1,6 +1,6 @@
 //! eventtransport —— topology-gated 事件传输选型（单源策略，零 adapter 依赖）。
 //!
-//! 组合根（`bins/server` / `journeys` / 未来 `examples`）经 [`resolve`] 按 [`Topology`] 单源选型
+//! library composition 与测试 journey 经 [`resolve`] 按 [`Topology`] 单源选型
 //! 事件传输：demo 拓扑用进程内 in-mem bus，durable 拓扑用 per-domain amqp broker。
 //!
 //! # 为什么 resolver 返回**决策**而非**构造好的 adapter**（ADR / `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 偏离）
@@ -13,7 +13,7 @@
 //! 决策；组合根 `match` 该决策再构造具体 adapter，并在**组合根层**持有 in-mem sealing。
 //!
 //! sealing 的实际归属与强度（主守卫是生产侧）：
-//! - 生产 bin（`bins/server` / `bins/rss`）经 cargo-deny **连 `memory` 都依赖不到** ⇒ in-mem bus
+//! - production assembly 经 cargo-deny **连 `memory` 都依赖不到** ⇒ in-mem bus
 //!   类型层不可命名（**Hard**，比「bootstrap 内 sealing」更强；这是 in-mem 生产不可达的主守卫）。
 //! - dev root（`journeys` / `examples`）合法依赖 `memory` + `amqp`，in-mem 仅经 `match
 //!   ResolvedTransport::Demo` 臂构造——**决策绑定纪律（Medium）**：`match` 把构造收束到已校验决策，
