@@ -1,9 +1,0 @@
-error[E0451]: fields `subscriptions` and `inbox_backlog` of struct `BridgedSubscriptions` are private
- --> tests/ui/bridged_subscriptions_forge_fail.rs:5:9
-  |
-4 |     let _forged = BridgedSubscriptions {
-  |                   -------------------- in this type
-5 |         subscriptions: Vec::new(),
-  |         ^^^^^^^^^^^^^ private field
-6 |         inbox_backlog: eventexec::InboxBacklogSelection::from_generated(&[]).unwrap(),
-  |         ^^^^^^^^^^^^^ private field

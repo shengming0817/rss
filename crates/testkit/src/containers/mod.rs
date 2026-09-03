@@ -224,11 +224,11 @@ fn vault_dev_tls_san_flags(dns_name: &str) -> Vec<String> {
 }
 const MINIO_ROOT_USER: &str = "rss-minio-root";
 const MINIO_ROOT_PASSWORD: &str = "rss-minio-root-test-password";
-const MINIO_WORKLOAD_USER: &str = "rss-settingsonly-workload";
-const MINIO_WORKLOAD_PASSWORD: &str = "rss-settingsonly-workload-password";
-const MINIO_ARCHIVE_BUCKET: &str = "rss-settingsonly-dlx";
-const MINIO_NEIGHBOR_BUCKET: &str = "rss-settingsonly-neighbor";
-const MINIO_POLICY_NAME: &str = "rss-settingsonly-archive";
+const MINIO_WORKLOAD_USER: &str = "rss-test-workload";
+const MINIO_WORKLOAD_PASSWORD: &str = "rss-test-workload-password";
+const MINIO_ARCHIVE_BUCKET: &str = "rss-test-dlx";
+const MINIO_NEIGHBOR_BUCKET: &str = "rss-test-neighbor";
+const MINIO_POLICY_NAME: &str = "rss-test-archive";
 
 /// rabbitmqctl exec 有界重试（broker 起后 rabbitmqctl/epmd 短暂不可用窗口）。
 const RABBITMQCTL_MAX_ATTEMPTS: u32 = 12;

@@ -2,14 +2,24 @@
 
 use semver::{Op, Version, VersionReq};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use workspacefacts::{
-    ApiStability, DependencyKind, DependencyResolution, DependencySource, PublicApiOwner,
-    PublishPolicy, WorkspaceFacts,
+    DependencyKind, DependencyResolution, DependencySource, PublicApiOwner, PublishPolicy,
+    WorkspaceFacts,
 };
 
-use crate::assembly::{Finding, Rule};
-use crate::diagnostic::finding;
+use crate::diagnostic::{self, finding};
+
+pub(crate) type Finding = diagnostic::Finding<Rule>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum Rule {
+    ReleaseSurfaceDeclaration,
+    ReleaseSurfaceExactSet,
+    ReleaseSurfacePackage,
+    ReleasePackageMetadata,
+    ReleasePublishClosure,
+}
 
 const CRATES_IO_REGISTRY: &str = "crates-io";
 const CRATES_IO_GIT_INDEX: &str = "https://github.com/rust-lang/crates.io-index";
@@ -30,45 +40,6 @@ impl ReleaseSurface {
     #[cfg(test)]
     pub(crate) fn publish_order(&self) -> &[String] {
         &self.publish_order
-    }
-
-    pub(crate) fn observed_summary(&self) -> String {
-        let mut output = String::from("release packages=[");
-        for (index, package) in self.packages.iter().enumerate() {
-            if index > 0 {
-                output.push_str(", ");
-            }
-            let registries = match package.publish_policy() {
-                PublishPolicy::Disabled => "disabled".to_owned(),
-                PublishPolicy::Unrestricted => "unrestricted".to_owned(),
-                PublishPolicy::Registries(registries) => {
-                    format!(
-                        "registries:{}",
-                        registries.iter().cloned().collect::<Vec<_>>().join("+")
-                    )
-                }
-            };
-            let owner = match package.public_api_owner() {
-                PublicApiOwner::StandaloneComponent => "standalone-component",
-                PublicApiOwner::FoundationPublic => "foundation-public",
-                PublicApiOwner::PlatformPublic => "platform-public",
-            };
-            let stability = match package.api_stability() {
-                ApiStability::Experimental => "experimental",
-                ApiStability::Stable => "stable",
-            };
-            let _ = write!(
-                output,
-                "{}@{}/msrv:{}/{registries}/{owner}/{stability}",
-                package.package(),
-                package.version(),
-                package.minimum_rust_version()
-            );
-        }
-        output.push_str("], publish order=[");
-        output.push_str(&self.publish_order.join(", "));
-        output.push(']');
-        output
     }
 }
 
@@ -424,9 +395,7 @@ pub(crate) struct ReleasePackage {
     version: Version,
     version_line: String,
     minimum_rust_version: Version,
-    publish_policy: PublishPolicy,
     public_api_owner: PublicApiOwner,
-    api_stability: ApiStability,
 }
 
 impl ReleasePackage {
@@ -445,16 +414,8 @@ impl ReleasePackage {
         &self.minimum_rust_version
     }
 
-    pub(crate) fn publish_policy(&self) -> &PublishPolicy {
-        &self.publish_policy
-    }
-
     pub(crate) const fn public_api_owner(&self) -> PublicApiOwner {
         self.public_api_owner
-    }
-
-    pub(crate) const fn api_stability(&self) -> ApiStability {
-        self.api_stability
     }
 }
 
@@ -575,9 +536,7 @@ pub(crate) fn validate(facts: &WorkspaceFacts) -> (Option<ReleaseSurface>, Vec<F
                 version: package.version().clone(),
                 version_line: version_line.to_owned(),
                 minimum_rust_version: minimum_rust_version.clone(),
-                publish_policy: package.publish_policy().clone(),
                 public_api_owner: selected_package.public_api_owner(),
-                api_stability: selected_package.api_stability(),
             });
         }
     }
@@ -1275,7 +1234,6 @@ mod tests {
             diag_release.public_api_owner(),
             PublicApiOwner::StandaloneComponent
         );
-        assert_eq!(diag_release.api_stability(), ApiStability::Experimental);
         let trace_release = surface
             .packages()
             .iter()
@@ -1285,7 +1243,6 @@ mod tests {
             trace_release.public_api_owner(),
             PublicApiOwner::StandaloneComponent
         );
-        assert_eq!(trace_release.api_stability(), ApiStability::Experimental);
 
         // Issue #2050 acceptance input, not a production candidate registry. Spec 011 forbids a
         // package inventory; Cargo publish policy plus the positive Release Surface remain the

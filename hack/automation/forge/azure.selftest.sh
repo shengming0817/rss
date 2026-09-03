@@ -625,28 +625,6 @@ check "gitlab branch-pr-merged dry: opened" "match" \
 check "gitlab branch-pr-merged dry: merged" "match" \
     "$(printf '%s' "$out" | grep -q 'glab mr list .*--merged' && echo match || echo nomatch)"
 
-# Case YAML: the checked-in pipeline is only a typed LocalOnly carrier. No
-# contract ids, test names, or alternate cargo test/JUnit path may live here.
-pipeline_yaml="${HERE}/../../../azure-pipelines.yml"
-check "pipeline yaml: checked in"             "zero" \
-    "$(if [ -f "${pipeline_yaml}" ]; then echo zero; else echo nonzero; fi)"
-check "pipeline yaml: trigger none"           "match" \
-    "$(grep -Eq '^trigger:[[:space:]]+none$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
-check "pipeline yaml: pr none"                "match" \
-    "$(grep -Eq '^pr:[[:space:]]+none$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
-check "pipeline yaml: ubuntu pool"             "match" \
-    "$(grep -Eq '^[[:space:]]+vmImage:[[:space:]]+ubuntu-latest$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
-check "pipeline yaml: full checkout"           "match" \
-    "$(grep -Eq '^[[:space:]]+fetchDepth:[[:space:]]+0$' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
-check "pipeline yaml: nextest pinned"         "match" \
-    "$(grep -q 'cargo install --locked --version 0.9.137 cargo-nextest' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
-check "pipeline yaml: one typed command"      "1" \
-    "$(grep -c 'cargo run --locked -p xtask -- ci localonly-evidence --output' "${pipeline_yaml}" 2>/dev/null || true)"
-check "pipeline yaml: no copied test plan"     "clean" \
-    "$(grep -Eq 'cargo (test|nextest)|--filter-expr|LOCAL_ONLY_SPECS|contractIds' "${pipeline_yaml}" 2>/dev/null && echo dirty || echo clean)"
-check "pipeline yaml: publish on success"      "match" \
-    "$(grep -A5 'PublishPipelineArtifact@1' "${pipeline_yaml}" 2>/dev/null | grep -q 'condition: succeeded()' && echo match || echo nomatch)"
-
 # The narrow validation is not the full observable ship CI lane.
 # shellcheck source=/dev/null
 ( . "${HERE}/../forge.conf" >/dev/null 2>&1; [ "${AZURE_HAS_CI}" = "false" ] ); narrow_cfg_rc=$?

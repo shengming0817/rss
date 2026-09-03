@@ -423,19 +423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "audit-composition"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "audit",
- "bootstrap",
- "diport",
- "postgres",
- "primitives",
- "tokio",
-]
-
-[[package]]
 name = "authmint"
 version = "0.0.0"
 
@@ -466,32 +453,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "aws-config"
-version = "1.8.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e33f815b73a3899c03b380d543532e5865f230dce9678d108dc10732a8682275"
-dependencies = [
- "aws-credential-types",
- "aws-runtime",
- "aws-sdk-sts",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-schema",
- "aws-smithy-types",
- "aws-types",
- "bytes",
- "fastrand",
- "http 1.4.2",
- "time",
- "tokio",
- "tracing",
- "url",
-]
 
 [[package]]
 name = "aws-credential-types"
@@ -567,32 +528,6 @@ dependencies = [
  "sha2 0.11.0",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "aws-sdk-sts"
-version = "1.107.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d0d328ba962af23ecfa3c9f23b98d3d35e325fa218d7f13d17a6bf522f8a560"
-dependencies = [
- "arc-swap",
- "aws-credential-types",
- "aws-runtime",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-observability",
- "aws-smithy-query",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "aws-smithy-xml",
- "aws-types",
- "fastrand",
- "http 0.2.12",
- "http 1.4.2",
- "regex-lite",
- "tracing",
 ]
 
 [[package]]
@@ -762,16 +697,6 @@ dependencies = [
  "roxmltree",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "aws-smithy-query"
-version = "0.60.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a56d79744fb3edb5d722ef79d86081e121d3b9422cb209eb03aea6aa4f21ebd"
-dependencies = [
- "aws-smithy-types",
- "urlencoding",
 ]
 
 [[package]]
@@ -1835,51 +1760,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deviceidentity"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "assembly-schema",
- "authmint",
- "authn",
- "axum",
- "bootstrap",
- "deviceloop",
- "diport",
- "eventexec",
- "httpd",
- "httpserve",
- "identity",
- "identity-composition",
- "ids",
- "jsonschema",
- "mqtt",
- "oidc",
- "postgres",
- "primitives",
- "prometheus-adapter",
- "redis-adapter",
- "rss-eventing",
- "rss-request-context",
- "runctx",
- "runtimeexec",
- "schemars 0.8.22",
- "secure",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml 0.8.23",
- "tower",
- "tracing",
- "url",
- "vault",
- "vocab",
- "zeroize",
-]
-
-[[package]]
 name = "deviceloop"
 version = "0.0.0"
 dependencies = [
@@ -2081,8 +1961,6 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
- "pem-rfc7468",
- "pkcs8",
  "rand_core 0.6.4",
  "sec1",
  "subtle",
@@ -2181,36 +2059,6 @@ dependencies = [
  "uuid",
  "vocab",
  "zeroize",
-]
-
-[[package]]
-name = "eventing-composition"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "audit",
- "bootstrap",
- "consistency",
- "crypto-adapter",
- "diport",
- "distributed",
- "eventexec",
- "futures",
- "generated",
- "metrics",
- "postgres",
- "primitives",
- "rss-eventing",
- "rss-request-context",
- "settings",
- "testkit",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "trybuild",
- "vocab",
 ]
 
 [[package]]
@@ -3064,7 +2912,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -3246,7 +3093,6 @@ dependencies = [
  "eventexec",
  "generated",
  "httpserve",
- "identity",
  "ids",
  "mockall",
  "observ",
@@ -3272,97 +3118,6 @@ dependencies = [
  "trybuild",
  "uuid",
  "vocab",
-]
-
-[[package]]
-name = "identity-composition"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "authn",
- "bootstrap",
- "consistency",
- "crypto-adapter",
- "deviceloop",
- "diport",
- "eventexec",
- "futures",
- "httpserve",
- "identity",
- "ids",
- "mqtt",
- "postgres",
- "primitives",
- "reqwest",
- "rss-eventing",
- "rss-request-context",
- "secure",
- "sha2 0.10.9",
- "static_assertions",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "vault",
- "vocab",
- "x509-parser",
-]
-
-[[package]]
-name = "identityaudit"
-version = "0.0.0"
-dependencies = [
- "amqp",
- "anyhow",
- "assembly-schema",
- "audit",
- "audit-composition",
- "authmint",
- "authn",
- "axum",
- "base64",
- "bootstrap",
- "crypto-adapter",
- "diport",
- "distributed",
- "eventexec",
- "eventing-composition",
- "generated",
- "httpd",
- "httpserve",
- "identity",
- "identity-composition",
- "ids",
- "jsonschema",
- "observ",
- "oidc",
- "p256",
- "postgres",
- "primitives",
- "prometheus-adapter",
- "ratelimit",
- "redis-adapter",
- "reqwest",
- "rss-contract",
- "rss-eventing",
- "rss-request-context",
- "runctx",
- "runtimeexec",
- "schemars 0.8.22",
- "secure",
- "serde",
- "serde_json",
- "testkit",
- "tokio",
- "tokio-util",
- "toml 0.8.23",
- "tower",
- "tracing",
- "url",
- "uuid",
- "vault",
- "vocab",
- "zeroize",
 ]
 
 [[package]]
@@ -3520,92 +3275,6 @@ checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 dependencies = [
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "journeys"
-version = "0.0.0"
-dependencies = [
- "amqp",
- "anyhow",
- "assembly-schema",
- "audit",
- "authn",
- "axum",
- "base64",
- "bootstrap",
- "consistency",
- "crypto-adapter",
- "diport",
- "distributed",
- "eventexec",
- "futures",
- "generated",
- "httpserve",
- "identity",
- "identityaudit",
- "ids",
- "memory",
- "metrics",
- "metrics-exporter-prometheus",
- "oidc",
- "p256",
- "postgres",
- "primitives",
- "prost",
- "rcgen",
- "reqwest",
- "rss-diag-context",
- "rss-eventing",
- "rss-request-context",
- "runctx",
- "runtime",
- "secure",
- "serde",
- "serde_json",
- "settings",
- "settingsonly",
- "spiffe",
- "spiffe-rustls",
- "sqlx",
- "testkit",
- "tokio",
- "tokio-util",
- "toml 0.8.23",
- "tonic",
- "tonic-prost",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "vault",
- "vocab",
- "wiremock",
-]
-
-[[package]]
-name = "journeys-fault-matrix"
-version = "0.0.0"
-dependencies = [
- "amqp",
- "anyhow",
- "consistency",
- "deadpool-redis",
- "diport",
- "eventexec",
- "futures",
- "generated",
- "postgres",
- "redis-adapter",
- "rss-request-context",
- "secure",
- "serde_json",
- "testkit",
- "tokio",
- "tokio-util",
- "uuid",
- "vocab",
 ]
 
 [[package]]
@@ -4579,7 +4248,6 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 name = "postgres"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "audit",
  "authn",
  "base64",
@@ -5236,7 +4904,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -5431,90 +5098,6 @@ dependencies = [
  "tokio",
  "uuid",
  "vocab",
-]
-
-[[package]]
-name = "runtime"
-version = "0.0.0"
-dependencies = [
- "amqp",
- "anyhow",
- "assembly-schema",
- "audit",
- "audit-composition",
- "authmint",
- "authn",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
- "aws-smithy-http-client",
- "axum",
- "base64",
- "bootstrap",
- "clap",
- "consistency",
- "crypto-adapter",
- "diport",
- "distributed",
- "dlqauthmint",
- "eventexec",
- "eventing-composition",
- "futures",
- "generated",
- "hmac 0.12.1",
- "http 1.4.2",
- "httpd",
- "httpserve",
- "identity",
- "identity-composition",
- "ids",
- "metrics",
- "metrics-exporter-prometheus",
- "observ",
- "oidc",
- "otel",
- "p256",
- "postgres",
- "primitives",
- "prometheus-adapter",
- "rcgen",
- "redis-adapter",
- "reqwest",
- "rss-contract",
- "rss-eventing",
- "rss-platform",
- "rss-request-context",
- "runctx",
- "runtimeexec",
- "runtimeinventorymint",
- "rustls",
- "s3",
- "sagaauthmint",
- "secure",
- "serde",
- "serde_json",
- "settings",
- "settings-composition",
- "settingsonly",
- "sha2 0.10.9",
- "sqlx",
- "static_assertions",
- "testkit",
- "thiserror",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml 0.8.23",
- "tower",
- "tracing",
- "tracing-subscriber",
- "trybuild",
- "uuid",
- "vault",
- "vocab",
- "wiremock",
- "zeroize",
 ]
 
 [[package]]
@@ -5831,7 +5414,6 @@ dependencies = [
  "base16ct",
  "der",
  "generic-array",
- "pkcs8",
  "subtle",
  "zeroize",
 ]
@@ -6126,85 +5708,6 @@ dependencies = [
  "trybuild",
  "uuid",
  "vocab",
-]
-
-[[package]]
-name = "settings-composition"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "bootstrap",
- "diport",
- "postgres",
- "primitives",
- "reqwest",
- "rss-request-context",
- "secure",
- "settings",
- "tokio",
- "tokio-util",
- "tracing",
- "vault",
- "vocab",
-]
-
-[[package]]
-name = "settingsonly"
-version = "0.0.0"
-dependencies = [
- "amqp",
- "anyhow",
- "assembly-schema",
- "authmint",
- "authn",
- "aws-sdk-s3",
- "axum",
- "base64",
- "bootstrap",
- "consistency",
- "crypto-adapter",
- "diport",
- "distributed",
- "eventexec",
- "eventing-composition",
- "generated",
- "httpd",
- "httpserve",
- "jsonschema",
- "observ",
- "oidc",
- "p256",
- "postgres",
- "primitives",
- "prometheus-adapter",
- "ratelimit",
- "rcgen",
- "redis-adapter",
- "reqwest",
- "rss-contract",
- "rss-eventing",
- "rss-request-context",
- "runctx",
- "runtimeexec",
- "rustls",
- "s3",
- "schemars 0.8.22",
- "secure",
- "serde",
- "serde_json",
- "settings",
- "settings-composition",
- "testkit",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml 0.8.23",
- "tracing",
- "uuid",
- "vault",
- "vocab",
- "wiremock",
- "zeroize",
 ]
 
 [[package]]
@@ -7531,12 +7034,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "urlencoding"
-version = "2.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
-
-[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7585,7 +7082,6 @@ dependencies = [
  "base64",
  "deviceloop",
  "diport",
- "identity-composition",
  "ids",
  "pkiauthmint",
  "rcgen",

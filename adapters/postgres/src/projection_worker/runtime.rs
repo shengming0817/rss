@@ -2353,7 +2353,7 @@ mod projection_worker_tests {
             "projection-worker-shutdown-test",
             CancellationToken::new(),
             Arc::new(eventexec::WorkerHealth::starting()),
-            Duration::from_secs(1),
+            eventing::lifecycle::ShutdownBudget::STANDARD,
             |token| {
                 while !token.is_cancelled() {
                     std::thread::yield_now();

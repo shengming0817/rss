@@ -1,4 +1,4 @@
-warning: 验签端口 `diport::Pdp` 仅 provider adapter 可 impl：组合根 / 域不得内联验签判定（信任根）
+warning: 验签端口 `diport::Pdp` 仅 provider adapter 可 impl：非 adapter crate 不得内联验签判定（信任根）
   --> $DIR/main.rs:18:1
    |
 LL | / impl Pdp for AllowAll {
@@ -9,8 +9,7 @@ LL | |             vocab::ServiceCallerDomain::MaintenanceOperator,
 LL | | }
    | |_^
    |
-   = help: 把验签实现放到 `adapters/<name>`（provider），组合根经构造器注入 `Box<DynPdp>` 消费；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由
+   = help: 把验签实现放到 `adapters/<name>`（provider），消费者注入 `Box<DynPdp>`；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由
    = note: `#[warn(rss_pdp_impl_adapter_only)]` on by default
 
 warning: 1 warning emitted
-

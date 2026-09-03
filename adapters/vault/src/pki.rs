@@ -1253,19 +1253,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use deviceloop::{
-        CertificateKeyUsage, CertificatePolicy, CertificatePolicyDurations,
-        CertificateRenewBeforeSeconds, CertificateSan, CertificateValiditySeconds,
-    };
     use diport::{
         CertScope, PkiAuthorizationReceipt, PkiCommonName, PkiPolicyDigest, PkiRequestGeneration,
         PkiSpkiDigest,
-    };
-    use identity_composition::{
-        CertificateArtifactAcquisition, CertificateArtifactError, DeviceCertificateScope,
-        DevicePolicyAuthorizationReceiptId, ExpectedGeneration, PolicyHash,
-        classify_external_pki_artifact_error, mint_external_pki_production_artifact,
-        validate_external_pki_artifact_request,
     };
     use ids::DeviceId;
     use rcgen::{
@@ -1355,46 +1345,18 @@ mod tests {
     #[test]
     fn status_mapping_is_closed_and_error_is_redacted() {
         let cases = [
-            (
-                401,
-                PkiArtifactErrorKind::Forbidden,
-                CertificateArtifactError::Rejected,
-            ),
-            (
-                403,
-                PkiArtifactErrorKind::Forbidden,
-                CertificateArtifactError::Rejected,
-            ),
-            (
-                404,
-                PkiArtifactErrorKind::Misconfigured,
-                CertificateArtifactError::Misconfigured,
-            ),
-            (
-                400,
-                PkiArtifactErrorKind::Rejected,
-                CertificateArtifactError::Rejected,
-            ),
-            (
-                429,
-                PkiArtifactErrorKind::Unavailable,
-                CertificateArtifactError::Unavailable,
-            ),
-            (
-                500,
-                PkiArtifactErrorKind::OutcomeUnknown,
-                CertificateArtifactError::OutcomeUnknown,
-            ),
+            (401, PkiArtifactErrorKind::Forbidden),
+            (403, PkiArtifactErrorKind::Forbidden),
+            (404, PkiArtifactErrorKind::Misconfigured),
+            (400, PkiArtifactErrorKind::Rejected),
+            (429, PkiArtifactErrorKind::Unavailable),
+            (500, PkiArtifactErrorKind::OutcomeUnknown),
         ];
-        for (status, expected, domain_expected) in cases {
+        for (status, expected) in cases {
             let error = status_error(reqwest::StatusCode::from_u16(status).expect("status"));
             assert_eq!(error.kind(), expected);
             assert_eq!(error.to_string(), "PKI artifact transport failed");
             assert!(format!("{error:?}").contains("<redacted>"));
-            assert_eq!(
-                classify_external_pki_artifact_error(&error),
-                domain_expected
-            );
         }
     }
 
@@ -1605,148 +1567,6 @@ mod tests {
         )
         .expect("unrelated issuer");
         (issuer.pem(), root.pem())
-    }
-
-    fn acquisition(receipt: [u8; 16]) -> CertificateArtifactAcquisition {
-        acquisition_with_usages(receipt, vec![CertificateKeyUsage::ClientAuth])
-    }
-
-    fn acquisition_with_usages(
-        receipt: [u8; 16],
-        key_usages: Vec<CertificateKeyUsage>,
-    ) -> CertificateArtifactAcquisition {
-        let scope = DeviceCertificateScope::for_test(
-            TenantId::parse("11111111-2222-4333-8444-555555555555").expect("tenant"),
-            DeviceId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("device"),
-        );
-        let policy = CertificatePolicy::new(
-            CertificatePolicyDurations::new(
-                CertificateValiditySeconds::try_new(86_400).expect("validity"),
-                CertificateRenewBeforeSeconds::try_new(300).expect("renew-before"),
-            )
-            .expect("durations"),
-            key_usages,
-            vec![CertificateSan::parse("device.example").expect("SAN")],
-        )
-        .expect("policy");
-        CertificateArtifactAcquisition::for_test(
-            scope,
-            ExpectedGeneration::try_new(7).expect("generation"),
-            PolicyHash::restore(&[7; 32]).expect("policy hash"),
-            DevicePolicyAuthorizationReceiptId::restore(uuid::Uuid::from_bytes(receipt))
-                .expect("receipt"),
-            policy,
-        )
-    }
-
-    #[test]
-    fn verified_vault_evidence_mints_only_the_receipt_bound_production_artifact() {
-        let (request, response, roots) = verified_fixture();
-        let evidence = verify_and_normalize(
-            request,
-            &serde_json::to_vec(&response).expect("response"),
-            FixedClock.now(),
-            &roots,
-            provider_config_digest(),
-        )
-        .expect("verified evidence");
-        let acquisition = acquisition([7; 16]);
-        let closure = ExternalPkiProviderClosure::seal_vault_csr_sign(
-            pkiauthmint::ExternalPkiProviderMint::capability(),
-            provider_config_digest(),
-        );
-
-        let authorization_receipt_id = acquisition.authorization_receipt_id();
-        let authorized =
-            mint_external_pki_production_artifact(&closure, acquisition, evidence.into_verified())
-                .expect("receipt-bound artifact");
-        let snapshot = authorized.into_append_authorization().into_snapshot();
-
-        assert_eq!(
-            snapshot.authorization_receipt_id(),
-            authorization_receipt_id
-        );
-        assert_eq!(
-            snapshot.artifact_id().as_str(),
-            format!(
-                "vault-pki-sha256:{}",
-                lowercase_hex(snapshot.artifact_digest().as_bytes())
-            )
-        );
-        assert_eq!(
-            format!("{closure:?}"),
-            "ExternalPkiProviderClosure(<sealed>)"
-        );
-    }
-
-    #[test]
-    fn provider_closure_cannot_authorize_evidence_from_a_different_config() {
-        let (request, response, roots) = verified_fixture();
-        let evidence = verify_and_normalize(
-            request,
-            &serde_json::to_vec(&response).expect("response"),
-            FixedClock.now(),
-            &roots,
-            provider_config_digest(),
-        )
-        .expect("verified evidence");
-        let different_closure = ExternalPkiProviderClosure::seal_vault_csr_sign(
-            pkiauthmint::ExternalPkiProviderMint::capability(),
-            PkiProviderConfigDigest::new([0x43; 32]),
-        );
-
-        assert!(matches!(
-            mint_external_pki_production_artifact(
-                &different_closure,
-                acquisition([7; 16]),
-                evidence.into_verified(),
-            ),
-            Err(CertificateArtifactError::BindingMismatch)
-        ));
-    }
-
-    #[test]
-    fn swapped_authorization_receipt_is_rejected_before_provider_io() {
-        let (request, _, _) = verified_fixture();
-        assert_eq!(
-            validate_external_pki_artifact_request(&acquisition([8; 16]), &request),
-            Err(CertificateArtifactError::BindingMismatch)
-        );
-    }
-
-    #[test]
-    fn common_name_must_be_authorized_by_the_current_device_scope() {
-        let (request, _, _) = verified_fixture();
-        let request = rebuild_with_matching_csr_common_name(&request, "other.example");
-        assert_eq!(
-            validate_external_pki_artifact_request(&acquisition([7; 16]), &request),
-            Err(CertificateArtifactError::BindingMismatch)
-        );
-    }
-
-    #[test]
-    fn equivalent_eku_set_order_preserves_receipt_binding() {
-        let (request, _, _) = verified_fixture();
-        let request = rebuild_request(
-            &request,
-            *request.spki_digest(),
-            request.sans().to_vec(),
-            vec![
-                PkiExtendedKeyUsage::ServerAuth,
-                PkiExtendedKeyUsage::ClientAuth,
-            ],
-        );
-        let acquisition = acquisition_with_usages(
-            [7; 16],
-            vec![
-                CertificateKeyUsage::ClientAuth,
-                CertificateKeyUsage::ServerAuth,
-            ],
-        );
-        assert_eq!(
-            validate_external_pki_artifact_request(&acquisition, &request),
-            Ok(())
-        );
     }
 
     fn rebuild_request(

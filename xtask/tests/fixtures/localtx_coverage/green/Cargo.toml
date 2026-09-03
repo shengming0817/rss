@@ -1,3 +1,0 @@
-[workspace]
-resolver = "2"
-members = ["adapters/pg", "crates/bootstrap", "crates/conformance", "crates/demo", "crates/httpserve", "crates/testkit", "crates/vocab", "generated", "journeys"]

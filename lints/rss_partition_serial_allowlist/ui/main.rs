@@ -1,5 +1,5 @@
 // rss_partition_serial_allowlist UI fixture（impl-site **不在** allowlist：example crate 源路径
-// 不含 `adapters` / `bins` / `assemblies` 路径段 ⇒ 非 allowlist ⇒ impl PartitionSerialDelivery 触发）。
+// 不含 `adapters` / `bins` 路径段 ⇒ 非 allowlist ⇒ impl PartitionSerialDelivery 触发）。
 // golden 见 main.stderr：impl 真 consistency::PartitionSerialDelivery 触发；#[allow] 逃生门不触发。
 // 须用真 consistency（dev-dep）：lint 按被 impl trait 的 crate 名（consistency）+ 名（PartitionSerialDelivery）匹配，
 // 本地 stub trait 无法触发。

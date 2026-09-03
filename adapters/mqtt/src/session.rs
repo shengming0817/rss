@@ -508,7 +508,7 @@ impl AuthenticatedDeviceDelivery {
     ///
     /// This narrow bridge is public only because Rust has no friend visibility across the MQTT
     /// adapter and identity composition crates. Repository policy permits one shipped callsite:
-    /// the closed durable-or-poison terminal bridge in `identity-composition`.
+    /// the closed durable-or-poison terminal bridge.
     #[doc(hidden)]
     pub fn settle_terminal(mut self) -> Result<(), MqttSessionError> {
         let capability = self.ack.take().ok_or(MqttSessionError::AckUnavailable)?;

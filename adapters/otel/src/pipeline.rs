@@ -17,7 +17,7 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use secure::redact_observation_field;
 
-/// INVARIANT: OTEL-RESOURCE-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "required sink-neutral TelemetryResource parameter with no default overload" } -- an OTLP provider cannot be built without the exact non-empty service, assembly and RuntimePlan identity supplied by the composition root.
+/// An OTLP provider requires the exact non-empty identity carried by [`TelemetryResource`].
 fn to_otel_resource(resource: &TelemetryResource) -> Resource {
     Resource::builder_empty()
         .with_attributes([

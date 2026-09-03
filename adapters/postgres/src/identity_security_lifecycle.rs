@@ -6,7 +6,6 @@
 //! unknown commit acknowledgement requires the caller to observe state and construct a new
 //! command.
 //!
-//! INVARIANT: IDENTITY-SECURITY-COTX-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed command plus ProducerFactAuthorization and one producer_tx" }.
 //! INVARIANT: IDENTITY-SECURITY-LOCK-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
 //!
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@main
@@ -40,11 +39,7 @@ pub struct PgIdentitySecurityLifecycle {
     pseudonym_keys: std::sync::Arc<secure::PseudonymKeyRing>,
     #[cfg(all(test, feature = "integration"))]
     fault: Option<IdentitySecurityFault>,
-    #[cfg(any(
-        all(test, feature = "integration"),
-        feature = "journey-fault-support",
-        feature = "test-support"
-    ))]
+    #[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
     start_barrier: Option<std::sync::Arc<IdentitySecurityStartBarrier>>,
 }
 
@@ -78,21 +73,13 @@ impl PgAccountReactivationLifecycle {
     }
 }
 
-#[cfg(any(
-    all(test, feature = "integration"),
-    feature = "journey-fault-support",
-    feature = "test-support"
-))]
+#[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
 struct IdentitySecurityStartBarrier {
     barrier: std::sync::Arc<tokio::sync::Barrier>,
     remaining: std::sync::atomic::AtomicU8,
 }
 
-#[cfg(any(
-    all(test, feature = "integration"),
-    feature = "journey-fault-support",
-    feature = "test-support"
-))]
+#[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
 impl IdentitySecurityStartBarrier {
     fn two_requests(barrier: std::sync::Arc<tokio::sync::Barrier>) -> Self {
         Self {
@@ -143,11 +130,7 @@ impl PgIdentitySecurityLifecycle {
             pseudonym_keys,
             #[cfg(all(test, feature = "integration"))]
             fault: None,
-            #[cfg(any(
-                all(test, feature = "integration"),
-                feature = "journey-fault-support",
-                feature = "test-support"
-            ))]
+            #[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
             start_barrier: None,
         }
     }
@@ -168,11 +151,7 @@ impl PgIdentitySecurityLifecycle {
         self
     }
 
-    #[cfg(any(
-        all(test, feature = "integration"),
-        feature = "journey-fault-support",
-        feature = "test-support"
-    ))]
+    #[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
     pub(crate) fn with_start_barrier(
         mut self,
         barrier: std::sync::Arc<tokio::sync::Barrier>,
@@ -224,11 +203,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
         let fault = self.fault;
         #[cfg(not(all(test, feature = "integration")))]
         let fault = None;
-        #[cfg(any(
-            all(test, feature = "integration"),
-            feature = "journey-fault-support",
-            feature = "test-support"
-        ))]
+        #[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
         let start_barrier = self.start_barrier.clone();
 
         metrics::counter!("identity_refresh_producer_attempt_total").increment(1);
@@ -242,7 +217,7 @@ impl IdentitySecurityLifecycle for PgIdentitySecurityLifecycle {
                     Box::pin(async move {
                         #[cfg(any(
                             all(test, feature = "integration"),
-                            feature = "journey-fault-support",
+                            test,
                             feature = "test-support"
                         ))]
                         if let Some(start_barrier) = start_barrier {
@@ -474,11 +449,7 @@ impl PgIdentitySecurityLifecycle {
         let fault = self.fault;
         #[cfg(not(all(test, feature = "integration")))]
         let fault = None;
-        #[cfg(any(
-            all(test, feature = "integration"),
-            feature = "journey-fault-support",
-            feature = "test-support"
-        ))]
+        #[cfg(any(all(test, feature = "integration"), test, feature = "test-support"))]
         let start_barrier = self.start_barrier.clone();
 
         self.write_pool
@@ -490,7 +461,7 @@ impl PgIdentitySecurityLifecycle {
                     Box::pin(async move {
                         #[cfg(any(
                             all(test, feature = "integration"),
-                            feature = "journey-fault-support",
+                            test,
                             feature = "test-support"
                         ))]
                         if let Some(start_barrier) = start_barrier {

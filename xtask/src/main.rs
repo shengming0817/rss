@@ -5,11 +5,6 @@
 #![deny(clippy::unreachable)]
 
 mod archrules;
-mod assembly;
-mod assembly_codegen;
-mod assembly_governance;
-mod assembly_lock;
-mod assembly_runtime_plan;
 mod cdc_config;
 mod ci_entry_guard;
 mod ci_impact;
@@ -19,48 +14,29 @@ mod cmd;
 pub(crate) use cmd::nextest;
 mod codegen;
 mod command_symmetry;
-mod consistency_effects;
-mod consistency_fixtures;
 mod contract;
 mod contract_binding_guard;
 mod coverage;
 mod defergate;
 mod diagnostic;
 mod diffcov;
-mod dlx_lifecycle_funnel;
-mod event_transport_guard;
-mod evidence_file;
 mod execution_profiles;
 mod generated_file;
-mod graph;
 mod inbox_cutover_guard;
 mod integration_shards;
-mod l2_assurance;
 mod layerdeps;
 mod layers;
-mod localonly_evidence;
-mod localtx_coverage;
-mod localtx_evidence;
 mod outbox_same_id_guard;
 mod package_proof;
 mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
-mod phase_helper_expand;
 mod postgres_feature_matrix;
-mod producer_assurance;
-mod production_composition;
-mod projection_target_enrollment;
 mod provider_capabilities;
 mod publicapi;
 mod reconcile_outbox_command_guard;
 mod release_surface;
 mod repo_scope_guard;
-mod report_format;
-mod runtime_assembly_residual;
-mod runtime_deps_guard;
-mod runtime_env_guard;
-mod runtime_root_guard;
 mod saga_durable_recovery_guard;
 mod schema_rls;
 mod source_semantic_guard;
@@ -73,13 +49,10 @@ mod verify;
 mod workspace_facts;
 mod wsdeps;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cli::{
-    ArchrulesCommand, AssemblyCommand, CdcConfigCommand, CiCommand, Command, ConsistencyCommand,
-    ContractCommand, GraphCommand, NextestEvidenceCommand, RuntimeDepsCommand, RuntimeEnvCommand,
-    RuntimeRootCommand,
+    ArchrulesCommand, CdcConfigCommand, CiCommand, Command, ContractCommand, NextestEvidenceCommand,
 };
-pub(crate) use report_format::ReportFormat;
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
@@ -101,39 +74,6 @@ fn dispatch(command: Command) -> Result<()> {
                 against.unwrap_or_else(|| contract::breaking::DEFAULT_AGAINST.to_string());
             contract::breaking::run(&against)
         }
-        Command::Assembly(AssemblyCommand::Validate) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("assembly validate: load command-scoped workspace facts")?;
-            diagnostic::run_check(&assembly::AssemblyValidate::new(&root, facts))
-        }
-        Command::Assembly(AssemblyCommand::GenerateModules { check }) => {
-            assembly_codegen::run(check)
-        }
-        Command::Assembly(AssemblyCommand::GenerateProviders { check }) => {
-            assembly_codegen::run_providers(check)
-        }
-        Command::Assembly(AssemblyCommand::GenerateRuntimePlans { check }) => {
-            assembly_runtime_plan::run(check)
-        }
-        Command::Assembly(AssemblyCommand::Lock(action)) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("assembly lock: load command-scoped workspace facts")?;
-            assembly_lock::run(&root, action, facts)
-        }
-        Command::Graph(GraphCommand::Assembly(options)) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("assembly graph: load command-scoped workspace facts")?;
-            graph::run(&root, &options, facts)
-        }
         Command::Archrules(ArchrulesCommand::List) => {
             let root = workspace_root()?;
             let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -149,15 +89,6 @@ fn dispatch(command: Command) -> Result<()> {
             let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
             archrules::matrix(command_facts.get()?)
         }
-        Command::RuntimeRoot(RuntimeRootCommand::Guard) => {
-            diagnostic::run_check(&runtime_root_guard::RuntimeRootGuard)
-        }
-        Command::RuntimeDeps(RuntimeDepsCommand::Guard) => {
-            diagnostic::run_check(&runtime_deps_guard::RuntimeDepsGuard)
-        }
-        Command::RuntimeEnv(RuntimeEnvCommand::Guard) => {
-            diagnostic::run_check(&runtime_env_guard::RuntimeEnvGuard)
-        }
         Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
         Command::WsdepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
         Command::SourceSemanticGuard => {
@@ -168,41 +99,6 @@ fn dispatch(command: Command) -> Result<()> {
         }
         Command::OutboxSameIdGuard => {
             diagnostic::run_check(&outbox_same_id_guard::OutboxSameIdGuard)
-        }
-        Command::ConsistencyFixtures => {
-            diagnostic::run_check(&consistency_fixtures::ConsistencyFixtures)
-        }
-        Command::Consistency(ConsistencyCommand::LocalOnlyEffects) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("local-only-effects: load command-scoped workspace facts")?;
-            diagnostic::run_check(&consistency_effects::LocalOnlyEffects::new(&root, facts))
-        }
-        Command::Consistency(ConsistencyCommand::Report { format }) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("consistency report: load command-scoped workspace facts")?;
-            consistency_effects::run_report(&root, facts, format[0])
-        }
-        Command::LocaltxCoverage => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("localtx-coverage: load command-scoped workspace facts")?;
-            diagnostic::run_check(&localtx_coverage::LocalTxCoverage::new(&root, facts))
-        }
-        Command::L2Assurance => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("l2-assurance: load command-scoped workspace facts")?;
-            l2_assurance::validate(&root, facts)
         }
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
@@ -239,40 +135,6 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Ci(CiCommand::Preflight { selection }) => {
             verify::run_remote_preflight(selection.as_ref())
         }
-        Command::Ci(CiCommand::ValidateEvidence {
-            kind,
-            input,
-            output,
-        }) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("validate-evidence: load command-scoped workspace facts")?;
-            match kind {
-                cli::RequiredEvidenceKind::Localonly => {
-                    localonly_evidence::validate_upload_snapshot(&input, &output, &root, facts)
-                }
-                cli::RequiredEvidenceKind::Localtx => {
-                    localtx_evidence::validate_upload_snapshot(&input, &output, &root, facts)
-                }
-            }
-        }
-        Command::Ci(CiCommand::LocalonlyEvidence { output }) => {
-            let root = workspace_root()?;
-            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
-            let facts = command_facts
-                .get()
-                .context("localonly-evidence: load command-scoped workspace facts")?;
-            let request = localonly_evidence::prepare_request(
-                ci_lanes::FixedCiJob::TestAffected,
-                Some(&output),
-                &root,
-            )?
-            .context("LocalOnly evidence owner must prepare a request")?;
-            localonly_evidence::execute(&root, facts, request, cmd::ExecutionPolicy::FailFast)?;
-            Ok(())
-        }
         Command::Ci(CiCommand::Audit) => verify::run_audit(false),
         Command::Ci(CiCommand::Plan(options)) => ci_impact::run(&workspace_root()?, &options),
         Command::NextestEvidence(NextestEvidenceCommand::Stage) => {
@@ -287,9 +149,6 @@ fn dispatch(command: Command) -> Result<()> {
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::InboxCutoverGuard => {
             diagnostic::run_check(&inbox_cutover_guard::InboxCutoverGuard)
-        }
-        Command::DlxLifecycleFunnel => {
-            diagnostic::run_check(&dlx_lifecycle_funnel::DlxLifecycleFunnel)
         }
         Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
         Command::RepoScopeGuard => diagnostic::run_check(&repo_scope_guard::RepoScopeGuard),

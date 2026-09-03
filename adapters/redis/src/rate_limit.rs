@@ -226,7 +226,7 @@ mod tests {
         let quota = RateLimitQuota::try_new(10, 20).unwrap_or_else(|_| unreachable!("test quota"));
         let runtime = RedisRateLimiter::new(Arc::clone(&store), "runtime", quota)
             .unwrap_or_else(|_| unreachable!("valid namespace"));
-        let audit = RedisRateLimiter::new(store, "identityaudit", quota)
+        let audit = RedisRateLimiter::new(store, "audit", quota)
             .unwrap_or_else(|_| unreachable!("valid namespace"));
         let key = RateLimitKey::new("203.0.113.9");
         let runtime_key = runtime.redis_key(&key);

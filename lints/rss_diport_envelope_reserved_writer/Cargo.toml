@@ -3,15 +3,15 @@ name = "rss_diport_envelope_reserved_writer"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：diport EnvelopeMetadata::insert_wire_pair callsite allowlist（adapters/bins/assemblies）；INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01"
+description = "RSS 治理：diport EnvelopeMetadata::insert_wire_pair callsite allowlist（adapters/bins）；INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep diport）
 
-# 本 lint 按 **package manifest 父目录**（adapters/bins/assemblies）判 callsite allowlist，镜像
+# 本 lint 按 **package manifest 父目录**（adapters/bins）判 callsite allowlist，镜像
 # rss_diport_impl_allowlist 的 impl_site_allowed 逻辑（callsite 场景复用相同判据）。
 # UI fixture 编译为单一 example crate，manifest 父目录为 `lints/rss_diport_envelope_reserved_writer`
-# → 父目录 `lints` ∉ adapters/bins/assemblies → insert_wire_pair 调用触发；try_insert / #[allow] 不触发。
+# → 父目录 `lints` ∉ adapters/bins → insert_wire_pair 调用触发；try_insert / #[allow] 不触发。
 [[example]]
 name = "rss_diport_envelope_reserved_writer_ui"
 path = "ui/main.rs"

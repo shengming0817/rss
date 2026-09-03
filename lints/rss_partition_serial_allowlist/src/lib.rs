@@ -29,14 +29,14 @@
 //!   `cargo dylint --all` 默认不扫 `#[cfg(test)]` 子树，此放行与 test 豁免无关）——按 `LOCAL_CRATE`
 //!   crate 身份判，不可被外部 `mod consistency` 伪造；
 //!   ② 被编译 package 的 `CARGO_MANIFEST_DIR`（绝对路径）其**父目录名** ∈ workspace 顶层成员
-//!   目录 `adapters` / `bins` / `assemblies`（对齐 `xtask/src/layers.rs` 顶层成员分层）——新增
+//!   目录 `adapters` / `bins`（对齐 `xtask/src/layers.rs` 顶层成员分层）——新增
 //!   adapter 自动覆盖，零 lint 编辑；键 package 位置而非源文件位置 ⇒ 域内 `src/adapters/` 子目录
 //!   **无法绕过**（manifest dir 仍 `crates/<domain>`，父目录 `crates`）。
 //!
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；
 //! ② `#[cfg(test)]` 子树因 `cargo dylint --all` 默认不带 `--all-targets` 不被扫——`consistency`
 //! 单测和 `eventexec` test module 里的 `SerialFake` impl 不报（test 替身合法，不进生产构建）；
-//! ③ allowlist 顶层成员目录集（`adapters`/`bins`/`assemblies`）扩项无机器复核（与 `layers.rs` 同源，
+//! ③ allowlist 顶层成员目录集（`adapters`/`bins`）扩项无机器复核（与 `layers.rs` 同源，
 //! 靠 greppable + 治理评审）。
 //!
 //! anti-vacuity（守卫非恒真 / 恒假，两向均机器锁）：红向由 UI golden 锁（example crate 路径非
@@ -62,7 +62,7 @@ use rustc_lint::{LateContext, LateLintPass};
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记**非** allowlist crate（package manifest 父目录不在 `adapters`/`bins`/`assemblies`，
+    /// 标记**非** allowlist crate（package manifest 父目录不在 `adapters`/`bins`，
     /// 即域 / 服务 / 引擎 / 基础 crate）里对 `consistency::PartitionSerialDelivery` 的 `impl`。
     ///
     /// ### Why is this bad?
@@ -74,7 +74,7 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]`
-    /// 子树默认不被扫（test fake impl 放行）；allowlist 顶层成员目录集（`adapters`/`bins`/`assemblies`）
+    /// 子树默认不被扫（test fake impl 放行）；allowlist 顶层成员目录集（`adapters`/`bins`）
     /// 扩项无机器复核（与 `xtask/src/layers.rs` 顶层成员约定同源，靠 greppable + 治理）。
     /// 确需在 allowlist 外 impl 加 `#[allow(rss_partition_serial_allowlist)] // reason: ...`。
     ///
@@ -120,7 +120,7 @@ impl<'tcx> LateLintPass<'tcx> for RssPartitionSerialAllowlist {
             ),
             |diag| {
                 diag.help(
-                    "把 impl 放到 `adapters/<name>`（或组合根 `bins/`·`assemblies/`）；\
+                    "把 impl 放到 `adapters/<name>` 或 `bins/`；\
                      测试 fake impl 放在 `#[cfg(test)]` 块内（不被扫）；\
                      确需在 allowlist 外 impl，在 impl 块加 `#[allow(rss_partition_serial_allowlist)] // reason: ...`（item-level 逃生门）",
                 );
@@ -142,7 +142,7 @@ fn trait_is_partition_serial_delivery(cx: &LateContext<'_>, trait_did: DefId) ->
 ///    `cargo dylint --all` 默认不扫 `#[cfg(test)]` 子树，此放行与 test 豁免无关（按 `LOCAL_CRATE`
 ///    crate 身份判，不可被外部 `mod consistency` 伪造）。
 /// 2. 被编译 package 的 manifest 目录（cargo 为每个 crate 设 `CARGO_MANIFEST_DIR`，绝对路径）
-///    其**父目录名** ∈ workspace 顶层成员目录 `adapters` / `bins` / `assemblies`。键 package 位置
+///    其**父目录名** ∈ workspace 顶层成员目录 `adapters` / `bins`。键 package 位置
 ///    而非源**文件**位置 ⇒ 域 crate 把 impl 放进 `crates/<domain>/src/adapters/` 等子目录**无法
 ///    绕过**（manifest dir 仍 `crates/<domain>`，父目录 `crates`）。
 ///
@@ -159,7 +159,7 @@ fn impl_site_allowed(cx: &LateContext<'_>) -> bool {
             .parent()
             .and_then(Path::file_name)
             .and_then(|n| n.to_str()),
-        Some("adapters" | "bins" | "assemblies")
+        Some("adapters" | "bins")
     )
 }
 

@@ -316,14 +316,6 @@ pub struct ServingWriteLane {
 pub(crate) struct ProjectionOperatorWriteLane;
 #[derive(Clone, Copy)]
 pub struct MaintenanceWriteLane;
-#[cfg(feature = "fault-matrix-test-support")]
-#[derive(Clone, Copy)]
-/// Elevated read lane available only to the closed fault-matrix control plane.
-pub(crate) struct FaultMatrixReadLane;
-#[cfg(feature = "fault-matrix-test-support")]
-#[derive(Clone, Copy)]
-/// Elevated write lane available only to the closed fault-matrix control plane.
-pub(crate) struct FaultMatrixWriteLane;
 
 impl tenant_lane_seal::Sealed for ServingReadLane {}
 impl tenant_lane_seal::Sealed for AuditAdminReadLane {}
@@ -331,10 +323,6 @@ impl tenant_lane_seal::Sealed for MaintenanceReadLane {}
 impl tenant_lane_seal::Sealed for ServingWriteLane {}
 impl tenant_lane_seal::Sealed for ProjectionOperatorWriteLane {}
 impl tenant_lane_seal::Sealed for MaintenanceWriteLane {}
-#[cfg(feature = "fault-matrix-test-support")]
-impl tenant_lane_seal::Sealed for FaultMatrixReadLane {}
-#[cfg(feature = "fault-matrix-test-support")]
-impl tenant_lane_seal::Sealed for FaultMatrixWriteLane {}
 
 impl TenantLane for ServingReadLane {}
 impl TenantLane for AuditAdminReadLane {}
@@ -342,10 +330,6 @@ impl TenantLane for MaintenanceReadLane {}
 impl TenantLane for ServingWriteLane {}
 impl TenantLane for ProjectionOperatorWriteLane {}
 impl TenantLane for MaintenanceWriteLane {}
-#[cfg(feature = "fault-matrix-test-support")]
-impl TenantLane for FaultMatrixReadLane {}
-#[cfg(feature = "fault-matrix-test-support")]
-impl TenantLane for FaultMatrixWriteLane {}
 
 impl ReadLane for ServingReadLane {}
 impl ReadLane for AuditAdminReadLane {}
@@ -353,10 +337,6 @@ impl ReadLane for MaintenanceReadLane {}
 impl WriteLane for ServingWriteLane {}
 impl WriteLane for ProjectionOperatorWriteLane {}
 impl WriteLane for MaintenanceWriteLane {}
-#[cfg(feature = "fault-matrix-test-support")]
-impl ReadLane for FaultMatrixReadLane {}
-#[cfg(feature = "fault-matrix-test-support")]
-impl WriteLane for FaultMatrixWriteLane {}
 
 /// Tenant-branded store view of one live PostgreSQL transaction.
 ///
@@ -408,10 +388,6 @@ impl<'tx, L: TenantLane> TenantTx<'tx, L> {
 }
 
 impl TenantTx<'_, ServingWriteLane> {
-    /// Integration-only seam that simulates losing the commit acknowledgement after PostgreSQL
-    /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
-    /// the default production feature graph cannot construct or trigger it. External journey
-    /// access is admitted only through the named store constructor behind `journey-fault-support`.
     /// Integration-only seam consumed after the sole producer funnel has successfully appended
     /// its OutboxFact but before the transaction can commit. The transaction-local marker cannot
     /// be set by the production feature graph.
@@ -441,9 +417,8 @@ impl TenantTx<'_, ServingWriteLane> {
 /// Tenant-scoped PostgreSQL database capability.
 ///
 /// `L` is a sealed read/write and serving/maintenance lane. Production construction requires the
-/// matching verified store. The test-only fault-matrix lanes are crate-private and honestly model
-/// their elevated owner credential instead of impersonating a serving lane. The capability never
-/// exposes its raw pool, and its transactions yield only tenant-branded [`TenantTx`] values.
+/// matching verified store. The capability never exposes its raw pool, and its transactions yield
+/// only tenant-branded [`TenantTx`] values.
 ///
 /// # INVARIANT: POSTGRES-TX-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed lane, private verified-store construction, private pool storage, and no raw capability projection" }
 ///
@@ -465,22 +440,12 @@ impl TenantDb<ServingReadLane> {
         }
     }
 
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
             pool: store.pool.clone(),
             lane: ServingReadLane,
-        }
-    }
-}
-
-#[cfg(feature = "fault-matrix-test-support")]
-impl TenantDb<FaultMatrixReadLane> {
-    pub(crate) fn new_fault_control(pool: &PgPool) -> Self {
-        Self {
-            pool: pool.clone(),
-            lane: FaultMatrixReadLane,
         }
     }
 }
@@ -494,7 +459,7 @@ impl TenantDb<AuditAdminReadLane> {
         }
     }
 
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
@@ -608,7 +573,7 @@ impl TenantDb<ServingWriteLane> {
         self.write(scope, read, map_storage).await
     }
 
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
         Self {
@@ -625,16 +590,6 @@ impl TenantDb<ProjectionOperatorWriteLane> {
         Self {
             pool: store.pool().clone(),
             lane: ProjectionOperatorWriteLane,
-        }
-    }
-}
-
-#[cfg(feature = "fault-matrix-test-support")]
-impl TenantDb<FaultMatrixWriteLane> {
-    pub(crate) fn new_fault_control(pool: &PgPool) -> Self {
-        Self {
-            pool: pool.clone(),
-            lane: FaultMatrixWriteLane,
         }
     }
 }
@@ -1646,18 +1601,18 @@ async fn commit_local_tx<T, E>(
 ) -> LocalTxAttempt<T, E> {
     #[allow(unused_mut)]
     let mut tx = tx;
-    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    #[cfg(all(test, feature = "integration"))]
     let inject_commit_unknown = {
         let mut tenant_tx = TenantTx::from_bound_connection(tx.connection(), tenant);
         test_commit_unknown_after_commit_requested(&mut tenant_tx).await
     };
-    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    #[cfg(all(test, feature = "integration"))]
     let commit_result = if inject_commit_unknown {
         policy.commit(tx.commit_unknown_after_ack()).await
     } else {
         policy.commit(tx.commit()).await
     };
-    #[cfg(not(any(all(test, feature = "integration"), feature = "journey-fault-support")))]
+    #[cfg(not(all(test, feature = "integration")))]
     let commit_result = policy.commit(tx.commit()).await;
 
     match commit_result {
@@ -1819,7 +1774,7 @@ pub(crate) async fn wait_for_rollback_timeout_for_test() {
     TEST_ROLLBACK_TIMEOUT_ENTERED.notified().await;
 }
 
-#[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+#[cfg(all(test, feature = "integration"))]
 async fn test_commit_unknown_after_commit_requested(
     tx: &mut TenantTx<'_, ServingWriteLane>,
 ) -> bool {

@@ -105,53 +105,28 @@ deny = [
   # 分层（target-centric wrappers）：只列 all-features 最终图中的真实 direct parents。
   # 集合相等由 cargo-deny 独占证明；layer-deps 只守 source 分层、wrapper 类别和特殊安全边界。
   # adapter→domain wrapper 仍必须有 shipped source edge。
-  # RuntimeExec 启动内核只准四个 assembly 直接消费；不是一般 Root wrapper。集合相等由
-  # RUNTIMEEXEC-LAYER-01 守，禁止 bins/composition/journeys/xtask 绕过 assembly phase funnel。
-  { crate = "runtimeexec", wrappers = ["runtime", "settingsonly", "identityaudit", "deviceidentity"] },
-  # AUTH-EVIDENCE-MINT-01：Authenticated production mint capability 只准 diport（opaque proof mint）、
-  # httpserve（构造面）+ 三 assembly 验签桥持有；域 / journeys 不得依赖 authmint（Hard = token + crate graph）。
-  { crate = "authmint", wrappers = ["diport", "httpserve", "runtime", "settingsonly", "identityaudit", "deviceidentity"] },
-  # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 与 production runtime 可持有；
-  # 依赖普通 authmint 的 httpserve/settingsonly/identityaudit 不能因此获得 operator authority。
-  { crate = "sagaauthmint", wrappers = ["diport", "runtime"] },
-  # DLQ-OPERATOR-MINT-01：DLQ operator mint 仅 DI proof owner 与 production runtime 可持有。
-  { crate = "dlqauthmint", wrappers = ["diport", "runtime"] },
+  # AUTH-EVIDENCE-MINT-01：Authenticated production mint capability 只准 diport（opaque proof mint）
+  # 与 httpserve（构造面）持有。
+  { crate = "authmint", wrappers = ["diport", "httpserve"] },
+  # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 可持有。
+  { crate = "sagaauthmint", wrappers = ["diport"] },
+  # DLQ-OPERATOR-MINT-01：DLQ operator mint 仅 DI proof owner 可持有。
+  { crate = "dlqauthmint", wrappers = ["diport"] },
   # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint；generated 仅消费 opaque carrier。
   { crate = "requestidmint", wrappers = ["httpserve", "generated"] },
   # EXTERNAL-PKI-PROVIDER-MINT-01：仅 Vault production 构造面调用 mint；diport 只在 opaque seal 签名中消费 token。
   { crate = "pkiauthmint", wrappers = ["diport", "vault"] },
   # RUNTIME-INVENTORY-MINT-01：assembly-schema only names the token in the private-field receipt
-  # constructor; runtimeexec mints full-plan receipts and live observations, while runtime alone
-  # mints placement-projected completed-provider receipts. Other assembly roots cannot name it.
-  { crate = "runtimeinventorymint", wrappers = ["assembly-schema", "runtimeexec", "runtime"] },
+  # constructor; runtimeexec mints full-plan receipts and live observations.
+  { crate = "runtimeinventorymint", wrappers = ["assembly-schema", "runtimeexec"] },
   # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
-  { crate = "identity", wrappers = ["deviceidentity", "identity-composition", "identityaudit", "journeys", "memory", "mqtt", "postgres", "runtime"] },
+  { crate = "identity", wrappers = ["memory", "mqtt", "postgres"] },
   # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
   # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
-  { crate = "settings", wrappers = ["eventing-composition", "journeys", "postgres", "runtime", "settings-composition", "settingsonly"] },
+  { crate = "settings", wrappers = ["postgres"] },
   # postgres impl AuditWriteRepo + AuditReadRepo（per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
-  { crate = "audit", wrappers = ["audit-composition", "eventing-composition", "identityaudit", "journeys", "postgres", "runtime"] },
-  # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。ban 按 **package 名** 匹配——
-  # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`、
-  # prometheus adapter package = `prometheus-adapter`，见各自 Cargo.toml），避免误伤同名 crates.io crate。
-  { crate = "postgres", wrappers = ["audit-composition", "deviceidentity", "eventing-composition", "identity-composition", "identityaudit", "journeys", "journeys-fault-matrix", "runtime", "settings-composition", "settingsonly"] },
-  { crate = "redis-adapter", wrappers = ["deviceidentity", "identityaudit", "journeys-fault-matrix", "runtime", "settingsonly"] },
-  { crate = "amqp", wrappers = ["identityaudit", "journeys", "journeys-fault-matrix", "runtime", "settingsonly"] },
-  { crate = "mqtt", wrappers = ["deviceidentity", "identity-composition", "journeys"] },
-  { crate = "s3", wrappers = ["runtime", "settingsonly"] },
-  { crate = "oidc", wrappers = ["deviceidentity", "identityaudit", "journeys", "runtime", "settingsonly"] },
-  # httpd HTTP 传输 adapter（#1320 运行时入口）：HttpServer + ManagedResource，只被组合根依赖。
-  { crate = "httpd", wrappers = ["deviceidentity", "identityaudit", "runtime", "settingsonly"] },
-  { crate = "otel", wrappers = ["runtime"] },
-  { crate = "prometheus-adapter", wrappers = ["deviceidentity", "identityaudit", "runtime", "settingsonly"] },
-  { crate = "vault", wrappers = ["deviceidentity", "identity-composition", "identityaudit", "journeys", "runtime", "settings-composition", "settingsonly"] },
-  { crate = "ratelimit", wrappers = ["identityaudit", "settingsonly"] },
-  # MacVerifier 生产 backend（package = `crypto-adapter`，lib = `crypto`；#1230）：只被组合根注入。
-  { crate = "crypto-adapter", wrappers = ["eventing-composition", "identity-composition", "identityaudit", "journeys", "runtime", "settingsonly"] },
-  # in-mem DI port provider adapter（RW-G1 追踪弹）：dev/test-only，只准验收 journey 依赖；
-  # 精确 consumer 由 cargo-deny 证明。
-  { crate = "memory", wrappers = ["journeys"] },
+  { crate = "audit", wrappers = ["postgres"] },
   # 注：testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层 test-support 库，
   # 不在此 ban——其「只准 [dev-dependencies] 消费」由 xtask layers.rs TEST_SUPPORT_CRATES + layer-deps
   # LAYER-DEPS-08（check_test_support_confinement：任一 shipped 边指向 testkit 即报）守，testcontainers 树经
@@ -160,7 +135,7 @@ deny = [
   # runtime seam 的 eventexec 与 typed subscription registrar 的 bootstrap 依赖。两条均为 exact crate
   # edge；bootstrap 的 production item surface 另由 LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01
   # 收窄到 registrar vocabulary，其它 Service→Generated 仍由 layer-deps 拒绝。
-  { crate = "generated", wrappers = ["amqp", "audit", "bootstrap", "contractreg", "eventexec", "eventing-composition", "httpserve", "identity", "identityaudit", "journeys", "journeys-fault-matrix", "memory", "postgres", "runtime", "settings", "settingsonly", "syshealth", "xtask"] },
+  { crate = "generated", wrappers = ["amqp", "audit", "bootstrap", "contractreg", "eventexec", "httpserve", "identity", "memory", "postgres", "settings", "syshealth", "xtask"] },
 ]
 
 # 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml

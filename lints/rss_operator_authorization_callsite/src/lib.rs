@@ -21,6 +21,7 @@ use rustc_span::Span;
 
 const ADMIN_PDP_CALLER_CRATES: &[&str] = &["httpserve"];
 const NO_CALLER_CRATES: &[&str] = &[];
+const NO_EXACT_CALLSITES: &[ExactCallsite] = &[];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FunnelKind {
@@ -47,46 +48,6 @@ struct GuardedFunnel {
     exact_callsites: &'static [ExactCallsite],
 }
 
-const DLQ_AUTHORIZATION_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
-    crate_name: "runtime",
-    module_path: "operator::dlq",
-    self_type: None,
-    item_name: "issue_dlq_authorization",
-}];
-const RECONCILE_CAPABILITY_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
-    crate_name: "runtime",
-    module_path: "operator::reconcile",
-    self_type: None,
-    item_name: "issue_authorized_reconcile_capability",
-}];
-const L2_DR_CAPABILITY_WRAPPERS: &[ExactCallsite] = &[
-    ExactCallsite {
-        crate_name: "runtime",
-        module_path: "operator::dr_recovery",
-        self_type: None,
-        item_name: "issue_authorized_l2_dr_recovery_capability",
-    },
-    ExactCallsite {
-        crate_name: "postgres",
-        module_path: "fault_matrix",
-        self_type: Some("FaultMatrixPreparedL2DrRecovery"),
-        item_name: "required_fence",
-    },
-];
-const L2_DR_PLAN_WRAPPERS: &[ExactCallsite] = &[
-    ExactCallsite {
-        crate_name: "runtime",
-        module_path: "operator::dr_recovery",
-        self_type: None,
-        item_name: "execute_connected_l2_dr_recovery",
-    },
-    ExactCallsite {
-        crate_name: "postgres",
-        module_path: "fault_matrix",
-        self_type: Some("FaultMatrixPreparedL2DrRecovery"),
-        item_name: "required_fence",
-    },
-];
 const L2_DR_START_PROOF_ISSUERS: &[ExactCallsite] = &[ExactCallsite {
     crate_name: "postgres",
     module_path: "bundle",
@@ -101,7 +62,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         method: "issue",
         kind: FunnelKind::Capability,
         allowed_caller_crates: NO_CALLER_CRATES,
-        exact_callsites: DLQ_AUTHORIZATION_WRAPPERS,
+        exact_callsites: NO_EXACT_CALLSITES,
     },
     GuardedFunnel {
         source_crate: "eventexec",
@@ -109,7 +70,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         method: "issue_for_authorized_operator",
         kind: FunnelKind::Capability,
         allowed_caller_crates: ADMIN_PDP_CALLER_CRATES,
-        exact_callsites: RECONCILE_CAPABILITY_WRAPPERS,
+        exact_callsites: NO_EXACT_CALLSITES,
     },
     GuardedFunnel {
         source_crate: "eventexec",
@@ -117,7 +78,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         method: "issue_for_authorized_operator",
         kind: FunnelKind::Capability,
         allowed_caller_crates: NO_CALLER_CRATES,
-        exact_callsites: L2_DR_CAPABILITY_WRAPPERS,
+        exact_callsites: NO_EXACT_CALLSITES,
     },
     GuardedFunnel {
         source_crate: "eventexec",
@@ -125,7 +86,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         method: "from_authenticated_and_authorized",
         kind: FunnelKind::AuditedRecoveryPlan,
         allowed_caller_crates: NO_CALLER_CRATES,
-        exact_callsites: L2_DR_PLAN_WRAPPERS,
+        exact_callsites: NO_EXACT_CALLSITES,
     },
     GuardedFunnel {
         source_crate: "eventexec",
@@ -233,11 +194,7 @@ fn format_exact_callsites(callsites: &[ExactCallsite]) -> String {
             let separator = if container.is_empty() { "" } else { "::" };
             format!(
                 "{}::{}::{}{}{}",
-                callsite.crate_name,
-                callsite.module_path,
-                container,
-                separator,
-                callsite.item_name
+                callsite.crate_name, callsite.module_path, container, separator, callsite.item_name
             )
         })
         .collect::<Vec<_>>()
@@ -246,36 +203,45 @@ fn format_exact_callsites(callsites: &[ExactCallsite]) -> String {
 
 fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: &GuardedFunnel) {
     let constructor = format!("{}::{}", funnel.self_type, funnel.method);
+    let no_exact_callsite = funnel.exact_callsites.is_empty();
     let multiple_callsites = funnel.exact_callsites.len() > 1;
-    let message = match (funnel.kind, multiple_callsites) {
-        (FunnelKind::Capability, true) => format!(
+    let message = match (funnel.kind, no_exact_callsite, multiple_callsites) {
+        (_, true, _) => {
+            format!("operator constructor `{constructor}` 当前没有获授权的生产 callsite")
+        }
+        (FunnelKind::Capability, false, true) => format!(
             "operator capability `{constructor}` 仅可在受信 admin/PDP 或精确受信 wrapper 签发"
         ),
-        (FunnelKind::Capability, false) => format!(
-            "operator capability `{constructor}` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发"
+        (FunnelKind::Capability, false, false) => format!(
+            "operator capability `{constructor}` 仅可在受信 admin/PDP 或精确生产 owner 签发"
         ),
-        (FunnelKind::AuditedRecoveryPlan, true) => format!(
+        (FunnelKind::AuditedRecoveryPlan, false, true) => format!(
             "operator recovery plan `{constructor}` 仅可在认证、精确授权且已消费 durable start proof 的精确受信 callsite 构造"
         ),
-        (FunnelKind::AuditedRecoveryPlan, false) => format!(
+        (FunnelKind::AuditedRecoveryPlan, false, false) => format!(
             "operator recovery plan `{constructor}` 仅可在认证、精确授权且已消费 durable start proof 的生产执行函数构造"
         ),
-        (FunnelKind::DurableStartProof, _) => format!(
+        (FunnelKind::DurableStartProof, false, _) => format!(
             "operator durable start proof `{constructor}` 仅可由已提交精确 start audit 的 Postgres issuer 构造"
         ),
     };
     let expected = format_exact_callsites(funnel.exact_callsites);
-    let help = match (funnel.kind, multiple_callsites) {
-        (FunnelKind::Capability, true) => format!(
+    let help = match (funnel.kind, no_exact_callsite, multiple_callsites) {
+        (_, true, _) => {
+            "不要直接调用或保存 constructor 函数项；生产 owner 必须先建立新的精确授权边界"
+                .to_owned()
+        }
+        (FunnelKind::Capability, false, true) => format!(
             "仅通过以下精确受信 wrapper 之一构造：`{expected}`；不要直接调用或保存 constructor 函数项"
         ),
-        (FunnelKind::Capability, false) => {
+        (FunnelKind::Capability, false, false) => {
             format!("仅通过 `{expected}` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项")
         }
-        (FunnelKind::AuditedRecoveryPlan, true) => format!(
+        (FunnelKind::AuditedRecoveryPlan, false, true) => format!(
             "仅允许以下精确受信 callsite 之一：`{expected}`；不要直接调用、保存 constructor 函数项或创建同名旁路"
         ),
-        (FunnelKind::AuditedRecoveryPlan, false) | (FunnelKind::DurableStartProof, _) => format!(
+        (FunnelKind::AuditedRecoveryPlan, false, false)
+        | (FunnelKind::DurableStartProof, false, _) => format!(
             "仅允许 `{expected}` 精确生产 callsite；不要直接调用、保存 constructor 函数项或创建同名旁路"
         ),
     };
@@ -298,14 +264,15 @@ fn guarded_funnel_catalog_is_unique_and_non_vacuous() {
         assert!(!funnel.self_type.is_empty());
         assert!(!funnel.source_crate.is_empty());
         assert!(!funnel.method.is_empty());
-        assert!(!funnel.exact_callsites.is_empty());
         for (callsite_index, callsite) in funnel.exact_callsites.iter().enumerate() {
             assert!(!callsite.crate_name.is_empty());
             assert!(!callsite.module_path.is_empty());
             assert!(!callsite.item_name.is_empty());
-            assert!(funnel.exact_callsites[callsite_index + 1..]
-                .iter()
-                .all(|other| callsite != other));
+            assert!(
+                funnel.exact_callsites[callsite_index + 1..]
+                    .iter()
+                    .all(|other| callsite != other)
+            );
         }
         assert!(GUARDED_FUNNELS[index + 1..].iter().all(|other| {
             (funnel.source_crate, funnel.self_type, funnel.method)
@@ -315,7 +282,7 @@ fn guarded_funnel_catalog_is_unique_and_non_vacuous() {
 }
 
 #[test]
-fn l2_dr_capability_has_exact_runtime_and_test_support_wrappers() {
+fn l2_dr_capability_is_closed_without_a_production_owner() {
     let funnel = GUARDED_FUNNELS
         .iter()
         .find(|funnel| funnel.self_type == "OperatorL2DrRecoveryCapability")
@@ -323,16 +290,11 @@ fn l2_dr_capability_has_exact_runtime_and_test_support_wrappers() {
     assert_eq!(funnel.method, "issue_for_authorized_operator");
     assert_eq!(funnel.kind, FunnelKind::Capability);
     assert!(funnel.allowed_caller_crates.is_empty());
-    assert_eq!(funnel.exact_callsites, L2_DR_CAPABILITY_WRAPPERS);
-    assert_eq!(
-        format_exact_callsites(funnel.exact_callsites),
-        "runtime::operator::dr_recovery::issue_authorized_l2_dr_recovery_capability`, `\
-         postgres::fault_matrix::FaultMatrixPreparedL2DrRecovery::required_fence"
-    );
+    assert!(funnel.exact_callsites.is_empty());
 }
 
 #[test]
-fn l2_dr_plan_has_exact_runtime_and_test_support_wrappers() {
+fn l2_dr_plan_is_closed_without_a_production_owner() {
     let funnel = GUARDED_FUNNELS
         .iter()
         .find(|funnel| funnel.self_type == "AuthorizedL2DrRecoveryPlan")
@@ -340,7 +302,7 @@ fn l2_dr_plan_has_exact_runtime_and_test_support_wrappers() {
     assert_eq!(funnel.method, "from_authenticated_and_authorized");
     assert_eq!(funnel.kind, FunnelKind::AuditedRecoveryPlan);
     assert!(funnel.allowed_caller_crates.is_empty());
-    assert_eq!(funnel.exact_callsites, L2_DR_PLAN_WRAPPERS);
+    assert!(funnel.exact_callsites.is_empty());
 }
 
 #[test]
@@ -362,11 +324,6 @@ fn ui_disallowed() {
 #[test]
 fn ui_httpserve_capability_allowed_but_authorization_disallowed() {
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "httpserve");
-}
-
-#[test]
-fn ui_runtime_non_boundary_disallowed() {
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
 }
 
 #[test]

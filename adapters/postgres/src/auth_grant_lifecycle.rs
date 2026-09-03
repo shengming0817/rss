@@ -4,8 +4,6 @@
 //! one [`TenantDb::<ServingWriteLane>::producer_tx`]. Terminal security mutations are exclusively owned by
 //! [`crate::PgIdentitySecurityLifecycle`].
 //!
-//! INVARIANT: AUTH-GRANT-LOGIN-COTX-01 { level = "Hard", exec = "native-compile", source = "code", native = "combined port method plus provider-owned transaction" }.
-//!
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@main
 
 use std::time::SystemTime;

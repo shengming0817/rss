@@ -9,8 +9,8 @@ description = "RSS 治理：diport provider port 仅 adapter / 组合根可 impl
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep diport）
 
 # 本 lint 先按 canonical trait DefPath 排除两个 lifecycle seam；其余 `diport` trait fail-closed 视为 provider
-# port。impl-site allowlist 键 package 的 `CARGO_MANIFEST_DIR` 父目录（`adapters` / `bins` / `assemblies` /
-# `composition`），非源文件路径。故 UI 的 synthetic red/green 覆盖 trait 分类、item-level `#[allow]` 与
+# port。impl-site allowlist 键 package 的 `CARGO_MANIFEST_DIR` 父目录（`adapters` / `bins`），
+# 非源文件路径。故 UI 的 synthetic red/green 覆盖 trait 分类、item-level `#[allow]` 与
 # anti-vacuity；真实 package 位置分支由 workspace Dylint 承载——见 src/lib.rs rustdoc「Known problems」。
 [[example]]
 name = "rss_diport_impl_allowlist_ui"

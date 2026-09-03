@@ -14,8 +14,6 @@ use std::str::FromStr;
 
 use crate::execution_profiles::ExecutionProfile;
 use crate::integration_shards::IntegrationJobGroup;
-#[cfg(test)]
-use crate::integration_shards::IntegrationShard;
 
 /// The complete, stable set of remote CI execution jobs.
 ///
@@ -29,9 +27,6 @@ pub(crate) enum FixedCiJob {
 }
 
 impl FixedCiJob {
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 3] = [Self::Check, Self::TestAffected, Self::IntegrationCritical];
-
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Check => "check",
@@ -106,7 +101,6 @@ pub(crate) enum GateGroup {
     Core,
     Security,
     Coverage,
-    LocalOnly,
     Audit,
 }
 
@@ -117,7 +111,6 @@ impl GateGroup {
             Self::Core => "ci-core",
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
-            Self::LocalOnly => "ci-local-only",
             Self::Audit => "audit",
         }
     }
@@ -138,8 +131,6 @@ pub(crate) enum CompileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LocalImpactDomain {
     RuntimeEventing,
-    AssemblyGeneration,
-    Consistency,
     TenancyPostgres,
     Pdp,
     ContractBinding,
@@ -147,10 +138,8 @@ pub(crate) enum LocalImpactDomain {
 }
 
 impl LocalImpactDomain {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::RuntimeEventing,
-        Self::AssemblyGeneration,
-        Self::Consistency,
         Self::TenancyPostgres,
         Self::Pdp,
         Self::ContractBinding,
@@ -195,7 +184,6 @@ pub(crate) enum GateExecutor {
     Metadata,
     CorePrerequisite,
     CoreTest,
-    RequiredEvidence,
     SupplyChain,
     Coverage,
 }
@@ -205,7 +193,6 @@ pub(crate) enum GatePolicy {
     OnChange,
     ReleaseOnChange,
     AdvisoryRefresh,
-    RequiredEvidence,
     Subsumed(SubsumptionProof),
 }
 
@@ -266,61 +253,6 @@ macro_rules! gate_catalog {
                         INTERNAL,
                         SOURCE,
                         GatePolicy::OnChange,
-                    )
-            ),
-            AssemblyValidate => (step_assembly_validate, Some("xtask/src/assembly.rs"),
-                gate(
-                        GateId::AssemblyValidate,
-                        "assembly-validate",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            AssemblyModulesCheck => (step_assembly_modules_check, Some("xtask/src/assembly_codegen.rs"),
-                gate(
-                        GateId::AssemblyModulesCheck,
-                        "assembly-modules-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            AssemblyProvidersCheck => (step_assembly_providers_check, Some("xtask/src/assembly_codegen.rs"),
-                gate(
-                        GateId::AssemblyProvidersCheck,
-                        "assembly-providers-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            AssemblyLockCheck => (step_assembly_lock_check, Some("xtask/src/assembly_lock.rs"),
-                gate(
-                        GateId::AssemblyLockCheck,
-                        "assembly-lock-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::ReleaseOnChange,
-                    )
-            ),
-            AssemblyRuntimePlanCheck => (step_assembly_runtime_plan_check, Some("xtask/src/assembly_runtime_plan.rs"),
-                gate(
-                        GateId::AssemblyRuntimePlanCheck,
-                        "assembly-runtime-plan-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::ReleaseOnChange,
                     )
             ),
             ContractBreaking => (step_contract_breaking, Some("xtask/src/contract/breaking.rs"),
@@ -389,87 +321,10 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            ConsistencyFixtures => (step_consistency_fixtures, Some("xtask/src/consistency_fixtures.rs"),
-                gate(
-                        GateId::ConsistencyFixtures,
-                        "consistency-fixtures",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            EventTransportGuard => (step_event_transport_guard, Some("xtask/src/event_transport_guard.rs"),
-                gate(
-                        GateId::EventTransportGuard,
-                        "event-transport-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             InboxCutoverGuard => (step_inbox_cutover_guard, Some("xtask/src/inbox_cutover_guard.rs"),
                 gate(
                         GateId::InboxCutoverGuard,
                         "inbox-cutover-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            DlxLifecycleFunnel => (step_dlx_lifecycle_funnel, Some("xtask/src/dlx_lifecycle_funnel.rs"),
-                gate(
-                        GateId::DlxLifecycleFunnel,
-                        "dlx-lifecycle-funnel",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            RuntimeAssemblyResidual => (step_runtime_assembly_residual, Some("xtask/src/runtime_assembly_residual.rs"),
-                gate(
-                        GateId::RuntimeAssemblyResidual,
-                        "runtime-assembly-residual",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            RuntimeRootGuard => (step_runtime_root_guard, Some("xtask/src/runtime_root_guard.rs"),
-                gate(
-                        GateId::RuntimeRootGuard,
-                        "runtime-root-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            RuntimeEnvGuard => (step_runtime_env_guard, Some("xtask/src/runtime_env_guard.rs"),
-                gate(
-                        GateId::RuntimeEnvGuard,
-                        "runtime-env-guard",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            RuntimeDepsGuard => (step_runtime_deps_guard, Some("xtask/src/runtime_deps_guard.rs"),
-                gate(
-                        GateId::RuntimeDepsGuard,
-                        "runtime-deps-guard",
                         META,
                         CompileKind::NoCompile,
                         INTERNAL,
@@ -499,17 +354,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            L2AssuranceCheck => (step_l2_assurance_check, Some("xtask/src/l2_assurance.rs"),
-                gate(
-                        GateId::L2AssuranceCheck,
-                        "l2-assurance-check",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             ProviderCapabilitiesCheck => (step_provider_capabilities_check, Some("xtask/src/provider_capabilities.rs"),
                 gate(
                         GateId::ProviderCapabilitiesCheck,
@@ -519,39 +363,6 @@ macro_rules! gate_catalog {
                         INTERNAL,
                         SOURCE,
                         GatePolicy::OnChange,
-                    )
-            ),
-            LocalTxCoverage => (step_localtx_coverage, Some("xtask/src/localtx_coverage.rs"),
-                gate(
-                        GateId::LocalTxCoverage,
-                        "localtx-coverage",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            LocalOnlyEffects => (step_local_only_effects, Some("xtask/src/consistency_effects.rs"),
-                gate(
-                        GateId::LocalOnlyEffects,
-                        "local-only-effects",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            LocalOnlyExecution => (step_local_only_execution, Some("xtask/src/localonly_evidence.rs"),
-                gate(
-                        GateId::LocalOnlyExecution,
-                        "local-only-execution",
-                        LOCALONLY,
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::RequiredEvidence,
                     )
             ),
             PdpAllowGuard => (step_pdp_allow_guard, Some("xtask/src/pdpallow.rs"),
@@ -893,31 +704,15 @@ impl GateId {
         match self {
             Self::Fmt
             | Self::ContractValidate
-            | Self::AssemblyValidate
             | Self::ContractBreaking
             | Self::LayerDeps
             | Self::WsDepsDrift
             | Self::CiEntryGuard
             | Self::DeferGate => Policy::Always,
 
-            Self::RuntimeRootGuard
-            | Self::RuntimeEnvGuard
-            | Self::RuntimeDepsGuard
-            | Self::EventTransportGuard
-            | Self::DlxLifecycleFunnel
-            | Self::InboxCutoverGuard
+            Self::InboxCutoverGuard
             | Self::OutboxSameIdGuard
             | Self::ReconcileOutboxCommandGuard => Policy::OnImpact(Domain::RuntimeEventing),
-
-            Self::AssemblyModulesCheck | Self::AssemblyProvidersCheck => {
-                Policy::OnImpact(Domain::AssemblyGeneration)
-            }
-
-            Self::AssemblyLockCheck | Self::AssemblyRuntimePlanCheck => Policy::FullOnly,
-
-            Self::ConsistencyFixtures | Self::LocalTxCoverage | Self::LocalOnlyEffects => {
-                Policy::OnImpact(Domain::Consistency)
-            }
 
             Self::SchemaRls
             | Self::PgTenantTxGuard
@@ -930,9 +725,7 @@ impl GateId {
             }
             Self::CommandSymmetry => Policy::OnImpact(Domain::CommandSymmetry),
 
-            Self::RuntimeAssemblyResidual
-            | Self::L2AssuranceCheck
-            | Self::ArchRules
+            Self::ArchRules
             | Self::ProviderCapabilitiesCheck
             | Self::SourceSemanticGuard
             | Self::SagaDurableRecoveryGuard => Policy::FullOnly,
@@ -977,10 +770,6 @@ impl GateSpec {
     pub(crate) fn evidence(self) -> EvidenceKind {
         self.evidence
     }
-    #[cfg(test)]
-    pub(crate) const fn policy(self) -> GatePolicy {
-        self.policy
-    }
     pub(crate) const fn included_in_profile(self, profile: ExecutionProfile) -> bool {
         profile.includes_owner(self.primary_owner())
             && !(profile as u8 == ExecutionProfile::ReleaseCheck as u8
@@ -999,7 +788,6 @@ impl GateSpec {
             (GateExecutor::CorePrerequisite | GateExecutor::CoreTest, _) => {
                 [Some(GateGroup::Core), None]
             }
-            (GateExecutor::RequiredEvidence, _) => [Some(GateGroup::LocalOnly), None],
             (GateExecutor::Coverage, _) => [Some(GateGroup::Coverage), None],
             (GateExecutor::SupplyChain, GatePolicy::AdvisoryRefresh) => {
                 [Some(GateGroup::Audit), None]
@@ -1055,13 +843,11 @@ const fn gate(
 ) -> GateSpec {
     let primary_owner = match policy {
         GatePolicy::ReleaseOnChange | GatePolicy::AdvisoryRefresh => ExecutionProfile::ReleaseCheck,
-        GatePolicy::OnChange | GatePolicy::RequiredEvidence | GatePolicy::Subsumed(_) => {
-            match evidence {
-                EvidenceKind::Test => ExecutionProfile::Test,
-                EvidenceKind::Source | EvidenceKind::SupplyChain => ExecutionProfile::Check,
-                EvidenceKind::Coverage | EvidenceKind::PublicApi => ExecutionProfile::ReleaseCheck,
-            }
-        }
+        GatePolicy::OnChange | GatePolicy::Subsumed(_) => match evidence {
+            EvidenceKind::Test => ExecutionProfile::Test,
+            EvidenceKind::Source | EvidenceKind::SupplyChain => ExecutionProfile::Check,
+            EvidenceKind::Coverage | EvidenceKind::PublicApi => ExecutionProfile::ReleaseCheck,
+        },
     };
     GateSpec {
         id,
@@ -1077,7 +863,6 @@ const fn gate(
 
 const META: GateExecutor = GateExecutor::Metadata;
 const CORE: GateExecutor = GateExecutor::CorePrerequisite;
-const LOCALONLY: GateExecutor = GateExecutor::RequiredEvidence;
 const SOURCE: EvidenceKind = EvidenceKind::Source;
 const INTERNAL: ToolRequirement = ToolRequirement::InProcess;
 macro_rules! define_registry {
@@ -1217,12 +1002,7 @@ const fn executor_const_valid(spec: GateSpec) -> bool {
     match spec.executor {
         GateExecutor::Metadata => {
             matches!(spec.compile, CompileKind::NoCompile)
-                && (spec.primary_owner as u8 == ExecutionProfile::Check as u8
-                    || (matches!(
-                        spec.id,
-                        GateId::AssemblyLockCheck | GateId::AssemblyRuntimePlanCheck
-                    ) && spec.primary_owner as u8 == ExecutionProfile::ReleaseCheck as u8
-                        && matches!(spec.policy, GatePolicy::ReleaseOnChange)))
+                && spec.primary_owner as u8 == ExecutionProfile::Check as u8
         }
         GateExecutor::CoreTest => {
             matches!(spec.tool, ToolRequirement::Nextest)
@@ -1230,10 +1010,6 @@ const fn executor_const_valid(spec: GateSpec) -> bool {
                 && spec.primary_owner as u8 == ExecutionProfile::Test as u8
         }
         GateExecutor::CorePrerequisite => !matches!(spec.tool, ToolRequirement::Nextest),
-        GateExecutor::RequiredEvidence => {
-            matches!(spec.policy, GatePolicy::RequiredEvidence)
-                && spec.primary_owner as u8 == ExecutionProfile::Test as u8
-        }
         GateExecutor::SupplyChain => matches!(spec.evidence, EvidenceKind::SupplyChain),
         GateExecutor::Coverage => {
             matches!(
@@ -1294,7 +1070,6 @@ pub(crate) fn specs_for_lane(lane: GateGroup) -> impl Iterator<Item = &'static G
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     #[test]
     fn fixed_ci_invocation_rejects_every_job_group_mismatch() -> anyhow::Result<()> {
@@ -1341,231 +1116,6 @@ mod tests {
         let component = GateId::ComponentTests.spec();
         assert_eq!(component.executor(), GateExecutor::CoreTest);
         assert_eq!(component.primary_owner(), ExecutionProfile::Test);
-    }
-
-    #[test]
-    fn local_meta_policy_is_an_exact_partition() {
-        let labels = |policy: fn(LocalMetaPolicy) -> bool| {
-            GateId::ALL
-                .iter()
-                .copied()
-                .filter(|id| policy(id.local_meta_policy()))
-                .map(|id| id.spec().label())
-                .collect::<BTreeSet<_>>()
-        };
-        let always = labels(|policy| matches!(policy, LocalMetaPolicy::Always));
-        let affected = labels(|policy| matches!(policy, LocalMetaPolicy::OnImpact(_)));
-        let full_only = labels(|policy| matches!(policy, LocalMetaPolicy::FullOnly));
-
-        assert_eq!(
-            always,
-            BTreeSet::from([
-                "fmt",
-                "contract-validate",
-                "contract-breaking",
-                "assembly-validate",
-                "layer-deps",
-                "wsdeps-drift",
-                "ci-entry-guard",
-                "defer-gate",
-            ])
-        );
-        assert_eq!(
-            affected,
-            BTreeSet::from([
-                "runtime-root-guard",
-                "runtime-env-guard",
-                "runtime-deps-guard",
-                "event-transport-guard",
-                "dlx-lifecycle-funnel",
-                "inbox-cutover-guard",
-                "outbox-same-id-guard",
-                "reconcile-outbox-command-guard",
-                "assembly-modules-check",
-                "assembly-providers-check",
-                "consistency-fixtures",
-                "localtx-coverage",
-                "local-only-effects",
-                "schema-rls",
-                "pg-tenant-tx-guard",
-                "repo-scope-guard",
-                "tenancy-closeout",
-                "pdp-allow-guard",
-                "codegen-check",
-                "contract-binding-guard",
-                "command-symmetry",
-            ])
-        );
-        let on_impact_labels = |domain: LocalImpactDomain| {
-            GateId::ALL
-                .iter()
-                .copied()
-                .filter(|id| matches!(id.local_meta_policy(), LocalMetaPolicy::OnImpact(d) if d == domain))
-                .map(|id| id.spec().label())
-                .collect::<BTreeSet<_>>()
-        };
-        let domain_fixtures: &[(LocalImpactDomain, &[&str])] = &[
-            (
-                LocalImpactDomain::RuntimeEventing,
-                &[
-                    "runtime-root-guard",
-                    "runtime-env-guard",
-                    "runtime-deps-guard",
-                    "event-transport-guard",
-                    "dlx-lifecycle-funnel",
-                    "inbox-cutover-guard",
-                    "outbox-same-id-guard",
-                    "reconcile-outbox-command-guard",
-                ],
-            ),
-            (
-                LocalImpactDomain::AssemblyGeneration,
-                &["assembly-modules-check", "assembly-providers-check"],
-            ),
-            (
-                LocalImpactDomain::Consistency,
-                &[
-                    "consistency-fixtures",
-                    "localtx-coverage",
-                    "local-only-effects",
-                ],
-            ),
-            (
-                LocalImpactDomain::TenancyPostgres,
-                &[
-                    "schema-rls",
-                    "pg-tenant-tx-guard",
-                    "repo-scope-guard",
-                    "tenancy-closeout",
-                ],
-            ),
-            (LocalImpactDomain::Pdp, &["pdp-allow-guard"]),
-            (
-                LocalImpactDomain::ContractBinding,
-                &["codegen-check", "contract-binding-guard"],
-            ),
-            (LocalImpactDomain::CommandSymmetry, &["command-symmetry"]),
-        ];
-        let mut union = BTreeSet::new();
-        for &(domain, expected) in domain_fixtures {
-            let expected: BTreeSet<_> = expected.iter().copied().collect();
-            assert_eq!(on_impact_labels(domain), expected, "{domain:?}");
-            union.extend(expected);
-        }
-        assert_eq!(union, affected);
-        assert_eq!(
-            full_only,
-            BTreeSet::from([
-                "runtime-assembly-residual",
-                "assembly-lock-check",
-                "assembly-runtime-plan-check",
-                "l2-assurance-check",
-                "archrules",
-                "provider-capabilities-check",
-                "source-semantic-guard",
-                "saga-durable-recovery-guard",
-            ])
-        );
-        assert!(
-            !GateId::ALL
-                .iter()
-                .any(|id| id.spec().label() == "setlocal-funnel"),
-            "retired gate label must not exist: setlocal-funnel"
-        );
-
-        for id in GateId::ALL
-            .iter()
-            .copied()
-            .filter(|id| !matches!(id.local_meta_policy(), LocalMetaPolicy::NeverLocal))
-        {
-            let spec = id.spec();
-            assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
-            let expected_owner = if matches!(
-                id,
-                GateId::AssemblyLockCheck | GateId::AssemblyRuntimePlanCheck
-            ) {
-                ExecutionProfile::ReleaseCheck
-            } else {
-                ExecutionProfile::Check
-            };
-            assert_eq!(spec.primary_owner(), expected_owner, "{id:?}");
-            assert_eq!(spec.executor(), GateExecutor::Metadata, "{id:?}");
-        }
-    }
-
-    #[test]
-    fn assembly_drift_gates_are_release_owned_and_not_pr_projected() {
-        for id in [GateId::AssemblyLockCheck, GateId::AssemblyRuntimePlanCheck] {
-            let spec = id.spec();
-            assert_eq!(
-                spec.primary_owner(),
-                ExecutionProfile::ReleaseCheck,
-                "{id:?}"
-            );
-            assert_eq!(spec.policy(), GatePolicy::ReleaseOnChange, "{id:?}");
-            assert_eq!(id.local_meta_policy(), LocalMetaPolicy::FullOnly, "{id:?}");
-            assert!(!spec.included_in_verify(), "{id:?}");
-            assert!(
-                spec.included_in_profile(ExecutionProfile::ReleaseCheck),
-                "{id:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn canonical_profiles_own_every_gate_and_critical_projects_owned_integration_units() {
-        use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
-        use crate::integration_shards::IntegrationUnitId;
-
-        assert!(
-            REGISTRY
-                .iter()
-                .all(|spec| ExecutionProfile::ALL.contains(&spec.primary_owner()))
-        );
-        assert!(REGISTRY.iter().all(|spec| {
-            spec.included_in_profile(ExecutionProfile::ReleaseCheck)
-                || matches!(spec.policy(), GatePolicy::Subsumed(proof) if proof.target().spec().included_in_profile(ExecutionProfile::ReleaseCheck))
-        }));
-        assert!(
-            REGISTRY
-                .iter()
-                .all(|spec| { spec.primary_owner() != ExecutionProfile::IntegrationCritical }),
-            "integration-critical must own only integration units"
-        );
-
-        let critical =
-            ExecutionUnitSpec::project(ExecutionProfile::IntegrationCritical).collect::<Vec<_>>();
-        assert!(!critical.is_empty(), "integration-critical must be active");
-        assert!(critical.iter().all(|unit| matches!(
-            unit,
-            ExecutionUnitSpec::Integration(spec)
-                if spec.primary_owner == ExecutionProfile::IntegrationCritical
-        )));
-
-        let critical_ids = critical
-            .iter()
-            .filter_map(|unit| match unit {
-                ExecutionUnitSpec::Integration(spec) => Some(spec.id),
-                ExecutionUnitSpec::Gate(_) => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let critical_owners = IntegrationUnitId::ALL
-            .into_iter()
-            .filter(|id| id.spec().primary_owner == ExecutionProfile::IntegrationCritical)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(critical_ids, critical_owners);
-        assert!(
-            critical_ids
-                .iter()
-                .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime)
-        );
-        assert!(
-            IntegrationShard::ProductionRuntime
-                .spec()
-                .units
-                .iter()
-                .all(|spec| spec.primary_owner == ExecutionProfile::ReleaseCheck)
-        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // rss_diport_impl_allowlist UI fixture（impl-site **不在** allowlist：example crate 源路径
-// 不含 `adapters` / `bins` / `assemblies` / `composition` 路径段 ⇒ 非 allowlist ⇒ impl provider port 触发）。
+// 不含 `adapters` / `bins` 路径段 ⇒ 非 allowlist ⇒ impl provider port 触发）。
 // golden 见 main.stderr：provider port 触发；lifecycle/non-port/inherent/item-level #[allow] 不触发。
 // 须用真 diport（dev-dep）：lint 按 trait crate identity + 完整 DefPath 匹配，本地 stub trait 无法触发。
 // UI 测试只编译查诊断、不运行；async shutdown body 不会执行。

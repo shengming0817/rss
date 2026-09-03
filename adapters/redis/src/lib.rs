@@ -18,7 +18,7 @@ mod cas;
 mod lock;
 #[cfg(feature = "backend")]
 mod rate_limit;
-#[cfg(feature = "fault-matrix-test-support")]
+#[cfg(feature = "integration")]
 mod saga_effect_fixture;
 
 #[cfg(feature = "backend")]
@@ -31,7 +31,7 @@ pub use rate_limit::{
     InvalidRateLimitNamespace, RedisRateLimitCapabilityError, RedisRateLimiter,
     RedisRateLimiterCapability,
 };
-#[cfg(feature = "fault-matrix-test-support")]
+#[cfg(feature = "integration")]
 pub use saga_effect_fixture::{
     RedisSagaEffectApplyOutcome, RedisSagaEffectError, RedisSagaEffectFixture,
     RedisSagaEffectObservation, RedisSagaEffectProbeOutcome,

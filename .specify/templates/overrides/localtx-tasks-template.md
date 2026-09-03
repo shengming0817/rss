@@ -2,7 +2,7 @@
 
 This override is a planning entry point. Correctness adoption is always applicable; GA maturity
 work is conditional. The manifest/codegen/typed route carriers are Hard, while cross-file backend
-and journey carriers are Medium. Completing a box does not replace those enforcement carriers.
+carriers are Medium. Completing a box does not replace those enforcement carriers.
 
 ## Correctness adoption
 
@@ -10,7 +10,6 @@ and journey carriers are Medium. Completing a box does not replace those enforce
 - [ ] [LOCALTX-CODEGEN] Run `cargo xtask codegen --check` and confirm the contract is derived into `generated::http::LOCAL_TX_SPECS`.
 - [ ] [LOCALTX-ROUTE-TEST] Bind a production handler whose first extractor is `ContractMarker<RouteMarker>` and place exactly one absolute `::vocab::HttpRouteBinding<::generated::http::<route>::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::<route>::ROUTE` in a real owner test.
 - [ ] [LOCALTX-BACKEND] Enroll one canonical `LOCALTX_BACKEND_PROFILE_` per provider + fixture and close every txModel-required probe without cross-fixture aggregation.
-- [ ] [LOCALTX-JOURNEY] Add the exact active entry to `journeys/status-board.toml`; its runner Cargo target keeps `required-features = ["integration"]`.
 - [ ] [LOCALTX-DIAGNOSIS] Close minimum T1/T2 transaction accounting and typed diagnostic metrics/probes.
 
 ## GA maturity work (conditional)

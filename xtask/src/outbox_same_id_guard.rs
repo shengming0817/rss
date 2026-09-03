@@ -15,8 +15,77 @@ use syn::spanned::Spanned as _;
 use syn::visit::Visit as _;
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
-use crate::event_transport_guard::parse_outbox_callable_catalog;
 use crate::workspace_root;
+
+fn parse_outbox_callable_catalog(source: &str) -> BTreeMap<String, String> {
+    use proc_macro2::{Delimiter, TokenTree};
+
+    let Ok(file) = syn::parse_file(source) else {
+        return BTreeMap::new();
+    };
+    let Some(invocation) = file.items.iter().find_map(|item| match item {
+        syn::Item::Macro(item)
+            if item
+                .mac
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "outbox_routine_catalog") =>
+        {
+            Some(&item.mac)
+        }
+        _ => None,
+    }) else {
+        return BTreeMap::new();
+    };
+    let tokens = invocation.tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut catalog = BTreeMap::new();
+    for index in 0..tokens.len().saturating_sub(1) {
+        let TokenTree::Ident(section) = &tokens[index] else {
+            continue;
+        };
+        if section != "serving" && section != "operator" {
+            continue;
+        }
+        let TokenTree::Group(entries) = &tokens[index + 1] else {
+            continue;
+        };
+        if entries.delimiter() != Delimiter::Brace {
+            continue;
+        }
+        let entries = entries.stream().into_iter().collect::<Vec<_>>();
+        for entry_index in 0..entries.len().saturating_sub(2) {
+            let (TokenTree::Ident(variant), TokenTree::Punct(eq), TokenTree::Punct(gt)) = (
+                &entries[entry_index],
+                &entries[entry_index + 1],
+                &entries[entry_index + 2],
+            ) else {
+                continue;
+            };
+            if eq.as_char() != '=' || gt.as_char() != '>' {
+                continue;
+            }
+            let Some(TokenTree::Group(fields)) = entries.get(entry_index + 3) else {
+                continue;
+            };
+            let fields = fields.stream().into_iter().collect::<Vec<_>>();
+            for field_index in 0..fields.len().saturating_sub(2) {
+                let (TokenTree::Ident(label), TokenTree::Punct(colon), TokenTree::Ident(function)) = (
+                    &fields[field_index],
+                    &fields[field_index + 1],
+                    &fields[field_index + 2],
+                ) else {
+                    continue;
+                };
+                if label == "function" && colon.as_char() == ':' {
+                    catalog.insert(variant.to_string(), function.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    catalog
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -193,35 +262,6 @@ const CARRIERS: &[Carrier] = &[
             "once the frozen receipt retention window is swept, the same key is Fresh again",
         ],
     },
-    Carrier {
-        path: "lints/rss_operator_authorization_callsite/src/lib.rs",
-        purpose: "action authorization issuance remains at the exact runtime mint funnel",
-        anchors: &[
-            "source_crate: \"diport\"",
-            "self_type: \"DlqOperatorAuthorization\"",
-            "method: \"issue\"",
-            "item_name: \"issue_dlq_authorization\"",
-            "caller_module_path(cx, parent)",
-        ],
-    },
-    Carrier {
-        path: "lints/rss_operator_authorization_callsite/ui/runtime.rs",
-        purpose: "UI red/green locks the exact runtime wrapper and rejects direct or nested forgery",
-        anchors: &[
-            "fn issue_dlq_authorization<A: diport::DlqOperatorAction>()",
-            "diport::DlqOperatorAuthorization::issue(",
-            "dlqauthmint::DlqOperatorMint::capability()",
-            "mod nested_runtime_module",
-        ],
-    },
-    Carrier {
-        path: "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
-        purpose: "UI golden proves both direct and same-named nested runtime calls are rejected",
-        anchors: &[
-            "operator capability `DlqOperatorAuthorization::issue`",
-            "不要直接调用或保存 constructor 函数项",
-        ],
-    },
 ];
 
 const ORDERED_SEQUENCES: &[(&str, &[&str])] = &[
@@ -273,14 +313,6 @@ fn scan_workspace(root: &Path) -> Result<Vec<Finding<Rule>>> {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("outbox-same-id-guard: read {}", path.display()))?;
         sources.insert(carrier.path.to_owned(), content);
-    }
-    for relative in [RESOLUTION_REQUEST_PATH, RESOLUTION_OPERATOR_PATH] {
-        let path = root.join(relative);
-        sources.insert(
-            relative.to_owned(),
-            std::fs::read_to_string(&path)
-                .with_context(|| format!("outbox-same-id-guard: read {}", path.display()))?,
-        );
     }
     collect_postgres_production_sources(root, &root.join("adapters/postgres/src"), &mut sources)?;
     Ok(scan_sources(&sources))
@@ -377,13 +409,10 @@ fn scan_sources(sources: &BTreeMap<String, String>) -> Vec<Finding<Rule>> {
         }
     }
     scan_expired_resolution_topology(sources, &mut findings);
-    scan_operator_resolution_chain(sources, &mut findings);
     findings
 }
 
 const EVENTING_FACADE_PATH: &str = "adapters/postgres/src/cotx/eventing.rs";
-const RESOLUTION_REQUEST_PATH: &str = "crates/eventexec/src/dlq.rs";
-const RESOLUTION_OPERATOR_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
 #[cfg(test)]
 const RESOLUTION_SQL: &str = "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)";
 
@@ -639,110 +668,6 @@ fn resolution_query_binds(expression: &syn::Expr) -> Option<Vec<String>> {
     }
 }
 
-fn scan_operator_resolution_chain(
-    sources: &BTreeMap<String, String>,
-    findings: &mut Vec<Finding<Rule>>,
-) {
-    let request_ok = sources
-        .get(RESOLUTION_REQUEST_PATH)
-        .and_then(|source| syn::parse_file(source).ok())
-        .is_some_and(|file| {
-            file.items.iter().any(|item| {
-                let syn::Item::Struct(item) = item else {
-                    return false;
-                };
-                item.ident == "OutboxExpiredResolutionRequest" && item.fields.iter().any(|field| {
-                    field
-                        .ident
-                        .as_ref()
-                        .is_some_and(|ident| ident == "authorization")
-                        && matches!(field.vis, syn::Visibility::Inherited)
-                        && token_key(&field.ty)
-                            == "DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>"
-                })
-            })
-        });
-    if !request_ok {
-        findings.push(finding(
-            Rule::MissingSemanticAnchor,
-            RESOLUTION_REQUEST_PATH,
-            "expired-resolution request must privately own the action-specific operator authorization",
-        ));
-    }
-
-    let operator_ok = sources
-        .get(RESOLUTION_OPERATOR_PATH)
-        .and_then(|source| syn::parse_file(source).ok())
-        .is_some_and(|file| {
-            let mut resolve_arm = false;
-            let mut mint = false;
-            let mut calls = OperatorResolutionCalls::default();
-            calls.visit_file(&file);
-            for item in &file.items {
-                let syn::Item::Fn(function) = item else {
-                    continue;
-                };
-                let body = token_key(&function.block);
-                if function.sig.ident == "issue_dlq_authorization" {
-                    mint = body.contains("DlqOperatorAuthorization::issue(")
-                        && token_key(&function.sig.generics)
-                            .contains("A:diport::DlqOperatorAction");
-                }
-                for statement in &function.block.stmts {
-                    let tokens = token_key(statement);
-                    if tokens.contains("DlqCliCommand::ResolveExpiredOutbox{") {
-                        resolve_arm |= tokens.contains(
-                            "issue_dlq_authorization::<dlq_operator_action::ResolveExpiredOutbox>(",
-                        ) && tokens.contains(
-                            "finish_audit_context::<dlq_operator_action::ResolveExpiredOutbox>(",
-                        ) && tokens
-                            .contains("OutboxExpiredResolutionRequest::accepted_gap(")
-                            && tokens.contains("OutboxExpiredResolutionRequest::compensated(")
-                            && tokens.contains("AuthorizedDlqRequest::Resolve(request)");
-                    }
-                }
-            }
-            if !(resolve_arm && mint && calls.principal && calls.dispatch) {
-                return false;
-            }
-            true
-        });
-    if !operator_ok {
-        findings.push(finding(
-            Rule::MissingSemanticAnchor,
-            RESOLUTION_OPERATOR_PATH,
-            "operator resolution must join principal authentication, action-specific mint, finish audit, typed request construction and dispatch",
-        ));
-    }
-}
-
-#[derive(Default)]
-struct OperatorResolutionCalls {
-    principal: bool,
-    dispatch: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for OperatorResolutionCalls {
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(function) = call.func.as_ref()
-            && let Some(name) = function.path.segments.last()
-        {
-            self.principal |= name.ident == "authorize_dlq_operator_principal";
-            self.dispatch |= name.ident == "authorize_dlq_command";
-        }
-        syn::visit::visit_expr_call(self, call);
-    }
-}
-
-fn token_key(tokens: &impl ToTokens) -> String {
-    tokens
-        .to_token_stream()
-        .to_string()
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -797,30 +722,6 @@ impl EventingTx<'_, MaintenanceWriteLane, DlqConcern> {
         .fetch_one(&mut *self.conn)
         .await
     }
-}
-"#
-            .to_owned(),
-        );
-        sources.insert(
-            RESOLUTION_REQUEST_PATH.to_owned(),
-            "pub struct OutboxExpiredResolutionRequest { authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox> }".to_owned(),
-        );
-        sources.insert(
-            RESOLUTION_OPERATOR_PATH.to_owned(),
-            r#"
-fn issue_dlq_authorization<A: diport::DlqOperatorAction>() { DlqOperatorAuthorization::issue(); }
-fn run() {
-    authorize_dlq_operator_principal();
-    authorize_dlq_command();
-    let value = match command {
-        DlqCliCommand::ResolveExpiredOutbox { event_id } => {
-            issue_dlq_authorization::<dlq_operator_action::ResolveExpiredOutbox>();
-            finish_audit_context::<dlq_operator_action::ResolveExpiredOutbox>();
-            OutboxExpiredResolutionRequest::accepted_gap();
-            OutboxExpiredResolutionRequest::compensated();
-            AuthorizedDlqRequest::Resolve(request)
-        }
-    };
 }
 "#
             .to_owned(),
@@ -961,7 +862,7 @@ fn run() {
     }
 
     #[test]
-    fn scan_rejects_resolution_alias_macro_and_operator_chain_breaks() -> Result<()> {
+    fn scan_rejects_resolution_alias_macro() -> Result<()> {
         for mutation in [
             "use self::DlqCallableRoutine as Routine;",
             "macro_rules! bypass { () => { DlqCallableRoutine::ResolveExpired.sql() } }",
@@ -974,18 +875,6 @@ fn run() {
             assert!(!scan_sources(&sources).is_empty(), "must reject {mutation}");
         }
 
-        for path in [RESOLUTION_REQUEST_PATH, RESOLUTION_OPERATOR_PATH] {
-            let mut sources = complete_sources();
-            *sources
-                .get_mut(path)
-                .with_context(|| format!("consumer fixture `{path}` must exist"))? =
-                "fn detached() {}".to_owned();
-            assert!(
-                scan_sources(&sources)
-                    .iter()
-                    .any(|finding| finding.subject == path)
-            );
-        }
         Ok(())
     }
 

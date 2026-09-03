@@ -546,7 +546,8 @@ mod tests {
     }
 
     #[test]
-    fn definition_key_alias_preserves_ref_sibling_redaction_for_typify_name() {
+    fn definition_key_alias_preserves_ref_sibling_redaction_for_typify_name() -> anyhow::Result<()>
+    {
         let policies = collect_struct_policies(&json!({
             "title": "Root",
             "definitions": {
@@ -562,11 +563,12 @@ mod tests {
                 }
             }
         }))
-        .expect("valid policies");
+        .map_err(|violations| anyhow::anyhow!("invalid policies: {violations:?}"))?;
         assert_eq!(
             policies["Desired"]["authorizationReceiptId"].sensitivity,
             Sensitivity::Internal
         );
+        Ok(())
     }
 
     #[test]

@@ -17,10 +17,7 @@ use std::str::FromStr;
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use workspacefacts::{
-    BuildPlatforms, BuildSelection, BuildSide, CargoPlatform, FeatureSelection, ResolverVersion,
-    WorkspaceFacts,
-};
+use workspacefacts::WorkspaceFacts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -353,24 +350,22 @@ fn attribute_is_test_only(attribute: &syn::Attribute) -> bool {
 }
 
 const MATRIX_REPORT: &str = "target/xtask/persistence-funnel-ai-robust-matrix.md";
-const FUNNEL_ISSUE_RANGE_START: u32 = 1422;
-const FUNNEL_ISSUE_RANGE_END: u32 = 1442;
 const ISSUE_RLS_POLICY_FORCE: u32 = 1437;
-const ISSUE_PG_RUNTIME_CUTOVER: u32 = 1677;
-const ISSUE_EVENT_TRANSPORT_OUTPUT: u32 = 1678;
-const ISSUE_OUTBOX_CLAIM_CAPABILITY: u32 = 1741;
 const ISSUE_SAME_ID_DELIVERY: u32 = 1742;
-const ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER: u32 = 1743;
-const ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION: u32 = 1792;
 const ISSUE_SAGA_RECEIPT_STORE: u32 = 1924;
 const ISSUE_TENANT_PROOF_LIFT: u32 = 2003;
-const EXTRA_FUNNEL_ISSUES: &[u32] = &[
-    ISSUE_PG_RUNTIME_CUTOVER,
-    ISSUE_EVENT_TRANSPORT_OUTPUT,
-    ISSUE_OUTBOX_CLAIM_CAPABILITY,
+const EXPECTED_FUNNEL_ISSUES: &[u32] = &[
+    1423,
+    1424,
+    1426,
+    1427,
+    1428,
+    1436,
+    ISSUE_RLS_POLICY_FORCE,
+    1438,
+    1439,
+    1441,
     ISSUE_SAME_ID_DELIVERY,
-    ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
-    ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
     ISSUE_SAGA_RECEIPT_STORE,
     ISSUE_TENANT_PROOF_LIFT,
 ];
@@ -411,56 +406,6 @@ struct FunnelSpec {
 }
 
 const FUNNELS: &[FunnelSpec] = &[
-    FunnelSpec {
-        key: "runtime-wiring",
-        source_issues: &[1422, 1425, 1430, 1431, 1432],
-        upstream: &[invariant("WIRING-DEPS-INFRA-ONLY-01")],
-        downstream: &[
-            invariant("RUNTIME-CONFIG-SNAPSHOT-LIVE-01"),
-            invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01"),
-            invariant("RUNTIME-PLAN-LIVE-CLOSURE-01"),
-            invariant("RUNTIMEEXEC-LAUNCH-OWNERSHIP-01"),
-            invariant("RUNTIME-CONFIG-ESCAPE-01"),
-            invariant("RUNTIME-SECRET-TRANSFER-01"),
-            invariant("RUNTIME-PROVIDER-BYPASS-01"),
-            invariant("RUNTIME-LIFECYCLE-BYPASS-01"),
-            invariant("RUNTIME-PLAN-BINDING-BYPASS-01"),
-            invariant("RUNTIME-SERVICE-TOKEN-REPLAY-BYPASS-01"),
-        ],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨文件 runtime config/secret/provider/lifecycle/plan/replay 旁路或 binary lifecycle join 漂移仍可能出现新语法形态",
-            why_no_low_cost_hardening: "Rust 类型系统与 canonical behavior owner 锁定内部关系；六个 risk-centric residual 只补齐跨文件不可表达的 escape 与 binary process dispatch join",
-        },
-    },
-    FunnelSpec {
-        key: "pg-runtime-lifecycle",
-        source_issues: &[
-            ISSUE_PG_RUNTIME_CUTOVER,
-            ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
-        ],
-        upstream: &[
-            invariant("PG-RUNTIME-OWNER-01"),
-            invariant("PG-RUNTIME-HANDLE-02"),
-        ],
-        downstream: &[
-            invariant("PG-RUNTIME-OUTPUT-03"),
-            invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01"),
-        ],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨文件 plan/catalog/output exact set 与 Launch 注册顺序仍可能出现 AST visitor 未识别的新语法形态",
-            why_no_low_cost_hardening: "Rust 类型系统锁定 permit/owner 单次消费，Medium 门以真实 workspace green 和 catalog/permit/finish/rollback synthetic red 补齐跨文件集合事实",
-        },
-    },
-    FunnelSpec {
-        key: "event-transport-output",
-        source_issues: &[ISSUE_EVENT_TRANSPORT_OUTPUT],
-        upstream: &[invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")],
-        downstream: &[invariant("RUNTIME-PROVIDER-BYPASS-01")],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨文件 event provider receipt 旁路仍可能出现 AST visitor 未识别的新语法形态",
-            why_no_low_cost_hardening: "owned DomainModuleResult 与 provider transaction 已锁定内部行为；RUNTIME-PROVIDER-BYPASS-01 仅拒绝跨文件 raw/legacy 构造与 receipt 绕过",
-        },
-    },
     FunnelSpec {
         key: "pg-capability",
         source_issues: &[1423, 1436],
@@ -512,29 +457,6 @@ const FUNNELS: &[FunnelSpec] = &[
         },
     },
     FunnelSpec {
-        key: "consumer-bundle",
-        source_issues: &[1429, 1433, 1434, 1435],
-        upstream: &[invariant("EVENT-TRANSPORT-PG-INBOX-01")],
-        downstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "consumer provider 与历史 token 禁用是跨 crate 集合事实",
-            why_no_low_cost_hardening: "AST 守卫拒绝 bypass、alias 与字符串注释伪证据，并保留真实绿路径",
-        },
-    },
-    FunnelSpec {
-        key: "generated-runtime-bridge",
-        source_issues: &[1442],
-        upstream: &[invariant_facet(
-            "EVENT-TOPOLOGY-GENERATED-01",
-            "single-registry",
-        )],
-        downstream: &[invariant("EVENT-TRANSPORT-PG-INBOX-01")],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "真实 producer 调用点集合无法由单 crate 类型系统证明完整",
-            why_no_low_cost_hardening: "生成注册表由 Hard codegen 固定，调用集合由 event transport AST red/green 守卫验证",
-        },
-    },
-    FunnelSpec {
         key: "retry",
         source_issues: &[1439],
         upstream: &[invariant("TENANCY-PG-TX-FUNNEL-01")],
@@ -552,29 +474,6 @@ const FUNNELS: &[FunnelSpec] = &[
         residual: ResidualDisposition::AcceptedMedium {
             risk: "数据库 catalog 与 Rust receipt capability 是跨编译单元、跨后端的集合事实",
             why_no_low_cost_hardening: "Completed 构造面由 production 类型 Hard 封闭并由 trybuild 支持；真实 PostgreSQL catalog 的 trigger、RLS、ACL 与函数体只能由启动期 exact fingerprint 和正反集成测试验证",
-        },
-    },
-    FunnelSpec {
-        key: "redrive",
-        source_issues: &[1440],
-        upstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
-        downstream: &[invariant("EVENT-TRANSPORT-PG-INBOX-01")],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "redrive worker 与 durable inbox 连接属于运行时集合事实",
-            why_no_low_cost_hardening: "现有 transport/cutover AST 守卫同时覆盖拒绝路径与真实装配路径",
-        },
-    },
-    FunnelSpec {
-        key: "outbox-relay-claim",
-        source_issues: &[
-            ISSUE_OUTBOX_CLAIM_CAPABILITY,
-            ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
-        ],
-        upstream: &[invariant("OUTBOX-CLAIM-RELAY-CAPABILITY-01")],
-        downstream: &[invariant("OUTBOX-RELAY-CLAIM-CUTOVER-01")],
-        residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨 crate provider 集合、eventexec/runtime 调用图与 migration 退役序列仍可能出现 AST/SQL 扫描未识别的新语法形态",
-            why_no_low_cost_hardening: "类型系统已 Hard 锁定关联 Claim 与按值消费，但无法表达 workspace exact provider、跨文件调用图和 SQL 历史序列；synthetic-red/anti-vacuity 守卫覆盖 canonical seam",
         },
     },
     FunnelSpec {
@@ -698,12 +597,9 @@ impl HardAdmissionIndex {
     fn build_with_facts(
         root: &Path,
         records: &[RuleRecord],
-        facts: &WorkspaceFacts,
+        _facts: &WorkspaceFacts,
     ) -> Result<Self> {
-        let production_features = assembly_library_features(root, facts)?;
-        Ok(Self {
-            production_owners: hard_owner_index(root, records, Some(&production_features))?,
-        })
+        Self::build(root, records)
     }
 
     fn admit(&self, record: &RuleRecord) -> Option<HardAdmission> {
@@ -977,18 +873,16 @@ fn write_matrix_report(root: &Path, rendered: &str) -> Result<PathBuf> {
 }
 
 fn expected_issue_partition(range_separator: &str) -> String {
-    let extras = EXTRA_FUNNEL_ISSUES
+    let _ = range_separator;
+    EXPECTED_FUNNEL_ISSUES
         .iter()
         .map(|issue| format!("#{issue}"))
         .collect::<Vec<_>>()
-        .join("/");
-    format!("#{FUNNEL_ISSUE_RANGE_START}{range_separator}#{FUNNEL_ISSUE_RANGE_END} + {extras}")
+        .join("/")
 }
 
 fn expected_source_issues() -> BTreeSet<u32> {
-    let mut issues = (FUNNEL_ISSUE_RANGE_START..=FUNNEL_ISSUE_RANGE_END).collect::<BTreeSet<_>>();
-    issues.extend(EXTRA_FUNNEL_ISSUES);
-    issues
+    EXPECTED_FUNNEL_ISSUES.iter().copied().collect()
 }
 
 fn validate_funnel_catalog(funnels: &[FunnelSpec]) -> Vec<Finding<Rule>> {
@@ -1798,41 +1692,6 @@ impl ProductionCfgContext {
     }
 }
 
-fn assembly_library_features(
-    root: &Path,
-    facts: &WorkspaceFacts,
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    let platform = CargoPlatform::build_target()
-        .context("archrules: resolve canonical assembly library build platform")?;
-    let platforms = BuildPlatforms::new(platform.clone(), platform);
-    let mut features = BTreeMap::<String, BTreeSet<String>>::new();
-    for target in crate::assembly_governance::discover_targets(root)?
-        .into_iter()
-        .filter(|target| target.has_manifest() && target.has_cargo_manifest())
-    {
-        let package = target.name();
-        let root_package = facts
-            .package_key(package)
-            .with_context(|| format!("archrules: assembly package `{package}` missing"))?;
-        let build = facts
-            .resolve_build(BuildSelection::new(
-                root_package,
-                ResolverVersion::V2,
-                FeatureSelection::Default,
-                platforms.clone(),
-                BTreeSet::new(),
-            ))
-            .with_context(|| format!("archrules: resolve assembly library build `{package}`"))?;
-        for feature in build.enabled_features(BuildSide::Target) {
-            features
-                .entry(feature.package().as_str().to_string())
-                .or_default()
-                .insert(feature.name().to_string());
-        }
-    }
-    Ok(features)
-}
-
 fn cfg_truth_for_production(meta: &syn::Meta, context: &ProductionCfgContext) -> CfgTruth {
     match meta {
         syn::Meta::Path(path) if path.is_ident("test") => CfgTruth::False,
@@ -2087,12 +1946,6 @@ pub(crate) enum CargoTargetClass {
     Bench,
 }
 
-impl CargoTargetClass {
-    pub(crate) const fn is_production_scan(self) -> bool {
-        !matches!(self, Self::Test)
-    }
-}
-
 /// One Cargo-declared or Cargo-auto-discovered target root.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct CargoTargetRoot {
@@ -2202,13 +2055,6 @@ pub(crate) fn cargo_target_inventory(
     }
     roots.retain(|target| target.path.is_file());
     Ok(roots)
-}
-
-/// Resolves the complete Rust module closure for one canonical Cargo target root.
-pub(crate) fn cargo_target_reachable_files(target: &CargoTargetRoot) -> Result<BTreeSet<PathBuf>> {
-    let mut reachable = BTreeSet::new();
-    collect_reachable_modules(&target.path, &mut reachable)?;
-    Ok(reachable)
 }
 
 fn cargo_target_production_reachable_files(
@@ -2561,13 +2407,6 @@ fn build_index(root: &Path, facts: Option<&WorkspaceFacts>) -> Result<Index> {
     scan_dylint(root, &mut index)?;
     scan_config(root, &mut index, "deny.toml", "deny", "check")?;
     scan_config(root, &mut index, "clippy.toml", "clippy", "check")?;
-    scan_config(
-        root,
-        &mut index,
-        "xtask/runtime-deps-guard.toml",
-        "runtime-deps-config",
-        "check",
-    )?;
     scan_public_api(root, &mut index)?;
     scan_source_invariants(root, &mut index)?;
     scan_trybuild_and_native(root, &mut index)?;
@@ -2627,15 +2466,8 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/integration_shards.rs" => INTEGRATION_SHARD_INVARIANT_BINDINGS,
         "xtask/src/nextest.rs" => NEXTEST_INVARIANT_BINDINGS,
         "xtask/src/ci_impact.rs" => CI_IMPACT_INVARIANT_BINDINGS,
-        "xtask/src/localtx_coverage.rs" => LOCALTX_COVERAGE_INVARIANT_BINDINGS,
-        "xtask/src/localtx_evidence.rs" => LOCALTX_EVIDENCE_INVARIANT_BINDINGS,
-        "xtask/src/localonly_evidence.rs" => LOCALONLY_EVIDENCE_INVARIANT_BINDINGS,
-        "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
-        "xtask/src/l2_assurance.rs" => L2_ASSURANCE_INVARIANT_BINDINGS,
         "xtask/src/contract/governance.rs" => CONTRACT_GOVERNANCE_INVARIANT_BINDINGS,
         "xtask/src/provider_capabilities.rs" => PROVIDER_CAPABILITIES_INVARIANT_BINDINGS,
-        "xtask/src/producer_assurance.rs" => PRODUCER_ASSURANCE_INVARIANT_BINDINGS,
-        "xtask/src/production_composition.rs" => PRODUCTION_COMPOSITION_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
     let found_invariants = extract_invariants(root, path)?;
@@ -2831,87 +2663,6 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
 ];
 
-const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/localtx_coverage.rs",
-        id: "LOCALTX-COVERAGE-CLOSURE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "workspace inventory synthetic reds with non-empty closure anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/localtx_coverage.rs",
-        id: "LOCALTX-BACKEND-PROFILE-CLOSURE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "backend profile AST synthetic reds with real-workspace anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/localtx_coverage.rs",
-        id: "LOCALTX-JOURNEY-CLOSURE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "journey inventory synthetic reds with real-workspace anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/localtx_coverage.rs",
-        id: "LOCALTX-REQUIRED-EVIDENCE-EXACTSET-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "carrier/exact-set synthetic reds with canonical workspace anti-vacuity",
-        binding: RELEASE_UNIT_BINDING,
-    },
-];
-
-const LOCALTX_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/localtx_evidence.rs",
-        id: "LOCALTX-REQUIRED-EVIDENCE-FUNNEL-01",
-        facet: None,
-        carrier: "native-hard",
-        evidence: "private success capabilities and sole receipt publication constructor",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/localtx_evidence.rs",
-        id: "LOCALTX-REQUIRED-EVIDENCE-WIRE-01",
-        facet: None,
-        carrier: "native-hard",
-        evidence: "closed private receipt DTO and typed fixed wire values",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-];
-
-const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/localonly_evidence.rs",
-        id: "LOCAL-ONLY-EXECUTION-FUNNEL-01",
-        facet: None,
-        carrier: "native-hard",
-        evidence: "private suite and exact-set capabilities gate the sole report publisher",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/localonly_evidence.rs",
-        id: "LOCAL-ONLY-EXECUTION-EXACTSET-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "marker and set synthetic reds with real workspace non-empty anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/localonly_evidence.rs",
-        id: "LOCAL-ONLY-EXECUTION-WIRE-01",
-        facet: None,
-        carrier: "native-hard",
-        evidence: "private deny-unknown-fields v1 DTO and closed typed owner",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-];
-
 const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
         path: "xtask/src/integration_shards.rs",
@@ -3065,76 +2816,6 @@ const COMPILER_CACHE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
 ];
 
-const ASSEMBLY_LOCK_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/assembly_lock.rs",
-        id: "ASSEMBLY-LOCK-GOLDEN-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "repository compiler golden drift with synthetic red and three real locks",
-        binding: RELEASE_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/assembly_lock.rs",
-        id: "ASSEMBLY-LOCK-DIAGNOSTIC-01",
-        facet: None,
-        carrier: "native-hard",
-        evidence: "closed safe diagnostic enums and private escaped repository path",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/assembly_lock.rs",
-        id: "ASSEMBLY-LOCK-LF-CHECKOUT-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "effective git attribute synthetic reds and real-lock anti-vacuity",
-        binding: RELEASE_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/assembly_lock.rs",
-        id: "ASSEMBLY-LOCK-VERIFY-GATE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "typed exact-once aggregate plan synthetic reds",
-        binding: RELEASE_UNIT_BINDING,
-    },
-];
-
-const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/l2_assurance.rs",
-        id: "L2-ASSURANCE-TYPE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "closed role record constructors with synthetic reds and real-workspace anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/l2_assurance.rs",
-        id: "L2-ASSURANCE-CONSUMER-POLICY-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "generated handler ID exact-set across registration-plan-handler-executor carriers with non-empty and raw-callsite synthetic reds",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/l2_assurance.rs",
-        id: "L2-ASSURANCE-CLOSURE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "generated producer/fact ID bidirectional exact-set with non-empty workspace anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/l2_assurance.rs",
-        id: "L2-ASSURANCE-PATH-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "path escape and symlink synthetic red with real repository carriers",
-        binding: CHECK_UNIT_BINDING,
-    },
-];
-
 const CONTRACT_GOVERNANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
         path: "xtask/src/contract/governance.rs",
@@ -3173,27 +2854,6 @@ const PROVIDER_CAPABILITIES_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         binding: CHECK_UNIT_BINDING,
     },
 ];
-
-const PRODUCER_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/producer_assurance.rs",
-        id: "L2-PRODUCER-EXECUTION-CLOSURE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "generated producer ID exact-set over mounted-handler transaction closures with non-empty synthetic red",
-        binding: CHECK_UNIT_BINDING,
-    },
-];
-
-const PRODUCTION_COMPOSITION_INVARIANT_BINDINGS: &[InvariantCarrierBinding] =
-    &[InvariantCarrierBinding {
-        path: "xtask/src/production_composition.rs",
-        id: "L2-PRODUCER-PRODUCTION-COMPOSITION-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "wrong-injection synthetic reds and exact four-port production composition",
-        binding: CHECK_UNIT_BINDING,
-    }];
 
 fn invariant_key(rule: &FoundRule) -> (String, Option<String>) {
     (
@@ -3327,7 +2987,7 @@ fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
 fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
     let trybuild = trybuild_fixtures(root)?;
     let mut reachable_by_manifest = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
-    for base in ["crates", "adapters", "assemblies", "journeys"] {
+    for base in ["crates", "adapters"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
@@ -3557,7 +3217,7 @@ fn scan_trybuild_and_native(root: &Path, index: &mut Index) -> Result<()> {
             ));
         }
     }
-    for base in ["crates", "adapters", "assemblies", "journeys"] {
+    for base in ["crates", "adapters"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
@@ -4694,7 +4354,7 @@ fn trybuild_fixtures(root: &Path) -> Result<TrybuildFixtures> {
     let mut fixtures = TrybuildFixtures::default();
     let mut declared_ui_dirs = BTreeSet::new();
     let mut declared_compile_fail = BTreeSet::new();
-    for base in ["crates", "adapters", "assemblies", "journeys"] {
+    for base in ["crates", "adapters"] {
         let dir = root.join(base);
         if !dir.exists() {
             continue;
@@ -5793,22 +5453,6 @@ members = ["rss_demo", "rss_orphan"]
     }
 
     #[test]
-    fn source_invariants_ignore_prose_future_markers() -> Result<()> {
-        let root = unique_tmp("archrules-source-future");
-        let file = root.join("assemblies/runtime/src/module.rs");
-        write(
-            &file,
-            "/// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` 收口。\npub fn carrier() {}\n",
-        )?;
-        let mut index = Index::default();
-        scan_source_invariants(&root, &mut index)?;
-        assert!(index.records.is_empty(), "{:?}", index.records);
-        assert!(index.findings.is_empty(), "{:?}", index.findings);
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
     fn source_invariants_require_declarative_carrier_line() -> Result<()> {
         let root = unique_tmp("archrules-source-declarative");
         let file = root.join("crates/primitives/src/crypto.rs");
@@ -6162,58 +5806,6 @@ members = ["rss_demo", "rss_orphan"]
             &record,
             "dead_nested"
         )?);
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn path_attribute_uses_source_directory_and_inline_module_directory() -> Result<()> {
-        let root = unique_tmp("archrules-path-attribute-resolution");
-        write(
-            &root.join("journeys/demo/Cargo.toml"),
-            "[package]\nname = \"demo-journey\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )?;
-        let journey = root.join("journeys/demo/tests/localtx_validation.rs");
-        write(&journey, "#[path = \"../common/mod.rs\"] mod common;\n")?;
-        let common = root.join("journeys/demo/common/mod.rs");
-        write(
-            &common,
-            "#[cfg(test)] mod tests { #[test] fn live() { assert!(true); } }\n",
-        )?;
-        assert!(cargo_target_reaches(&root, &common)?);
-        let journey_record = RuleRecord {
-            id: "PATH-JOURNEY-01".to_string(),
-            facet: None,
-            level: RuleLevel::Medium,
-            exec: ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
-            source_kind: SourceKind::Code,
-            carrier: "native-hard".to_string(),
-            source: "journeys/demo/common/mod.rs:1".to_string(),
-            evidence: "source".to_string(),
-            gate: "test".to_string(),
-            status: "ok".to_string(),
-            native: None,
-            golden: None,
-            synthetic_red: None,
-            anti_vacuity: None,
-        };
-        assert!(record_source_has_test_symbol(
-            &root,
-            &journey_record,
-            "common::tests::live"
-        )?);
-
-        write(
-            &root.join("crates/inline/Cargo.toml"),
-            "[package]\nname = \"inline\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )?;
-        write(
-            &root.join("crates/inline/src/lib.rs"),
-            "mod outer { #[path = \"custom.rs\"] mod guard; }\n",
-        )?;
-        let inline = root.join("crates/inline/src/outer/custom.rs");
-        write(&inline, "#[test] fn live() { assert!(true); }\n")?;
-        assert!(cargo_target_reaches(&root, &inline)?);
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -6761,26 +6353,6 @@ fn ui() {
     }
 
     #[test]
-    fn runtime_fixture_security_root_hard_truth_is_production_reachable() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let index = build_index(&root, None)?;
-        let record = index
-            .records
-            .iter()
-            .find(|record| record.id == "RUNTIME-FIXTURE-SECURITY-ROOT-01")
-            .context("runtime security-root invariant is indexed")?;
-        assert_eq!(
-            diagnostic_source_path(&record.source),
-            "assemblies/runtime/src/phase.rs"
-        );
-        assert!(
-            index.hard_admissions.admit(record).is_some(),
-            "runtime security-root Hard truth must have a production consumer"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn compile_fail_doctest_indexes_only_native_compile_rules() -> Result<()> {
         let root = unique_tmp("archrules-doctest-native-only");
         let file = root.join("crates/demo/src/lib.rs");
@@ -6831,10 +6403,6 @@ members = ["rss_demo"]
         )?;
         write(&root.join("clippy.toml"), "# synthetic clippy carrier\n")?;
         write(
-            &root.join("xtask/runtime-deps-guard.toml"),
-            "# INVARIANT: RUNTIME-DEPS-CONFIG-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"config\" }\n",
-        )?;
-        write(
             &root.join("xtask/src/layerdeps.rs"),
             "//! INVARIANT: XTASK-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"code\" }\n",
         )?;
@@ -6858,7 +6426,6 @@ members = ["rss_demo"]
             "DENY-DEMO-01",
             "LINT-DEMO-01",
             "PUBLICAPI-DEMO-01",
-            "RUNTIME-DEPS-CONFIG-DEMO-01",
             "XTASK-DEMO-01",
         ] {
             assert!(index.records.iter().any(|r| r.id == id), "missing {id}");
@@ -6878,80 +6445,6 @@ members = ["rss_demo"]
         assert_eq!(
             issues.iter().copied().collect::<BTreeSet<_>>(),
             expected_source_issues()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn funnel_matrix_has_exact_runtime_and_eventing_relations() -> Result<()> {
-        let pg_runtime = FUNNELS
-            .iter()
-            .find(|funnel| {
-                funnel.source_issues
-                    == [
-                        ISSUE_PG_RUNTIME_CUTOVER,
-                        ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
-                    ]
-            })
-            .with_context(|| format!("#{ISSUE_PG_RUNTIME_CUTOVER} lifecycle funnel"))?;
-        assert_eq!(
-            pg_runtime.upstream,
-            [
-                invariant("PG-RUNTIME-OWNER-01"),
-                invariant("PG-RUNTIME-HANDLE-02")
-            ]
-        );
-        assert_eq!(
-            pg_runtime.downstream,
-            [
-                invariant("PG-RUNTIME-OUTPUT-03"),
-                invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01")
-            ]
-        );
-        assert!(matches!(
-            pg_runtime.residual,
-            ResidualDisposition::AcceptedMedium { .. }
-        ));
-        let outbox_relay = FUNNELS
-            .iter()
-            .find(|funnel| {
-                funnel.source_issues
-                    == [
-                        ISSUE_OUTBOX_CLAIM_CAPABILITY,
-                        ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
-                    ]
-            })
-            .with_context(|| {
-                format!(
-                    "#{}/#{} claimed relay funnel",
-                    ISSUE_OUTBOX_CLAIM_CAPABILITY, ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER
-                )
-            })?;
-        assert_eq!(
-            outbox_relay.upstream,
-            [invariant("OUTBOX-CLAIM-RELAY-CAPABILITY-01")]
-        );
-        assert_eq!(
-            outbox_relay.downstream,
-            [invariant("OUTBOX-RELAY-CLAIM-CUTOVER-01")]
-        );
-        assert!(matches!(
-            outbox_relay.residual,
-            ResidualDisposition::AcceptedMedium { .. }
-        ));
-        let event_output = FUNNELS
-            .iter()
-            .find(|funnel| funnel.source_issues == [ISSUE_EVENT_TRANSPORT_OUTPUT])
-            .with_context(|| {
-                format!("#{ISSUE_EVENT_TRANSPORT_OUTPUT} event transport output funnel")
-            })?;
-        assert_eq!(
-            event_output.upstream,
-            [invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")]
-        );
-        assert_eq!(
-            event_output.downstream,
-            [invariant("RUNTIME-PROVIDER-BYPASS-01")]
         );
         Ok(())
     }
@@ -7043,17 +6536,11 @@ members = ["rss_demo"]
     #[test]
     fn funnel_matrix_configuration_is_single_source() {
         let source = include_str!("archrules.rs");
-        for scattered in [
-            ["EXPECTED_FUNNEL", "_COUNT"].concat(),
-            format!("({FUNNEL_ISSUE_RANGE_START}_u32..={FUNNEL_ISSUE_RANGE_END})"),
-            format!("expected.extend({EXTRA_FUNNEL_ISSUES:?})"),
-            ["EXTRA_FUNNEL_ISSUES", "["].concat(),
-        ] {
-            assert!(
-                !source.contains(&scattered),
-                "matrix configuration remains duplicated: {scattered}"
-            );
-        }
+        let scattered = ["EXPECTED_FUNNEL", "_COUNT"].concat();
+        assert!(
+            !source.contains(&scattered),
+            "matrix configuration remains duplicated: {scattered}"
+        );
     }
 
     #[test]
@@ -7437,49 +6924,6 @@ fn unrelated_green_accepted() { assert!(true); }
     }
 
     #[test]
-    fn assembly_lock_binding_rejects_omission_and_wrong_carrier_red() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let path = root.join("xtask/src/assembly_lock.rs");
-        let found = extract_invariants(&root, &path)?;
-
-        let omitted = ASSEMBLY_LOCK_INVARIANT_BINDINGS
-            .iter()
-            .copied()
-            .filter(|binding| binding.id != "ASSEMBLY-LOCK-VERIFY-GATE-01")
-            .collect::<Vec<_>>();
-        let mut missing = Index::default();
-        validate_closed_invariant_bindings(&mut missing, &path, &found, &omitted);
-        assert!(missing.findings.iter().any(|finding| {
-            finding.rule == Rule::MissingInvariant && finding.detail.contains("缺 carrier binding")
-        }));
-
-        let mut wrong = ASSEMBLY_LOCK_INVARIANT_BINDINGS.to_vec();
-        wrong
-            .iter_mut()
-            .find(|binding| binding.id == "ASSEMBLY-LOCK-DIAGNOSTIC-01")
-            .context("diagnostic binding missing")?
-            .carrier = "xtask";
-        let mut invalid = Index::default();
-        for binding in wrong {
-            scan_extracted_invariant_rules_filtered(
-                &root,
-                &mut invalid,
-                &found,
-                binding.carrier,
-                binding.evidence,
-                Some(binding.binding.token()),
-                |rule| binding.matches(rule) && binding.accepts(rule),
-            )?;
-        }
-        assert!(invalid.findings.iter().any(|finding| {
-            finding.rule == Rule::CarrierBindingMismatch
-                && finding.subject.contains("assembly_lock.rs")
-                && finding.detail.contains("ASSEMBLY-LOCK-DIAGNOSTIC-01")
-        }));
-        Ok(())
-    }
-
-    #[test]
     fn contract_owner_native_hard_binding_is_closed_and_non_vacuous() -> Result<()> {
         let root = crate::workspace_root()?;
         let path = root.join("crates/assembly-schema/src/contract_owner.rs");
@@ -7517,106 +6961,6 @@ fn unrelated_green_accepted() { assert!(true); }
             finding.rule == Rule::CarrierBindingMismatch
                 && finding.subject.contains("contract_owner.rs")
                 && finding.detail.contains("CONTRACT-OWNER-PROMOTION-01")
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn l2_assurance_binding_is_check_bound_without_fake_consumption() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let path = root.join("xtask/src/l2_assurance.rs");
-        let found = extract_invariants(&root, &path)?;
-
-        let type_rule = found
-            .iter()
-            .flat_map(|invariant| &invariant.rules)
-            .find(|rule| rule.id == "L2-ASSURANCE-TYPE-01")
-            .context("L2 assurance type invariant missing")?;
-        let type_metadata = type_rule
-            .metadata
-            .as_ref()
-            .context("L2 assurance type invariant metadata missing")?;
-        assert_eq!(type_metadata.level, RuleLevel::Medium);
-        assert_eq!(
-            type_metadata.exec,
-            ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Check)
-        );
-        let type_binding = L2_ASSURANCE_INVARIANT_BINDINGS
-            .iter()
-            .find(|binding| binding.id == "L2-ASSURANCE-TYPE-01")
-            .context("L2 assurance type binding missing")?;
-        assert_eq!(type_binding.carrier, "xtask");
-        assert_eq!(type_binding.binding, CHECK_UNIT_BINDING);
-
-        let source = fs::read_to_string(&path)?;
-        assert!(!source.contains(".map(Inventory::finish)"));
-        assert!(!source.contains("fn finish(self)"));
-
-        let omitted = L2_ASSURANCE_INVARIANT_BINDINGS
-            .iter()
-            .copied()
-            .filter(|binding| binding.id != "L2-ASSURANCE-PATH-01")
-            .collect::<Vec<_>>();
-        let mut missing = Index::default();
-        validate_closed_invariant_bindings(&mut missing, &path, &found, &omitted);
-        assert!(missing.findings.iter().any(|finding| {
-            finding.rule == Rule::MissingInvariant && finding.detail.contains("缺 carrier binding")
-        }));
-
-        let mut wrong = L2_ASSURANCE_INVARIANT_BINDINGS.to_vec();
-        wrong
-            .iter_mut()
-            .find(|binding| binding.id == "L2-ASSURANCE-TYPE-01")
-            .context("L2 assurance type binding missing")?
-            .carrier = "dylint";
-        let mut invalid = Index::default();
-        for binding in wrong {
-            scan_extracted_invariant_rules_filtered(
-                &root,
-                &mut invalid,
-                &found,
-                binding.carrier,
-                binding.evidence,
-                Some(binding.binding.token()),
-                |rule| binding.matches(rule) && binding.accepts(rule),
-            )?;
-        }
-        assert!(invalid.findings.iter().any(|finding| {
-            finding.rule == Rule::CarrierBindingMismatch
-                && finding.subject.contains("l2_assurance.rs")
-                && finding.detail.contains("L2-ASSURANCE-TYPE-01")
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn producer_assurance_binding_rejects_omission_red() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let path = root.join("xtask/src/producer_assurance.rs");
-        let found = extract_invariants(&root, &path)?;
-        let mut missing = Index::default();
-        validate_closed_invariant_bindings(&mut missing, &path, &found, &[]);
-        assert!(missing.findings.iter().any(|finding| {
-            finding.rule == Rule::MissingInvariant
-                && finding.detail.contains("L2-PRODUCER-EXECUTION-CLOSURE-01")
-                && finding.detail.contains("缺 carrier binding")
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn production_composition_binding_rejects_omission_red() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let path = root.join("xtask/src/production_composition.rs");
-        let found = extract_invariants(&root, &path)?;
-        let mut missing = Index::default();
-        validate_closed_invariant_bindings(&mut missing, &path, &found, &[]);
-        assert!(missing.findings.iter().any(|finding| {
-            finding.rule == Rule::MissingInvariant
-                && finding
-                    .detail
-                    .contains("L2-PRODUCER-PRODUCTION-COMPOSITION-01")
-                && finding.detail.contains("缺 carrier binding")
         }));
         Ok(())
     }

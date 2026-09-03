@@ -1,14 +1,12 @@
 #![feature(rustc_private)]
-//! `rss_authplan_callsite` — RSS G0.4 治理 dylint lint：限定 AuthPlan 构造入口仅组合根可调用。
-//! `primitives::authplan::AuthPlan::new` 与 `AuthPlan::none` 仅 assembly / bin crate（组合根）可调用。
+//! `rss_authplan_callsite` — RSS G0.4 治理 dylint lint：封闭 AuthPlan 构造入口。
+//! `primitives::authplan::AuthPlan::new` 与 `AuthPlan::none` 仅定义 crate 可调用。
 //!
 //! INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
-//! `AuthPlan` 是 listener 级认证计划，语义上必须由组合根（assembly / bin）装配后通过 bootstrap option
-//! 注入；域 crate 直接 mint AuthPlan 绕过组合根注入语义，可能导致认证方案错配。
+//! `AuthPlan` 是 listener 级认证计划；业务 crate 直接 mint 会绕过认证计划所有权。
 //!
-//! httpserve typed builders、`finalize_auth` 与 `RuntimePlan` 明文：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」——当前仅 Soft
-//! 文档约束，本 lint 升为 Medium callsite-allowlist 守卫。
+//! `AuthPlan` 构造入口由本 lint 作为 Medium callsite 边界封闭。
 //!
 //! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（构造守卫）：`AuthPlan` 字段均私有，外部 crate 可通过 `new` / `none` 合法构造——类型层无
@@ -40,27 +38,16 @@ use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
-/// 仅这些 crate 可调用 `AuthPlan::new` / `AuthPlan::none`——单一 greppable 真源，扩项须治理评审。
-/// 组合根（assembly / bin）装配 AuthPlan 后经 bootstrap option 注入，是唯一合法构造点。
-/// assemblies/runtime → package name "runtime"；assemblies/identityaudit → "identityaudit"
-/// （生产 assembly 组合根；薄 bin 已移出）。`settingsonly` 走下方精确函数表。
 /// `primitives` 本身定义 `AuthPlan`，在 `none()` 内调 `Self::new()` 是内部实现，合法豁免。
-const ALLOWED_CALLER_CRATES: &[&str] = &["primitives", "runtime", "identityaudit"];
-const ALLOWED_SETTINGSONLY_FUNCTIONS: &[(&str, &str)] = &[
-    ("primary_auth_plan", "listeners::primary_auth_plan"),
-    ("health_auth_plan", "listeners::health_auth_plan"),
-    ("admin_auth_plan", "listeners::admin_auth_plan"),
-];
+const ALLOWED_CALLER_CRATES: &[&str] = &["primitives"];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记非组合根 crate 对 `primitives::authplan::AuthPlan::new` 或 `AuthPlan::none` 的
+    /// 标记定义 crate 外对 `primitives::authplan::AuthPlan::new` 或 `AuthPlan::none` 的
     /// **任意 path 引用**（直接 call、`let f = AuthPlan::new` 别名、fn-pointer 强转——凡解析到该 assoc fn DefId）。
     ///
     /// ### Why is this bad?
-    /// `AuthPlan` 是 listener 级认证计划，必须由组合根（assembly / bin crate）装配后经 bootstrap option 注入。
-    /// 域 crate 直接 mint AuthPlan 绕过组合根注入语义，可能导致认证方案错配。
-    /// httpserve typed builders、`finalize_auth` 与 `RuntimePlan`：「域 crate 禁止构造 AuthPlan；组合根经 bootstrap option 注入」。
+    /// `AuthPlan` 是 listener 级认证计划；定义 crate 外直接 mint 会绕过认证计划所有权。
     /// INVARIANT: AUTH-PLAN-MINT-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
@@ -71,13 +58,13 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Example
     /// ```ignore
-    /// // 域 crate（非组合根）：
+    /// // 非定义 crate：
     /// let plan = primitives::authplan::AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken); // 触发
     /// ```
-    /// Use instead: 在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入其它 crate。
+    /// Use instead: 由 `primitives` 内部构造并通过类型化边界传递。
     pub RSS_AUTHPLAN_CALLSITE,
     Warn,
-    "AuthPlan 构造仅限组合根 crate（assembly / bin）（callsite-allowlist，INVARIANT AUTH-PLAN-MINT-01）"
+    "AuthPlan 构造仅限定义 crate（callsite-allowlist，INVARIANT AUTH-PLAN-MINT-01）"
 }
 
 impl<'tcx> LateLintPass<'tcx> for RssAuthplanCallsite {
@@ -128,26 +115,9 @@ fn is_authplan_mint_did(cx: &LateContext<'_>, did: DefId) -> bool {
 
 /// 当前被编译 crate（caller）在 allowlist 内。`LOCAL_CRATE` 是 caller，区别于 callee 的 `did.krate`；
 /// 按 crate 名判定不可被「在别的 crate 里 `mod server`」伪造。
-fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+fn caller_is_allowed(cx: &LateContext<'_>, _hir_id: HirId) -> bool {
     let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
-    if ALLOWED_CALLER_CRATES.contains(&crate_name.as_str()) {
-        return true;
-    }
-    if crate_name.as_str() != "settingsonly" {
-        return false;
-    }
-    let parent = cx.tcx.hir_get_parent_item(hir_id).to_def_id();
-    let item_name = cx.tcx.item_name(parent);
-    let def_path = cx.tcx.def_path_str(parent);
-    ALLOWED_SETTINGSONLY_FUNCTIONS
-        .iter()
-        .any(|(expected_name, expected_path)| {
-            item_name.as_str() == *expected_name
-                && (def_path == *expected_path
-                    || def_path
-                        .strip_prefix("settingsonly::")
-                        .is_some_and(|path| path == *expected_path))
-        })
+    ALLOWED_CALLER_CRATES.contains(&crate_name.as_str())
 }
 
 /// 在调用处报告；用调用 expr 的 `HirId` 解析 lint 级别，使 item/expr 级
@@ -158,10 +128,10 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         RSS_AUTHPLAN_CALLSITE,
         hir_id,
         span,
-        "AuthPlan 仅组合根（assembly / bin crate）可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用",
+        "AuthPlan 仅定义 crate 可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用",
         |diag| {
             diag.help(
-                "在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`",
+                "由 `primitives` 内部构造 AuthPlan 并通过类型化边界传递；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`",
             );
         },
     );
@@ -179,9 +149,4 @@ fn ui_primitives_allowed() {
     // example target 名 `primitives`（= allowlist 项，定义 crate 内部豁免）⇒ crate_name(LOCAL_CRATE)=="primitives"
     // ⇒ 调 funnel 不触发，验证 allowlist 分支（anti-vacuity：lint 非恒报）。golden ui/primitives.stderr 为空。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "primitives");
-}
-
-#[test]
-fn ui_settingsonly_exact_wrappers() {
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "settingsonly");
 }

@@ -9,13 +9,7 @@ const OLD_SURFACES: &[&str] = &[
     "setup_test_fixture_with_projection_bindings(",
 ];
 
-const CONSUMER_ROOTS: &[&str] = &[
-    "adapters/postgres",
-    "adapters/postgres-migration",
-    "assemblies/runtime",
-    "journeys",
-    "journeys-fault-matrix",
-];
+const CONSUMER_ROOTS: &[&str] = &["adapters/postgres", "adapters/postgres-migration"];
 
 fn workspace_root() -> Result<PathBuf, std::io::Error> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -167,7 +161,6 @@ fn provider_consumers_are_owned_before_migration_or_role_ddl()
             let normalized = path.to_string_lossy().replace('\\', "/");
             if calls_owner_mutation_entrypoint(&source)
                 && !normalized.ends_with("adapters/postgres/src/bundle.rs")
-                && !normalized.ends_with("adapters/postgres/src/fault_matrix.rs")
             {
                 assert!(
                     owned_proof_is_visible(&source),

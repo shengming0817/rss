@@ -1881,16 +1881,16 @@ mod tests {
         let cache = root.join(".cache");
         fs::create_dir_all(&cache)?;
         fs::write(root.join("tracked.rs"), "fn tracked() {}\n")?;
+        for relative in COMPILE_FAIL_FIXTURES {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().context("compile-fail fixture parent")?)?;
+            fs::write(path, "fn main() {}\n")?;
+        }
         let init =
             external_cmd(ExternalProgram::SystemGit, &["init"], &[], Some(&root)).output()?;
         assert!(init.status.success());
-        let add = external_cmd(
-            ExternalProgram::SystemGit,
-            &["add", "tracked.rs"],
-            &[],
-            Some(&root),
-        )
-        .output()?;
+        let add =
+            external_cmd(ExternalProgram::SystemGit, &["add", "."], &[], Some(&root)).output()?;
         assert!(add.status.success());
         fs::write(
             cache.join("bait.rs"),

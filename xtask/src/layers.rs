@@ -5,7 +5,7 @@
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain），另将精确路径
 //! `crates/runtimeexec` 分类为 RuntimeExec；
-//! `adapters/*` / `xtask` / `assemblies/*` / `composition/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `xtask` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -98,7 +98,7 @@ pub(crate) const DOMAIN_CRATES: &[&str] = assembly_schema::REGISTERED_DOMAIN_LAB
 /// [`DEV_ADAPTER_ROOTS`]；真实 parent exact-set 由 cargo-deny 证明（`INVARIANT: LAYER-DEPS-07` { level = "Medium", exec = "check", source = "code" }）。
 pub(crate) const DEV_ADAPTERS: &[&str] = &["memory"];
 /// 允许消费 dev/test adapter 的组合根（验收 journey + tooling，排除 `server`/`rss` 生产 bin）。
-pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["journeys", "xtask"];
+pub(crate) const DEV_ADAPTER_ROOTS: &[&str] = &["xtask"];
 
 /// 该 adapter 是否 dev/test-only（demo provider）。
 pub(crate) fn is_dev_adapter(name: &str) -> bool {
@@ -149,12 +149,12 @@ pub(crate) enum Layer {
     Generated,
     /// 非发布 tooling/verification facts；仅组合根可消费，自身无 workspace 内部出边。
     Tooling,
-    /// 组合根（xtask / assemblies / composition / journeys）：可依赖所有库 crate。
+    /// 非发布 workspace 根（xtask）：可依赖所有库 crate。
     Root,
 }
 
 /// 按 crate 名 + 成员路径（相对 workspace root，如 `crates/vocab` / `adapters/redis` /
-/// `assemblies/runtime` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
+/// `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if matches!(
@@ -178,13 +178,7 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if member_path == "generated" {
         return Some(Layer::Generated);
     }
-    if member_path == "xtask"
-        || member_path.starts_with("assemblies/")
-        || member_path.starts_with("composition/")
-        || member_path == "journeys"
-        || member_path.starts_with("journeys/")
-        || member_path == "journeys-fault-matrix"
-    {
+    if member_path == "xtask" {
         return Some(Layer::Root);
     }
     if member_path.starts_with("adapters/") {
@@ -372,8 +366,6 @@ mod tests {
     #[case("postgres", "adapters/postgres", Some(Layer::Adapter))]
     #[case("generated", "generated", Some(Layer::Generated))]
     #[case("xtask", "xtask", Some(Layer::Root))]
-    #[case("journeys", "journeys", Some(Layer::Root))]
-    #[case("journeys-fault-matrix", "journeys-fault-matrix", Some(Layer::Root))]
     #[case("memory", "adapters/memory", Some(Layer::Adapter))]
     #[case("workspacefacts", "crates/workspacefacts", Some(Layer::Tooling))]
     fn classify_maps_known_members(

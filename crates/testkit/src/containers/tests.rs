@@ -1040,7 +1040,7 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() -> anyhow::Result<(
         "--scope",
         scope.as_str(),
         "--shard",
-        "consistency-fault",
+        "runtime",
         "--partition",
         "unpartitioned",
         "--log-dir",
@@ -1059,7 +1059,7 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() -> anyhow::Result<(
         ContainerService::Redis,
         Some(CiContainerContext {
             scope: scope.clone(),
-            shard: "consistency-fault".to_string(),
+            shard: "runtime".to_string(),
             partition: "unpartitioned".to_string(),
             log_dir: log_dir.clone(),
         }),
@@ -1098,7 +1098,7 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() -> anyhow::Result<(
     for (key, value) in [
         ("io.rss.integration.managed", "true"),
         ("io.rss.integration.scope", scope.as_str()),
-        ("io.rss.integration.shard", "consistency-fault"),
+        ("io.rss.integration.shard", "runtime"),
         ("io.rss.integration.partition", "unpartitioned"),
         ("io.rss.integration.service", "redis"),
     ] {
@@ -1116,7 +1116,7 @@ async fn real_redis_lifecycle_preserves_cross_scope_canary() -> anyhow::Result<(
             "--label",
             &format!("io.rss.integration.scope={other_scope}"),
             "--label",
-            "io.rss.integration.shard=consistency-fault",
+            "io.rss.integration.shard=runtime",
             "--label",
             "io.rss.integration.partition=unpartitioned",
             "--label",

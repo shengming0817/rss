@@ -43,22 +43,18 @@
 //!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、
 //!   `eventexec/l2-test-support|internal-test-support`（构造 delivery harness 或 internal conformance authority）、
 //!   `generated/test-support`（暴露 sealed test-only contract catalog）、以及
-//!   `bootstrap/test-support`（`forge_topology_for_test`）与 `identity-composition|deviceidentity/test-support`
+//!   `bootstrap/test-support`（`forge_topology_for_test`）等测试能力
 //!   （暂停 application-receipt relay 的测试控制）、`runtimeexec/test-support`（绕过 launch lifecycle
 //!   funnel 构造 ready host）；生产构建启用即可伪造 tenant scope / 事件拓扑或
 //!   暴露 relay 控制，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
 //!   出边默认只能指向外部 crate；唯一内部例外为 `testkit → rss-conformance`，使内部 harness 复用同一
 //!   provider-neutral 分类 owner，其余 workspace 内部出边均失败。与 LAYER-DEPS-08 的 shipped 入边约束正交。
-//! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
-//!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit/deviceidentity 四个 assembly，禁止 bins、composition、
-//!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
 //! INVARIANT: AUTHMINT-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::authmint_wrapper_widened_to_bin_red|tests::authmint_wrapper_missing_consumer_red", anti_vacuity = "tests::authmint_wrapper_exact_green" }——
-//!   `authmint` target wrapper 必须恰为 diport/httpserve + runtime/settingsonly/identityaudit/deviceidentity；域 / journeys 不得持有
-//!   Authenticated production mint capability（AUTH-EVIDENCE-MINT-01 Hard 的 deny.toml 半段）。
-//! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeinventorymint_wrapper_widened_to_assembly_red", anti_vacuity = "tests::runtimeinventorymint_wrapper_exact_green|tests::real_workspace_green" }——
-//!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 铸造完整计划 receipt，以及 runtime
-//!   的 placement-projected provider transaction 持有；其它 assembly roots 不得依赖。
+//!   `authmint` target wrapper 必须恰为 diport/httpserve；其它 crate 不得持有
+//!   Authenticated production mint capability。
+//! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeinventorymint_wrapper_widened_red", anti_vacuity = "tests::runtimeinventorymint_wrapper_exact_green|tests::real_workspace_green" }——
+//!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 铸造完整计划 receipt。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
 //!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/rss-eventing/
 //!   listenerlifecycle/primitives/rss-platform/runtimeinventorymint/secure 与外部
@@ -299,7 +295,7 @@ struct PkiMintCallsite {
 
 /// The capability crate necessarily exposes a public constructor to its approved wrappers, so the
 /// source graph must additionally prove the two production invocations are the private Vault
-/// closure/evidence seals and nothing else. Downstream identity/composition crates only consume
+/// closure/evidence seals and nothing else. Downstream consumers only use
 /// the resulting move-only carriers and cannot name the mint token.
 ///
 /// INVARIANT: EXTERNAL-PKI-PROVIDER-MINT-01 { level = "Medium", exec = "check", source = "code", facet = "production-callsite-exact-set", synthetic_red = "tests::pkiauthmint_callsite_extra_red", anti_vacuity = "tests::pkiauthmint_callsite_exact_green|tests::real_workspace_green" }
@@ -712,7 +708,7 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
 }
 
 /// Domain test dependencies retain only the boundaries that are invariant across production and
-/// test graphs. Tests may depend on lower layers/generated and composition roots may assemble real
+/// test graphs. Tests may depend on lower layers/generated, while binary roots may assemble real
 /// adapters, but a domain test must not couple to a sibling bounded context or concrete adapter.
 fn check_dev_layer_boundaries(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
     let layer_of: BTreeMap<&str, Layer> = members
@@ -770,28 +766,18 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
 ];
 
 const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
-const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] =
-    &["runtime", "settingsonly", "identityaudit", "deviceidentity"];
 const AUTHMINT_CRATE: &str = "authmint";
-const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
-    "diport",
-    "httpserve",
-    "runtime",
-    "settingsonly",
-    "identityaudit",
-    "deviceidentity",
-];
+const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "httpserve"];
 const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
-const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
+const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport"];
 const DLQAUTHMINT_CRATE: &str = "dlqauthmint";
-const DLQAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
+const DLQAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport"];
 const REQUESTIDMINT_CRATE: &str = "requestidmint";
 const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
 const PKIAUTHMINT_CRATE: &str = "pkiauthmint";
 const PKIAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "vault"];
 const RUNTIMEINVENTORYMINT_CRATE: &str = "runtimeinventorymint";
-const RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS: &[&str] =
-    &["assembly-schema", "runtimeexec", "runtime"];
+const RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS: &[&str] = &["assembly-schema", "runtimeexec"];
 const WORKSPACEFACTS_CRATE: &str = "workspacefacts";
 const WORKSPACEFACTS_CONSUMER: &str = "xtask";
 const GUPPY_CRATE: &str = "guppy";
@@ -869,8 +855,7 @@ pub(crate) fn check_wrappers(
         .map(|b| (b.crate_name.as_str(), b.wrappers.as_slice()))
         .collect();
 
-    let mut findings = check_runtimeexec_wrapper_coverage(members, bans, shipped_edges, dev_edges);
-    findings.extend(check_authmint_wrapper_coverage(members, bans));
+    let mut findings = check_authmint_wrapper_coverage(members, bans);
     findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
     findings.extend(check_dlqauthmint_wrapper_coverage(members, bans));
     findings.extend(check_requestidmint_wrapper_coverage(members, bans));
@@ -909,7 +894,6 @@ pub(crate) fn check_wrappers(
         if EXTERNAL_CONFINEMENT_WRAPPERS
             .iter()
             .any(|(ext, _)| *ext == b.crate_name.as_str())
-            || b.crate_name == RUNTIMEEXEC_CRATE
             || b.crate_name == AUTHMINT_CRATE
             || b.crate_name == SAGAAUTHMINT_CRATE
             || b.crate_name == DLQAUTHMINT_CRATE
@@ -1011,100 +995,8 @@ fn check_postgres_migration_consumer_absence(
         .collect()
 }
 
-/// `runtimeexec` 是内部 target crate，但 wrapper 比普通分层 leaf 更窄：只准三个 assembly 直接消费。
-/// 集合相等同时拒绝过宽和漏项；批准项自身必须是对应 `assemblies/*` 成员，防 const 漂移到其它 Root。
-pub(crate) fn check_runtimeexec_wrapper_coverage(
-    members: &[Member],
-    bans: &[BanEntry],
-    shipped_edges: &[Edge],
-    dev_edges: &[Edge],
-) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let target = members.iter().find(|m| m.name == RUNTIMEEXEC_CRATE);
-    let ban = bans.iter().find(|b| b.crate_name == RUNTIMEEXEC_CRATE);
-    // 纯函数的其它分层 fixture 可不携带 RuntimeExec；真实工作区至少含 target 或 ban，缺一侧仍会红。
-    if target.is_none() && ban.is_none() {
-        return findings;
-    }
-    if !matches!(target.map(|m| m.layer), Some(Some(Layer::RuntimeExec))) {
-        findings.push(finding(
-            Rule::WrapperCoverage,
-            RUNTIMEEXEC_CRATE,
-            "runtimeexec wrapper target 不是已分类的 RuntimeExec workspace 成员",
-        ));
-        return findings;
-    }
-
-    for allowed in RUNTIMEEXEC_ALLOWED_WRAPPERS {
-        match members.iter().find(|m| m.name == *allowed) {
-            Some(m)
-                if m.layer == Some(Layer::Root)
-                    && m.path == format!("assemblies/{allowed}") => {}
-            Some(m) => findings.push(finding(
-                Rule::WrapperCoverage,
-                RUNTIMEEXEC_CRATE,
-                format!(
-                    "runtimeexec 批准消费者 `{allowed}` 必须是 `assemblies/{allowed}` Root，实际为 `{}` / {:?}",
-                    m.path, m.layer
-                ),
-            )),
-            None => findings.push(finding(
-                Rule::WrapperCoverage,
-                RUNTIMEEXEC_CRATE,
-                format!("runtimeexec 批准消费者 `{allowed}` 不是 workspace 成员"),
-            )),
-        }
-    }
-
-    match ban {
-        None => findings.push(finding(
-            Rule::WrapperCoverage,
-            RUNTIMEEXEC_CRATE,
-            "deny.toml 缺 runtimeexec target wrapper",
-        )),
-        Some(ban) => {
-            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
-            let want: BTreeSet<&str> = RUNTIMEEXEC_ALLOWED_WRAPPERS.iter().copied().collect();
-            if have != want {
-                let extra: Vec<&str> = have.difference(&want).copied().collect();
-                let missing: Vec<&str> = want.difference(&have).copied().collect();
-                findings.push(finding(
-                    Rule::WrapperCoverage,
-                    RUNTIMEEXEC_CRATE,
-                    format!(
-                        "runtimeexec wrapper 必须与批准 assembly 集合相等：多列 {extra:?} / 欠列 {missing:?}"
-                    ),
-                ));
-            }
-        }
-    }
-    let actual = shipped_edges
-        .iter()
-        .chain(dev_edges)
-        .filter(|edge| edge.to == RUNTIMEEXEC_CRATE)
-        .map(|edge| edge.from.as_str())
-        .collect::<BTreeSet<_>>();
-    let allowed = RUNTIMEEXEC_ALLOWED_WRAPPERS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    if actual != allowed {
-        let unauthorized = actual.difference(&allowed).copied().collect::<Vec<_>>();
-        let missing = allowed.difference(&actual).copied().collect::<Vec<_>>();
-        findings.push(finding(
-            Rule::WrapperCoverage,
-            RUNTIMEEXEC_CRATE,
-            format!(
-                "runtimeexec 实际 shipped/dev source consumers 必须与批准 assembly 集合相等：未授权 {unauthorized:?} / 缺失 {missing:?}"
-            ),
-        ));
-    }
-    findings
-}
-
-/// `authmint` 是独立 Basis capability token：wrapper 只准 diport（opaque proof mint）、
-/// httpserve（构造面）+ 三个 assembly 验签桥。
-/// 集合相等同时拒绝过宽（域/journeys）和漏项；批准项自身必须匹配精确路径与层。
+/// `authmint` 是独立 Basis capability token：wrapper 只准 diport（opaque proof mint）与
+/// httpserve（构造面）。
 pub(crate) fn check_authmint_wrapper_coverage(
     members: &[Member],
     bans: &[BanEntry],
@@ -1152,13 +1044,11 @@ pub(crate) fn check_authmint_wrapper_coverage(
                     ));
                 }
             }
-            Some(m)
-                if m.layer == Some(Layer::Root) && m.path == format!("assemblies/{allowed}") => {}
             Some(m) => findings.push(finding(
                 Rule::WrapperCoverage,
                 AUTHMINT_CRATE,
                 format!(
-                    "authmint 批准消费者 `{allowed}` 必须是 `assemblies/{allowed}` Root，实际为 `{}` / {:?}",
+                    "authmint 批准消费者 `{allowed}` 的路径或层级无效：`{}` / {:?}",
                     m.path, m.layer
                 ),
             )),
@@ -1223,10 +1113,7 @@ pub(crate) fn check_sagaauthmint_wrapper_coverage(
         ));
         return findings;
     }
-    for (name, path, layer) in [
-        ("diport", "crates/diport", Layer::DiPort),
-        ("runtime", "assemblies/runtime", Layer::Root),
-    ] {
+    for (name, path, layer) in [("diport", "crates/diport", Layer::DiPort)] {
         if !members
             .iter()
             .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
@@ -1290,10 +1177,7 @@ pub(crate) fn check_dlqauthmint_wrapper_coverage(
         ));
         return findings;
     }
-    for (name, path, layer) in [
-        ("diport", "crates/diport", Layer::DiPort),
-        ("runtime", "assemblies/runtime", Layer::Root),
-    ] {
+    for (name, path, layer) in [("diport", "crates/diport", Layer::DiPort)] {
         if !members
             .iter()
             .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
@@ -1331,7 +1215,7 @@ pub(crate) fn check_dlqauthmint_wrapper_coverage(
 }
 
 /// The HTTP request-id mint is an isolated Basis capability. Only the transport owner may mint
-/// it, and generated response factories may consume it; domains and composition roots stay out.
+/// it, and generated response factories may consume it; domains stay out.
 ///
 /// INVARIANT: HTTP-REQUEST-ID-AUTHORITY-01 { level = "Medium", exec = "check", source = "code", facet = "wrapper-exact-set", synthetic_red = "tests::requestidmint_wrapper_widened_to_domain_red", anti_vacuity = "tests::requestidmint_wrapper_exact_green" }
 pub(crate) fn check_requestidmint_wrapper_coverage(
@@ -1399,7 +1283,7 @@ pub(crate) fn check_requestidmint_wrapper_coverage(
 }
 
 /// The external-PKI mint capability is an isolated Basis root. Only the provider-neutral seal
-/// signatures and the official Vault adapter may name it; identity/composition only consume the
+/// signatures and the official Vault adapter may name it; identity consumers only use the
 /// opaque closure/evidence values.
 ///
 /// INVARIANT: EXTERNAL-PKI-PROVIDER-MINT-01 { level = "Medium", exec = "check", source = "code", facet = "wrapper-exact-set", synthetic_red = "tests::pkiauthmint_wrapper_widened_red", anti_vacuity = "tests::pkiauthmint_wrapper_exact_green" }
@@ -1495,7 +1379,6 @@ pub(crate) fn check_runtimeinventorymint_wrapper_coverage(
     for (name, path, layer) in [
         ("assembly-schema", "crates/assembly-schema", Layer::Basis),
         ("runtimeexec", "crates/runtimeexec", Layer::RuntimeExec),
-        ("runtime", "assemblies/runtime", Layer::Root),
     ] {
         if !members
             .iter()
@@ -1750,16 +1633,6 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str, &str)] = &[
         "runtimeexec",
         "test-support",
         "RuntimeExec launch lifecycle funnel is bypassed by RuntimeHostView::ready_for_test",
-    ),
-    (
-        "identity-composition",
-        "test-support",
-        "pause_receipt_relay_for_test and pause_ingress_for_test expose pilot loop pause controls; must stay [dev-dependencies]-only",
-    ),
-    (
-        "deviceidentity",
-        "test-support",
-        "pause_receipt_relay_for_test and pause_ingress_for_test expose assembly pilot loop pause controls; must stay [dev-dependencies]-only",
     ),
     (
         "mqtt",
@@ -2915,7 +2788,7 @@ mod tests {
     }
 
     #[test]
-    fn eventing_public_identity_requires_one_member_path_package_and_workspace_key() {
+    fn eventing_public_identity_requires_one_member_path_package_and_workspace_key() -> Result<()> {
         let valid: RootManifest = toml::from_str(
             r#"
 [workspace]
@@ -2923,8 +2796,7 @@ members = ["crates/eventing"]
 [workspace.dependencies]
 eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
 "#,
-        )
-        .expect("valid synthetic manifest");
+        )?;
         let members = [m(
             "rss-eventing",
             "crates/eventing",
@@ -2955,9 +2827,10 @@ eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.
 eventing_alias = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
 "#,
         ] {
-            let root: RootManifest = toml::from_str(invalid).expect("invalid synthetic parses");
+            let root: RootManifest = toml::from_str(invalid)?;
             assert!(!check_eventing_public_identity(&root.workspace, &members).is_empty());
         }
+        Ok(())
     }
 
     #[test]
@@ -3115,27 +2988,6 @@ eventing_alias = { package = "rss-eventing", path = "crates/eventing", version =
 
     /// RUNTIMEEXEC-LAYER-01 anti-vacuity：assembly Root 可消费 runtimeexec，runtimeexec 可向批准下层出边。
     #[test]
-    fn check_layers_green_runtimeexec_allowed_inbound_and_outbound() {
-        let members = vec![
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
-            m(
-                "runtimeexec",
-                "crates/runtimeexec",
-                Some(Layer::RuntimeExec),
-            ),
-            m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
-            m("diport", "crates/diport", Some(Layer::DiPort)),
-        ];
-        let edges = vec![
-            e("runtime", "runtimeexec"),
-            e("runtimeexec", "bootstrap"),
-            e("runtimeexec", "diport"),
-        ];
-        assert!(check_layers(&members, &edges).is_empty());
-    }
-
-    /// RUNTIMEEXEC-LAYER-01 synthetic red：RuntimeExec 不得取得域/adapter，非 Root 也不得消费 RuntimeExec。
-    #[test]
     fn check_layers_red_runtimeexec_illegal_inbound_and_outbound() {
         let members = vec![
             m(
@@ -3283,203 +3135,6 @@ eventing_alias = { package = "rss-eventing", path = "crates/eventing", version =
     }
 
     #[test]
-    fn red_testsupport_features_follow_direct_and_workspace_package_aliases() -> Result<()> {
-        let root = crate::testutil::unique_tmp("testsupport-feature-package-alias-red");
-        let manifest_path = root.join("crates/badcrate/Cargo.toml");
-        std::fs::create_dir_all(manifest_path.parent().context("badcrate manifest parent")?)?;
-        std::fs::write(
-            &manifest_path,
-            r#"
-[package]
-name = "badcrate"
-
-[dependencies]
-ctx_alias = { package = "runctx", version = "1", features = ["test-support"] }
-identity_alias = { workspace = true }
-relay_alias = { package = "identity-composition", version = "1", features = ["test-support"] }
-deviceidentity = { workspace = true }
-"#,
-        )?;
-        let members = [m("badcrate", "crates/badcrate", Some(Layer::Root))];
-        let workspace_dependencies: BTreeMap<String, DepSpec> = toml::from_str::<RootManifest>(
-            r#"
-[workspace]
-members = []
-
-[workspace.dependencies]
-identity_alias = { package = "identity", version = "1", features = ["test-support"] }
-deviceidentity = { version = "1", features = ["test-support"] }
-"#,
-        )?
-        .workspace
-        .dependencies;
-
-        let deps = collect_shipped_deps(&root, &members, &workspace_dependencies)?;
-        let findings = scan_shipped_testsupport_features(&deps);
-        assert_eq!(findings.len(), 4, "{findings:?}");
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("ctx_alias"))
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("identity_alias"))
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("relay_alias"))
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("deviceidentity"))
-        );
-        Ok(())
-    }
-
-    /// LAYER-DEPS-09 synthetic red：依赖条目只启用无害的本地 feature 名时，仍须沿
-    /// `default` / local forwarding / package alias / dependency-feature 递归到真正的
-    /// `identity-composition/test-support`；本地 feature 环不能让遍历提前静默放行。
-    #[test]
-    fn red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle() -> Result<()> {
-        let root = crate::testutil::unique_tmp("testsupport-feature-closure-red");
-        let manifests = [
-            (
-                "crates/identity-composition/Cargo.toml",
-                r#"
-[package]
-name = "identity-composition"
-
-[features]
-default = []
-test-support = []
-"#,
-            ),
-            (
-                "crates/feature-bridge/Cargo.toml",
-                r#"
-[package]
-name = "feature-bridge"
-
-[features]
-default = ["relay-control"]
-relay-control = ["cycle-a"]
-cycle-a = ["cycle-b"]
-cycle-b = ["cycle-a", "relay_alias/test-support"]
-
-[dependencies]
-relay_alias = { package = "identity-composition", path = "../identity-composition", default-features = false }
-"#,
-            ),
-            (
-                "crates/consumer/Cargo.toml",
-                r#"
-[package]
-name = "consumer"
-
-[dependencies]
-bridge_alias = { package = "feature-bridge", path = "../feature-bridge" }
-"#,
-            ),
-        ];
-        for (relative, source) in manifests {
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
-            std::fs::write(path, source)?;
-        }
-        let members = [
-            m(
-                "identity-composition",
-                "crates/identity-composition",
-                Some(Layer::Root),
-            ),
-            m("feature-bridge", "crates/feature-bridge", Some(Layer::Root)),
-            m("consumer", "crates/consumer", Some(Layer::Root)),
-        ];
-
-        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
-        assert_eq!(
-            findings.len(),
-            2,
-            "root default + consumer default: {findings:#?}"
-        );
-        assert!(findings.iter().all(|finding| {
-            finding.rule == Rule::TestSupportFeatureShipped
-                && finding.detail.contains("identity-composition/test-support")
-                && finding.detail.contains("cycle-a")
-        }));
-        assert!(findings.iter().any(|finding| finding.subject == "consumer"));
-        Ok(())
-    }
-
-    #[test]
-    fn red_eventexec_internal_testsupport_feature_closure_is_shipped() -> Result<()> {
-        let root =
-            crate::testutil::unique_tmp("eventexec-internal-testsupport-feature-closure-red");
-        let manifests = [
-            (
-                "crates/eventexec/Cargo.toml",
-                r#"
-[package]
-name = "eventexec"
-
-[features]
-default = []
-internal-test-support = []
-"#,
-            ),
-            (
-                "adapters/postgres/Cargo.toml",
-                r#"
-[package]
-name = "postgres"
-
-[features]
-default = []
-integration = ["eventexec/internal-test-support"]
-
-[dependencies]
-eventexec = { path = "../../crates/eventexec" }
-"#,
-            ),
-            (
-                "assemblies/runtime/Cargo.toml",
-                r#"
-[package]
-name = "runtime"
-
-[dependencies]
-postgres = { path = "../../adapters/postgres", features = ["integration"] }
-"#,
-            ),
-        ];
-        for (relative, source) in manifests {
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
-            std::fs::write(path, source)?;
-        }
-        let members = [
-            m("eventexec", "crates/eventexec", Some(Layer::Service)),
-            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
-        ];
-
-        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
-        assert_eq!(findings.len(), 1, "{findings:#?}");
-        assert_eq!(findings[0].subject, "runtime");
-        assert!(
-            findings[0].detail.contains(
-                "postgres/integration → postgres/eventexec/internal-test-support → eventexec/internal-test-support",
-            ),
-            "{findings:#?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn red_generated_testsupport_direct_alias_and_forwarding_are_shipped() -> Result<()> {
         let direct = scan_shipped_testsupport_features(&[ShippedDep {
             from: "direct-consumer".to_owned(),
@@ -3555,95 +3210,6 @@ bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["
     /// LAYER-DEPS-09 synthetic red：`dep:` 激活 optional dependency 后，其 default feature
     /// 与跨包 dependency-feature forwarding 同属 shipped closure，不能只检查入口 dependency entry。
     #[test]
-    fn red_testsupport_feature_closure_follows_dep_activation_and_dependency_default() -> Result<()>
-    {
-        let root = crate::testutil::unique_tmp("testsupport-feature-dep-activation-red");
-        let manifests = [
-            (
-                "crates/deviceidentity/Cargo.toml",
-                r#"
-[package]
-name = "deviceidentity"
-
-[features]
-default = ["relay-control"]
-relay-control = ["test-support"]
-test-support = []
-"#,
-            ),
-            (
-                "crates/feature-bridge/Cargo.toml",
-                r#"
-[package]
-name = "feature-bridge"
-
-[features]
-default = []
-ship = ["dep:device_alias"]
-
-[dependencies]
-device_alias = { package = "deviceidentity", path = "../deviceidentity", optional = true }
-"#,
-            ),
-            (
-                "crates/consumer/Cargo.toml",
-                r#"
-[package]
-name = "consumer"
-
-[dependencies]
-bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default-features = false, features = ["ship"] }
-"#,
-            ),
-        ];
-        for (relative, source) in manifests {
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
-            std::fs::write(path, source)?;
-        }
-        let members = [
-            m("deviceidentity", "crates/deviceidentity", Some(Layer::Root)),
-            m("feature-bridge", "crates/feature-bridge", Some(Layer::Root)),
-            m("consumer", "crates/consumer", Some(Layer::Root)),
-        ];
-
-        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
-        assert!(
-            findings.iter().any(|finding| {
-                finding.subject == "consumer"
-                    && finding.detail.contains("dep:device_alias")
-                    && finding.detail.contains("deviceidentity/test-support")
-            }),
-            "{findings:#?}"
-        );
-        Ok(())
-    }
-
-    /// LAYER-DEPS-09 real-graph anti-vacuity：当前 assembly 的 test-only façade 确实存在跨包
-    /// forwarding；该断言防止 synthetic parser 自洽但没有解析真实 Cargo feature 图。
-    #[test]
-    fn real_workspace_testsupport_forwarding_graph_is_nonempty() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let workspace = parse_root_manifest(&root)?.workspace;
-        let members = load_members(&root, &workspace.members)?;
-        let graph = load_feature_graph(&root, &members, &workspace.dependencies)?;
-        let node = FeatureNode::new("deviceidentity", "test-support");
-        let forwarding = graph
-            .edges
-            .get(&node)
-            .context("真实 deviceidentity/test-support feature 未进入解析图")?;
-        assert!(
-            forwarding.iter().any(|step| {
-                step.node == FeatureNode::new("identity-composition", "test-support")
-                    && step.label.contains("identity-composition/test-support")
-            }),
-            "真实 deviceidentity forwarding 未进入 feature closure: {forwarding:#?}"
-        );
-        Ok(())
-    }
-
-    /// 红：domain / bootstrap scoped-construction 的 `test-support` 也不得经 shipped 依赖启用。
-    #[test]
     fn red_domain_scope_testsupport_in_dependencies() {
         let findings = scan_shipped_testsupport_features(&[
             sdep(
@@ -3666,25 +3232,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 &["test-support"],
             ),
             sdep(
-                "bad-identity-composition",
-                "[dependencies]",
-                "identity-composition",
-                &["test-support"],
-            ),
-            sdep(
-                "bad-deviceidentity",
-                "[dependencies]",
-                "deviceidentity",
-                &["test-support"],
-            ),
-            sdep(
                 "bad-eventexec",
                 "[dependencies]",
                 "eventexec",
                 &["internal-test-support"],
             ),
         ]);
-        assert_eq!(findings.len(), 7, "{findings:?}");
+        assert_eq!(findings.len(), 5, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -4044,8 +3598,8 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
 
     fn wrapper_fixture_members() -> Vec<Member> {
         vec![
-            m("fixture", "assemblies/fixture", Some(Layer::Root)),
-            m("fixture-alt", "assemblies/fixture-alt", Some(Layer::Root)),
+            m("fixture", "roots/fixture", Some(Layer::Root)),
+            m("fixture-alt", "roots/fixture-alt", Some(Layer::Root)),
             m("xtask", "xtask", Some(Layer::Root)),
             m("diport", "crates/diport", Some(Layer::DiPort)),
             m("identity", "crates/identity", Some(Layer::Domain)),
@@ -4054,148 +3608,19 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         ]
     }
 
-    fn runtimeexec_fixture_members() -> Vec<Member> {
-        vec![
-            m(
-                "runtimeexec",
-                "crates/runtimeexec",
-                Some(Layer::RuntimeExec),
-            ),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
-            m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
-            m(
-                "identityaudit",
-                "assemblies/identityaudit",
-                Some(Layer::Root),
-            ),
-            m(
-                "deviceidentity",
-                "assemblies/deviceidentity",
-                Some(Layer::Root),
-            ),
-            m("fixture", "assemblies/fixture", Some(Layer::Root)),
-        ]
-    }
-
-    fn runtimeexec_allowed_edges() -> Vec<Edge> {
-        RUNTIMEEXEC_ALLOWED_WRAPPERS
-            .iter()
-            .map(|consumer| e(consumer, "runtimeexec"))
-            .collect()
-    }
-
-    #[test]
-    fn runtimeexec_wrapper_exact_green() {
-        let bans = vec![ban(
-            "runtimeexec",
-            &["runtime", "settingsonly", "identityaudit", "deviceidentity"],
-        )];
-        assert!(
-            check_runtimeexec_wrapper_coverage(
-                &runtimeexec_fixture_members(),
-                &bans,
-                &runtimeexec_allowed_edges(),
-                &[],
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn runtimeexec_wrapper_widened_to_bin_red() {
-        let bans = vec![ban(
-            "runtimeexec",
-            &[
-                "runtime",
-                "settingsonly",
-                "identityaudit",
-                "deviceidentity",
-                "unregistered-root",
-            ],
-        )];
-        let findings = check_runtimeexec_wrapper_coverage(
-            &runtimeexec_fixture_members(),
-            &bans,
-            &runtimeexec_allowed_edges(),
-            &[],
-        );
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
-        assert_eq!(findings[0].subject, "runtimeexec");
-    }
-
-    #[test]
-    fn runtimeexec_wrapper_missing_assembly_red() {
-        let bans = vec![ban(
-            "runtimeexec",
-            &["runtime", "settingsonly", "deviceidentity"],
-        )];
-        let findings = check_runtimeexec_wrapper_coverage(
-            &runtimeexec_fixture_members(),
-            &bans,
-            &runtimeexec_allowed_edges(),
-            &[],
-        );
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::WrapperCoverage);
-        assert_eq!(findings[0].subject, "runtimeexec");
-    }
-
-    #[test]
-    fn runtimeexec_actual_bin_consumer_is_rejected_even_with_exact_wrappers() {
-        let bans = vec![ban(
-            "runtimeexec",
-            &["runtime", "settingsonly", "identityaudit", "deviceidentity"],
-        )];
-        let findings = check_wrappers(
-            &runtimeexec_fixture_members(),
-            &bans,
-            &[e("unregistered-root", "runtimeexec")],
-            &[],
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.subject == "runtimeexec" && finding.detail.contains("unregistered-root")
-            }),
-            "an actual bin consumer must fail closed: {findings:?}"
-        );
-    }
-
     fn authmint_fixture_members() -> Vec<Member> {
         vec![
             m("authmint", "crates/authmint", Some(Layer::Basis)),
             m("diport", "crates/diport", Some(Layer::DiPort)),
             m("httpserve", "crates/httpserve", Some(Layer::Service)),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
-            m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
-            m(
-                "identityaudit",
-                "assemblies/identityaudit",
-                Some(Layer::Root),
-            ),
-            m(
-                "deviceidentity",
-                "assemblies/deviceidentity",
-                Some(Layer::Root),
-            ),
-            m("fixture", "assemblies/fixture", Some(Layer::Root)),
+            m("fixture", "roots/fixture", Some(Layer::Root)),
             m("identity", "crates/identity", Some(Layer::Domain)),
         ]
     }
 
     #[test]
     fn authmint_wrapper_exact_green() {
-        let bans = vec![ban(
-            "authmint",
-            &[
-                "diport",
-                "httpserve",
-                "runtime",
-                "settingsonly",
-                "identityaudit",
-                "deviceidentity",
-            ],
-        )];
+        let bans = vec![ban("authmint", &["diport", "httpserve"])];
         assert!(check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans).is_empty());
     }
 
@@ -4203,15 +3628,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn authmint_wrapper_widened_to_bin_red() {
         let bans = vec![ban(
             "authmint",
-            &[
-                "diport",
-                "httpserve",
-                "runtime",
-                "settingsonly",
-                "identityaudit",
-                "deviceidentity",
-                "unregistered-root",
-            ],
+            &["diport", "httpserve", "unregistered-root"],
         )];
         let findings = check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
@@ -4221,16 +3638,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
 
     #[test]
     fn authmint_wrapper_missing_consumer_red() {
-        let bans = vec![ban(
-            "authmint",
-            &[
-                "diport",
-                "httpserve",
-                "runtime",
-                "settingsonly",
-                "deviceidentity",
-            ],
-        )];
+        let bans = vec![ban("authmint", &["diport"])];
         let findings = check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
@@ -4241,15 +3649,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         vec![
             m("sagaauthmint", "crates/sagaauthmint", Some(Layer::Basis)),
             m("diport", "crates/diport", Some(Layer::DiPort)),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
             m("httpserve", "crates/httpserve", Some(Layer::Service)),
-            m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
         ]
     }
 
     #[test]
     fn sagaauthmint_wrapper_exact_green() {
-        let bans = vec![ban("sagaauthmint", &["diport", "runtime"])];
+        let bans = vec![ban("sagaauthmint", &["diport"])];
         assert!(
             check_sagaauthmint_wrapper_coverage(&sagaauthmint_fixture_members(), &bans).is_empty()
         );
@@ -4257,7 +3663,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
 
     #[test]
     fn sagaauthmint_wrapper_widened_red() {
-        let bans = vec![ban("sagaauthmint", &["diport", "runtime", "httpserve"])];
+        let bans = vec![ban("sagaauthmint", &["diport", "httpserve"])];
         let findings = check_sagaauthmint_wrapper_coverage(&sagaauthmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].subject, "sagaauthmint");
@@ -4267,14 +3673,13 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         vec![
             m("dlqauthmint", "crates/dlqauthmint", Some(Layer::Basis)),
             m("diport", "crates/diport", Some(Layer::DiPort)),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
             m("postgres", "adapters/postgres", Some(Layer::Adapter)),
         ]
     }
 
     #[test]
     fn dlqauthmint_wrapper_exact_green() {
-        let bans = vec![ban("dlqauthmint", &["diport", "runtime"])];
+        let bans = vec![ban("dlqauthmint", &["diport"])];
         assert!(
             check_dlqauthmint_wrapper_coverage(&dlqauthmint_fixture_members(), &bans).is_empty()
         );
@@ -4282,7 +3687,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
 
     #[test]
     fn dlqauthmint_wrapper_widened_red() {
-        let bans = vec![ban("dlqauthmint", &["diport", "runtime", "postgres"])];
+        let bans = vec![ban("dlqauthmint", &["diport", "postgres"])];
         let findings = check_dlqauthmint_wrapper_coverage(&dlqauthmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].subject, "dlqauthmint");
@@ -4290,7 +3695,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
 
     #[test]
     fn dlqauthmint_wrapper_missing_consumer_red() {
-        let bans = vec![ban("dlqauthmint", &["diport"])];
+        let bans = vec![ban("dlqauthmint", &[])];
         let findings = check_dlqauthmint_wrapper_coverage(&dlqauthmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].subject, "dlqauthmint");
@@ -4342,13 +3747,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             m("pkiauthmint", "crates/pkiauthmint", Some(Layer::Basis)),
             m("diport", "crates/diport", Some(Layer::DiPort)),
             m("identity", "crates/identity", Some(Layer::Domain)),
-            m(
-                "identity-composition",
-                "composition/identity",
-                Some(Layer::Root),
-            ),
             m("vault", "adapters/vault", Some(Layer::Adapter)),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
         ]
     }
 
@@ -4470,7 +3869,6 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "crates/runtimeexec",
                 Some(Layer::RuntimeExec),
             ),
-            m("runtime", "assemblies/runtime", Some(Layer::Root)),
         ]
     }
 
@@ -4478,7 +3876,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn runtimeinventorymint_wrapper_exact_green() {
         let bans = vec![ban(
             "runtimeinventorymint",
-            &["assembly-schema", "runtimeexec", "runtime"],
+            &["assembly-schema", "runtimeexec"],
         )];
         assert!(
             check_runtimeinventorymint_wrapper_coverage(
@@ -4490,10 +3888,10 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     }
 
     #[test]
-    fn runtimeinventorymint_wrapper_widened_to_assembly_red() {
+    fn runtimeinventorymint_wrapper_widened_red() {
         let bans = vec![ban(
             "runtimeinventorymint",
-            &["assembly-schema", "runtimeexec", "runtime", "settingsonly"],
+            &["assembly-schema", "runtimeexec", "unapproved"],
         )];
         let findings = check_runtimeinventorymint_wrapper_coverage(
             &runtimeinventorymint_fixture_members(),
@@ -4687,7 +4085,7 @@ tracing = { package = "tower", version = "1" }
                 "adapters/postgres-migration",
                 Some(Layer::Adapter),
             ),
-            m("fixture", "assemblies/fixture", Some(Layer::Root)),
+            m("fixture", "roots/fixture", Some(Layer::Root)),
         ];
         let findings = check_wrappers(
             &members,
@@ -4727,36 +4125,6 @@ tracing = { package = "tower", version = "1" }
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "identity");
-    }
-
-    fn dev_adapter_fixture_members() -> Vec<Member> {
-        vec![
-            m("fixture", "assemblies/fixture", Some(Layer::Root)),
-            m("fixture-alt", "assemblies/fixture-alt", Some(Layer::Root)),
-            m("xtask", "xtask", Some(Layer::Root)),
-            m("journeys", "journeys", Some(Layer::Root)),
-            m("memory", "adapters/memory", Some(Layer::Adapter)),
-        ]
-    }
-
-    #[test]
-    fn check_wrappers_dev_adapter_green() {
-        // LAYER-DEPS-07 green：dev adapter `memory` 只被 dev 组合根（journeys/xtask）依赖。
-        let bans = vec![ban("memory", &["journeys", "xtask"])];
-        assert!(check_wrappers(&dev_adapter_fixture_members(), &bans, &[], &[]).is_empty());
-    }
-
-    #[test]
-    fn check_wrappers_dev_adapter_red_production_bin() {
-        // LAYER-DEPS-07 red（anti-vacuity）：dev adapter `memory` 的 wrapper 含生产 bin `server` → 红。
-        let bans = vec![ban("memory", &["fixture", "journeys", "xtask"])];
-        let findings = check_wrappers(&dev_adapter_fixture_members(), &bans, &[], &[]);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.subject == "memory" && f.rule == Rule::WrapperCoverage),
-            "生产 bin server 依赖 dev adapter 须被 LAYER-DEPS-07 拦截"
-        );
     }
 
     #[test]
@@ -5039,7 +4407,7 @@ tracing = { package = "tower", version = "1" }
     #[test]
     fn workspacefacts_confinement_rejects_widening_and_missing_edges() {
         let (mut members, _, _, _) = workspacefacts_fixture();
-        members.push(m("fixture", "assemblies/fixture", Some(Layer::Root)));
+        members.push(m("fixture", "roots/fixture", Some(Layer::Root)));
         let bans = vec![
             ban("workspacefacts", &["xtask", "fixture"]),
             ban("guppy", &["workspacefacts", "xtask"]),
@@ -5056,7 +4424,7 @@ tracing = { package = "tower", version = "1" }
     #[test]
     fn workspacefacts_confinement_rejects_actual_workspace_consumer_with_exact_wrappers() {
         let (mut members, mut shipped_edges, dev_edges, deps) = workspacefacts_fixture();
-        members.push(m("fixture", "assemblies/fixture", Some(Layer::Root)));
+        members.push(m("fixture", "roots/fixture", Some(Layer::Root)));
         shipped_edges.push(e("fixture", "workspacefacts"));
         let bans = vec![
             ban("workspacefacts", &["xtask", "workspacefacts"]),
@@ -5442,7 +4810,7 @@ missing = { path = "../missing-member" }
             m("testkit", "crates/testkit", Some(Layer::Service)),
             m("generated", "generated", Some(Layer::Generated)),
             m("postgres", "adapters/postgres", Some(Layer::Adapter)),
-            m("journeys", "journeys", Some(Layer::Root)),
+            m("test-harness", "test-harness", Some(Layer::Root)),
         ];
         let edges = [
             dev_e("identity", "identity"),
@@ -5450,7 +4818,7 @@ missing = { path = "../missing-member" }
             dev_e("identity", "httpserve"),
             dev_e("identity", "testkit"),
             dev_e("identity", "generated"),
-            dev_e("journeys", "postgres"),
+            dev_e("test-harness", "postgres"),
         ];
         assert!(check_dev_layer_boundaries(&members, &edges).is_empty());
     }

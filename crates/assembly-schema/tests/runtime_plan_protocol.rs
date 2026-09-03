@@ -2,8 +2,7 @@
 // reason: protocol fixtures should fail at the exact local assertion when their frozen bytes drift.
 
 use assembly_schema::{
-    AssemblyManifest, CanonicalAssemblyManifestV2, ParsedAssemblyLock, ParsedRuntimePlan,
-    RepositoryVerifiedAssemblyLock, RuntimePlan, RuntimePlanErrorStage, RuntimePlanJsonCategory,
+    ParsedAssemblyLock, RuntimePlan, RuntimePlanErrorStage, RuntimePlanJsonCategory,
     validate_runtime_plan_json_slice,
 };
 use serde::Serialize;
@@ -65,49 +64,6 @@ fn assembly_lock_wire_from_vector() -> Value {
         .expect("unsigned AssemblyLock object")
         .insert("fingerprint".to_owned(), Value::String(fingerprint));
     unsigned
-}
-
-fn manifest_bound_workflow_fixture() -> (
-    CanonicalAssemblyManifestV2,
-    RepositoryVerifiedAssemblyLock,
-    Value,
-) {
-    let manifest =
-        AssemblyManifest::from_toml_str(include_str!("../../../assemblies/runtime/assembly.toml"))
-            .expect("bound fixture manifest")
-            .canonicalize_v2()
-            .expect("canonical bound fixture manifest");
-    let lock = repository_verified_lock(
-        "runtime",
-        include_bytes!("../../../assemblies/runtime/assembly.lock.json"),
-    );
-    let plan_wire = serde_json::from_slice(include_bytes!(
-        "../../../assemblies/runtime/runtime-plan.json"
-    ))
-    .expect("committed runtime plan");
-    ParsedRuntimePlan::from_json_slice_bound(
-        &serde_json::to_vec(&plan_wire).expect("bound fixture RuntimePlan JSON"),
-        &manifest,
-        &lock,
-    )
-    .expect("valid manifest-bound workflow fixture");
-    (manifest, lock, plan_wire)
-}
-
-fn repository_verified_lock(name: &str, bytes: &[u8]) -> RepositoryVerifiedAssemblyLock {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("repository root");
-    let source = assembly_schema::RepositoryAssemblyManifestV2::discover_v2(
-        root,
-        &root.join("assemblies").join(name),
-    )
-    .expect("repository assembly manifest");
-    ParsedAssemblyLock::from_json_slice(bytes)
-        .expect("parsed AssemblyLock")
-        .verify_repository_v2(&source)
-        .expect("repository-verified AssemblyLock")
 }
 
 fn seal_unsigned(mut unsigned: Value) -> Value {
@@ -331,22 +287,6 @@ fn runtime_plan_reader_is_closed_and_fails_on_bad_version_enum_or_digest() {
 }
 
 #[test]
-fn repository_bound_workflows_round_trip_without_capability_requirements() {
-    let (manifest, lock, wire) = manifest_bound_workflow_fixture();
-    let wire_text = serde_json::to_string(&wire).expect("serialize RuntimePlan text");
-    assert!(!wire_text.contains("capabilityRequirement"));
-
-    let bytes = serde_json::to_vec(&wire).expect("serialize omission RuntimePlan bytes");
-    validate_runtime_plan_json_slice(&bytes).expect("strict RuntimePlan reader");
-    let parsed = ParsedRuntimePlan::from_json_slice_bound(&bytes, &manifest, &lock)
-        .expect("repository-bound RuntimePlan reader");
-    assert_eq!(
-        parsed.workflow_plans().len(),
-        manifest.workflow_activations().len()
-    );
-}
-
-#[test]
 fn runtime_plan_reader_rejects_complete_negative_matrix() {
     for field in ["providerPlans", "domainPlans", "placementPlans"] {
         let mut missing = runtime_vector()["unsigned"].clone();
@@ -438,60 +378,6 @@ fn runtime_plan_reader_rejects_complete_negative_matrix() {
     let mut unsorted_outputs = runtime_vector()["unsigned"].clone();
     unsorted_outputs["providerPlans"][0]["outputs"] = json!(["workers", "probes"]);
     assert_reader_rejects(seal_unsigned(unsorted_outputs), "not in canonical order");
-}
-
-#[test]
-fn manifest_bound_reader_rejects_missing_and_extra_workflow_plans() {
-    let (manifest, lock, valid) = manifest_bound_workflow_fixture();
-
-    let mut missing = valid.clone();
-    missing
-        .as_object_mut()
-        .expect("RuntimePlan wire")
-        .remove("runtimePlanFingerprint");
-    missing["workflowPlans"]
-        .as_array_mut()
-        .expect("workflow plans")
-        .pop();
-    let missing = seal_unsigned(missing);
-    let missing_result = ParsedRuntimePlan::from_json_slice_bound(
-        &serde_json::to_vec(&missing).expect("missing workflow JSON"),
-        &manifest,
-        &lock,
-    );
-    assert!(missing_result.is_err());
-    let Some(missing_error) = missing_result.err() else {
-        return;
-    };
-    assert!(missing_error.to_string().contains("workflowPlans"));
-
-    let mut extra = valid;
-    extra
-        .as_object_mut()
-        .expect("RuntimePlan wire")
-        .remove("runtimePlanFingerprint");
-    extra["workflowPlans"]
-        .as_array_mut()
-        .expect("workflow plans")
-        .push(json!({
-            "mode": "projection",
-            "id": "syshealth.extra-view",
-            "definitionVersion": "v1",
-            "definitionSchemaDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "targetGeneration": "extra-v1",
-            "activation": "disabled"
-        }));
-    let extra = seal_unsigned(extra);
-    let extra_result = ParsedRuntimePlan::from_json_slice_bound(
-        &serde_json::to_vec(&extra).expect("extra workflow JSON"),
-        &manifest,
-        &lock,
-    );
-    assert!(extra_result.is_err());
-    let Some(extra_error) = extra_result.err() else {
-        return;
-    };
-    assert!(extra_error.to_string().contains("workflowPlans"));
 }
 
 #[test]

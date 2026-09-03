@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! `rss_diport_envelope_reserved_writer` — RSS 治理 dylint lint：限定
 //! `diport::EnvelopeMetadata::insert_wire_pair` 的调用站点到 adapter / 组合根
-//! （`adapters`/`bins`/`assemblies`）+ diport 自身。
+//! （`adapters`/`bins`）+ diport 自身。
 //!
 //! INVARIANT: DIPORT-ENVELOPE-WIRE-WRITER-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
@@ -28,11 +28,11 @@
 //! - 目标方法：`ExprKind::MethodCall` 中方法名 == `insert_wire_pair`，且通过 `type_dependent_def_id`
 //!   解析的方法 `DefId` 的 krate 名 == "diport"（强校验：名称 + crate 两层，非任意同名方法触发）。
 //! - callsite 放行：① `LOCAL_CRATE` 名 == "diport"；② `CARGO_MANIFEST_DIR` 父目录名 ∈
-//!   adapters/bins/assemblies（与 `rss_diport_impl_allowlist` 同款）。
+//!   adapters/bins（与 `rss_diport_impl_allowlist` 同款）。
 //!
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；
 //! ② `#[cfg(test)]` 子树默认不被扫（test 内调用不报，test 路径非生产路径）；③ allowlist 顶层成员目录
-//! 集（`adapters`/`bins`/`assemblies`）扩项无机器复核，靠 greppable + 治理评审；④ intraprocedural 盲区：
+//! 集（`adapters`/`bins`）扩项无机器复核，靠 greppable + 治理评审；④ intraprocedural 盲区：
 //! allowlist crate 内封装 `fn relay_wrap() { …insert_wire_pair()… }` 被外部调用时，外部只见函数调用、
 //! 不见内部 `insert_wire_pair` 调用（与 `rss_authplan_callsite` 同款盲区，#1085 跟踪）。
 //!
@@ -60,7 +60,7 @@ use rustc_lint::{LateContext, LateLintPass};
 dylint_linting::declare_late_lint! {
     /// ### What it does
     /// 标记**非** callsite-allowlist crate 里对 `diport::EnvelopeMetadata::insert_wire_pair`
-    /// （allowlist：`adapters`/`bins`/`assemblies` + diport）的调用。
+    /// （allowlist：`adapters`/`bins` + diport）的调用。
     ///
     /// ### Why is this bad?
     /// `insert_wire_pair` 是 reserved-capable wire 透传写面——relay（postgres）从 `outbox.metadata` 列、
@@ -82,7 +82,7 @@ dylint_linting::declare_late_lint! {
     /// md.insert_wire_pair("trace", "abc"); // 触发——业务不应写 reserved key
     /// ```
     /// Use instead: `md.try_insert("myKey", "val")?;`（非 reserved key 业务 metadata）。
-    /// relay / subscriber 路径用 `insert_wire_pair` 须将代码移到 `adapters/<name>` 或组合根（`bins`/`assemblies`）。
+    /// relay / subscriber 路径用 `insert_wire_pair` 须将代码移到 `adapters/<name>` 或组合根（`bins`）。
     pub RSS_DIPORT_ENVELOPE_RESERVED_WRITER,
     Warn,
     "reserved-capable wire writer EnvelopeMetadata::insert_wire_pair is callsite-allowlisted (INVARIANT DIPORT-ENVELOPE-WIRE-WRITER-01)"
@@ -121,10 +121,10 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportEnvelopeReservedWriter {
             RSS_DIPORT_ENVELOPE_RESERVED_WRITER,
             expr.hir_id,
             expr.span,
-            "reserved-capable wire 写面 `EnvelopeMetadata::insert_wire_pair` 仅 adapter（`adapters/`）/ 组合根（`bins`/`assemblies`）可调：此 crate 不在 callsite allowlist",
+            "reserved-capable wire 写面 `EnvelopeMetadata::insert_wire_pair` 仅 adapter（`adapters/`）/ 组合根（`bins`）可调：此 crate 不在 callsite allowlist",
             |diag| {
                 diag.help(
-                    "业务写 metadata 请用 `try_insert`（拒 reserved key，Hard 边界）；adapter（`adapters/`）/ 组合根（`bins`/`assemblies`）的 relay / subscriber rehydrate 才用 `insert_wire_pair`；确需在 allowlist 外调用在该调用处加 `#[allow(rss_diport_envelope_reserved_writer)] // reason: ...`（item-level 逃生门）",
+                    "业务写 metadata 请用 `try_insert`（拒 reserved key，Hard 边界）；adapter（`adapters/`）/ 组合根（`bins`）的 relay / subscriber rehydrate 才用 `insert_wire_pair`；确需在 allowlist 外调用在该调用处加 `#[allow(rss_diport_envelope_reserved_writer)] // reason: ...`（item-level 逃生门）",
                 );
             },
         );
@@ -136,10 +136,10 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportEnvelopeReservedWriter {
 /// 1. 被编译 crate 是 `diport` 自身——定义方内部调用合法（含 diport 单元测试对
 ///    `insert_wire_pair` 的调用）。`LOCAL_CRATE` 身份不可被外部 `mod diport` 伪造。
 /// 2. 被编译 package 的 manifest 目录（`CARGO_MANIFEST_DIR`，绝对路径、随调用位置不变）其**父目录名**
-///    ∈ workspace 顶层成员目录 `adapters`/`bins`/`assemblies`。键 package 位置而非源文件路径 ⇒
+///    ∈ workspace 顶层成员目录 `adapters`/`bins`。键 package 位置而非源文件路径 ⇒
 ///    域 crate 把调用藏进 `crates/<domain>/src/adapters/` 子目录无法绕过（manifest dir 仍 `crates/<domain>`，
-///    父目录 `crates`）。**allowlist 刻意窄于架构单源的「组合根」全集**——`xtask` / `journeys`（父目录均为
-///    workspace 根）虽属组合根，但**不构造 wire envelope / 不调 `insert_wire_pair`**，故意不入 allowlist
+///    父目录 `crates`）。`xtask` 位于 workspace 根且**不构造 wire envelope / 不调
+///    `insert_wire_pair`**，故意不入 allowlist
 ///    （fail-closed 更严；确需则走 item-level `#[allow]`）。判定逻辑与兄弟 lint `rss_diport_impl_allowlist` 同款。
 ///
 /// `CARGO_MANIFEST_DIR` 缺失（理论上 cargo 必设；非 cargo 驱动场景）fail-closed 视为不允许。
@@ -155,7 +155,7 @@ fn callsite_allowed(cx: &LateContext<'_>) -> bool {
             .parent()
             .and_then(Path::file_name)
             .and_then(|n| n.to_str()),
-        Some("adapters" | "bins" | "assemblies")
+        Some("adapters" | "bins")
     )
 }
 

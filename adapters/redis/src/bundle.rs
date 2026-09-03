@@ -107,8 +107,8 @@ impl RedisRuntimeDeps {
         }
     }
 
-    /// Test-only raw-pool seam for deterministic fault injection.
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    /// Test-only raw-pool seam for provider integration fixtures.
+    #[cfg(any(test, feature = "integration"))]
     #[must_use]
     pub fn setup_for_test(pool: Pool) -> Self {
         Self::from_pool(pool)
@@ -192,8 +192,8 @@ impl RedisInfraDeps {
         limiter.verify_capability().await
     }
 
-    /// Fault-matrix-only real Redis effect handle.
-    #[cfg(feature = "fault-matrix-test-support")]
+    /// Real Redis effect handle for provider integration tests.
+    #[cfg(feature = "integration")]
     #[must_use]
     pub fn saga_effect_fixture(&self) -> crate::RedisSagaEffectFixture {
         crate::RedisSagaEffectFixture::new(Arc::clone(&self.store))

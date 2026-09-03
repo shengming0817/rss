@@ -3,7 +3,7 @@ name = "rss_pdp_impl_adapter_only"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：diport::Pdp 验签端口仅 provider adapter 可 impl——组合根（bins/assemblies）/ 域不得内联 always-allow Pdp（信任根，INVARIANT PDP-IMPL-ADAPTER-ONLY-01；T004.6 / #1198）"
+description = "RSS 治理：diport::Pdp 验签端口仅 provider adapter 可 impl——非 adapter crate 不得内联 always-allow Pdp（信任根，INVARIANT PDP-IMPL-ADAPTER-ONLY-01；T004.6 / #1198）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep diport）

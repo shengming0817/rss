@@ -719,86 +719,6 @@ async fn outbox_log_append_only_grants_and_tenant_isolation() -> TestResult {
     Ok(())
 }
 
-#[cfg(feature = "fault-matrix-test-support")]
-#[tokio::test(flavor = "multi_thread")]
-async fn fault_matrix_exact_claim_does_not_mutate_other_eligible_rows() -> TestResult {
-    type DurableClaimState = (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    );
-
-    let (_pg, store) = connect_pg().await?;
-    setup_outbox(&store).await?;
-
-    let domain = unique_domain("fault_matrix_exact_claim");
-    let other_id = unique_event_id("fault-matrix-other");
-    let target_id = unique_event_id("fault-matrix-target");
-    for event_id in [&other_id, &target_id] {
-        let entry = make_entry(event_id);
-        let domain = domain.clone();
-        eventing_test_db(&store)
-            .test_write(
-                integration_tenant_scope(test_tenant()),
-                |cap| {
-                    Box::pin(async move {
-                        let _outcome =
-                            append_outbox(cap, &entry, &make_test_env(&domain, "contract-1"))
-                                .await
-                                .map_err(test_append_error)?;
-                        Ok(())
-                    }) as BoxFuture<'_, Result<(), sqlx::Error>>
-                },
-                std::convert::identity,
-            )
-            .await?;
-    }
-
-    let outbox = make_pg_outbox_for_domain(
-        &store,
-        &domain,
-        RecordingPublisher {
-            result: || Ok(()),
-            calls: Arc::new(Mutex::new(0)),
-        },
-    );
-    let other_before: DurableClaimState = sqlx::query_as(
-        "SELECT status, lease_token::text, lease_until::text, \
-                automatic_retry_deadline::text, published_at::text, dlx_at::text, \
-                updated_at::text \
-         FROM outbox WHERE event_id = $1",
-    )
-    .bind(&other_id)
-    .fetch_one(&store.pool)
-    .await?;
-    let claimed = outbox
-        .fault_matrix_claim_exact(&store.pool, &target_id)
-        .await?
-        .ok_or("target row was not claimed")?;
-    assert_eq!(claimed.idem_key().as_str(), target_id);
-
-    let other_after: DurableClaimState = sqlx::query_as(
-        "SELECT status, lease_token::text, lease_until::text, \
-                automatic_retry_deadline::text, published_at::text, dlx_at::text, \
-                updated_at::text \
-         FROM outbox WHERE event_id = $1",
-    )
-    .bind(&other_id)
-    .fetch_one(&store.pool)
-    .await?;
-    assert_eq!(
-        other_after, other_before,
-        "exact target claim must leave every durable state/lease column of another eligible row unchanged"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_outbox_append_serializes_same_fact_and_conflict() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -5242,7 +5162,15 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
     let tenant = test_tenant();
     let session_id = uuid::Uuid::from_u128(0x2005);
     let session_id_wire = session_id.hyphenated().to_string();
-    let event = reviewed_session_event(
+    let first = reviewed_session_event(
+        &event_id,
+        tenant,
+        "cdc-subj-opaque-77",
+        actor_for(tenant),
+        session_id,
+    )
+    .await?;
+    let second = reviewed_session_event(
         &event_id,
         tenant,
         "cdc-subj-opaque-77",
@@ -5251,8 +5179,8 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
     )
     .await?;
     let emitter = crate::PgOutboxCdcEmitter::new(&store);
-    emitter.write(event.clone()).await?;
-    emitter.write(event).await?;
+    emitter.write(first).await?;
+    emitter.write(second).await?;
 
     let count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox_log WHERE event_id = $1")
         .bind(&event_id)

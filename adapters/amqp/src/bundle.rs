@@ -37,7 +37,7 @@
 //!
 //! amqp bundle live 接入已落地（#1251）：组合根 `runtime` 经 topology-gated resolver
 //! （`bootstrap::eventtransport::resolve`）注入 publisher（outbox relay 发布）+ subscriber（consumer 订阅）
-//! 到 `eventexec`——见 `assemblies/runtime/src/event_transport.rs`。
+//! 到 `eventexec`。
 //!
 //! ## 测试覆盖
 //!

@@ -237,7 +237,7 @@ impl PgStore {
     ///
     /// This runs only on the migration lane before serving starts. Runtime `rss_app` cannot
     /// register or retire bindings.
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     // reason: integration fixtures use this raw selected-binding helper; runtime module tests
     // enable `test-support` without registering arbitrary bindings.
@@ -269,7 +269,7 @@ impl PgStore {
         tx.commit().await
     }
 
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn register_projection_capture(
         &self,
         capture: &ProjectionCaptureRegistration,

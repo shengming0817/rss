@@ -3,9 +3,6 @@
 //! INVARIANT: TENANCY-CLOSEOUT-REVERSE-01 { level = "Medium", exec = "check", source = "code" } -- final
 //! tenancy governance facts must stay machine-visible in verify/ci membership, dylint registration,
 //! projection wiring, and code/config carriers.
-//! INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::missing_service_token_claim_bound_e2e_carrier_is_reported", anti_vacuity = "tests::required_code_carriers_anchor_service_token_claim_bound_e2e" } -- service-token
-//! claim-bound canonical tenant headers and mTLS/SPIFFE tenantless service identity must remain locked by reverse
-//! closeout anchors.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -24,7 +21,6 @@ const VERIFY_CI_REQUIRED_GATES: &[&str] = &[
     "codegen-check",
     "schema-rls",
     "pg-tenant-tx-guard",
-    "dlx-lifecycle-funnel",
     "repo-scope-guard",
     "pdp-allow-guard",
     "tenancy-closeout",
@@ -42,66 +38,6 @@ const TENANCY_DYLINTS: &[&str] = &[
 ];
 
 const REGISTRY_FILES: &[&str] = &["Cargo.toml", "lints/Cargo.toml"];
-const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
-
-/// Code carriers bind governance facts to **code/config** only.
-///
-/// Markdown checks are not enforcement: they duplicate constraints that real gates already own
-/// and force prose to restate implementation detail. Constraints that earlier doc anchors named
-/// are carried by their own gates (`schema-rls`, `pg-tenant-tx-guard`,
-/// `PgStore::verify_rls_capability`, `TENANCY-PG-CATALOG-PROOF-01` /
-/// `TENANCY-PG-BEHAVIOR-PROOF-01`, the tenancy dylints, and the projection chain checks below).
-const REQUIRED_CODE_CARRIERS: &[RequiredCodeCarrier] = &[
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "internal_mtls_verified_peer_remains_tenantless_scope",
-        detail: "runtime auth e2e must lock mTLS service principal as tenantless",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "service_token_missing_or_wrong_tenant_header_is_401",
-        detail: "runtime auth e2e must lock missing/wrong service-token tenant header as 401",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "service_token_duplicate_tenant_header_is_401",
-        detail: "runtime auth e2e must lock duplicate service-token tenant header as 401",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "service_token_establishes_scope_from_claim_bound_tenant",
-        detail: "runtime auth e2e must lock claim-bound service-token ambient tenant scope",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "service_token_missing_tenant_claim_is_401",
-        detail: "runtime auth e2e must lock missing signed tenant_id claim as 401",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "service_token_tampered_signature_is_401",
-        detail: "runtime auth e2e must lock tampered standard JWS HS256 signature as 401",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "VerifiedMtlsPeer",
-        detail: "runtime auth e2e must inject verified mTLS evidence",
-    },
-    RequiredCodeCarrier {
-        rule: Rule::CodeCarrier,
-        path: AUTH_E2E_TEST_PATH,
-        needle: "body, SCOPE_MISSING",
-        detail: "runtime auth e2e must assert mTLS does not establish ambient tenant scope",
-    },
-];
-
 const AUDIT_PROJECTION_FIELDS: &[HttpProjectionFieldName] = &[
     HttpProjectionFieldName::AuditTenantId,
     HttpProjectionFieldName::AuditActor,
@@ -157,15 +93,6 @@ pub(crate) enum Rule {
     VerifyGate,
     DylintRegistry,
     ProjectionAnchor,
-    CodeCarrier,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RequiredCodeCarrier {
-    rule: Rule,
-    path: &'static str,
-    needle: &'static str,
-    detail: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,13 +125,11 @@ impl GovernanceCheck for TenancyCloseout {
         findings.extend(check_verify_ci_membership());
         findings.extend(check_required_lint_registry(&root)?);
         findings.extend(check_projection_wiring(&root)?);
-        findings.extend(check_required_code_carriers(&root)?);
         Ok((
             format!(
-                "{} verify/ci gates, {} dylints, {} code carriers, {} projection fields checked",
+                "{} verify/ci gates, {} dylints, {} projection fields checked",
                 VERIFY_CI_REQUIRED_GATES.len(),
                 TENANCY_DYLINTS.len(),
-                REQUIRED_CODE_CARRIERS.len(),
                 projection_field_count()
             ),
             findings,
@@ -614,34 +539,6 @@ fn missing_projection(
     )
 }
 
-fn check_required_code_carriers(root: &Path) -> Result<Vec<Finding>> {
-    let mut findings = Vec::new();
-    for carrier in REQUIRED_CODE_CARRIERS {
-        let content = read_required(root, carrier.path)?;
-        findings.extend(scan_required_code_carrier(carrier, &content));
-    }
-    Ok(findings)
-}
-
-fn scan_required_code_carrier(carrier: &RequiredCodeCarrier, content: &str) -> Vec<Finding> {
-    let stripped;
-    let searchable = if carrier.path.ends_with(".rs") {
-        stripped = strip_rust_line_comments(content);
-        stripped.as_str()
-    } else {
-        content
-    };
-    if searchable.contains(carrier.needle) {
-        Vec::new()
-    } else {
-        vec![finding(
-            carrier.rule,
-            format!("{}:{}", carrier.path, carrier.needle),
-            carrier.detail,
-        )]
-    }
-}
-
 fn strip_rust_line_comments(content: &str) -> String {
     content
         .lines()
@@ -715,90 +612,6 @@ mod tests {
     /// RED anti-vacuity for TENANCY-SERVICE-IDENTITY-SCOPE-01: reverse closeout must
     /// structurally pin the claim-bound service-token runtime e2e carriers (not merely mTLS).
     #[test]
-    fn required_code_carriers_anchor_service_token_claim_bound_e2e() {
-        const REQUIRED: &[&str] = &[
-            "service_token_missing_or_wrong_tenant_header_is_401",
-            "service_token_duplicate_tenant_header_is_401",
-            "service_token_establishes_scope_from_claim_bound_tenant",
-            "service_token_missing_tenant_claim_is_401",
-            "service_token_tampered_signature_is_401",
-        ];
-        for needle in REQUIRED {
-            assert!(
-                REQUIRED_CODE_CARRIERS.iter().any(|carrier| {
-                    carrier.path == AUTH_E2E_TEST_PATH && carrier.needle == *needle
-                }),
-                "TENANCY-SERVICE-IDENTITY-SCOPE-01 reverse closeout must anchor {needle}"
-            );
-        }
-    }
-
-    #[test]
-    fn missing_service_identity_scope_carrier_is_reported() {
-        let carrier = RequiredCodeCarrier {
-            rule: Rule::CodeCarrier,
-            path: AUTH_E2E_TEST_PATH,
-            needle: "internal_mtls_verified_peer_remains_tenantless_scope",
-            detail: "must exist",
-        };
-        let findings = scan_required_code_carrier(&carrier, "async fn unrelated_case() {}");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::CodeCarrier);
-        assert!(
-            findings[0]
-                .subject
-                .contains("internal_mtls_verified_peer_remains_tenantless_scope"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn missing_service_token_claim_bound_e2e_carrier_is_reported() {
-        let carrier = RequiredCodeCarrier {
-            rule: Rule::CodeCarrier,
-            path: AUTH_E2E_TEST_PATH,
-            needle: "service_token_establishes_scope_from_claim_bound_tenant",
-            detail: "must exist",
-        };
-        let findings = scan_required_code_carrier(
-            &carrier,
-            "// service_token_establishes_scope_from_claim_bound_tenant documented only\n\
-             async fn internal_mtls_verified_peer_remains_tenantless_scope() {}",
-        );
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::CodeCarrier);
-        assert!(
-            findings[0]
-                .subject
-                .contains("service_token_establishes_scope_from_claim_bound_tenant"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn missing_mtls_tenantless_e2e_carrier_is_reported() {
-        let carrier = RequiredCodeCarrier {
-            rule: Rule::CodeCarrier,
-            path: AUTH_E2E_TEST_PATH,
-            needle: "internal_mtls_verified_peer_remains_tenantless_scope",
-            detail: "must exist",
-        };
-        let findings = scan_required_code_carrier(
-            &carrier,
-            "// internal_mtls_verified_peer_remains_tenantless_scope documented only\n\
-             async fn service_token_establishes_scope_from_claim_bound_tenant() {}",
-        );
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::CodeCarrier);
-        assert!(
-            findings[0]
-                .subject
-                .contains("internal_mtls_verified_peer_remains_tenantless_scope"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
     fn root_lint_registry_ignores_comment_only_lint() {
         let content = r#"
 [workspace.metadata.dylint]
@@ -840,42 +653,6 @@ members = [
             findings
                 .iter()
                 .any(|finding| finding.subject.contains("rss_projection_append_only")),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn missing_projection_carrier_is_reported() {
-        let carrier = RequiredCodeCarrier {
-            rule: Rule::ProjectionAnchor,
-            path: "generated/src/http/audit_v1.rs",
-            needle: "ProjectionField::AuditActor",
-            detail: "must exist",
-        };
-        let findings = scan_required_code_carrier(&carrier, "ProjectionField::Other");
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::ProjectionAnchor);
-    }
-
-    #[test]
-    fn rust_source_required_code_carrier_ignores_line_comment_only() {
-        let carrier = RequiredCodeCarrier {
-            rule: Rule::CodeCarrier,
-            path: AUTH_E2E_TEST_PATH,
-            needle: "VerifiedMtlsPeer",
-            detail: "must exist",
-        };
-        let findings = scan_required_code_carrier(
-            &carrier,
-            r#"
-fn main() {
-    // VerifiedMtlsPeer
-}
-"#,
-        );
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert!(
-            findings[0].subject.contains("VerifiedMtlsPeer"),
             "{findings:?}"
         );
     }
@@ -1045,46 +822,5 @@ pub mod unrelated {
             AUDIT_PROJECTION_FIELDS.len(),
             "{findings:?}"
         );
-    }
-
-    #[test]
-    fn green_fixture_has_no_findings() {
-        assert!(scan_plan_membership("ci", VERIFY_CI_REQUIRED_GATES).is_empty());
-        assert!(
-            VERIFY_CI_REQUIRED_GATES.contains(&"repo-scope-guard"),
-            "tenancy closeout required gate set must include repo-scope-guard"
-        );
-        assert!(
-            VERIFY_CI_REQUIRED_GATES.contains(&"dlx-lifecycle-funnel"),
-            "tenancy closeout required gate set must include dlx-lifecycle-funnel"
-        );
-
-        let root_lint_fixture = format!(
-            "[workspace.metadata.dylint]\nlibraries = [{}]\n",
-            TENANCY_DYLINTS
-                .iter()
-                .map(|lint| format!("{{ path = \"lints/{lint}\" }}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        assert!(scan_lint_registry("Cargo.toml", &root_lint_fixture).is_empty());
-
-        let lints_workspace_fixture = format!(
-            "[workspace]\nmembers = [{}]\n",
-            TENANCY_DYLINTS
-                .iter()
-                .map(|lint| format!("\"{lint}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        assert!(scan_lint_registry("lints/Cargo.toml", &lints_workspace_fixture).is_empty());
-
-        let carrier = RequiredCodeCarrier {
-            rule: Rule::CodeCarrier,
-            path: AUTH_E2E_TEST_PATH,
-            needle: "VerifiedMtlsPeer",
-            detail: "must exist",
-        };
-        assert!(scan_required_code_carrier(&carrier, "VerifiedMtlsPeer").is_empty());
     }
 }

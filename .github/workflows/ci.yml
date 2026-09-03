@@ -130,20 +130,10 @@ jobs:
       selection: ${{ needs.preflight.outputs.selection }}
       source-revision: ${{ github.sha }}
 
-  integration-artifact:
-    name: integration / artifact
-    needs: preflight
-    uses: ./.github/workflows/rss-rust-job.yml
-    with:
-      job: integration-critical
-      integration-group: artifact
-      selection: ${{ needs.preflight.outputs.selection }}
-      source-revision: ${{ github.sha }}
-
   integration-critical:
     name: integration-critical
     if: ${{ always() }}
-    needs: [integration-postgres, integration-transport, integration-runtime, integration-artifact]
+    needs: [integration-postgres, integration-transport, integration-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -153,15 +143,13 @@ jobs:
           POSTGRES_RESULT: ${{ needs.integration-postgres.result }}
           TRANSPORT_RESULT: ${{ needs.integration-transport.result }}
           RUNTIME_RESULT: ${{ needs.integration-runtime.result }}
-          ARTIFACT_RESULT: ${{ needs.integration-artifact.result }}
         run: |
           set -euo pipefail
           failed=false
           for dependency in \
             "postgres=$POSTGRES_RESULT" \
             "transport=$TRANSPORT_RESULT" \
-            "runtime=$RUNTIME_RESULT" \
-            "artifact=$ARTIFACT_RESULT"; do
+            "runtime=$RUNTIME_RESULT"; do
             printf '%s\n' "$dependency"
             case "$dependency" in *=success) ;; *) failed=true ;; esac
           done

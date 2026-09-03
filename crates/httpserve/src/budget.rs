@@ -54,6 +54,10 @@ pub struct RequestControl {
 }
 
 impl RequestControl {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "transport middleware owns the monotonic request deadline source"
+    )]
     pub(crate) fn start(budget: ServerRequestBudget) -> Arc<Self> {
         Arc::new(Self {
             deadline: Instant::now() + budget.duration(),

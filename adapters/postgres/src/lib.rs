@@ -69,8 +69,6 @@ mod device_outbox;
 mod dlq;
 mod dlx_lifecycle;
 mod emitter;
-#[cfg(feature = "fault-matrix-test-support")]
-pub mod fault_matrix;
 #[cfg(feature = "domain-identity")]
 mod identity_security_lifecycle;
 mod inbox;
@@ -86,10 +84,7 @@ mod projection_events;
 mod projection_worker;
 mod readiness;
 mod reconcile;
-#[cfg(any(
-    all(test, feature = "integration"),
-    feature = "fault-matrix-test-support"
-))]
+#[cfg(all(test, feature = "integration"))]
 mod reconcile_test_driver;
 #[cfg(feature = "domain-identity")]
 mod refresh_token_store;
@@ -165,7 +160,7 @@ pub mod tx_boundary_proof {
     pub fn reconcile_operation(_: &mut ReconcileTx<'_, ServingWriteLane>) {}
 }
 
-#[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 mod test_migration {
     use crate::{PgError, PgStore};
 
@@ -188,8 +183,6 @@ pub use auth_audit_sink::PgAuthAuditSink;
 pub use account_security_repo::PgAccountSecurityRepo;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::PgDeviceIdentityDraftRuntime;
-#[cfg(feature = "domain-identity")]
-pub use bundle::PgDeviceIdentityProductionRuntime;
 #[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]

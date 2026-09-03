@@ -16,10 +16,6 @@ seed-login = ["secure/test-support"]
 # 测试跨 crate 驱动密封的领域 funnel。生产构建不启用即不编译，seal 不变；与 authn / runctx 的
 # `test-support` 同信任模型。
 test-support = ["httpserve/test-util"]
-# Exposes only the generated `identity.session-created` payload type needed by the closed L2
-# fault-matrix seam. This is deliberately separate from the broader domain test-support bundle.
-fault-matrix-test-support = []
-
 [dependencies]
 eventing.workspace = true
 rss-contract.workspace = true
@@ -62,7 +58,6 @@ axum = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
-identity = { path = ".", features = ["test-support"] }
 diport = { path = "../diport", features = ["test-support"] }
 eventexec = { path = "../eventexec", features = ["internal-test-support"] }
 # 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写；域单测不依赖 adapter crate。

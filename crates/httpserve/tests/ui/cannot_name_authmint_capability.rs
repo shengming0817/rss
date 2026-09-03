@@ -3,7 +3,7 @@
 //!
 //! 注：trybuild 会把被测 crate 的 `[dependencies]`（含 authmint）拷进临时工程，故本 harness
 //! **无法**表达「无 authmint dep 的 E0433」；那半段由 deny.toml wrappers + `cargo xtask layer-deps`
-//! 在真实 crate 图上 Hard 强制（journeys/域不可依赖 authmint）。
+//! 在真实 crate 图上 Hard 强制（业务域不可依赖 authmint）。
 fn main() {
     let _ = authmint::AuthenticatedMint(());
 }

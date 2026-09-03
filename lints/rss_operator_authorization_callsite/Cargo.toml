@@ -3,7 +3,7 @@ name = "rss_operator_authorization_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS operator authorization 治理：按 diport/eventexec 类型与精确 runtime wrapper 限定构造入口（INVARIANT OPERATOR-AUTHORIZATION-CALLSITE-01）"
+description = "RSS operator authorization 治理：按 diport/eventexec 类型与精确生产 owner 限定构造入口（INVARIANT OPERATOR-AUTHORIZATION-CALLSITE-01）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -15,10 +15,6 @@ path = "ui/disallowed.rs"
 [[example]]
 name = "httpserve"
 path = "ui/httpserve.rs"
-
-[[example]]
-name = "runtime"
-path = "ui/runtime.rs"
 
 [[example]]
 name = "postgres"

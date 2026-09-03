@@ -223,7 +223,7 @@ derive_keys() {
   case "$lane" in preflight|check|test-affected|integration-critical|audit) ;; *) die 'invalid lane' ;; esac
   [ "$profile" = "$lane" ] || die 'profile must match lane'
   case "$lane:$compiler_partition" in
-    preflight:preflight|check:check|test-affected:test-affected|audit:audit|integration-critical:postgres|integration-critical:transport|integration-critical:runtime|integration-critical:artifact) ;;
+    preflight:preflight|check:check|test-affected:test-affected|audit:audit|integration-critical:postgres|integration-critical:transport|integration-critical:runtime) ;;
     *) die 'invalid compiler partition for lane' ;;
   esac
   if ! valid_epoch "$download_epoch" || ! valid_epoch "$tool_epoch" || ! valid_epoch "$compiler_epoch"; then die 'invalid cache epoch'; fi
@@ -270,8 +270,8 @@ finalize_policy() {
     and (keys | sort) == ["compiler","download","lane","partition","schema"]
     and .schema == "rss-ci-cache-context-v2"
     and (.lane | type == "string" and test("^(preflight|check|test-affected|integration-critical|audit)$"))
-    and (.partition | type == "string" and test("^(preflight|check|test-affected|postgres|transport|runtime|artifact|audit)$"))
-    and ((.lane == "integration-critical" and (.partition | test("^(postgres|transport|runtime|artifact)$"))) or (.lane != "integration-critical" and .lane == .partition))
+    and (.partition | type == "string" and test("^(preflight|check|test-affected|postgres|transport|runtime|audit)$"))
+    and ((.lane == "integration-critical" and (.partition | test("^(postgres|transport|runtime)$"))) or (.lane != "integration-critical" and .lane == .partition))
     and (.download |
       type == "object"
       and (keys | sort) == ["enabled","hit","matched","primary","restore_outcome"]

@@ -7,7 +7,6 @@
 
 use crate::ci_lanes::{GateId, LocalImpactDomain, LocalMetaPolicy, REGISTRY};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
-use crate::execution_profiles::{DeviceLatentEvidenceId, ExecutionUnitId};
 use crate::integration_shards::{
     self, AdapterPackage, AdapterProjection, ChangedIntegrationSource, ImpactMarker,
     IntegrationSelection, IntegrationShard, IntegrationUnitId, Resource,
@@ -125,7 +124,6 @@ const HIGH_IMPACT_PATHS: &[&str] = &[
     "xtask/src/integration_shards.rs",
     "xtask/src/main.rs",
     "xtask/src/nextest.rs",
-    "xtask/src/report_format.rs",
     "xtask/src/verify.rs",
 ];
 const HIGH_IMPACT_PREFIXES: &[&str] = &[
@@ -659,18 +657,11 @@ impl SelectionPlan {
                         )?,
                     }
                 };
-                let mut units = input.integration_units;
-                units.extend(
-                    integration_shards::localtx_required_selection()?
-                        .unit_ids()
-                        .iter()
-                        .copied(),
-                );
                 Selection::Adaptive {
                     affected_packages: input.affected_packages.into_iter().collect(),
                     public_api: input.public_api.into_selection()?,
                     test_selection,
-                    integration_selection: IntegrationSelection::critical(units)?,
+                    integration_selection: IntegrationSelection::critical(input.integration_units)?,
                 }
             }
             SelectionMode::PrComplete => Selection::PrComplete {
@@ -746,13 +737,6 @@ impl SelectionPlan {
                 != crate::execution_profiles::ExecutionProfile::IntegrationCritical
             {
                 bail!("adaptive selection requires integration-critical units");
-            }
-            let required = integration_shards::localtx_required_selection()?;
-            if !required
-                .unit_ids()
-                .is_subset(integration_selection.unit_ids())
-            {
-                bail!("adaptive integration selection omits LocalTx required units");
             }
         }
         if !legal_selection(self.mode(), self.decision_reason) {
@@ -866,11 +850,6 @@ impl SelectionPlan {
             }
             PublicApiSelection::CompleteInternal => ProjectedPublicApiSelection::CompleteInternal,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn unknown_paths(&self) -> &[String] {
-        &self.unknown_paths
     }
 }
 
@@ -3354,7 +3333,7 @@ fn try_impact_entries(
     let mut markers = BTreeSet::new();
     let mut resources = BTreeSet::new();
     let mut providers = BTreeSet::new();
-    add_device_certificate_candidate_impact(entries, facts, &mut packages, &mut markers)?;
+    add_device_certificate_candidate_impact(entries, &mut markers);
     add_vault_pki_seam_impact(entries, &mut markers);
     for (package, reasons) in &packages {
         let has_structured_relation = reasons.iter().any(|impact| {
@@ -3458,36 +3437,15 @@ fn try_impact_entries(
 
 fn add_device_certificate_candidate_impact(
     entries: &[DiffEntry],
-    facts: Option<&WorkspaceFacts>,
-    packages: &mut BTreeMap<String, BTreeSet<PackageImpact>>,
     markers: &mut BTreeSet<ImpactMarker>,
-) -> Result<()> {
+) {
     if !entries
         .iter()
         .any(|entry| device_latent_semantic_impact_path(&entry.path))
     {
-        return Ok(());
+        return;
     }
     markers.insert(ImpactMarker::DeviceCertificateCandidate);
-    for evidence in DeviceLatentEvidenceId::ALL
-        .into_iter()
-        .map(DeviceLatentEvidenceId::spec)
-        .filter(|spec| spec.owner == ExecutionUnitId::Gate(GateId::ComponentTests))
-    {
-        let package = match facts {
-            Some(facts) => facts
-                .package_for_repo_path(Path::new(evidence.source_path))?
-                .map(|package| package.as_str().to_owned()),
-            None => path_package(evidence.source_path),
-        };
-        if let Some(package) = package {
-            packages
-                .entry(package)
-                .or_default()
-                .insert(PackageImpact::Test);
-        }
-    }
-    Ok(())
 }
 
 fn add_vault_pki_seam_impact(entries: &[DiffEntry], markers: &mut BTreeSet<ImpactMarker>) {
@@ -3587,28 +3545,16 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/ci_lanes.rs",
         "xtask/src/ci_impact.rs",
         "xtask/src/cli.rs",
-        "xtask/src/report_format.rs",
         "xtask/src/verify.rs",
         "xtask/src/main.rs",
         "xtask/src/contract/governance.rs",
         "xtask/src/contract/source_funnel.rs",
-        "xtask/src/assembly_governance.rs",
     ];
     // Root set used by scanners which discover production crates through workspace.members.
     // Keep this catalog here, next to the domain policy: scanner-specific subsets below must be
     // projections of this set instead of independently drifting copies.
-    const WORKSPACE_MEMBER_PREFIXES: &[&str] = &[
-        "adapters/",
-        "assemblies/",
-        "composition/",
-        "crates/",
-        "generated/",
-        "journeys/",
-        "journeys-fault-matrix/",
-    ];
+    const WORKSPACE_MEMBER_PREFIXES: &[&str] = &["adapters/", "crates/", "generated/"];
     const RUNTIME_PREFIXES: &[&str] = &[
-        "assemblies/runtime/",
-        "composition/eventing/",
         "crates/consistency/",
         "crates/eventexec/",
         "crates/runtimeexec/",
@@ -3619,52 +3565,13 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "generated/src/event/",
     ];
     const RUNTIME_CARRIERS: &[&str] = &[
-        "xtask/src/runtime_root_guard.rs",
-        "xtask/src/runtime_env_guard.rs",
-        "xtask/src/runtime_deps_guard.rs",
-        "xtask/src/event_transport_guard.rs",
-        "xtask/src/dlx_lifecycle_funnel.rs",
         "xtask/src/inbox_cutover_guard.rs",
         "xtask/src/outbox_same_id_guard.rs",
         "xtask/src/reconcile_outbox_command_guard.rs",
-        "xtask/runtime-deps-guard.toml",
     ];
-    const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] =
-        &["crates/", "adapters/", "assemblies/", "journeys/"];
+    const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] = &["crates/", "adapters/"];
     const OUTBOX_SAME_ID_CARRIER_PREFIXES: &[&str] =
         &["lints/rss_operator_authorization_callsite/"];
-    const ASSEMBLY_PREFIXES: &[&str] = &[
-        "assemblies/",
-        "generated/",
-        "contracts/",
-        "crates/assembly-schema/",
-        "journeys/",
-        "journeys-fault-matrix/",
-    ];
-    const ASSEMBLY_CARRIERS: &[&str] = &[
-        "xtask/src/assembly_codegen.rs",
-        "xtask/src/assembly_lock.rs",
-        "xtask/src/assembly_runtime_plan.rs",
-        "xtask/src/graph.rs",
-        ".gitattributes",
-    ];
-    const CONSISTENCY_PREFIXES: &[&str] = &[
-        "crates/consistency/",
-        // LocalTx/LocalOnly scanners load Cargo inventory exclusively via workspacefacts;
-        // a Cargo.toml-only edit must schedule those gates (Cargo.toml is not `.rs`).
-        "crates/workspacefacts/",
-        "contracts/",
-        "generated/",
-        "journeys/",
-        "journeys-fault-matrix/",
-        "fixtures/",
-    ];
-    const CONSISTENCY_CARRIERS: &[&str] = &[
-        "xtask/src/consistency_fixtures.rs",
-        "xtask/src/consistency_effects.rs",
-        "xtask/src/localtx_coverage.rs",
-    ];
-    const CONSISTENCY_EXTRA_RUST_PREFIXES: &[&str] = &["lints/", "xtask/"];
     const TENANCY_PREFIXES: &[&str] = &[
         "adapters/postgres/",
         "adapters/postgres-migration/",
@@ -3672,9 +3579,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "crates/audit/",
         "crates/identity/",
         "crates/settings/",
-        "composition/audit/",
-        "composition/identity/",
-        "composition/settings/",
     ];
     const TENANCY_CARRIERS: &[&str] = &[
         "xtask/src/pg_tenant_tx_guard.rs",
@@ -3682,19 +3586,12 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/tenancy_closeout.rs",
         "Cargo.toml",
         "lints/Cargo.toml",
-        "assemblies/runtime/tests/auth_e2e.rs",
     ];
     const TENANCY_GOVERNANCE_PREFIXES: &[&str] = &["lints/"];
-    const CONTRACT_BINDING_PREFIXES: &[&str] = &[
-        "contracts/",
-        "generated/",
-        "journeys/",
-        "journeys-fault-matrix/",
-    ];
-    const PDP_RUST_PREFIXES: &[&str] = &["crates/", "assemblies/"];
-    const COMMAND_RUST_PREFIXES: &[&str] = &["crates/", "adapters/", "assemblies/"];
-    const COMMAND_PREFIXES: &[&str] =
-        &["contracts/command/", "generated/src/command/", "journeys/"];
+    const CONTRACT_BINDING_PREFIXES: &[&str] = &["contracts/", "generated/"];
+    const PDP_RUST_PREFIXES: &[&str] = &["crates/"];
+    const COMMAND_RUST_PREFIXES: &[&str] = &["crates/", "adapters/"];
+    const COMMAND_PREFIXES: &[&str] = &["contracts/command/", "generated/src/command/"];
 
     if SHARED_POLICY_PATHS.contains(&path) {
         return Domain::ALL.into_iter().collect();
@@ -3711,26 +3608,9 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         // dlx-lifecycle-funnel discovers every shipped workspace member from root Cargo.toml.
         || workspace_member_rust
         || path == "Cargo.toml"
-        || (path.ends_with(".toml") && path.starts_with("assemblies/"))
         || matches_any(OUTBOX_SAME_ID_CARRIER_PREFIXES)
     {
         domains.insert(Domain::RuntimeEventing);
-    }
-    if matches_any(ASSEMBLY_PREFIXES)
-        || ASSEMBLY_CARRIERS.contains(&path)
-        // Cargo enrollment and declared binary/journey targets are inputs to the shared IR and
-        // artifact matrix. Source changes are covered by their declared carrier roots above.
-        || path == "Cargo.toml"
-        || workspace_member_manifest
-    {
-        domains.insert(Domain::AssemblyGeneration);
-    }
-    if matches_any(CONSISTENCY_PREFIXES)
-        || CONSISTENCY_CARRIERS.contains(&path)
-        || workspace_member_rust
-        || (path.ends_with(".rs") && matches_any(CONSISTENCY_EXTRA_RUST_PREFIXES))
-    {
-        domains.insert(Domain::Consistency);
     }
     if matches_any(TENANCY_PREFIXES)
         || TENANCY_CARRIERS.contains(&path)
@@ -3774,15 +3654,8 @@ fn device_latent_candidate_impact_path(path: &str) -> bool {
             })
 }
 
-fn device_latent_evidence_impact_path(path: &str) -> bool {
-    DeviceLatentEvidenceId::ALL
-        .into_iter()
-        .map(DeviceLatentEvidenceId::spec)
-        .any(|evidence| path == evidence.source_path)
-}
-
 fn device_latent_semantic_impact_path(path: &str) -> bool {
-    device_latent_candidate_impact_path(path) || device_latent_evidence_impact_path(path)
+    device_latent_candidate_impact_path(path)
 }
 
 fn coverage_closure_for(
@@ -3872,18 +3745,14 @@ fn generated_entrypoint(path: &str) -> bool {
 fn path_package(path: &str) -> Option<String> {
     let parts = path.split('/').collect::<Vec<_>>();
     match parts.as_slice() {
-        [
-            "crates" | "adapters" | "assemblies" | "composition" | "examples",
-            name,
-            ..,
-        ] => Some(if *name == "redis" && parts[0] == "adapters" {
-            "redis-adapter".to_owned()
-        } else {
-            (*name).to_owned()
-        }),
+        ["crates" | "adapters" | "examples", name, ..] => {
+            Some(if *name == "redis" && parts[0] == "adapters" {
+                "redis-adapter".to_owned()
+            } else {
+                (*name).to_owned()
+            })
+        }
         ["xtask", ..] => Some("xtask".to_owned()),
-        ["journeys", ..] => Some("journeys".to_owned()),
-        [name, ..] if name.starts_with("journeys-") => Some((*name).to_owned()),
         _ => None,
     }
 }
@@ -3927,7 +3796,7 @@ fn contract_package_impacts(
     let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     let mut extend = |source: &str, origin: &str| -> Result<()> {
         for (package, reasons) in
-            contract_manifest_impacts(root, source).with_context(|| origin.to_owned())?
+            contract_manifest_impacts(source).with_context(|| origin.to_owned())?
         {
             packages.entry(package).or_default().extend(reasons);
         }
@@ -3987,22 +3856,21 @@ fn component_package_impacts(
         let current = root.join(&manifest_path);
         let source = fs::read_to_string(&current)
             .with_context(|| format!("read working component consumer {}", current.display()))?;
-        merge_contract_impacts(root, &source, &mut packages)?;
+        merge_contract_impacts(&source, &mut packages)?;
     }
     for manifest_path in base {
         let source = git_stdout(root, ["show", &format!("{merge_base}:{manifest_path}")])
             .with_context(|| format!("read merge-base component consumer {manifest_path}"))?;
-        merge_contract_impacts(root, &source, &mut packages)?;
+        merge_contract_impacts(&source, &mut packages)?;
     }
     Ok(packages)
 }
 
 fn merge_contract_impacts(
-    root: &Path,
     source: &str,
     packages: &mut BTreeMap<String, BTreeSet<PackageImpact>>,
 ) -> Result<()> {
-    for (package, reasons) in contract_manifest_impacts(root, source)? {
+    for (package, reasons) in contract_manifest_impacts(source)? {
         packages.entry(package).or_default().extend(reasons);
     }
     Ok(())
@@ -4092,10 +3960,7 @@ fn collect_regular_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(
     Ok(())
 }
 
-fn contract_manifest_impacts(
-    root: &Path,
-    source: &str,
-) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
+fn contract_manifest_impacts(source: &str) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
     let impact = crate::contract::governance::contract_impact_from_manifest(source)?;
     let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     if let Some(owner) = impact.owner() {
@@ -4104,34 +3969,10 @@ fn contract_manifest_impacts(
             .or_default()
             .insert(PackageImpact::ContractOwner);
     } else {
-        let governance = crate::assembly_governance::AssemblyGovernanceIr::<
-            crate::assembly_governance::Core,
-        >::load(root)
-        .context("load canonical assembly consumers for framework contract")?;
-        let consumers = governance
-            .assemblies()
-            .iter()
-            .filter(|assembly| {
-                assembly
-                    .manifest()
-                    .framework_contracts()
-                    .iter()
-                    .any(|mount| mount.id == impact.id())
-            })
-            .map(|assembly| assembly.manifest().name().to_owned())
-            .collect::<BTreeSet<_>>();
-        if consumers.is_empty() {
-            bail!(
-                "framework contract `{}` has no canonical assembly consumer",
-                impact.id()
-            );
-        }
-        for consumer in consumers {
-            packages
-                .entry(consumer)
-                .or_default()
-                .insert(PackageImpact::ContractOwner);
-        }
+        packages
+            .entry("generated".to_owned())
+            .or_default()
+            .insert(PackageImpact::Generated);
     }
     for subscription in impact.subscribers() {
         packages
@@ -4358,7 +4199,6 @@ fn policy_semantic_catalog_with_selector_overrides(
             marker.label()
         ));
     }
-    catalog.extend(integration_shards::shared_source_relation_semantics());
     let release = IntegrationSelection::release_check();
     for shard in IntegrationShard::ALL {
         catalog.push(format!("integration-shard={}", shard.as_str()));
@@ -4428,13 +4268,6 @@ fn policy_semantic_catalog_with_selector_overrides(
         catalog.push(format!(
             "device-certificate-candidate={}:{}:{:?}:{:?}:{:?}",
             spec.source_dir, spec.id, spec.kind, spec.consistency_level, spec.lifecycle
-        ));
-    }
-    for evidence in DeviceLatentEvidenceId::ALL {
-        let spec = evidence.spec();
-        catalog.push(format!(
-            "device-latent-evidence={evidence:?}:{}:{:?}:{:?}:{}:{}",
-            spec.issue, spec.tier, spec.owner, spec.source_path, spec.selector
         ));
     }
     catalog.extend(
@@ -5106,7 +4939,7 @@ externalPathPrefixes = [".external-tool/"]
         let external = DiffEntry::modified(".external-tool/config.json");
         let project = DiffEntry::modified("crates/leaf/src/lib.rs");
 
-        let external_only = policy.filter_entries(&[external.clone()]);
+        let external_only = policy.filter_entries(std::slice::from_ref(&external));
         assert!(external_only.included.is_empty());
         assert_eq!(external_only.external_count, 1);
         let empty = impact_entries(
@@ -5494,72 +5327,6 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn one_impact_set_projects_to_local_and_remote_without_path_remapping() {
-        let empty = impact_entries(&[], None, &BTreeSet::new(), &BTreeMap::new());
-        assert_eq!(LocalProjection::from(&empty), LocalProjection::Empty);
-        assert_eq!(RemoteProjection::from(&empty).mode, SelectionMode::Adaptive);
-
-        let docs = impact_entries(
-            &[DiffEntry::modified("docs/ops/example.md")],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        );
-        assert_eq!(
-            LocalProjection::from(&docs),
-            LocalProjection::Meta(local_meta_gates(None))
-        );
-
-        let mut direct = BTreeMap::new();
-        direct.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
-        let selective = impact_entries(
-            &[DiffEntry::modified("crates/leaf/src/lib.rs")],
-            None,
-            &BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()]),
-            &direct,
-        );
-        assert_eq!(
-            LocalProjection::from(&selective),
-            LocalProjection::Selective {
-                meta_gates: local_meta_gates(Some(&BTreeSet::from([
-                    LocalImpactDomain::RuntimeEventing,
-                    LocalImpactDomain::Consistency,
-                    LocalImpactDomain::TenancyPostgres,
-                    LocalImpactDomain::Pdp,
-                    LocalImpactDomain::ContractBinding,
-                    LocalImpactDomain::CommandSymmetry,
-                ]))),
-                check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
-                check_includes_lib: true,
-                test_clippy_packages: vec!["leaf".to_owned()],
-                public_api_packages: Vec::new(),
-                governance: BTreeSet::new(),
-            }
-        );
-        let remote = RemoteProjection::from(&selective);
-        assert_eq!(remote.mode, SelectionMode::Adaptive);
-        assert_eq!(
-            remote.affected_packages,
-            BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()])
-        );
-
-        let full = impact_entries(
-            &[DiffEntry::modified(".gitattributes")],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        );
-        assert_eq!(
-            LocalProjection::from(&full),
-            LocalProjection::Meta(all_local_meta_gates())
-        );
-        assert_eq!(
-            RemoteProjection::from(&full).mode,
-            SelectionMode::PrComplete
-        );
-    }
-
-    #[test]
     fn coverage_projection_table_covers_seeds_consumers_and_exclusions() {
         // label, package impacts, coverage_closure, packages_with_tests, expected packages, expected strict
         // Empty expected_packages ⇒ CoverageDecision::Skip.
@@ -5805,78 +5572,6 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn local_unknown_paths_preserve_known_package_selection() -> Result<()> {
-        let unknown = impact_entries(
-            &[DiffEntry::modified("unowned/input.bin")],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        );
-        assert_eq!(
-            LocalProjection::from(&unknown),
-            LocalProjection::Meta(local_meta_gates(None))
-        );
-
-        let mixed = impact_entries(
-            &[
-                DiffEntry::modified("crates/leaf/src/lib.rs"),
-                DiffEntry::modified("unowned/input.bin"),
-            ],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        );
-        assert_eq!(
-            local_steps(&mixed)
-                .iter()
-                .map(LocalStep::label)
-                .collect::<Vec<_>>(),
-            vec![
-                LocalStep::Meta(local_meta_gates(Some(&BTreeSet::from([
-                    LocalImpactDomain::RuntimeEventing,
-                    LocalImpactDomain::Consistency,
-                    LocalImpactDomain::TenancyPostgres,
-                    LocalImpactDomain::Pdp,
-                    LocalImpactDomain::ContractBinding,
-                    LocalImpactDomain::CommandSymmetry,
-                ]))))
-                .label(),
-                "test direct packages leaf".to_owned(),
-                "clippy direct packages leaf".to_owned(),
-            ],
-            "unknown paths must not erase known package checks"
-        );
-        let remote = RemoteProjection::from(&mixed);
-        assert_eq!(remote.mode, SelectionMode::Adaptive);
-        assert_eq!(
-            remote.affected_packages,
-            BTreeSet::from(["leaf".to_owned()])
-        );
-        assert_eq!(
-            remote.unknown_paths,
-            BTreeSet::from(["unowned/input.bin".to_owned()]),
-            "mixed unknown paths must remain visible without erasing known package selection"
-        );
-        let selection = SelectionPlan::new(SelectionInput {
-            policy_version: "a".repeat(64),
-            mode: remote.mode,
-            decision_reason: remote.decision_reason(),
-            fallback_context: remote.fallback_context(),
-            revisions: unknown_revisions("e".repeat(40)),
-            affected_packages: remote.affected_packages,
-            public_api: PublicApiInput::Affected(remote.public_api_packages),
-            test_packages: remote.test_packages,
-            integration_units: remote.integration_units,
-            external_paths_excluded: remote.external_paths_excluded,
-            unknown_paths: remote.unknown_paths,
-        })?;
-        assert_eq!(selection.mode(), SelectionMode::Adaptive);
-        assert_eq!(selection.unknown_paths(), ["unowned/input.bin"]);
-
-        Ok(())
-    }
-
-    #[test]
     fn governance_paths_are_metadata_only() {
         for path in [
             ".github/workflows/ci.yml",
@@ -5972,185 +5667,6 @@ externalPathPrefixes = [".external-tool/"]
                 expected
             );
         }
-    }
-
-    #[test]
-    fn local_impact_domains_are_closed_and_shared_policy_selects_all() {
-        use LocalImpactDomain as Domain;
-
-        for (path, expected) in [
-            (
-                "contracts/event/identity/v1/demo/contract.toml",
-                Domain::RuntimeEventing,
-            ),
-            (
-                "assemblies/runtime/assembly.toml",
-                Domain::AssemblyGeneration,
-            ),
-            ("journeys/status-board.toml", Domain::Consistency),
-            ("crates/workspacefacts/Cargo.toml", Domain::Consistency),
-            (
-                "adapters/postgres/migrations/0001.sql",
-                Domain::TenancyPostgres,
-            ),
-            ("crates/vocab/src/lib.rs", Domain::Pdp),
-            (
-                "contracts/http/identity/v1/demo/contract.toml",
-                Domain::ContractBinding,
-            ),
-            (
-                "generated/src/command/identity_v1.rs",
-                Domain::CommandSymmetry,
-            ),
-            ("crates/bootstrap/src/shutdown.rs", Domain::RuntimeEventing),
-            ("composition/identity/src/lib.rs", Domain::Consistency),
-            ("lints/src/lib.rs", Domain::TenancyPostgres),
-            ("lints/Cargo.toml", Domain::TenancyPostgres),
-        ] {
-            assert!(
-                local_impact_domains(path).contains(&expected),
-                "{path} must select {expected:?}"
-            );
-        }
-        assert!(local_impact_domains("docs/ops/runbook.md").is_empty());
-        assert_eq!(
-            local_impact_domains("xtask/src/ci_impact.rs"),
-            Domain::ALL.into_iter().collect()
-        );
-
-        // Asserts the projector filters the same as local_meta_policy (catches projector
-        // bugs). Domain→gate membership is locked by
-        // ci_lanes::local_meta_policy_is_exact_9_24_7_partition.
-        for domain in Domain::ALL {
-            let expected: Vec<_> = GateId::ALL
-                .iter()
-                .copied()
-                .filter(|id| match id.local_meta_policy() {
-                    LocalMetaPolicy::Always => true,
-                    LocalMetaPolicy::OnImpact(impact) => impact == domain,
-                    LocalMetaPolicy::FullOnly | LocalMetaPolicy::NeverLocal => false,
-                })
-                .collect();
-            assert_eq!(
-                local_meta_gates(Some(&BTreeSet::from([domain]))),
-                expected,
-                "{domain:?} gate projection drift"
-            );
-        }
-        let expected_all: Vec<_> = GateId::ALL
-            .iter()
-            .copied()
-            .filter(|id| {
-                matches!(
-                    id.local_meta_policy(),
-                    LocalMetaPolicy::Always | LocalMetaPolicy::OnImpact(_)
-                )
-            })
-            .collect();
-        assert_eq!(all_local_meta_gates(), expected_all);
-    }
-
-    #[test]
-    fn local_impact_domain_catalog_matches_real_scanner_closures() -> Result<()> {
-        use LocalImpactDomain as Domain;
-
-        let cases = [
-            (
-                "composition/identity/src/lib.rs",
-                BTreeSet::from([
-                    Domain::RuntimeEventing,
-                    Domain::Consistency,
-                    Domain::TenancyPostgres,
-                    Domain::ContractBinding,
-                ]),
-            ),
-            (
-                "crates/identity/src/lib.rs",
-                BTreeSet::from([
-                    Domain::RuntimeEventing,
-                    Domain::Consistency,
-                    Domain::TenancyPostgres,
-                    Domain::Pdp,
-                    Domain::ContractBinding,
-                    Domain::CommandSymmetry,
-                ]),
-            ),
-            ("docs/rules/example.md", BTreeSet::new()),
-            (
-                "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
-                BTreeSet::from([Domain::RuntimeEventing, Domain::TenancyPostgres]),
-            ),
-            (
-                "xtask/src/publicapi.rs",
-                BTreeSet::from([Domain::Consistency, Domain::TenancyPostgres]),
-            ),
-            (
-                // Cargo.toml-only edit under workspacefacts must hit Consistency
-                // (LocalTxCoverage / LocalOnlyEffects); `.rs`-only workspace_member_rust
-                // cannot cover this path.
-                "crates/workspacefacts/Cargo.toml",
-                BTreeSet::from([
-                    Domain::AssemblyGeneration,
-                    Domain::Consistency,
-                    Domain::ContractBinding,
-                ]),
-            ),
-            ("docs/ops/unrelated-runbook.md", BTreeSet::new()),
-        ];
-
-        for (path, expected) in cases {
-            let actual = local_impact_domains(path);
-            assert_eq!(actual, expected, "domain closure drift for {path}");
-
-            let impact = impact_entries(
-                &[DiffEntry::modified(path)],
-                None,
-                &BTreeSet::new(),
-                &BTreeMap::new(),
-            );
-            let expected_meta = local_meta_gates(Some(&expected));
-            assert_eq!(
-                local_steps(&impact).first(),
-                Some(&LocalStep::Meta(expected_meta)),
-                "exact meta projection drift for {path}"
-            );
-            if path == "crates/workspacefacts/Cargo.toml" {
-                let steps = local_steps(&impact);
-                let Some(LocalStep::Meta(meta)) = steps.first() else {
-                    bail!("workspacefacts Cargo.toml must project Meta")
-                };
-                assert!(
-                    meta.contains(&GateId::LocalTxCoverage),
-                    "workspacefacts Cargo.toml must schedule LocalTxCoverage"
-                );
-                assert!(
-                    meta.contains(&GateId::LocalOnlyEffects),
-                    "workspacefacts Cargo.toml must schedule LocalOnlyEffects"
-                );
-            }
-        }
-
-        assert_eq!(
-            local_impact_domains("xtask/src/assembly_governance.rs"),
-            Domain::ALL.into_iter().collect(),
-            "shared assembly governance IR must invalidate every local domain"
-        );
-        assert_eq!(
-            local_impact_domains("xtask/src/cli.rs"),
-            Domain::ALL.into_iter().collect(),
-            "clap CLI ADT carrier must invalidate every local domain"
-        );
-        assert_eq!(
-            immediate_escalation_cause(&[DiffEntry::modified("xtask/src/cli.rs")]),
-            Some(EscalationCause::GlobalImpact),
-            "cli.rs must escalate like main.rs high-impact carriers"
-        );
-        assert_eq!(
-            local_impact_domains("xtask/src/report_format.rs"),
-            Domain::ALL.into_iter().collect(),
-            "report format ADT is shared CLI policy"
-        );
-        Ok(())
     }
 
     #[test]
@@ -6254,12 +5770,6 @@ externalPathPrefixes = [".external-tool/"]
             vec![
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Test,
-                    packages: vec!["runtime".to_owned()],
-                    target: None,
-                    check_includes_lib: true,
-                },
-                LocalStep::Packages {
-                    operation: LocalCargoOperation::Test,
                     packages: vec!["xtask".to_owned()],
                     target: None,
                     check_includes_lib: true,
@@ -6270,45 +5780,12 @@ externalPathPrefixes = [".external-tool/"]
                     target: None,
                     check_includes_lib: true,
                 },
-                LocalStep::Packages {
-                    operation: LocalCargoOperation::Test,
-                    packages: vec!["identityaudit".to_owned()],
-                    target: None,
-                    check_includes_lib: true,
-                },
             ],
             facts,
         )?;
         assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Lib), .. }
-                if packages == &["runtime"]
-        )));
-        assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Doc), .. }
-                if packages == &["runtime"]
-        )));
-        for target in ["auth_e2e", "refresh_mint_e2e", "key_rotation_e2e"] {
-            assert!(steps.iter().any(|step| matches!(step,
-                LocalStep::Packages {
-                    packages,
-                    target: Some(LocalCargoTarget::Test { name, required_features }),
-                    ..
-                } if packages == &["runtime"]
-                    && name == target
-                    && required_features == &["integration"]
-            )));
-        }
-        assert!(steps.iter().any(|step| matches!(step,
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Bin(name)), .. }
                 if packages == &["xtask"] && name == "xtask"
-        )));
-        assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
-                if packages == &["xtask"] && name == "consistency_report_cli"
-        )));
-        assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
-                if packages == &["mqtt"] && name == "ownership_gate"
         )));
         assert!(!steps.iter().any(|step| matches!(step,
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
@@ -6503,185 +5980,6 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn local_package_native_flags_follow_execution_policy() -> Result<()> {
-        use crate::cmd::ExecutionPolicy;
-        let packages = vec!["leaf".to_owned()];
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Check,
-                &packages,
-                None,
-                true,
-                ExecutionPolicy::KeepGoing
-            )?,
-            ["--locked", "--lib", "--bins", "-p", "leaf", "--keep-going"]
-        );
-        let xtask = vec!["xtask".to_owned()];
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Check,
-                &xtask,
-                None,
-                false,
-                ExecutionPolicy::KeepGoing
-            )?,
-            ["--locked", "--bins", "-p", "xtask", "--keep-going"]
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Test,
-                &packages,
-                Some(&LocalCargoTarget::Test {
-                    name: "leaf_api".to_owned(),
-                    required_features: Vec::new(),
-                }),
-                true,
-                ExecutionPolicy::KeepGoing
-            )?,
-            [
-                "--locked",
-                "--test",
-                "leaf_api",
-                "-p",
-                "leaf",
-                "--no-fail-fast"
-            ]
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Test,
-                &packages,
-                Some(&LocalCargoTarget::Test {
-                    name: "auth_e2e".to_owned(),
-                    required_features: vec!["integration".to_owned()],
-                }),
-                true,
-                ExecutionPolicy::KeepGoing
-            )?,
-            [
-                "--locked",
-                "--test",
-                "auth_e2e",
-                "--features",
-                "integration",
-                "-p",
-                "leaf",
-                "--no-fail-fast"
-            ]
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Test,
-                &packages,
-                Some(&LocalCargoTarget::Doc),
-                true,
-                ExecutionPolicy::KeepGoing
-            )?,
-            ["--locked", "--doc", "-p", "leaf", "--no-fail-fast"]
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Clippy,
-                &packages,
-                Some(&LocalCargoTarget::Lib),
-                true,
-                ExecutionPolicy::KeepGoing
-            )?,
-            [
-                "--locked",
-                "--no-deps",
-                "--lib",
-                "-p",
-                "leaf",
-                "--keep-going",
-                "--",
-                "-D",
-                "warnings"
-            ]
-        );
-        assert!(
-            package_operation_args(
-                LocalCargoOperation::Check,
-                &packages,
-                Some(&LocalCargoTarget::Lib),
-                true,
-                ExecutionPolicy::KeepGoing
-            )
-            .is_err()
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Clippy,
-                &packages,
-                None,
-                true,
-                ExecutionPolicy::KeepGoing
-            )?,
-            [
-                "--locked",
-                "--no-deps",
-                "--all-targets",
-                "-p",
-                "leaf",
-                "--keep-going",
-                "--",
-                "-D",
-                "warnings"
-            ]
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Test,
-                &packages,
-                None,
-                true,
-                ExecutionPolicy::FailFast
-            )?,
-            ["--locked", "-p", "leaf"]
-        );
-        let identity_composition = vec!["identity-composition".to_owned()];
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Test,
-                &identity_composition,
-                Some(&LocalCargoTarget::Lib),
-                true,
-                ExecutionPolicy::FailFast
-            )?,
-            [
-                "--locked",
-                "--lib",
-                "--features",
-                "identity-composition/device-mqtt",
-                "-p",
-                "identity-composition"
-            ]
-        );
-        assert_eq!(
-            package_operation_args(
-                LocalCargoOperation::Clippy,
-                &identity_composition,
-                Some(&LocalCargoTarget::Lib),
-                true,
-                ExecutionPolicy::FailFast
-            )?,
-            [
-                "--locked",
-                "--no-deps",
-                "--lib",
-                "--features",
-                "identity-composition/device-mqtt",
-                "-p",
-                "identity-composition",
-                "--",
-                "-D",
-                "warnings"
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
     fn local_xtask_unit_tests_use_one_positive_module_filter() -> Result<()> {
         use crate::cmd::ExecutionPolicy;
 
@@ -6735,7 +6033,7 @@ externalPathPrefixes = [".external-tool/"]
         let mut seeded = BTreeMap::new();
         seeded.insert("xtask".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = impact_entries(
-            &[DiffEntry::modified("xtask/src/assembly.rs")],
+            &[DiffEntry::modified("xtask/src/release_surface.rs")],
             Some(&facts),
             &BTreeSet::from(["xtask".to_owned()]),
             &seeded,
@@ -7250,84 +6548,6 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn selection_modes_bind_exact_test_and_integration_scope() -> Result<()> {
-        let adaptive = test_adaptive_selection_plan()?;
-        assert!(matches!(
-            adaptive.test_selection(),
-            ProjectedTestSelection::None
-        ));
-        assert_eq!(
-            adaptive.integration_selection()?,
-            integration_shards::localtx_required_selection()?
-        );
-
-        let pr_complete = fallback_selection(
-            "a".repeat(64),
-            DecisionReason::DiffUnavailable,
-            SelectionMode::PrComplete,
-            "e".repeat(40),
-        )?;
-        assert!(matches!(
-            pr_complete.test_selection(),
-            ProjectedTestSelection::Workspace
-        ));
-        assert_eq!(
-            pr_complete.integration_selection()?,
-            IntegrationSelection::for_profile(
-                crate::execution_profiles::ExecutionProfile::IntegrationCritical
-            )?
-        );
-
-        let release = test_selection_plan()?;
-        assert!(matches!(
-            release.test_selection(),
-            ProjectedTestSelection::Workspace
-        ));
-        assert_eq!(
-            release.integration_selection()?,
-            IntegrationSelection::release_check()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn semantic_package_impact_selects_units_before_shard_projection() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts.get()?;
-        for (package, path, expected) in [
-            (
-                "mqtt",
-                "adapters/mqtt/src/lib.rs",
-                BTreeSet::from([IntegrationUnitId::MqttIntegration]),
-            ),
-            (
-                "deviceidentity",
-                "assemblies/deviceidentity/src/lib.rs",
-                BTreeSet::from([IntegrationUnitId::PostgresLib]),
-            ),
-        ] {
-            let impact = impact_with_facts(
-                &root,
-                &[DiffEntry::modified(path)],
-                facts,
-                "unused-for-non-contract-source",
-            )?;
-            let ImpactSet::Selective(selective) = impact else {
-                bail!("{package} change must remain selective");
-            };
-            assert_eq!(selective.integration_units, expected, "{package}");
-            assert!(
-                !selective
-                    .integration_units
-                    .contains(&IntegrationUnitId::AmqpIntegration),
-                "{package} must not select the AMQP carrier"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn planning_boundary_rejects_catalog_drift_before_projection() -> Result<()> {
         for (drift, expected) in [
             (
@@ -7451,79 +6671,6 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn adapter_resources_and_direct_targets_project_exact_critical_units() -> Result<()> {
-        use IntegrationUnitId as Id;
-        let cases = [
-            (
-                "adapters/postgres/src/lib.rs",
-                "postgres",
-                integration_shards::critical_units_for_resource(Resource::Postgres),
-            ),
-            (
-                "adapters/redis/src/lib.rs",
-                "redis-adapter",
-                integration_shards::critical_units_for_resource(Resource::Redis),
-            ),
-            (
-                "adapters/amqp/src/lib.rs",
-                "amqp",
-                integration_shards::critical_units_for_resource(Resource::Amqp),
-            ),
-            (
-                "adapters/mqtt/src/lib.rs",
-                "mqtt",
-                integration_shards::critical_units_for_resource(Resource::Mqtt),
-            ),
-            (
-                "adapters/s3/src/lib.rs",
-                "s3",
-                integration_shards::critical_units_for_resource(Resource::ObjectStorage),
-            ),
-        ];
-        for (path, package, expected) in cases {
-            let mut direct = BTreeMap::new();
-            direct.insert(package.to_owned(), BTreeSet::from([PackageImpact::Source]));
-            let ImpactSet::Selective(selective) = impact_entries(
-                &[DiffEntry::modified(path)],
-                None,
-                &BTreeSet::new(),
-                &direct,
-            ) else {
-                bail!("adapter path must remain selective: {path}");
-            };
-            assert_eq!(selective.integration_units, expected, "{path}");
-            assert!(
-                selective
-                    .integration_units
-                    .iter()
-                    .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime),
-                "adapter projection cannot pull T3: {path}"
-            );
-        }
-
-        let mut direct = BTreeMap::new();
-        direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Test]));
-        let ImpactSet::Selective(target) = impact_entries(
-            &[DiffEntry::modified("adapters/mqtt/tests/integration.rs")],
-            None,
-            &BTreeSet::new(),
-            &direct,
-        ) else {
-            bail!("critical target edit must remain selective");
-        };
-        assert_eq!(
-            target.integration_units,
-            BTreeSet::from([Id::MqttIntegration])
-        );
-        assert!(
-            !target
-                .integration_units
-                .contains(&Id::EventTransportDurableE2e)
-        );
-        Ok(())
-    }
-
-    #[test]
     fn postgres_migration_sql_selects_postgres_lib_and_postgres_resource_critical_units()
     -> Result<()> {
         use IntegrationUnitId as Id;
@@ -7585,92 +6732,6 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn shared_journey_sources_follow_their_declared_execution_profiles() -> Result<()> {
-        use IntegrationUnitId as Id;
-        assert!(matches!(
-            impact_entries(
-                &[DiffEntry::modified("journeys/tests/common/mod.rs")],
-                None,
-                &BTreeSet::new(),
-                &BTreeMap::new(),
-            ),
-            ImpactSet::Escalated {
-                cause: EscalationCause::GlobalImpact,
-                ..
-            }
-        ));
-
-        let localtx_path = "journeys/tests/support/localtx_validation.rs";
-        let ImpactSet::Selective(localtx) = impact_entries(
-            &[DiffEntry::modified(localtx_path)],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        ) else {
-            bail!("critical-only shared journey source must remain selective: {localtx_path}");
-        };
-        assert_eq!(
-            localtx.integration_units,
-            BTreeSet::from([
-                Id::AuditListTenantEntriesLocalTxJourney,
-                Id::SettingsSecretPublishLocalTxJourney,
-            ])
-        );
-
-        let ImpactSet::Selective(manifest) = impact_entries(
-            &[DiffEntry::modified("journeys/Cargo.toml")],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        ) else {
-            bail!("journeys manifest must select its critical target set");
-        };
-        let expected = IntegrationUnitId::ALL
-            .into_iter()
-            .filter(|id| {
-                id.spec().package == "journeys"
-                    && id.spec().primary_owner
-                        == crate::execution_profiles::ExecutionProfile::IntegrationCritical
-            })
-            .collect::<BTreeSet<_>>();
-        assert!(!expected.is_empty(), "journeys critical-set anti-vacuity");
-        assert_eq!(manifest.integration_units, expected);
-        Ok(())
-    }
-
-    #[test]
-    fn undeclared_journey_support_fails_closed() {
-        let path = "journeys/tests/support/new_shared_fixture.rs";
-        assert!(
-            classify_diff(&[DiffEntry::modified(path)]).mode == SelectionMode::PrComplete,
-            "{path} must require the complete PR set without a declared critical carrier"
-        );
-    }
-
-    #[test]
-    fn oidc_provider_change_selects_all_declared_critical_carriers() -> Result<()> {
-        use IntegrationUnitId as Id;
-        let ImpactSet::Selective(impact) = impact_entries(
-            &[DiffEntry::modified("adapters/oidc/src/verify.rs")],
-            None,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        ) else {
-            bail!("OIDC provider must use its exact critical carrier set");
-        };
-        assert_eq!(
-            impact.integration_units,
-            BTreeSet::from([
-                Id::IdentityPasswordSecurityEventJourney,
-                Id::IdentityRefreshProducerTransactionJourney,
-                Id::IdentityLoginWireE2e,
-                Id::ServiceTokenReplayE2e,
-            ])
-        );
-        Ok(())
-    }
-
-    #[test]
     fn vault_provider_change_selects_the_unique_live_carrier() -> Result<()> {
         use IntegrationUnitId as Id;
         let ImpactSet::Selective(impact) = impact_entries(
@@ -7709,220 +6770,6 @@ externalPathPrefixes = [".external-tool/"]
             bail!("diport PKI seam must select its exact critical carrier");
         };
         assert_eq!(impact.integration_units, BTreeSet::from([Id::VaultLive]));
-        Ok(())
-    }
-
-    #[test]
-    fn contract_runtime_and_localtx_relations_are_closed_markers() -> Result<()> {
-        use IntegrationUnitId as Id;
-        let mut contracts = BTreeMap::new();
-        contracts.insert(
-            "identity".to_owned(),
-            BTreeSet::from([PackageImpact::ContractOwner]),
-        );
-        contracts.insert(
-            "audit".to_owned(),
-            BTreeSet::from([PackageImpact::ContractSubscriber]),
-        );
-        let ImpactSet::Selective(contract) = impact_entries(
-            &[DiffEntry::modified(
-                "contracts/http/identity/v1/login/contract.toml",
-            )],
-            None,
-            &BTreeSet::new(),
-            &contracts,
-        ) else {
-            bail!("contract relation must remain selective");
-        };
-        for localtx in [
-            Id::AuditListTenantEntriesLocalTxJourney,
-            Id::IdentityPasswordSecurityEventJourney,
-            Id::IdentityRefreshProducerTransactionJourney,
-            Id::SettingsSecretPublishLocalTxJourney,
-        ] {
-            assert!(contract.integration_units.contains(&localtx));
-        }
-
-        let mut runtime = BTreeMap::new();
-        runtime.insert(
-            "runtime".to_owned(),
-            BTreeSet::from([PackageImpact::Source]),
-        );
-        let ImpactSet::Selective(runtime) = impact_entries(
-            &[DiffEntry::modified("assemblies/runtime/src/lib.rs")],
-            None,
-            &BTreeSet::new(),
-            &runtime,
-        ) else {
-            bail!("runtime surface must remain selective");
-        };
-        assert_eq!(
-            runtime.integration_units,
-            integration_shards::critical_units_for_markers(&BTreeSet::from([
-                ImpactMarker::RuntimeSurface,
-            ]))
-        );
-        assert!(
-            runtime
-                .integration_units
-                .iter()
-                .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn device_latent_candidate_selects_only_declared_pr_critical_carriers() -> Result<()> {
-        use IntegrationUnitId as Id;
-
-        let root = crate::workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let ImpactSet::Selective(impact) = impact_with_facts(
-            &root,
-            &[DiffEntry::modified(
-                "contracts/http/identity/v2/device-certificate-policy-put/contract.toml",
-            )],
-            command_facts.get()?,
-            UNKNOWN_REVISION,
-        )?
-        else {
-            bail!("device-certificate candidate must remain selectively planned");
-        };
-
-        assert_eq!(impact.integration_units, BTreeSet::from([Id::PostgresLib]));
-        assert!(impact.packages.contains_key("observ"));
-        for release_only in [Id::DeviceIdentityLib, Id::RuntimeLib] {
-            assert!(!impact.integration_units.contains(&release_only));
-            assert_eq!(
-                release_only.spec().primary_owner,
-                crate::execution_profiles::ExecutionProfile::ReleaseCheck
-            );
-        }
-        assert!(
-            impact
-                .local_meta_domains
-                .contains(&LocalImpactDomain::ContractBinding)
-        );
-        let local_gates = local_meta_gates(Some(&impact.local_meta_domains));
-        for gate in [
-            GateId::ContractValidate,
-            GateId::CodegenCheck,
-            GateId::ContractBindingGuard,
-        ] {
-            assert!(
-                local_gates.contains(&gate),
-                "missing candidate gate {gate:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn device_latent_candidate_and_evidence_paths_are_typed_and_non_vacuous() -> Result<()> {
-        use IntegrationUnitId as Id;
-
-        let root = crate::workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts.get()?;
-        let mut candidate_paths = BTreeSet::new();
-        for candidate in crate::contract::DeviceCertificateCandidateId::ALL {
-            let source_dir = candidate.spec().source_dir;
-            candidate_paths.insert(format!("{source_dir}/contract.toml"));
-            for entry in std::fs::read_dir(root.join(source_dir))? {
-                let path = entry?.path();
-                if path.extension() == Some(OsStr::new("json")) {
-                    candidate_paths
-                        .insert(path.strip_prefix(&root)?.to_string_lossy().into_owned());
-                }
-            }
-        }
-        let evidence_paths = DeviceLatentEvidenceId::ALL
-            .into_iter()
-            .map(DeviceLatentEvidenceId::spec)
-            .map(|spec| spec.source_path)
-            .collect::<BTreeSet<_>>();
-
-        assert!(candidate_paths.len() > 6);
-        assert_eq!(evidence_paths.len(), 4);
-        assert!(device_latent_candidate_impact_path(
-            "generated/src/device_certificate.rs"
-        ));
-        for path in candidate_paths
-            .iter()
-            .map(String::as_str)
-            .chain(["generated/src/device_certificate.rs"])
-        {
-            assert!(
-                device_latent_candidate_impact_path(path),
-                "missing typed impact edge for {path}"
-            );
-            let ImpactSet::Selective(impact) =
-                impact_with_facts(&root, &[DiffEntry::modified(path)], facts, UNKNOWN_REVISION)?
-            else {
-                bail!("typed DeviceLatent path {path} must remain selective");
-            };
-            assert_eq!(
-                impact.integration_units,
-                BTreeSet::from([Id::PostgresLib]),
-                "unexpected PR-critical projection for {path}"
-            );
-        }
-        for path in evidence_paths {
-            assert!(
-                device_latent_evidence_impact_path(path),
-                "missing typed evidence impact edge for {path}"
-            );
-            assert!(device_latent_semantic_impact_path(path));
-            assert!(!device_latent_candidate_impact_path(path));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn device_latent_evidence_paths_preserve_owner_first_selection_red() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts.get()?;
-        let evidence_paths = DeviceLatentEvidenceId::ALL
-            .into_iter()
-            .map(DeviceLatentEvidenceId::spec)
-            .map(|spec| spec.source_path)
-            .collect::<BTreeSet<_>>();
-
-        for path in evidence_paths {
-            let impact =
-                impact_with_facts(&root, &[DiffEntry::modified(path)], facts, UNKNOWN_REVISION)?;
-            match integration_shards::changed_integration_source(path) {
-                Some(ChangedIntegrationSource::ReleaseCheck) => assert!(
-                    matches!(
-                        impact,
-                        ImpactSet::Escalated {
-                            cause: EscalationCause::GlobalImpact,
-                            ..
-                        }
-                    ),
-                    "release-owned evidence must retain its ordinary fail-closed selection: {path}"
-                ),
-                exact => {
-                    let ImpactSet::Selective(impact) = impact else {
-                        bail!("affected evidence owner must remain selectively planned: {path}");
-                    };
-                    let package = facts
-                        .package_for_repo_path(Path::new(path))?
-                        .context("DeviceLatent evidence package")?;
-                    assert!(
-                        impact.packages.contains_key(package.as_str()),
-                        "evidence owner package was swallowed for {path}"
-                    );
-                    if let Some(ChangedIntegrationSource::Exact(units)) = exact {
-                        assert!(
-                            units.is_subset(&impact.integration_units),
-                            "exact evidence target was swallowed for {path}"
-                        );
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -8136,9 +6983,10 @@ externalPathPrefixes = [".external-tool/"]
         ] {
             let source = root.join("src/included_expr.rs");
             fs::write(&source, expression)?;
-            let error = rust_consumed_machine_inputs(&root)
-                .expect_err("documentation includes must be rejected")
-                .to_string();
+            let Err(error) = rust_consumed_machine_inputs(&root) else {
+                bail!("documentation includes must be rejected")
+            };
+            let error = error.to_string();
             assert!(
                 error.contains("documentation include"),
                 "{name} include was not rejected: {error}"
@@ -8537,12 +7385,8 @@ externalPathPrefixes = [".external-tool/"]
                 DiffStatus::Added,
                 "unused",
             )?,
-            BTreeSet::from([
-                "identityaudit".to_owned(),
-                "runtime".to_owned(),
-                "settingsonly".to_owned(),
-            ]),
-            "framework-owned contracts must select every assembly that mounts the contract"
+            BTreeSet::from(["generated".to_owned()]),
+            "framework-owned contracts select the generated contract carrier"
         );
         assert_eq!(
             contract_packages(
@@ -8866,15 +7710,6 @@ readiness = "required"
             ImpactMarker::PACKAGE_RELATIONS.len(),
             "impact selector relation catalog must be non-vacuous and complete"
         );
-        let shared_source_fields = catalog
-            .iter()
-            .filter(|field| field.starts_with("integration-shared-source="))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            shared_source_fields.len(),
-            integration_shards::shared_source_relation_semantics().len(),
-            "shared-source relation catalog must be complete"
-        );
         assert_eq!(
             catalog
                 .iter()
@@ -8897,11 +7732,6 @@ readiness = "required"
                 .any(|field| field == "documentation-path=contracts/README.md"),
             "contracts/README.md must be an exact documentation catalog entry"
         );
-        assert!(shared_source_fields.iter().any(|field| {
-            field.contains("journeys/tests/common/mod.rs")
-                && field.contains("amqp-consumer-at-least-once-journey")
-                && field.contains("identity-login-audit-durable-journey")
-        }));
         assert_eq!(
             catalog
                 .iter()
@@ -8974,17 +7804,6 @@ readiness = "required"
             policy_version_with_catalog(compact, catalog),
             policy_version_with_catalog(compact, &provider_relation_mutation),
             "security-provider projection mutation must rotate policyVersion"
-        );
-        let mut shared_source_mutation = catalog.to_vec();
-        let source = shared_source_mutation
-            .iter_mut()
-            .find(|field| field.contains("journeys/tests/common/mod.rs"))
-            .context("shared journey source policy field")?;
-        source.push_str(",settings-config-publish-durable-e2e");
-        assert_ne!(
-            policy_version_with_catalog(compact, catalog),
-            policy_version_with_catalog(compact, &shared_source_mutation),
-            "shared source-to-carrier mutation must rotate policyVersion"
         );
         let impact_relation_mutation = policy_semantic_catalog_with_selector_overrides(
             POLICY_BEHAVIOR_SPEC,

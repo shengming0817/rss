@@ -19,8 +19,6 @@ use std::sync::Arc;
 
 const X_REQUEST_ID: &str = "x-request-id";
 
-/// 入站 `X-Request-Id` 长度上限：超出则丢弃并生成新 UUID（防超大值污染 span/日志）。
-
 /// 入站 `X-Correlation-ID` header 名（小写，axum HeaderName 约定）。
 const CORRELATION_HEADER: &str = "x-correlation-id";
 
@@ -131,6 +129,10 @@ pub(crate) async fn server_request_budget(
 pub struct VerifiedRequestId(requestidmint::WireRequestId);
 
 impl VerifiedRequestId {
+    #[allow(
+        clippy::expect_used,
+        reason = "the middleware validates the request ID or generates a UUID before minting"
+    )]
     pub(crate) fn from_middleware(value: String) -> Self {
         let request_id = rss_request_context::RequestId::parse(&value)
             .expect("HTTP middleware must validate request IDs before minting provenance");

@@ -8,8 +8,7 @@ LL | |     }
 LL | | }
    | |_^
    |
-   = help: 把 provider 实现放到 `adapters/<name>`（或组合根 `bins/`·`assemblies/`·`composition/`），域 / 服务 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_diport_impl_allowlist)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由
+   = help: 把 provider 实现放到 `adapters/<name>` 或 `bins/`，域 / 服务 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_diport_impl_allowlist)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由
    = note: `#[warn(rss_diport_impl_allowlist)]` on by default
 
 warning: 1 warning emitted
-

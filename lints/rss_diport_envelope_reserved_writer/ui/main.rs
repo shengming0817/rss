@@ -1,6 +1,6 @@
 // rss_diport_envelope_reserved_writer UI fixture（callsite **不在** allowlist：
 // example crate manifest 父目录为 `lints/rss_diport_envelope_reserved_writer`，父 `lints` ∉
-// adapters/bins/assemblies ⇒ insert_wire_pair 触发；try_insert / item-level #[allow] 不触发）。
+// adapters/bins ⇒ insert_wire_pair 触发；try_insert / item-level #[allow] 不触发）。
 // golden 见 main.stderr；须用真 diport（dev-dep）：lint 按方法 DefId krate 名（diport）匹配，
 // 本地同名 struct 方法 DefId krate 非 diport，无法触发。
 // allow(unknown_lints)：普通 cargo build 本 example 时不认 rss_diport_envelope_reserved_writer，

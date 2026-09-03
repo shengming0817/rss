@@ -21,11 +21,6 @@
 //! ref: serverlesstechnology/cqrs `persistence/postgres-es/src/event_repository.rs@main`
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
-use std::future::Future;
-use std::sync::Arc;
-#[cfg(feature = "fault-matrix-test-support")]
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use consistency::{
     BacklogMetricSample, BacklogObservation, BacklogSample, EngineError, EngineErrorKind,
     EventEntry, IdemKey, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactConflict,
@@ -41,6 +36,8 @@ use diport::{
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use eventing::delivery::{DeliveryBudget, PublishErrorKind};
 use sqlx::Row;
+use std::future::Future;
+use std::sync::Arc;
 
 use crate::PgStore;
 use crate::cotx::eventing::{EventingTx, GeneratedOutboxConcern};
@@ -49,8 +46,6 @@ use crate::cotx::{
 };
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 use crate::delivery_policy::DeliveryBudgetPgProjection as _;
-#[cfg(feature = "fault-matrix-test-support")]
-use crate::pool::PgRuntimeStores;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::pool::VerifiedPgWriteStore;
 use crate::projection_events::{ProjectionWriteRegistry, append_projection_event_if_bound};
@@ -197,10 +192,6 @@ impl PgClaimedOutboxEntry {
     }
 
     fn lease_deadline_epoch_micros(&self) -> i64 {
-        #[cfg(feature = "fault-matrix-test-support")]
-        self.lease
-            .fault_matrix_sql_deadline_bound
-            .store(true, Ordering::Release);
         self.lease.deadline_epoch_micros()
     }
 
@@ -229,8 +220,6 @@ pub(crate) struct OutboxLease {
     token: String,
     deadline_epoch_micros: i64,
     monotonic_deadline: tokio::time::Instant,
-    #[cfg(feature = "fault-matrix-test-support")]
-    fault_matrix_sql_deadline_bound: AtomicBool,
 }
 
 impl std::fmt::Debug for OutboxLease {
@@ -273,8 +262,6 @@ impl OutboxLease {
             token,
             deadline_epoch_micros,
             monotonic_deadline,
-            #[cfg(feature = "fault-matrix-test-support")]
-            fault_matrix_sql_deadline_bound: AtomicBool::new(false),
         })
     }
 
@@ -291,10 +278,7 @@ impl OutboxLease {
         self.monotonic_deadline
     }
 
-    #[cfg(any(
-        all(test, feature = "integration"),
-        feature = "fault-matrix-test-support"
-    ))]
+    #[cfg(all(test, feature = "integration"))]
     fn test_override_deadlines(
         &mut self,
         deadline_epoch_micros: i64,
@@ -302,40 +286,7 @@ impl OutboxLease {
     ) {
         self.deadline_epoch_micros = deadline_epoch_micros;
         self.monotonic_deadline = io_deadline_after(monotonic_remaining);
-        #[cfg(feature = "fault-matrix-test-support")]
-        self.fault_matrix_sql_deadline_bound
-            .store(false, Ordering::Release);
     }
-}
-
-#[cfg(feature = "fault-matrix-test-support")]
-impl PgClaimedOutboxEntry {
-    pub(crate) fn fault_matrix_expire_persisted_deadline(
-        &mut self,
-        deadline_epoch_micros: i64,
-        relay_budget: DeliveryBudget,
-    ) {
-        let monotonic_remaining = relay_budget
-            .settle_timeout()
-            .saturating_add(relay_budget.safety_margin());
-        self.lease
-            .test_override_deadlines(deadline_epoch_micros, monotonic_remaining);
-    }
-
-    fn fault_matrix_sql_deadline_was_bound(&self) -> bool {
-        self.lease
-            .fault_matrix_sql_deadline_bound
-            .load(Ordering::Acquire)
-    }
-}
-
-#[cfg(feature = "fault-matrix-test-support")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FaultMatrixPublishedSettlementEvidence {
-    Settled,
-    PersistedDeadlineExpired,
-    LocalDeadlineExpired,
-    LostLease,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1259,151 +1210,6 @@ impl PgOutbox {
             payload_protector,
         }
     }
-
-    /// Atomically claim one exact durable event without leasing any other eligible row.
-    ///
-    /// The fault matrix drives named crash points and therefore cannot consume a domain batch as
-    /// though it were an event lookup. This seam retains the production claim predicate, partition
-    /// gate, governed lease policy, opaque provider binding, hydration rollback, and commit-before-
-    /// return semantics while narrowing selection by the durable event identity.
-    ///
-    /// The owner pool remains inside the feature-gated adapter harness. Production serving roles
-    /// claim only through the governed `SECURITY DEFINER` batch function; this privileged test seam
-    /// must not widen that runtime API or expose raw SQL outside the postgres adapter.
-    #[cfg(feature = "fault-matrix-test-support")]
-    pub(crate) async fn fault_matrix_claim_exact(
-        &self,
-        owner_pool: &sqlx::PgPool,
-        event_id: &str,
-    ) -> Result<Option<PgClaimedOutboxEntry>, EngineError> {
-        let domain = self.provider.domain.as_str();
-        let mut tx = owner_pool.begin().await.map_err(|error| {
-            tracing::warn!(
-                target: "postgres",
-                domain,
-                error = %secure::redact_error(&error),
-                "outbox: exact fault-matrix claim begin error"
-            );
-            EngineError::new(EngineErrorKind::Transient)
-        })?;
-        let monotonic_deadline = io_deadline_after(self.relay_budget.lease_ttl());
-        let row: Option<ClaimedOutboxRow> = sqlx::query_as(
-            r#"
-            WITH claim_clock AS MATERIALIZED (
-                SELECT clock_timestamp() AS claimed_at
-            ),
-            governed_policy AS MATERIALIZED (
-                SELECT automatic_retry_window_seconds, relay_lease_ttl_ms
-                FROM event_delivery_policy
-                WHERE singleton
-                  AND relay_lease_ttl_ms = $3
-                  AND relay_publish_timeout_ms
-                      + relay_settle_timeout_ms
-                      + relay_safety_margin_ms = $4
-            ),
-            eligible AS MATERIALIZED (
-                SELECT o.id, o.seq, claim_clock.claimed_at,
-                       governed_policy.automatic_retry_window_seconds,
-                       governed_policy.relay_lease_ttl_ms
-                FROM outbox AS o
-                CROSS JOIN claim_clock
-                CROSS JOIN governed_policy
-                WHERE o.domain = $1
-                  AND o.event_id = $2
-                  AND (
-                        (o.status = 'pending'
-                         AND (o.retry_after IS NULL
-                              OR o.retry_after <= claim_clock.claimed_at))
-                     OR (o.status = 'publishing'
-                         AND o.lease_until <= claim_clock.claimed_at)
-                  )
-                  AND (
-                        o.partition_key IS NULL
-                     OR NOT EXISTS (
-                            SELECT 1
-                            FROM outbox AS blocker
-                            WHERE blocker.tenant_id = o.tenant_id
-                              AND blocker.domain = o.domain
-                              AND blocker.partition_key = o.partition_key
-                              AND blocker.seq < o.seq
-                              AND blocker.status NOT IN ('published', 'abandoned')
-                        )
-                  )
-                FOR UPDATE OF o SKIP LOCKED
-            ),
-            claimed AS (
-                UPDATE outbox AS o
-                SET status = 'publishing',
-                    lease_token = gen_random_uuid(),
-                    lease_until = eligible.claimed_at
-                        + eligible.relay_lease_ttl_ms * interval '1 millisecond',
-                    automatic_retry_deadline = COALESCE(
-                        o.automatic_retry_deadline,
-                        eligible.claimed_at
-                            + make_interval(
-                                secs => eligible.automatic_retry_window_seconds::double precision
-                            )
-                    ),
-                    published_at = NULL,
-                    dlx_at = NULL,
-                    updated_at = eligible.claimed_at
-                FROM eligible
-                WHERE o.id = eligible.id
-                RETURNING o.tenant_id::text AS tenant_id, o.contract_id, o.topic, o.event_id,
-                          o.payload, o.retry_count, o.metadata::text AS metadata, o.domain,
-                          o.contract_version, o.schema_hash, eligible.claimed_at,
-                          o.lease_token::text AS lease_token, o.lease_until
-            )
-            SELECT claimed.tenant_id, claimed.contract_id, claimed.topic, claimed.event_id,
-                   claimed.payload, claimed.retry_count, claimed.metadata, claimed.domain,
-                   claimed.contract_version, claimed.schema_hash,
-                   EXTRACT(EPOCH FROM claimed.claimed_at)::bigint AS claimed_at_epoch_seconds,
-                   claimed.lease_token,
-                   (EXTRACT(EPOCH FROM claimed.lease_until) * 1000000)::bigint
-                       AS deadline_epoch_micros
-            FROM claimed
-            "#,
-        )
-        .bind(domain)
-        .bind(event_id)
-        .bind(self.relay_budget.lease_ttl_millis())
-        .bind(self.relay_budget.required_budget_millis())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                target: "postgres",
-                domain,
-                error = %secure::redact_error(&error),
-                "outbox: exact fault-matrix claim db error"
-            );
-            EngineError::new(EngineErrorKind::Transient)
-        })?;
-
-        let claim = row
-            .map(|row| hydrate_claimed_outbox_row(row, &self.provider, monotonic_deadline))
-            .transpose()
-            .map_err(|error| {
-                tracing::error!(
-                    target: "postgres",
-                    domain,
-                    hydration_phase = error.phase(),
-                    error = %error,
-                    "outbox: exact fault-matrix claim hydration error; rolling back"
-                );
-                EngineError::new(EngineErrorKind::Invariant)
-            })?;
-        tx.commit().await.map_err(|error| {
-            tracing::warn!(
-                target: "postgres",
-                domain,
-                error = %secure::redact_error(&error),
-                "outbox: exact fault-matrix claim commit error"
-            );
-            EngineError::new(EngineErrorKind::Transient)
-        })?;
-        Ok(claim)
-    }
 }
 
 fn publish_request(entry: &StoredOutboxEntry, metadata: EnvelopeMetadata) -> PublishRequest {
@@ -1413,39 +1219,6 @@ fn publish_request(entry: &StoredOutboxEntry, metadata: EnvelopeMetadata) -> Pub
         entry.payload().to_vec(),
     )
     .with_metadata(metadata)
-}
-
-#[cfg(feature = "fault-matrix-test-support")]
-pub(crate) async fn fault_matrix_publish_before_settle(
-    pool: &sqlx::PgPool,
-    publisher: Box<DynPublisher<'static>>,
-    relay_budget: DeliveryBudget,
-    tenant_authority: Arc<TenantAuthority>,
-    payload_protector: DlxPayloadProtector,
-    domain: &str,
-    event_id: &str,
-) -> Result<(), EngineError> {
-    let store = Arc::new(PgStore { pool: pool.clone() });
-    let stores = PgRuntimeStores::from_unverified_for_test(Arc::clone(&store), store);
-    let domain = vocab::DomainName::parse(domain)
-        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    let relay = PgOutbox::new(
-        stores.writer_capability(),
-        domain,
-        publisher,
-        relay_budget,
-        tenant_authority,
-        payload_protector,
-    );
-    let claimed = relay
-        .fault_matrix_claim_exact(pool, event_id)
-        .await?
-        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
-    match relay.publish_claimed(&claimed).await {
-        Ok(()) => Ok(()),
-        Err(ClaimPublishError::Engine(error)) => Err(error),
-        Err(ClaimPublishError::Publish(_)) => Err(EngineError::new(EngineErrorKind::Transient)),
-    }
 }
 
 /// PostgreSQL outbox maintenance adapter：impl [`OutboxBacklog`] + [`RetentionSweeper`]，不持 publisher。
@@ -1715,15 +1488,6 @@ impl PgOutbox {
             ClaimPublishError::Publish(RelayPublishFailure::Envelope(error))
         })?;
         Ok(request)
-    }
-
-    #[cfg(feature = "fault-matrix-test-support")]
-    async fn publish_claimed(
-        &self,
-        claimed: &PgClaimedOutboxEntry,
-    ) -> Result<(), ClaimPublishError> {
-        let deadline = io_deadline_after(self.relay_budget.publisher_watchdog_timeout());
-        self.publish_claimed_before(claimed, deadline).await
     }
 
     async fn publish_claimed_before(
@@ -2364,10 +2128,7 @@ pub(crate) const fn backoff_seconds(retry_count: i32) -> i64 {
 
 // ── 单测 ──────────────────────────────────────────────────────────────────────
 
-#[cfg(any(
-    all(test, feature = "integration"),
-    feature = "fault-matrix-test-support"
-))]
+#[cfg(all(test, feature = "integration"))]
 impl PgOutbox {
     async fn observed_published_settlement_outcome(
         &self,
@@ -2380,43 +2141,11 @@ impl PgOutbox {
         }
     }
 
-    #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn test_published_settlement_outcome(
         &self,
         claimed: &PgClaimedOutboxEntry,
     ) -> Result<&'static str, EngineError> {
         self.observed_published_settlement_outcome(claimed).await
-    }
-
-    #[cfg(feature = "fault-matrix-test-support")]
-    pub(crate) async fn fault_matrix_published_settlement_outcome(
-        &self,
-        claimed: &PgClaimedOutboxEntry,
-    ) -> Result<&'static str, EngineError> {
-        self.observed_published_settlement_outcome(claimed).await
-    }
-
-    #[cfg(feature = "fault-matrix-test-support")]
-    pub(crate) async fn fault_matrix_persisted_deadline_settlement_evidence(
-        &self,
-        claimed: &PgClaimedOutboxEntry,
-    ) -> Result<FaultMatrixPublishedSettlementEvidence, EngineError> {
-        let outcome = settlement::published(&self.tenant_pool, claimed, self.relay_budget).await?;
-        let sql_deadline_was_bound = claimed.fault_matrix_sql_deadline_was_bound();
-        Ok(match outcome {
-            settlement::Settlement::Settled((), _) => {
-                FaultMatrixPublishedSettlementEvidence::Settled
-            }
-            settlement::Settlement::Expired(_) if sql_deadline_was_bound => {
-                FaultMatrixPublishedSettlementEvidence::PersistedDeadlineExpired
-            }
-            settlement::Settlement::Expired(_) => {
-                FaultMatrixPublishedSettlementEvidence::LocalDeadlineExpired
-            }
-            settlement::Settlement::LostLease(_) => {
-                FaultMatrixPublishedSettlementEvidence::LostLease
-            }
-        })
     }
 }
 

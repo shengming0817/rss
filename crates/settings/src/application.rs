@@ -1019,7 +1019,7 @@ fn config_error_response(
 /// secret-publish State 持 read repo + mutation UoW；secret-resolve State 只持
 /// [`crate::SecretResolveService`]（read repo + resolver），因此 LocalOnly read dispatch 无法携带写端口。
 ///
-/// `configs_ready` 探针由组合根（`assemblies/runtime::wire_settings`）经 `DomainModuleResult` 注册——探针包
+/// `configs_ready` 探针由运行时集成经 `DomainModuleResult` 注册——探针包
 /// `PgDbReadiness`（adapter 类型，域 crate 不可依赖 adapter），故不在此声明（层序约束）。
 pub struct SettingsDomain {
     config: Arc<SettingsService>,
@@ -1057,8 +1057,8 @@ impl SettingsDomain {
 
     /// Restrict the mounted HTTP surface to the three durable config mutations.
     ///
-    /// The settingsonly assembly consumes this typed choice because its federated permission
-    /// universe deliberately excludes config reads and secret operations.
+    /// Restricted integrations consume this typed choice when their permission universe excludes
+    /// config reads and secret operations.
     #[must_use]
     pub fn config_cud_only(mut self) -> Self {
         self.http_surface = SettingsHttpSurface::ConfigCud;

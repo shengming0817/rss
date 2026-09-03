@@ -1461,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_twenty_one_unique_active_factories_and_one_draft() {
+    fn registry_has_twenty_four_unique_active_factories_and_one_draft() {
         assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
         assert_eq!(
             PROVIDER_ROLE_SPECS
@@ -1478,7 +1478,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
             .count();
-        assert_eq!(active, 21);
+        assert_eq!(active, 24);
         assert_eq!(drafts, 1);
         assert_registry_invariants(&PROVIDER_ROLE_SPECS);
     }

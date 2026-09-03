@@ -14,10 +14,6 @@
 //! - **不替换**任何既有 Medium/Hard 门：此前无机器门守「`instrument` 的 `err` 缺 `level`」；
 //!   Soft 文档/review 约定不是 enforcement 门（ai-robust 禁 Soft 新增），本 lint 是该失效模式的
 //!   **首个** Medium carrier，不是「多一道保险」。
-//! - **不可并入**唯一其它 pre-expansion owner `rss_runtime_env_funnel`：对方守 `runtime` crate 的
-//!   `MacCall`（`env!` / `option_env!` / `include!`）与 HIR env reader；本 lint 守全 workspace
-//!   Attribute path 末段 `instrument` 的 `err`/`level` token。AST 节点、激活范围、失效模式均不同，
-//!   合并会把无关约束绑进同一 pass，破坏 owner 边界。
 //! - **不存在**既有 tracing-attribute / instrument-meta lint 可 merge；统一 tracing attribute policy
 //!   lint 属未来重构种子，不在本 INVARIANT 范围。
 //!
@@ -117,9 +113,7 @@ fn is_instrument_attr_path(path: &rustc_ast::Path) -> bool {
 ///
 /// `err(...)` 仅当括号内顶层出现 Ident `level` 时放行；否则（裸 `err` /
 /// `err(Debug)` / `err(Display)` / `err()`）仍诊断。
-fn bare_err_spans<'a>(
-    tokens: impl IntoIterator<Item = &'a TokenTree>,
-) -> Vec<Span> {
+fn bare_err_spans<'a>(tokens: impl IntoIterator<Item = &'a TokenTree>) -> Vec<Span> {
     let mut out = Vec::new();
     let mut iter = tokens.into_iter().peekable();
     while let Some(tt) = iter.next() {
@@ -148,9 +142,7 @@ fn bare_err_spans<'a>(
 }
 
 /// `err(...)` Delimited 内顶层是否出现 Ident `level`（不递归嵌套括号）。
-fn delimited_contains_level_ident<'a>(
-    tokens: impl IntoIterator<Item = &'a TokenTree>,
-) -> bool {
+fn delimited_contains_level_ident<'a>(tokens: impl IntoIterator<Item = &'a TokenTree>) -> bool {
     tokens.into_iter().any(|tt| {
         let TokenTree::Token(tok, _) = tt else {
             return false;
@@ -172,8 +164,8 @@ fn gate_budget_declared_in_module_docs() {
         "module docs must declare Gate budget section"
     );
     assert!(
-        src.contains("rss_runtime_env_funnel"),
-        "must name the only other pre-expansion owner and why it cannot absorb this failure mode"
+        src.contains("不存在"),
+        "must explain why no existing lint can own this failure mode"
     );
     assert!(
         src.contains("只加不减") || src.contains("只加不减，理由"),

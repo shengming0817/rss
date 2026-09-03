@@ -11,7 +11,7 @@
 //!
 //! # 为何是 adapter（而非 httpserve 服务 crate）
 //!
-//! `impl diport::ManagedResource` 仅 `adapters/`·`bins/`·`assemblies/` package 可做
+//! `impl diport::ManagedResource` 仅 `adapters/`·`bins/` package 可做
 //! （`rss_diport_impl_allowlist` dylint，INVARIANT DIPORT-IMPL-ALLOWLIST-01）——`crates/httpserve`
 //! 是 Service 层、impl DI port 会被守卫拒。HTTP serve 是 transport 关注点，本就归 adapter。
 //!

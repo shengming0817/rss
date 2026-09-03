@@ -1,4 +1,4 @@
-//! Canonical execution profile identities shared by gates, tests, and journeys.
+//! Canonical execution profile identities shared by gates, tests, and integrations.
 
 use std::{fmt, str::FromStr};
 
@@ -7,115 +7,11 @@ use crate::{
     integration_shards::{IntegrationUnitId, IntegrationUnitSpec},
 };
 
-/// Stable identity spanning every executable gate, test scope, and integration journey.
+/// Stable identity spanning every executable gate, test scope, and integration unit.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ExecutionUnitId {
     Gate(GateId),
     Integration(IntegrationUnitId),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DeviceLatentEvidenceTier {
-    T1,
-    T2,
-}
-
-/// Stable semantic identity for the minimum sufficient DeviceLatent draft evidence.
-/// Issue numbers are provenance only; the semantic variants remain the machine identity.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum DeviceLatentEvidenceId {
-    DraftPilotComposition,
-    MetricClosure,
-    InspectionAuthorization,
-    InspectionRedaction,
-    InspectionZeroWriteAudit,
-    LeaseTakeover,
-    PostcommitReclaim,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DeviceLatentEvidenceSpec {
-    pub(crate) id: DeviceLatentEvidenceId,
-    pub(crate) issue: u16,
-    pub(crate) tier: DeviceLatentEvidenceTier,
-    pub(crate) owner: ExecutionUnitId,
-    pub(crate) source_path: &'static str,
-    pub(crate) selector: &'static str,
-}
-
-macro_rules! device_latent_evidence_catalog {
-    ($( $variant:ident => ($issue:literal, $tier:ident, $owner:expr, $source:literal, $selector:literal), )+) => {
-        impl DeviceLatentEvidenceId {
-            pub(crate) const ALL: [Self; [$(stringify!($variant)),+].len()] = [
-                $(Self::$variant),+
-            ];
-
-            pub(crate) const fn spec(self) -> DeviceLatentEvidenceSpec {
-                match self {
-                    $(Self::$variant => DeviceLatentEvidenceSpec {
-                        id: self,
-                        issue: $issue,
-                        tier: DeviceLatentEvidenceTier::$tier,
-                        owner: $owner,
-                        source_path: $source,
-                        selector: $selector,
-                    }),+
-                }
-            }
-        }
-    };
-}
-
-device_latent_evidence_catalog! {
-    DraftPilotComposition => (
-        1904,
-        T1,
-        ExecutionUnitId::Integration(IntegrationUnitId::DeviceIdentityLib),
-        "assemblies/deviceidentity/src/lib.rs",
-        "tests::provider_catalog_is_the_exact_production_closure"
-    ),
-    MetricClosure => (
-        1905,
-        T1,
-        ExecutionUnitId::Gate(GateId::ComponentTests),
-        "crates/observ/src/device_latent.rs",
-        "device_latent::tests::metric_families_are_exact_and_unlabelled"
-    ),
-    InspectionAuthorization => (
-        1905,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::RuntimeLib),
-        "assemblies/runtime/src/operator/device_latent.rs",
-        "operator::device_latent::tests::exact_status_authorization_mints_the_single_tenant_device_receipt"
-    ),
-    InspectionRedaction => (
-        1905,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::RuntimeLib),
-        "assemblies/runtime/src/operator/device_latent.rs",
-        "operator::device_latent::tests::real_json_and_prometheus_outputs_are_closed_and_identifier_free"
-    ),
-    InspectionZeroWriteAudit => (
-        1905,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::PostgresLib),
-        "adapters/postgres/src/integration_tests/device_certificate_tests.rs",
-        "integration_tests::device_certificate_tests::device_latent_operator_audit_is_fixed_identifier_free_and_business_zero_write"
-    ),
-    LeaseTakeover => (
-        1907,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::PostgresLib),
-        "adapters/postgres/src/integration_tests/device_certificate_tests.rs",
-        "integration_tests::device_certificate_tests::authorized_artifact_return_loses_to_lease_takeover_without_stale_command"
-    ),
-    PostcommitReclaim => (
-        1907,
-        T2,
-        ExecutionUnitId::Integration(IntegrationUnitId::PostgresLib),
-        "adapters/postgres/src/integration_tests/device_certificate_tests.rs",
-        "integration_tests::device_certificate_tests::postcommit_worker_crash_reclaim_keeps_command_singular_and_exposes_interrupted_attempt"
-    ),
 }
 
 impl ExecutionUnitId {
@@ -163,7 +59,7 @@ impl ExecutionUnitSpec {
         }
     }
 
-    /// The sole profile projection across gates and integration journeys.
+    /// The sole profile projection across gates and integrations.
     /// `release-check` first takes the union of every primary owner, then gate
     /// subsumption removes only units carrying a closed typed proof.
     pub(crate) fn project(profile: ExecutionProfile) -> impl Iterator<Item = Self> {
@@ -283,32 +179,6 @@ mod tests {
                 .iter()
                 .all(|spec| ExecutionProfile::ALL.contains(&spec.primary_owner()))
         );
-    }
-
-    #[test]
-    fn device_latent_evidence_catalog_is_exact_non_vacuous_and_t1_t2_only() {
-        let specs = DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec);
-        let ids = DeviceLatentEvidenceId::ALL
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        let selectors = specs
-            .iter()
-            .map(|spec| (spec.source_path, spec.selector))
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(ids.len(), DeviceLatentEvidenceId::ALL.len());
-        assert_eq!(selectors.len(), specs.len());
-        assert_eq!(
-            specs
-                .iter()
-                .map(|spec| spec.issue)
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([1904, 1905, 1907])
-        );
-        assert!(specs.iter().all(|spec| matches!(
-            spec.tier,
-            DeviceLatentEvidenceTier::T1 | DeviceLatentEvidenceTier::T2
-        )));
-        assert!(specs.iter().all(|spec| !spec.selector.is_empty()));
     }
 
     #[test]

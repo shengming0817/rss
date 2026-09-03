@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `eventing_composition::ConsumerTxOutcome`
- --> tests/ui/consumer_tx_forged_committed_fail.rs:1:5
-  |
-1 | use eventing_composition::ConsumerTxOutcome;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ConsumerTxOutcome` in the root

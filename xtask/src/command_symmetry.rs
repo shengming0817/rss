@@ -35,8 +35,7 @@ pub(crate) enum Rule {
 }
 
 const COMMAND_GEN_DIR: &str = "generated/src/command";
-const SOURCE_MEMBER_ROOTS: &[&str] = &["crates", "adapters", "assemblies"];
-const SOURCE_LEAF_ROOTS: &[&str] = &["journeys"];
+const SOURCE_MEMBER_ROOTS: &[&str] = &["crates", "adapters"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Policy {
@@ -248,9 +247,6 @@ fn scan_sources(root: &Path) -> Result<SourceAudit> {
             scan_src_dir(&member.join("src"), &mut audit)?;
         }
     }
-    for leaf in SOURCE_LEAF_ROOTS {
-        scan_src_dir(&root.join(leaf).join("src"), &mut audit)?;
-    }
     Ok(audit)
 }
 
@@ -391,7 +387,7 @@ fn impl_allowed(site: &ImplSite) -> bool {
             site.target == "JournaledCommandDispatcher"
                 && site.path.ends_with("crates/eventexec/src/command.rs")
         }
-        Port::Register => is_composition_root_source(&site.path),
+        Port::Register => false,
         Port::JournalStore => {
             site.target == "PgCommandJournal"
                 && site
@@ -405,16 +401,6 @@ fn impl_allowed(site: &ImplSite) -> bool {
                     .ends_with("adapters/postgres/src/command_journal.rs")
         }
     }
-}
-
-fn is_composition_root_source(path: &Path) -> bool {
-    let components = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect::<Vec<_>>();
-    components
-        .windows(3)
-        .any(|window| window[0] == "assemblies" && window[2] == "src")
 }
 
 fn call_allowed(site: &CallSite) -> bool {
@@ -776,16 +762,10 @@ mod tests {
             port: Port::DispatchStore,
             target: "PgCommandJournal".to_string(),
         };
-        let composition_register = ImplSite {
-            path: PathBuf::from("/repo/assemblies/runtime/src/command_transport.rs"),
-            port: Port::Register,
-            target: "RuntimeCommandRegistrar".to_string(),
-        };
         assert!(impl_allowed(&runtime_emit));
         assert!(impl_allowed(&runtime_journal));
         assert!(impl_allowed(&postgres));
         assert!(impl_allowed(&postgres_direct));
-        assert!(impl_allowed(&composition_register));
     }
 
     #[test]
@@ -794,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn command_register_impl_is_rejected_outside_composition_roots() {
+    fn command_register_impl_is_rejected() {
         let domain_register = ImplSite {
             path: PathBuf::from("/repo/crates/settings/src/application.rs"),
             port: Port::Register,

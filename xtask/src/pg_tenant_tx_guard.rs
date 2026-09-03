@@ -99,32 +99,9 @@ pub(crate) enum Rule {
     IdentityReactivationBypass,
     /// The exact non-producing account reactivation write path disappeared.
     IdentityReactivationSitesAbsent,
-    /// The feature-gated fault harness attempted to author a production terminal state directly.
-    FaultMatrixTerminalBypass,
 }
 
 pub(crate) struct PgTenantTxGuard;
-
-const FAULT_MATRIX_FILE: &str = "fault_matrix.rs";
-const MAX_FAULT_MATRIX_GUARD_SOURCE_BYTES: u64 = 512 * 1024;
-const FAULT_MATRIX_LIB_GATE: &str = "#[cfg(feature = \"fault-matrix-test-support\")]";
-const FAULT_MATRIX_OWNER_POOL: &str = "fault-matrix-owner-pool";
-const FAULT_MATRIX_EXACT_OUTBOX_CLAIM: &str = "fault-matrix-exact-outbox-claim";
-const FAULT_MATRIX_SEED_OUTBOX: &str = "fault-matrix-seed-outbox";
-const FAULT_MATRIX_SEED_SESSION_CREATED: &str = "fault-matrix-seed-session-created";
-const FAULT_MATRIX_SESSION_RETRY_DUE: &str = "fault-matrix-session-retry-due";
-const FAULT_MATRIX_PUBLISH_BUDGET_RETRY_DUE: &str = "fault-matrix-publish-budget-retry-due";
-const FAULT_MATRIX_OUTBOX_RETRY_OBSERVATION: &str = "fault-matrix-outbox-retry-observation";
-const FAULT_MATRIX_RECONCILE_ALIAS_OBSERVATION: &str = "fault-matrix-reconcile-alias-observation";
-const FAULT_MATRIX_SESSION_AUDIT_COUNT: &str = "fault-matrix-session-audit-count";
-const FAULT_MATRIX_SESSION_INBOX_DONE_COUNT: &str = "fault-matrix-session-inbox-done-count";
-const FAULT_MATRIX_EXPIRED_DEADLINE: &str = "fault-matrix-expired-deadline";
-const FAULT_MATRIX_OUTBOX_STATUS_OBSERVATION: &str = "fault-matrix-outbox-status-observation";
-const FAULT_MATRIX_TERMINAL_OBSERVATION: &str = "fault-matrix-terminal-observation";
-const FAULT_MATRIX_OUTBOX_STATUS_COUNT: &str = "fault-matrix-outbox-status-count";
-const FAULT_MATRIX_DEAD_LETTER_OBSERVATION: &str = "fault-matrix-dead-letter-observation";
-const FAULT_MATRIX_AGE_OUTBOX_PUBLISHING: &str = "fault-matrix-age-outbox-publishing";
-const FAULT_MATRIX_AGE_INBOX_CLAIM: &str = "fault-matrix-age-inbox-claim";
 
 impl GovernanceCheck for PgTenantTxGuard {
     type Rule = Rule;
@@ -139,61 +116,11 @@ impl GovernanceCheck for PgTenantTxGuard {
         let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
         let workspace_files = load_workspace_prod_rs(&root)?;
         let (summary, mut findings) = scan_guard(&migrations, &files);
-        findings.extend(load_fault_matrix_governance_findings(
-            &migrations,
-            &root.join("adapters/postgres/src"),
-        )?);
         findings.extend(identity_security_sql_funnel_findings(&files));
         findings.extend(localtx_required_carriers_missing(&files));
         findings.extend(localtx_deadline_observation_findings(&workspace_files));
         Ok((summary, findings))
     }
-}
-
-fn load_fault_matrix_governance_findings(
-    migrations: &[(String, String)],
-    src_dir: &Path,
-) -> Result<Vec<Finding>> {
-    let mut files = Vec::new();
-    for rel in ["lib.rs", FAULT_MATRIX_FILE] {
-        let path = src_dir.join(rel);
-        let source = crate::generated_file::read_stable_utf8_file(
-            &path,
-            MAX_FAULT_MATRIX_GUARD_SOURCE_BYTES,
-            "PostgreSQL fault-matrix governance source",
-        )
-        .with_context(|| format!("稳定读取 {} 失败", path.display()))?;
-        files.push((rel.to_string(), source));
-    }
-    let mut findings = fault_matrix_exception_staleness(&files);
-    findings.extend(fault_matrix_terminal_bypass_findings(&files));
-    let tenant_tables = tenant_tables_from_migrations(migrations);
-    if let Some((rel, source)) = files.iter().find(|(rel, _)| rel == FAULT_MATRIX_FILE) {
-        let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(source));
-        let expanded = expand_simple_table_consts(&stripped).to_lowercase();
-        let helper_tables = tenant_pgconnection_helpers(&expanded, &tenant_tables);
-        let (raw_tenant_hits, _) =
-            raw_tenant_accesses(rel, &expanded, &tenant_tables, &helper_tables);
-        let (raw_outbox_hits, _, _) = raw_outbox_insert_sites(rel, &expanded);
-        findings.extend(raw_tenant_hits.iter().map(|hit| {
-            finding(
-                Rule::RawTenantTableAccess,
-                site_subject(rel, hit.line),
-                format!(
-                    "tenant tables {:?} touched through raw pattern {:?}; use exact-lane TenantDb scoped methods",
-                    hit.tables, hit.pattern
-                ),
-            )
-        }));
-        findings.extend(raw_outbox_hits.iter().map(|hit| {
-            finding(
-                Rule::RawOutboxInsert,
-                site_subject(rel, hit.line),
-                "outbox rows must be created through the closed outbox append facade",
-            )
-        }));
-    }
-    Ok(findings)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -692,7 +619,7 @@ fn load_prod_rs(dir: &Path) -> Result<Vec<(String, String)>> {
     paths.sort();
     let mut files = Vec::new();
     for path in paths {
-        if is_test_file(&path) || is_feature_gated_harness(dir, &path)? {
+        if is_test_file(&path) {
             continue;
         }
         let rel = path
@@ -769,47 +696,6 @@ fn collect_rs_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn is_feature_gated_harness(src_dir: &Path, path: &Path) -> Result<bool> {
-    let rel = path
-        .strip_prefix(src_dir)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    if rel != "fault_matrix.rs" {
-        return Ok(false);
-    }
-    let lib_content = std::fs::read_to_string(src_dir.join("lib.rs"))
-        .with_context(|| format!("读 {} 失败", src_dir.join("lib.rs").display()))?;
-    Ok(is_feature_gated_harness_rel(&rel, &lib_content))
-}
-
-fn is_feature_gated_harness_rel(rel: &str, lib_content: &str) -> bool {
-    rel == "fault_matrix.rs" && fault_matrix_module_has_feature_gate(lib_content)
-}
-
-fn fault_matrix_module_has_feature_gate(lib_content: &str) -> bool {
-    let stripped = strip_rust_comment_lines(lib_content);
-    let mut pending_attrs = Vec::new();
-    for line in stripped.lines().map(str::trim) {
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with("#[") {
-            pending_attrs.push(line);
-            continue;
-        }
-        if matches!(line, "pub mod fault_matrix;" | "mod fault_matrix;") {
-            return pending_attrs.iter().any(|attr| {
-                attr.starts_with("#[cfg(")
-                    && attr.contains("feature")
-                    && attr.contains("\"fault-matrix-test-support\"")
-            });
-        }
-        pending_attrs.clear();
-    }
-    false
-}
-
 fn is_test_file(path: &Path) -> bool {
     if crate::src_scan::is_crate_internal_integration_test_source(path) {
         return true;
@@ -843,8 +729,6 @@ pub(crate) fn scan_guard(
     }
 
     let mut state = ScanState::default();
-    findings.extend(fault_matrix_exception_staleness(files));
-    findings.extend(fault_matrix_terminal_bypass_findings(files));
     findings.extend(localtx_quarantine_findings(files));
 
     for (rel, content) in files {
@@ -2449,20 +2333,13 @@ fn scan_source_file(
     let helper_tables = tenant_pgconnection_helpers(&expanded, tenant_tables);
     let (raw_hits, site_exceptions) =
         raw_tenant_accesses(rel, &expanded, tenant_tables, &helper_tables);
-    let (outbox_insert_hits, outbox_exceptions, outbox_insert_sites) =
-        raw_outbox_insert_sites(rel, &expanded);
+    let (outbox_insert_hits, outbox_insert_sites) = raw_outbox_insert_sites(rel, &expanded);
     state.allowed_exceptions.extend(site_exceptions);
-    state.allowed_exceptions.extend(outbox_exceptions);
     for site in outbox_insert_sites {
         *state.outbox_insert_sites.entry(site).or_default() += 1;
     }
     let raw_pool_field_hits = raw_tenant_pool_fields(&stripped);
-    let raw_pool_field_exception = raw_pool_field_exception(rel, &expanded);
-    note_raw_pool_field_exception(
-        &mut state.allowed_exceptions,
-        raw_pool_field_exception,
-        &raw_pool_field_hits,
-    );
+    let raw_pool_field_exception = is_raw_pool_field_exception(rel);
     state.raw_sites += raw_hits.len() + raw_pool_field_hits.len() + outbox_insert_hits.len();
 
     findings.extend(outbox_insert_hits.iter().map(|hit| {
@@ -4358,13 +4235,6 @@ fn attributes_are_test_only(attributes: &[syn::Attribute]) -> bool {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct SqlQuerySite {
-    line: usize,
-    column: usize,
-    sql: Option<String>,
-}
-
 fn sql_string_constants(syntax: &syn::File) -> BTreeMap<String, String> {
     syntax
         .items
@@ -4477,235 +4347,6 @@ fn expand_static_format_captures(
     Some(expanded)
 }
 
-fn sqlx_query_aliases(syntax: &syn::File) -> BTreeSet<String> {
-    fn collect(tree: &syn::UseTree, prefix: &mut Vec<String>, aliases: &mut BTreeSet<String>) {
-        match tree {
-            syn::UseTree::Path(path) => {
-                prefix.push(path.ident.to_string());
-                collect(&path.tree, prefix, aliases);
-                prefix.pop();
-            }
-            syn::UseTree::Name(name)
-                if prefix.as_slice() == ["sqlx"] && sqlx_query_name(&name.ident.to_string()) =>
-            {
-                aliases.insert(name.ident.to_string());
-            }
-            syn::UseTree::Rename(rename)
-                if prefix.as_slice() == ["sqlx"] && sqlx_query_name(&rename.ident.to_string()) =>
-            {
-                aliases.insert(rename.rename.to_string());
-            }
-            syn::UseTree::Rename(rename) if prefix.is_empty() && rename.ident == "sqlx" => {
-                aliases.insert(format!("@crate:{}", rename.rename));
-            }
-            syn::UseTree::Group(group) => {
-                for item in &group.items {
-                    collect(item, prefix, aliases);
-                }
-            }
-            syn::UseTree::Glob(_) if prefix.as_slice() == ["sqlx"] => {
-                aliases.extend(
-                    ["query", "query_as", "query_scalar", "raw_sql"]
-                        .into_iter()
-                        .map(str::to_string),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    let mut aliases = BTreeSet::new();
-    for item in &syntax.items {
-        if let syn::Item::Use(item_use) = item {
-            collect(&item_use.tree, &mut Vec::new(), &mut aliases);
-        } else if let syn::Item::ExternCrate(extern_crate) = item
-            && extern_crate.ident == "sqlx"
-            && let Some((_, rename)) = &extern_crate.rename
-        {
-            aliases.insert(format!("@crate:{rename}"));
-        }
-    }
-    aliases
-}
-
-fn sqlx_query_name(name: &str) -> bool {
-    matches!(name, "query" | "query_as" | "query_scalar" | "raw_sql")
-}
-
-fn is_sqlx_query_path(path: &syn::Path, aliases: &BTreeSet<String>) -> bool {
-    let segments = path.segments.iter().collect::<Vec<_>>();
-    matches!(segments.as_slice(), [root, query] if (root.ident == "sqlx" || aliases.contains(&format!("@crate:{}", root.ident))) && sqlx_query_name(&query.ident.to_string()))
-        || matches!(segments.as_slice(), [query] if aliases.contains(&query.ident.to_string()))
-}
-
-fn sqlx_query_call_site(
-    call: &syn::ExprCall,
-    aliases: &BTreeSet<String>,
-    constants: &BTreeMap<String, String>,
-) -> Option<SqlQuerySite> {
-    let syn::Expr::Path(function) = call.func.as_ref() else {
-        return None;
-    };
-    if !is_sqlx_query_path(&function.path, aliases) {
-        return None;
-    }
-    let start = function.path.span().start();
-    let sql = call
-        .args
-        .first()
-        .and_then(|argument| resolve_static_sql_expr(argument, constants));
-    Some(SqlQuerySite {
-        line: start.line,
-        column: start.column,
-        sql,
-    })
-}
-
-fn sqlx_query_macro_site(
-    expression: &syn::ExprMacro,
-    aliases: &BTreeSet<String>,
-    constants: &BTreeMap<String, String>,
-) -> Option<SqlQuerySite> {
-    use syn::parse::Parser as _;
-
-    if !is_sqlx_query_path(&expression.mac.path, aliases) {
-        return None;
-    }
-    let start = expression.mac.path.span().start();
-    let sql = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
-        .parse2(expression.mac.tokens.clone())
-        .ok()
-        .and_then(|arguments| {
-            arguments
-                .first()
-                .and_then(|argument| resolve_static_sql_expr(argument, constants))
-        });
-    Some(SqlQuerySite {
-        line: start.line,
-        column: start.column,
-        sql,
-    })
-}
-
-fn skip_nested_sql_comment(bytes: &[u8], mut index: usize) -> Option<usize> {
-    index += 2;
-    let mut depth = 1_usize;
-    while index < bytes.len() && depth > 0 {
-        if bytes.get(index..index + 2) == Some(b"/*") {
-            depth += 1;
-            index += 2;
-        } else if bytes.get(index..index + 2) == Some(b"*/") {
-            depth -= 1;
-            index += 2;
-        } else {
-            index += 1;
-        }
-    }
-    (depth == 0).then_some(index)
-}
-
-fn skip_sql_quoted(bytes: &[u8], mut index: usize, quote: u8) -> Option<usize> {
-    index += 1;
-    loop {
-        let byte = *bytes.get(index)?;
-        index += 1;
-        if byte == quote {
-            if bytes.get(index) == Some(&quote) {
-                index += 1;
-            } else {
-                return Some(index);
-            }
-        }
-    }
-}
-
-fn read_sql_quoted_identifier(sql: &str, mut index: usize) -> Option<(usize, String)> {
-    let bytes = sql.as_bytes();
-    index += 1;
-    let mut identifier = String::new();
-    loop {
-        let byte = *bytes.get(index)?;
-        index += 1;
-        if byte == b'"' {
-            if bytes.get(index) == Some(&b'"') {
-                identifier.push('"');
-                index += 1;
-            } else {
-                return Some((index, identifier.to_ascii_uppercase()));
-            }
-        } else {
-            identifier.push(byte as char);
-        }
-    }
-}
-
-fn skip_sql_dollar_quote(sql: &str, index: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let tag_end = bytes[index + 1..]
-        .iter()
-        .position(|byte| *byte == b'$')
-        .map(|offset| index + offset + 1);
-    let Some(tag_end) = tag_end.filter(|tag_end| {
-        bytes[index + 1..*tag_end]
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-    }) else {
-        return Some(index + 1);
-    };
-    let delimiter = &sql[index..=tag_end];
-    let body_start = tag_end + 1;
-    let close = sql[body_start..].find(delimiter)?;
-    Some(body_start + close + delimiter.len())
-}
-
-fn sql_tokens(sql: &str) -> Option<Vec<String>> {
-    let bytes = sql.as_bytes();
-    let mut tokens = Vec::new();
-    let mut index = 0_usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            byte if byte.is_ascii_whitespace() => index += 1,
-            b'-' if bytes.get(index + 1) == Some(&b'-') => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index = skip_nested_sql_comment(bytes, index)?;
-            }
-            b'\'' => {
-                index = skip_sql_quoted(bytes, index, b'\'')?;
-            }
-            b'"' => {
-                let (next, identifier) = read_sql_quoted_identifier(sql, index)?;
-                tokens.push(identifier);
-                index = next;
-            }
-            b'$' => {
-                index = skip_sql_dollar_quote(sql, index)?;
-            }
-            b'(' | b')' | b',' | b';' | b'=' => {
-                tokens.push((bytes[index] as char).to_string());
-                index += 1;
-            }
-            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
-                let start = index;
-                index += 1;
-                while index < bytes.len()
-                    && (bytes[index].is_ascii_alphanumeric()
-                        || matches!(bytes[index], b'_' | b'$' | b'.'))
-                {
-                    index += 1;
-                }
-                tokens.push(sql[start..index].to_ascii_uppercase());
-            }
-            _ => index += 1,
-        }
-    }
-    Some(tokens)
-}
-
 #[derive(Debug)]
 struct RawTenantAccess {
     tables: Vec<String>,
@@ -4729,15 +4370,7 @@ struct RawOutboxAccess {
     clippy::unreachable,
     reason = "the preceding exact owner allowlist closes the symbol mapping"
 )]
-fn raw_outbox_insert_sites(
-    rel: &str,
-    content: &str,
-) -> (
-    Vec<RawOutboxAccess>,
-    BTreeSet<&'static str>,
-    Vec<&'static str>,
-) {
-    let mut exceptions = BTreeSet::new();
+fn raw_outbox_insert_sites(rel: &str, content: &str) -> (Vec<RawOutboxAccess>, Vec<&'static str>) {
     let mut owned_sites = Vec::new();
     let mut findings = Vec::new();
     for (needle, owner, symbols) in [
@@ -4777,24 +4410,12 @@ fn raw_outbox_insert_sites(
                 owned_sites.push(site);
                 continue;
             }
-            let (_, end) = raw_access_window(content, idx, ".execute(pool");
-            let window = &content[idx.saturating_sub(400)..end];
-            if needle == "insert into outbox"
-                && let Some(exception) = allowed_fault_matrix_outbox_insert(
-                    rel,
-                    enclosing_function_name(content, idx),
-                    window,
-                )
-            {
-                exceptions.insert(exception);
-                continue;
-            }
             findings.push(RawOutboxAccess {
                 line: line_number(content, idx),
             });
         }
     }
-    (findings, exceptions, owned_sites)
+    (findings, owned_sites)
 }
 
 fn enclosing_function_name(content: &str, target: usize) -> Option<&str> {
@@ -4840,13 +4461,7 @@ fn raw_tenant_accesses(
             tables.sort();
             tables.dedup();
             if !tables.is_empty() {
-                if let Some(exception) = allowed_site_exception(
-                    rel,
-                    enclosing_function_name(content, idx),
-                    &pattern,
-                    &tables,
-                    window,
-                ) {
+                if let Some(exception) = allowed_site_exception(rel, &tables, window) {
                     allowed_exceptions.insert(exception);
                     continue;
                 }
@@ -5053,26 +4668,7 @@ fn raw_store_type(ty: &syn::Type) -> Option<&'static str> {
     }
 }
 
-fn allowed_site_exception(
-    rel: &str,
-    symbol: Option<&str>,
-    pattern: &str,
-    tables: &[String],
-    window: &str,
-) -> Option<&'static str> {
-    if rel == "outbox.rs"
-        && symbol == Some("fault_matrix_claim_exact")
-        && tables == ["outbox"]
-        && ((pattern == "pool.begin().await" && window.contains("owner_pool.begin().await"))
-            || (pattern.starts_with(".fetch_optional(&mut *tx")
-                && window.contains("from claimed")
-                && window.contains(".bind(self.relay_budget.required_budget_millis())")))
-    {
-        return Some(FAULT_MATRIX_EXACT_OUTBOX_CLAIM);
-    }
-    if let Some(exception) = allowed_fault_matrix_raw_tenant_site(rel, symbol, tables, window) {
-        return Some(exception);
-    }
+fn allowed_site_exception(rel: &str, tables: &[String], window: &str) -> Option<&'static str> {
     if rel == "config_repo.rs"
         && tables == ["config_entries"]
         && window.contains("select tenant_id::text, config_key, version, value, value_enc, key_id")
@@ -5110,170 +4706,6 @@ fn allowed_site_exception(
     None
 }
 
-fn allowed_fault_matrix_raw_tenant_site(
-    rel: &str,
-    symbol: Option<&str>,
-    tables: &[String],
-    window: &str,
-) -> Option<&'static str> {
-    if rel != FAULT_MATRIX_FILE {
-        return None;
-    }
-    if tables == ["outbox"]
-        && symbol == Some("seed_session_created")
-        && window.contains("insert into outbox (")
-        && window.contains(".bind(input.idem_key.as_str())")
-        && window.contains(".bind(payload)")
-        && window.contains("session_created_fact.contract().schema_hash()")
-        && window.contains(".execute(pool)")
-    {
-        return Some(FAULT_MATRIX_SEED_SESSION_CREATED);
-    }
-    if tables == ["outbox"]
-        && window.contains("insert into outbox (")
-        && window.contains("decode('70', 'hex')")
-        && window.contains(".execute(pool)")
-    {
-        return Some(FAULT_MATRIX_SEED_OUTBOX);
-    }
-    if tables == ["outbox"]
-        && symbol == Some("make_session_created_retry_due")
-        && window.contains("update outbox set retry_after = clock_timestamp()")
-        && window.contains("contract_id = $4 and status = 'pending'")
-        && window.contains(".execute(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_SESSION_RETRY_DUE);
-    }
-    if tables == ["outbox"]
-        && symbol == Some("run_outbox_publish_to_budget")
-        && window.contains("update outbox set retry_after = clock_timestamp()")
-        && window.contains("event_id = $2 and status = 'pending'")
-        && window.contains(".execute(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_PUBLISH_BUDGET_RETRY_DUE);
-    }
-    if tables == ["outbox"]
-        && symbol == Some("outbox_retry_observation")
-        && window.contains("select status, retry_count")
-        && window.contains("lease_token is null and lease_until is null")
-        && window.contains(".fetch_optional(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_OUTBOX_RETRY_OBSERVATION);
-    }
-    if tables == ["command_idempotency_aliases"]
-        && symbol == Some("reconcile_dispatch_key_stable")
-        && window.contains("select command_id from command_idempotency_aliases")
-        && window.contains("alias_digest = $3")
-        && window.contains(".fetch_all(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_RECONCILE_ALIAS_OBSERVATION);
-    }
-    if tables == ["audit_entries"]
-        && window.contains("action = 'identity:login'")
-        && window.contains("resource_kind = 'session'")
-        && window.contains("resource_id = $2")
-        && window.contains(".fetch_one(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_SESSION_AUDIT_COUNT);
-    }
-    if tables == ["inbox_receipts"]
-        && window.contains("consumer_group = $3")
-        && window.contains("contract_id = $5 and status = 'done'")
-        && window.contains(".fetch_one(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_SESSION_INBOX_DONE_COUNT);
-    }
-    if tables == ["outbox"]
-        && window.contains("update outbox set updated_at = clock_timestamp()")
-        && window.contains("returning (extract(epoch from lease_until)")
-        && window.contains(".fetch_one(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_EXPIRED_DEADLINE);
-    }
-    if tables == ["outbox"]
-        && window.contains("select status from outbox")
-        && window.contains("domain = $3 and contract_id = $4")
-        && window.contains(".fetch_one(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_OUTBOX_STATUS_OBSERVATION);
-    }
-    if tables == ["outbox"]
-        && window.contains("published_at is null and dlx_at is null")
-        && window.contains("domain = $3 and contract_id = $4")
-        && window.contains(".fetch_one(pool)")
-    {
-        return Some(FAULT_MATRIX_TERMINAL_OBSERVATION);
-    }
-    if tables == ["outbox"]
-        && window.contains("select count(*)::bigint from outbox")
-        && window.contains("event_id = $2")
-        && window.contains("status = $3")
-        && window.contains(".fetch_one(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_OUTBOX_STATUS_COUNT);
-    }
-    if tables == ["dead_letter"]
-        && window.contains("from dead_letter")
-        && window.contains("source_kind")
-        && window.contains("message_id = $2")
-        && window.contains(".fetch_optional(&self.owner_pool)")
-    {
-        return Some(FAULT_MATRIX_DEAD_LETTER_OBSERVATION);
-    }
-    if tables == ["outbox"]
-        && symbol == Some("age_outbox_publishing")
-        && window.contains("update outbox")
-        && window.contains("set updated_at = clock_timestamp()")
-        && window.contains("status = $3")
-        && window.contains(".execute(pool)")
-    {
-        return Some(FAULT_MATRIX_AGE_OUTBOX_PUBLISHING);
-    }
-    if tables == ["inbox_receipts"]
-        && window.contains("update inbox_receipts set claimed_at")
-        && window.contains("consumer_group = $3")
-        && window.contains(".execute(pool)")
-    {
-        return Some(FAULT_MATRIX_AGE_INBOX_CLAIM);
-    }
-    None
-}
-
-fn allowed_fault_matrix_outbox_insert(
-    rel: &str,
-    symbol: Option<&str>,
-    window: &str,
-) -> Option<&'static str> {
-    if rel == FAULT_MATRIX_FILE
-        && symbol == Some("seed_session_created")
-        && window.contains("insert into outbox (")
-        && window.contains(".bind(input.idem_key.as_str())")
-        && window.contains(".bind(payload)")
-        && window.contains("session_created_fact.contract().schema_hash()")
-        && window.contains(".execute(pool)")
-    {
-        return Some(FAULT_MATRIX_SEED_SESSION_CREATED);
-    }
-    if rel == FAULT_MATRIX_FILE
-        && window.contains("insert into outbox (")
-        && window.contains("decode('70', 'hex')")
-        && window.contains(".execute(pool)")
-    {
-        return Some(FAULT_MATRIX_SEED_OUTBOX);
-    }
-    None
-}
-
-fn note_raw_pool_field_exception(
-    allowed_exceptions: &mut BTreeSet<&'static str>,
-    is_exception: bool,
-    hits: &[RawPoolFieldAccess],
-) {
-    if is_exception && !hits.is_empty() {
-        allowed_exceptions.insert(FAULT_MATRIX_OWNER_POOL);
-    }
-}
-
 fn raw_pool_field_findings(
     rel: &str,
     tenant_hits: &[String],
@@ -5302,13 +4734,6 @@ fn raw_pool_field_findings(
         .collect()
 }
 
-fn raw_pool_field_exception(rel: &str, content: &str) -> bool {
-    if rel == FAULT_MATRIX_FILE {
-        return content.matches("owner_pool: pgpool").count() == 1;
-    }
-    is_raw_pool_field_exception(rel)
-}
-
 fn is_raw_pool_field_exception(rel: &str) -> bool {
     matches!(
         rel,
@@ -5325,346 +4750,6 @@ fn is_raw_pool_field_exception(rel: &str) -> bool {
             | "outbox.rs"
             | "projection_events.rs"
     )
-}
-
-fn fault_matrix_exception_staleness(files: &[(String, String)]) -> Vec<Finding> {
-    let Some((_, fault_matrix)) = files.iter().find(|(rel, _)| rel == FAULT_MATRIX_FILE) else {
-        return Vec::new();
-    };
-    let mut findings = Vec::new();
-    let gate_ok = files.iter().any(|(rel, content)| {
-        rel == "lib.rs"
-            && content.contains(FAULT_MATRIX_LIB_GATE)
-            && content.contains("pub mod fault_matrix;")
-    });
-    if !gate_ok {
-        findings.push(finding(
-            Rule::StaleException,
-            "fault-matrix-test-support-gate",
-            "fault_matrix raw-access exceptions require the lib.rs feature gate",
-        ));
-    }
-
-    if let Some((_, outbox)) = files.iter().find(|(rel, _)| rel == "outbox.rs") {
-        let outbox = strip_rust_comment_lines(&strip_cfg_test_modules(outbox)).to_lowercase();
-        if ![
-            "#[cfg(feature = \"fault-matrix-test-support\")]",
-            "fn fault_matrix_claim_exact",
-            "owner_pool.begin().await",
-            "with claim_clock as materialized",
-            "from claimed",
-            ".fetch_optional(&mut *tx)",
-        ]
-        .iter()
-        .all(|needle| outbox.contains(needle))
-        {
-            findings.push(finding(
-                Rule::StaleException,
-                FAULT_MATRIX_EXACT_OUTBOX_CLAIM,
-                "fault_matrix exact-claim raw-access exception target is absent or no longer exact",
-            ));
-        }
-    }
-
-    let content = strip_rust_comment_lines(&strip_cfg_test_modules(fault_matrix)).to_lowercase();
-    for (name, needles) in [
-        (FAULT_MATRIX_OWNER_POOL, &["owner_pool: pgpool"][..]),
-        (
-            FAULT_MATRIX_SEED_OUTBOX,
-            &[
-                "insert into outbox (",
-                "decode('70', 'hex')",
-                ".execute(pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_SEED_SESSION_CREATED,
-            &[
-                "insert into outbox (",
-                "serde_json::to_vec(&input.payload)",
-                ".bind(input.idem_key.as_str())",
-                ".bind(payload)",
-                "session_created_fact.contract().schema_hash()",
-                ".execute(pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_SESSION_RETRY_DUE,
-            &[
-                "update outbox set retry_after = clock_timestamp()",
-                "contract_id = $4 and status = 'pending'",
-                ".execute(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_PUBLISH_BUDGET_RETRY_DUE,
-            &[
-                "fn run_outbox_publish_to_budget",
-                "update outbox set retry_after = clock_timestamp()",
-                "event_id = $2 and status = 'pending'",
-                ".execute(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_OUTBOX_RETRY_OBSERVATION,
-            &[
-                "fn outbox_retry_observation",
-                "select status, retry_count",
-                "lease_token is null and lease_until is null",
-                ".fetch_optional(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_RECONCILE_ALIAS_OBSERVATION,
-            &[
-                "fn reconcile_dispatch_key_stable",
-                "select command_id from command_idempotency_aliases",
-                "alias_digest = $3",
-                ".fetch_all(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_SESSION_AUDIT_COUNT,
-            &[
-                "from audit_entries",
-                "action = 'identity:login'",
-                "resource_kind = 'session'",
-                "resource_id = $2",
-                ".fetch_one(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_SESSION_INBOX_DONE_COUNT,
-            &[
-                "from inbox_receipts",
-                "consumer_group = $3",
-                "contract_id = $5 and status = 'done'",
-                ".fetch_one(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_EXPIRED_DEADLINE,
-            &[
-                "update outbox set updated_at = clock_timestamp()",
-                "returning (extract(epoch from lease_until)",
-                ".fetch_one(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_OUTBOX_STATUS_OBSERVATION,
-            &[
-                "select status from outbox",
-                "domain = $3 and contract_id = $4",
-                ".fetch_one(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_TERMINAL_OBSERVATION,
-            &[
-                "published_at is null and dlx_at is null",
-                "domain = $3 and contract_id = $4",
-                ".fetch_one(pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_OUTBOX_STATUS_COUNT,
-            &[
-                "select count(*)::bigint from outbox",
-                "event_id = $2",
-                "status = $3",
-                ".fetch_one(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_DEAD_LETTER_OBSERVATION,
-            &[
-                "from dead_letter",
-                "source_kind",
-                "message_id = $2",
-                ".fetch_optional(&self.owner_pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_AGE_OUTBOX_PUBLISHING,
-            &[
-                "fn age_outbox_publishing",
-                "update outbox",
-                "set updated_at = clock_timestamp()",
-                "status = $3",
-                ".execute(pool)",
-            ][..],
-        ),
-        (
-            FAULT_MATRIX_AGE_INBOX_CLAIM,
-            &[
-                "update inbox_receipts set claimed_at",
-                "consumer_group = $3",
-                ".execute(pool)",
-            ][..],
-        ),
-    ] {
-        if !needles.iter().all(|needle| content.contains(needle)) {
-            findings.push(finding(
-                Rule::StaleException,
-                name,
-                "fault_matrix raw-access exception target is absent or no longer exact",
-            ));
-        }
-    }
-    findings
-}
-
-fn fault_matrix_terminal_bypass_findings(files: &[(String, String)]) -> Vec<Finding> {
-    use syn::visit::Visit as _;
-
-    let Some((_, fault_matrix)) = files.iter().find(|(rel, _)| rel == FAULT_MATRIX_FILE) else {
-        return Vec::new();
-    };
-    let production = strip_cfg_test_modules(fault_matrix);
-    let Ok(syntax) = syn::parse_file(&production) else {
-        return vec![finding(
-            Rule::FaultMatrixTerminalBypass,
-            FAULT_MATRIX_FILE,
-            "fault_matrix production AST could not be parsed; terminal-state SQL check fails closed",
-        )];
-    };
-    let aliases = sqlx_query_aliases(&syntax);
-    let constants = sql_string_constants(&syntax);
-    struct QueryVisitor<'a> {
-        aliases: &'a BTreeSet<String>,
-        constants: &'a BTreeMap<String, String>,
-        sites: BTreeSet<SqlQuerySite>,
-    }
-    impl<'ast> syn::visit::Visit<'ast> for QueryVisitor<'_> {
-        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-            if let Some(site) = sqlx_query_call_site(call, self.aliases, self.constants) {
-                self.sites.insert(site);
-            }
-            syn::visit::visit_expr_call(self, call);
-        }
-
-        fn visit_expr_macro(&mut self, expression: &'ast syn::ExprMacro) {
-            if let Some(site) = sqlx_query_macro_site(expression, self.aliases, self.constants) {
-                self.sites.insert(site);
-            }
-            syn::visit::visit_expr_macro(self, expression);
-        }
-    }
-    let mut visitor = QueryVisitor {
-        aliases: &aliases,
-        constants: &constants,
-        sites: BTreeSet::new(),
-    };
-    visitor.visit_file(&syntax);
-    visitor
-        .sites
-        .into_iter()
-        .filter_map(|site| {
-            let detail = match site.sql {
-                Some(sql) => fault_matrix_terminal_sql_violation(&sql),
-                None => Some(
-                    "fault_matrix SQL must be statically resolvable so terminal writes cannot hide behind dynamic text"
-                        .to_string(),
-                ),
-            }?;
-            Some(finding(
-                Rule::FaultMatrixTerminalBypass,
-                site_subject(FAULT_MATRIX_FILE, site.line),
-                detail,
-            ))
-        })
-        .collect()
-}
-
-fn fault_matrix_terminal_sql_violation(sql: &str) -> Option<String> {
-    let tokens = sql_tokens(sql)?;
-    for (index, token) in tokens.iter().enumerate() {
-        if token == "INSERT"
-            && let Some(into) = tokens[index + 1..]
-                .iter()
-                .position(|candidate| candidate == "INTO")
-                .map(|offset| index + offset + 1)
-            && tokens[into + 1..]
-                .iter()
-                .take_while(|candidate| candidate.as_str() != "(")
-                .any(|candidate| sql_identifier_is(candidate, "AUDIT_ENTRIES"))
-        {
-            return Some(
-                "fault_matrix must author audit business effects through the production ConsumerTx"
-                    .to_string(),
-            );
-        }
-        if token != "UPDATE" {
-            continue;
-        }
-        let Some(set) = tokens[index + 1..]
-            .iter()
-            .position(|candidate| candidate == "SET")
-            .map(|offset| index + offset + 1)
-        else {
-            return Some("fault_matrix UPDATE SQL could not be classified safely".to_string());
-        };
-        let target = &tokens[index + 1..set];
-        if target
-            .iter()
-            .any(|candidate| sql_identifier_is(candidate, "OUTBOX"))
-            && update_assigns_any(&tokens[set + 1..], &["STATUS", "PUBLISHED_AT", "DLX_AT"])
-        {
-            return Some(
-                "fault_matrix must settle outbox status and terminal timestamps through the production settlement funnel"
-                    .to_string(),
-            );
-        }
-        if target
-            .iter()
-            .any(|candidate| sql_identifier_is(candidate, "INBOX_RECEIPTS"))
-            && update_assigns_any(&tokens[set + 1..], &["STATUS"])
-        {
-            return Some(
-                "fault_matrix must commit Inbox Done through the production Inbox/ConsumerTx funnel"
-                    .to_string(),
-            );
-        }
-    }
-    None
-}
-
-fn update_assigns_any(tokens: &[String], forbidden: &[&str]) -> bool {
-    let mut depth = 0_i32;
-    let mut assignment_start = 0;
-    for index in 0..=tokens.len() {
-        let token = tokens.get(index).map(String::as_str);
-        let boundary = index == tokens.len()
-            || (depth == 0 && matches!(token, Some("," | "WHERE" | "RETURNING" | "FROM" | ";")));
-        if boundary {
-            let assignment = &tokens[assignment_start..index];
-            let lhs_end = assignment
-                .iter()
-                .position(|candidate| candidate == "=")
-                .unwrap_or(assignment.len());
-            if assignment[..lhs_end].iter().any(|candidate| {
-                forbidden
-                    .iter()
-                    .any(|column| sql_identifier_is(candidate, column))
-            }) {
-                return true;
-            }
-            if matches!(token, Some("WHERE" | "RETURNING" | "FROM" | ";") | None) {
-                break;
-            }
-            assignment_start = index + 1;
-        }
-        match token {
-            Some("(") => depth += 1,
-            Some(")") => depth -= 1,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn sql_identifier_is(token: &str, expected: &str) -> bool {
-    token.rsplit('.').next() == Some(expected)
 }
 
 fn site_subject(rel: &str, line: usize) -> String {
@@ -6805,34 +5890,6 @@ impl Drop for LocalTxConnectionLease {
     }
 
     #[test]
-    fn feature_harness_skip_requires_exact_fault_matrix_module_gate() {
-        let gated_lib = r#"
-#[cfg(feature = "fault-matrix-test-support")]
-pub mod fault_matrix;
-"#;
-        assert!(is_feature_gated_harness_rel("fault_matrix.rs", gated_lib));
-        assert!(!is_feature_gated_harness_rel(
-            "subsystem/fault_matrix.rs",
-            gated_lib
-        ));
-    }
-
-    #[test]
-    fn feature_harness_skip_requires_feature_gate() {
-        assert!(!is_feature_gated_harness_rel(
-            "fault_matrix.rs",
-            "pub mod fault_matrix;"
-        ));
-        assert!(!is_feature_gated_harness_rel(
-            "fault_matrix.rs",
-            r#"
-#[cfg(test)]
-pub mod fault_matrix;
-"#
-        ));
-    }
-
-    #[test]
     fn red_direct_pool_begin_touching_tenant_table() {
         let (_, findings) = scan_guard(
             &migrations(),
@@ -7328,245 +6385,6 @@ ALTER TABLE public.roles ADD COLUMN tenant_id uuid NOT NULL;
             findings.iter().any(|f| f.rule == Rule::RawTenantTableAccess
                 && f.subject.starts_with("dead_letter.rs:")),
             "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn green_fault_matrix_test_support_is_file_level_exception() {
-        let (_, findings) = scan_guard(
-            &migrations(),
-            &files(&[
-                (
-                    "role_repo.rs",
-                    "fn safe_site(){ sqlx::query(\"SELECT id FROM roles WHERE tenant_id = $1\"); }",
-                ),
-                (
-                    "fault_matrix.rs",
-                    "struct Harness { owner_pool: PgPool } \
-                     async fn seed(pool: &PgPool) { \
-                         sqlx::query(\"INSERT INTO outbox (event_id, payload) \
-                                      VALUES ($1, decode('70', 'hex'))\").execute(pool).await; \
-                         sqlx::query(\"DELETE FROM inbox_receipts WHERE tenant_id = $1\").execute(pool).await; \
-                     }",
-                ),
-            ]),
-        );
-        assert!(
-            findings.iter().all(|finding| !matches!(
-                finding.rule,
-                Rule::RawTenantTableAccess | Rule::RawTenantPoolField | Rule::RawOutboxInsert
-            )),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn red_fault_matrix_extra_raw_tenant_access_is_not_file_level_exception() {
-        let (_, findings) = scan_guard(
-            &migrations(),
-            &files(&[
-                (
-                    "role_repo.rs",
-                    "fn safe_site(){ sqlx::query(\"SELECT id FROM roles WHERE tenant_id = $1\"); }",
-                ),
-                (
-                    "fault_matrix.rs",
-                    "struct Harness { owner_pool: PgPool } \
-                     async fn seed(pool: &PgPool) { \
-                         sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(pool).await; \
-                     } \
-                     async fn accidental(&self) { \
-                         sqlx::query(\"DELETE FROM roles WHERE tenant_id = $1\").execute(&self.owner_pool).await; \
-                     }",
-                ),
-            ]),
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::RawTenantTableAccess),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn red_fault_matrix_cannot_write_outbox_terminal_status_directly() {
-        let (_, findings) = scan_guard(
-            &migrations(),
-            &files(&[
-                (
-                    "role_repo.rs",
-                    "fn safe_site(){ sqlx::query(\"SELECT id FROM roles WHERE tenant_id = $1\"); }",
-                ),
-                (
-                    "fault_matrix.rs",
-                    "struct Harness { owner_pool: PgPool } \
-                     async fn bypass(&self) { \
-                         sqlx::query(\"UPDATE outbox SET status = 'published' \
-                                      WHERE tenant_id = $1::uuid AND event_id = $2\") \
-                             .execute(&self.owner_pool).await; \
-                     }",
-                ),
-            ]),
-        );
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
-            "fault harness terminal writes must go through production settlement: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn red_fault_matrix_terminal_column_is_rejected_when_not_first_assignment() {
-        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
-            "fault_matrix.rs",
-            "async fn bypass(pool: &PgPool) { \
-                 sqlx::query(\"UPDATE outbox SET retry_after = now(), published_at = now() \
-                              WHERE event_id = $1\") \
-                     .execute(pool).await; \
-             }",
-        )]));
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
-            "non-first terminal assignment passed: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn red_fault_matrix_schema_qualified_inbox_status_is_rejected() {
-        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
-            "fault_matrix.rs",
-            "async fn bypass(pool: &PgPool) { \
-                 sqlx::query(\"UPDATE public.inbox_receipts \
-                              SET claimed_at = now(), status = 'done' WHERE event_id = $1\") \
-                     .execute(pool).await; \
-             }",
-        )]));
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
-            "schema-qualified Inbox terminal assignment passed: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn red_fault_matrix_schema_qualified_audit_insert_is_rejected() {
-        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
-            "fault_matrix.rs",
-            "async fn bypass(pool: &PgPool) { \
-                 sqlx::query(\"INSERT INTO public.audit_entries (tenant_id) VALUES ($1)\") \
-                     .execute(pool).await; \
-             }",
-        )]));
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
-            "schema-qualified audit mutation passed: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn red_real_fault_matrix_loader_feeds_specialized_terminal_check() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("rss-pg-guard-fault-loader-{}", std::process::id()));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        std::fs::create_dir_all(&root)?;
-        std::fs::write(
-            root.join("lib.rs"),
-            "#[cfg(feature = \"fault-matrix-test-support\")]\npub mod fault_matrix;\n",
-        )?;
-        std::fs::write(
-            root.join("fault_matrix.rs"),
-            "async fn bypass(pool: &PgPool) { \
-                 sqlx::query(\"UPDATE outbox SET retry_after = now(), dlx_at = now()\") \
-                     .execute(pool).await; \
-             }",
-        )?;
-        let findings = load_fault_matrix_governance_findings(&migrations(), &root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::FaultMatrixTerminalBypass),
-            "real fault_matrix loader omitted the specialized terminal check: {findings:?}"
-        );
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn red_real_fault_matrix_loader_feeds_raw_tenant_scan() -> Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "rss-pg-guard-fault-raw-loader-{}",
-            std::process::id()
-        ));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
-        }
-        std::fs::create_dir_all(&root)?;
-        std::fs::write(
-            root.join("lib.rs"),
-            "#[cfg(feature = \"fault-matrix-test-support\")]\npub mod fault_matrix;\n",
-        )?;
-        std::fs::write(
-            root.join("fault_matrix.rs"),
-            "struct Harness { owner_pool: PgPool } \
-             impl Harness { \
-                 async fn accidental(&self) { \
-                     sqlx::query(\"DELETE FROM roles WHERE tenant_id = $1\") \
-                         .execute(&self.owner_pool).await; \
-                 } \
-             }",
-        )?;
-        let findings = load_fault_matrix_governance_findings(&migrations(), &root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::RawTenantTableAccess),
-            "real fault_matrix loader omitted the shared raw tenant scan: {findings:?}"
-        );
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn real_fault_matrix_loader_accepts_only_registered_exact_sites() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let migrations = load_sql_files(&root.join("adapters/postgres/migrations"))?;
-        let findings = load_fault_matrix_governance_findings(
-            &migrations,
-            &root.join("adapters/postgres/src"),
-        )?;
-        assert!(
-            findings.is_empty(),
-            "registered feature-gated fault-matrix sites drifted or a raw access escaped the exact allowlist: {findings:#?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn green_fault_matrix_setup_time_and_read_only_sql_pass_terminal_check() {
-        let findings = fault_matrix_terminal_bypass_findings(&files(&[(
-            "fault_matrix.rs",
-            "async fn allowed(pool: &PgPool) { \
-                 sqlx::query(\"UPDATE public.outbox SET retry_after = now(), updated_at = now() \
-                              WHERE status = 'pending'\").execute(pool).await; \
-                 sqlx::query(\"UPDATE inbox_receipts SET claimed_at = now() \
-                              WHERE status = 'processing'\").execute(pool).await; \
-                 sqlx::query(\"INSERT INTO outbox (event_id, status) VALUES ($1, 'pending')\") \
-                     .execute(pool).await; \
-                 sqlx::query_scalar(\"SELECT count(*) FROM audit_entries\").fetch_one(pool).await; \
-             }",
-        )]));
-        assert!(
-            findings.is_empty(),
-            "fixture seed/time injection/read-only observation must remain allowed: {findings:?}"
         );
     }
 

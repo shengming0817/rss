@@ -5,7 +5,7 @@
 //! INVARIANT: NEXTEST-EVIDENCE-DTO-01 { level = "Hard", exec = "native-compile", source = "code", native = "Evidence construction requires the closed typed DTO and Outcome enum" }——证据内部状态只能由闭合类型构造。
 //! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
 //! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
-//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
+//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
 //! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
 //! INVARIANT: COVERAGE-SCOPE-NONEMPTY-01 { level = "Hard", exec = "native-compile", source = "code", native = "CoverageScope::packages returns None for empty package lists; execution paths only accept CoverageScope" }.
 //! INVARIANT: COVERAGE-ARGV-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "Packages argv uses -p exclusively; Workspace uses --workspace exclusively" }.
@@ -19,7 +19,7 @@ use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use workspacefacts::{TargetKind, WorkspaceFacts, WorkspaceFactsError};
@@ -66,50 +66,7 @@ pub(crate) fn run_gated_with_probe<T>(
     bail!("{lane}: 缺少 {TOOL_NAME}，无法执行 {label}；安装：{INSTALL_HINT}")
 }
 
-/// Execute the exact canonical LocalOnly conformance tests selected by the source-receipt AST
-/// inventory. The caller owns reconciliation of the emitted runtime markers; this function only
-/// returns after nextest reports that every selected test passed.
-pub(crate) fn run_local_only_exact(
-    root: &Path,
-    packages: &[String],
-    tests: &[String],
-    marker_dir: &Path,
-    execution_policy: crate::cmd::ExecutionPolicy,
-) -> Result<()> {
-    let args = local_only_args(packages, tests, execution_policy)?;
-    let marker_dir = marker_dir
-        .to_str()
-        .context("LocalOnly execution marker directory must be UTF-8")?;
-    run_gated(
-        "ci-local-only",
-        false,
-        "LocalOnly exact conformance",
-        || {
-            let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
-            let command = super::nextest_cmd(
-                super::NextestCapability,
-                super::NextestMode::Direct,
-                &borrowed,
-                &[("RSS_LOCAL_ONLY_EXECUTION_DIR", marker_dir)],
-                Some(root),
-            );
-            execute_local_only_command(command)
-        },
-    )?
-    .context("LocalOnly nextest execution unexpectedly skipped")
-}
-
-fn execute_local_only_command(mut command: Command) -> Result<()> {
-    let status = command
-        .status()
-        .context("启动 LocalOnly cargo-nextest 失败")?;
-    if !status.success() {
-        bail!("LocalOnly canonical conformance tests failed: exit={status}");
-    }
-    Ok(())
-}
-
-/// Cargo package identity charset shared by LocalOnly and coverage `-p` argv (defense-in-depth).
+/// Cargo package identity charset used by typed `-p` argv (defense-in-depth).
 fn valid_cargo_package_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|byte| {
@@ -117,69 +74,22 @@ fn valid_cargo_package_name(name: &str) -> bool {
         })
 }
 
-fn local_only_args(
-    packages: &[String],
-    tests: &[String],
-    execution_policy: crate::cmd::ExecutionPolicy,
-) -> Result<Vec<String>> {
-    if packages.is_empty() || tests.is_empty() {
-        bail!("LocalOnly exact conformance inventory must be non-empty");
-    }
-    if packages.windows(2).any(|pair| pair[0] >= pair[1])
-        || tests.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        bail!("LocalOnly packages and tests must be uniquely sorted");
-    }
-    if packages
-        .iter()
-        .any(|package| !valid_cargo_package_name(package))
-        || tests.iter().any(|test| {
-            test.is_empty()
-                || !test
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
-                || test.contains(":::")
-        })
-    {
-        bail!("LocalOnly package or test identity is invalid");
-    }
-    let mut args = vec![
-        "--profile".to_owned(),
-        NextestProfile::CiCore.as_str().to_owned(),
-        "--locked".to_owned(),
-        "--no-tests=fail".to_owned(),
-        "--lib".to_owned(),
-    ];
-    if execution_policy.keeps_going() {
-        args.push("--no-fail-fast".to_owned());
-    }
-    for package in packages {
-        args.extend(["-p".to_owned(), package.clone()]);
-    }
-    args.push("--".to_owned());
-    args.extend(tests.iter().cloned());
-    args.push("--exact".to_owned());
-    Ok(args)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum NextestProfile {
     CiCore,
     Integration,
-    FaultMatrix,
 }
 
 impl NextestProfile {
-    const ALL: [Self; 3] = [Self::CiCore, Self::Integration, Self::FaultMatrix];
+    const ALL: [Self; 2] = [Self::CiCore, Self::Integration];
 
-    const VALIDATED_EXECUTION: [Self; 3] = [Self::CiCore, Self::Integration, Self::FaultMatrix];
+    const VALIDATED_EXECUTION: [Self; 2] = [Self::CiCore, Self::Integration];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CiCore => "ci-core",
             Self::Integration => "integration",
-            Self::FaultMatrix => "fault-matrix",
         }
     }
 
@@ -187,7 +97,6 @@ impl NextestProfile {
         match self {
             Self::CiCore => "target/nextest/ci-core/junit.xml",
             Self::Integration => "target/nextest/integration/junit.xml",
-            Self::FaultMatrix => "target/nextest/fault-matrix/junit.xml",
         }
     }
 
@@ -199,7 +108,6 @@ impl NextestProfile {
         match self {
             Self::CiCore => Some(("120s", 2)),
             Self::Integration => Some(("300s", 2)),
-            Self::FaultMatrix => Some(("600s", 1)),
         }
     }
 }
@@ -377,11 +285,10 @@ enum DeterministicTestFeature {
     VaultBackend,
     SoftcaBackend,
     TestkitContainers,
-    IdentityCompositionDeviceMqtt,
 }
 
 impl DeterministicTestFeature {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 10] = [
         Self::AmqpBackend,
         Self::S3Backend,
         Self::RedisBackend,
@@ -392,7 +299,6 @@ impl DeterministicTestFeature {
         Self::VaultBackend,
         Self::SoftcaBackend,
         Self::TestkitContainers,
-        Self::IdentityCompositionDeviceMqtt,
     ];
 
     const fn package(self) -> &'static str {
@@ -407,14 +313,12 @@ impl DeterministicTestFeature {
             Self::VaultBackend => "vault",
             Self::SoftcaBackend => "softca",
             Self::TestkitContainers => "testkit",
-            Self::IdentityCompositionDeviceMqtt => "identity-composition",
         }
     }
 
     const fn feature(self) -> &'static str {
         match self {
             Self::TestkitContainers => "containers",
-            Self::IdentityCompositionDeviceMqtt => "device-mqtt",
             Self::AmqpBackend
             | Self::S3Backend
             | Self::RedisBackend
@@ -936,23 +840,9 @@ impl NextestInvocation {
 }
 
 fn profile_for_integration_batch(
-    batch: &crate::integration_shards::ShardBatch,
+    _batch: &crate::integration_shards::ShardBatch,
 ) -> Result<NextestProfile> {
-    use crate::integration_shards::IntegrationUnitId;
-
-    let mut matching = [(
-        IntegrationUnitId::ConsistencyFaultMatrixJourney,
-        NextestProfile::FaultMatrix,
-    )]
-    .into_iter()
-    .filter(|(unit, _)| batch.unit_ids.contains(unit));
-    let profile = matching
-        .next()
-        .map_or(NextestProfile::Integration, |(_, profile)| profile);
-    if matching.next().is_some() {
-        bail!("integration batch contains multiple special-profile execution units");
-    }
-    Ok(profile)
+    Ok(NextestProfile::Integration)
 }
 
 fn shard_for_integration_batch(
@@ -1418,14 +1308,6 @@ pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
             partition,
         } => crate::verify::run_nextest_replay(&selection, shard, unit_ids.as_set(), partition),
     }
-}
-
-pub(crate) fn integration_batch_fails_on_empty(
-    batch: &crate::integration_shards::ShardBatch,
-) -> bool {
-    let args = integration_batch_args(batch, false);
-    args.iter().any(|argument| argument == "--no-tests=fail")
-        && !args.iter().any(|argument| argument == "--no-tests=pass")
 }
 
 fn integration_batch_args(
@@ -2045,95 +1927,6 @@ mod tests {
     }
 
     #[test]
-    fn local_only_invocation_is_exact_non_empty_and_inventory_derived() -> Result<()> {
-        let packages = vec!["audit".to_owned(), "identity".to_owned()];
-        let tests = vec![
-            "application::tests::audit_receipt".to_owned(),
-            "application::tests::identity_receipt".to_owned(),
-        ];
-        let args = local_only_args(&packages, &tests, crate::cmd::ExecutionPolicy::FailFast)?;
-        assert_eq!(
-            args,
-            [
-                "--profile",
-                "ci-core",
-                "--locked",
-                "--no-tests=fail",
-                "--lib",
-                "-p",
-                "audit",
-                "-p",
-                "identity",
-                "--",
-                "application::tests::audit_receipt",
-                "application::tests::identity_receipt",
-                "--exact",
-            ]
-        );
-        assert!(local_only_args(&[], &tests, crate::cmd::ExecutionPolicy::FailFast).is_err());
-        assert!(local_only_args(&packages, &[], crate::cmd::ExecutionPolicy::FailFast).is_err());
-        assert!(
-            local_only_args(
-                &["identity".into(), "audit".into()],
-                &tests,
-                crate::cmd::ExecutionPolicy::FailFast,
-            )
-            .is_err()
-        );
-        assert!(
-            local_only_args(
-                &packages,
-                &["bad/name".into()],
-                crate::cmd::ExecutionPolicy::FailFast,
-            )
-            .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn nextest_failure_policy_is_explicit_and_local_only() -> Result<()> {
-        use crate::cmd::ExecutionPolicy;
-
-        let remote =
-            NextestInvocation::for_core(CoreTestSelection::workspace(), NextestLane::CiCore, None)
-                .execution_argv();
-        assert!(!remote.iter().any(|arg| arg == "--no-fail-fast"));
-
-        let local =
-            NextestInvocation::for_core(CoreTestSelection::workspace(), NextestLane::Verify, None)
-                .with_execution_policy(ExecutionPolicy::KeepGoing)
-                .execution_argv();
-        assert!(local.iter().any(|arg| arg == "--no-fail-fast"));
-
-        let packages = vec!["identity".to_owned()];
-        let tests = vec!["application::tests::identity_receipt".to_owned()];
-        assert!(
-            local_only_args(&packages, &tests, ExecutionPolicy::KeepGoing)?
-                .iter()
-                .any(|arg| arg == "--no-fail-fast")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn local_only_command_rejects_real_nonzero_exit_status() -> Result<()> {
-        #[cfg(unix)]
-        let command = super::super::clean_cmd("sh", &["-c", "exit 23"], &[], None);
-        #[cfg(windows)]
-        let command = super::super::clean_cmd("cmd", &["/C", "exit 23"], &[], None);
-
-        let error = execute_local_only_command(command)
-            .err()
-            .context("exit 23 must fail closed")?;
-        assert!(
-            error.to_string().contains("23"),
-            "helper must observe the real child exit status: {error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn hash_partition_accepts_only_closed_m_over_n() -> Result<()> {
         for (raw, expected) in [
             ("1/1", "hash:1/1"),
@@ -2165,7 +1958,6 @@ mod tests {
         let profiles: String = [
             ("ci-core", "120s", "junit.xml", 2),
             ("integration", "300s", "junit.xml", 2),
-            ("fault-matrix", "600s", "junit.xml", 1),
         ]
         .into_iter()
         .map(|(name, period, path, terminate)| format!("[profile.{name}]\nretries = 0\nflaky-result = \"fail\"\nslow-timeout = {{ period = \"{period}\", terminate-after = {terminate} }}\n[profile.{name}.junit]\npath = \"{path}\"\n"))
@@ -2191,7 +1983,6 @@ mod tests {
             green.replacen(TRYBUILD_FILTER, "binary(/trybuild/)", 1),
             green.replacen("test-group='trybuild'", "test-group='other'", 1),
             green.replacen("terminate-after = 2", "terminate-after = 1", 1),
-            green.replacen("terminate-after = 1", "terminate-after = 2", 1),
             green.replacen("retries = 0", "global-timeout = \"60s\"\nretries = 0", 1),
         ] {
             assert!(validate_config(&red).is_err());
@@ -2604,89 +2395,6 @@ mod tests {
                 selection: CoreTestSelection::workspace(),
                 partition
             }
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn component_test_selection_is_typed_nonempty_and_feature_closed() -> Result<()> {
-        let workspace = CoreTestSelection::workspace();
-        assert!(workspace.packages_ref().is_none());
-
-        let packages = CoreTestSelection::packages(vec!["grpc".to_owned(), "testkit".to_owned()])
-            .context("non-empty package selection")?;
-        assert_eq!(
-            packages.packages_ref(),
-            Some(&["grpc".to_owned(), "testkit".to_owned()][..])
-        );
-        assert!(CoreTestSelection::packages(Vec::new()).is_none());
-
-        let features = deterministic_feature_args(&workspace);
-        assert!(features.iter().any(|value| value == "grpc/backend"));
-        assert!(features.iter().any(|value| value == "testkit/containers"));
-        assert!(
-            features
-                .iter()
-                .any(|value| value == "identity-composition/device-mqtt")
-        );
-        let pilot = CoreTestSelection::packages(vec!["identity-composition".to_owned()])
-            .context("pilot package selection")?;
-        assert_eq!(
-            deterministic_feature_args(&pilot),
-            ["identity-composition/device-mqtt"]
-        );
-        assert!(
-            features
-                .iter()
-                .all(|value| { !value.contains("integration") && !value.contains("broker-tests") })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn postgres_transaction_journey_serial_batch_fails_when_compiled_inventory_is_empty()
-    -> Result<()> {
-        let selection = crate::integration_shards::localtx_required_selection()?;
-        let batch =
-            crate::integration_shards::postgres_transaction_journey_execution_batch(&selection)?;
-        let expected_targets = batch.targets.iter().copied().collect::<BTreeSet<_>>();
-        assert!(integration_batch_fails_on_empty(&batch));
-        let invocation = NextestInvocation::for_integration_batch(&selection, &batch, None)?;
-        let args = invocation.execution_argv();
-        let selected: BTreeSet<_> = args
-            .windows(2)
-            .filter_map(|pair| (pair[0] == "--test").then_some(pair[1].as_str()))
-            .collect();
-        assert_eq!(selected, expected_targets);
-        assert!(args.iter().any(|argument| argument == "--no-tests=fail"));
-        assert!(!args.iter().any(|argument| argument == "--no-tests=pass"));
-        Ok(())
-    }
-
-    #[test]
-    fn llvm_cov_replay_spec_closes_profile_without_raw_args() -> Result<()> {
-        let workspace = crate::ci_impact::coverage_scope_for_full_ci();
-        let invocation =
-            NextestInvocation::for_coverage("target/coverage.json", workspace.clone())?;
-        assert_eq!(
-            invocation.execution_argv(),
-            [
-                "cargo",
-                "llvm-cov",
-                "nextest",
-                "--workspace",
-                "--locked",
-                "--features",
-                "amqp/backend,s3/backend,redis-adapter/backend,oidc/backend,prometheus-adapter/backend,otel/backend,grpc/backend,vault/backend,softca/backend,testkit/containers,identity-composition/device-mqtt",
-                "--json",
-                "--output-path",
-                "target/coverage.json"
-            ]
-            .map(str::to_owned)
-        );
-        assert_eq!(
-            invocation.replay_spec(),
-            &ReplaySpec::Coverage { scope: workspace }
         );
         Ok(())
     }

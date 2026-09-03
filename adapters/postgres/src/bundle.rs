@@ -229,54 +229,15 @@ pub struct PgDeviceIdentityDraftRuntime {
     readiness: Arc<PgDbReadiness>,
 }
 
-/// Single-origin PostgreSQL capability receipt for the production deviceidentity candidate.
-#[cfg(feature = "domain-identity")]
-pub struct PgDeviceIdentityProductionRuntime {
-    repository:
-        PgDeviceCertificateRepository<identity::ports::device_certificate::ProductionEligibility>,
-    commands:
-        crate::PgDeviceCommandStore<identity::ports::device_certificate::ProductionEligibility>,
-    revocations: PgRevocationStore,
-    reconcile: PgReconcileStore,
-    readiness: Arc<PgDbReadiness>,
-}
-
-#[cfg(feature = "domain-identity")]
-impl PgDeviceIdentityProductionRuntime {
-    #[must_use]
-    pub fn revocation_store(&self) -> PgRevocationStore {
-        self.revocations.clone()
-    }
-
-    #[must_use]
-    pub fn into_parts(
-        self,
-    ) -> (
-        PgDeviceCertificateRepository<identity::ports::device_certificate::ProductionEligibility>,
-        crate::PgDeviceCommandStore<identity::ports::device_certificate::ProductionEligibility>,
-        PgRevocationStore,
-        PgReconcileStore,
-        Arc<PgDbReadiness>,
-    ) {
-        (
-            self.repository,
-            self.commands,
-            self.revocations,
-            self.reconcile,
-            self.readiness,
-        )
-    }
-}
-
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 impl PgDeviceIdentityDraftRuntime {
-    /// Project the same-origin revocation provider into assembly infrastructure wiring.
+    /// Project the same-origin revocation provider into infrastructure wiring.
     #[must_use]
     pub fn revocation_store(&self) -> PgRevocationStore {
         self.revocations.clone()
     }
 
-    /// Consume the single-origin receipt inside the canonical identity composition root.
+    /// Consume the single-origin receipt inside an identity integration test.
     #[must_use]
     pub fn into_parts(
         self,
@@ -978,7 +939,7 @@ impl Clock for PgMaintenanceSystemClock {
 }
 
 impl PgRuntimeDeps {
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn setup_owned_test_fixture(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
@@ -1018,7 +979,7 @@ impl PgRuntimeDeps {
         .await
     }
 
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     async fn setup_owned_test_fixture_inner(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
@@ -1051,7 +1012,7 @@ impl PgRuntimeDeps {
     }
 
     /// Connects an already-migrated external test database without accepting a migrator identity.
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn connect_prepared_test_fixture(
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
@@ -1335,21 +1296,6 @@ impl PgRuntimeHandle {
         }
     }
 
-    /// Mint the only PostgreSQL receipt accepted by the production deviceidentity candidate.
-    #[cfg(feature = "domain-identity")]
-    #[must_use]
-    pub fn device_identity_production_runtime(&self) -> PgDeviceIdentityProductionRuntime {
-        let identity = self.for_domain::<caps::Identity>();
-        let infra = self.infra();
-        PgDeviceIdentityProductionRuntime {
-            repository: identity.device_certificate_repository(),
-            commands: identity.device_command_store(),
-            revocations: infra.revocation_store(),
-            reconcile: infra.reconcile(),
-            readiness: self.readiness_handle(),
-        }
-    }
-
     /// Flat durable auth-decision sink for framework HTTP enforcement.
     #[cfg(feature = "auth-audit-sink")]
     #[must_use]
@@ -1376,7 +1322,7 @@ impl PgRuntimeHandle {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry.clone(),
-            #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
+            #[cfg(any(test, feature = "test-support"))]
             identity_security_start_barrier: None,
             _marker: PhantomData,
         }
@@ -2449,7 +2395,7 @@ pub struct PgDomainDeps<D: PgDomain> {
     stores: Arc<PgRuntimeStores>,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     projection_registry: ProjectionWriteRegistry,
-    #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     identity_security_start_barrier: Option<Arc<tokio::sync::Barrier>>,
     _marker: PhantomData<D>,
 }
@@ -2461,7 +2407,7 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
             stores: Arc::clone(&self.stores),
             audit_admin_store: self.audit_admin_store.clone(),
             projection_registry: self.projection_registry.clone(),
-            #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
+            #[cfg(any(test, feature = "test-support"))]
             identity_security_start_barrier: self.identity_security_start_barrier.clone(),
             _marker: PhantomData,
         }
@@ -2675,7 +2621,7 @@ impl PgDomainDeps<caps::Identity> {
     }
 
     /// Inject a deterministic transaction-start rendezvous for the HTTP concurrency journey.
-    #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_identity_security_start_barrier_for_test(
         mut self,
@@ -2703,7 +2649,7 @@ impl PgDomainDeps<caps::Identity> {
             self.projection_registry.clone(),
             pseudonym_keys,
         );
-        #[cfg(any(feature = "journey-fault-support", feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support"))]
         let security = match &self.identity_security_start_barrier {
             Some(barrier) => security.with_start_barrier(Arc::clone(barrier)),
             None => security,
@@ -3503,7 +3449,7 @@ mod tests {
 
     #[cfg(feature = "domain-identity")]
     #[tokio::test]
-    async fn deviceidentity_runtime_is_minted_as_one_move_only_receipt() {
+    async fn draft_runtime_is_minted_as_one_move_only_receipt() {
         let handle = PgRuntimeHandle::from_store_for_test(lazy_store());
         let runtime = handle.device_identity_draft_runtime();
         let (_repository, _commands, _revocations, _reconcile, readiness) = runtime.into_parts();

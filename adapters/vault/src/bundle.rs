@@ -5,8 +5,8 @@
 //! `SecretResolver` 由 **settings 域消费**（`SecretService`），故经 per-domain [`VaultDomainDeps<D>`]
 //! + sealed [`caps`] 隔离派发（与 pg `PgDomainDeps<caps::Settings>` 同范式）。
 //!
-//! `VaultSigner` 是 RSS access JWT 的 profile-bound capability，由 runtime/identityaudit 各自的 identity
-//! signer provider output 持有唯一 lifecycle guard；它不属于 Settings capability bundle，避免一个资源
+//! `VaultSigner` 是 RSS access JWT 的 profile-bound capability，由认证集成持有唯一 lifecycle guard；
+//! 它不属于 Settings capability bundle，避免一个资源
 //! 被两个装配出口重复注册。
 //!
 //! ## 构造模型（vault TLS-agnostic 注入）
@@ -61,7 +61,6 @@ mod sealed {
 ///
 /// 实现集封闭在本 crate（[`caps`] 下的 ZST）；外部 crate 既不能命名内层 `Sealed`、也不能新增 marker，
 /// 故 `VaultDomainDeps<D>` 的 `D` 只能是本 crate 声明的域（VAULT-BUNDLE-DOMAIN-01）。
-/// INVARIANT: VAULT-BUNDLE-DOMAIN-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed production VaultDomain capability marker" }.
 pub trait VaultDomain: sealed::Sealed {}
 
 /// per-domain 能力 marker ZST。
@@ -81,7 +80,6 @@ impl VaultDomain for caps::Settings {}
 /// 经 [`VaultRuntimeDeps::new`] 构造（resolver 由组合根 DI 注入，vault TLS-agnostic 模型）。`Clone` 廉价
 /// （仅 `Arc` clone）。不暴露 `Arc<VaultSecretResolver>`（VAULT-BUNDLE-RESOLVER-02）。
 #[derive(Clone)]
-/// INVARIANT: VAULT-BUNDLE-RESOLVER-02 { level = "Hard", exec = "native-compile", source = "code", native = "production bundle privately owns and shares the resolver Arc" }.
 pub struct VaultRuntimeDeps {
     resolver: Arc<VaultSecretResolver>,
     key_provider: Arc<VaultKeyProvider>,

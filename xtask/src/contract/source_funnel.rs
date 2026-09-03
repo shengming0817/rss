@@ -14,15 +14,7 @@ const GOVERNANCE_OWNER: &str = "xtask/src/contract/governance.rs";
 const REPOSITORY_OWNER: &str = "crates/assembly-schema/src/repository_contract.rs";
 const ASSEMBLY_LOCK_OWNER: &str = "crates/assembly-schema/src/lock.rs";
 const CONTRACT_MODULE: &str = "xtask/src/contract/mod.rs";
-const WORKSPACE_SOURCE_ROOTS: &[&str] = &[
-    "xtask",
-    "crates",
-    "generated",
-    "adapters",
-    "assemblies",
-    "composition",
-    "journeys",
-];
+const WORKSPACE_SOURCE_ROOTS: &[&str] = &["xtask", "crates", "generated", "adapters"];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Violation {

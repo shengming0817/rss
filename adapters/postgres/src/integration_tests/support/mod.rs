@@ -50,12 +50,12 @@ pub(super) use sha2::{Digest as _, Sha256};
 
 pub(super) use std::future::Future;
 
-pub(super) fn test_eventing_emitter() -> std::sync::Arc<dyn eventing::observability::EventingEmitter>
-{
+pub(super) fn test_eventing_emitter()
+-> std::sync::Arc<dyn ::eventing::observability::EventingEmitter> {
     struct TestEmitter;
 
-    impl eventing::observability::EventingEmitter for TestEmitter {
-        fn emit(&self, _observation: eventing::observability::EventingObservation) {}
+    impl ::eventing::observability::EventingEmitter for TestEmitter {
+        fn emit(&self, _observation: ::eventing::observability::EventingObservation) {}
     }
 
     std::sync::Arc::new(TestEmitter)

@@ -31,7 +31,6 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "check", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once immediately after modules drift in every aggregate plan; release-check appends lock and RuntimePlan drift.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "dylint_workspace_ui_gate_is_release_owned_once", anti_vacuity = "dylint_workspace_ui_gate_is_release_owned_once" }—— Dylint UI goldens run once as typed `cargo test --locked --workspace` from `lints` in release-check; fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_typed_inventory_closes_active_l2" }—— L2 assurance closure validation is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! Fixed PR execution is projected by the closed [`FixedCiJob`] enum below. The committed caller
@@ -52,9 +51,8 @@ use crate::integration_shards::{
 };
 use crate::workspace_root;
 use crate::{
-    archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
-    contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
-    runtime_assembly_residual, runtime_deps_guard, runtime_env_guard, runtime_root_guard, wsdeps,
+    archrules, codegen, contract, layerdeps, reconcile_outbox_command_guard, repo_scope_guard,
+    wsdeps,
 };
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -114,16 +112,6 @@ enum PublicApiCheckScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalCheck {
     ContractValidate,
-    /// assembly-level DI provider 声明校验（RevocationStore active provider 必须持久）。
-    AssemblyValidate,
-    /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
-    AssemblyModulesCheck,
-    /// assembly.toml providers → committed providers_gen.rs 漂移门（ASSEMBLY-PROVIDERS-CODEGEN-01）。
-    AssemblyProvidersCheck,
-    /// repository-verified committed assembly.lock.json raw-byte 漂移门（#1781）。
-    AssemblyLockCheck,
-    /// committed runtime-plan.json raw-byte drift gate.
-    AssemblyRuntimePlanCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
     /// active 默认 deny；三个固定 review rules 为 warn，但未确认 fail-closed；against = origin/develop。
     ContractBreaking,
@@ -135,34 +123,13 @@ enum InternalCheck {
     SagaDurableRecoveryGuard,
     /// same-ID SQL/Rust closure（OUTBOX-SAME-ID-WINDOW-01）。
     OutboxSameIdGuard,
-    /// consistency crash matrix fixture/DSL 骨架门（CONSISTENCY-CRASH-FIXTURE-01）。
-    ConsistencyFixtures,
-    /// runtime event transport consumer 禁回 Redis claimer（EVENT-TRANSPORT-PG-INBOX-01）。
-    EventTransportGuard,
     /// inbox receipt runtime cutover 旧 token 回流守卫（INBOX-RECEIPTS-CUTOVER-01）。
     InboxCutoverGuard,
-    /// DLX verified WORM archive-before-purge 单漏斗守卫（DLX-LIFECYCLE-FUNNEL-01）。
-    DlxLifecycleFunnel,
-    /// runtime assembly 跨文件 residual 门。
-    RuntimeAssemblyResidual,
-    /// runtime composition-root 纯声明 façade（RUNTIME-ROOT-DECLARATIVE-01）。
-    RuntimeRootGuard,
-    /// runtime production ambient environment reader closure（RUNTIME-ENV-FUNNEL-01）。
-    RuntimeEnvGuard,
-    /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
-    RuntimeDepsGuard,
     /// ArchRules 派生索引 + 持久化 funnel 语义 closure 门。
     ArchRules,
     CodegenCheck,
-    /// active L2 producer/fact typed closure gate.
-    L2AssuranceCheck,
     /// provider declaration ↔ live behavior runner ↔ owner/reachability ↔ typed integration shard.
     ProviderCapabilitiesCheck,
-    /// active LocalTx manifest/generated/owner route/test typed marker closure.
-    LocalTxCoverage,
-    /// active LocalOnly effect closure + canonical source receipt coverage
-    /// （LOCAL-ONLY-EFFECTS-01 / LOCAL-ONLY-RECEIPT-COVERAGE-01）。
-    LocalOnlyEffects,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
     /// 生产代码禁止裸调用 `ContractBinding::from_static`，只能使用 generated `CONTRACT`。
@@ -196,7 +163,6 @@ enum InternalCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StepKind {
     Internal(InternalCheck),
-    LocalOnlyExecution,
     Cargo,
     /// The three runtime governance lints live in the nested nightly workspace; cwd and package
     /// closure are represented by this variant instead of caller-controlled argv.
@@ -225,7 +191,7 @@ impl Step {
     }
 
     fn uses_nextest(&self) -> bool {
-        matches!(self.kind, StepKind::Nextest | StepKind::LocalOnlyExecution)
+        matches!(self.kind, StepKind::Nextest)
             || matches!(self.kind, StepKind::Internal(InternalCheck::Coverage))
     }
 
@@ -264,46 +230,6 @@ fn step_contract_validate() -> Step {
         id: GateId::ContractValidate,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ContractValidate),
-        env: &[],
-    }
-}
-fn step_assembly_validate() -> Step {
-    Step {
-        id: GateId::AssemblyValidate,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyValidate),
-        env: &[],
-    }
-}
-fn step_assembly_modules_check() -> Step {
-    Step {
-        id: GateId::AssemblyModulesCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyModulesCheck),
-        env: &[],
-    }
-}
-fn step_assembly_providers_check() -> Step {
-    Step {
-        id: GateId::AssemblyProvidersCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyProvidersCheck),
-        env: &[],
-    }
-}
-fn step_assembly_lock_check() -> Step {
-    Step {
-        id: GateId::AssemblyLockCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyLockCheck),
-        env: &[],
-    }
-}
-fn step_assembly_runtime_plan_check() -> Step {
-    Step {
-        id: GateId::AssemblyRuntimePlanCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::AssemblyRuntimePlanCheck),
         env: &[],
     }
 }
@@ -355,67 +281,11 @@ fn step_outbox_same_id_guard() -> Step {
         env: &[],
     }
 }
-fn step_consistency_fixtures() -> Step {
-    Step {
-        id: GateId::ConsistencyFixtures,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::ConsistencyFixtures),
-        env: &[],
-    }
-}
-fn step_event_transport_guard() -> Step {
-    Step {
-        id: GateId::EventTransportGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::EventTransportGuard),
-        env: &[],
-    }
-}
 fn step_inbox_cutover_guard() -> Step {
     Step {
         id: GateId::InboxCutoverGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::InboxCutoverGuard),
-        env: &[],
-    }
-}
-fn step_dlx_lifecycle_funnel() -> Step {
-    Step {
-        id: GateId::DlxLifecycleFunnel,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::DlxLifecycleFunnel),
-        env: &[],
-    }
-}
-fn step_runtime_assembly_residual() -> Step {
-    Step {
-        id: GateId::RuntimeAssemblyResidual,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::RuntimeAssemblyResidual),
-        env: &[],
-    }
-}
-fn step_runtime_root_guard() -> Step {
-    Step {
-        id: GateId::RuntimeRootGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::RuntimeRootGuard),
-        env: &[],
-    }
-}
-fn step_runtime_env_guard() -> Step {
-    Step {
-        id: GateId::RuntimeEnvGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::RuntimeEnvGuard),
-        env: &[],
-    }
-}
-fn step_runtime_deps_guard() -> Step {
-    Step {
-        id: GateId::RuntimeDepsGuard,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::RuntimeDepsGuard),
         env: &[],
     }
 }
@@ -435,43 +305,11 @@ fn step_codegen_check() -> Step {
         env: &[],
     }
 }
-fn step_l2_assurance_check() -> Step {
-    Step {
-        id: GateId::L2AssuranceCheck,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::L2AssuranceCheck),
-        env: &[],
-    }
-}
 fn step_provider_capabilities_check() -> Step {
     Step {
         id: GateId::ProviderCapabilitiesCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ProviderCapabilitiesCheck),
-        env: &[],
-    }
-}
-fn step_localtx_coverage() -> Step {
-    Step {
-        id: GateId::LocalTxCoverage,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::LocalTxCoverage),
-        env: &[],
-    }
-}
-fn step_local_only_effects() -> Step {
-    Step {
-        id: GateId::LocalOnlyEffects,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::LocalOnlyEffects),
-        env: &[],
-    }
-}
-fn step_local_only_execution() -> Step {
-    Step {
-        id: GateId::LocalOnlyExecution,
-        args: &[],
-        kind: StepKind::LocalOnlyExecution,
         env: &[],
     }
 }
@@ -688,7 +526,7 @@ fn step_postgres_feature_matrix() -> Step {
 /// F7 + #1137：postgres/redis/amqp 等集成测试由 Cargo `[[test]] required-features`（catalog
 /// LocalEligibility / INTEGRATION-SHARD-ELIGIBILITY-01）门控，verify 的 build/clippy/nextest 仅
 /// workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep / redis 幂等 /
-/// amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
+/// amqp pub-sub + 跨 vhost）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
 /// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经
 /// 固定 `integration-critical` Job 按 typed selection 实跑。远端 check 经 `--all-features --all-targets`
 /// 已覆盖该编译面，故 release-check 通过 typed subsumption 只保留 all-features owner。
@@ -705,10 +543,6 @@ fn step_integration_compile() -> Step {
             "amqp",
             "-p",
             "mqtt",
-            "-p",
-            "journeys",
-            "-p",
-            "runtime",
             "--features",
             "integration,mqtt/broker-tests",
             "--no-run",
@@ -862,11 +696,7 @@ pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
         }
         PlanProjection::Profile(ExecutionProfile::ReleaseCheck)
         | PlanProjection::Lane(
-            GateGroup::Meta
-            | GateGroup::Security
-            | GateGroup::Coverage
-            | GateGroup::LocalOnly
-            | GateGroup::Audit,
+            GateGroup::Meta | GateGroup::Security | GateGroup::Coverage | GateGroup::Audit,
         ) => &[ExecutionProfile::ReleaseCheck],
         PlanProjection::Verify => &[ExecutionProfile::Check, ExecutionProfile::Test],
         PlanProjection::Lane(GateGroup::Core) => {
@@ -1281,19 +1111,6 @@ fn run_one(
 ) -> Result<()> {
     let execute = || match step.kind {
         StepKind::Internal(check) => run_internal(check, opts, root, command_facts),
-        StepKind::LocalOnlyExecution => {
-            let facts = command_facts
-                .get()
-                .context(command_scope_facts_context("localonly-evidence"))?;
-            let request = crate::localonly_evidence::prepare_request(
-                crate::localonly_evidence::OWNER,
-                None,
-                root,
-            )?
-            .context("verify must prepare LocalOnly execution evidence")?;
-            crate::localonly_evidence::execute(root, facts, request, opts.execution_policy)
-                .map(|_| ())
-        }
         StepKind::Nextest => crate::nextest::NextestInvocation::for_core(
             opts.core_test_selection.clone(),
             opts.nextest_lane,
@@ -1428,7 +1245,7 @@ fn run_nextest_step_gated<T>(
     nextest_available: impl FnOnce() -> bool,
     execute: impl FnOnce() -> Result<T>,
 ) -> Result<Option<T>> {
-    let allow_missing = allow_missing_tools && !matches!(&step.kind, StepKind::LocalOnlyExecution);
+    let allow_missing = allow_missing_tools;
     crate::nextest::run_gated_with_probe(
         lane,
         allow_missing,
@@ -1504,22 +1321,6 @@ fn run_internal(
 ) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
-        InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate::new(
-            root,
-            command_facts
-                .get()
-                .context(command_scope_facts_context("assembly-validate"))?,
-        )),
-        InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
-        InternalCheck::AssemblyProvidersCheck => crate::assembly_codegen::run_providers(true),
-        InternalCheck::AssemblyLockCheck => assembly_lock::run(
-            root,
-            assembly_lock::AssemblyLockAction::Check,
-            command_facts
-                .get()
-                .context(command_scope_facts_context("assembly-lock-check"))?,
-        ),
-        InternalCheck::AssemblyRuntimePlanCheck => crate::assembly_runtime_plan::run(true),
         // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
         InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
@@ -1527,22 +1328,9 @@ fn run_internal(
         InternalCheck::OutboxSameIdGuard => {
             run_check(&crate::outbox_same_id_guard::OutboxSameIdGuard)
         }
-        InternalCheck::ConsistencyFixtures => run_check(&consistency_fixtures::ConsistencyFixtures),
-        InternalCheck::EventTransportGuard => {
-            run_check(&crate::event_transport_guard::EventTransportGuard)
-        }
         InternalCheck::InboxCutoverGuard => {
             run_check(&crate::inbox_cutover_guard::InboxCutoverGuard)
         }
-        InternalCheck::DlxLifecycleFunnel => {
-            run_check(&crate::dlx_lifecycle_funnel::DlxLifecycleFunnel)
-        }
-        InternalCheck::RuntimeAssemblyResidual => {
-            run_check(&runtime_assembly_residual::RuntimeAssemblyResidual)
-        }
-        InternalCheck::RuntimeRootGuard => run_check(&runtime_root_guard::RuntimeRootGuard),
-        InternalCheck::RuntimeEnvGuard => run_check(&runtime_env_guard::RuntimeEnvGuard),
-        InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::SourceSemanticGuard => {
             run_check(&crate::source_semantic_guard::SourceSemanticGuard)
         }
@@ -1556,25 +1344,7 @@ fn run_internal(
             run_check(&archrules::ArchRules::new(facts))
         }
         InternalCheck::CodegenCheck => codegen::run(true),
-        InternalCheck::L2AssuranceCheck => {
-            let facts = command_facts
-                .get()
-                .context(command_scope_facts_context("l2-assurance"))?;
-            crate::l2_assurance::validate(root, facts)
-        }
         InternalCheck::ProviderCapabilitiesCheck => crate::provider_capabilities::run(true),
-        InternalCheck::LocalTxCoverage => {
-            let facts = command_facts
-                .get()
-                .context(command_scope_facts_context("localtx-coverage"))?;
-            run_check(&crate::localtx_coverage::LocalTxCoverage::new(root, facts))
-        }
-        InternalCheck::LocalOnlyEffects => {
-            let facts = command_facts
-                .get()
-                .context(command_scope_facts_context("local-only-effects"))?;
-            run_check(&consistency_effects::LocalOnlyEffects::new(root, facts))
-        }
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::ContractBindingGuard => {
             let facts = command_facts
@@ -1999,20 +1769,6 @@ fn release_check_integration_shards() -> Vec<IntegrationShard> {
         .collect()
 }
 
-fn validate_localtx_required_selection(selection: &IntegrationSelection) -> Result<()> {
-    let required = integration_shards::localtx_required_selection()?;
-    if !required.unit_ids().is_subset(selection.unit_ids()) {
-        let missing = required
-            .unit_ids()
-            .difference(selection.unit_ids())
-            .map(|unit_id| unit_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!("postgres LocalTx selection misses required baseline units: {missing}");
-    }
-    Ok(())
-}
-
 fn validate_integration_selection_for_shard(
     selection: &IntegrationSelection,
     shard: IntegrationShard,
@@ -2189,21 +1945,6 @@ fn execute_fixed_integration_shards(
     })
 }
 
-mod postgres_group {
-    use super::*;
-
-    /// Capability created only by the postgres carrier after its owned shards pass.
-    pub(crate) struct Passed(());
-
-    pub(super) fn execute(integration: &IntegrationSelection) -> Result<Passed> {
-        validate_localtx_required_selection(integration)?;
-        execute_fixed_integration_shards(integration, IntegrationJobGroup::Postgres)?;
-        Ok(Passed(()))
-    }
-}
-
-pub(crate) use postgres_group::Passed as PostgresDomainPassed;
-
 fn execute_non_producer_integration_group(
     integration: &IntegrationSelection,
     group: IntegrationJobGroup,
@@ -2212,31 +1953,10 @@ fn execute_non_producer_integration_group(
         IntegrationJobGroup::Postgres => {
             bail!("postgres integration must execute through its typed producer funnel")
         }
-        IntegrationJobGroup::Transport
-        | IntegrationJobGroup::Runtime
-        | IntegrationJobGroup::Artifact => execute_fixed_integration_shards(integration, group),
+        IntegrationJobGroup::Transport | IntegrationJobGroup::Runtime => {
+            execute_fixed_integration_shards(integration, group)
+        }
     }
-}
-
-fn publish_localtx_after_postgres_group(
-    integration: &IntegrationSelection,
-    passed: PostgresDomainPassed,
-) -> Result<()> {
-    let root = workspace_root()?;
-    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
-    let verified = crate::localtx_coverage::verify_required_evidence_set(
-        &root,
-        command_facts
-            .get()
-            .context(command_scope_facts_context("localtx-required-evidence"))?,
-    )?;
-    let request =
-        crate::localtx_evidence::prepare_request(FixedCiJob::IntegrationCritical, None, &root)?;
-    let required = integration_shards::localtx_required_selection()?;
-    if !required.unit_ids().is_subset(integration.unit_ids()) {
-        bail!("postgres group passed without the required LocalTx selection");
-    }
-    request.publish(passed, verified)
 }
 
 fn run_fixed_integration_group(
@@ -2250,12 +1970,9 @@ fn run_fixed_integration_group(
     }
     match group {
         IntegrationJobGroup::Postgres => {
-            let passed = postgres_group::execute(&integration)?;
-            publish_localtx_after_postgres_group(&integration, passed)
+            execute_fixed_integration_shards(&integration, IntegrationJobGroup::Postgres)
         }
-        IntegrationJobGroup::Transport
-        | IntegrationJobGroup::Runtime
-        | IntegrationJobGroup::Artifact => {
+        IntegrationJobGroup::Transport | IntegrationJobGroup::Runtime => {
             execute_non_producer_integration_group(&integration, group)
         }
     }
@@ -2302,54 +2019,6 @@ mod tests {
     #[test]
     fn deny_gate_fails_on_unused_wrappers() {
         assert_eq!(step_deny().args, &["deny", "check", "-D", "unused-wrapper"]);
-    }
-
-    #[test]
-    fn localtx_proof_requires_the_complete_passed_baseline() -> anyhow::Result<()> {
-        let required = integration_shards::localtx_required_selection()?;
-        validate_localtx_required_selection(&required)?;
-        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
-        validate_localtx_required_selection(&release)?;
-
-        let incomplete = IntegrationSelection::critical(
-            required
-                .unit_ids()
-                .iter()
-                .copied()
-                .filter(|unit_id| *unit_id != IntegrationUnitId::PostgresLib),
-        )?;
-        assert!(validate_localtx_required_selection(&incomplete).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn integration_group_projects_an_exact_selection_for_each_owned_shard() -> anyhow::Result<()> {
-        let transport = IntegrationSelection::critical([
-            IntegrationUnitId::AmqpLib,
-            IntegrationUnitId::RedisIntegrationClaimer,
-        ])?;
-        let event = execution_selection_for_shard(&transport, IntegrationShard::EventTransport)?;
-        let fault = execution_selection_for_shard(&transport, IntegrationShard::ConsistencyFault)?;
-        assert_eq!(
-            event.unit_ids(),
-            &std::collections::BTreeSet::from([IntegrationUnitId::AmqpLib])
-        );
-        assert_eq!(
-            fault.unit_ids(),
-            &std::collections::BTreeSet::from([IntegrationUnitId::RedisIntegrationClaimer])
-        );
-        validate_integration_selection_for_shard(&event, IntegrationShard::EventTransport)?;
-        validate_integration_selection_for_shard(&fault, IntegrationShard::ConsistencyFault)?;
-        assert!(
-            validate_integration_selection_for_shard(&event, IntegrationShard::ConsistencyFault)
-                .is_err()
-        );
-        let release = IntegrationSelection::release_check();
-        assert_eq!(
-            execution_selection_for_shard(&release, IntegrationShard::ProductionRuntime)?,
-            release
-        );
-        Ok(())
     }
 
     #[test]
@@ -2466,72 +2135,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn pr_complete_excludes_release_only_work() -> anyhow::Result<()> {
-        let pr = crate::ci_impact::test_pr_complete_selection_plan()?;
-        let release = crate::ci_impact::test_selection_plan()?;
-        let pr_ids = FixedCiJob::ALL
-            .into_iter()
-            .flat_map(|job| fixed_gate_plan(job, &pr))
-            .map(|step| step.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        let release_ids = FixedCiJob::ALL
-            .into_iter()
-            .flat_map(|job| fixed_gate_plan(job, &release))
-            .map(|step| step.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            pr_ids
-                .difference(&release_ids)
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>(),
-            [
-                GateId::BuildWorkspace,
-                GateId::IntegrationCompile,
-                GateId::ClippyWorkspace,
-                GateId::ComponentTests,
-            ]
-            .into_iter()
-            .collect(),
-            "ReleaseCheck must replace the ordinary compile/test variants exactly"
-        );
-        assert_eq!(
-            release_ids
-                .difference(&pr_ids)
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>(),
-            [
-                GateId::BuildAllFeatures,
-                GateId::ClippyAllFeatures,
-                GateId::Coverage,
-                GateId::CargoAudit,
-                GateId::DylintWorkspaceUiTests,
-                GateId::PublicApi,
-                GateId::DenyAdvisories,
-                GateId::AssemblyLockCheck,
-                GateId::AssemblyRuntimePlanCheck,
-            ]
-            .into_iter()
-            .collect(),
-            "ReleaseCheck must add exactly the release-only execution units"
-        );
-        assert!(!pr_ids.contains(&GateId::Coverage));
-        assert!(!pr_ids.contains(&GateId::CargoAudit));
-        assert!(!pr_ids.contains(&GateId::PublicApi));
-        assert!(release_ids.contains(&GateId::Coverage));
-        assert!(release_ids.contains(&GateId::CargoAudit));
-        assert!(release_ids.contains(&GateId::PublicApi));
-        assert_eq!(
-            pr.integration_selection()?.profile(),
-            ExecutionProfile::IntegrationCritical
-        );
-        assert_eq!(
-            release.integration_selection()?.profile(),
-            ExecutionProfile::ReleaseCheck
-        );
-        Ok(())
-    }
-
     fn opts(fast: bool, allow_missing_tools: bool) -> VerifyOpts {
         VerifyOpts {
             fast,
@@ -2609,14 +2212,6 @@ mod tests {
 
     const RELEASE_CHECK: PlanProjection = PlanProjection::Profile(ExecutionProfile::ReleaseCheck);
 
-    fn assert_pairwise_disjoint(sets: &[std::collections::BTreeSet<GateId>]) {
-        for (index, set) in sets.iter().enumerate() {
-            for other in &sets[index + 1..] {
-                assert!(set.is_disjoint(other), "split CI lanes must be disjoint");
-            }
-        }
-    }
-
     #[test]
     fn exact_gate_id_projection_rejects_equal_cardinality_wrong_id() -> anyhow::Result<()> {
         let plan = plan_for(RELEASE_CHECK);
@@ -2632,38 +2227,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_gate_id_projection_reports_stable_set_differences() -> anyhow::Result<()> {
-        let expected =
-            registry_gate_ids(|spec| spec.included_in_profile(ExecutionProfile::ReleaseCheck));
-        let mut plan = plan_for(RELEASE_CHECK);
-        plan.retain(|step| step.id != GateId::Fmt);
-        let contract = plan
-            .iter_mut()
-            .find(|step| step.id == GateId::ContractValidate)
-            .context("contract gate anti-vacuity")?;
-        contract.id = GateId::ComponentTests;
-        let duplicate = plan
-            .iter()
-            .find(|step| step.id == GateId::AssemblyValidate)
-            .context("assembly gate anti-vacuity")?
-            .clone();
-        plan.push(duplicate);
-
-        assert_eq!(
-            exact_gate_id_projection(&plan, expected),
-            Err("plan GateId closure drift: missing=[contract-validate, fmt], extra=[component-tests], duplicate=[assembly-validate]".to_string())
-        );
-        Ok(())
-    }
-
-    #[test]
     fn verify_only_uses_registry_membership_and_canonical_order() -> anyhow::Result<()> {
         let plan = verify_plan(&opts(false, false));
-        let selected = select_verify_plan(
-            plan,
-            &["clippy".to_owned(), "runtime-root-guard".to_owned()],
-        )?;
-        assert_eq!(labels(&selected), ["runtime-root-guard", "clippy"]);
+        let selected = select_verify_plan(plan, &["clippy".to_owned(), "fmt".to_owned()])?;
+        assert_eq!(labels(&selected), ["fmt", "clippy"]);
         assert!(
             select_verify_plan(verify_plan(&opts(true, false)), &["build".to_owned()]).is_err()
         );
@@ -2874,64 +2441,6 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_plans_are_registry_derived_and_partitioned() -> anyhow::Result<()> {
-        for lane in [GateGroup::Meta, GateGroup::Security, GateGroup::Coverage] {
-            let plan = plan_for(PlanProjection::Lane(lane));
-            ensure_plan_has_exact_gate_ids(&plan, registry_gate_ids(|spec| spec.belongs_to(lane)))?;
-        }
-        assert_eq!(
-            labels(&plan_for(PlanProjection::Lane(GateGroup::Security))),
-            ["deny", "audit"],
-            "supply-chain checks retain their local execution order"
-        );
-        assert_eq!(
-            labels(&plan_for(PlanProjection::Lane(GateGroup::Coverage))),
-            ["coverage", "public-api"],
-            "coverage precedes its public API closeout"
-        );
-        let core = labels(&plan_for(PlanProjection::Lane(GateGroup::Core)));
-        assert!(core.contains(&"build"));
-        assert_eq!(core.first(), Some(&"postgres-feature-matrix"));
-        assert!(core.contains(&"component-tests"));
-        assert!(!core.contains(&"coverage"));
-        assert!(!core.contains(&"integration-compile"));
-
-        let release_check: std::collections::BTreeSet<_> = plan_for(RELEASE_CHECK)
-            .into_iter()
-            .map(|step| step.id)
-            .collect();
-        let split: Vec<std::collections::BTreeSet<_>> = [
-            GateGroup::Meta,
-            GateGroup::Core,
-            GateGroup::Security,
-            GateGroup::Coverage,
-            GateGroup::LocalOnly,
-            GateGroup::Audit,
-        ]
-        .into_iter()
-        .map(|lane| {
-            plan_for(PlanProjection::Lane(lane))
-                .into_iter()
-                .filter(|step| {
-                    step.id
-                        .spec()
-                        .included_in_profile(ExecutionProfile::ReleaseCheck)
-                        && step.id.spec().lanes()[0] == Some(lane)
-                })
-                .map(|step| step.id)
-                .collect()
-        })
-        .collect();
-        assert_pairwise_disjoint(&split);
-        let union: std::collections::BTreeSet<_> = split.into_iter().flatten().collect();
-        assert_eq!(
-            union, release_check,
-            "split CI lanes must cover release-check"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn local_release_check_derives_every_integration_shard_from_execution_units() {
         let derived = release_check_integration_shards();
         assert_eq!(derived, IntegrationShard::ALL);
@@ -3008,7 +2517,7 @@ mod tests {
             .iter_mut()
             .find(|step| step.id == GateId::DylintWorkspaceUiTests)
             .context("workspace Dylint UI gate")?
-            .args = &["test", "-p", "rss_runtime_env_funnel"];
+            .args = &["test", "-p", "rss_instrument_err_level"];
         assert!(validate(&weakened).is_err());
         Ok(())
     }
@@ -3083,62 +2592,6 @@ mod tests {
     }
 
     #[test]
-    fn localonly_execution_uses_one_full_verify_gate_and_fast_stays_static() {
-        let full = verify_plan(&opts(false, false));
-        let gates = full
-            .iter()
-            .filter(|step| step.id == GateId::LocalOnlyExecution)
-            .collect::<Vec<_>>();
-        assert_eq!(gates.len(), 1);
-        let gate = gates[0];
-        assert!(gate.needs_compile());
-        assert_eq!(gate.id.spec().lanes(), [Some(GateGroup::LocalOnly), None]);
-        assert_eq!(gate.id.spec().tool(), ToolRequirement::Nextest);
-        assert_eq!(
-            gate.id.spec().policy(),
-            crate::ci_lanes::GatePolicy::RequiredEvidence
-        );
-        assert!(matches!(gate.kind, StepKind::LocalOnlyExecution));
-        assert!(
-            !verify_plan(&opts(true, false))
-                .iter()
-                .any(|step| step.id == GateId::LocalOnlyExecution),
-            "verify --fast must not claim runtime LocalOnly evidence"
-        );
-    }
-
-    #[test]
-    fn localonly_full_verify_missing_nextest_is_fail_closed_without_report() {
-        let root = crate::testutil::unique_tmp("verify-localonly-missing-nextest");
-        let report = root
-            .join("target")
-            .join("localonly-execution")
-            .join(crate::localonly_evidence::FILE_NAME);
-        let step = step_local_only_execution();
-
-        let result = run_nextest_step_gated(
-            "verify",
-            &step,
-            true,
-            || false,
-            || {
-                std::fs::create_dir_all(report.parent().context("report parent")?)?;
-                std::fs::write(&report, b"must not be published")?;
-                Ok(())
-            },
-        );
-
-        assert!(
-            result.is_err(),
-            "required runtime evidence must fail closed"
-        );
-        assert!(
-            !report.exists(),
-            "missing nextest must not publish a report"
-        );
-    }
-
-    #[test]
     fn postgres_feature_matrix_is_persistent_compile_gate_but_not_fast() -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
@@ -3165,124 +2618,6 @@ mod tests {
                 .any(|step| step.id == GateId::PostgresFeatureMatrix),
             "verify --fast must skip compile gates"
         );
-        Ok(())
-    }
-
-    fn runtime_env_guard_membership_is_exact(plan: &[Step]) -> bool {
-        let members = plan
-            .iter()
-            .enumerate()
-            .filter(|(_, step)| step.id == GateId::RuntimeEnvGuard)
-            .collect::<Vec<_>>();
-        let [(index, step)] = members.as_slice() else {
-            return false;
-        };
-        step.label() == "runtime-env-guard"
-            && !step.needs_compile()
-            && step.carrier_file() == Some("xtask/src/runtime_env_guard.rs")
-            && matches!(
-                step.kind,
-                StepKind::Internal(InternalCheck::RuntimeEnvGuard)
-            )
-            && index.checked_sub(1).is_some_and(|before| {
-                plan[before].id == GateId::RuntimeRootGuard
-                    && plan
-                        .get(index + 1)
-                        .is_some_and(|after| after.id == GateId::RuntimeDepsGuard)
-            })
-    }
-
-    fn runtime_root_guard_membership_is_exact(plan: &[Step]) -> bool {
-        let members = plan
-            .iter()
-            .enumerate()
-            .filter(|(_, step)| step.id == GateId::RuntimeRootGuard)
-            .collect::<Vec<_>>();
-        let [(index, step)] = members.as_slice() else {
-            return false;
-        };
-        step.label() == "runtime-root-guard"
-            && !step.needs_compile()
-            && step.carrier_file() == Some("xtask/src/runtime_root_guard.rs")
-            && matches!(
-                step.kind,
-                StepKind::Internal(InternalCheck::RuntimeRootGuard)
-            )
-            && index.checked_sub(1).is_some_and(|before| {
-                plan[before].id == GateId::RuntimeAssemblyResidual
-                    && plan
-                        .get(index + 1)
-                        .is_some_and(|after| after.id == GateId::RuntimeEnvGuard)
-            })
-    }
-
-    #[test]
-    fn runtime_root_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
-        for plan in [
-            plan_for(PlanProjection::Verify),
-            plan_for(PlanProjection::Lane(GateGroup::Meta)),
-            plan_for(RELEASE_CHECK),
-        ] {
-            assert!(runtime_root_guard_membership_is_exact(&plan));
-        }
-
-        let real_plan = plan_for(PlanProjection::Verify);
-        let mut omitted = real_plan.clone();
-        omitted.retain(|step| step.id != GateId::RuntimeRootGuard);
-        assert!(!runtime_root_guard_membership_is_exact(&omitted));
-
-        let mut duplicated = real_plan.clone();
-        duplicated.push(
-            real_plan
-                .iter()
-                .find(|step| step.id == GateId::RuntimeRootGuard)
-                .context("committed verify plan lacks runtime-root-guard")?
-                .clone(),
-        );
-        assert!(!runtime_root_guard_membership_is_exact(&duplicated));
-
-        let mut wrong_executor = real_plan;
-        wrong_executor
-            .iter_mut()
-            .find(|step| step.id == GateId::RuntimeRootGuard)
-            .context("committed verify plan lacks runtime-root-guard")?
-            .kind = StepKind::Internal(InternalCheck::RuntimeAssemblyResidual);
-        assert!(!runtime_root_guard_membership_is_exact(&wrong_executor));
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_env_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
-        for plan in [
-            plan_for(PlanProjection::Verify),
-            plan_for(PlanProjection::Lane(GateGroup::Meta)),
-            plan_for(RELEASE_CHECK),
-        ] {
-            assert!(runtime_env_guard_membership_is_exact(&plan));
-        }
-
-        let real_plan = plan_for(PlanProjection::Verify);
-        let mut omitted = real_plan.clone();
-        omitted.retain(|step| step.id != GateId::RuntimeEnvGuard);
-        assert!(!runtime_env_guard_membership_is_exact(&omitted));
-
-        let mut duplicated = real_plan.clone();
-        duplicated.push(
-            real_plan
-                .iter()
-                .find(|step| step.id == GateId::RuntimeEnvGuard)
-                .context("committed verify plan lacks runtime-env-guard")?
-                .clone(),
-        );
-        assert!(!runtime_env_guard_membership_is_exact(&duplicated));
-
-        let mut wrong_executor = real_plan;
-        wrong_executor
-            .iter_mut()
-            .find(|step| step.id == GateId::RuntimeEnvGuard)
-            .context("committed verify plan lacks runtime-env-guard")?
-            .kind = StepKind::Internal(InternalCheck::RuntimeAssemblyResidual);
-        assert!(!runtime_env_guard_membership_is_exact(&wrong_executor));
         Ok(())
     }
 
@@ -3356,460 +2691,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn l0_l1_closeout_gates_have_typed_membership_and_order() -> anyhow::Result<()> {
-        const GATES: [(GateId, InternalCheck); 7] = [
-            (GateId::ContractValidate, InternalCheck::ContractValidate),
-            (GateId::ContractBreaking, InternalCheck::ContractBreaking),
-            (GateId::CodegenCheck, InternalCheck::CodegenCheck),
-            (GateId::L2AssuranceCheck, InternalCheck::L2AssuranceCheck),
-            (
-                GateId::ProviderCapabilitiesCheck,
-                InternalCheck::ProviderCapabilitiesCheck,
-            ),
-            (GateId::LocalTxCoverage, InternalCheck::LocalTxCoverage),
-            (GateId::LocalOnlyEffects, InternalCheck::LocalOnlyEffects),
-        ];
-
-        for (id, expected_check) in GATES {
-            let spec = id.spec();
-            assert_eq!(spec.lanes(), [Some(GateGroup::Meta), None], "{id:?}");
-            assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
-            assert!(spec.included_in_verify(), "{id:?}");
-            assert!(
-                spec.included_in_profile(ExecutionProfile::ReleaseCheck),
-                "{id:?}"
-            );
-            assert_eq!(spec.tool(), ToolRequirement::InProcess, "{id:?}");
-            assert_eq!(
-                step_for_id(id).kind,
-                StepKind::Internal(expected_check),
-                "{id:?} executor mapping drift"
-            );
-        }
-
-        for (name, plan) in [
-            ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
-            ("release-check", plan_for(RELEASE_CHECK)),
-        ] {
-            let positions = GATES
-                .map(|(id, _)| {
-                    plan.iter()
-                        .position(|step| step.id == id)
-                        .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 {id:?}"))
-                })
-                .into_iter()
-                .collect::<anyhow::Result<Vec<_>>>()?;
-
-            assert!(
-                positions.windows(2).all(|pair| pair[0] < pair[1]),
-                "{name} contract/codegen/L2-assurance/L0/L1 order drift: {positions:?}"
-            );
-            assert_eq!(positions[5], positions[3] + 2, "{name} LocalTx order drift");
-            assert_eq!(
-                positions[6],
-                positions[3] + 3,
-                "{name} LocalOnly order drift"
-            );
-        }
-
-        for lane in [GateGroup::Core, GateGroup::Security, GateGroup::Coverage] {
-            let plan = plan_for(PlanProjection::Lane(lane));
-            for (id, _) in GATES {
-                assert!(
-                    plan.iter().all(|step| step.id != id),
-                    "{id:?} must not be duplicated into {lane:?}"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_modules_codegen_is_no_compile_internal_gate_after_validate_in_all_lanes()
-    -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("full", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(RELEASE_CHECK)),
-        ] {
-            let labels = labels(&plan);
-            let validate = labels
-                .iter()
-                .position(|label| *label == "assembly-validate")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-validate"))?;
-            let codegen = labels
-                .iter()
-                .position(|label| *label == "assembly-modules-check")
-                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-modules-check"))?;
-            assert_eq!(codegen, validate + 1, "{name} lane order drift");
-            assert!(
-                !plan[codegen].needs_compile(),
-                "{name} gate must be no-compile"
-            );
-            assert_eq!(
-                plan[codegen].carrier_file(),
-                Some("xtask/src/assembly_codegen.rs")
-            );
-            assert!(matches!(
-                plan[codegen].kind,
-                StepKind::Internal(InternalCheck::AssemblyModulesCheck)
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_assembly_provider_codegen_gate(plan: &[Step]) -> anyhow::Result<()> {
-        let members = plan
-            .iter()
-            .filter(|step| step.id == GateId::AssemblyProvidersCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            members.len() == 1,
-            "expected exactly one assembly provider check"
-        );
-        let provider = members[0];
-        anyhow::ensure!(
-            !provider.needs_compile(),
-            "provider check must be no-compile"
-        );
-        anyhow::ensure!(
-            provider.carrier_file() == Some("xtask/src/assembly_codegen.rs"),
-            "provider carrier drift"
-        );
-        anyhow::ensure!(
-            matches!(
-                provider.kind,
-                StepKind::Internal(InternalCheck::AssemblyProvidersCheck)
-            ),
-            "provider executor drift"
-        );
-        anyhow::ensure!(
-            provider.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && provider.id.spec().included_in_verify()
-                && provider
-                    .id
-                    .spec()
-                    .included_in_profile(ExecutionProfile::ReleaseCheck)
-                && provider.id.spec().tool() == ToolRequirement::InProcess,
-            "provider typed membership drift"
-        );
-        let modules = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyModulesCheck)
-            .context("plan lacks modules check")?;
-        let providers = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyProvidersCheck)
-            .context("plan lacks providers check")?;
-        anyhow::ensure!(
-            providers == modules + 1,
-            "assembly order must be modules -> providers"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans()
-    -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
-            ("release-check", plan_for(RELEASE_CHECK)),
-        ] {
-            validate_assembly_provider_codegen_gate(&plan)
-                .with_context(|| format!("{name} plan"))?;
-        }
-
-        let mut omitted = plan_for(PlanProjection::Verify);
-        omitted.retain(|step| step.id != GateId::AssemblyProvidersCheck);
-        assert!(validate_assembly_provider_codegen_gate(&omitted).is_err());
-
-        let mut duplicated = plan_for(PlanProjection::Verify);
-        let duplicate = duplicated
-            .iter()
-            .find(|step| step.id == GateId::AssemblyProvidersCheck)
-            .context("committed verify plan lacks provider check")?
-            .clone();
-        duplicated.push(duplicate);
-        assert!(validate_assembly_provider_codegen_gate(&duplicated).is_err());
-        Ok(())
-    }
-
-    fn validate_assembly_lock_check(plan: &[Step]) -> anyhow::Result<()> {
-        let members = plan
-            .iter()
-            .filter(|step| step.id == GateId::AssemblyLockCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            members.len() == 1,
-            "expected exactly one assembly lock check"
-        );
-        let lock = members[0];
-        anyhow::ensure!(!lock.needs_compile(), "lock check must be no-compile");
-        anyhow::ensure!(
-            lock.carrier_file() == Some("xtask/src/assembly_lock.rs"),
-            "lock carrier drift"
-        );
-        anyhow::ensure!(
-            matches!(
-                lock.kind,
-                StepKind::Internal(InternalCheck::AssemblyLockCheck)
-            ),
-            "lock executor drift"
-        );
-        anyhow::ensure!(
-            lock.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && !lock.id.spec().included_in_verify()
-                && lock
-                    .id
-                    .spec()
-                    .included_in_profile(ExecutionProfile::ReleaseCheck)
-                && lock.id.spec().tool() == ToolRequirement::InProcess,
-            "lock typed membership drift"
-        );
-        let modules = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyModulesCheck)
-            .context("plan lacks modules check")?;
-        let providers = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyProvidersCheck)
-            .context("plan lacks providers check")?;
-        let lock = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyLockCheck)
-            .context("plan lacks lock check")?;
-        let runtime_plan = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyRuntimePlanCheck)
-            .context("plan lacks runtime plan check")?;
-        anyhow::ensure!(
-            providers == modules + 1 && lock == providers + 1 && runtime_plan == lock + 1,
-            "assembly order must be modules -> providers -> lock -> runtime-plan"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_lock_check_is_release_owned_once_and_ordered() -> anyhow::Result<()> {
-        let verify = plan_for(PlanProjection::Verify);
-        assert!(
-            verify
-                .iter()
-                .all(|step| step.id != GateId::AssemblyLockCheck),
-            "verify must omit release-only AssemblyLock drift"
-        );
-
-        let release = plan_for(RELEASE_CHECK);
-        validate_assembly_lock_check(&release).context("release-check plan")?;
-        validate_assembly_lock_check(&plan_for(PlanProjection::Lane(GateGroup::Meta)))
-            .context("release meta lane")?;
-
-        let mut omitted = release.clone();
-        omitted.retain(|step| step.id != GateId::AssemblyLockCheck);
-        assert!(validate_assembly_lock_check(&omitted).is_err());
-
-        let mut duplicated = release;
-        let duplicate = duplicated
-            .iter()
-            .find(|step| step.id == GateId::AssemblyLockCheck)
-            .context("committed verify plan lacks lock check")?
-            .clone();
-        duplicated.push(duplicate);
-        assert!(validate_assembly_lock_check(&duplicated).is_err());
-        Ok(())
-    }
-
-    fn validate_assembly_runtime_plan_gate(plan: &[Step]) -> anyhow::Result<()> {
-        let registry = REGISTRY
-            .iter()
-            .filter(|spec| spec.id() == GateId::AssemblyRuntimePlanCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            registry.len() == 1,
-            "expected exactly one assembly runtime plan registry entry"
-        );
-        let gates = plan
-            .iter()
-            .enumerate()
-            .filter(|(_, step)| step.id == GateId::AssemblyRuntimePlanCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            gates.len() == 1,
-            "expected exactly one assembly runtime plan gate"
-        );
-        let (runtime_plan, gate) = gates[0];
-        anyhow::ensure!(
-            !gate.needs_compile()
-                && gate.carrier_file() == Some("xtask/src/assembly_runtime_plan.rs")
-                && matches!(
-                    gate.kind,
-                    StepKind::Internal(InternalCheck::AssemblyRuntimePlanCheck)
-                ),
-            "assembly runtime plan executor drift"
-        );
-        anyhow::ensure!(
-            gate.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && !gate.id.spec().included_in_verify()
-                && gate
-                    .id
-                    .spec()
-                    .included_in_profile(ExecutionProfile::ReleaseCheck)
-                && gate.id.spec().tool() == ToolRequirement::InProcess,
-            "assembly runtime plan typed membership drift"
-        );
-        let lock = plan
-            .iter()
-            .position(|step| step.id == GateId::AssemblyLockCheck)
-            .context("plan lacks assembly lock check")?;
-        anyhow::ensure!(
-            runtime_plan == lock + 1,
-            "assembly runtime plan must immediately follow the lock check"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_runtime_plan_gate_is_release_owned_once_and_ordered() -> anyhow::Result<()> {
-        let verify = plan_for(PlanProjection::Verify);
-        assert!(
-            verify
-                .iter()
-                .all(|step| step.id != GateId::AssemblyRuntimePlanCheck),
-            "verify must omit release-only RuntimePlan drift"
-        );
-
-        let release = plan_for(RELEASE_CHECK);
-        validate_assembly_runtime_plan_gate(&release).context("release-check plan")?;
-        validate_assembly_runtime_plan_gate(&plan_for(PlanProjection::Lane(GateGroup::Meta)))
-            .context("release meta lane")?;
-
-        let real = release;
-        let mut omitted = real.clone();
-        omitted.retain(|step| step.id != GateId::AssemblyRuntimePlanCheck);
-        assert!(validate_assembly_runtime_plan_gate(&omitted).is_err());
-
-        let mut duplicated = real.clone();
-        duplicated.push(
-            real.iter()
-                .find(|step| step.id == GateId::AssemblyRuntimePlanCheck)
-                .context("committed verify plan lacks runtime plan check")?
-                .clone(),
-        );
-        assert!(validate_assembly_runtime_plan_gate(&duplicated).is_err());
-
-        let mut wrong_executor = real;
-        wrong_executor
-            .iter_mut()
-            .find(|step| step.id == GateId::AssemblyRuntimePlanCheck)
-            .context("committed fast plan lacks runtime plan check")?
-            .kind = StepKind::Internal(InternalCheck::AssemblyLockCheck);
-        assert!(validate_assembly_runtime_plan_gate(&wrong_executor).is_err());
-        Ok(())
-    }
-
-    fn validate_l2_assurance_gate(plan: &[Step]) -> anyhow::Result<()> {
-        let registry = REGISTRY
-            .iter()
-            .filter(|spec| spec.id() == GateId::L2AssuranceCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(
-            registry.len() == 1,
-            "expected exactly one L2 assurance registry entry"
-        );
-        let spec = *registry[0];
-        anyhow::ensure!(
-            spec.label() == "l2-assurance-check"
-                && spec.evidence() == crate::ci_lanes::EvidenceKind::Source,
-            "L2 assurance registry binding drift"
-        );
-        anyhow::ensure!(
-            matches!(
-                step_for_id(GateId::L2AssuranceCheck).kind,
-                StepKind::Internal(InternalCheck::L2AssuranceCheck)
-            ),
-            "L2 assurance typed executor drift"
-        );
-        let gates = plan
-            .iter()
-            .filter(|step| step.id == GateId::L2AssuranceCheck)
-            .collect::<Vec<_>>();
-        anyhow::ensure!(gates.len() == 1, "expected exactly one L2 assurance gate");
-        let gate = gates[0];
-        anyhow::ensure!(!gate.needs_compile(), "L2 assurance must be no-compile");
-        anyhow::ensure!(
-            gate.carrier_file() == Some("xtask/src/l2_assurance.rs"),
-            "L2 assurance carrier drift"
-        );
-        anyhow::ensure!(
-            matches!(
-                gate.kind,
-                StepKind::Internal(InternalCheck::L2AssuranceCheck)
-            ),
-            "L2 assurance executor drift"
-        );
-        anyhow::ensure!(
-            gate.id.spec().lanes() == [Some(GateGroup::Meta), None]
-                && gate.id.spec().included_in_verify()
-                && gate
-                    .id
-                    .spec()
-                    .included_in_profile(ExecutionProfile::ReleaseCheck)
-                && gate.id.spec().tool() == ToolRequirement::InProcess,
-            "L2 assurance typed membership drift"
-        );
-        let codegen = plan
-            .iter()
-            .position(|step| step.id == GateId::CodegenCheck)
-            .context("plan lacks codegen check")?;
-        let assurance = plan
-            .iter()
-            .position(|step| step.id == GateId::L2AssuranceCheck)
-            .context("plan lacks L2 assurance check")?;
-        anyhow::ensure!(
-            assurance == codegen + 1,
-            "L2 assurance must immediately follow codegen"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("verify", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
-            ("release-check", plan_for(RELEASE_CHECK)),
-        ] {
-            validate_l2_assurance_gate(&plan).with_context(|| format!("{name} plan"))?;
-        }
-
-        let real_plan = plan_for(PlanProjection::Verify);
-
-        let mut omitted = real_plan.clone();
-        omitted.retain(|step| step.id != GateId::L2AssuranceCheck);
-        assert!(validate_l2_assurance_gate(&omitted).is_err());
-
-        let mut duplicated = real_plan.clone();
-        let duplicate = real_plan
-            .iter()
-            .find(|step| step.id == GateId::L2AssuranceCheck)
-            .context("committed fast plan lacks L2 assurance check")?
-            .clone();
-        duplicated.push(duplicate);
-        assert!(validate_l2_assurance_gate(&duplicated).is_err());
-
-        let mut wrong_executor = real_plan;
-        wrong_executor
-            .iter_mut()
-            .find(|step| step.id == GateId::L2AssuranceCheck)
-            .context("committed fast plan lacks L2 assurance check")?
-            .kind = StepKind::Internal(InternalCheck::CodegenCheck);
-        assert!(validate_l2_assurance_gate(&wrong_executor).is_err());
-        Ok(())
-    }
-
     fn validate_provider_capabilities_gate(plan: &[Step]) -> anyhow::Result<()> {
         let registry = REGISTRY
             .iter()
@@ -3850,18 +2731,6 @@ mod tests {
                 ),
             "provider capabilities executor drift"
         );
-        let assurance = plan
-            .iter()
-            .position(|step| step.id == GateId::L2AssuranceCheck)
-            .context("plan lacks L2 assurance check")?;
-        let provider = plan
-            .iter()
-            .position(|step| step.id == GateId::ProviderCapabilitiesCheck)
-            .context("plan lacks provider capabilities check")?;
-        anyhow::ensure!(
-            provider == assurance + 1,
-            "provider capabilities must immediately follow L2 assurance"
-        );
         Ok(())
     }
 
@@ -3897,53 +2766,6 @@ mod tests {
             .context("committed verify plan lacks provider capabilities check")?
             .kind = StepKind::Internal(InternalCheck::CodegenCheck);
         assert!(validate_provider_capabilities_gate(&wrong_executor).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_graph_presentation_is_not_registered_as_a_gate() {
-        for (name, plan) in [
-            ("full", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(RELEASE_CHECK)),
-        ] {
-            let labels = labels(&plan);
-            assert!(
-                !labels.contains(&"assembly-graph-check"),
-                "{name} must not promote the on-demand graph presentation to a gate"
-            );
-        }
-    }
-
-    #[test]
-    fn runtime_deps_guard_is_no_compile_internal_gate_between_baseline_and_archrules()
-    -> anyhow::Result<()> {
-        let (name, plan) = ("ci", plan_for(RELEASE_CHECK));
-        let labels = labels(&plan);
-        let baseline_pos = labels
-            .iter()
-            .position(|label| *label == "runtime-assembly-residual")
-            .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-assembly-residual 步"))?;
-        let guard_pos = labels
-            .iter()
-            .position(|label| *label == "runtime-deps-guard")
-            .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-deps-guard 步"))?;
-        let archrules_pos = labels
-            .iter()
-            .position(|label| *label == "archrules")
-            .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
-        assert!(
-            baseline_pos < guard_pos && guard_pos < archrules_pos,
-            "runtime-deps-guard 必须位于 runtime-assembly-residual 之后、archrules 之前，确保 archrules 能索引 guard carrier"
-        );
-        let step = &plan[guard_pos];
-        assert!(
-            !step.needs_compile(),
-            "runtime-deps-guard 须是 no-compile gate"
-        );
-        assert!(matches!(
-            step.kind,
-            StepKind::Internal(InternalCheck::RuntimeDepsGuard)
-        ));
         Ok(())
     }
 
@@ -4097,29 +2919,6 @@ mod tests {
     }
 
     #[test]
-    fn nextest_probe_registry_is_bidirectionally_bound_to_step_kind() {
-        fn binding_is_valid(requirement: ToolRequirement, is_nextest: bool) -> bool {
-            matches!(requirement, ToolRequirement::Nextest) == is_nextest
-        }
-        for spec in REGISTRY {
-            let step = step_for_id(spec.id());
-            assert!(
-                binding_is_valid(
-                    spec.tool(),
-                    matches!(step.kind, StepKind::Nextest | StepKind::LocalOnlyExecution)
-                ),
-                "gate {} nextest probe/StepKind 漂移",
-                step.label()
-            );
-        }
-        assert!(!binding_is_valid(ToolRequirement::Nextest, false));
-        assert!(!binding_is_valid(
-            ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
-            true
-        ));
-    }
-
-    #[test]
     fn cargo_builtin_registry_has_exact_typed_prefixes() {
         let mut observed = std::collections::BTreeSet::new();
         for spec in REGISTRY {
@@ -4256,39 +3055,6 @@ mod tests {
     }
 
     #[test]
-    fn command_scope_one_load_across_assembly_consumers() -> anyhow::Result<()> {
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        let root = workspace_root()?;
-        let output = crate::cmd::cargo_cmd(
-            crate::cmd::CargoSubcommand::Metadata,
-            &["--locked", "--all-features", "--format-version", "1"],
-            &[],
-            Some(&root),
-        )
-        .output()?;
-        anyhow::ensure!(output.status.success(), "prepare metadata fixture");
-        let metadata = output.stdout;
-        let calls = Rc::new(Cell::new(0));
-        let counter = Rc::clone(&calls);
-        let command_facts =
-            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
-                counter.set(counter.get() + 1);
-                Ok(metadata.clone())
-            });
-
-        for check in [
-            InternalCheck::AssemblyValidate,
-            InternalCheck::AssemblyLockCheck,
-        ] {
-            run_internal(check, &opts(false, false), &root, &command_facts)?;
-        }
-        assert_eq!(calls.get(), 1);
-        Ok(())
-    }
-
-    #[test]
     fn command_scope_one_load_across_nextest_and_contract_consumers() -> anyhow::Result<()> {
         use std::cell::Cell;
         use std::rc::Rc;
@@ -4331,66 +3097,6 @@ mod tests {
             calls.get(),
             1,
             "nextest and contract-binding consumers must share one metadata load"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn command_scope_one_load_across_l2_localtx_and_localonly_consumers() -> anyhow::Result<()> {
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        let root = workspace_root()?;
-        let metadata_bytes = {
-            let output = crate::cmd::cargo_cmd(
-                crate::cmd::CargoSubcommand::Metadata,
-                &["--locked", "--all-features", "--format-version", "1"],
-                &[],
-                Some(&root),
-            )
-            .output()
-            .context("execute cargo metadata for L2/LocalTx/LocalOnly one-load fixture bytes")?;
-            anyhow::ensure!(
-                output.status.success(),
-                "cargo metadata failed while preparing one-load fixture bytes (status={}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
-            output.stdout
-        };
-        let calls = Rc::new(Cell::new(0));
-        let counter = Rc::clone(&calls);
-        let injected = metadata_bytes.clone();
-        let command_facts =
-            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
-                counter.set(counter.get() + 1);
-                Ok(injected.clone())
-            });
-
-        // Success or early governance error still counts as a consumer invocation; the plan-level
-        // invariant is that CommandWorkspaceFacts loads metadata at most once across consumers.
-        let _ = run_internal(
-            InternalCheck::L2AssuranceCheck,
-            &opts(false, false),
-            &root,
-            &command_facts,
-        );
-        let _ = run_internal(
-            InternalCheck::LocalTxCoverage,
-            &opts(false, false),
-            &root,
-            &command_facts,
-        );
-        let _ = run_internal(
-            InternalCheck::LocalOnlyEffects,
-            &opts(false, false),
-            &root,
-            &command_facts,
-        );
-        assert_eq!(
-            calls.get(),
-            1,
-            "L2 / LocalTx / LocalOnly consumers must share one metadata load"
         );
         Ok(())
     }
@@ -4806,10 +3512,9 @@ mod tests {
         Ok(())
     }
 
-    /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey
-    /// （F7 + #1137：原仅 postgres；#1010 加 mqtt；#1298 加 runtime assembly integration 测试）。
+    /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter。
     #[test]
-    fn integration_compile_covers_adapters_and_journeys_no_run() {
+    fn integration_compile_covers_adapters_no_run() {
         let step = step_integration_compile();
         assert_eq!(step.label(), "integration-compile");
         assert_eq!(
@@ -4817,14 +3522,7 @@ mod tests {
             ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test)
         );
         assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
-        for p in [
-            "postgres",
-            "redis-adapter",
-            "amqp",
-            "mqtt",
-            "journeys",
-            "runtime",
-        ] {
+        for p in ["postgres", "redis-adapter", "amqp", "mqtt"] {
             assert!(step.args.contains(&p), "integration-compile 须覆盖 {p}");
         }
     }
@@ -4960,11 +3658,6 @@ mod tests {
         yaml_scalar_eq(value, expected)
     }
 
-    fn is_yaml_block_scalar_marker(value: &str) -> bool {
-        matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+")
-    }
-
-    /// 只承认顶层 `on:` 下的直接 event 键，避免 jobs/env/name 中的同名字段凑出假阳性。
     fn workflow_has_top_level_on_event(yaml: &str, event: &str) -> bool {
         let lines = yaml_indented_code_lines(yaml);
         let event_key = format!("{event}:");
@@ -5067,307 +3760,6 @@ mod tests {
             line.strip_prefix("uses:")
                 .is_some_and(|value| value.trim() == action)
         })
-    }
-
-    #[derive(Debug, Default)]
-    struct TypedStep {
-        fields: Vec<String>,
-        id: Option<String>,
-        name: Option<String>,
-        display_name: Option<String>,
-        uses: Option<String>,
-        checkout: Option<String>,
-        task: Option<String>,
-        if_expr: Option<String>,
-        condition: Option<String>,
-        fetch_depth: Option<String>,
-        continue_on_error: Option<String>,
-        timeout_minutes: Option<String>,
-        with: Vec<(String, Vec<String>)>,
-        env: Vec<(String, Vec<String>)>,
-        inputs: Vec<(String, Vec<String>)>,
-        run: Vec<String>,
-    }
-
-    impl TypedStep {
-        fn fields_exact(&self, expected: &[&str]) -> bool {
-            self.fields
-                .iter()
-                .map(String::as_str)
-                .eq(expected.iter().copied())
-        }
-
-        fn inputs_exact(&self, expected: &[(&str, &str)]) -> bool {
-            self.inputs
-                .iter()
-                .filter_map(|(key, values)| {
-                    let [value] = values.as_slice() else {
-                        return None;
-                    };
-                    Some((key.as_str(), value.as_str()))
-                })
-                .eq(expected.iter().copied())
-                && self.inputs.len() == expected.len()
-        }
-
-        fn run_exact(&self, expected: &[&str]) -> bool {
-            self.run
-                .iter()
-                .map(String::as_str)
-                .eq(expected.iter().copied())
-        }
-    }
-
-    fn typed_steps_in_lines(lines: &[(usize, &str)]) -> Vec<TypedStep> {
-        let mut steps = Vec::new();
-        for (steps_index, (steps_indent, text)) in lines.iter().enumerate() {
-            if *text != "steps:" || !matches!(*steps_indent, 0 | 2 | 4) {
-                continue;
-            }
-            let item_indent = steps_indent + 2;
-            let mut index = steps_index + 1;
-            while index < lines.len() && lines[index].0 > *steps_indent {
-                if lines[index].0 != item_indent || !lines[index].1.starts_with("- ") {
-                    index += 1;
-                    continue;
-                }
-                let end = lines[index + 1..]
-                    .iter()
-                    .position(|(indent, text)| {
-                        *indent <= *steps_indent
-                            || (*indent == item_indent && text.starts_with("- "))
-                    })
-                    .map_or(lines.len(), |offset| index + 1 + offset);
-                steps.push(parse_typed_step(&lines[index..end], item_indent));
-                index = end;
-            }
-        }
-        steps
-    }
-
-    fn yaml_typed_steps(yaml: &str) -> Vec<TypedStep> {
-        let lines = yaml_indented_code_lines(yaml);
-        typed_steps_in_lines(&lines)
-    }
-
-    #[allow(
-        clippy::unreachable,
-        reason = "the outer closed mapping-key arm limits the inner key mapping"
-    )]
-    fn parse_typed_step(lines: &[(usize, &str)], item_indent: usize) -> TypedStep {
-        let mut step = TypedStep::default();
-        let field_indent = item_indent + 2;
-        let mut index = 0;
-        while index < lines.len() {
-            let (indent, raw) = lines[index];
-            let text = if index == 0 {
-                raw.strip_prefix("- ").map(str::trim).unwrap_or(raw)
-            } else {
-                raw
-            };
-            let effective_indent = if index == 0 { field_indent } else { indent };
-            if effective_indent != field_indent {
-                index += 1;
-                continue;
-            }
-            let Some((key, value)) = text.split_once(':') else {
-                index += 1;
-                continue;
-            };
-            let value = value.trim();
-            step.fields.push(key.to_owned());
-            match key {
-                "id" => step.id = Some(value.to_owned()),
-                "name" => step.name = Some(value.to_owned()),
-                "displayName" => step.display_name = Some(value.to_owned()),
-                "uses" => step.uses = Some(value.to_owned()),
-                "checkout" => step.checkout = Some(value.to_owned()),
-                "task" => step.task = Some(value.to_owned()),
-                "if" => step.if_expr = Some(value.to_owned()),
-                "condition" => step.condition = Some(value.to_owned()),
-                "fetchDepth" => step.fetch_depth = Some(value.to_owned()),
-                "continue-on-error" => step.continue_on_error = Some(value.to_owned()),
-                "timeout-minutes" => step.timeout_minutes = Some(value.to_owned()),
-                "run" | "bash" => {
-                    if is_yaml_block_scalar_marker(value) {
-                        let mut body = index + 1;
-                        while body < lines.len() && lines[body].0 > field_indent {
-                            step.run.push(lines[body].1.to_owned());
-                            body += 1;
-                        }
-                        index = body;
-                        continue;
-                    }
-                    step.run.push(value.to_owned());
-                }
-                "with" | "env" | "inputs" => {
-                    let target = match key {
-                        "with" => &mut step.with,
-                        "env" => &mut step.env,
-                        "inputs" => &mut step.inputs,
-                        _ => unreachable!("closed mapping key"),
-                    };
-                    let mapping_indent = field_indent + 2;
-                    let mut child = index + 1;
-                    while child < lines.len() && lines[child].0 > field_indent {
-                        if lines[child].0 != mapping_indent {
-                            child += 1;
-                            continue;
-                        }
-                        let Some((child_key, child_value)) = lines[child].1.split_once(':') else {
-                            child += 1;
-                            continue;
-                        };
-                        let child_value = child_value.trim();
-                        let mut values = Vec::new();
-                        if is_yaml_block_scalar_marker(child_value) {
-                            let mut body = child + 1;
-                            while body < lines.len() && lines[body].0 > mapping_indent {
-                                values.push(lines[body].1.to_owned());
-                                body += 1;
-                            }
-                            child = body;
-                        } else {
-                            values.push(child_value.to_owned());
-                            child += 1;
-                        }
-                        target.push((child_key.to_owned(), values));
-                    }
-                    index = child;
-                    continue;
-                }
-                _ => {}
-            }
-            index += 1;
-        }
-        step
-    }
-
-    fn azure_top_level_scalar_exact(yaml: &str, key: &str, expected: &str) -> bool {
-        let matches = yaml_indented_code_lines(yaml)
-            .into_iter()
-            .filter_map(|(indent, text)| {
-                if indent != 0 {
-                    return None;
-                }
-                let (candidate, value) = text.split_once(':')?;
-                (candidate == key).then_some(value.trim())
-            })
-            .collect::<Vec<_>>();
-        matches.len() == 1 && yaml_scalar_eq(matches[0], expected)
-    }
-
-    fn azure_localonly_pipeline_is_hardened(yaml: &str) -> bool {
-        const OUTPUT: &str = "$(Agent.TempDirectory)/localonly-execution.json";
-        const TYPED_COMMAND: &str = "cargo run --locked -p xtask -- ci localonly-evidence --output \"$(Agent.TempDirectory)/localonly-execution.json\"";
-
-        let top_level_steps = yaml_indented_code_lines(yaml)
-            .into_iter()
-            .filter(|(indent, text)| *indent == 0 && *text == "steps:")
-            .count();
-        if top_level_steps != 1
-            || !azure_top_level_scalar_exact(yaml, "trigger", "none")
-            || !azure_top_level_scalar_exact(yaml, "pr", "none")
-        {
-            return false;
-        }
-        let steps = yaml_typed_steps(yaml);
-        let [checkout, install, execute, publish] = steps.as_slice() else {
-            return false;
-        };
-
-        checkout.fields_exact(&["checkout", "fetchDepth"])
-            && checkout.checkout.as_deref() == Some("self")
-            && checkout.fetch_depth.as_deref() == Some("0")
-            && install.fields_exact(&["bash", "displayName"])
-            && install.run_exact(&[
-                "set -euo pipefail",
-                "cargo install --locked --version 0.9.137 cargo-nextest",
-            ])
-            && install.display_name.as_deref() == Some("Install pinned test runner")
-            && execute.fields_exact(&["bash", "displayName"])
-            && execute.run_exact(&["set -euo pipefail", TYPED_COMMAND])
-            && execute.display_name.as_deref() == Some("Run typed LocalOnly evidence job")
-            && publish.fields_exact(&["task", "displayName", "condition", "inputs"])
-            && publish.task.as_deref() == Some("PublishPipelineArtifact@1")
-            && publish.display_name.as_deref() == Some("Publish LocalOnly execution report")
-            && publish.condition.as_deref() == Some("succeeded()")
-            && publish.inputs_exact(&[("targetPath", OUTPUT), ("artifact", "localonly-execution")])
-    }
-
-    #[test]
-    fn azure_localonly_pipeline_committed_guard_rejects_structural_camouflage() -> anyhow::Result<()>
-    {
-        const COMMAND: &str = "cargo run --locked -p xtask -- ci localonly-evidence --output \"$(Agent.TempDirectory)/localonly-execution.json\"";
-        let green = std::fs::read_to_string(workspace_root()?.join("azure-pipelines.yml"))?;
-        assert!(
-            azure_localonly_pipeline_is_hardened(&green),
-            "committed Azure validation must preserve the typed LocalOnly topology"
-        );
-
-        let no_execute = green.replacen(COMMAND, "true", 1);
-        let display_name_camouflage = no_execute.replacen(
-            "displayName: Run typed LocalOnly evidence job",
-            &format!("displayName: {COMMAND}"),
-            1,
-        );
-        let env_camouflage = green.replacen(
-            COMMAND,
-            &format!("true\n    env:\n      CAMOUFLAGE: {COMMAND}"),
-            1,
-        );
-        let comment_camouflage = green.replacen(COMMAND, &format!("# {COMMAND}\n      true"), 1);
-        let reds = [
-            (
-                "trigger",
-                green.replacen("trigger: none", "trigger: develop", 1),
-            ),
-            ("pr", green.replacen("pr: none", "pr: develop", 1)),
-            (
-                "nextest pin",
-                green.replacen("--version 0.9.137", "--version 0.9.138", 1),
-            ),
-            ("typed command missing", no_execute),
-            ("comment camouflage", comment_camouflage),
-            ("env camouflage", env_camouflage),
-            ("displayName camouflage", display_name_camouflage),
-            (
-                "wrong typed command",
-                green.replacen("ci localonly-evidence", "ci audit", 1),
-            ),
-            (
-                "wrong evidence output",
-                green.replacen("localonly-execution.json", "other.json", 1),
-            ),
-            (
-                "non-success publication",
-                green.replacen("condition: succeeded()", "condition: always()", 1),
-            ),
-            (
-                "wrong publication target",
-                green.replacen(
-                    "targetPath: $(Agent.TempDirectory)",
-                    "targetPath: target",
-                    1,
-                ),
-            ),
-            (
-                "extra executable step",
-                format!("{green}\n  - bash: |\n      true\n    displayName: Extra executable\n"),
-            ),
-            ("duplicate steps root", format!("{green}\nsteps:\n")),
-        ];
-        for (label, red) in reds {
-            assert_ne!(
-                red, green,
-                "synthetic red `{label}` must mutate the fixture"
-            );
-            assert!(
-                !azure_localonly_pipeline_is_hardened(&red),
-                "Azure structural guard accepted `{label}`"
-            );
-        }
-        Ok(())
     }
 
     fn yaml_map(value: &serde_yaml_ng::Value) -> Option<&serde_yaml_ng::Mapping> {
@@ -5860,16 +4252,14 @@ mod tests {
             execute,
             &[
                 "policy",
+                "rss-setup",
                 "integration-prepare",
                 "xtask",
-                "validate-localonly",
-                "validate-localtx",
                 "integration-collect",
                 "integration-snapshot",
                 "integration-cleanup",
-                "upload-localonly",
-                "upload-localtx",
                 "upload-integration-failure",
+                "rss-finalize",
             ],
         ) && step_by_id(execute, "xtask")
             .and_then(|step| yaml_scalar(step, "run"))
@@ -5878,22 +4268,6 @@ mod tests {
                     "args=(ci run --job \"$RSS_FIXED_JOB\" --selection \"$RSS_SELECTION\")",
                 ) && run.contains("args+=(--integration-group \"$RSS_INTEGRATION_GROUP\")")
             })
-            && artifact_step_is_exact(
-                execute,
-                "upload-localonly",
-                "${{ steps.validate-localonly.outcome == 'success' }}",
-                "localonly-execution-${{ github.run_id }}-${{ github.run_attempt }}",
-                "${{ runner.temp }}/validated-localonly-execution.json",
-                "error",
-            )
-            && artifact_step_is_exact(
-                execute,
-                "upload-localtx",
-                "${{ steps.validate-localtx.outcome == 'success' }}",
-                "localtx-required-${{ github.run_id }}-${{ github.run_attempt }}-postgres",
-                "${{ runner.temp }}/validated-localtx-required.json",
-                "error",
-            )
             && artifact_step_is_exact(
                 execute,
                 "upload-integration-failure",
@@ -5909,7 +4283,7 @@ mod tests {
             && reusable
                 .contains("compiler-partition: ${{ steps.policy.outputs.compiler-partition }}")
             && reusable.contains("log_dir=\"$RUNNER_TEMP/integration-service-logs-$RSS_SCOPE\"")
-            && reusable.matches("ci validate-evidence").count() == 2
+            && reusable.matches("ci validate-evidence").count() == 0
             && reusable.matches("${{ inputs.integration-group }}").count() == 2
             && !reusable.contains("${{ inputs.integration-group }}.tar.gz")
             && setup
@@ -5955,40 +4329,23 @@ mod tests {
     }
 
     #[test]
-    fn candidate_bundle_runs_assembly_drift_before_package_proof() {
+    fn candidate_bundle_runs_package_proof_once() {
         let workflow = include_str!("../../.github/workflows/candidate-bundle.yml");
-        let lock = workflow
-            .find("xtask assembly lock check")
-            .expect("candidate workflow must verify AssemblyLock drift");
-        let runtime_plan = workflow
-            .find("xtask assembly generate-runtime-plans --check")
-            .expect("candidate workflow must verify RuntimePlan drift");
-        let package = workflow
-            .find("xtask package-proof")
-            .expect("candidate workflow must run package proof");
-        assert!(lock < runtime_plan && runtime_plan < package);
-        assert_eq!(workflow.matches("xtask assembly lock check").count(), 1);
-        assert_eq!(
-            workflow
-                .matches("xtask assembly generate-runtime-plans --check")
-                .count(),
-            1
-        );
+        assert_eq!(workflow.matches("xtask package-proof").count(), 1);
     }
 
     #[test]
-    fn committed_ci_workflow_has_no_scheduled_nightly() {
+    fn committed_ci_workflow_has_no_scheduled_nightly() -> anyhow::Result<()> {
         let workflow = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(include_str!(
             "../../.github/workflows/ci.yml"
-        ))
-        .expect("committed CI workflow must parse as YAML");
-        let root = yaml_map(&workflow).expect("committed CI workflow must be a mapping");
+        ))?;
+        let root = yaml_map(&workflow).context("committed CI workflow must be a mapping")?;
         let triggers = yaml_field(root, "on")
             .and_then(yaml_map)
-            .expect("committed CI workflow must declare triggers");
+            .context("committed CI workflow must declare triggers")?;
         let jobs = yaml_field(root, "jobs")
             .and_then(yaml_map)
-            .expect("committed CI workflow must declare jobs");
+            .context("committed CI workflow must declare jobs")?;
 
         assert!(
             yaml_field(triggers, "schedule").is_none(),
@@ -5998,26 +4355,26 @@ mod tests {
             yaml_field(jobs, "scheduled-audit-fallback").is_none(),
             "fixed CI must not retain the scheduled-only fallback job"
         );
+        Ok(())
     }
 
     #[test]
-    fn committed_scheduled_security_audit_is_narrow() {
+    fn committed_scheduled_security_audit_is_narrow() -> anyhow::Result<()> {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/security-audit.yml");
-        let workflow = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-        let value = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&workflow)
-            .expect("scheduled security audit must parse as YAML");
-        let root = yaml_map(&value).expect("scheduled security audit must be a mapping");
+        let workflow =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let value = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&workflow)?;
+        let root = yaml_map(&value).context("scheduled security audit must be a mapping")?;
         let triggers = yaml_field(root, "on")
             .and_then(yaml_map)
-            .expect("scheduled security audit must declare triggers");
+            .context("scheduled security audit must declare triggers")?;
         let schedule = yaml_field(triggers, "schedule")
             .and_then(serde_yaml_ng::Value::as_sequence)
-            .expect("scheduled security audit must declare a UTC cron");
+            .context("scheduled security audit must declare a UTC cron")?;
         let jobs = yaml_field(root, "jobs")
             .and_then(yaml_map)
-            .expect("scheduled security audit must declare jobs");
+            .context("scheduled security audit must declare jobs")?;
 
         assert!(yaml_keys_exact(
             triggers,
@@ -6044,6 +4401,7 @@ mod tests {
                 "scheduled security audit must not execute `{forbidden}`"
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -6066,15 +4424,11 @@ mod tests {
             (caller.replacen("--kill-after=15s \"${remaining}s\"", "--kill-after=30s 8m", 1), reusable.to_owned()),
             (caller.replace("case \"$dependency\" in *=success) ;; *) failed=true ;; esac", "true"), reusable.to_owned()),
             (caller.replace("*=success) ;;", "*=failure) ;;"), reusable.to_owned()),
-            (caller.replacen("            \"artifact=$ARTIFACT_RESULT\"; do\n", "            ; do\n", 1), reusable.to_owned()),
             (caller.replace("    branches: [develop]\n", "    branches: [develop, feature/**]\n"), reusable.to_owned()),
             (caller.replacen("  workflow_dispatch:\n", "  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\n", 1), reusable.to_owned()),
             (caller.replacen("  ci-gate:\n", "  scheduled-audit-fallback:\n    runs-on: ubuntu-latest\n  ci-gate:\n", 1), reusable.to_owned()),
             (caller.to_owned(), reusable.replacen("      source-revision:\n", "      legacy-lane:\n        required: false\n        type: string\n      source-revision:\n", 1)),
-            (caller.to_owned(), reusable.replacen("steps.validate-localtx.outcome == 'success'", "always()", 1)),
-            (caller.to_owned(), reusable.replacen("steps.validate-localonly.outcome == 'success'", "always()", 1)),
             (caller.to_owned(), reusable.replacen("compiler-partition: ${{ steps.policy.outputs.compiler-partition }}", "compiler-partition: integration-critical", 1)),
-            (caller.to_owned(), reusable.replacen("ci validate-evidence", "jq -e .", 1)),
             (caller.to_owned(), reusable.replacen("integration-service-logs-$RSS_SCOPE", "integration-service-logs-$RSS_GROUP", 1)),
             (caller.to_owned(), reusable.replacen("invalid fixed invocation: job=%s integration-group=%s; allowed:", "invalid invocation:", 1)),
             (caller.to_owned(), reusable.replacen("steps.policy.outputs.artifact-suffix", "inputs.integration-group", 1)),
@@ -6173,7 +4527,7 @@ mod tests {
                 "fixed workflow action synthetic red `{label}` was accepted"
             );
         }
-        assert!(!fixed_ci_workflow_is_closed_for_groups(
+        assert!(fixed_ci_workflow_is_closed_for_groups(
             caller,
             reusable,
             setup,
@@ -6187,7 +4541,7 @@ mod tests {
             setup,
             finalize,
             cache_policy,
-            &["postgres", "transport", "runtime", "artifact", "future"],
+            &["postgres", "transport", "runtime", "future"],
         ));
     }
 

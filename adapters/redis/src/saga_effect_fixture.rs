@@ -1,4 +1,4 @@
-//! Real Redis effect fixture restricted to fault-matrix builds.
+//! Real Redis effect fixture for provider integration tests.
 //!
 //! The handle deliberately exposes no pool, storage key, stored effect bytes, lease, journal, or
 //! checkpoint API. It exists only to prove external Saga effect recovery against a real provider.
@@ -14,7 +14,7 @@ use crate::RedisStore;
 
 const REDIS_CMD_EVAL: &str = "EVAL";
 const REDIS_CMD_EXISTS: &str = "EXISTS";
-const SAGA_EFFECT_NAMESPACE: &str = "_fault_matrix:saga_effect";
+const SAGA_EFFECT_NAMESPACE: &str = "_integration:saga_effect";
 const STATUS_APPLIED: i64 = 1;
 const STATUS_EXACT_DUPLICATE: i64 = 2;
 const STATUS_CONFLICT: i64 = 3;
@@ -67,7 +67,7 @@ struct Counters {
     probe: AtomicU64,
 }
 
-/// Sanitized counter-only snapshot used by fault evidence.
+/// Sanitized counter-only snapshot used by component-test evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedisSagaEffectObservation {
     apply: u64,
@@ -182,7 +182,7 @@ impl RedisSagaEffectFixture {
         Ok(outcome)
     }
 
-    /// Returns a counter-only observation suitable for sanitized journey evidence.
+    /// Returns a counter-only observation suitable for sanitized integration evidence.
     #[must_use]
     pub fn observation(&self) -> RedisSagaEffectObservation {
         RedisSagaEffectObservation {

@@ -170,7 +170,7 @@ impl LocalTxTransaction<'_> {
         Ok(())
     }
 
-    #[cfg(any(all(test, feature = "integration"), feature = "journey-fault-support"))]
+    #[cfg(all(test, feature = "integration"))]
     pub(super) async fn commit_unknown_after_ack(self) -> Result<(), sqlx::Error> {
         let Self {
             transaction,

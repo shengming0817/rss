@@ -998,33 +998,6 @@ outputs = ["probes", "resources"]
     }
 
     #[test]
-    fn listenerless_shape_is_closed_to_demo_identity_library_assembly() {
-        let pilot = AssemblyManifest::from_toml_str(include_str!(
-            "../../../assemblies/deviceidentity/assembly.toml"
-        ))
-        .expect("listenerless pilot parses");
-        assert!(pilot.listeners.is_empty());
-        assert!(pilot.basic_validation_errors().is_empty());
-        pilot
-            .validate_graph_evidence()
-            .expect("exact demo identity library shape has no HTTP binding");
-
-        let mut settings = pilot.clone();
-        settings.domains = vec![AssemblyDomain::Settings];
-        assert!(
-            settings
-                .basic_validation_errors()
-                .contains(&ManifestValidationError::Empty { field: "listeners" })
-        );
-        assert!(matches!(
-            settings.validate_graph_evidence(),
-            Err(errors) if errors.as_slice().contains(&GraphEvidenceValidationError::UnboundDomain {
-                domain: AssemblyDomain::Settings,
-            })
-        ));
-    }
-
-    #[test]
     fn manifest_v2_requires_closed_schema_version_and_explicit_workflow_activations() {
         assert!(
             AssemblyManifest::from_toml_str(&MINIMAL.replace("schemaVersion = 2\n", "")).is_err()

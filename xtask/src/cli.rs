@@ -8,13 +8,10 @@
 //!
 //! ref: clap-rs/clap examples/derive_ref
 
-use crate::assembly_lock::AssemblyLockAction;
 use crate::ci_impact::{self, LocalOptions, SelectionPlan};
 use crate::ci_lanes::{FixedCiInvocation, FixedCiJob};
-use crate::graph;
 use crate::integration_shards::IntegrationJobGroup;
 use crate::publicapi;
-use crate::report_format::ReportFormat;
 use anyhow::{Result, bail};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
@@ -53,24 +50,9 @@ pub(crate) enum Command {
     /// 契约元数据校验与 breaking 检测。
     #[command(subcommand)]
     Contract(ContractCommand),
-    /// assembly 校验、产物与 lock。
-    #[command(subcommand)]
-    Assembly(AssemblyCommand),
-    /// assembly 静态声明图。
-    #[command(subcommand)]
-    Graph(GraphCommand),
     /// ArchRules 派生索引与 funnel 矩阵。
     #[command(subcommand)]
     Archrules(ArchrulesCommand),
-    /// runtime composition-root 单调职责。
-    #[command(subcommand)]
-    RuntimeRoot(RuntimeRootCommand),
-    /// SharedRuntimeDeps infra-only 字段守卫。
-    #[command(subcommand)]
-    RuntimeDeps(RuntimeDepsCommand),
-    /// runtime ambient environment 单漏斗。
-    #[command(subcommand)]
-    RuntimeEnv(RuntimeEnvCommand),
     /// source-centric 分层依赖 lint。
     LayerDeps,
     /// workspace.dependencies pin↔lock 漂移门。
@@ -81,15 +63,6 @@ pub(crate) enum Command {
     SagaDurableRecoveryGuard,
     /// same-ID SQL/Rust 完整闭包门。
     OutboxSameIdGuard,
-    /// consistency crash matrix fixture/DSL 治理门。
-    ConsistencyFixtures,
-    /// consistency / effect 治理与报告。
-    #[command(subcommand)]
-    Consistency(ConsistencyCommand),
-    /// active LocalTx manifest/generated/route/test closure 门。
-    LocaltxCoverage,
-    /// 校验 active L2 producer/fact typed assurance closure。
-    L2Assurance,
     /// L2 provider conformance 语义校验；裸命令按需生成 target 诊断报告。
     ProviderCapabilities {
         #[arg(long)]
@@ -129,8 +102,6 @@ pub(crate) enum Command {
     SchemaRls,
     /// inbox receipt cutover 旧 token 回流守卫（CI 门）。
     InboxCutoverGuard,
-    /// DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）。
-    DlxLifecycleFunnel,
     /// Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）。
     PgTenantTxGuard,
     /// domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（CI 门）。
@@ -161,36 +132,6 @@ pub(crate) enum ContractCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum AssemblyCommand {
-    /// 校验 assembly manifest、Cargo closure 与 production governance residual。
-    Validate,
-    /// assembly.toml domains → committed modules_gen.rs。
-    GenerateModules {
-        #[arg(long)]
-        check: bool,
-    },
-    /// assembly.toml providers → committed typed provider catalog。
-    GenerateProviders {
-        #[arg(long)]
-        check: bool,
-    },
-    /// manifest + lock → committed typed runtime-plan.json。
-    GenerateRuntimePlans {
-        #[arg(long)]
-        check: bool,
-    },
-    /// 全仓 v1 assembly.lock.json 原子生成 / raw-byte 漂移门。
-    #[command(subcommand)]
-    Lock(AssemblyLockAction),
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum GraphCommand {
-    /// 按需生成 assembly 静态声明图到 target/xtask。
-    Assembly(graph::Options),
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum ArchrulesCommand {
     /// 列出 ArchRules 派生索引。
     List,
@@ -198,36 +139,6 @@ pub(crate) enum ArchrulesCommand {
     Verify,
     /// 按需生成持久化 funnel 报告到 target/xtask。
     Matrix,
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum RuntimeRootCommand {
-    /// runtime composition-root 纯声明 façade 守卫。
-    Guard,
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum RuntimeDepsCommand {
-    /// SharedRuntimeDeps infra-only 字段类型守卫。
-    Guard,
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum RuntimeEnvCommand {
-    /// runtime ambient environment 单漏斗守卫。
-    Guard,
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum ConsistencyCommand {
-    /// active LocalOnly HTTP effect profile 治理门。
-    LocalOnlyEffects,
-    /// active HTTP consistency/effect posture 确定性报告。
-    Report {
-        /// Append + validate 拒绝重复（clap Set 默认为 last-wins）。
-        #[arg(long, value_enum, required = true, action = clap::ArgAction::Append)]
-        format: Vec<ReportFormat>,
-    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -257,28 +168,8 @@ pub(crate) enum CiCommand {
         #[arg(long, value_parser = parse_selection_plan, required = true)]
         selection: Box<SelectionPlan>,
     },
-    /// 严格校验 required-evidence，并发布不可替换的上传快照。
-    ValidateEvidence {
-        #[arg(long, value_enum, required = true)]
-        kind: RequiredEvidenceKind,
-        #[arg(long, required = true)]
-        input: PathBuf,
-        #[arg(long, required = true)]
-        output: PathBuf,
-    },
     /// cargo-audit 门。
     Audit,
-    /// LocalOnly required evidence producer。
-    LocalonlyEvidence {
-        #[arg(long, required = true)]
-        output: PathBuf,
-    },
-}
-
-#[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
-pub(crate) enum RequiredEvidenceKind {
-    Localonly,
-    Localtx,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -315,7 +206,6 @@ impl Command {
                 }
                 Ok(())
             }
-            Self::Graph(GraphCommand::Assembly(options)) => options.validate(),
             Self::Ci(CiCommand::Local(options)) => options.validate(),
             Self::Ci(CiCommand::Run {
                 job,
@@ -323,18 +213,6 @@ impl Command {
                 ..
             }) => {
                 FixedCiInvocation::new(*job, *integration_group)?;
-                Ok(())
-            }
-            Self::Consistency(ConsistencyCommand::Report { format }) => {
-                if format.len() != 1 {
-                    bail!("consistency report 重复参数: --format");
-                }
-                Ok(())
-            }
-            Self::Ci(CiCommand::LocalonlyEvidence { output }) => {
-                if output.file_name().is_none() {
-                    bail!("ci localonly-evidence --output 必须包含文件名");
-                }
                 Ok(())
             }
             _ => Ok(()),
@@ -422,10 +300,7 @@ fn parse_selection_plan(value: &str) -> std::result::Result<Box<SelectionPlan>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assembly_lock;
-    use crate::graph;
     use crate::publicapi;
-    use crate::report_format::ReportFormat;
 
     fn parse(args: &[&str]) -> Result<Command> {
         let mut full = vec!["xtask"];
@@ -481,14 +356,11 @@ mod tests {
         for cmd in [
             "layer-deps",
             "wsdeps-drift",
-            "localtx-coverage",
             "outbox-same-id-guard",
-            "consistency-fixtures",
             "source-semantic-guard",
             "saga-durable-recovery-guard",
             "schema-rls",
             "inbox-cutover-guard",
-            "dlx-lifecycle-funnel",
             "pg-tenant-tx-guard",
             "repo-scope-guard",
             "reconcile-outbox-command-guard",
@@ -508,31 +380,6 @@ mod tests {
             err.to_string().contains("unknown subcommand"),
             "retired `setlocal-funnel` must be unknown subcommand, got: {err}"
         );
-        Ok(())
-    }
-
-    fn assert_assembly_and_graph_parse_shapes() -> Result<()> {
-        assert_eq!(
-            parse(&["assembly", "validate"])?,
-            Command::Assembly(AssemblyCommand::Validate)
-        );
-        assert_eq!(
-            parse(&["assembly", "generate-modules", "--check"])?,
-            Command::Assembly(AssemblyCommand::GenerateModules { check: true })
-        );
-        assert_eq!(
-            parse(&["assembly", "lock", "generate"])?,
-            Command::Assembly(AssemblyCommand::Lock(
-                assembly_lock::AssemblyLockAction::Generate
-            ))
-        );
-        assert_eq!(
-            parse(&["graph", "assembly"])?,
-            Command::Graph(GraphCommand::Assembly(graph::Options::default()))
-        );
-        assert!(parse(&["graph", "assembly", "--check"]).is_err());
-        assert!(parse(&["graph"]).is_err());
-        assert!(parse(&["graph", "assembly", "--assembly", "../x"]).is_err());
         Ok(())
     }
 
@@ -558,7 +405,7 @@ mod tests {
             })
         );
         assert!(parse(&["contract", "breaking", "--against"]).is_err());
-        assert_assembly_and_graph_parse_shapes()
+        Ok(())
     }
 
     #[test]
@@ -581,61 +428,14 @@ mod tests {
                 "legacy matrix flags must be rejected: {bad:?}"
             );
         }
-        assert_eq!(
-            parse(&["runtime-root", "guard"])?,
-            Command::RuntimeRoot(RuntimeRootCommand::Guard)
-        );
-        assert_eq!(
-            parse(&["runtime-deps", "guard"])?,
-            Command::RuntimeDeps(RuntimeDepsCommand::Guard)
-        );
-        assert_eq!(
-            parse(&["runtime-env", "guard"])?,
-            Command::RuntimeEnv(RuntimeEnvCommand::Guard)
-        );
         for bad in [
             &["archrules"][..],
-            &["runtime-assembly-residual"][..],
-            &["runtime-assembly-residual", "verify"][..],
-            &["runtime-assembly-residual", "update"][..],
             &["runtime-baseline", "verify"][..],
             &["runtime-baseline", "update"][..],
-            &["runtime-assembly-residual", "update", "extra"][..],
-            &["runtime-root"][..],
             &["runtime-deps", "guard", "extra"][..],
         ] {
             assert!(parse(bad).is_err(), "accepted {bad:?}");
         }
-        Ok(())
-    }
-
-    #[test]
-    fn try_parse_report_formats_are_closed() -> Result<()> {
-        assert_eq!(
-            parse(&["consistency", "report", "--format", "json"])?,
-            Command::Consistency(ConsistencyCommand::Report {
-                format: vec![ReportFormat::Json],
-            })
-        );
-        assert_eq!(
-            parse(&["consistency", "report", "--format", "markdown"])?,
-            Command::Consistency(ConsistencyCommand::Report {
-                format: vec![ReportFormat::Markdown],
-            })
-        );
-        assert!(parse(&["consistency", "report"]).is_err());
-        assert!(
-            parse(&[
-                "consistency",
-                "report",
-                "--format",
-                "json",
-                "--format",
-                "markdown",
-            ])
-            .is_err()
-        );
-        assert!(parse(&["consistency", "report", "--output", "out.json"]).is_err());
         Ok(())
     }
 
@@ -821,11 +621,6 @@ mod tests {
         // legacy 平铺 argv（无 subcommand）必须拒绝。
         assert!(parse(&["ci", "--base", "origin/develop"]).is_err());
         assert!(parse(&["ci", "localonly-evidence"]).is_err());
-        assert!(matches!(
-            parse(&["ci", "localonly-evidence", "--output", "out.json"])?,
-            Command::Ci(CiCommand::LocalonlyEvidence { .. })
-        ));
-        assert!(parse(&["ci", "localonly-evidence", "--output", "/"]).is_err());
         assert_eq!(
             parse(&["nextest-evidence", "stage"])?,
             Command::NextestEvidence(NextestEvidenceCommand::Stage)
@@ -851,9 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_l2_and_provider_flags() -> Result<()> {
-        assert_eq!(parse(&["l2-assurance"])?, Command::L2Assurance);
-        assert!(parse(&["l2-assurance", "--check"]).is_err());
+    fn try_parse_provider_flags() -> Result<()> {
         assert_eq!(
             parse(&["provider-capabilities", "--check"])?,
             Command::ProviderCapabilities { check: true }
@@ -862,7 +655,6 @@ mod tests {
             parse(&["provider-capabilities"])?,
             Command::ProviderCapabilities { check: false }
         );
-        assert!(parse(&["l2-assurance", "extra"]).is_err());
         for invalid in [
             &["provider-capabilities", "extra"][..],
             &["provider-capabilities", "--output", "report.json"][..],
@@ -878,34 +670,11 @@ mod tests {
 
     #[test]
     #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
-    fn try_parse_assembly_lock_rejects_SECRET_BAIT_without_echo() -> Result<()> {
-        for invalid in [
-            vec!["assembly", "lock"],
-            vec!["assembly", "lock", "--check"],
-            vec!["assembly", "lock", "generate", "runtime"],
-            vec!["assembly", "lock", "check", "SECRET_BAIT"],
-        ] {
-            let error = match parse(&invalid) {
-                Ok(command) => bail!("invalid lock argv parsed as {command:?}"),
-                Err(error) => error,
-            };
-            assert!(
-                !error.to_string().contains("SECRET_BAIT"),
-                "diagnostic leaked SECRET_BAIT: {error}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
-    fn try_parse_SECRET_BAIT_never_echoes_and_distinguishes_kinds() -> Result<()> {
+    fn try_parse_SECRET_BAIT_never_echoes() -> Result<()> {
         for args in [
             &["SECRET_BAIT"][..],
             &["codegen", "SECRET_BAIT"][..],
             &["codegen", "--SECRET_BAIT"][..],
-            &["consistency", "report", "--format", "SECRET_BAIT"][..],
-            &["localtx", "report", "--format", "SECRET_BAIT"][..],
         ] {
             let error = match parse(args) {
                 Ok(command) => bail!("bait argv parsed as {command:?}"),
@@ -933,15 +702,6 @@ mod tests {
         assert!(
             unknown_flag.contains("unexpected argument"),
             "flag path: {unknown_flag}"
-        );
-        let Err(invalid_value) = parse(&["consistency", "report", "--format", "SECRET_BAIT"])
-        else {
-            bail!("invalid value")
-        };
-        let invalid_value = invalid_value.to_string();
-        assert!(
-            invalid_value.contains("invalid value"),
-            "value path: {invalid_value}"
         );
         let Err(trailing) = parse(&["codegen", "SECRET_BAIT"]) else {
             bail!("trailing unknown")

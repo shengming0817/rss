@@ -1224,29 +1224,6 @@ fn fingerprint_for(
 mod tests {
     use super::*;
     use crate::AssemblyManifest;
-    use anyhow::Context as _;
-    use std::path::Path;
-
-    #[test]
-    fn unsupported_version_error_preserves_actual_and_supported_versions() -> anyhow::Result<()> {
-        let mut wire = serde_json::from_slice::<serde_json::Value>(include_bytes!(
-            "../../../assemblies/runtime/runtime-plan.json"
-        ))?;
-        wire["schemaVersion"] = serde_json::json!(1);
-
-        let error = match parse_unbound_runtime_plan(&serde_json::to_vec(&wire)?) {
-            Ok(_) => anyhow::bail!("RuntimePlan v1 unexpectedly parsed"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error.0,
-            RuntimePlanErrorKind::UnsupportedVersion {
-                actual: 1,
-                supported: 3
-            }
-        ));
-        Ok(())
-    }
 
     #[test]
     fn executable_provider_declarations_exclude_draft_roles() -> anyhow::Result<()> {
@@ -1316,58 +1293,6 @@ outputs = ["resources"]
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, declarations);
-        Ok(())
-    }
-
-    #[test]
-    fn manifest_bound_reader_rejects_self_consistent_extra_provider() -> anyhow::Result<()> {
-        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .context("repository root")?;
-        let source = crate::RepositoryAssemblyManifestV2::discover_v2(
-            repository_root,
-            &repository_root.join("assemblies/runtime"),
-        )?;
-        let manifest = source.canonical();
-        let lock = crate::ParsedAssemblyLock::from_json_slice(include_bytes!(
-            "../../../assemblies/runtime/assembly.lock.json"
-        ))?
-        .verify_repository_v2(&source)?;
-        let candidate = parse_unbound_runtime_plan(include_bytes!(
-            "../../../assemblies/runtime/runtime-plan.json"
-        ))?;
-        let RuntimePlan {
-            mut provider_plans,
-            listener_plans,
-            domain_plans,
-            placement_plans,
-            workflow_plans,
-            ..
-        } = candidate;
-        provider_plans.push(ProviderPlan {
-            id: "distributed-cas-store-alternative".to_owned(),
-            constructor: ProviderConstructor::RedisCasStore,
-            activation: ProviderRole::DistributedCasStoreAlternative.activation(),
-            outputs: vec![LifecycleChannel::Resources],
-        });
-        provider_plans.sort_by(|left, right| left.id.cmp(&right.id));
-        let forged = RuntimePlan::from_parts(
-            lock.fingerprint().clone(),
-            provider_plans,
-            listener_plans,
-            domain_plans,
-            placement_plans,
-            workflow_plans,
-        )?;
-        let bytes = serde_json::to_vec(&forged)?;
-
-        validate_runtime_plan_json_slice(&bytes)?;
-        let error = match ParsedRuntimePlan::from_json_slice_bound(&bytes, manifest, &lock) {
-            Ok(_) => anyhow::bail!("manifest-bound reader accepted an extra provider"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("providerPlans"));
         Ok(())
     }
 }

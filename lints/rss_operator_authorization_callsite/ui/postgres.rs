@@ -76,38 +76,4 @@ mod bundle {
     }
 }
 
-mod fault_matrix {
-    pub struct FaultMatrixPreparedL2DrRecovery;
-
-    impl FaultMatrixPreparedL2DrRecovery {
-        pub fn required_fence(
-            &self,
-            plan: eventexec::L2DrRecoveryPlan,
-            proof: eventexec::L2DrRecoveryDurableStartProof,
-        ) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, eventexec::L2DrRecoveryError> {
-            let capability =
-                eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
-            eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
-                plan, proof, capability,
-            )
-        }
-    }
-
-    pub struct SameNamedSibling;
-
-    impl SameNamedSibling {
-        pub fn required_fence(
-            &self,
-            plan: eventexec::L2DrRecoveryPlan,
-            proof: eventexec::L2DrRecoveryDurableStartProof,
-        ) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, eventexec::L2DrRecoveryError> {
-            let capability =
-                eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
-            eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
-                plan, proof, capability,
-            )
-        }
-    }
-}
-
 fn main() {}

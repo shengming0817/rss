@@ -1,11 +1,10 @@
-warning: reserved-capable wire 写面 `EnvelopeMetadata::insert_wire_pair` 仅 adapter（`adapters/`）/ 组合根（`bins`/`assemblies`）可调：此 crate 不在 callsite allowlist
+warning: reserved-capable wire 写面 `EnvelopeMetadata::insert_wire_pair` 仅 adapter（`adapters/`）/ 组合根（`bins`）可调：此 crate 不在 callsite allowlist
   --> $DIR/main.rs:15:5
    |
 LL |     md.insert_wire_pair("trace", "abc");
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 业务写 metadata 请用 `try_insert`（拒 reserved key，Hard 边界）；adapter（`adapters/`）/ 组合根（`bins`/`assemblies`）的 relay / subscriber rehydrate 才用 `insert_wire_pair`；确需在 allowlist 外调用在该调用处加 `#[allow(rss_diport_envelope_reserved_writer)] // reason: ...`（item-level 逃生门）
+   = help: 业务写 metadata 请用 `try_insert`（拒 reserved key，Hard 边界）；adapter（`adapters/`）/ 组合根（`bins`）的 relay / subscriber rehydrate 才用 `insert_wire_pair`；确需在 allowlist 外调用在该调用处加 `#[allow(rss_diport_envelope_reserved_writer)] // reason: ...`（item-level 逃生门）
    = note: `#[warn(rss_diport_envelope_reserved_writer)]` on by default
 
 warning: 1 warning emitted
-

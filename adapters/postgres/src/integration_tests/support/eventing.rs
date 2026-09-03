@@ -20,11 +20,11 @@ pub(in super::super) use diport::{
     PublishRequest, Publisher, PublisherError,
 };
 
+pub(in super::super) use ::eventing::delivery::DeliveryBudget;
+pub(in super::super) use ::eventing::lifecycle::RetryPolicy;
 pub(in super::super) use eventexec::{
     ConsumerMeta, LeaseConfig, TenantAuthority, TenantAuthorityBinding,
 };
-pub(in super::super) use eventing::delivery::DeliveryBudget;
-pub(in super::super) use eventing::lifecycle::RetryPolicy;
 
 pub(in super::super) use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
@@ -49,6 +49,7 @@ pub(in super::super) async fn run_consumer_ackable<S, H>(
     meta: &ConsumerMeta,
     handler: &H,
     lease_cfg: LeaseConfig,
+    retry_policy: RetryPolicy,
     admission: primitives::ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -69,7 +70,7 @@ pub(in super::super) async fn run_consumer_ackable<S, H>(
                 meta,
                 handler,
                 lease_cfg,
-                eventing::lifecycle::RetryPolicy::STANDARD,
+                retry_policy,
                 admission,
             )
             .await;
@@ -542,7 +543,7 @@ where
     C: generated::event::EventContract,
     C::Payload: serde::de::DeserializeOwned + Send + Sync,
 {
-    if entry.topic().as_str() != C::FACT.topic() || envelope.contract() != C::FACT.contract() {
+    if entry.topic().as_str() != C::FACT.topic() || *envelope.contract() != C::FACT.contract() {
         return Err("fixture topic or contract does not match its generated event contract".into());
     }
     let payload = serde_json::from_slice::<C::Payload>(entry.payload())?;
@@ -551,7 +552,7 @@ where
         .and_then(serde_json::Value::as_i64)
         .ok_or("fixture payload must carry occurredAt")?;
     let occurred_at = rss_contract::Timepoint::try_from(occurred_at)?;
-    let event_id = eventing::envelope::EventId::parse(entry.idem_key().as_str())?;
+    let event_id = ::eventing::envelope::EventId::parse(entry.idem_key().as_str())?;
     let (_contract, tenant, subject_id, actor, partition_key, causation_id) = envelope.into_parts();
     if partition_key.is_some() || causation_id.is_some() {
         return Err("fixture cannot override generated transport coordinates after review".into());
@@ -588,7 +589,7 @@ pub(in super::super) async fn reviewed_session_event(
         rss_contract::Timepoint::try_from(expected_occurred_at())?,
         subject_id(envelope_subject),
         actor,
-        eventing::envelope::EventId::parse(event_id)?,
+        ::eventing::envelope::EventId::parse(event_id)?,
     )
     .await?)
 }
@@ -1681,9 +1682,6 @@ pub(in super::super) async fn conf_relay(
             Disposition::Ack => eventconf::RelayDisposition::Ack,
             Disposition::Requeue => eventconf::RelayDisposition::Requeue,
             Disposition::Reject => eventconf::RelayDisposition::Reject,
-            _ => {
-                return Err("unknown relay disposition".to_string());
-            }
         },
         message_id,
         publish_count,
@@ -2102,6 +2100,7 @@ pub(in super::super) fn conf_consumer_meta(group: &str) -> ConsumerMeta {
         "eventing.conf.consumer",
         group,
         test_tenant_authority(),
+        test_eventing_emitter(),
     )
     .with_expected_schema("v1", TEST_SCHEMA_HASH)
 }
@@ -2205,7 +2204,6 @@ pub(in super::super) fn action_to_settle(
         AckAction::Ack => Ok(eventconf::SettleAction::Ack),
         AckAction::Requeue => Ok(eventconf::SettleAction::Requeue),
         AckAction::Reject => Ok(eventconf::SettleAction::Reject),
-        _ => Err("unknown ack action".to_string()),
     }
 }
 
@@ -2309,7 +2307,7 @@ pub(in super::super) async fn conf_duplicate_delivery(
         &(meta),
         &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
-        eventing::lifecycle::RetryPolicy::STANDARD,
+        RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2344,7 +2342,7 @@ pub(in super::super) async fn conf_poison_delivery(
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
-        eventing::lifecycle::RetryPolicy::STANDARD,
+        RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2381,7 +2379,7 @@ pub(in super::super) async fn conf_dlx_failure(
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
-        eventing::lifecycle::RetryPolicy::STANDARD,
+        RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;
@@ -2421,7 +2419,7 @@ pub(in super::super) async fn conf_malformed_delivery(
         &(conf_consumer_meta(&group)),
         &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
-        eventing::lifecycle::RetryPolicy::STANDARD,
+        RetryPolicy::STANDARD,
         conf_consumer_admission(),
     )
     .await;

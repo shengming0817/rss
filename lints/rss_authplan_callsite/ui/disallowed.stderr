@@ -1,27 +1,26 @@
-warning: AuthPlan 仅组合根（assembly / bin crate）可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
+warning: AuthPlan 仅定义 crate 可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
   --> $DIR/disallowed.rs:13:17
    |
 LL |     let _plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken);
    |                 ^^^^^^^^^^^^^
    |
-   = help: 在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
+   = help: 由 `primitives` 内部构造 AuthPlan 并通过类型化边界传递；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
    = note: `#[warn(rss_authplan_callsite)]` on by default
 
-warning: AuthPlan 仅组合根（assembly / bin crate）可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
+warning: AuthPlan 仅定义 crate 可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
   --> $DIR/disallowed.rs:16:18
    |
 LL |     let new_fn = AuthPlan::new;
    |                  ^^^^^^^^^^^^^
    |
-   = help: 在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
+   = help: 由 `primitives` 内部构造 AuthPlan 并通过类型化边界传递；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
 
-warning: AuthPlan 仅组合根（assembly / bin crate）可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
+warning: AuthPlan 仅定义 crate 可构造：`AuthPlan::new` / `AuthPlan::none` 不得在此 crate 调用
   --> $DIR/disallowed.rs:20:18
    |
 LL |     let _plan3 = AuthPlan::none(ListenerKind::Primary);
    |                  ^^^^^^^^^^^^^^
    |
-   = help: 在 assembly / bin crate 的组合根中构造 AuthPlan，经 bootstrap option 注入；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
+   = help: 由 `primitives` 内部构造 AuthPlan 并通过类型化边界传递；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_authplan_callsite)] // reason: ...`
 
 warning: 3 warnings emitted
-

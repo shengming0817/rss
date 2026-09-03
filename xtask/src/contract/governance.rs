@@ -514,10 +514,6 @@ impl GovernedContract {
         self.source.manifest_path()
     }
 
-    pub(crate) fn manifest_bytes(&self) -> &[u8] {
-        self.source.manifest_bytes()
-    }
-
     pub(crate) fn schema(
         &self,
         file: &str,
@@ -537,32 +533,15 @@ impl GovernedContract {
     }
 }
 
-pub(crate) fn validate_workflow_activations(
-    manifest: &assembly_schema::CanonicalAssemblyManifestV2,
-    contracts: &[GovernedContract],
-) -> Result<()> {
-    let repository = contracts
-        .iter()
-        .map(|contract| contract.source.clone())
-        .collect::<Vec<_>>();
-    assembly_schema::repository_contract::validate_workflow_activations(manifest, &repository)
-        .map_err(anyhow::Error::new)
-}
-
 /// Minimal typed projection for CI impact planning from either working-tree or git-ref bytes.
 /// Raw manifest owner parsing is confined to the governance source owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContractImpact {
-    id: String,
     owner: Option<String>,
     subscribers: Vec<String>,
 }
 
 impl ContractImpact {
-    pub(crate) fn id(&self) -> &str {
-        &self.id
-    }
-
     pub(crate) fn owner(&self) -> Option<&str> {
         self.owner.as_deref()
     }
@@ -574,18 +553,13 @@ impl ContractImpact {
 
 pub(crate) fn contract_impact_from_manifest(source: &str) -> Result<ContractImpact> {
     let manifest = ContractManifest::from_toml_str(source).context("parse impacted contract")?;
-    let id = manifest.id.clone();
     let owner = manifest.owner_domain().map(str::to_owned);
     let subscribers = manifest
         .subscriptions
         .into_iter()
         .map(|subscription| subscription.consumer)
         .collect();
-    Ok(ContractImpact {
-        id,
-        owner,
-        subscribers,
-    })
+    Ok(ContractImpact { owner, subscribers })
 }
 
 /// Complete validated repository contract IR.
@@ -675,6 +649,7 @@ impl ContractGovernanceIr {
     }
 
     /// Inspect one isolated contract repository without workspace-only prerequisites.
+    #[cfg(test)]
     pub(crate) fn inspect_contracts_root(
         contracts_root: &Path,
     ) -> Result<ContractGovernanceInspection> {

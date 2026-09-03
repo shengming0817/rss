@@ -12,7 +12,7 @@
 //!   finalize driver 已落地——[`Registry::readyz_report`] 驱动探针 worst-of 聚合，
 //!   [`Registry::admit_writes`] 消费 process gate 后由 [`WriteAdmittedRegistry::finalize_routes`]
 //!   按 listener 分组折叠路由组 register 闭包。HTTP mount + auth
-//!   finalize（httpserve）、subscriber dispatch（eventexec）、socket bind / 信号 / config 归组合根（assemblies/runtime launch）。
+//!   finalize（httpserve）、subscriber dispatch（eventexec）、socket bind / 信号 / config 归运行时集成。
 //!   对标：kube-rs controller lifecycle、uber-go/fx Lifecycle.Append、omicron nexus 分 listener 隔离。
 //!
 //! - [`eventtransport`]：topology-gated 事件传输选型（单源策略）——[`resolve`] 按 [`Topology`]

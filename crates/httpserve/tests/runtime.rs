@@ -12,7 +12,7 @@
 //!
 //! 注：本 contract 测试**不** feature-gate——rust-standards §命名的 `#[cfg(feature="integration")]`
 //! 隔离针对需外部资源（DB/broker/网络）的集成测试；本测试全程 in-process（axum oneshot、
-//! 确定性、毫秒级），是 `cargo test` 默认验收门，故有意不隔离（同 journeys/tests）。
+//! 确定性、毫秒级），是 `cargo test` 默认验收门，故有意不隔离。
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};

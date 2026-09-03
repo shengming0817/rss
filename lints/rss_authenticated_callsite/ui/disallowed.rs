@@ -10,7 +10,7 @@ use httpserve::Authenticated;
 use rss_request_context::PrincipalKind;
 
 fn main() {
-    // R1：非组合根 crate 调 profile-specific evidence constructor → 触发。
+    // R1：未授权 crate 调 profile-specific evidence constructor → 触发。
     let _ev = Authenticated::new_federated(
         authmint::AuthenticatedMint::capability(),
         PrincipalKind::User,
@@ -51,7 +51,7 @@ fn main() {
     // 只针对 Authenticated 的 profile-specific constructor 闭集。
     let _f = httpserve::finalize_auth;
 
-    // R3：非组合根 crate 引用 Principal 审计 subject accessor → 触发。
+    // R3：未授权 crate 引用 Principal 审计 subject accessor → 触发。
     let _subject = authn::Principal::audit_subject;
     let _caller = authn::Principal::service_caller_domain;
     inspect_principal;

@@ -84,8 +84,6 @@ zeroize = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（tokio_util::sync::CancellationToken）——adopt 式 worker 两阶段关闭。
 tokio-util = { workspace = true }
-# fault-matrix-test-support 专用边界错误聚合；默认 feature 不启用。
-anyhow = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -112,25 +110,6 @@ test-support = ["eventexec/l2-test-support", "eventexec/internal-test-support"]
 # Composition 单测专用 proof mint；不进入通用 test-support/integration，避免任何 provider
 # conformance/trybuild 图把测试构造器误当成生产能力。
 consumer-tx-composition-test-support = []
-# Journey 专用事务故障 seam；不恢复任何 refresh store 写入能力。
-# 不被通用 test-support 包含，避免 Cargo feature 并集把事务故障注入带入无关测试图。
-journey-fault-support = []
-# N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。
-fault-matrix-test-support = [
-    "test-support",
-    "domain-audit",
-    "domain-identity",
-    "domain-settings",
-    "auth-audit-sink",
-    "dep:anyhow",
-    "dep:serde_json_canonicalizer",
-    "diport/test-support",
-    "eventexec/l2-test-support",
-    "eventexec/internal-test-support",
-    "dep:identity",
-    "identity/fault-matrix-test-support",
-]
-
 # Catalog Test targets：LocalEligibility 与资源声明以 `xtask` integration_shards catalog 为准；
 # Cargo `[[test]] required-features` 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
 # RemoteOnly（live PG）：必须声明 `integration` RF。

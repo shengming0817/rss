@@ -1,24 +1,5 @@
-// Exact green fixture for the sole persistence hydration impl method; the same target also carries
-// the postgres-owned capability red fixture without a same-named adapter dev-dependency.
+// Exact green fixture for the sole persistence hydration impl method.
 #![allow(unused)]
-
-struct ConfigValueMaintenanceCapability;
-
-impl ConfigValueMaintenanceCapability {
-    fn from_verified_maintenance_service_operator(
-        _: &authn::VerifiedMaintenanceServiceOperator,
-    ) -> Self {
-        Self
-    }
-}
-
-fn forbidden_capability_mint(proof: &authn::VerifiedMaintenanceServiceOperator) {
-    let _ = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(proof);
-    let mint = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator;
-    let _mint_fn: fn(&authn::VerifiedMaintenanceServiceOperator) -> ConfigValueMaintenanceCapability =
-        ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator;
-    let _ = mint;
-}
 
 mod auth_grant_lifecycle {
     pub(super) struct PgAuthGrantLifecycle;

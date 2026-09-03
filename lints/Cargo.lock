@@ -571,6 +571,8 @@ dependencies = [
  "ids",
  "pkiauthmint",
  "primitives",
+ "rss-contract",
+ "rss-eventing",
  "rss-request-context",
  "sagaauthmint",
  "secure",
@@ -800,6 +802,9 @@ dependencies = [
  "generated",
  "metrics",
  "primitives",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-eventing",
  "rss-request-context",
  "rss-trace-context",
  "secure",
@@ -1322,6 +1327,9 @@ dependencies = [
  "observ",
  "primitives",
  "regex",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-eventing",
  "rss-request-context",
  "runctx",
  "secure",
@@ -1650,6 +1658,7 @@ dependencies = [
  "ids",
  "metrics",
  "primitives",
+ "rss-eventing",
  "runctx",
  "secure",
  "support",
@@ -2044,6 +2053,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-eventing"
+version = "0.1.0"
+dependencies = [
+ "rss-contract",
+ "rss-diag-context",
+ "rss-request-context",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rss-request-context"
 version = "0.1.0"
 dependencies = [
@@ -2290,15 +2309,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rss_runtime_env_funnel"
-version = "0.0.0"
-dependencies = [
- "clippy_utils",
- "dylint_linting",
- "dylint_testing",
-]
-
-[[package]]
 name = "rss_spawn_missing_scope"
 version = "0.0.0"
 dependencies = [
@@ -2440,6 +2450,7 @@ dependencies = [
  "argon2",
  "base64",
  "hmac",
+ "rss-contract",
  "rss-request-context",
  "secrecy",
  "securederive",
@@ -3241,7 +3252,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vocab"
 version = "0.0.0"
 dependencies = [
- "base64",
  "rss-contract",
  "rss-request-context",
  "serde",

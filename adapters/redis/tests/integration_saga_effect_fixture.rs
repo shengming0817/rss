@@ -1,7 +1,7 @@
-//! Real Redis coverage for the fault-matrix-only Saga effect fixture.
+//! Real Redis coverage for the Saga effect fixture.
 //!
 //! Cargo `[[test]] required-features = ["integration"]` is the sole eligibility owner;
-//! `integration` transitively enables `fault-matrix-test-support` / backend.
+//! `integration` directly enables the backend.
 
 use consistency::{SagaEffectPhase, SagaIdempotencyKey};
 use deadpool_redis::{Config, Runtime};

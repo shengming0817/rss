@@ -32,17 +32,6 @@ flaky-result = "fail"
 [profile.integration.junit]
 path = "junit.xml"
 
-# fault matrix 当前只有单个顶层测试；独立 profile 仅放宽故障注入 case 的上限，不伪装成可均衡拆分。
-[profile.fault-matrix]
-slow-timeout = { period = "600s", terminate-after = 1 }
-leak-timeout = "200ms"
-fail-fast = false
-retries = 0
-flaky-result = "fail"
-
-[profile.fault-matrix.junit]
-path = "junit.xml"
-
 [test-groups.trybuild]
 max-threads = 1
 

@@ -1,5 +1,0 @@
-error[E0616]: field `revocation_store` of struct `SharedRuntimeDeps` is private
- --> tests/ui/shared_runtime_deps_revocation_field_private_fail.rs:4:26
-  |
-4 |     let _private = &deps.revocation_store;
-  |                          ^^^^^^^^^^^^^^^^ private field

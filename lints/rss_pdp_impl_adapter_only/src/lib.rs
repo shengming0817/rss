@@ -1,15 +1,15 @@
 #![feature(rustc_private)]
 //! `rss_pdp_impl_adapter_only` — RSS 治理 dylint lint：`diport::Pdp` 验签端口**仅 provider adapter 可
-//! impl**；组合根（`bins` / `assemblies`）与域 / 服务 crate 不得内联 `impl diport::Pdp`（信任根锁）。
+//! impl**；非 adapter 的域 / 服务 crate 不得内联 `impl diport::Pdp`（信任根锁）。
 //!
 //! INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "check", source = "dylint" }（T004.6 / #1198 / ADR-006 §5 安全同批门信任根分线）
 //!
 //! 背景：`Pdp` 是认证决策的**信任原点**（验签 = 信任原点，authn 的 profile-specific verify funnels
 //! 经其铸 `VerifiedClaims`）。
-//! 既有 `rss_diport_impl_allowlist`（DIPORT-IMPL-ALLOWLIST-01）放行 `adapters` / `bins` / `assemblies` impl
+//! 既有 `rss_diport_impl_allowlist`（DIPORT-IMPL-ALLOWLIST-01）放行 `adapters` / `bins` impl
 //! **任一** DI port，`deny.toml` oidc/memory wrapper 只拦「依赖 stub adapter crate」——二者都**拦不住**组合根
-//! （bins/assemblies，在 allowlist 内）**内联** 一个 always-allow `impl Pdp`（恒返回伪 `VerifiedClaims`）绕过真
-//! 验签（`tasks.md:14` stub 防线缺口）。本 lint 把 `Pdp` 收紧到**只准 provider adapter 实现**：组合根只能经
+//! （bins，在 allowlist 内）**内联** 一个 always-allow `impl Pdp`（恒返回伪 `VerifiedClaims`）绕过真
+//! 验签（`tasks.md:14` stub 防线缺口）。本 lint 把 `Pdp` 收紧到**只准 provider adapter 实现**：消费者只能经
 //! 构造器注入真 adapter（如 `oidc::OidcProvider`），不可自造验签判定。
 //!
 //! 判定面：
@@ -18,7 +18,7 @@
 //! - impl 站点放行（二选一，键 **package 身份 / 位置**，非源文件路径）：① 被编译 crate 是 `diport` 自身
 //!   （dynosaur/trait_variant 宏在 diport 源内生成的 `impl Pdp for DynPdp` bridge，按 `LOCAL_CRATE` 身份判）；
 //!   ② 被编译 package 的 `CARGO_MANIFEST_DIR` 父目录名 == `adapters`（provider 实现唯一合法位）。**故意不**放行
-//!   `bins` / `assemblies`（≠ `rss_diport_impl_allowlist`）——组合根内联 Pdp 即信任根被旁路，正是本 lint 所拦。
+//!   非 adapter crate——内联 Pdp 即信任根被旁路，正是本 lint 所拦。
 //!
 //! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游（定义面）：`Pdp` 只定义在 `diport`（`deny.toml` 宏依赖 wrapper，DIPORT-MACRO-CONFINE-01）。
@@ -53,13 +53,13 @@ use rustc_lint::{LateContext, LateLintPass};
 dylint_linting::declare_late_lint! {
     /// ### What it does
     /// 标记**非** `adapters` package（且非 `diport` 自身）里对 `diport::Pdp` / `diport::PdpLocal` 验签端口的
-    /// `impl`——即组合根（`bins` / `assemblies`）或域 / 服务 crate 内联实现验签判定。
+    /// `impl`——即非 adapter 的域 / 服务 crate 内联实现验签判定。
     ///
     /// ### Why is this bad?
-    /// `Pdp` 是认证信任原点。组合根（bins/assemblies，在 `rss_diport_impl_allowlist` 放行集内）内联一个
+    /// `Pdp` 是认证信任原点。非 adapter crate 内联一个
     /// always-allow `impl Pdp`（恒返回伪 `VerifiedClaims`）即可旁路真验签——`deny.toml` stub wrapper 与既有
     /// impl-site allowlist 都拦不住（ADR-006 §5 安全同批门信任根缺口，`tasks.md:14`）。本 lint 把 `Pdp` 收紧到
-    /// **只准 provider adapter 实现**，组合根只能经构造器注入真 adapter（如 `oidc::OidcProvider`）。
+    /// **只准 provider adapter 实现**；消费者只能注入真 adapter（如 `oidc::OidcProvider`）。
     /// INVARIANT: PDP-IMPL-ADAPTER-ONLY-01 { level = "Medium", exec = "check", source = "dylint" }。
     ///
     /// ### Known problems
@@ -70,11 +70,11 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Example
     /// ```ignore
-    /// // assemblies/runtime（组合根，非 adapters）：
+    /// // 非 adapters crate：
     /// struct AllowAll;
     /// impl diport::Pdp for AllowAll { /* 恒返回伪 VerifiedClaims */ } // 触发
     /// ```
-    /// Use instead: 把验签实现放到 `adapters/<name>`（provider），组合根经构造器注入 `Box<DynPdp>` 消费。
+    /// Use instead: 把验签实现放到 `adapters/<name>`（provider），消费者注入 `Box<DynPdp>`。
     pub RSS_PDP_IMPL_ADAPTER_ONLY,
     Warn,
     "diport::Pdp 验签端口仅 provider adapter 可 impl（信任根，INVARIANT PDP-IMPL-ADAPTER-ONLY-01）"
@@ -106,12 +106,12 @@ impl<'tcx> LateLintPass<'tcx> for RssPdpImplAdapterOnly {
             item.hir_id(),
             item.span,
             format!(
-                "验签端口 `diport::{}` 仅 provider adapter 可 impl：组合根 / 域不得内联验签判定（信任根）",
+                "验签端口 `diport::{}` 仅 provider adapter 可 impl：非 adapter crate 不得内联验签判定（信任根）",
                 cx.tcx.item_name(trait_did)
             ),
             |diag| {
                 diag.help(
-                    "把验签实现放到 `adapters/<name>`（provider），组合根经构造器注入 `Box<DynPdp>` 消费；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由",
+                    "把验签实现放到 `adapters/<name>`（provider），消费者注入 `Box<DynPdp>`；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_pdp_impl_adapter_only)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由",
                 );
             },
         );
@@ -135,7 +135,7 @@ fn is_local_diport(cx: &LateContext<'_>) -> bool {
 /// impl 站点放行：被编译 package 的 manifest 目录父目录名 == `adapters`（provider 实现唯一合法位）。
 /// 键 package 位置（`CARGO_MANIFEST_DIR`，绝对路径、随调用位置不变）非源**文件**位置 ⇒ 域 crate 把 impl
 /// 放进 `crates/<domain>/src/adapters/` 子目录无法绕过（manifest dir 仍 `crates/<domain>`，父目录 `crates`）。
-/// `CARGO_MANIFEST_DIR` 缺失 fail-closed 视为不允许。**故意不**放行 `bins` / `assemblies`（组合根内联 Pdp 即旁路）。
+/// `CARGO_MANIFEST_DIR` 缺失 fail-closed 视为不允许，并且故意不放行其它 crate。
 fn impl_site_allowed() -> bool {
     let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") else {
         return false;

@@ -3,34 +3,17 @@ name = "rss_authenticated_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS 治理：限定认证证据、主体降维与 verified maintenance capability funnel 仅 runtime 组合根可调用"
+description = "RSS 治理：封闭认证证据、主体降维与授权 funnel"
 
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep httpserve / vocab）
 
 # 本 lint 按 **caller crate 名** 判 allowlist（≠ 按 callee fn 名唯一判定）。
 # `new` 是极常见名，必须额外校验 self-ty=Authenticated；UI fixture 验证 specificity。
-# UI fixture 编译为单一 example crate、crate 名 = example target 名，故须两个 example target：
-#   - authenticated_callsite_ui（crate 名非 allowlist）→ 红例：调证据 / grant funnel 触发；
-#   - runtime（crate 名 = 唯一合法组合根）→ 绿例：调 funnel 不触发（anti-vacuity，验 allowlist 分支非恒报）。
-#   - identity / postgres / authn → grant 生产链精确 impl-method 绿例与同 crate 红控。
-# golden 随源文件名（ui/disallowed.stderr / ui/runtime.stderr / ui/authn.stderr）。
-# 绿例用 "runtime"：不与 rss_authplan_callsite 的 "primitives" 在共享 lints workspace 撞 target 名。
+# UI fixture 编译为单一 example crate；identity / postgres / authn 覆盖 grant 生产链。
 [[example]]
 name = "authenticated_callsite_ui"
 path = "ui/disallowed.rs"
-
-[[example]]
-name = "runtime"
-path = "ui/runtime.rs"
-
-[[example]]
-name = "settingsonly"
-path = "ui/settingsonly.rs"
-
-[[example]]
-name = "identityaudit"
-path = "ui/identityaudit.rs"
 
 [[example]]
 name = "identity"

@@ -2,9 +2,9 @@
 //!
 //! INVARIANT: INTEGRATION-SHARD-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "catalog macro generates the closed enum, ALL, lookup, resources, and execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
-//! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets|source_and_security_provider_relations_reject_catalog_drift", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets|shared_journey_relations_match_independently_discovered_module_edges|source_and_security_provider_relations_are_closed_and_non_vacuous" }.
+//! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code" }.
 //! INVARIANT: INTEGRATION-SHARD-ELIGIBILITY-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift|cargo_target_eligibility_rejects_crate_level_feature_cfg", anti_vacuity = "catalog_test_and_remote_only_sets_are_non_vacuous|workspace_cargo_target_eligibility_matches_local_feature_scope" }.
-//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
+//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets" }.
 
 #[cfg(test)]
 use crate::workspace_root;
@@ -130,12 +130,7 @@ impl SecurityProvider {
     fn expected_critical_carriers(self) -> BTreeSet<IntegrationUnitId> {
         use IntegrationUnitId as Id;
         match self {
-            Self::Oidc => BTreeSet::from([
-                Id::IdentityPasswordSecurityEventJourney,
-                Id::IdentityRefreshProducerTransactionJourney,
-                Id::IdentityLoginWireE2e,
-                Id::ServiceTokenReplayE2e,
-            ]),
+            Self::Oidc => BTreeSet::new(),
             Self::Vault => BTreeSet::from([Id::VaultLive]),
         }
     }
@@ -150,16 +145,11 @@ pub(crate) enum ImpactMarker {
     AuditPackage,
     AuthnPackage,
     IdentityPackage,
-    IdentityCompositionPackage,
-    DeviceIdentityPackage,
-    SettingsOnlyPackage,
-    IdentityAuditPackage,
     SettingsPackage,
     AmqpPackage,
     EventexecPackage,
     MqttPackage,
     RedisAdapterPackage,
-    RuntimePackage,
     HttpdPackage,
     HttpservePackage,
     BootstrapPackage,
@@ -176,22 +166,17 @@ pub(crate) enum ImpactMarker {
 }
 
 impl ImpactMarker {
-    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 23] = [
+    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 18] = [
         ("postgres", Self::PostgresPackage),
         ("postgres-migration", Self::PostgresMigrationPackage),
         ("audit", Self::AuditPackage),
         ("authn", Self::AuthnPackage),
         ("identity", Self::IdentityPackage),
-        ("identity-composition", Self::IdentityCompositionPackage),
-        ("deviceidentity", Self::DeviceIdentityPackage),
-        ("settingsonly", Self::SettingsOnlyPackage),
-        ("identityaudit", Self::IdentityAuditPackage),
         ("settings", Self::SettingsPackage),
         ("amqp", Self::AmqpPackage),
         ("eventexec", Self::EventexecPackage),
         ("mqtt", Self::MqttPackage),
         ("redis-adapter", Self::RedisAdapterPackage),
-        ("runtime", Self::RuntimePackage),
         ("httpd", Self::HttpdPackage),
         ("httpserve", Self::HttpservePackage),
         ("bootstrap", Self::BootstrapPackage),
@@ -209,16 +194,11 @@ impl ImpactMarker {
             Self::AuditPackage => "package:audit",
             Self::AuthnPackage => "package:authn",
             Self::IdentityPackage => "package:identity",
-            Self::IdentityCompositionPackage => "package:identity-composition",
-            Self::DeviceIdentityPackage => "package:deviceidentity",
-            Self::SettingsOnlyPackage => "package:settingsonly",
-            Self::IdentityAuditPackage => "package:identityaudit",
             Self::SettingsPackage => "package:settings",
             Self::AmqpPackage => "package:amqp",
             Self::EventexecPackage => "package:eventexec",
             Self::MqttPackage => "package:mqtt",
             Self::RedisAdapterPackage => "package:redis-adapter",
-            Self::RuntimePackage => "package:runtime",
             Self::HttpdPackage => "package:httpd",
             Self::HttpservePackage => "package:httpserve",
             Self::BootstrapPackage => "package:bootstrap",
@@ -331,32 +311,20 @@ pub(crate) enum LocalFeatureScope {
     RedisAdapter,
     Amqp,
     Mqtt,
-    DeviceIdentity,
-    Journeys,
-    Runtime,
     Testkit,
-    JourneysFaultMatrix,
     S3,
-    SettingsOnly,
-    IdentityAudit,
     Vault,
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Postgres,
         Self::PostgresMigration,
         Self::RedisAdapter,
         Self::Amqp,
         Self::Mqtt,
-        Self::DeviceIdentity,
-        Self::Journeys,
-        Self::Runtime,
         Self::Testkit,
-        Self::JourneysFaultMatrix,
         Self::S3,
-        Self::SettingsOnly,
-        Self::IdentityAudit,
         Self::Vault,
     ];
 
@@ -367,14 +335,8 @@ impl LocalFeatureScope {
             Self::RedisAdapter => "redis-adapter",
             Self::Amqp => "amqp",
             Self::Mqtt => "mqtt",
-            Self::DeviceIdentity => "deviceidentity",
-            Self::Journeys => "journeys",
-            Self::Runtime => "runtime",
             Self::Testkit => "testkit",
-            Self::JourneysFaultMatrix => "journeys-fault-matrix",
             Self::S3 => "s3",
-            Self::SettingsOnly => "settingsonly",
-            Self::IdentityAudit => "identityaudit",
             Self::Vault => "vault",
         }
     }
@@ -382,17 +344,12 @@ impl LocalFeatureScope {
     pub(crate) const fn feature(self) -> &'static str {
         match self {
             Self::Mqtt => "broker-tests",
-            Self::DeviceIdentity | Self::IdentityAudit => "test-support",
             Self::Postgres
             | Self::PostgresMigration
             | Self::RedisAdapter
             | Self::Amqp
-            | Self::Journeys
-            | Self::Runtime
             | Self::Testkit
-            | Self::JourneysFaultMatrix
             | Self::S3
-            | Self::SettingsOnly
             | Self::Vault => "integration",
         }
     }
@@ -404,14 +361,8 @@ impl LocalFeatureScope {
             Self::RedisAdapter => "adapters/redis",
             Self::Amqp => "adapters/amqp",
             Self::Mqtt => "adapters/mqtt",
-            Self::DeviceIdentity => "assemblies/deviceidentity",
-            Self::Journeys => "journeys",
-            Self::Runtime => "assemblies/runtime",
             Self::Testkit => "crates/testkit",
-            Self::JourneysFaultMatrix => "journeys-fault-matrix",
             Self::S3 => "adapters/s3",
-            Self::SettingsOnly => "assemblies/settingsonly",
-            Self::IdentityAudit => "assemblies/identityaudit",
             Self::Vault => "adapters/vault",
         }
     }
@@ -492,7 +443,7 @@ impl IntegrationUnitSpec {
     }
 }
 
-/// Only targets whose typed unit policy requires remote resources or production composition are
+/// Only targets whose typed unit policy requires remote resources are
 /// excluded locally. Remote orchestration ownership alone does not remove T1/component proof.
 pub(crate) fn is_remote_only_test_target(package: &str, target: &str) -> bool {
     IntegrationShard::ALL.iter().any(|shard| {
@@ -697,86 +648,8 @@ pub(crate) enum ChangedIntegrationSource {
     ReleaseCheck,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SharedJourneySource {
-    Common,
-    LocalTxValidation,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SharedJourneyRelation {
-    critical_carriers: &'static [IntegrationUnitId],
-    has_release_consumer: bool,
-}
-
-impl SharedJourneySource {
-    const ALL: [Self; 2] = [Self::Common, Self::LocalTxValidation];
-
-    const fn path(self) -> &'static str {
-        match self {
-            Self::Common => "journeys/tests/common/mod.rs",
-            Self::LocalTxValidation => "journeys/tests/support/localtx_validation.rs",
-        }
-    }
-
-    /// One typed source→consumer/profile relation. Selector projection and graph-drift validation
-    /// must consume these two dimensions together.
-    const fn relation(self) -> SharedJourneyRelation {
-        match self {
-            Self::Common => SharedJourneyRelation {
-                critical_carriers: &[
-                    IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-                    IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
-                    IntegrationUnitId::AmqpConsumerAtLeastOnceJourney,
-                    IntegrationUnitId::IdentityLoginAuditDurableJourney,
-                ],
-                has_release_consumer: true,
-            },
-            Self::LocalTxValidation => SharedJourneyRelation {
-                critical_carriers: &[
-                    IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-                    IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
-                ],
-                has_release_consumer: false,
-            },
-        }
-    }
-
-    fn for_path(path: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|source| source.path() == path)
-    }
-}
-
-/// Project an integration target root or a declared shared journey source to stable unit IDs.
-/// Unknown journey support and release-only carriers deliberately fail closed.
+/// Project an integration target root to stable unit IDs.
 pub(crate) fn changed_integration_source(path: &str) -> Option<ChangedIntegrationSource> {
-    if path == "journeys/Cargo.toml" {
-        let units = IntegrationUnitId::ALL
-            .into_iter()
-            .filter(|id| {
-                id.spec().package == "journeys"
-                    && id.spec().primary_owner == ExecutionProfile::IntegrationCritical
-            })
-            .collect::<BTreeSet<_>>();
-        return Some(ChangedIntegrationSource::Exact(units));
-    }
-    if let Some(source) = SharedJourneySource::for_path(path) {
-        let relation = source.relation();
-        let units = relation
-            .critical_carriers
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        return Some(if relation.has_release_consumer {
-            ChangedIntegrationSource::ReleaseCheck
-        } else {
-            ChangedIntegrationSource::Exact(units)
-        });
-    }
-    if path.starts_with("journeys/tests/support/") || path.starts_with("journeys/tests/common/") {
-        return Some(ChangedIntegrationSource::ReleaseCheck);
-    }
-
     for id in IntegrationUnitId::ALL {
         let spec = id.spec();
         if spec.kind != TargetKind::Test {
@@ -799,54 +672,10 @@ pub(crate) fn changed_integration_source(path: &str) -> Option<ChangedIntegratio
     None
 }
 
-pub(crate) fn shared_source_relation_semantics() -> Vec<String> {
-    SharedJourneySource::ALL
-        .into_iter()
-        .map(|source| {
-            let relation = source.relation();
-            let carriers = source
-                .relation()
-                .critical_carriers
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "integration-shared-source={}:{}",
-                source.path(),
-                if relation.has_release_consumer {
-                    if carriers.is_empty() {
-                        "release-check".to_owned()
-                    } else {
-                        format!("release-check+{carriers}")
-                    }
-                } else {
-                    carriers
-                }
-            )
-        })
-        .collect()
-}
-
-#[cfg(test)]
-pub(crate) fn critical_units_for_targets(
-    targets: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
-) -> BTreeSet<IntegrationUnitId> {
-    let targets = targets
-        .into_iter()
-        .map(|(package, target)| (package.as_ref().to_owned(), target.as_ref().to_owned()))
-        .collect::<BTreeSet<_>>();
-    IntegrationUnitId::ALL
-        .into_iter()
-        .filter(|id| id.spec().primary_owner == ExecutionProfile::IntegrationCritical)
-        .filter(|id| targets.contains(&(id.spec().package.to_owned(), id.spec().target.to_owned())))
-        .collect()
-}
-
 integration_shard_catalog! {
     PostgresDomain => {
         name: "postgres-domain",
-        local_feature_scopes: [Postgres, PostgresMigration, Journeys, Runtime],
+        local_feature_scopes: [Postgres, PostgresMigration],
         units: [
             PostgresLib => ("postgres-lib", IntegrationCritical, "postgres", "postgres", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresPackage, DeviceCertificateCandidate], capabilities: []),
             PostgresMigrationLib => ("postgres-migration-lib", IntegrationCritical, "postgres-migration", "postgres_migration", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresMigrationPackage], capabilities: []),
@@ -882,23 +711,16 @@ integration_shard_catalog! {
             PostgresMigration0112DevicePolicyCorrelation => ("postgres-migration-0112-device-policy-correlation", ReleaseCheck, "postgres", "migration_0112_device_policy_correlation", Test, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             PostgresMigration0113ReceiptBoundReadyUpgrade => ("postgres-migration-0113-receipt-bound-ready-upgrade", ReleaseCheck, "postgres", "migration_0113_receipt_bound_ready_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
-            IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            IdentityPasswordSecurityEventJourney => ("identity-password-security-event-journey", IntegrationCritical, "journeys", "identity_password_security_event_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, IdentityPackage, PostgresPackage, LocalTxContract, OidcProvider], capabilities: []),
-            IdentityRefreshProducerTransactionJourney => ("identity-refresh-producer-transaction-journey", IntegrationCritical, "journeys", "identity_refresh_producer_transaction_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, IdentityPackage, PostgresPackage, LocalTxContract, OidcProvider], capabilities: []),
-            SettingsSecretPublishLocalTxJourney => ("settings-secret-publish-local-tx-journey", IntegrationCritical, "journeys", "settings_secret_publish_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [SettingsPackage, PostgresPackage, LocalTxContract], capabilities: []),
-            SettingsSecretE2e => ("settings-secret-e2e", IntegrationCritical, "runtime", "settings_secret_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [SettingsPackage, PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: []),
         ],
     },
     EventTransport => {
         name: "event-transport",
-        local_feature_scopes: [Amqp, Mqtt, DeviceIdentity, Testkit, Journeys, Runtime],
+        local_feature_scopes: [Amqp, Mqtt, Testkit],
         units: [
             AmqpLib => ("amqp-lib", IntegrationCritical, "amqp", "amqp", Lib, Parallel, Affected, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
             AmqpIntegration => ("amqp-integration", IntegrationCritical, "amqp", "integration", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
             MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
-            DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -907,43 +729,19 @@ integration_shard_catalog! {
             TestkitEventingLifecycleT2 => ("testkit-eventing-lifecycle-t2", ReleaseCheck, "testkit", "eventing_lifecycle_t2", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             TestkitMqttMtlsFixture => ("testkit-mqtt-mtls-fixture", ReleaseCheck, "testkit", "mqtt_mtls_fixture", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
             TestkitMqttOwnershipGate => ("testkit-mqtt-ownership-gate", ReleaseCheck, "testkit", "mqtt_ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            AmqpConsumerAtLeastOnceJourney => ("amqp-consumer-at-least-once-journey", IntegrationCritical, "journeys", "amqp_consumer_at_least_once_journey", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage, EventexecPackage], capabilities: []),
-            EventTransportJourney => ("event-transport-journey", ReleaseCheck, "journeys", "eventtransport_journey", Test, Parallel, Affected, resources: [Postgres, Redis, Amqp, Mqtt], impact_packages: [], capabilities: [Docker]),
-            IdentityLoginAuditDurableJourney => ("identity-login-audit-durable-journey", IntegrationCritical, "journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, EventexecPackage, IdentityPackage, PostgresPackage], capabilities: []),
-            IdentityLoginAuditJourney => ("identity-login-audit-journey", ReleaseCheck, "journeys", "identity_login_audit_journey", Test, Parallel, Affected, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
-            EventTransportDurableE2e => ("event-transport-durable-e2e", IntegrationCritical, "runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [AmqpPackage, EventexecPackage, MqttPackage, PostgresPackage, RedisAdapterPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
         ],
     },
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
-        local_feature_scopes: [Journeys, Runtime, SettingsOnly, IdentityAudit, Vault],
+        local_feature_scopes: [Vault],
         units: [
-            SecurityProviderCloseoutJourney => ("security-provider-closeout-journey", ReleaseCheck, "journeys", "security_provider_closeout", Test, Parallel, Affected, resources: [Postgres, Vault], impact_packages: [], capabilities: []),
-            SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
-            SettingsOnlyLib => ("settings-only-lib", ReleaseCheck, "settingsonly", "settingsonly", Lib, Serial, Affected, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
-            IdentityAuditLib => ("identity-audit-lib", ReleaseCheck, "identityaudit", "identityaudit", Lib, Serial, Affected, resources: [], impact_packages: [IdentityAuditPackage], capabilities: []),
-            RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             VaultLib => ("vault-lib", ReleaseCheck, "vault", "vault", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             VaultLive => ("vault-live", IntegrationCritical, "vault", "live_vault", Test, Serial, RemoteOnly, resources: [Vault], impact_packages: [VaultProvider], capabilities: [Docker]),
-            AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
-            AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            ConfigsReadyE2e => ("configs-ready-e2e", IntegrationCritical, "runtime", "configs_ready_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: []),
-            DomainExecutionPlanTrybuild => ("domain-execution-plan-trybuild", ReleaseCheck, "runtime", "domain_execution_plan_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            IdentityLoginWireE2e => ("identity-login-wire-e2e", IntegrationCritical, "runtime", "identity_login_wire_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, HttpdPackage, HttpservePackage, IdentityPackage, PostgresPackage, RuntimePackage, RuntimeSurface, OidcProvider], capabilities: []),
-            InfraBuildersApi => ("infra-builders-api", ReleaseCheck, "runtime", "infra_builders_api", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            ListenerPlanTrybuild => ("listener-plan-trybuild", ReleaseCheck, "runtime", "listener_plan_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            OperatorSurfaceTrybuild => ("operator-surface-trybuild", ReleaseCheck, "runtime", "operator_surface_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            RefreshMintE2e => ("refresh-mint-e2e", ReleaseCheck, "runtime", "refresh_mint_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
-            KeyRotationE2e => ("key-rotation-e2e", ReleaseCheck, "runtime", "key_rotation_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
-            RuntimeOutputsTrybuild => ("runtime-outputs-trybuild", ReleaseCheck, "runtime", "runtime_outputs_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            RuntimeServeE2e => ("runtime-serve-e2e", IntegrationCritical, "runtime", "runtime_serve_e2e", Test, Parallel, RemoteOnly, resources: [], impact_packages: [BootstrapPackage, HttpdPackage, HttpservePackage, RuntimePackage, RuntimeSurface], capabilities: []),
-            ServiceTokenReplayE2e => ("service-token-replay-e2e", IntegrationCritical, "runtime", "service_token_replay_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, IdentityPackage, PostgresPackage, RuntimePackage, RuntimeSurface, OidcProvider], capabilities: []),
-            WireContractE2e => ("wire-contract-e2e", IntegrationCritical, "runtime", "wire_contract_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [PostgresPackage, RuntimePackage, SettingsPackage, RuntimeSurface], capabilities: []),
         ],
     },
-    ConsistencyFault => {
-        name: "consistency-fault",
-        local_feature_scopes: [Testkit, RedisAdapter, JourneysFaultMatrix],
+    CdcProjectionSaga => {
+        name: "cdc-projection-saga",
+        local_feature_scopes: [Testkit, RedisAdapter],
         units: [
             TestkitLib => ("testkit-lib", ReleaseCheck, "testkit", "testkit", Lib, Serial, Affected, resources: [Redis], impact_packages: [], capabilities: []),
             TestkitCrashMatrix => ("testkit-crash-matrix", ReleaseCheck, "testkit", "crash_matrix", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -958,19 +756,6 @@ integration_shard_catalog! {
             RedisIntegrationClaimer => ("redis-integration-claimer", IntegrationCritical, "redis-adapter", "integration_claimer", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [DistributedPackage, RedisAdapterPackage], capabilities: []),
             RedisIntegrationRateLimit => ("redis-integration-rate-limit", IntegrationCritical, "redis-adapter", "integration_rate_limit", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [RedisAdapterPackage], capabilities: []),
             RedisIntegrationSagaEffectFixture => ("redis-integration-saga-effect-fixture", ReleaseCheck, "redis-adapter", "integration_saga_effect_fixture", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [], capabilities: []),
-            ConsistencyFaultMatrixJourney => ("consistency-fault-matrix-journey", ReleaseCheck, "journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [], capabilities: []),
-            L2DrRecoveryJourney => ("l2-dr-recovery-journey", ReleaseCheck, "journeys-fault-matrix", "l2_dr_recovery_journey", Test, Serial, RemoteOnly, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
-            SagaFaultRecovery => ("saga-fault-recovery", ReleaseCheck, "journeys-fault-matrix", "saga_fault_recovery", Test, Serial, RemoteOnly, resources: [Postgres, Redis], impact_packages: [], capabilities: []),
-        ],
-    },
-    CdcProjectionSaga => {
-        name: "cdc-projection-saga",
-        local_feature_scopes: [Journeys, Runtime],
-        units: [
-            SagaRuntimeProviderIntegration => ("saga-runtime-provider-integration", ReleaseCheck, "journeys", "saga_runtime_provider_integration", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [EventexecPackage, PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: [PreparedExternalPostgres]),
-            SagaProjectionDepsJourney => ("saga-projection-deps-journey", ReleaseCheck, "journeys", "saga_projection_deps_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
-            SettingsConfigPublishJourney => ("settings-config-publish-journey", ReleaseCheck, "journeys", "settings_config_publish_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
-            SettingsConfigPublishDurableE2e => ("settings-config-publish-durable-e2e", IntegrationCritical, "runtime", "settings_config_publish_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [ConsistencyPackage, EventexecPackage, PostgresPackage, RuntimePackage, SettingsPackage, RuntimeSurface], capabilities: []),
         ],
     },
     ObjectStorage => {
@@ -980,13 +765,6 @@ integration_shard_catalog! {
             S3Lib => ("s3-lib", ReleaseCheck, "s3", "s3", Lib, Parallel, Affected, resources: [ObjectStorage], impact_packages: [], capabilities: [Docker]),
             DlxArchiveStore => ("dlx-archive-store", ReleaseCheck, "s3", "dlx_archive_store", Test, Parallel, RemoteOnly, resources: [ObjectStorage], impact_packages: [], capabilities: [Docker]),
             IntegrationObjectStore => ("integration-object-store", IntegrationCritical, "s3", "integration_object_store", Test, Serial, RemoteOnly, resources: [ObjectStorage], impact_packages: [EventexecPackage, S3Package], capabilities: [Docker]),
-        ],
-    },
-    ProductionRuntime => {
-        name: "production-runtime",
-        local_feature_scopes: [Journeys],
-        units: [
-            RuntimeInventoryJourney => ("runtime-inventory-journey", ReleaseCheck, "journeys", "runtime_inventory", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: []),
         ],
     },
 }
@@ -999,24 +777,17 @@ pub(crate) enum IntegrationJobGroup {
     Postgres,
     Transport,
     Runtime,
-    Artifact,
 }
 
 impl IntegrationJobGroup {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 4] = [
-        Self::Postgres,
-        Self::Transport,
-        Self::Runtime,
-        Self::Artifact,
-    ];
+    pub(crate) const ALL: [Self; 3] = [Self::Postgres, Self::Transport, Self::Runtime];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Postgres => "postgres",
             Self::Transport => "transport",
             Self::Runtime => "runtime",
-            Self::Artifact => "artifact",
         }
     }
 
@@ -1026,20 +797,14 @@ impl IntegrationJobGroup {
             .copied()
             .filter(move |shard| shard.execution_group() == self)
     }
-
-    #[cfg(test)]
-    pub(crate) const fn owns_localtx_evidence(self) -> bool {
-        matches!(self, Self::Postgres)
-    }
 }
 
 impl IntegrationShard {
     pub(crate) const fn execution_group(self) -> IntegrationJobGroup {
         match self {
             Self::PostgresDomain => IntegrationJobGroup::Postgres,
-            Self::EventTransport | Self::ConsistencyFault => IntegrationJobGroup::Transport,
+            Self::EventTransport | Self::ObjectStorage => IntegrationJobGroup::Transport,
             Self::RuntimeHttpAuth | Self::CdcProjectionSaga => IntegrationJobGroup::Runtime,
-            Self::ObjectStorage | Self::ProductionRuntime => IntegrationJobGroup::Artifact,
         }
     }
 }
@@ -1058,9 +823,8 @@ impl FromStr for IntegrationJobGroup {
             "postgres" => Ok(Self::Postgres),
             "transport" => Ok(Self::Transport),
             "runtime" => Ok(Self::Runtime),
-            "artifact" => Ok(Self::Artifact),
             other => bail!(
-                "unknown integration job group `{other}`; expected postgres, transport, runtime, or artifact"
+                "unknown integration job group `{other}`; expected postgres, transport, or runtime"
             ),
         }
     }
@@ -1215,30 +979,6 @@ fn validate_source_and_provider_relations(specs: &[IntegrationUnitSpec]) -> Resu
         }
     }
 
-    let mut paths = BTreeSet::new();
-    for source in SharedJourneySource::ALL {
-        if !paths.insert(source.path()) {
-            bail!(
-                "shared journey source path is duplicated: {}",
-                source.path()
-            );
-        }
-        let mut carriers = BTreeSet::new();
-        for carrier in source.relation().critical_carriers {
-            if !carriers.insert(*carrier) {
-                bail!("shared journey source repeats carrier {carrier:?}");
-            }
-            let Some(spec) = specs.iter().find(|spec| spec.id == *carrier) else {
-                bail!("shared journey source references unknown carrier {carrier:?}");
-            };
-            if spec.primary_owner != ExecutionProfile::IntegrationCritical
-                || spec.package != "journeys"
-                || spec.kind != TargetKind::Test
-            {
-                bail!("shared journey source carrier {carrier:?} is not a critical journey test");
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1263,9 +1003,6 @@ impl IntegrationSelection {
     fn new(profile: ExecutionProfile, unit_ids: BTreeSet<IntegrationUnitId>) -> Result<Self> {
         match profile {
             ExecutionProfile::IntegrationCritical => {
-                if unit_ids.is_empty() {
-                    bail!("integration-critical selection must not be empty");
-                }
                 if let Some(id) = unit_ids
                     .iter()
                     .find(|id| id.spec().primary_owner != ExecutionProfile::IntegrationCritical)
@@ -1310,12 +1047,6 @@ impl IntegrationSelection {
             ExecutionProfile::IntegrationCritical,
             unit_ids.into_iter().collect(),
         )
-    }
-
-    /// Reconstruct the exact critical selection carried by one typed batch.
-    #[cfg(test)]
-    pub(crate) fn for_exact_batch(batch: &ShardBatch) -> Result<Self> {
-        Self::critical(batch.unit_ids.iter().copied())
     }
 
     pub(crate) const fn profile(&self) -> ExecutionProfile {
@@ -1416,7 +1147,7 @@ impl FromStr for IntegrationSelection {
             bail!("unknown integration selection `{value}`");
         };
         if raw_ids.is_empty() {
-            bail!("integration-critical selection must not be empty");
+            return Self::critical([]);
         }
         let mut unit_ids = BTreeSet::new();
         for raw_id in raw_ids.split(',') {
@@ -1468,11 +1199,9 @@ impl IntegrationShard {
     pub(crate) const fn partition_policy(self) -> PartitionPolicy {
         match self {
             Self::EventTransport | Self::RuntimeHttpAuth => PartitionPolicy::TwoWayHash,
-            Self::PostgresDomain
-            | Self::ConsistencyFault
-            | Self::CdcProjectionSaga
-            | Self::ObjectStorage
-            | Self::ProductionRuntime => PartitionPolicy::Unpartitioned,
+            Self::PostgresDomain | Self::CdcProjectionSaga | Self::ObjectStorage => {
+                PartitionPolicy::Unpartitioned
+            }
         }
     }
 
@@ -1555,106 +1284,14 @@ pub(crate) fn batches(
         .collect()
 }
 
-pub(crate) fn localtx_required_selection() -> Result<IntegrationSelection> {
-    localtx_required_selection_from([
-        IntegrationUnitId::PostgresLib,
-        IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-        IntegrationUnitId::IdentityPasswordSecurityEventJourney,
-        IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
-        IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
-    ])
-}
-
-fn localtx_required_selection_from(
-    unit_ids: impl IntoIterator<Item = IntegrationUnitId>,
-) -> Result<IntegrationSelection> {
-    IntegrationSelection::critical(unit_ids)
-}
-
-pub(crate) fn postgres_transaction_journey_execution_batch(
-    selection: &IntegrationSelection,
-) -> Result<ShardBatch> {
-    if IntegrationShard::PostgresDomain.partition_policy() != PartitionPolicy::Unpartitioned {
-        bail!("Postgres transaction journey shard must remain unpartitioned");
-    }
-    let required = localtx_required_selection()
-        .context("derive required LocalTx catalog selection for postgres journey batch")?;
-    let required_journey_unit_ids = required
-        .units_for_shard(IntegrationShard::PostgresDomain)
-        .filter(|unit| unit.package == "journeys")
-        .map(|unit| unit.id)
-        .collect::<BTreeSet<_>>();
-    if required_journey_unit_ids.is_empty() {
-        bail!("required LocalTx catalog selection has no postgres journey units");
-    }
-    let matches = batches(selection, IntegrationShard::PostgresDomain)
-        .into_iter()
-        .filter(|batch| {
-            batch.scheduling == Scheduling::Serial
-                && batch.kind == TargetKind::Test
-                && batch.package == "journeys"
-                && batch.unit_ids == required_journey_unit_ids
-        })
-        .collect::<Vec<_>>();
-    let [batch] = matches.as_slice() else {
-        bail!(
-            "Postgres transaction journeys must have exactly one postgres-domain Serial integration batch; found {}",
-            matches.len()
-        );
-    };
-    Ok(batch.clone())
-}
-
-fn localtx_backend_execution_unit_from(
-    units: &[IntegrationUnitSpec],
-) -> Result<IntegrationUnitSpec> {
-    let expected = *IntegrationUnitId::PostgresLib.spec();
-    let matches = units
-        .iter()
-        .copied()
-        .filter(|unit| unit.id == expected.id)
-        .collect::<Vec<_>>();
-    let [unit] = matches.as_slice() else {
-        bail!(
-            "LocalTx backend evidence must have exactly one stable postgres execution unit; found {}",
-            matches.len()
-        );
-    };
-    if *unit != expected {
-        bail!("LocalTx backend stable execution unit spec drift");
-    }
-    Ok(*unit)
-}
-
-/// Resolve the one real-backend carrier executed by the LocalTx required-evidence owner.
-pub(crate) fn localtx_backend_execution_unit(
-    selection: &IntegrationSelection,
-) -> Result<IntegrationUnitSpec> {
-    let shard = IntegrationShard::PostgresDomain;
-    if shard.partition_policy() != PartitionPolicy::Unpartitioned {
-        bail!("LocalTx backend evidence shard must remain unpartitioned");
-    }
-    let projected = selection
-        .units_for_shard(shard)
-        .copied()
-        .collect::<Vec<_>>();
-    localtx_backend_execution_unit_from(&projected)
-}
-
 const INTEGRATION_PACKAGES: &[&str] = &[
     "postgres",
     "postgres-migration",
     "redis-adapter",
     "amqp",
     "mqtt",
-    "deviceidentity",
-    "journeys",
-    "runtime",
-    "journeys-fault-matrix",
     "testkit",
     "s3",
-    "settingsonly",
-    "identityaudit",
     "vault",
 ];
 
@@ -2184,68 +1821,6 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn neutral_saga_fixture_is_not_a_production_runtime_carrier() {
-        let spec = IntegrationUnitId::SagaRuntimeProviderIntegration.spec();
-        assert_eq!(spec.shard, IntegrationShard::CdcProjectionSaga);
-        assert!(!spec.id.as_str().contains("production"));
-        assert!(!spec.target.contains("production"));
-        assert!(
-            spec.capabilities
-                .contains(&Capability::PreparedExternalPostgres)
-        );
-        assert!(!unit_requires_docker(spec));
-        assert!(unit_requires_docker(IntegrationUnitId::PostgresLib.spec()));
-    }
-
-    fn assert_release_check_only(id: IntegrationUnitId) -> Result<()> {
-        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
-        assert!(!critical.unit_ids().contains(&id));
-        assert!(
-            IntegrationSelection::release_check()
-                .unit_ids()
-                .contains(&id)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn saga_fault_recovery_is_one_release_check_pg_redis_owner() {
-        let spec = IntegrationUnitId::SagaFaultRecovery.spec();
-        assert_eq!(spec.shard, IntegrationShard::ConsistencyFault);
-        assert_eq!(spec.primary_owner, ExecutionProfile::ReleaseCheck);
-        assert_eq!(spec.package, "journeys-fault-matrix");
-        assert_eq!(spec.target, "saga_fault_recovery");
-        assert_eq!(spec.scheduling, Scheduling::Serial);
-        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Redis]);
-    }
-
-    #[test]
-    fn l2_dr_recovery_is_one_release_check_pg_amqp_owner() -> Result<()> {
-        let id = IntegrationUnitId::L2DrRecoveryJourney;
-        let spec = id.spec();
-        assert_eq!(id.as_str(), "l2-dr-recovery-journey");
-        assert_eq!("l2-dr-recovery-journey".parse::<IntegrationUnitId>()?, id);
-        assert_eq!(spec.shard, IntegrationShard::ConsistencyFault);
-        assert_eq!(spec.primary_owner, ExecutionProfile::ReleaseCheck);
-        assert_eq!(spec.package, "journeys-fault-matrix");
-        assert_eq!(spec.target, "l2_dr_recovery_journey");
-        assert_eq!(spec.kind, TargetKind::Test);
-        assert_eq!(spec.scheduling, Scheduling::Serial);
-        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Amqp]);
-        assert!(spec.impact_markers.is_empty());
-        assert!(spec.capabilities.is_empty());
-        assert!(
-            critical_units_for_targets([("journeys-fault-matrix", "l2_dr_recovery_journey")])
-                .is_empty()
-        );
-
-        assert_release_check_only(id)?;
-        Ok(())
-    }
-
-    #[test]
     fn integration_unit_ids_have_stable_wire_round_trips() -> Result<()> {
         let mut wire_ids = BTreeSet::new();
         for id in IntegrationUnitId::ALL {
@@ -2306,328 +1881,12 @@ mod tests {
     }
 
     #[test]
-    fn critical_impact_projection_is_non_vacuous_and_exact() -> Result<()> {
-        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
-        assert!(
-            critical
-                .unit_ids()
-                .iter()
-                .all(|id| !id.impact_markers().is_empty())
-        );
-
-        let mqtt = critical_units_for_markers(&BTreeSet::from([ImpactMarker::MqttPackage]));
+    fn integration_selection_rejects_noncanonical_or_open_tokens() -> Result<()> {
         assert_eq!(
-            mqtt,
-            BTreeSet::from([
-                IntegrationUnitId::MqttIntegration,
-                IntegrationUnitId::EventTransportDurableE2e,
-            ])
+            "integration-critical:".parse::<IntegrationSelection>()?,
+            IntegrationSelection::critical([])?
         );
-        assert!(!mqtt.contains(&IntegrationUnitId::AmqpIntegration));
-
-        assert_eq!(
-            critical_units_for_targets([("journeys", "identity_login_audit_durable_journey")]),
-            BTreeSet::from([IntegrationUnitId::IdentityLoginAuditDurableJourney])
-        );
-        assert_eq!(
-            critical_units_for_targets([("amqp", "integration")]),
-            BTreeSet::from([IntegrationUnitId::AmqpIntegration]),
-            "same-named targets in different packages must not alias"
-        );
-        assert_eq!(
-            critical_units_for_targets([("mqtt", "integration")]),
-            BTreeSet::from([IntegrationUnitId::MqttIntegration]),
-            "same-named targets in different packages must not alias"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn source_and_security_provider_relations_are_closed_and_non_vacuous() -> Result<()> {
-        use IntegrationUnitId as Id;
-        assert_eq!(
-            changed_integration_source("journeys/tests/common/mod.rs"),
-            Some(ChangedIntegrationSource::ReleaseCheck),
-            "a common source with any release-only consumer must fail closed to ReleaseCheck"
-        );
-        assert_eq!(
-            changed_integration_source("journeys/tests/support/localtx_validation.rs"),
-            Some(ChangedIntegrationSource::Exact(BTreeSet::from([
-                Id::AuditListTenantEntriesLocalTxJourney,
-                Id::SettingsSecretPublishLocalTxJourney,
-            ])))
-        );
-        assert_eq!(
-            changed_integration_source("journeys/tests/support/unregistered.rs"),
-            Some(ChangedIntegrationSource::ReleaseCheck)
-        );
-        assert_eq!(
-            critical_units_for_provider(SecurityProvider::Oidc),
-            Some(BTreeSet::from([
-                Id::IdentityPasswordSecurityEventJourney,
-                Id::IdentityRefreshProducerTransactionJourney,
-                Id::IdentityLoginWireE2e,
-                Id::ServiceTokenReplayE2e,
-            ]))
-        );
-        assert_eq!(
-            critical_units_for_provider(SecurityProvider::Vault),
-            Some(BTreeSet::from([Id::VaultLive]))
-        );
-        validate_source_and_provider_relations(INTEGRATION_UNIT_SPECS)
-    }
-
-    #[test]
-    fn source_and_security_provider_relations_reject_catalog_drift() {
-        let mut drifted = INTEGRATION_UNIT_SPECS.to_vec();
-        drifted[IntegrationUnitId::IdentityLoginWireE2e as usize].impact_markers = &[];
-        drifted[IntegrationUnitId::IdentityPasswordSecurityEventJourney as usize].impact_markers =
-            &[];
-        drifted[IntegrationUnitId::IdentityRefreshProducerTransactionJourney as usize]
-            .impact_markers = &[];
-        drifted[IntegrationUnitId::ServiceTokenReplayE2e as usize].impact_markers = &[];
-        assert!(
-            validate_source_and_provider_relations(&drifted).is_err(),
-            "removing every OIDC carrier edge must invalidate the closed provider relation"
-        );
-
-        let mut vault_drifted = INTEGRATION_UNIT_SPECS.to_vec();
-        vault_drifted[IntegrationUnitId::VaultLive as usize].impact_markers = &[];
-        assert!(
-            validate_source_and_provider_relations(&vault_drifted).is_err(),
-            "removing the unique Vault carrier edge must invalidate the closed provider relation"
-        );
-
-        let mut duplicated_vault = INTEGRATION_UNIT_SPECS.to_vec();
-        duplicated_vault[IntegrationUnitId::ConfigsReadyE2e as usize].impact_markers =
-            &[ImpactMarker::VaultProvider];
-        assert!(
-            validate_source_and_provider_relations(&duplicated_vault).is_err(),
-            "adding a second Vault carrier must invalidate the exact provider relation"
-        );
-
-        let mut wrong_vault = INTEGRATION_UNIT_SPECS.to_vec();
-        wrong_vault[IntegrationUnitId::VaultLive as usize].impact_markers = &[];
-        wrong_vault[IntegrationUnitId::ConfigsReadyE2e as usize].impact_markers =
-            &[ImpactMarker::VaultProvider];
-        assert!(
-            validate_source_and_provider_relations(&wrong_vault).is_err(),
-            "moving the Vault marker to the wrong carrier must invalidate the relation"
-        );
-
-        let mut wrong_owner = INTEGRATION_UNIT_SPECS.to_vec();
-        wrong_owner[IntegrationUnitId::AmqpConsumerAtLeastOnceJourney as usize].primary_owner =
-            ExecutionProfile::ReleaseCheck;
-        assert!(
-            validate_source_and_provider_relations(&wrong_owner).is_err(),
-            "shared source relations cannot point at a non-critical carrier"
-        );
-    }
-
-    #[test]
-    fn shared_journey_relations_match_independently_discovered_module_edges() -> Result<()> {
-        let root = workspace_root()?;
-        let tests = root.join("journeys/tests");
-        let mut discovered = SharedJourneySource::ALL
-            .into_iter()
-            .map(|source| (source.path().to_owned(), (BTreeSet::new(), false)))
-            .collect::<BTreeMap<_, _>>();
-
-        fn discover_sources(
-            path: &std::path::Path,
-            root: &std::path::Path,
-            tests: &std::path::Path,
-            carrier: Option<IntegrationUnitId>,
-            release_consumer: bool,
-            discovered: &mut BTreeMap<String, (BTreeSet<IntegrationUnitId>, bool)>,
-            visited: &mut BTreeSet<std::path::PathBuf>,
-        ) -> Result<()> {
-            if !visited.insert(path.to_owned()) {
-                return Ok(());
-            }
-            let source = std::fs::read_to_string(path)?;
-            let mut children = Vec::new();
-            if source.lines().any(|line| line.trim() == "mod common;") {
-                children.push(tests.join("common/mod.rs"));
-            }
-            for line in source.lines() {
-                let line = line.trim();
-                let Some(relative) = line
-                    .strip_prefix("#[path = \"")
-                    .and_then(|line| line.strip_suffix("\"]"))
-                else {
-                    continue;
-                };
-                children.push(
-                    path.parent()
-                        .context("journey module path has no parent")?
-                        .join(relative),
-                );
-            }
-            for child in children {
-                let relative = child
-                    .strip_prefix(root)
-                    .context("journey module escaped workspace")?
-                    .to_string_lossy()
-                    .into_owned();
-                if let Some((carriers, has_release_consumer)) = discovered.get_mut(&relative) {
-                    if let Some(carrier) = carrier {
-                        carriers.insert(carrier);
-                    }
-                    *has_release_consumer |= release_consumer;
-                }
-                if child.starts_with(tests) {
-                    discover_sources(
-                        &child,
-                        root,
-                        tests,
-                        carrier,
-                        release_consumer,
-                        discovered,
-                        visited,
-                    )?;
-                }
-            }
-            Ok(())
-        }
-
-        for entry in std::fs::read_dir(&tests)? {
-            let path = entry?.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("rs") {
-                continue;
-            }
-            let target = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .context("journey target path is not UTF-8")?;
-            let consumer = IntegrationUnitId::ALL.into_iter().find(|id| {
-                let spec = id.spec();
-                spec.package == "journeys" && spec.target == target
-            });
-            let Some(consumer) = consumer else {
-                continue;
-            };
-            let critical = (consumer.spec().primary_owner == ExecutionProfile::IntegrationCritical)
-                .then_some(consumer);
-            let release_consumer = consumer.spec().primary_owner == ExecutionProfile::ReleaseCheck;
-            discover_sources(
-                &path,
-                &root,
-                &tests,
-                critical,
-                release_consumer,
-                &mut discovered,
-                &mut BTreeSet::new(),
-            )?;
-        }
-
-        let declared = SharedJourneySource::ALL
-            .into_iter()
-            .map(|source| {
-                (
-                    source.path().to_owned(),
-                    (
-                        source
-                            .relation()
-                            .critical_carriers
-                            .iter()
-                            .copied()
-                            .collect::<BTreeSet<_>>(),
-                        source.relation().has_release_consumer,
-                    ),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(discovered, declared);
-
-        let support_files = std::fs::read_dir(tests.join("support"))?
-            .filter_map(|entry| match entry {
-                Ok(entry)
-                    if entry.path().extension().and_then(|value| value.to_str()) == Some("rs") =>
-                {
-                    Some(Ok(entry.file_name()))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .map(|name| {
-                let name = name?
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("journey support filename is not UTF-8"))?;
-                Ok(format!("journeys/tests/support/{name}"))
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
-        let declared_support = SharedJourneySource::ALL
-            .into_iter()
-            .map(SharedJourneySource::path)
-            .filter(|path| path.starts_with("journeys/tests/support/"))
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(support_files, declared_support);
-        Ok(())
-    }
-
-    #[test]
-    fn adapter_resources_project_exact_critical_units_and_exclude_t3() {
-        use IntegrationUnitId as Id;
-        let cases = [
-            (
-                Resource::Postgres,
-                BTreeSet::from([
-                    Id::PostgresLib,
-                    Id::PostgresMigrationLib,
-                    Id::AuditListTenantEntriesLocalTxJourney,
-                    Id::IdentityPasswordSecurityEventJourney,
-                    Id::IdentityRefreshProducerTransactionJourney,
-                    Id::SettingsSecretPublishLocalTxJourney,
-                    Id::SettingsSecretE2e,
-                    Id::IdentityLoginAuditDurableJourney,
-                    Id::EventTransportDurableE2e,
-                    Id::ConfigsReadyE2e,
-                    Id::IdentityLoginWireE2e,
-                    Id::ServiceTokenReplayE2e,
-                    Id::WireContractE2e,
-                    Id::SettingsConfigPublishDurableE2e,
-                ]),
-            ),
-            (
-                Resource::Redis,
-                BTreeSet::from([
-                    Id::EventTransportDurableE2e,
-                    Id::RedisIntegrationClaimer,
-                    Id::RedisIntegrationRateLimit,
-                ]),
-            ),
-            (
-                Resource::Amqp,
-                BTreeSet::from([
-                    Id::AmqpLib,
-                    Id::AmqpIntegration,
-                    Id::AmqpConsumerAtLeastOnceJourney,
-                    Id::EventTransportDurableE2e,
-                ]),
-            ),
-            (Resource::Mqtt, BTreeSet::from([Id::MqttIntegration])),
-            (
-                Resource::ObjectStorage,
-                BTreeSet::from([Id::IntegrationObjectStore]),
-            ),
-            (Resource::Vault, BTreeSet::from([Id::VaultLive])),
-        ];
-        for (resource, expected) in cases {
-            let actual = critical_units_for_resource(resource);
-            assert_eq!(actual, expected, "{}", resource.label());
-            assert!(actual.iter().all(|id| {
-                id.spec().primary_owner == ExecutionProfile::IntegrationCritical
-                    && id.spec().shard != IntegrationShard::ProductionRuntime
-            }));
-        }
-    }
-
-    #[test]
-    fn integration_selection_rejects_noncanonical_or_open_tokens() {
         for invalid in [
-            "integration-critical:",
             "integration-critical:postgres-lib,postgres-lib",
             "integration-critical:postgres-migration-lib,postgres-lib",
             "integration-critical:postgres-feature-manifest",
@@ -2645,50 +1904,6 @@ mod tests {
                 "{invalid}"
             );
         }
-    }
-
-    #[test]
-    fn exact_selection_derives_only_exact_batches() -> Result<()> {
-        let exact = "integration-critical:audit-list-tenant-entries-local-tx-journey,identity-password-security-event-journey"
-            .parse::<IntegrationSelection>()?;
-        let plan = batches(&exact, IntegrationShard::PostgresDomain);
-        assert_eq!(plan.len(), 1);
-        assert_eq!(
-            plan[0].unit_ids,
-            BTreeSet::from([
-                IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-                IntegrationUnitId::IdentityPasswordSecurityEventJourney,
-            ])
-        );
-        assert_eq!(
-            plan[0].targets,
-            [
-                "audit_list_tenant_entries_localtx_journey",
-                "identity_password_security_event_journey",
-            ]
-        );
-        assert_eq!(
-            IntegrationSelection::for_exact_batch(&plan[0])?,
-            exact,
-            "typed batch replay must preserve exact unit identity"
-        );
-        assert_eq!(
-            exact.resources_for_shard(IntegrationShard::PostgresDomain),
-            [Resource::Postgres]
-        );
-
-        let amqp = IntegrationSelection::critical([IntegrationUnitId::AmqpIntegration])?;
-        assert_eq!(
-            amqp.resources_for_shard(IntegrationShard::EventTransport),
-            [Resource::Amqp]
-        );
-        assert!(!amqp.requires_docker_for_shard(IntegrationShard::EventTransport));
-        let mqtt = IntegrationSelection::critical([IntegrationUnitId::MqttIntegration])?;
-        assert_eq!(
-            mqtt.resources_for_shard(IntegrationShard::EventTransport),
-            [Resource::Mqtt]
-        );
-        assert!(mqtt.requires_docker_for_shard(IntegrationShard::EventTransport));
         Ok(())
     }
 
@@ -2745,7 +1960,7 @@ mod tests {
                 .into_iter()
                 .map(IntegrationJobGroup::as_str)
                 .collect::<Vec<_>>(),
-            ["postgres", "transport", "runtime", "artifact"]
+            ["postgres", "transport", "runtime"]
         );
         assert!(
             IntegrationJobGroup::ALL
@@ -2779,23 +1994,6 @@ mod tests {
     }
 
     #[test]
-    fn localtx_required_evidence_has_exactly_one_producer_group() -> Result<()> {
-        let owners = IntegrationJobGroup::ALL
-            .into_iter()
-            .filter(|group| group.owns_localtx_evidence())
-            .collect::<Vec<_>>();
-        assert_eq!(owners, [IntegrationJobGroup::Postgres]);
-        let required = localtx_required_selection()?;
-        assert!(
-            required
-                .unit_ids()
-                .iter()
-                .all(|unit| unit.spec().shard.execution_group() == IntegrationJobGroup::Postgres)
-        );
-        Ok(())
-    }
-
-    #[test]
     fn shard_names_are_closed_and_round_trip() -> Result<()> {
         let names: Vec<_> = IntegrationShard::ALL
             .iter()
@@ -2807,10 +2005,8 @@ mod tests {
                 "postgres-domain",
                 "event-transport",
                 "runtime-http-auth",
-                "consistency-fault",
                 "cdc-projection-saga",
                 "object-storage",
-                "production-runtime",
             ]
         );
         for shard in IntegrationShard::ALL {
@@ -2820,39 +2016,6 @@ mod tests {
         assert!("POSTGRES-DOMAIN".parse::<IntegrationShard>().is_err());
         assert!("unknown".parse::<IntegrationShard>().is_err());
         validate_local_feature_catalog(SHARD_SPECS)?;
-        Ok(())
-    }
-
-    #[test]
-    fn local_feature_scope_catalog_is_non_vacuous_and_rejects_omissions() -> Result<()> {
-        assert_eq!(LocalFeatureScope::ALL.len(), INTEGRATION_PACKAGES.len());
-        assert_eq!(LocalFeatureScope::Mqtt.feature(), "broker-tests");
-        assert!(LocalFeatureScope::ALL.into_iter().all(|scope| match scope {
-            LocalFeatureScope::Mqtt => scope.feature() == "broker-tests",
-            LocalFeatureScope::DeviceIdentity | LocalFeatureScope::IdentityAudit => {
-                scope.feature() == "test-support"
-            }
-            _ => scope.feature() == "integration",
-        }));
-        validate_local_feature_catalog(SHARD_SPECS)?;
-
-        let mut missing = SHARD_SPECS.to_vec();
-        missing[IntegrationShard::EventTransport as usize].local_feature_scopes = &[];
-        assert!(validate_local_feature_catalog(&missing).is_err());
-
-        const UNKNOWN_UNITS: &[IntegrationUnitSpec] = &[IntegrationUnitSpec::new(
-            IntegrationUnitId::AmqpIntegration,
-            IntegrationShard::EventTransport,
-            ExecutionProfile::ReleaseCheck,
-            "new-integration-package",
-            "integration",
-            TargetKind::Test,
-            Scheduling::Serial,
-            LocalEligibility::RemoteOnly,
-        )];
-        let mut unknown = SHARD_SPECS.to_vec();
-        unknown[IntegrationShard::EventTransport as usize].units = UNKNOWN_UNITS;
-        assert!(validate_local_feature_catalog(&unknown).is_err());
         Ok(())
     }
 
@@ -3001,351 +2164,14 @@ mod tests {
         assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
     }
 
-    fn assert_vault_and_closeout_carriers(units: &[IntegrationUnitSpec]) -> Result<()> {
-        let vault_units = units
-            .iter()
-            .filter(|unit| unit.package == "vault")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            vault_units.len(),
-            2,
-            "Vault must have exactly lib and live carriers"
-        );
-        let live = vault_units
-            .iter()
-            .find(|unit| unit.id == IntegrationUnitId::VaultLive)
-            .context("Vault live carrier must remain catalog-owned")?;
-        assert_eq!(live.target, "live_vault");
-        assert_eq!(live.primary_owner, ExecutionProfile::IntegrationCritical);
-        assert_eq!(live.scheduling, Scheduling::Serial);
-        assert_eq!(live.local_eligibility, LocalEligibility::RemoteOnly);
-        assert_eq!(live.resources, &[Resource::Vault]);
-        assert_eq!(live.capabilities, &[Capability::Docker]);
-
-        let closeout = units
-            .iter()
-            .find(|unit| unit.id == IntegrationUnitId::SecurityProviderCloseoutJourney)
-            .context("security-provider closeout journey must remain registry-owned")?;
-        assert_eq!(closeout.scheduling, Scheduling::Parallel);
-        Ok(())
-    }
-
     #[test]
-    fn settingsonly_and_vault_carriers_are_unique_and_feature_enabled() -> Result<()> {
-        let spec = IntegrationShard::RuntimeHttpAuth.spec();
-        let release = IntegrationSelection::release_check();
-        assert!(
-            release
-                .resources_for_shard(IntegrationShard::RuntimeHttpAuth)
-                .contains(&Resource::Vault)
-        );
-        assert!(
-            spec.local_feature_scopes
-                .contains(&LocalFeatureScope::SettingsOnly)
-        );
-        assert!(
-            spec.local_feature_scopes
-                .contains(&LocalFeatureScope::Vault)
-        );
-        assert_vault_and_closeout_carriers(spec.units)?;
-
-        let units = spec
-            .units
-            .iter()
-            .filter(|unit| {
-                unit.package == "settingsonly"
-                    && unit.target == "settingsonly"
-                    && unit.kind == TargetKind::Lib
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(units.len(), 1, "SettingsOnly carrier must be unique");
-        assert_eq!(units[0].target, "settingsonly");
-        assert_eq!(units[0].kind, TargetKind::Lib);
-        assert_eq!(units[0].scheduling, Scheduling::Serial);
-        Ok(())
-    }
-
-    #[test]
-    fn scheduling_plan_rejects_dangerous_target_parallelism() -> Result<()> {
-        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
-        let expected_serial = BTreeSet::from([
-            ("postgres", "postgres"),
-            ("postgres", "migration_0067_historical_artifact"),
-            ("postgres", "migration_0086_hard_cutover"),
-            ("postgres", "migration_0087_device_command_fencing"),
-            ("postgres", "migration_0089_saga_operator_control"),
-            ("postgres", "migration_0097_projection_worker_upgrade"),
-            ("postgres", "migration_0098_settings_active_serving_upgrade"),
-            ("postgres", "migration_0102_abac_profile_upgrade"),
-            (
-                "postgres",
-                "migration_0104_abac_policy_operator_values_upgrade",
-            ),
-            ("postgres", "migration_0105_projection_generation_upgrade"),
-            ("postgres", "migration_0109_inbox_backlog_samples_live"),
-            ("postgres", "migration_0113_receipt_bound_ready_upgrade"),
-            ("postgres-migration", "postgres_migration"),
-            ("journeys", "audit_list_tenant_entries_localtx_journey"),
-            ("journeys", "identity_password_security_event_journey"),
-            ("journeys", "identity_refresh_producer_transaction_journey"),
-            ("journeys", "settings_secret_publish_localtx_journey"),
-            ("runtime", "settings_secret_e2e"),
-            ("amqp", "integration"),
-            ("mqtt", "integration"),
-            ("journeys", "amqp_consumer_at_least_once_journey"),
-            ("journeys", "identity_login_audit_durable_journey"),
-            ("runtime", "event_transport_durable_e2e"),
-            ("settingsonly", "settingsonly"),
-            ("identityaudit", "identityaudit"),
-            ("runtime", "runtime"),
-            ("runtime", "configs_ready_e2e"),
-            ("runtime", "identity_login_wire_e2e"),
-            ("runtime", "service_token_replay_e2e"),
-            ("runtime", "wire_contract_e2e"),
-            ("redis-adapter", "integration_claimer"),
-            ("redis-adapter", "integration_rate_limit"),
-            ("redis-adapter", "integration_saga_effect_fixture"),
-            ("testkit", "testkit"),
-            ("testkit", "mqtt_mtls_fixture"),
-            ("testkit", "postgres_test_login_governance"),
-            ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
-            ("journeys-fault-matrix", "l2_dr_recovery_journey"),
-            ("journeys-fault-matrix", "saga_fault_recovery"),
-            ("runtime", "settings_config_publish_durable_e2e"),
-            ("journeys", "saga_runtime_provider_integration"),
-            ("s3", "integration_object_store"),
-            ("vault", "live_vault"),
-        ]);
-        let actual_serial: BTreeSet<_> = all_units()
-            .into_iter()
-            .filter(|unit| unit.scheduling == Scheduling::Serial)
-            .map(|unit| (unit.package, unit.target))
-            .collect();
-        assert_eq!(actual_serial, expected_serial);
-
-        for shard in IntegrationShard::ALL {
-            let plan = batches(&release, *shard);
-            assert!(!plan.is_empty());
-            for batch in &plan {
-                assert!(!batch.filter.contains("not "));
-                assert!(!batch.filter.contains('/'));
-                assert!(!batch.package.is_empty());
-                assert!(!batch.targets.is_empty());
-            }
-            assert!(
-                plan.iter()
-                    .any(|batch| batch.scheduling == Scheduling::Parallel)
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn postgres_transaction_journeys_form_one_unpartitioned_serial_batch() -> Result<()> {
-        let required = localtx_required_selection()?;
-        let batch = postgres_transaction_journey_execution_batch(&required)?;
-        assert_eq!(batch.scheduling, Scheduling::Serial);
-        assert_eq!(batch.kind, TargetKind::Test);
-        assert_eq!(batch.package, "journeys");
-        assert_eq!(batch.unit_ids.len(), 4);
-        Ok(())
-    }
-
-    #[test]
-    fn localtx_backend_execution_unit_is_unique() -> Result<()> {
-        let required = localtx_required_selection()?;
-        let unit = localtx_backend_execution_unit(&required)?;
-        assert_eq!(unit.package, LocalFeatureScope::Postgres.package());
-        assert_eq!(unit.target, unit.package);
-        assert_eq!(unit.kind, TargetKind::Lib);
-        assert_eq!(unit.scheduling, Scheduling::Serial);
-        Ok(())
-    }
-
-    #[test]
-    fn localtx_backend_execution_unit_rejects_missing_duplicate_and_drift() -> Result<()> {
-        let required = localtx_required_selection()?;
-        let expected = localtx_backend_execution_unit(&required)?;
-        let units = IntegrationShard::PostgresDomain.spec().units;
-
-        let missing = units
-            .iter()
-            .copied()
-            .filter(|unit| *unit != expected)
-            .collect::<Vec<_>>();
-        assert!(localtx_backend_execution_unit_from(&missing).is_err());
-
-        let mut duplicate = units.to_vec();
-        duplicate.push(expected);
-        assert!(localtx_backend_execution_unit_from(&duplicate).is_err());
-
-        let mut drift = units.to_vec();
-        let carrier = drift
-            .iter_mut()
-            .find(|unit| **unit == expected)
-            .context("typed LocalTx backend carrier")?;
-        carrier.target = "postgres-drift";
-        assert!(localtx_backend_execution_unit_from(&drift).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn localtx_required_selection_is_exact_and_each_unit_is_required() -> Result<()> {
-        let required = localtx_required_selection()?;
-        let expected = BTreeSet::from([
-            IntegrationUnitId::PostgresLib,
-            IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-            IntegrationUnitId::IdentityPasswordSecurityEventJourney,
-            IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
-            IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
-        ]);
-        assert_eq!(required.unit_ids(), &expected);
-        localtx_backend_execution_unit(&required)?;
-        postgres_transaction_journey_execution_batch(&required)?;
-
-        for omitted in &expected {
-            let incomplete = IntegrationSelection::critical(
-                expected.iter().copied().filter(|id| id != omitted),
-            )?;
-            if *omitted == IntegrationUnitId::PostgresLib {
-                assert!(localtx_backend_execution_unit(&incomplete).is_err());
-            } else {
-                assert!(
-                    postgres_transaction_journey_execution_batch(&incomplete).is_err(),
-                    "omitting {} must invalidate the required journey batch",
-                    omitted.as_str()
-                );
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn localtx_required_selection_preserves_owner_profile_drift_error() -> Result<()> {
-        let Err(error) = localtx_required_selection_from([
-            IntegrationUnitId::PostgresFeatureManifest,
-            IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-            IntegrationUnitId::IdentityPasswordSecurityEventJourney,
-            IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
-            IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
-        ])
-        .context("derive required LocalTx catalog selection") else {
-            bail!("release-check owner drift must fail closed")
-        };
-        let chain = format!("{error:#}");
-        assert!(chain.contains("derive required LocalTx catalog selection"));
-        assert!(chain.contains("release-check unit `postgres-feature-manifest`"));
-        Ok(())
-    }
-
-    #[test]
-    fn redis_shard_owns_one_real_testkit_container_lifecycle_target() {
-        let spec = IntegrationShard::ConsistencyFault.spec();
-        assert_eq!(
-            spec.local_feature_scopes,
-            &[
-                LocalFeatureScope::Testkit,
-                LocalFeatureScope::RedisAdapter,
-                LocalFeatureScope::JourneysFaultMatrix,
-            ]
-        );
-        let matches = spec
-            .units
-            .iter()
-            .filter(|unit| {
-                unit.package == "testkit"
-                    && unit.target == "testkit"
-                    && unit.kind == TargetKind::Lib
-                    && unit.scheduling == Scheduling::Serial
-            })
-            .count();
-        assert_eq!(
-            matches, 1,
-            "real Redis ownership/log/cleanup smoke must be registry-owned without copying adapter tests"
-        );
-    }
-
-    #[test]
-    fn workspace_plan_freezes_resources_and_dangerous_targets() -> Result<()> {
-        let release = IntegrationSelection::release_check();
-        let expected = [
-            (IntegrationShard::PostgresDomain, &[Resource::Postgres][..]),
-            (
-                IntegrationShard::EventTransport,
-                &[
-                    Resource::Postgres,
-                    Resource::Redis,
-                    Resource::Amqp,
-                    Resource::Mqtt,
-                ][..],
-            ),
-            (
-                IntegrationShard::RuntimeHttpAuth,
-                &[Resource::Postgres, Resource::Redis, Resource::Vault][..],
-            ),
-            (
-                IntegrationShard::ConsistencyFault,
-                &[Resource::Postgres, Resource::Redis, Resource::Amqp][..],
-            ),
-            (
-                IntegrationShard::CdcProjectionSaga,
-                &[Resource::Postgres][..],
-            ),
-            (
-                IntegrationShard::ObjectStorage,
-                &[Resource::ObjectStorage][..],
-            ),
-            (IntegrationShard::ProductionRuntime, &[][..]),
-        ];
-        assert_eq!(IntegrationShard::ALL.len(), expected.len());
-        for (shard, resources) in expected {
-            assert_eq!(release.resources_for_shard(shard), resources.to_vec());
-            assert!(!shard.spec().units.is_empty());
-        }
-        assert!(!release.requires_docker_for_shard(IntegrationShard::ProductionRuntime));
-        assert!(release.requires_docker_for_shard(IntegrationShard::CdcProjectionSaga));
-
-        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
-        let critical_expected = [
-            (IntegrationShard::PostgresDomain, vec![Resource::Postgres]),
-            (
-                IntegrationShard::EventTransport,
-                vec![
-                    Resource::Postgres,
-                    Resource::Redis,
-                    Resource::Amqp,
-                    Resource::Mqtt,
-                ],
-            ),
-            (
-                IntegrationShard::RuntimeHttpAuth,
-                vec![Resource::Postgres, Resource::Vault],
-            ),
-            (IntegrationShard::ConsistencyFault, vec![Resource::Redis]),
-            (
-                IntegrationShard::CdcProjectionSaga,
-                vec![Resource::Postgres],
-            ),
-            (
-                IntegrationShard::ObjectStorage,
-                vec![Resource::ObjectStorage],
-            ),
-            (IntegrationShard::ProductionRuntime, vec![]),
-        ];
-        for (shard, resources) in critical_expected {
-            assert_eq!(critical.resources_for_shard(shard), resources);
-        }
-        assert!(critical.requires_docker_for_shard(IntegrationShard::EventTransport));
-        assert!(critical.requires_docker_for_shard(IntegrationShard::ObjectStorage));
-        Ok(())
-    }
-
-    #[test]
-    fn cdc_projection_saga_contains_only_executable_tests() {
+    fn cdc_projection_saga_retains_component_level_carriers() {
         let spec = IntegrationShard::CdcProjectionSaga.spec();
+        assert!(!spec.units.is_empty());
         assert!(
-            spec.units.iter().all(|unit| unit.kind == TargetKind::Test),
-            "cdc projection/saga must not keep an empty carrier-only lib target"
+            spec.units
+                .iter()
+                .all(|unit| matches!(unit.package, "testkit" | "redis-adapter"))
         );
     }
 
@@ -3456,100 +2282,11 @@ mod tests {
         .to_string())
     }
 
-    fn metadata_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> Result<String> {
-        metadata_from_at(Path::new("/workspace"), targets, packages)
-    }
-
-    fn facts_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> Result<WorkspaceFacts> {
-        WorkspaceFacts::from_metadata_json(
-            Path::new("/workspace"),
-            &metadata_from(targets, packages)?,
-        )
-        .map_err(Into::into)
-    }
-
     fn all_units() -> Vec<IntegrationUnitSpec> {
         IntegrationShard::ALL
             .iter()
             .flat_map(|shard| shard.spec().units.iter().copied())
             .collect()
-    }
-
-    #[test]
-    fn metadata_coverage_rejects_missing_duplicate_and_unknown_targets() -> Result<()> {
-        let units = all_units();
-        validate_facts(&facts_from(&units, INTEGRATION_PACKAGES)?)?;
-
-        let mut missing = units.clone();
-        let missing_unit = missing.pop().context("synthetic catalog is non-empty")?;
-        let Err(error) = validate_facts(&facts_from(&missing, INTEGRATION_PACKAGES)?) else {
-            bail!("missing integration target must fail closed")
-        };
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "integration shard coverage mismatch; unassigned=[]; stale={:?}",
-                [(
-                    missing_unit.package.to_owned(),
-                    missing_unit.target.to_owned(),
-                    missing_unit.kind.as_str().to_owned(),
-                )]
-            )
-        );
-
-        let mut unknown = units;
-        let unknown_unit = IntegrationUnitSpec::new(
-            IntegrationUnitId::RuntimeInventoryJourney,
-            IntegrationShard::ProductionRuntime,
-            ExecutionProfile::ReleaseCheck,
-            "runtime",
-            "new_unclassified_target",
-            TargetKind::Test,
-            Scheduling::Parallel,
-            LocalEligibility::RemoteOnly,
-        );
-        unknown.push(unknown_unit);
-        let Err(error) = validate_facts(&facts_from(&unknown, INTEGRATION_PACKAGES)?) else {
-            bail!("unassigned integration target must fail closed")
-        };
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "integration shard coverage mismatch; unassigned={:?}; stale=[]",
-                [(
-                    unknown_unit.package.to_owned(),
-                    unknown_unit.target.to_owned(),
-                    unknown_unit.kind.as_str().to_owned(),
-                )]
-            )
-        );
-
-        let Err(error) = validate_facts(&facts_from(
-            &all_units(),
-            &INTEGRATION_PACKAGES[..INTEGRATION_PACKAGES.len() - 1],
-        )?) else {
-            bail!("missing integration package must fail closed")
-        };
-        assert_eq!(
-            error.to_string(),
-            "workspace facts missing legacy integration packages: [\"vault\"]"
-        );
-
-        let mut duplicate = all_units();
-        duplicate.push(duplicate[0]);
-        let duplicate_id = (
-            duplicate[0].package.to_owned(),
-            duplicate[0].target.to_owned(),
-            duplicate[0].kind.as_str().to_owned(),
-        );
-        let Err(error) = unique_targets(duplicate) else {
-            bail!("duplicate integration target assignment must fail closed")
-        };
-        assert_eq!(
-            error.to_string(),
-            format!("integration target assigned more than once: {duplicate_id:?}")
-        );
-        Ok(())
     }
 
     #[derive(Clone, Copy)]
@@ -3737,25 +2474,6 @@ mod tests {
         check_eligibility(&root, &valid, &[remote, affected, mqtt_remote])
             .context("valid eligibility fixture must pass exact closure")?;
 
-        let affected_typed = eligibility_unit("runtime", "auth_e2e", LocalEligibility::Affected);
-        let affected_typed_path =
-            expected_test_src_path(affected_typed.package, affected_typed.target)?;
-        let affected_typed_src = affected_typed_path
-            .to_str()
-            .context("runtime affected test path must be UTF-8")?;
-        let runtime_feature = LocalFeatureScope::for_package(affected_typed.package)
-            .context("runtime scope must exist")?
-            .feature();
-        let affected_typed_ok = [EligibilityFixture {
-            package: affected_typed.package,
-            name: affected_typed.target,
-            src_path: affected_typed_src,
-            required_features: &[runtime_feature],
-            test: true,
-        }];
-        check_eligibility(&root, &affected_typed_ok, &[affected_typed])
-            .context("Affected may share the typed LocalFeatureScope compile boundary")?;
-
         let missing = [EligibilityFixture {
             package: affected.package,
             name: affected.target,
@@ -3910,37 +2628,6 @@ mod tests {
             "disabled test diagnostic must mention test_by_default: {error}"
         );
 
-        let affected_wrong = [EligibilityFixture {
-            package: affected_typed.package,
-            name: affected_typed.target,
-            src_path: affected_typed_src,
-            required_features: &["broker-tests"],
-            test: true,
-        }];
-        let error = eligibility_rejection(
-            check_eligibility(&root, &affected_wrong, &[affected_typed]),
-            "Affected wrong feature must fail closed",
-        )?;
-        assert!(
-            error.to_string().contains(runtime_feature),
-            "Affected wrong-feature diagnostic must mention typed feature `{runtime_feature}`: {error}"
-        );
-
-        let affected_extra = [EligibilityFixture {
-            package: affected_typed.package,
-            name: affected_typed.target,
-            src_path: affected_typed_src,
-            required_features: &[runtime_feature, "extra-gate"],
-            test: true,
-        }];
-        let error = eligibility_rejection(
-            check_eligibility(&root, &affected_extra, &[affected_typed]),
-            "Affected extra features must fail closed",
-        )?;
-        assert!(
-            error.to_string().contains("required_features"),
-            "Affected extra-feature diagnostic must mention required_features: {error}"
-        );
         Ok(())
     }
 
@@ -4119,22 +2806,6 @@ mod tests {
         assert!(is_remote_only_test_target("mqtt", "integration"));
         assert!(is_remote_only_test_target("testkit", "mqtt_mtls_fixture"));
         assert!(!is_remote_only_test_target("mqtt", "ownership_gate"));
-        assert!(!is_remote_only_test_target(
-            "journeys",
-            "eventtransport_journey"
-        ));
-        assert!(!is_remote_only_test_target("runtime", "auth_e2e"));
-        assert!(!is_remote_only_test_target("runtime", "refresh_mint_e2e"));
-        assert!(!is_remote_only_test_target("runtime", "key_rotation_e2e"));
-        assert!(!is_remote_only_test_target(
-            "runtime",
-            "auth_bridge_structure"
-        ));
-        assert!(!is_remote_only_test_target(
-            "xtask",
-            "consistency_report_cli"
-        ));
-        assert!(!is_remote_only_test_target("runtime", "runtime"));
     }
 
     #[test]

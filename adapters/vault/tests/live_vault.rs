@@ -10,20 +10,11 @@ mod live_vault_support;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use deviceloop::{
-    CertificateKeyUsage, CertificatePolicy, CertificatePolicyDurations,
-    CertificateRenewBeforeSeconds, CertificateSan, CertificateValiditySeconds,
-};
 use diport::{
     CertScope, Clock, KeyId, KeyName, KeyProvider, PkiArtifactErrorKind, PkiArtifactRequest,
     PkiAuthorizationReceipt, PkiCommonName, PkiExtendedKeyUsage, PkiPolicyDigest,
     PkiRequestGeneration, PkiSan, PkiSpkiDigest, RedactedBytes, SignRequest, Signer,
     SigningPurpose,
-};
-use identity_composition::{
-    CertificateArtifactAcquisition, DeviceCertificateScope, DevicePolicyAuthorizationReceiptId,
-    ExpectedGeneration, PolicyHash, classify_external_pki_artifact_error,
-    mint_external_pki_production_artifact, validate_external_pki_artifact_request,
 };
 use ids::DeviceId;
 use rcgen::{
@@ -36,8 +27,8 @@ use secure::{Plaintext, ProtectionContext};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use vault::{
-    VaultExternalPkiProviderClosure, VaultKeyProvider, VaultPkiHttpClient, VaultPkiMount,
-    VaultPkiRole, VaultPkiTransport, VaultPkiTransportConfig, VaultSigner,
+    VaultKeyProvider, VaultPkiHttpClient, VaultPkiMount, VaultPkiRole, VaultPkiTransport,
+    VaultPkiTransportConfig, VaultSigner,
 };
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -315,31 +306,6 @@ fn pki_transport_config(
     ))
 }
 
-fn production_acquisition() -> Result<CertificateArtifactAcquisition, Box<dyn std::error::Error>> {
-    let scope = DeviceCertificateScope::for_test(
-        TenantId::parse("11111111-2222-4333-8444-555555555555")?,
-        DeviceId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")?,
-    );
-    let policy = CertificatePolicy::new(
-        CertificatePolicyDurations::new(
-            CertificateValiditySeconds::try_new(3600)?,
-            CertificateRenewBeforeSeconds::try_new(300)?,
-        )?,
-        vec![CertificateKeyUsage::ClientAuth],
-        vec![
-            CertificateSan::parse("device.example")?,
-            CertificateSan::parse("spiffe://tenant/device")?,
-        ],
-    )?;
-    Ok(CertificateArtifactAcquisition::for_test(
-        scope,
-        ExpectedGeneration::try_new(7)?,
-        PolicyHash::restore(&[0x5a; 32])?,
-        DevicePolicyAuthorizationReceiptId::restore(uuid::Uuid::from_bytes([7; 16]))?,
-        policy,
-    ))
-}
-
 fn pki_http_client(
     vault: &ProvisionedVault,
 ) -> Result<VaultPkiHttpClient, Box<dyn std::error::Error>> {
@@ -412,42 +378,6 @@ async fn integration_vault_transit_and_pki_conformance() -> Result<(), Box<dyn s
             REQUEST_TIMEOUT,
         )?,
     )?;
-    let production_provider = VaultExternalPkiProviderClosure::new(
-        Arc::new(LiveClock),
-        pki_http_client(&vault)?,
-        pki_transport_config(
-            vault.endpoint.clone(),
-            vault.runtime_token.clone(),
-            PKI_MOUNT,
-            PKI_ROLE,
-            vec![RedactedBytes::new(vault.pki_root_pem.as_bytes().to_vec())],
-            REQUEST_TIMEOUT,
-        )?,
-    )?;
-    let production_acquisition = production_acquisition()?;
-    let production_request = pki_request()?;
-    validate_external_pki_artifact_request(&production_acquisition, &production_request)?;
-    let production_evidence = production_provider
-        .sign_csr(production_request)
-        .await
-        .map_err(|error| classify_external_pki_artifact_error(&error))?;
-    let production_artifact = mint_external_pki_production_artifact(
-        production_provider.provider_closure(),
-        production_acquisition,
-        production_evidence.into_verified(),
-    )?
-    .into_append_authorization()
-    .into_snapshot();
-    assert_eq!(
-        production_artifact.authorization_receipt_id().as_uuid(),
-        uuid::Uuid::from_bytes([7; 16])
-    );
-    assert!(
-        production_artifact
-            .artifact_id()
-            .as_str()
-            .starts_with("vault-pki-sha256:")
-    );
     let evidence = transport.sign_csr(pki_request()?).await?;
     assert_eq!(
         evidence.request().scope().tenant().to_string(),

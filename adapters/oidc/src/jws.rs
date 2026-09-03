@@ -1,7 +1,7 @@
 //! JWS 三段解析 + base64url 解码 + header 算法白名单（[`SupportedAlg`]）。
 //!
 //! 只做**结构解析与算法识别**，不验签（签名校验在 [`crate::verify`]）。`alg=none` / RS* / PS* / 未知 →
-//! 不在 [`SupportedAlg`] 闭枚举 → 类型层不可表达 → fail-closed 拒（INVARIANT: OIDC-ALG-WHITELIST-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum + exhaustive match in verify" }）。
+//! 不在 [`SupportedAlg`] 闭枚举 → 类型层不可表达 → fail-closed 拒。
 //!
 //! ref: RFC 7515 §7.1（JWS Compact Serialization：`header.payload.signature`，各段 base64url 无填充）；
 //! spiffe/rust-spiffe src/bundle/jwt + src/svid/jwt（3 段 split + base64url header 解析范式）。
@@ -14,7 +14,7 @@ use diport::TokenPolicy;
 
 /// 支持的验签算法白名单（**闭枚举** → RS256 / `none` / 未知在类型层不可表达；防 alg-confusion 的第一道闸）。
 ///
-/// INVARIANT: OIDC-ALG-WHITELIST-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum + exhaustive match in verify" }—— 仅 ES256（非对称，JWT 路径）+ HS256（对称，service-token 路径）。
+/// 仅 ES256（非对称，JWT 路径）+ HS256（对称，service-token 路径）。
 /// 新增算法须显式扩枚举 + 扩 [`crate::verify`] 验签器 + 扩测试（anti-vacuity：删任一分支即编译失败）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportedAlg {

@@ -74,8 +74,8 @@ fn validate_event_metadata_public_source(source: &str) -> Result<()> {
         matches!(public_items.as_slice(), [syn::Item::Struct(item)] if item.ident == "EventMetadata"),
         "owner module must expose only EventMetadata"
     );
-    let syn::Item::Struct(event_metadata) = public_items[0] else {
-        unreachable!("exact public item checked above")
+    let Some(syn::Item::Struct(event_metadata)) = public_items.first() else {
+        bail!("owner module must expose EventMetadata as a struct")
     };
     anyhow::ensure!(
         event_metadata.generics.params.is_empty(),
@@ -99,8 +99,12 @@ fn validate_event_metadata_public_source(source: &str) -> Result<()> {
                 matches!(field.vis, syn::Visibility::Inherited),
                 "EventMetadata fields must be private"
             );
+            let ident = field
+                .ident
+                .as_ref()
+                .context("EventMetadata named field lost its identifier")?;
             Ok((
-                field.ident.as_ref().expect("named field").to_string(),
+                ident.to_string(),
                 field.ty.to_token_stream().to_string().replace(' ', ""),
             ))
         })
@@ -163,11 +167,11 @@ fn validate_event_metadata_public_source(source: &str) -> Result<()> {
             continue;
         };
         if owner.qself.is_some()
-            || !owner
+            || owner
                 .path
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == "EventMetadata")
+                .is_none_or(|segment| segment.ident != "EventMetadata")
         {
             continue;
         }
@@ -275,6 +279,7 @@ fn validate_consumer_tx_public_surface(root: &Path) -> Result<()> {
     })
 }
 
+#[allow(clippy::cognitive_complexity)]
 fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
     use quote::ToTokens as _;
 
@@ -342,7 +347,7 @@ fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
     let mut enums = BTreeMap::new();
     for item in public_items {
         let syn::Item::Enum(item) = item else {
-            unreachable!("filtered to canonical ConsumerTx enums")
+            bail!("canonical ConsumerTx item is not an enum")
         };
         enums.insert(item.ident.to_string(), item);
     }
@@ -426,7 +431,7 @@ fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
                 "constfnobservability_status(&self)->crate::observability::EventingTransactionStatus",
                 "constfnas_label(&self)->&'staticstr",
             ],
-            _ => unreachable!("owner exact-set checked above"),
+            _ => bail!("ConsumerTx owner exact-set drifted"),
         };
         let actual_signatures = methods
             .iter()
@@ -441,6 +446,7 @@ fn validate_consumer_tx_public_source(source: &str) -> Result<()> {
 }
 
 fn validate_consumer_tx_root_source(source: &str) -> Result<()> {
+    #[allow(clippy::cognitive_complexity)]
     fn exposes_consumer_tx(item: &syn::Item) -> bool {
         use quote::ToTokens as _;
 
@@ -657,7 +663,6 @@ struct BaselineCatalog {
 impl BaselineCatalog {
     fn derive(root: &Path, facts: &WorkspaceFacts) -> Result<Self> {
         crate::workspace_facts::validate_command_funnel(root)?;
-        crate::assembly_governance::validate_source_funnel(root)?;
         let (surface, findings) = crate::release_surface::validate(facts);
         if !findings.is_empty() {
             let details = findings
@@ -687,7 +692,6 @@ impl BaselineCatalog {
         surface: &crate::release_surface::ReleaseSurface,
     ) -> Result<Self> {
         crate::workspace_facts::validate_command_funnel(root)?;
-        crate::assembly_governance::validate_source_funnel(root)?;
         Self::from_release_surface(facts, surface)
     }
 
@@ -1950,9 +1954,7 @@ pub(crate) fn validated_release_surface(
     root: &Path,
     facts: &WorkspaceFacts,
 ) -> Result<crate::release_surface::ReleaseSurface> {
-    crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
-        root,
-    )?;
+    crate::workspace_facts::validate_command_funnel(root)?;
     let (surface, findings) = crate::release_surface::validate(facts);
     if !findings.is_empty() {
         bail!(
@@ -3845,6 +3847,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn target_crates_counts_and_curated_exact_set() {
         // exact-set 单源 = layers + CURATED_EXTRA_CRATES，经 is_proc_macro 过滤（含 sagaauthmint；securederive 排除）。
         let expected_basis: Vec<_> = BASIS_CRATES

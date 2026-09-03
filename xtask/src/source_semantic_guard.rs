@@ -14,14 +14,7 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-const SOURCE_ROOTS: &[&str] = &[
-    "crates",
-    "adapters",
-    "assemblies",
-    "generated",
-    "journeys",
-    "journeys-fault-matrix",
-];
+const SOURCE_ROOTS: &[&str] = &["crates", "adapters", "generated"];
 
 const TOKEN_PROFILE_RUSTDOC_CONTRACTS: &[(&str, &[&[&str]])] = &[
     (

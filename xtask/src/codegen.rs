@@ -347,16 +347,12 @@ enum ModKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GeneratedItem {
     Contract,
-    Spec,
-    Producer,
 }
 
 impl GeneratedItem {
     const fn ident(self) -> &'static str {
         match self {
             Self::Contract => "CONTRACT",
-            Self::Spec => "SPEC",
-            Self::Producer => "PRODUCER",
         }
     }
 }
@@ -373,9 +369,6 @@ pub(crate) struct GeneratedItemProjection {
 pub(crate) struct GeneratedCarrier {
     repo_path: String,
     module_path: String,
-    kind: ContractKind,
-    lifecycle: Lifecycle,
-    is_http_producer: bool,
 }
 
 impl GeneratedCarrier {
@@ -395,42 +388,12 @@ impl GeneratedCarrier {
         Ok(Self {
             repo_path: format!("generated/src/{kind_dir}/{module}.rs"),
             module_path,
-            kind,
-            lifecycle: manifest.lifecycle,
-            is_http_producer: kind == ContractKind::Http
-                && manifest.lifecycle == Lifecycle::Active
-                && manifest.consistency_level == ConsistencyLevel::OutboxFact
-                && manifest
-                    .capabilities
-                    .outbox
-                    .as_ref()
-                    .is_some_and(|outbox| outbox.role == OutboxRole::Producer),
         })
-    }
-
-    /// Canonical generated HTTP module key used by runtime/source assurance joins.
-    pub(crate) fn route_key(&self) -> Result<&str> {
-        if self.kind != ContractKind::Http {
-            bail!("only HTTP contracts have a generated route key");
-        }
-        self.module_path
-            .strip_prefix("generated::http::")
-            .context("generated HTTP module path lost its canonical prefix")
     }
 
     pub(crate) fn item(&self, item: GeneratedItem) -> Result<GeneratedItemProjection> {
         match item {
             GeneratedItem::Contract => {}
-            GeneratedItem::Spec => {
-                if self.kind == ContractKind::Http && self.lifecycle != Lifecycle::Active {
-                    bail!("inactive HTTP contract has no generated SPEC");
-                }
-            }
-            GeneratedItem::Producer => {
-                if !self.is_http_producer {
-                    bail!("only active OutboxFact HTTP producers have generated PRODUCER");
-                }
-            }
         }
         Ok(GeneratedItemProjection {
             repo_path: self.repo_path.clone(),
@@ -2466,6 +2429,7 @@ fn saga_action_registry_generation(saga: &crate::contract::manifest::SagaBlock) 
     format!("sha256:{}", lower_hex(&hasher.finalize()))
 }
 
+#[allow(clippy::cognitive_complexity)]
 fn render_http_glue(
     c: &GovernedContract,
     sup: &str,
@@ -3360,15 +3324,6 @@ fn render_http_mount_key(c: &GovernedContract) -> Result<String> {
     c.slug().map_or(Ok(module.clone()), |slug| {
         Ok(format!("{module}::{}", slug_module_ident(slug)?))
     })
-}
-
-pub(crate) fn rendered_http_route_evidence_path(c: &GovernedContract) -> Result<String> {
-    let module = module_name(&c.manifest().domain, &c.manifest().version);
-    let path = match c.slug() {
-        Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
-        None => module,
-    };
-    Ok(format!("::generated::http::{path}::ROUTE.evidence()"))
 }
 
 fn render_http_effect_profile_consts(c: &GovernedContract) -> Result<String> {
@@ -6120,7 +6075,7 @@ mod tests {
         let mut nil_allowed = resolved.clone();
         nil_allowed
             .pointer_mut("/definitions/AuthorizationReceiptId/not")
-            .expect("definition")
+            .context("authorization receipt definition")?
             .take();
         assert!(
             validate_authorization_receipt_component("identity.test", "payload.json", &nil_allowed)
@@ -6130,7 +6085,7 @@ mod tests {
         let mut parallel_definition = canonical.clone();
         parallel_definition
             .pointer_mut("/properties/authorizationReceiptId/$ref")
-            .expect("property")
+            .context("authorization receipt reference")?
             .clone_from(&serde_json::json!("#/definitions/authorizationReceiptId"));
         let mut red_count = 0;
         assert!(
@@ -6146,7 +6101,7 @@ mod tests {
         let mut unredacted = canonical.clone();
         unredacted
             .pointer_mut("/properties/authorizationReceiptId/x-redaction")
-            .expect("property")
+            .context("authorization receipt redaction")?
             .take();
         let mut red_count = 0;
         assert!(
@@ -7593,18 +7548,6 @@ mod tests {
                 "emits = [\"seed.happened\"]\n",
             ),
         )?;
-        let contracts = load_contract_fixtures(&root.join("contracts"))?;
-        let producer_contract = contracts
-            .iter()
-            .find(|contract| contract.manifest().id == "seed.echo")
-            .context("seed producer")?;
-        let carrier = GeneratedCarrier::from_contract(producer_contract)?;
-        assert_eq!(carrier.route_key()?, "_seed_v1");
-        assert_eq!(
-            carrier.item(GeneratedItem::Producer)?.symbol,
-            "generated::http::_seed_v1::PRODUCER"
-        );
-
         let gen_src = root.join("generated/src");
         generate(&root.join("contracts"), &gen_src, false)?;
         let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
@@ -9613,6 +9556,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn device_certificate_candidate_registry_is_exact_draft_projection() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let governance = ContractGovernanceIr::load_consumer_workspace(&root)?;

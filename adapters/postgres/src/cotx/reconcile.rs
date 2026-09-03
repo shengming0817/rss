@@ -22,10 +22,7 @@ use crate::device_certificate_scope::{
 };
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox};
 use crate::reconcile::CommittedActionOutcome;
-#[cfg(any(
-    all(test, feature = "integration"),
-    feature = "fault-matrix-test-support"
-))]
+#[cfg(all(test, feature = "integration"))]
 use crate::reconcile::TargetFields;
 
 /// Non-interchangeable reconcile authority. It owns only reconcile operations and cannot invoke
@@ -110,10 +107,7 @@ impl TenantDb<MaintenanceReadLane> {
     }
 }
 
-#[cfg(any(
-    all(test, feature = "integration"),
-    feature = "fault-matrix-test-support"
-))]
+#[cfg(all(test, feature = "integration"))]
 #[derive(sqlx::FromRow)]
 pub(crate) struct ReconcileLeaseRow {
     pub(crate) target_id: String,
@@ -280,29 +274,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
         }
     }
 
-    #[cfg(feature = "fault-matrix-test-support")]
-    pub(crate) async fn reconcile_seed_device_desired_for_fault_matrix(
-        &mut self,
-        device_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO device_certificate_desired_states \
-             (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
-              client_auth, server_auth, sans) \
-             VALUES ($1::uuid, $2::uuid, 2, 3600, 600, true, false, ARRAY[]::text[]) \
-             ON CONFLICT (tenant_id, device_id) DO NOTHING",
-        )
-        .bind(self.tenant.to_string())
-        .bind(device_id)
-        .execute(&mut *self.conn)
-        .await
-        .map(|_| ())
-    }
-
-    #[cfg(any(
-        all(test, feature = "integration"),
-        feature = "fault-matrix-test-support"
-    ))]
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn reconcile_upsert_target(
         &mut self,
         fields: &TargetFields,
@@ -358,10 +330,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
         Ok(target_id)
     }
 
-    #[cfg(any(
-        all(test, feature = "integration"),
-        feature = "fault-matrix-test-support"
-    ))]
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn reconcile_acquire_lease(
         &mut self,
         target_id: &str,

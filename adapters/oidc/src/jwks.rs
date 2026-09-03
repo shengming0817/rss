@@ -658,7 +658,6 @@ fn read_and_parse(path: &Path) -> Result<KeySet, JwksError> {
 
 /// Access JWKS 唯一合法 `alg` 字面量。缺字段 / 非 `ES256` → serde 失败（类型层不可表达）。
 ///
-/// INVARIANT: OIDC-ALG-JWKS-BIND-01 { level = "Hard", exec = "native-compile", source = "code", native = "required serde newtype / closed enum" }——
 /// RSS 偏离 RFC 7517 §4.4（`alg` 可选）：access 本地 JWKS profile 强制显式 `alg=ES256`
 ///（与 Vault 导出路径一致；为 #1109 HTTP JWKS 扩展前置收紧）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

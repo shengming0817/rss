@@ -159,8 +159,7 @@ fn domain_feature_shared_capability_allowlist_is_closed() {
 }
 
 #[test]
-fn journey_fault_support_does_not_restore_refresh_store_writes()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_support_does_not_restore_refresh_store_writes() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = manifest()?;
     let features = manifest
         .get("features")
@@ -173,78 +172,14 @@ fn journey_fault_support_does_not_restore_refresh_store_writes()
             "eventexec/internal-test-support".to_owned(),
             "eventexec/l2-test-support".to_owned(),
         ]),
-        "general test support may forward eventexec fixtures but must not activate journey transaction faults"
-    );
-    assert_eq!(
-        feature_set(features, "journey-fault-support")?,
-        BTreeSet::new(),
-        "journey fault support must remain an explicit leaf feature"
+        "general test support forwards only the retained eventexec fixtures"
     );
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for source in ["src/cotx/mod.rs", "src/refresh_token_store.rs"] {
-        let source = fs::read_to_string(root.join(source))?;
-        assert!(
-            !source.contains("feature = \"test-support\""),
-            "transaction fault code must not be compiled by general test support"
-        );
-    }
     let bundle = fs::read_to_string(root.join("src/bundle.rs"))?;
     assert!(
         !bundle.contains("refresh_token_store_with_commit_unknown_once"),
-        "journey faults must not restore the deleted refresh writer constructor"
-    );
-    Ok(())
-}
-
-#[test]
-fn fault_matrix_support_closes_its_shipped_dependency_graph()
--> Result<(), Box<dyn std::error::Error>> {
-    let manifest = manifest()?;
-    let dependencies = manifest
-        .get("dependencies")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| std::io::Error::other("dependencies must be a table"))?;
-    let dev_dependencies = manifest
-        .get("dev-dependencies")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| std::io::Error::other("dev-dependencies must be a table"))?;
-    let features = manifest
-        .get("features")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| std::io::Error::other("features must be a table"))?;
-
-    // After #1903 / PR #675, fault-matrix shipped feature no longer optional-deps `generated`;
-    // integration fixtures keep it as a normal (non-optional) dev-dependency only.
-    assert!(
-        dependencies.get("generated").is_none(),
-        "fault-matrix shipped feature must not pull generated into normal dependencies"
-    );
-    let generated = dev_dependencies
-        .get("generated")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| std::io::Error::other("generated must be a normal dev-dependency table"))?;
-    assert_eq!(
-        generated.get("path").and_then(toml::Value::as_str),
-        Some("../../generated")
-    );
-    assert_eq!(
-        feature_set(features, "fault-matrix-test-support")?,
-        BTreeSet::from([
-            "auth-audit-sink".to_owned(),
-            "dep:anyhow".to_owned(),
-            "dep:identity".to_owned(),
-            "dep:serde_json_canonicalizer".to_owned(),
-            "diport/test-support".to_owned(),
-            "domain-audit".to_owned(),
-            "domain-identity".to_owned(),
-            "domain-settings".to_owned(),
-            "eventexec/internal-test-support".to_owned(),
-            "eventexec/l2-test-support".to_owned(),
-            "identity/fault-matrix-test-support".to_owned(),
-            "test-support".to_owned(),
-        ]),
-        "fault support must compile from its declared shipped feature alone"
+        "test support must not expose a refresh writer constructor"
     );
     Ok(())
 }

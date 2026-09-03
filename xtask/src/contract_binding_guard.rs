@@ -15,7 +15,7 @@
 //! generated binding。PostgreSQL projection fixed function 只能由 sanctioned typed wrapper 调用。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }.
-//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_workspace_compositions_and_direct_journeys" }.
+//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "check", source = "code" }.
 //! INVARIANT: PRODUCER-RAW-TRANSPORT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "contract_binding_guard::tests::flags_raw_transport_in_cross_file_reachable_helper", anti_vacuity = "contract_binding_guard::tests::real_active_producer_providers_have_no_raw_transport" }.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -33,15 +33,8 @@ use syn::{
 use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
-use crate::execution_profiles::{
-    DeviceLatentEvidenceId, DeviceLatentEvidenceSpec, ExecutionUnitId,
-};
-use crate::integration_shards::{
-    IntegrationShard, LocalFeatureScope, TargetKind as IntegrationTargetKind,
-};
 use crate::src_scan::rs_files;
 
-const DIRECT_SCAN_ROOTS: &[&str] = &["journeys", "journeys-fault-matrix"];
 const EXCLUDED_WORKSPACE_PACKAGES: &[&str] = &["generated", "xtask"];
 const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
 const PROJECTION_EVENTING_CAPABILITY: &str = "adapters/postgres/src/cotx/eventing.rs";
@@ -69,8 +62,6 @@ pub(crate) enum Rule {
     ProjectionDbFunctionCallsite,
     /// active HTTP producer provider 引用 raw publisher/emitter transport。
     RawProducerTransport,
-    /// DeviceLatent draft candidates, generated bindings, and canonical T1/T2 assertions drifted.
-    DeviceLatentEvidenceClosure,
 }
 
 /// Command-scope consumer：必填 workspace root + 已加载的 [`WorkspaceFacts`]，不自建 owner。
@@ -93,403 +84,14 @@ impl GovernanceCheck for ContractBindingGuard<'_> {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
-        let (scanned, mut findings) = scan_sources(self.root, self.facts)?;
-        findings.extend(validate_device_latent_evidence(
-            self.root,
-            self.facts,
-            &DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec),
-        )?);
+        let (scanned, findings) = scan_sources(self.root, self.facts)?;
         Ok((
             format!(
-                "扫描 {scanned} 个生产 Rust 源文件；contract/event fact/HTTP route/projection/saga binding 生产 mint 仅允许 generated/codegen owner；projection DB functions 仅允许 sanctioned wrapper；active HTTP producer provider 禁止 raw publisher/emitter；DeviceLatent draft candidate/evidence closure 已核对"
+                "扫描 {scanned} 个生产 Rust 源文件；contract/event fact/HTTP route/projection/saga binding 生产 mint 仅允许 generated/codegen owner；projection DB functions 仅允许 sanctioned wrapper；active HTTP producer provider 禁止 raw publisher/emitter"
             ),
             findings,
         ))
     }
-}
-
-fn validate_device_latent_evidence(
-    root: &Path,
-    facts: &WorkspaceFacts,
-    evidence: &[DeviceLatentEvidenceSpec],
-) -> Result<Vec<Finding<Rule>>> {
-    let mut findings = Vec::new();
-    let expected_evidence = DeviceLatentEvidenceId::ALL
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let actual_evidence = evidence.iter().map(|spec| spec.id).collect::<BTreeSet<_>>();
-    if evidence.len() != expected_evidence.len() || actual_evidence != expected_evidence {
-        findings.push(finding(
-            Rule::DeviceLatentEvidenceClosure,
-            "DeviceLatentEvidenceId::ALL",
-            format!(
-                "DeviceLatent evidence identity exact-set drift: expected {expected_evidence:?}, got {actual_evidence:?} across {} entries",
-                evidence.len()
-            ),
-        ));
-    }
-    findings.extend(validate_generated_device_certificate_candidates());
-    findings.extend(validate_device_latent_evidence_selectors(
-        root, facts, evidence,
-    )?);
-    Ok(findings)
-}
-
-fn validate_generated_device_certificate_candidates() -> Vec<Finding<Rule>> {
-    let expected = crate::contract::DeviceCertificateCandidateId::ALL
-        .map(crate::contract::DeviceCertificateCandidateId::spec);
-    let actual = generated::device_certificate::CANDIDATE_CONTRACTS;
-    let mut findings = Vec::new();
-    if actual.len() != expected.len() {
-        findings.push(finding(
-            Rule::DeviceLatentEvidenceClosure,
-            "generated::device_certificate::CANDIDATE_CONTRACTS",
-            format!(
-                "generated candidate count drift: expected {} got {}",
-                expected.len(),
-                actual.len()
-            ),
-        ));
-    }
-    for (index, expected) in expected.iter().enumerate() {
-        let Some(actual) = actual.get(index).copied() else {
-            continue;
-        };
-        if actual.binding().contract_id() != expected.id
-            || actual.kind() != expected.kind
-            || actual.consistency_level() != expected.consistency_level
-            || actual.lifecycle() != expected.lifecycle
-        {
-            findings.push(finding(
-                Rule::DeviceLatentEvidenceClosure,
-                expected.id,
-                "generated candidate identity/kind/consistency/lifecycle drifted from the canonical typed catalog",
-            ));
-        }
-    }
-    findings
-}
-
-fn validate_device_latent_evidence_selectors(
-    root: &Path,
-    facts: &WorkspaceFacts,
-    evidence: &[DeviceLatentEvidenceSpec],
-) -> Result<Vec<Finding<Rule>>> {
-    let mut findings = Vec::new();
-    let mut selectors = BTreeSet::new();
-    for spec in evidence {
-        let subject = format!("{}::{}", spec.source_path, spec.selector);
-        if !selectors.insert((spec.source_path, spec.selector)) {
-            findings.push(finding(
-                Rule::DeviceLatentEvidenceClosure,
-                &subject,
-                "duplicate DeviceLatent evidence selector",
-            ));
-            continue;
-        }
-        let source_path = Path::new(spec.source_path);
-        let package = facts
-            .package_for_repo_path(source_path)
-            .with_context(|| format!("resolve evidence package for {}", spec.source_path))?;
-        let Some(package) = package else {
-            findings.push(finding(
-                Rule::DeviceLatentEvidenceClosure,
-                &subject,
-                "evidence source is not owned by a workspace package",
-            ));
-            continue;
-        };
-        let mut enabled_features = package_default_features(facts, &package);
-        let target_source = match spec.owner {
-            ExecutionUnitId::Integration(id) => {
-                let owner = id.spec();
-                if let Some(scope) = LocalFeatureScope::for_package(owner.package) {
-                    enabled_features.insert(scope.feature().to_owned());
-                }
-                if owner.shard == IntegrationShard::ProductionRuntime {
-                    findings.push(finding(
-                        Rule::DeviceLatentEvidenceClosure,
-                        &subject,
-                        "DeviceLatent draft evidence may not use ProductionRuntime",
-                    ));
-                }
-                if package.as_str() != owner.package {
-                    findings.push(finding(
-                        Rule::DeviceLatentEvidenceClosure,
-                        &subject,
-                        format!(
-                            "evidence package {} does not match integration owner package {}",
-                            package.as_str(),
-                            owner.package
-                        ),
-                    ));
-                }
-                let target = facts.targets_for(&package)?.iter().find(|target| {
-                    target.name() == owner.target
-                        && match owner.kind {
-                            IntegrationTargetKind::Test => {
-                                target.kind() == TargetKind::Test
-                                    && target.repo_relative_src_path() == source_path
-                            }
-                            IntegrationTargetKind::Lib => {
-                                target.kind() == TargetKind::Library
-                                    && source_path.starts_with(
-                                        target
-                                            .repo_relative_src_path()
-                                            .parent()
-                                            .unwrap_or_else(|| Path::new("")),
-                                    )
-                            }
-                        }
-                });
-                if target.is_none() {
-                    findings.push(finding(
-                        Rule::DeviceLatentEvidenceClosure,
-                        &subject,
-                        format!(
-                            "evidence source does not belong to integration owner target {}/{}",
-                            owner.package, owner.target
-                        ),
-                    ));
-                }
-                if let Some(target) = target {
-                    enabled_features.extend(target.required_features().iter().cloned());
-                }
-                target.map(|target| target.repo_relative_src_path().to_path_buf())
-            }
-            ExecutionUnitId::Gate(gate) => {
-                if gate != crate::ci_lanes::GateId::ComponentTests {
-                    findings.push(finding(
-                        Rule::DeviceLatentEvidenceClosure,
-                        &subject,
-                        "T1 source evidence must use the existing ComponentTests owner",
-                    ));
-                }
-                let target = facts.targets_for(&package)?.iter().find(|target| {
-                    target.kind() == TargetKind::Library
-                        && source_path.starts_with(
-                            target
-                                .repo_relative_src_path()
-                                .parent()
-                                .unwrap_or_else(|| Path::new("")),
-                        )
-                });
-                if target.is_none() {
-                    findings.push(finding(
-                        Rule::DeviceLatentEvidenceClosure,
-                        &subject,
-                        "ComponentTests evidence source is outside a library target",
-                    ));
-                }
-                if let Some(target) = target {
-                    enabled_features.extend(target.required_features().iter().cloned());
-                }
-                target.map(|target| target.repo_relative_src_path().to_path_buf())
-            }
-        };
-
-        let source = std::fs::read_to_string(root.join(source_path))
-            .with_context(|| format!("read DeviceLatent evidence source {}", spec.source_path))?;
-        let ast = syn::parse_file(&source)
-            .with_context(|| format!("parse DeviceLatent evidence source {}", spec.source_path))?;
-        let mut tests = Vec::new();
-        let mut module_prefix = target_source
-            .as_deref()
-            .and_then(|target| rust_test_module_prefix(target, source_path))
-            .unwrap_or_default();
-        collect_enabled_test_paths(
-            &ast.items,
-            &mut module_prefix,
-            &enabled_features,
-            &mut tests,
-        );
-        let selector = spec
-            .selector
-            .split("::")
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let matches = tests.iter().filter(|test| **test == selector).count();
-        if matches != 1 {
-            findings.push(finding(
-                Rule::DeviceLatentEvidenceClosure,
-                &subject,
-                format!(
-                    "evidence selector must resolve to exactly one enabled test; found {matches}"
-                ),
-            ));
-        }
-    }
-    Ok(findings)
-}
-
-fn collect_enabled_test_paths(
-    items: &[Item],
-    prefix: &mut Vec<String>,
-    enabled_features: &BTreeSet<String>,
-    tests: &mut Vec<Vec<String>>,
-) {
-    for item in items {
-        match item {
-            Item::Mod(module) if test_attributes_enabled(&module.attrs, enabled_features) => {
-                if let Some((_, nested)) = &module.content {
-                    prefix.push(module.ident.to_string());
-                    collect_enabled_test_paths(nested, prefix, enabled_features, tests);
-                    prefix.pop();
-                }
-            }
-            Item::Fn(function)
-                if function.attrs.iter().any(is_test_attribute)
-                    && test_attributes_enabled(&function.attrs, enabled_features) =>
-            {
-                let mut path = prefix.clone();
-                path.push(function.sig.ident.to_string());
-                tests.push(path);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn package_default_features(facts: &WorkspaceFacts, package: &PackageKey) -> BTreeSet<String> {
-    let Some(metadata) = facts
-        .workspace_packages()
-        .into_iter()
-        .find(|candidate| candidate.key() == package)
-        .map(|candidate| candidate.publish_metadata().clone())
-    else {
-        return BTreeSet::new();
-    };
-    let catalog = metadata.features();
-    let mut enabled = BTreeSet::new();
-    let mut pending = catalog
-        .contains_key("default")
-        .then(|| "default".to_owned())
-        .into_iter()
-        .collect::<Vec<_>>();
-    while let Some(feature) = pending.pop() {
-        if !enabled.insert(feature.clone()) {
-            continue;
-        }
-        if let Some(expansion) = catalog.get(&feature) {
-            pending.extend(
-                expansion
-                    .iter()
-                    .filter(|nested| catalog.contains_key(*nested))
-                    .cloned(),
-            );
-        }
-    }
-    enabled
-}
-
-fn rust_test_module_prefix(target_source: &Path, source_path: &Path) -> Option<Vec<String>> {
-    if target_source == source_path {
-        return Some(Vec::new());
-    }
-    let relative = source_path.strip_prefix(target_source.parent()?).ok()?;
-    let mut components = relative
-        .parent()
-        .into_iter()
-        .flat_map(Path::components)
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => value.to_str().map(str::to_owned),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let stem = relative.file_stem()?.to_str()?;
-    if !matches!(stem, "lib" | "main" | "mod") {
-        components.push(stem.to_owned());
-    }
-    Some(components)
-}
-
-fn test_attributes_enabled(attributes: &[Attribute], enabled_features: &BTreeSet<String>) -> bool {
-    !attributes.iter().any(|attribute| {
-        attribute.path().is_ident("ignore")
-            || attribute.path().is_ident("cfg_attr")
-            || (attribute.path().is_ident("cfg")
-                && matches!(&attribute.meta, Meta::List(list) if cfg_value(&list.tokens, enabled_features) != CfgValue::True))
-    })
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CfgValue {
-    True,
-    False,
-    Unknown,
-}
-
-fn cfg_value(tokens: &proc_macro2::TokenStream, enabled_features: &BTreeSet<String>) -> CfgValue {
-    syn::parse2::<Meta>(tokens.clone()).map_or(CfgValue::Unknown, |meta| {
-        cfg_meta_value(&meta, enabled_features)
-    })
-}
-
-fn cfg_meta_value(meta: &Meta, enabled_features: &BTreeSet<String>) -> CfgValue {
-    match meta {
-        Meta::Path(path) if path.is_ident("test") => CfgValue::True,
-        Meta::NameValue(value) if value.path.is_ident("feature") => {
-            if let Expr::Lit(literal) = &value.value
-                && let Lit::Str(feature) = &literal.lit
-                && enabled_features.contains(feature.value().as_str())
-            {
-                CfgValue::True
-            } else {
-                CfgValue::False
-            }
-        }
-        Meta::Path(_) | Meta::NameValue(_) => CfgValue::Unknown,
-        Meta::List(list) => {
-            let nested = Punctuated::<Meta, Token![,]>::parse_terminated
-                .parse2(list.tokens.clone())
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| cfg_meta_value(item, enabled_features))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if list.path.is_ident("all") {
-                if nested.contains(&CfgValue::False) {
-                    CfgValue::False
-                } else if nested.iter().all(|value| *value == CfgValue::True) {
-                    CfgValue::True
-                } else {
-                    CfgValue::Unknown
-                }
-            } else if list.path.is_ident("any") {
-                if nested.contains(&CfgValue::True) {
-                    CfgValue::True
-                } else if nested.iter().all(|value| *value == CfgValue::False) {
-                    CfgValue::False
-                } else {
-                    CfgValue::Unknown
-                }
-            } else if list.path.is_ident("not") && nested.len() == 1 {
-                match nested[0] {
-                    CfgValue::True => CfgValue::False,
-                    CfgValue::False => CfgValue::True,
-                    CfgValue::Unknown => CfgValue::Unknown,
-                }
-            } else {
-                CfgValue::Unknown
-            }
-        }
-    }
-}
-
-fn is_test_attribute(attribute: &Attribute) -> bool {
-    attribute.path().is_ident("test")
-        || (attribute
-            .path()
-            .segments
-            .first()
-            .is_some_and(|segment| segment.ident == "tokio")
-            && attribute
-                .path()
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "test"))
 }
 
 fn scan_sources(root: &Path, facts: &WorkspaceFacts) -> Result<(usize, Vec<Finding<Rule>>)> {
@@ -515,7 +117,6 @@ fn scan_sources(root: &Path, facts: &WorkspaceFacts) -> Result<(usize, Vec<Findi
 
 fn production_source_roots(root: &Path, facts: &WorkspaceFacts) -> Result<Vec<PathBuf>> {
     let mut roots = workspace_member_production_roots(root, facts)?;
-    roots.extend(DIRECT_SCAN_ROOTS.iter().map(|direct| root.join(direct)));
     roots.sort();
     roots.dedup();
     Ok(roots)
@@ -1712,32 +1313,6 @@ mod tests {
         assert!(roots.contains(&root.join("bins/prod_bin")));
         assert!(roots.contains(&root.join("crates/prod_macro")));
         assert!(!roots.contains(&root.join("crates/test_only")));
-        for direct in DIRECT_SCAN_ROOTS {
-            assert!(
-                roots.contains(&root.join(direct)),
-                "direct scan root {direct} must remain"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_roots_exclude_owner_packages_and_keep_direct_roots() -> anyhow::Result<()> {
-        let root = Path::new("/workspace");
-        let facts = facts_for_packages(
-            root,
-            &[
-                ("leaf", "crates/leaf", &[("leaf", "lib")]),
-                ("generated", "generated", &[("generated", "lib")]),
-                ("xtask", "xtask", &[("xtask", "bin")]),
-            ],
-        )?;
-        let roots = production_source_roots(root, &facts)?;
-        assert!(roots.contains(&root.join("crates/leaf")));
-        assert!(!roots.contains(&root.join("generated")));
-        assert!(!roots.contains(&root.join("xtask")));
-        assert!(roots.contains(&root.join("journeys")));
-        assert!(roots.contains(&root.join("journeys-fault-matrix")));
         Ok(())
     }
 
@@ -1807,117 +1382,6 @@ mod tests {
             err.to_string().contains("`left`") && err.to_string().contains("`right`"),
             "claim error must name both packages: {err:#}"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn duplicate_direct_and_member_roots_are_deduped() -> anyhow::Result<()> {
-        let root = Path::new("/workspace");
-        let facts = facts_for_packages(
-            root,
-            &[
-                ("leaf", "crates/leaf", &[("leaf", "lib")]),
-                ("journeys", "journeys", &[("journeys", "lib")]),
-            ],
-        )?;
-        let roots = production_source_roots(root, &facts)?;
-        let journeys = root.join("journeys");
-        assert_eq!(
-            roots.iter().filter(|path| *path == &journeys).count(),
-            1,
-            "member + DIRECT_SCAN_ROOTS overlap must dedup: {roots:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn scan_sources_covers_workspace_compositions_and_direct_journey_roots() -> anyhow::Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "rss-contract-binding-roots-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
-        std::fs::create_dir_all(&root)?;
-        let source = r#"
-            fn mint() {
-                let _ = vocab::HttpRouteEvidence::from_static(
-                    generated::http::identity_v1::profile::CONTRACT,
-                    "/forged",
-                    "GET",
-                    &[],
-                    vocab::HttpSuccessStatus::new(200),
-                    vocab::HttpIdempotency::Idempotent,
-                    vocab::HttpRouteAuth::Public,
-                    None,
-                    false,
-                    vocab::HttpConsistencyLevel::LocalOnly,
-                    generated::http::identity_v1::profile::EFFECT_PROFILE,
-                );
-            }
-        "#;
-        for relative in [
-            "composition/settings/src/lib.rs",
-            "journeys/src/lib.rs",
-            "journeys-fault-matrix/src/lib.rs",
-        ] {
-            let path = root.join(relative);
-            let Some(parent) = path.parent() else {
-                anyhow::bail!(
-                    "synthetic source path must have a parent: {}",
-                    path.display()
-                );
-            };
-            std::fs::create_dir_all(parent)?;
-            std::fs::write(path, source)?;
-        }
-        let facts = facts_for_packages(
-            &root,
-            &[(
-                "composition-settings",
-                "composition/settings",
-                &[("composition-settings", "lib")],
-            )],
-        )?;
-
-        let result = scan_sources(&root, &facts);
-        std::fs::remove_dir_all(&root)?;
-        let (scanned, findings) = result?;
-        assert_eq!(
-            scanned, 3,
-            "all workspace members and direct production root shapes must be scanned"
-        );
-        assert_eq!(
-            findings.len(),
-            3,
-            "each synthetic root must trip the provenance guard: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn real_source_roots_cover_workspace_compositions_and_direct_journeys() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts.get()?;
-        let roots = production_source_roots(&root, facts)?;
-        for relative in [
-            "composition/identity",
-            "composition/settings",
-            "composition/audit",
-            "journeys",
-            "journeys-fault-matrix",
-        ] {
-            assert!(
-                roots.contains(&root.join(relative)),
-                "production provenance scan must include {relative}"
-            );
-        }
-        for relative in ["generated", "xtask"] {
-            assert!(
-                !roots.contains(&root.join(relative)),
-                "{relative} is an owner, not a production provenance consumer"
-            );
-        }
         Ok(())
     }
 
@@ -2244,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_feature_gated_fault_matrix_binding_mint() -> anyhow::Result<()> {
+    fn flags_feature_gated_provider_binding_mint() -> anyhow::Result<()> {
         let src = r#"
             const STEP: vocab::SagaStepBinding =
                 vocab::SagaStepBinding::from_static(
@@ -2254,7 +1718,10 @@ mod tests {
                 );
 
         "#;
-        let findings = scan_file(Path::new("adapters/postgres/src/fault_matrix.rs"), src)?;
+        let findings = scan_file(
+            Path::new("adapters/postgres/src/integration_support.rs"),
+            src,
+        )?;
         assert_eq!(findings.len(), 1);
         assert!(findings.iter().any(|f| f.rule == Rule::BareFromStatic));
         Ok(())
@@ -2741,139 +2208,5 @@ mod tests {
             fact_mints >= 6 && contract_impls >= 6,
             "codegen owner must retain real event fact mints and sealed contract impls; fact_mints={fact_mints}, contract_impls={contract_impls}"
         );
-    }
-
-    #[test]
-    fn device_latent_evidence_real_workspace_is_exact_and_non_vacuous() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts.get()?;
-        assert!(
-            !package_default_features(facts, &facts.package_key("observ")?).contains("default")
-        );
-        let runtime_features = package_default_features(facts, &facts.package_key("runtime")?);
-        assert!(runtime_features.contains("default"));
-        assert!(runtime_features.contains("operator-cli"));
-        let findings = validate_device_latent_evidence(
-            &root,
-            facts,
-            &DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec),
-        )?;
-        assert!(findings.is_empty(), "{findings:?}");
-        Ok(())
-    }
-
-    #[test]
-    fn device_latent_evidence_rejects_missing_duplicate_and_production_runtime_selector()
-    -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts.get()?;
-
-        let exact = DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec);
-        let findings = validate_device_latent_evidence(&root, facts, &exact[1..])?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding.detail.contains("identity exact-set drift")
-        }));
-
-        let mut wrong_identity = exact;
-        wrong_identity[0] = wrong_identity[1];
-        let findings = validate_device_latent_evidence(&root, facts, &wrong_identity)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding.detail.contains("identity exact-set drift")
-        }));
-
-        let mut missing = DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec);
-        missing[0].selector = "tests::missing_device_latent_evidence";
-        let findings = validate_device_latent_evidence(&root, facts, &missing)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding.detail.contains("exactly one enabled test; found 0")
-        }));
-
-        let mut wrong_prefix = DeviceLatentEvidenceId::ALL.map(DeviceLatentEvidenceId::spec);
-        wrong_prefix[0].selector = "bogus::tests::provider_catalog_is_the_exact_production_closure";
-        let findings = validate_device_latent_evidence(&root, facts, &wrong_prefix)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding.detail.contains("exactly one enabled test; found 0")
-        }));
-
-        let duplicate = [
-            DeviceLatentEvidenceId::DraftPilotComposition.spec(),
-            DeviceLatentEvidenceId::DraftPilotComposition.spec(),
-        ];
-        let findings = validate_device_latent_evidence(&root, facts, &duplicate)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding
-                    .detail
-                    .contains("duplicate DeviceLatent evidence selector")
-        }));
-
-        let mut production = [DeviceLatentEvidenceId::DraftPilotComposition.spec()];
-        production[0].owner = ExecutionUnitId::Integration(
-            crate::integration_shards::IntegrationUnitId::RuntimeInventoryJourney,
-        );
-        let findings = validate_device_latent_evidence(&root, facts, &production)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding.detail.contains("may not use ProductionRuntime")
-        }));
-
-        let mut wrong_owner = [DeviceLatentEvidenceId::DraftPilotComposition.spec()];
-        wrong_owner[0].owner =
-            ExecutionUnitId::Integration(crate::integration_shards::IntegrationUnitId::RuntimeLib);
-        let findings = validate_device_latent_evidence(&root, facts, &wrong_owner)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::DeviceLatentEvidenceClosure
-                && finding
-                    .detail
-                    .contains("does not match integration owner package")
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn device_latent_selector_ast_rejects_ignored_and_non_test_functions() -> anyhow::Result<()> {
-        let ast = syn::parse_file(
-            r#"
-                fn helper() {}
-                #[test]
-                #[ignore]
-                fn ignored_evidence() {}
-                #[test]
-                #[cfg(any())]
-                fn false_cfg_evidence() {}
-                #[test]
-                #[cfg_attr(test, ignore)]
-                fn conditional_ignore_evidence() {}
-                #[test]
-                #[cfg(feature = "disabled-feature")]
-                fn disabled_feature_evidence() {}
-                #[test]
-                #[cfg(feature = "enabled-feature")]
-                fn enabled_feature_evidence() {}
-                #[tokio::test]
-                async fn enabled_evidence() {}
-            "#,
-        )?;
-        let mut tests = Vec::new();
-        collect_enabled_test_paths(
-            &ast.items,
-            &mut Vec::new(),
-            &BTreeSet::from(["enabled-feature".to_owned()]),
-            &mut tests,
-        );
-        assert_eq!(
-            tests,
-            vec![
-                vec!["enabled_feature_evidence".to_string()],
-                vec!["enabled_evidence".to_string()]
-            ]
-        );
-        Ok(())
     }
 }

@@ -97,7 +97,7 @@ pub enum PgError {
         #[source]
         source: sqlx::Error,
     },
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     #[error("postgres test migration failed")]
     Migrate(#[source] sqlx::migrate::MigrateError),
     /// Serving role cannot read the SQLx ledger.
@@ -816,7 +816,7 @@ impl PgRuntimeStores {
         &self.reader
     }
 
-    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn from_unverified_for_test(writer: Arc<PgStore>, reader: Arc<PgStore>) -> Self {
         Self {

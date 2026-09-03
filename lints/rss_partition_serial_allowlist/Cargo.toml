@@ -8,7 +8,7 @@ description = "RSS 治理：consistency::PartitionSerialDelivery 仅 adapter / �
 [lib]
 crate-type = ["cdylib", "rlib"]   # rlib 供 [[example]] ui fixture 链接（ui_test_example 经此暴露 dev-dep consistency）
 
-# 本 lint 按 **impl 所在 package manifest 父目录**（`adapters` / `bins` / `assemblies`）判 allowlist。
+# 本 lint 按 **impl 所在 package manifest 父目录**（`adapters` / `bins`）判 allowlist。
 # UI 只需单一 example target：红例（路径不含 allowlist 段 → 触发）内嵌绿子例（逃生门 #[allow]）。
 # adapter-path 绿分支无法在 UI harness 模拟，由真 workspace `cargo dylint --all`（adapter 0 诊断）承载。
 [[example]]

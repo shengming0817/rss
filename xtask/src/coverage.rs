@@ -88,7 +88,7 @@ struct Shortfall {
 }
 
 /// 把绝对文件名归属到 workspace crate 名：找**路径组件** `crates`，取紧随的下一段为 crate 名。非
-/// `crates/` 路径（`adapters/` / `assemblies/` / `generated` / …）→ `None`。用组件级匹配（非裸 substring
+/// `crates/` 路径（`adapters/` / `generated` / …）→ `None`。用组件级匹配（非裸 substring
 /// `split("crates/")`）以免 `…/extracrates/vocab/…` 误归属（review #206 A2/A3）。
 fn crate_of_file(filename: &str) -> Option<&str> {
     let mut comps = filename.split('/');

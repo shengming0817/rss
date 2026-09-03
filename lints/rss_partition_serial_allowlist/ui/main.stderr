@@ -4,8 +4,7 @@ warning: consistency::PartitionSerialDelivery 仅 adapter / 组合根可 impl：
 LL | impl PartitionSerialDelivery for NonSerialStore {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 把 impl 放到 `adapters/<name>`（或组合根 `bins/`·`assemblies/`）；测试 fake impl 放在 `#[cfg(test)]` 块内（不被扫）；确需在 allowlist 外 impl，在 impl 块加 `#[allow(rss_partition_serial_allowlist)] // reason: ...`（item-level 逃生门）
+   = help: 把 impl 放到 `adapters/<name>` 或 `bins/`；测试 fake impl 放在 `#[cfg(test)]` 块内（不被扫）；确需在 allowlist 外 impl，在 impl 块加 `#[allow(rss_partition_serial_allowlist)] // reason: ...`（item-level 逃生门）
    = note: `#[warn(rss_partition_serial_allowlist)]` on by default
 
 warning: 1 warning emitted
-

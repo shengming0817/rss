@@ -14,7 +14,6 @@ pub const UNVERIFIED_DEVICE_LATENT_OPERATOR: &str = "unverified-device-latent-op
 /// service-token replay store, the two fixed identifier-free audit operations, and lifecycle
 /// shutdown. General maintenance stores and parameterized audit methods are not projected.
 ///
-/// INVARIANT: PG-DEVICE-LATENT-OPERATOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields, non-Clone owner, and purpose-specific method set; trybuild rejects clone and general maintenance access" }
 pub struct PgDeviceLatentOperatorDeps {
     maintenance: PgMaintenanceDeps,
 }

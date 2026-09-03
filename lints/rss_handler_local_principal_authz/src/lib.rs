@@ -13,7 +13,7 @@
 //! `GrantPermission` / `RoutePermissionId`。
 //!
 //! `TenantId`、`RowScope`、`pg_tenant_tx_guard` 与 PostgreSQL RLS/ACL 明文：primary handler 只能消费 `AuthorizedSubject` 中的已授权主体上下文；
-//! `Authenticated` 的 tenant/principal getter 仅允许 httpserve 内部 route gate 与 runtime 组合根审计链路使用。
+//! `Authenticated` 的 tenant/principal getter 仅允许 httpserve 内部 route gate 使用。
 //!
 //! 上下游强度（`cargo xtask archrules verify`）：
 //! - 上游：primary 路由统一在 `httpserve` route gate 调 `RouteAuthorizer`，成功后插入 `AuthorizedSubject`。
@@ -49,10 +49,9 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
 /// 仅这些 crate 可读取 `Authenticated` tenant / principal kind / self subject——单一 greppable 真源，扩项须治理评审。
-/// `httpserve` route gate 负责把认证证据升级为 `AuthorizedSubject`；runtime 组合根保留审计链路读取权。
-/// assemblies/runtime → package name "runtime"（单一 library 组合根）。
+/// `httpserve` route gate 负责把认证证据升级为 `AuthorizedSubject`。
 /// `httpserve` 本身定义 `Authenticated`，并在 route gate 内构造授权请求，合法豁免。
-const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve", "runtime"];
+const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve"];
 const PRINCIPAL_BRANCH_ALLOWED_CRATES: &[&str] = &["httpserve", "generated"];
 const AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "kind_claim",
@@ -63,15 +62,6 @@ const AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "cross_tenant_audit_grant",
 ];
 const DIPORT_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &["federated_access"];
-const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
-    "allow_evidence",
-    "verify_maintenance_operator_subject",
-    "verified_service_maintenance_operator",
-    "verified_projection_maintenance_operator_subject",
-];
-/// 关联方法例外使用 local-crate 内的完整 DefPath，禁止跨模块同名类型误命中。
-const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_METHODS: &[(&str, &str)] =
-    &[("authorize", "routes::MtlsRouteAuthorizer")];
 const REQUEST_CONTEXT_PRINCIPAL_KIND_REPR_ITEMS: &[&str] = &["fmt", "as_actor_metadata_label"];
 const IDENTITY_CONTRACT_AUTHORIZER_METHODS: &[&str] = &[
     "authorize_request",
@@ -101,8 +91,6 @@ const POSTGRES_ALLOWED_METHODS: &[(&str, &str)] = &[(
     "from_reviewed_event",
     "cotx::identity::CanonicalDeviceIngressFact",
 )];
-/// identityaudit 组合根：RSS access verify 后绑定 User（非 primary handler 授权）。
-const IDENTITYAUDIT_ALLOWED_METHODS: &[&str] = &["authenticate"];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -125,7 +113,7 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Example
     /// ```ignore
-    /// // 域 crate（非组合根）：
+    /// // 未授权 crate：
     /// if ev.principal_kind() == PrincipalKind::Admin { /* 本地授权 */ } // 触发
     /// ```
     /// Use instead: handler 读取 route gate 插入的 `AuthorizedSubject`。
@@ -339,21 +327,12 @@ fn principal_branch_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bo
         }
         "authn" => enclosing_item_is_any(cx, hir_id, AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
         "diport" => enclosing_item_is_any(cx, hir_id, DIPORT_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
-        "runtime" => {
-            enclosing_item_is_any(cx, hir_id, RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS)
-                || enclosing_method_on_allowed_type_is(
-                    cx,
-                    hir_id,
-                    RUNTIME_PRINCIPAL_BRANCH_ALLOWED_METHODS,
-                )
-        }
         "identity" => enclosing_item_is_any(cx, hir_id, IDENTITY_CONTRACT_AUTHORIZER_METHODS),
         "audit" => enclosing_item_is_any(cx, hir_id, AUDIT_ALLOWED_METHODS),
         "postgres" => {
             enclosing_item_is_any(cx, hir_id, POSTGRES_ALLOWED_ITEMS)
                 || enclosing_method_on_allowed_type_is(cx, hir_id, POSTGRES_ALLOWED_METHODS)
         }
-        "identityaudit" => enclosing_item_is_any(cx, hir_id, IDENTITYAUDIT_ALLOWED_METHODS),
         _ => false,
     }
 }
@@ -483,13 +462,6 @@ fn ui_httpserve_allowed() {
 }
 
 #[test]
-fn ui_runtime_bridge_only_allowed() {
-    // example target 名 `runtime`：真实 DefPath 的 mTLS authorizer 放行；跨模块同名 shadow 与其它
-    // handler-local role literal 分支仍触发，证明 allowlist 绑定 canonical identity。
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
-}
-
-#[test]
 fn ui_diport_profile_shape_only_allowed() {
     // example target 名 `diport`：闭合 verified profile 构造器可校验 PrincipalKind shape；
     // 同 crate 其它 principal 分支仍触发，证明不是 crate 级白名单。
@@ -507,10 +479,4 @@ fn ui_postgres_actor_kind_mapper_only_allowed() {
     // example target 名 `postgres`：只放行 mapper 与真实 DefPath 的 ingress fact；跨模块同名 shadow
     // 及其它 handler-local 分支仍触发。
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "postgres");
-}
-
-#[test]
-fn ui_identityaudit_authenticate_only_allowed() {
-    // example target 名 `identityaudit`：只放行组合根 authenticate；同 crate 其它分支仍触发。
-    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "identityaudit");
 }

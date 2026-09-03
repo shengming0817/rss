@@ -93,7 +93,7 @@ use eventing::observability::{
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
 /// [`crate::OUTBOX_RELAY_PROBE`]）。组合根据此 + domain/topic 组装 per-worker `primitives::ProbeName`
-/// （如 `event_consumer:audit:identity.session-created`）接 readyz 聚合（HTTP endpoint mount 归 #1320 / assemblies/runtime）。
+/// （如 `event_consumer:audit:identity.session-created`）接 readyz 聚合。
 pub const EVENT_CONSUMER_PROBE: &str = "event_consumer";
 
 // ── spawn（专用线程驱动 !Send 消费 future）─────────────────────────────────────

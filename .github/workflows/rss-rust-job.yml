@@ -52,13 +52,12 @@ jobs:
         run: |
           set -euo pipefail
           case "$RSS_FIXED_JOB:$RSS_INTEGRATION_GROUP" in
-            check:) nightly="$RSS_NIGHTLY_PINNED"; partition=check; suffix=check; localtx=false ;;
-            test-affected:) nightly=''; partition=test-affected; suffix=test-affected; localtx=false ;;
-            integration-critical:postgres|integration-critical:transport|integration-critical:runtime|integration-critical:artifact)
-              nightly=''; partition="$RSS_INTEGRATION_GROUP"; suffix="$RSS_INTEGRATION_GROUP"
-              if [ "$RSS_INTEGRATION_GROUP" = postgres ]; then localtx=true; else localtx=false; fi ;;
+            check:) nightly="$RSS_NIGHTLY_PINNED"; partition=check; suffix=check ;;
+            test-affected:) nightly=''; partition=test-affected; suffix=test-affected ;;
+            integration-critical:postgres|integration-critical:transport|integration-critical:runtime)
+              nightly=''; partition="$RSS_INTEGRATION_GROUP"; suffix="$RSS_INTEGRATION_GROUP" ;;
             *)
-              printf 'invalid fixed invocation: job=%s integration-group=%s; allowed: check:<empty>, test-affected:<empty>, integration-critical:{postgres,transport,runtime,artifact}\n' \
+              printf 'invalid fixed invocation: job=%s integration-group=%s; allowed: check:<empty>, test-affected:<empty>, integration-critical:{postgres,transport,runtime}\n' \
                 "$RSS_FIXED_JOB" "${RSS_INTEGRATION_GROUP:-<empty>}" >&2
               exit 64
               ;;
@@ -69,7 +68,6 @@ jobs:
             echo "nightly=$nightly"
             echo "compiler-partition=$partition"
             echo "artifact-suffix=$suffix"
-            echo "localtx=$localtx"
           } >> "$GITHUB_OUTPUT"
       - name: Setup RSS Rust CI
         id: rss-setup
@@ -118,26 +116,6 @@ jobs:
           fi
           timeout --signal=TERM --kill-after=30s 32m "$CARGO_TARGET_DIR/debug/xtask" "${args[@]}"
 
-      - name: Validate LocalOnly semantic report
-        id: validate-localonly
-        if: ${{ inputs.job == 'test-affected' && steps.xtask.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          "$CARGO_TARGET_DIR/debug/xtask" ci validate-evidence \
-            --kind localonly \
-            --input target/localonly-execution/localonly-execution.json \
-            --output "$RUNNER_TEMP/validated-localonly-execution.json"
-
-      - name: Validate LocalTx semantic report
-        id: validate-localtx
-        if: ${{ inputs.job == 'integration-critical' && steps.policy.outputs.localtx == 'true' && steps.xtask.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          "$CARGO_TARGET_DIR/debug/xtask" ci validate-evidence \
-            --kind localtx \
-            --input target/required-evidence/localtx-required.json \
-            --output "$RUNNER_TEMP/validated-localtx-required.json"
-
       - name: Collect integration failure logs
         id: integration-collect
         if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
@@ -157,26 +135,6 @@ jobs:
         id: integration-cleanup
         if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
         run: timeout --signal=TERM --kill-after=30s 5m .github/scripts/integration-services.sh cleanup --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RSS_CI_LIFECYCLE_EVIDENCE"
-
-      - name: Upload LocalOnly semantic report
-        id: upload-localonly
-        if: ${{ steps.validate-localonly.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: localonly-execution-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/validated-localonly-execution.json
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload LocalTx semantic report
-        id: upload-localtx
-        if: ${{ steps.validate-localtx.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: localtx-required-${{ github.run_id }}-${{ github.run_attempt }}-postgres
-          path: ${{ runner.temp }}/validated-localtx-required.json
-          if-no-files-found: error
-          retention-days: 7
 
       - name: Upload integration diagnostics on failure
         id: upload-integration-failure

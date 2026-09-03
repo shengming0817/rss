@@ -137,7 +137,7 @@ mod cred_redact_tests {
     //! Hard 入参 funnel 见模块 rustdoc；本测试是字段值 Medium 执行体。
     //!
     //! ref: vectordotdev/vector src/sinks/util/uri.rs@74173af63a84
-    //! ref: assemblies/runtime phase_result_redacts_error_field（CaptureLayer 形态）
+    //! CaptureLayer 形态与阶段结果脱敏保持一致。
 
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};

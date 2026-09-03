@@ -58,7 +58,6 @@ path = "tests/live_vault.rs"
 required-features = ["integration"]
 
 [dev-dependencies]
-identity-composition = { path = "../../composition/identity", features = ["test-support"] }
 deviceloop = { path = "../../crates/deviceloop" }
 uuid.workspace = true
 # macros/rt：普通 live case；net/io-util/sync：warm-outage TCP forwarder；time：cut/connect timeout（#1982）。
