@@ -17,7 +17,7 @@ consistency = { path = "../../crates/consistency" }
 eventexec = { path = "../../crates/eventexec" }
 diport = { path = "../../crates/diport" }
 rss-contract.workspace = true
-secure = { path = "../../crates/secure" }
+rss-data-protection.workspace = true
 primitives = { path = "../../crates/primitives" }
 # MemLeaderElector/MemFencedWriter 的 LeaseToken.epoch / FencedWriteRequest.epoch（单调 fencing token）。
 # 单测亦构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。

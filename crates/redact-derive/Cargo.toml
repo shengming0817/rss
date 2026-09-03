@@ -1,0 +1,32 @@
+[package]
+name = "rss-redact-derive"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Derive implementation for rss-redact"
+categories = ["development-tools::procedural-macro-helpers"]
+keywords = ["redaction", "derive", "diagnostics", "security"]
+publish = ["crates-io"]
+
+[features]
+default = []
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+proc-macro-crate = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+syn = { workspace = true }
+trybuild = { workspace = true }
+privacy = { package = "rss-redact", path = "../redact" }
+
+[lints]
+workspace = true

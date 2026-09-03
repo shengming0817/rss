@@ -7,8 +7,8 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::redacted_bytes::RedactedFixedBytes;
-use crate::{KeyRef, RedactedBytes};
+use crate::KeyRef;
+use rss_redact::RedactedBytes;
 
 /// Maximum plaintext size accepted by the HOT replay capsule codec.
 ///
@@ -54,24 +54,24 @@ impl std::fmt::Debug for ArchiveVersionId {
 
 /// SHA-256 of the exact archive object ciphertext.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ArchiveChecksum(RedactedFixedBytes<32>);
+pub struct ArchiveChecksum([u8; 32]);
 
 impl ArchiveChecksum {
     pub const fn from_sha256_bytes(bytes: [u8; 32]) -> Self {
-        Self(RedactedFixedBytes::new(bytes))
+        Self(bytes)
     }
 
     pub fn sha256(bytes: &[u8]) -> Self {
-        Self(RedactedFixedBytes::new(Sha256::digest(bytes).into()))
+        Self(Sha256::digest(bytes).into())
     }
 
     pub const fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
+        &self.0
     }
 
     pub fn as_hex(&self) -> String {
         let mut encoded = String::with_capacity(64);
-        for byte in self.0.as_bytes() {
+        for byte in &self.0 {
             use std::fmt::Write as _;
             let _ = write!(encoded, "{byte:02x}");
         }

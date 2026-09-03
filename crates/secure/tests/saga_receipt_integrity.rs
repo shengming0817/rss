@@ -1,6 +1,6 @@
 use secure::{
-    RedactionHashKey, SagaReceiptFingerprint, SagaReceiptIntegrityKeyId,
-    SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
+    SagaReceiptFingerprint, SagaReceiptIntegrityKeyId, SagaReceiptIntegrityKeyring,
+    VersionedSagaReceiptIntegrityKey,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -14,10 +14,10 @@ const PREVIOUS_KEY_IDS: [(&str, u8); 3] = [
 const COMPONENTS: [&[u8]; 3] = [b"tenant-a", b"step-a", b"{\"ok\":true}"];
 
 fn key(id: &str, fill: u8) -> TestResult<VersionedSagaReceiptIntegrityKey> {
-    Ok(VersionedSagaReceiptIntegrityKey::new(
+    Ok(VersionedSagaReceiptIntegrityKey::from_bytes(
         SagaReceiptIntegrityKeyId::parse(id)?,
-        RedactionHashKey::from_bytes(vec![fill; 32])?,
-    ))
+        vec![fill; 32],
+    )?)
 }
 
 fn fingerprint(id: &str, fill: u8) -> TestResult<SagaReceiptFingerprint> {

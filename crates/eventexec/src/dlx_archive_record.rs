@@ -4,7 +4,7 @@ use diport::{
     DLX_MAX_HOT_CAPSULE_PLAINTEXT_BYTES, DeadLetterSource, DlxLifecycleError,
     DlxLifecycleOperation, DlxLifecycleReason,
 };
-use secure::Plaintext;
+use rss_data_protection::Plaintext;
 use zeroize::Zeroizing;
 
 use crate::dead_letter::DeadLetterId;
@@ -375,7 +375,7 @@ fn append_lower_hex(encoded: &mut Vec<u8>, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use diport::DeadLetterSource;
-    use secure::Plaintext;
+    use rss_data_protection::Plaintext;
 
     use super::{
         ArchiveCanonicalRecord, DLX_MAX_ARCHIVE_CANONICAL_PLAINTEXT_BYTES,

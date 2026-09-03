@@ -1,6 +1,6 @@
 //! Tenant-only ambient execution scope.
 
-#[derive(Clone, PartialEq, Eq, secure::Redact)]
+#[derive(Clone, PartialEq, Eq, rss_redact::Redact)]
 pub struct RequestCtx<T> {
     #[redact(sensitivity = internal)]
     tenant: T,

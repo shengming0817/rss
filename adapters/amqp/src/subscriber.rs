@@ -680,14 +680,14 @@ async fn cancel_ackable(channel: Channel, consumer_tag: String) {
         .basic_cancel(consumer_tag.into(), BasicCancelOptions::default())
         .await
     {
-        tracing::warn!(target: "amqp", error = %secure::redact_error(&error), "amqp ackable basic.cancel error");
+        tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp ackable basic.cancel error");
         close_failed_subscription(&channel, "basic.cancel failed").await;
     }
 }
 
 async fn close_failed_subscription(channel: &Channel, reason: &'static str) {
     if let Err(error) = channel.close(REPLY_SUCCESS, reason.into()).await {
-        tracing::warn!(target: "amqp", error = %secure::redact_error(&error), "amqp failed subscription channel close error");
+        tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp failed subscription channel close error");
     }
 }
 
@@ -702,7 +702,7 @@ impl ManagedResource for AmqpSubscriber {
             .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
             .await
             .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(e), "amqp connection close error");
+                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(e), "amqp connection close error");
             })
             .map_err(ShutdownError::new)
     }
@@ -936,7 +936,7 @@ impl AckableSubscriber for AmqpSubscriber {
                         Err(error) => {
                             tracing::warn!(
                                 target: "amqp",
-                                error = %secure::redact_error(&error),
+                                error = %rss_redact::redact_error(&error),
                                 "amqp ackable delivery error; skipping",
                             );
                             None
@@ -959,7 +959,7 @@ impl AckableSubscriber for AmqpSubscriber {
             .close(REPLY_SUCCESS, "ackable subscriber shutdown".into())
             .await
             .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(e), "amqp connection close error (ackable)");
+                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(e), "amqp connection close error (ackable)");
             })
             .map_err(SubscriberError::new)
     }

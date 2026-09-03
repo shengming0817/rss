@@ -3,7 +3,7 @@
 
 use consistency::{SagaAttempt, SagaReceiptFormatVersion, SagaReceiptScope};
 use diport::{SagaForwardCompletion, SagaForwardProgress, SagaStepCompletion};
-use secure::Plaintext;
+use rss_data_protection::Plaintext;
 
 fn forge_step(
     scope: SagaReceiptScope,

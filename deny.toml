@@ -76,6 +76,9 @@ deny = [
   # Cargo-deny constrains dependency parents, not Rust impl sites.
   { crate = "dynosaur", wrappers = ["diport"] },
   { crate = "trait-variant", wrappers = ["diport"] },
+  # REDACT-DERIVE-CONFINEMENT-01：proc-macro 是 rss-redact 的私有实现层；workspace 消费者只依赖
+  # 用户入口 rss-redact，并从该入口取得 derive re-export。
+  { crate = "rss-redact-derive", wrappers = ["rss-redact"] },
   # WORKSPACEFACTS-CONFINEMENT-01：workspacefacts is retained as a standalone metadata façade;
   # its test-support self edge is the only current workspace parent.
   { crate = "workspacefacts", wrappers = ["workspacefacts"] },

@@ -44,7 +44,7 @@
 //! );
 //! ```
 //!
-//! **字段保护 AAD 映射**：`VaultKeyProvider` 把 RSS `secure::DerivedAad` 的 canonical bytes 经单一 funnel
+//! **字段保护 AAD 映射**：`VaultKeyProvider` 把 RSS `rss_data_protection::DerivedAad` 的 canonical bytes 经单一 funnel
 //! base64 编码进 Vault Transit `context` 字段，**要求 Transit key `derived=true`，不使用 `associated_data`**。
 //! Vault `/rewrap` 源码对 `context` 生效，但非 batch rewrap 不实际使用 `associated_data`；用 `context` 可保留
 //! 原生 rewrap，避免 decrypt+encrypt fallback 把明文拉回 adapter。组合根启动 self-check 用 wrong-AAD 解密
@@ -79,7 +79,7 @@ use diport::{ManagedResource, ShutdownError};
 
 /// Vault 认证 token（opaque newtype）。底层 `Zeroizing<String>` 在 drop 时清零密钥物料（F5，杜绝 token 残留
 /// 进程内存）；`Debug` 恒输出 `VaultToken(<redacted>)`——即便 [`VaultSigner`] 将来误加 `#[derive(Debug)]` 也不
-/// 泄漏（类型层 Hard，对标 `diport::Signature` / `secure::Redacted`）。
+/// 泄漏（类型层 Hard，对标 `diport::Signature` / `rss_redact::Redacted`）。
 #[cfg(feature = "backend")]
 struct VaultToken(zeroize::Zeroizing<String>);
 
@@ -308,8 +308,8 @@ impl diport::KeyProvider for VaultKeyProvider {
     async fn encrypt(
         &self,
         key: diport::KeyName,
-        plaintext: secure::Plaintext,
-        aad: secure::DerivedAad,
+        plaintext: rss_data_protection::Plaintext,
+        aad: rss_data_protection::DerivedAad,
     ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
         transit::encrypt_impl(
             transit::TransitHttp::new(
@@ -328,10 +328,10 @@ impl diport::KeyProvider for VaultKeyProvider {
 
     async fn decrypt(
         &self,
-        ciphertext: diport::RedactedBytes,
+        ciphertext: rss_redact::RedactedBytes,
         key: diport::KeyRef,
-        aad: secure::DerivedAad,
-    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        aad: rss_data_protection::DerivedAad,
+    ) -> Result<rss_data_protection::Plaintext, diport::KeyProviderError> {
         transit::decrypt_impl(
             transit::TransitHttp::new(
                 &self.client,
@@ -349,9 +349,9 @@ impl diport::KeyProvider for VaultKeyProvider {
 
     async fn rewrap(
         &self,
-        ciphertext: diport::RedactedBytes,
+        ciphertext: rss_redact::RedactedBytes,
         key: diport::KeyRef,
-        aad: secure::DerivedAad,
+        aad: rss_data_protection::DerivedAad,
     ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
         transit::rewrap_impl(
             transit::TransitHttp::new(

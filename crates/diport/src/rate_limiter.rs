@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use dynosaur::dynosaur;
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 /// Largest accepted rate and burst. The bound keeps provider arithmetic precise and prevents an
 /// explicit configuration typo from turning the guard into an effectively unlimited limiter.
@@ -66,7 +66,7 @@ impl RateLimitQuota {
 /// `%err` 同样不泄漏 source 凭据——把原 Soft 消费侧约定上移为类型层保证）。adapter 原始错误经
 /// [`RateLimitError::new`] 由 [`RedactedSource`] **owned 但 write-only** 保留（redis-distributed provider 的
 /// source 可能携网络细节，如 Redis URL）：`RedactedSource::source()` 恒 `None`，原始 source **不经标准
-/// `Error` 链暴露**（fail-closed）；安全摘要走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source 链）。
+/// `Error` 链暴露**（fail-closed）；安全摘要走统一脱敏 funnel `rss_redact::redact_error`（顶层 `Display`、不遍历 source 链）。
 ///
 /// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（source 经 `RedactedSource` 脱敏；回归见 `redacted.rs`
 /// `redacted_source` 单测）。
@@ -95,7 +95,7 @@ impl RateLimitError {
 /// `Hash + Eq + Clone`：provider 据此分桶（governor keyed store 的 key 约束）。
 ///
 /// `Debug` 经字段级脱敏，避免 per-principal key（tenant/principal/route）随 `?key` / `{key:?}` 泄漏主体标识。
-#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+#[derive(Clone, PartialEq, Eq, Hash, rss_redact::Redact)]
 pub struct RateLimitKey(#[redact(sensitivity = pii)] String);
 
 impl RateLimitKey {

@@ -23,7 +23,7 @@ eventexec = { path = "../eventexec" }
 listenerlifecycle = { path = "../listenerlifecycle" }
 primitives = { path = "../primitives" }
 runtimeinventorymint = { path = "../runtimeinventorymint" }
-secure = { path = "../secure" }
+rss-redact.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }

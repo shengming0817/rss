@@ -24,12 +24,12 @@ tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 # observ::MetricLabel 闭值集 → otel KeyValue 映射（observ #1006 W 阶段委派给本 adapter，本 crate 闭环其契约）。
 observ = { path = "../../crates/observ", optional = true }
-# 导出边界脱敏：RedactingSpanExporter 经 secure::redact_field（敏感 key 单源 funnel）清洗 span 属性，
-# 避免 authorization/access_token/session 等经 tracing→OTLP 裸传到 collector（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
-secure = { path = "../../crates/secure", optional = true }
+# 导出边界脱敏：RedactingSpanExporter 经 rss_redact::redact_field（敏感 key 单源 funnel）清洗 span 属性，
+# 避免 authorization/access_token/session 等经 tracing→OTLP 裸传到 collector（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
+rss-redact = { workspace = true, optional = true }
 # OtelEndpoint::insecure_localhost 的 loopback 校验用 canonical URL parser（防 userinfo 伪装 host 绕过）。
 url = { workspace = true, optional = true }
-# pipeline 构建失败的 typed 错误（fail-fast，经 diport::RedactedSource 脱敏）。
+# pipeline 构建失败的 typed 错误（fail-fast，经 rss_redact::RedactedSource 脱敏）。
 thiserror = { workspace = true, optional = true }
 # ManagedResource::shutdown：SdkTracerProvider::shutdown 是同步阻塞（batch worker flush）；spawn_blocking
 # 移出 async executor，使 bootstrap 的 per-resource timeout 可在 .await 让出点生效（见 lib.rs shutdown）。
@@ -45,7 +45,7 @@ backend = [
   "dep:tracing",
   "dep:tracing-subscriber",
   "dep:observ",
-  "dep:secure",
+  "dep:rss-redact",
   "dep:thiserror",
   "dep:tokio",
   "dep:url",

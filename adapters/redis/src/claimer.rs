@@ -5,7 +5,7 @@
 
 use consistency::{EngineError, EngineErrorKind, IdemKey, InboxReceiptContext, SeenState};
 
-/// claim key 命名空间（固定 `inbox_receipts` role 段，对齐 `crates/observ`、`secure::redact_error` 与 typed metric enums）。
+/// claim key 命名空间（固定 `inbox_receipts` role 段，对齐 `crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
 ///
 /// **结构互斥**（review F1）：`_runtime:inbox_receipts:` 的字面 `inbox_receipts` 第二段与其它 `_runtime` 原语
 /// （`_runtime:{eventID}:lease|done`、`_runtime:<tenant>:{key}:…`，二者第二段均为 UUID 形）
@@ -143,7 +143,7 @@ mod backend {
                 resource = RESOURCE,
                 operation = "idem-claim",
                 ?kind,
-                error = %secure::redact_error(&e),
+                error = %rss_redact::redact_error(&e),
                 "{}", POOL_ACQUIRE_FAILED
             );
             EngineError::new(kind)
@@ -167,7 +167,7 @@ mod backend {
                     resource = RESOURCE,
                     operation = "idem-claim",
                     ?kind,
-                    error = %secure::redact_error(&e),
+                    error = %rss_redact::redact_error(&e),
                     "redis EVAL try-claim failed"
                 );
                 EngineError::new(kind)
@@ -189,7 +189,7 @@ mod backend {
                 resource = RESOURCE,
                 operation = "idem-extend",
                 ?kind,
-                error = %secure::redact_error(&e),
+                error = %rss_redact::redact_error(&e),
                 "{}", POOL_ACQUIRE_FAILED
             );
             EngineError::new(kind)
@@ -210,7 +210,7 @@ mod backend {
                     resource = RESOURCE,
                     operation = "idem-extend",
                     ?kind,
-                    error = %secure::redact_error(&e),
+                    error = %rss_redact::redact_error(&e),
                     "redis EVAL extend CAS failed"
                 );
                 EngineError::new(kind)
@@ -239,7 +239,7 @@ mod backend {
                 resource = RESOURCE,
                 operation = "idem-commit",
                 ?kind,
-                error = %secure::redact_error(&e),
+                error = %rss_redact::redact_error(&e),
                 "{}", POOL_ACQUIRE_FAILED
             );
             EngineError::new(kind)
@@ -259,7 +259,7 @@ mod backend {
                     resource = RESOURCE,
                     operation = "idem-commit",
                     ?kind,
-                    error = %secure::redact_error(&e),
+                    error = %rss_redact::redact_error(&e),
                     "redis EVAL commit CAS failed"
                 );
                 EngineError::new(kind)
@@ -286,7 +286,7 @@ mod backend {
                 resource = RESOURCE,
                 operation = "idem-release",
                 ?kind,
-                error = %secure::redact_error(&e),
+                error = %rss_redact::redact_error(&e),
                 "{}", POOL_ACQUIRE_FAILED
             );
             EngineError::new(kind)
@@ -305,7 +305,7 @@ mod backend {
                     resource = RESOURCE,
                     operation = "idem-release",
                     ?kind,
-                    error = %secure::redact_error(&e),
+                    error = %rss_redact::redact_error(&e),
                     "redis EVAL release CAS failed"
                 );
                 EngineError::new(kind)

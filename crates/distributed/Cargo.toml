@@ -12,7 +12,7 @@ workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
-secure = { path = "../secure" }
+rss-redact.workspace = true
 support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }

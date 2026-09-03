@@ -459,7 +459,7 @@ fn eventing_disposition(disposition: Disposition) -> EventingDisposition {
 //
 // PII 安全：`error = %e` 记的是 `consistency::EngineError` 的 Display，而 EngineError::Display 仅输出
 // `kind().message()`（`&'static str` const，无 runtime 数据/SQL/PII——`engine_error_display_equals_kind_message`
-// 测试约束）；adapter 层 sqlx 错误已在落 EngineError 前经 `secure::redact_error` 清洗。**前提**：EngineError
+// 测试约束）；adapter 层 sqlx 错误已在落 EngineError 前经 `rss_redact::redact_error` 清洗。**前提**：EngineError
 // 若未来新增携 runtime 数据的 variant，本处需复核（同 consumer.rs `log_dead_lettered` 假设）。
 
 /// claim_batch 失败：退避到下一 tick 前结构化记录。

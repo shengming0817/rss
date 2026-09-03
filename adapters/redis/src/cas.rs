@@ -1,6 +1,7 @@
 //! Redis state-CAS provider (`diport::CasStore`).
 
-use diport::{CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, RedactedBytes};
+use diport::{CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest};
+use rss_redact::RedactedBytes;
 
 use crate::bundle::RedisCasStore;
 
@@ -62,7 +63,7 @@ where
     tracing::warn!(
         resource = RESOURCE,
         operation,
-        error = %secure::redact_error(&error),
+        error = %rss_redact::redact_error(&error),
         "redis cas operation failed"
     );
     CasStoreError::new(error)

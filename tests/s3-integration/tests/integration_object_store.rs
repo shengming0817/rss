@@ -5,9 +5,10 @@ use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
 use diport::{
     ArchiveChecksum, Clock, DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchivePutOutcome,
-    DlxArchivePutRequest, DlxArchiveStore, KeyRef, RedactedBytes,
+    DlxArchivePutRequest, DlxArchiveStore, KeyRef,
 };
 use eventexec::{DeadLetterId, DlxArchiveObjectKey};
+use rss_redact::RedactedBytes;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 

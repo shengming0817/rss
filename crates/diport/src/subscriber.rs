@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::envelope::{EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, MessageEnvelope};
 use crate::publisher::Topic;
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 // ── 消息原语（对齐 watermill Message UUID/Metadata/Payload）─────────────────────
 

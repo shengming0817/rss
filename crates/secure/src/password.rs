@@ -224,7 +224,7 @@ impl std::fmt::Debug for ValidatedPassword {
 }
 
 /// Argon2id PHC string. The owned material is zeroized and always redacted in Debug output.
-#[derive(Clone, PartialEq, Eq, secure::Redact)]
+#[derive(Clone, PartialEq, Eq, rss_redact::Redact)]
 pub struct PasswordHash(#[redact(sensitivity = secret)] zeroize::Zeroizing<String>);
 
 impl PasswordHash {

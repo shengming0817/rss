@@ -337,7 +337,7 @@ impl Drop for StartupTransaction<'_> {
         let batches = self.take_lifecycle_batches();
         if let Err(error) = register_lifecycle_outputs(self.stack, None, batches, false) {
             tracing::error!(
-                error = %secure::redact_error(error.as_ref()),
+                error = %rss_redact::redact_error(error.as_ref()),
                 "cancelled startup failed to transfer lifecycle outputs"
             );
         }
@@ -731,7 +731,7 @@ fn preserve_startup_result(
         (Ok(()), result) | (result @ Err(_), Ok(())) => result,
         (Err(primary), Err(transfer)) => {
             tracing::error!(
-                cleanup_error = %secure::redact_error(transfer.as_ref()),
+                cleanup_error = %rss_redact::redact_error(transfer.as_ref()),
                 "startup failed and lifecycle transfer also failed; preserving primary error"
             );
             Err(primary)
@@ -864,7 +864,7 @@ async fn finish_launch(
         Ok(result) => result,
         Err(error) => Err(anyhow::anyhow!(
             "runtime shutdown driver task failed: {}",
-            secure::redact_error(&error)
+            rss_redact::redact_error(&error)
         )),
     };
     preserve_launch_error(launch_result, drain_result)
@@ -1212,7 +1212,7 @@ fn report_shutdown_failures(
     }
     for failure in &failures {
         tracing::error!(
-            error = %secure::redact_error(failure),
+            error = %rss_redact::redact_error(failure),
             "runtime resource shutdown failure"
         );
     }
@@ -1232,7 +1232,7 @@ fn preserve_launch_error(
         (Err(launch_error), Ok(())) => Err(launch_error),
         (Err(launch_error), Err(drain_error)) => {
             tracing::error!(
-                cleanup_error = %secure::redact_error(drain_error.as_ref()),
+                cleanup_error = %rss_redact::redact_error(drain_error.as_ref()),
                 "launch failed and cleanup also failed; preserving primary launch error"
             );
             Err(launch_error)

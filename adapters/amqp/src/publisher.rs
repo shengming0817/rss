@@ -1673,7 +1673,7 @@ impl Publisher for AmqpPublisher {
         self.shutdown_channels()
             .await
             .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(e), "amqp channel close error");
+                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(e), "amqp channel close error");
             })
             // shutdown 不经 relay settle，kind 无关——transient benign 默认（不夸大为永久）。
             .map_err(PublisherError::transient)
@@ -1689,7 +1689,7 @@ impl ManagedResource for AmqpPublisher {
         match self.shutdown_resource_transport().await {
             Ok(()) => Ok(()),
             Err(error) => {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(&error), "amqp publisher transport close error");
+                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(&error), "amqp publisher transport close error");
                 Err(publisher_transport_shutdown_error(error))
             }
         }

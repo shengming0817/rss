@@ -15,8 +15,11 @@ members = [
   # 基础（仅 std + 外部 crate）
   "crates/vocab",
   "crates/ids",
-  # secure 的字段级脱敏 derive（#[derive(Redact)]）proc-macro；intra-base DAG 低于 secure（secure → securederive 前向边）
-  "crates/securederive",
+  # 字段级脱敏 runtime + derive；proc-macro 仅由 rss-redact 包装。
+  "crates/redact-derive",
+  "crates/redact",
+  # Provider-neutral storage protection primitives.
+  "crates/data-protection",
   "crates/secure",
   "crates/support",
   "crates/runctx",
@@ -80,6 +83,9 @@ packages = [
   { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
   { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
+  { package = "rss-redact-derive", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-redact", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-data-protection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental" },
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-eventing", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -100,6 +106,9 @@ rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }
 eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.0" }
+rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
+rss-redact = { path = "crates/redact", version = "0.1.0" }
+rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }
 # 运行时 / 序列化 / 错误 / 日志
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken（tokio_util::sync::CancellationToken，cargo feature = "rt"）；见 bootstrap shutdown 范式
@@ -193,7 +202,7 @@ reqwest = { version = "0.12", default-features = false }
 # Vault token 内存清零（adapters/vault，#1011 F5）：Zeroizing<String> drop 时清零密钥物料。
 # default-features=false + alloc：只取 String Zeroize impl，不拉 std/derive（Apache-2.0 OR MIT，deny allow-list 内）。
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-# 解密产物明文封装（secure::aead::Plaintext，#1469）：SecretSlice<u8> Debug=[REDACTED] + Drop-zeroize，
+# 解密产物明文封装（rss_data_protection::Plaintext，#1469）：SecretSlice<u8> Debug=[REDACTED] + Drop-zeroize，
 # 承载 ADR-011 D5 no-decrypt-in-debug（FIELDPROT-NODBG-DECRYPT-01）。0.10 已去掉 alloc/std feature gate，
 # 默认即提供 SecretBox/SecretSlice/ExposeSecret + 传递 zeroize；serde 默认 off（不给 secret 类型上 serde，Apache-2.0 OR MIT）。
 secrecy = { version = "0.10" }
@@ -243,10 +252,12 @@ semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
 syn = { version = "2", features = ["full", "parsing"] }
-# securederive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
+# rss-redact-derive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
 # 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
+# proc-macro 展开时解析消费方对 rss-redact 的真实依赖名，支持 Cargo dependency alias。
+proc-macro-crate = "3"
 toml = "0.8"
 # Cargo workspace 图事实（#1994）：pre-1.0 exact pin；仅 workspacefacts 直接消费。
 guppy = { version = "=0.17.26", default-features = false }

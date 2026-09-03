@@ -19,8 +19,9 @@ diport = { path = "../../crates/diport" }
 eventexec = { path = "../../crates/eventexec", optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-smithy-http-client = { workspace = true, optional = true }
-# redacted 结构化日志（仅 backend）：secure::redact_error funnel + tracing（`crates/observ`、`secure::redact_error` 与 typed metric enums：错误经 redact）。
+# redacted 结构化日志（仅 backend）：rss_redact::redact_error funnel + tracing（`crates/observ` 与 typed metric enums：错误经 redact）。
 secure = { path = "../../crates/secure", optional = true }
+rss-redact = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 # 构造期 bucket 校验错误（fail-fast，非静默）。
 thiserror = { workspace = true, optional = true }
@@ -31,7 +32,7 @@ base64 = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
+backend = ["dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:secure", "dep:rss-redact", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
 integration = ["backend"]
 
 [[test]]
@@ -40,6 +41,7 @@ path = "tests/dlx_archive_store.rs"
 required-features = ["backend"]
 
 [dev-dependencies]
+rss-data-protection.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。
 # 本 crate 直接组装 aws-smithy-mocks 的 HTTP 1.x client/interceptor，避免 SDK test-util 经

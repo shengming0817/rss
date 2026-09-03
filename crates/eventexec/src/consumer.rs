@@ -1289,7 +1289,7 @@ fn log_parse_failed() {
 ///
 /// `error = %error` 安全前提：`consistency::EngineError` 的 `Display` 实现恒为 const literal
 /// （不携 runtime 数据，见 `consistency::error` invariant）。若未来 `EngineError` 新增携
-/// runtime 数据的变体，此处须改走 `secure::redact_error` funnel。
+/// runtime 数据的变体，此处须改走 `rss_redact::redact_error` funnel。
 fn log_try_claim_failed(msg: &Message, error: &consistency::error::EngineError) {
     tracing::warn!(
         message_id = msg.id().as_str(),

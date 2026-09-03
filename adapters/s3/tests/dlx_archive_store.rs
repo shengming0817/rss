@@ -24,9 +24,9 @@ use base64::Engine as _;
 use diport::{
     ArchiveChecksum, ArchiveVersionId, Clock, DlxArchiveCiphertext, DlxArchiveHeadOutcome,
     DlxArchivePutOutcome, DlxArchivePutRequest, DlxArchiveStore, DlxLifecycleErrorKind, KeyRef,
-    RedactedBytes,
 };
 use eventexec::DeadLetterId;
+use rss_redact::RedactedBytes;
 use s3::{S3DlxArchiveCapabilityError, S3DlxArchiveStore, VerifiedS3DlxArchiveStore};
 
 const BUCKET: &str = "dlx-archive-test";
@@ -748,14 +748,15 @@ mod provider_conformance_cases {
         ArchiveClaimSettleOutcome, ClaimedArchiveCandidate, DlxArchiveBacklog, DlxArchiveStore,
         DlxLifecycleError, DlxLifecycleOperation, DlxLifecycleReason, DlxLifecycleRepository,
         EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
-        ReceiptCasOutcome, RedactedBytes,
+        ReceiptCasOutcome,
     };
     use eventexec::{
         DeadLetterId, DlxArchiveCandidate, DlxArchiveKeyName, DlxArchiveSafeMetadata,
         DlxArchiveSafeMetadataInput, DlxLifecycle, DlxLifecycleHealth, DlxMetadataDigest,
         ExpiredArchiveReceipt, MissingArchiveProof, VerifiedArchiveReceipt,
     };
-    use secure::Plaintext;
+    use rss_data_protection::Plaintext;
+    use rss_redact::RedactedBytes;
 
     use super::{
         NOW, ProbeRules, RETAIN_UNTIL, VERSION_ID, archive_version_id, checksum_header, object_key,
@@ -1113,7 +1114,7 @@ mod provider_conformance_cases {
             &self,
             key: KeyName,
             plaintext: Plaintext,
-            _aad: secure::DerivedAad,
+            _aad: rss_data_protection::DerivedAad,
         ) -> Result<EncryptOutput, KeyProviderError> {
             Ok(EncryptOutput::new(
                 plaintext.expose().to_vec(),
@@ -1125,7 +1126,7 @@ mod provider_conformance_cases {
             &self,
             ciphertext: RedactedBytes,
             _key: KeyRef,
-            _aad: secure::DerivedAad,
+            _aad: rss_data_protection::DerivedAad,
         ) -> Result<Plaintext, KeyProviderError> {
             Ok(Plaintext::new(ciphertext.into_bytes()))
         }
@@ -1134,7 +1135,7 @@ mod provider_conformance_cases {
             &self,
             ciphertext: RedactedBytes,
             key: KeyRef,
-            _aad: secure::DerivedAad,
+            _aad: rss_data_protection::DerivedAad,
         ) -> Result<EncryptOutput, KeyProviderError> {
             Ok(EncryptOutput::new(ciphertext.into_bytes(), key))
         }

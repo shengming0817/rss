@@ -364,7 +364,7 @@ fn is_dev_container_host(parsed: &Url, plaintext_scheme: &str) -> bool {
 
 fn render_redacted_url(raw: &str) -> String {
     let without_query_fragment = raw.split(['?', '#']).next().unwrap_or(raw);
-    crate::redact_url_credentials(without_query_fragment).to_string()
+    rss_redact::redact_url_credentials(without_query_fragment).to_string()
 }
 
 #[cfg(test)]

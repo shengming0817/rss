@@ -19,7 +19,7 @@ use dynosaur::dynosaur;
 
 use consistency::{EventEntry, OutboxFactConflict};
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 const OPAQUE_ID_MAX_LEN: usize = 256;
 

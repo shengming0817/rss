@@ -1190,7 +1190,7 @@ impl SagaDurableStore for MemSagaDurableStore {
                     row.scope.clone(),
                     row.attempt,
                     row.format,
-                    secure::Plaintext::new(row.plaintext.to_vec()),
+                    rss_data_protection::Plaintext::new(row.plaintext.to_vec()),
                     row.completed_seq,
                 ));
             }
@@ -1258,7 +1258,7 @@ impl SagaDurableStore for MemSagaDurableStore {
             row.scope.clone(),
             row.attempt,
             row.format,
-            secure::Plaintext::new(row.plaintext.to_vec()),
+            rss_data_protection::Plaintext::new(row.plaintext.to_vec()),
             row.completed_seq,
         );
         Ok(SagaTerminalReceiptOutcome::Verified(Box::new(

@@ -10,7 +10,7 @@
 //! adapter 从已验证 per-domain AMQP endpoint 连接；生产 private-CA 组合根必须分别注入 publisher 与
 //! subscriber role endpoint——隔离经 broker 侧的 **vhost + role credential**，**不**经 exchange/queue
 //! 命名前缀（命名前缀会把域身份泄进 wire 且可绕过）。URL 由组合根经 `bootstrap::eventtransport` 决策
-//! 注入。凭据 non-leak：连接日志经 `conn_events`（`AmqpEndpoint` Display + `secure::redact_error`）。
+//! 注入。凭据 non-leak：连接日志经 `conn_events`（`AmqpEndpoint` Display + `rss_redact::redact_error`）。
 //! 明文 `amqp://` 只允许 testcontainer / dev loopback fixture 显式 opt-in，非 loopback 明文不可表达。
 //!
 //! # P7 传输边界（manual-ack，at-least-once）

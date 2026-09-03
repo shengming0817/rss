@@ -1,6 +1,6 @@
 //! aws-sdk-s3 操作映射（put / get / delete → `diport::ObjectStoreError`）。逻辑拆出 `lib.rs` 控制认知复杂度。
 //!
-//! 错误经 `secure::redact_error` + `tracing::warn` 记录后包成不透明 [`ObjectStoreError`]（PII 边界：原始 SDK
+//! 错误经 `rss_redact::redact_error` + `tracing::warn` 记录后包成不透明 [`ObjectStoreError`]（PII 边界：原始 SDK
 //! 错误可能携 endpoint / bucket / 凭据签名，只进服务端日志且经脱敏，不入 wire——见 diport rustdoc）。**不**记录
 //! 对象 key 原文（key 可能内嵌租户 / 用户标识，按 PII 保守处理；与 redis adapter 只记 `resource`/`operation` 一致）。
 
@@ -82,7 +82,7 @@ pub(crate) async fn delete_impl(
 }
 
 /// 记录脱敏诊断后把 SDK 错误包成不透明 [`ObjectStoreError`]。`operation` 是闭值集低基数标签；
-/// 错误经 `secure::redact_error`（顶层 Display、不遍历 source 链）——不泄漏 endpoint / 凭据。
+/// 错误经 `rss_redact::redact_error`（顶层 Display、不遍历 source 链）——不泄漏 endpoint / 凭据。
 fn wrap<E>(operation: &str, err: E) -> ObjectStoreError
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -91,7 +91,7 @@ where
         target: "s3",
         resource = "s3",
         operation = operation,
-        error = %secure::redact_error(&err),
+        error = %rss_redact::redact_error(&err),
         "s3 object store operation failed"
     );
     ObjectStoreError::new(err)

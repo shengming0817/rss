@@ -11,6 +11,7 @@ diport = { path = "../../crates/diport" }
 eventexec = { path = "../../crates/eventexec" }
 s3 = { path = "../../adapters/s3", features = ["integration"] }
 secure = { path = "../../crates/secure" }
+rss-redact.workspace = true
 testkit = { path = "../../crates/testkit", features = ["containers"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid = { workspace = true, features = ["v4"] }

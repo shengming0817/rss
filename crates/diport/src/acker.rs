@@ -21,8 +21,8 @@ use futures::Stream;
 use tokio_util::sync::CancellationToken;
 
 use crate::publisher::Topic;
-use crate::redacted::RedactedSource;
 use crate::subscriber::{Message, SubscriberError};
+use rss_redact::RedactedSource;
 
 // ── AckAction（broker 结算动作）────────────────────────────────────────────────
 

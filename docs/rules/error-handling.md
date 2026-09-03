@@ -39,7 +39,7 @@ runtime 数据。runtime 数据进入两条 typed 通道：
 
 由 const literal 检查（编译期 `&'static str` 类型约束，Hard）与 sealed 字段冻结（类型系统，Hard）守。
 typed 通道分流（`PublicDetail` vs `InternalAttr`）**本身即脱敏决策**——wire mapper 只读 `public_details()`、
-不对其二次 `redact`（`PublicDetail` 已是 vetted 公开值）。字段级值进日志 / trace / wire 前经 `secure::safe(value,
+不对其二次 `redact`（`PublicDetail` 已是 vetted 公开值）。字段级值进日志 / trace / wire 前经 `rss_redact::safe(value,
   scope)` 按 typed redaction policy 渲染。
 
 ## Panic

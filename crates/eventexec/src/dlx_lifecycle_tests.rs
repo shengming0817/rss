@@ -2,8 +2,8 @@ use diport::{
     ArchiveChecksum, ArchiveVersionId, DlxArchiveCiphertext, DlxArchiveObjectMetadata,
     DlxArchivePutRequest, DlxLifecycleError, DlxLifecycleErrorKind, DlxLifecycleOperation,
     DlxLifecycleReason, KeyName, KeyRef, KeyVersion, ObjectLockMode, ReceiptCasOutcome,
-    RedactedBytes,
 };
+use rss_redact::RedactedBytes;
 
 use super::*;
 

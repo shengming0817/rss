@@ -13,8 +13,8 @@
 use dynosaur::dynosaur;
 
 use crate::envelope::EnvelopeMetadata;
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 // ── DeadLetterSummary ─────────────────────────────────────────────────────────
 
@@ -332,7 +332,7 @@ impl DeadLetterRecord {
 ///
 /// PII 边界（与 [`crate::SignerError`] 同范式）：`Display` 仅输出安全摘要常量；source 经 [`RedactedSource`]
 /// 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，
-/// fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
+/// fail-closed），见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`rss_redact::redact_error` funnel 取顶层 Display、不遍历 source 链。
 #[derive(Debug, thiserror::Error)]
 #[error("dead letter write failed")]
 pub struct DeadLetterStoreError {

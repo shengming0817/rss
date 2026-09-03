@@ -1,0 +1,31 @@
+[package]
+name = "rss-redact"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Provider-neutral redaction primitives for RSS diagnostics"
+categories = ["development-tools", "data-structures"]
+keywords = ["redaction", "diagnostics", "privacy", "security"]
+publish = ["crates-io"]
+
+[features]
+default = []
+
+[dependencies]
+rss-contract.workspace = true
+rss-redact-derive.workspace = true
+hmac = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+
+[dev-dependencies]
+rstest = { workspace = true }
+
+[lints]
+workspace = true

@@ -13,7 +13,7 @@ use dynosaur::dynosaur;
 
 use consistency::Lsn;
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 // ── owner / checkpoint id newtype funnel ──────────────────────────────────────
 

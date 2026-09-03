@@ -243,7 +243,7 @@ fn handle_observation<E: std::error::Error>(
             fail_closed(control, last_epoch);
             health.mark_degraded();
             tracing::warn!(
-                error = %secure::redact_error(&error),
+                error = %rss_redact::redact_error(&error),
                 "DR admission durable observation failed; controller remains fail-closed"
             );
             None

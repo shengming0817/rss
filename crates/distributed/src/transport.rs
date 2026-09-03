@@ -84,7 +84,7 @@ impl TransportOutcome {
 /// The fields are private so a static route template cannot cross the transport seam. The only
 /// constructor binds every generated path parameter and validates query names against generated
 /// request-schema metadata before URL encoding either component.
-#[derive(Clone, secure::Redact)]
+#[derive(Clone, rss_redact::Redact)]
 pub struct HttpContractTarget {
     #[redact(sensitivity = public, mode = "show")]
     contract: ContractBinding,
@@ -217,10 +217,10 @@ fn route_parameter_name(segment: &str) -> Option<&str> {
 
 /// Minimal cross-domain contract HTTP dispatch request.
 ///
-/// `Debug` is derived through `secure::Redact`: adding a field without an explicit `#[redact(...)]`
+/// `Debug` is derived through `rss_redact::Redact`: adding a field without an explicit `#[redact(...)]`
 /// annotation is a compile error. Path and body may contain tenant/resource identifiers
 /// or credentials and are therefore never rendered in clear text.
-#[derive(Clone, secure::Redact)]
+#[derive(Clone, rss_redact::Redact)]
 pub struct HttpContractRequest {
     #[redact(sensitivity = public, mode = "show")]
     target: HttpContractTarget,
@@ -262,7 +262,7 @@ impl HttpContractRequest {
 }
 
 /// Minimal cross-domain contract HTTP dispatch response.
-#[derive(Clone, secure::Redact)]
+#[derive(Clone, rss_redact::Redact)]
 pub struct HttpContractResponse {
     #[redact(sensitivity = public, mode = "show")]
     status_code: u16,
@@ -320,7 +320,7 @@ impl HttpContractTransportErrorKind {
 #[derive(Debug, Clone)]
 pub struct HttpContractTransportError {
     kind: HttpContractTransportErrorKind,
-    source: Option<secure::LastError>,
+    source: Option<rss_redact::LastError>,
 }
 
 impl HttpContractTransportError {
@@ -336,7 +336,7 @@ impl HttpContractTransportError {
     ) -> Self {
         Self {
             kind,
-            source: Some(secure::LastError::from_error(source)),
+            source: Some(rss_redact::LastError::from_error(source)),
         }
     }
 
@@ -346,7 +346,7 @@ impl HttpContractTransportError {
     }
 
     /// Redacted source summary, if a source was captured.
-    pub fn source_summary(&self) -> Option<&secure::LastError> {
+    pub fn source_summary(&self) -> Option<&rss_redact::LastError> {
         self.source.as_ref()
     }
 }

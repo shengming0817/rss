@@ -117,11 +117,9 @@ pub mod rate_limiter;
 // provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进跨 crate 导出面）：`pub enum` 错误
 // （`ObjectStoreError`）变体字段恒 public，须持 public 类型避免 privacy leak（#1120 merge：PR215 RedactedSource
 // pub(crate) 与 PR214 pub-enum 错误不兼容）。
-mod redacted;
 // DTO 字节 payload 脱敏 newtype（`Debug`/`Display` 恒 `<redacted>`，经 `as_bytes`/`into_bytes` 受控访问）。
 // `pub`（经下方 re-export 进跨 crate 导出面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
 mod dlq_operator;
-mod redacted_bytes;
 pub mod saga_durable_store;
 pub mod secret_resolver;
 pub mod signer;
@@ -199,8 +197,6 @@ pub use rate_limiter::{
     DynRateLimiter, MAX_RATE_LIMIT_QUOTA, RateLimitDecision, RateLimitError, RateLimitKey,
     RateLimitQuota, RateLimitQuotaError, RateLimiter,
 };
-pub use redacted::RedactedSource;
-pub use redacted_bytes::RedactedBytes;
 pub use saga_durable_store::{
     DynSagaDurableStore, DynSagaTenantSource, SagaClaimOutcome, SagaClaimRequest,
     SagaCompensationCompletion, SagaCompensationFailure, SagaCompensationIntent,

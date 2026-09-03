@@ -20,10 +20,10 @@ use consistency::{
 pub use consistency::{
     SagaContractId, SagaContractIdError, SagaWorkerIdentity, SagaWorkerIdentityError,
 };
-use secure::Plaintext;
+use rss_data_protection::Plaintext;
 use vocab::StepName;
 
-use crate::RedactedSource;
+use rss_redact::RedactedSource;
 
 /// Stable, safe classification for all durable Saga storage failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

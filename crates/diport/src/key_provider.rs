@@ -6,26 +6,26 @@
 //! （ADR-003 dynosaur Send 变体范式）。`adapters/vault` 经 DIP 内向边 impl encrypt/decrypt/rewrap（#1466），
 //! 不被域依赖；域持久化路径经组合根注入的 `Box<DynKeyProvider>` 消费（#1467）。
 //!
-//! ## 与 `secure::Aead` 的边界
+//! ## 与 `rss_data_protection::Aead` 的边界
 //!
-//! - `secure::Aead`（sync 静态分发原语，`seal`/`open` → `CiphertextEnvelope`/`Plaintext`）= **本地 AEAD codec**，非 DI port。
+//! - `rss_data_protection::Aead`（sync 静态分发原语，`seal`/`open` → `CiphertextEnvelope`/`Plaintext`）= **本地 AEAD codec**，非 DI port。
 //! - `KeyProvider`（async DI port）= **provider-agnostic KMS 接缝**：组合根可注入 Vault Transit（远端 KMS，密文是
-//!   `vault:vN:` opaque 串）或本地软件 provider。故 port 签名用 **opaque 密文字节 [`crate::RedactedBytes`] + [`KeyRef`]
-//!   元数据**，**不引** `secure::CiphertextEnvelope`（那是软件 AEAD 的具体 DEK/nonce/tag 格式，会把 provider 假设
+//!   `vault:vN:` opaque 串）或本地软件 provider。故 port 签名用 **opaque 密文字节 [`rss_redact::RedactedBytes`] + [`KeyRef`]
+//!   元数据**，**不引** `rss_data_protection::CiphertextEnvelope`（那是软件 AEAD 的具体 DEK/nonce/tag 格式，会把 provider 假设
 //!   泄进 port、破坏 Vault 适配）。
 //!
 //! ## 数据保护不变式（类型层复用，Hard）
 //!
 //! - **AAD 必填 + 受信派生**（`FIELDPROT-AAD-DERIVE-FROM-CTX-01`）：encrypt/decrypt/rewrap 的 `aad: DerivedAad` 是
-//!   必填位置参；[`secure::DerivedAad`] 只能经 [`secure::ProtectionContext`] funnel 派生，envelope 存储的 AAD 回灌即类型错误。
-//! - **no-decrypt-in-debug**（`FIELDPROT-NODBG-DECRYPT-01`）：明文出入用 [`secure::Plaintext`]（`Debug=<redacted>` + Drop-zeroize）。
-//! - **密文脱敏**（`DIPORT-DTO-BYTES-REDACT-01`）：密文用 [`crate::RedactedBytes`]（`Debug=<redacted>`、可读字节）。
-//! - **错误源脱敏**（`DIPORT-ERR-SOURCE-REDACT-01`）：[`KeyProviderError`] 经 [`crate::RedactedSource`] 脱敏内层错误。
+//!   必填位置参；[`rss_data_protection::DerivedAad`] 只能经 [`rss_data_protection::ProtectionContext`] funnel 派生，envelope 存储的 AAD 回灌即类型错误。
+//! - **no-decrypt-in-debug**（`FIELDPROT-NODBG-DECRYPT-01`）：明文出入用 [`rss_data_protection::Plaintext`]（`Debug=<redacted>` + Drop-zeroize）。
+//! - **密文脱敏**（`DIPORT-DTO-BYTES-REDACT-01`）：密文用 [`rss_redact::RedactedBytes`]（`Debug=<redacted>`、可读字节）。
+//! - **错误源脱敏**（`DIPORT-ERR-SOURCE-REDACT-01`）：[`KeyProviderError`] 经 [`rss_redact::RedactedSource`] 脱敏内层错误。
 //! - **解密访问审计 + 错误源脱敏**（`FIELDPROT-KEYPROV-AUDIT-01`，Medium，**执行体 #1466**）：[`KeyProviderLocal::decrypt`]
 //!   实现者义务——解密访问经 tracing span 审计 + 错误源脱敏（错误链不泄漏密钥/明文）。本 PR 是接口切片，
 //!   接口层在 `decrypt` rustdoc 声明该义务（不阻断审计路径），守卫执行体落 #1466。
 //! - **key-id 等值-only 匹配**（ADR-011 §D3，防 timing oracle）：[`KeyName`]/[`KeyVersion`]/[`KeyRef`] **不** derive
-//!   `PartialEq`/`Eq`，仅经 `ct_eq` 比较——对标 `secure::BlindIndexValue` 的等值-only 范式，类型层杜绝非常数时间
+//!   `PartialEq`/`Eq`，仅经 `ct_eq` 比较——对标 `rss_data_protection::BlindIndexValue` 的等值-only 范式，类型层杜绝非常数时间
 //!   `==` 匹配 key 标识。常数时间**严格性**按维度分级：[`KeyVersion`]（定长 4-byte u32 BE）严格常数时间，是
 //!   timing oracle 防护核心维度；[`KeyName`] 对变长字符串经 `constant_time_eq` 比内容、但长度差异会短路（key 名是
 //!   非机密配置元数据，长度泄漏可接受）。
@@ -40,17 +40,17 @@
 
 use dynosaur::dynosaur;
 use primitives::crypto::constant_time_eq;
-use secure::{DerivedAad, Plaintext};
+use rss_data_protection::{DerivedAad, Plaintext};
 
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 /// key provider 操作的失败分类（**in-process** 路由用：retry / no-retry / operator 告警 / 排障映射）。
 ///
 /// 对标同 crate `SecretResolverError` 变体 / `PublishErrorKind`。与脱敏正交：`kind` 供进程内调用方分类、
 /// **不进 wire**（[`KeyProviderError`] 的 `Display` 仍是单一安全摘要常量、不泄漏 kind）。解密验证类失败
 /// （AAD-mismatch / 坏密文 / 错版本）**收敛单一 [`Rejected`](Self::Rejected)**、不区分维度（对标
-/// `secure::AeadError::Open`，杜绝 downgrade oracle）。
+/// `rss_data_protection::AeadError::Open`，杜绝 downgrade oracle）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeyProviderErrorKind {
@@ -290,7 +290,7 @@ pub trait KeyProviderLocal: Send + Sync {
 
     /// 按 `key`（含 version → previous-read 选 key）解密 `ciphertext`，绑定 `aad`；AAD/版本不符 fail-closed。
     ///
-    /// **实现者义务（#1466 落地，`INVARIANT: FIELDPROT-KEYPROV-AUDIT-01`， { level = "Medium", exec = "manual/opt-in", source = "code" }对标 [`secure::Aead::open`] 调用方义务）**：
+    /// **实现者义务（#1466 落地，`INVARIANT: FIELDPROT-KEYPROV-AUDIT-01`， { level = "Medium", exec = "manual/opt-in", source = "code" }对标 [`rss_data_protection::Aead::open`] 调用方义务）**：
     /// - 解密访问须发射 tracing span 审计（含 `key_name` / `key_version` / `aad.coordinates()` 维度，**不含明文/密钥材料**）。
     /// - [`KeyProviderError`] 自身不携带失败维度上下文（防降级探测），故实现须在 `Err` 分支于 span 内记录 key/version
     ///   元数据（如 `tracing::error!(key = %key, "key provider decrypt failed")`），保证生产可观测性。
@@ -320,9 +320,9 @@ mod tests {
         DynKeyProvider, EncryptOutput, KeyName, KeyParseError, KeyProvider, KeyProviderError,
         KeyProviderErrorKind, KeyRef, KeyVersion,
     };
-    use crate::RedactedBytes;
+    use rss_data_protection::{DerivedAad, Plaintext, ProtectionContext};
+    use rss_redact::RedactedBytes;
     use rss_request_context::TenantId;
-    use secure::{DerivedAad, Plaintext, ProtectionContext};
 
     const TENANT_A: &str = "11111111-2222-4333-8444-555555555555";
 

@@ -19,7 +19,7 @@ use std::pin::Pin;
 use dynosaur::dynosaur;
 use futures::Stream;
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 /// 对象存储操作失败。
 ///
@@ -27,7 +27,7 @@ use crate::redacted::RedactedSource;
 /// `source`（S3 provider 错误，可能携 endpoint / bucket / 凭据签名细节）经 [`RedactedSource`] 脱敏（`Debug`/`Display`
 /// 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed），`derive(Debug)`
 /// 即安全。`Display` 仅 provider 无关安全摘要常量。`LimitExceeded` 的 `max_bytes` 是消费域设定的配置上界、**非 PII**，可观测。
-/// 需要 source 诊断时走统一脱敏 funnel `secure::redact_error`（顶层 `Display`、不遍历 source 链），**不**裸 `.source()`。
+/// 需要 source 诊断时走统一脱敏 funnel `rss_redact::redact_error`（顶层 `Display`、不遍历 source 链），**不**裸 `.source()`。
 ///
 /// INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（source 经 `RedactedSource` 不暴露原始错误；回归见 `error_redaction` 单测）。
 #[derive(Debug, thiserror::Error)]
@@ -64,12 +64,12 @@ impl ObjectStoreError {
 /// opaque：key 命名 / 前缀策略随消费域派生，不在 DI-infra 层冻结。bucket **不**在此（是 adapter 构造配置）。
 ///
 /// PII 边界（**类型层 Hard**，对标 [`crate::Message`] 的 `payload` / [`ObjectStoreError`]）：key 可能内嵌租户 /
-/// 用户标识，`#[derive(secure::Redact)]` 只输出 `ObjectKey(<redacted>)`，使任意消费方的 `?key` /
+/// 用户标识，`#[derive(rss_redact::Redact)]` 只输出 `ObjectKey(<redacted>)`，使任意消费方的 `?key` /
 /// `{key:?}` 不泄漏原文（把 adapter 侧「不记录 key 原文」的 Soft 约定上移为通用类型层保证）。
 /// INVARIANT: DIPORT-OBJECTKEY-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（回归见 `smoke::object_key_debug_redacts`）。
 ///
 /// `Clone`：dynosaur `dyn(box)` 派发要求方法签名无生命周期参数，故 key 取所有权 move 进各操作。
-#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+#[derive(Clone, PartialEq, Eq, Hash, rss_redact::Redact)]
 pub struct ObjectKey(#[redact(sensitivity = pii)] String);
 
 impl ObjectKey {
@@ -168,7 +168,7 @@ mod smoke {
     //! 另覆盖 [`ObjectPayload::collect_limited`] 的有界 / 超限 / 错误传播行为（stream-first 读取契约）。
     use super::{DynObjectStore, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError};
 
-    fn _assert_redact<T: secure::Redact>() {}
+    fn _assert_redact<T: rss_redact::Redact>() {}
 
     fn obj_stream(bytes: &'static [u8]) -> ObjectPayload {
         ObjectPayload::new(Box::pin(futures::stream::once(async move {

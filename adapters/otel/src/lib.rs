@@ -140,7 +140,7 @@ impl ManagedResource for OtelExporter {
             // 它是**同步阻塞**调用（等 batch worker thread flush+ack，自带 5s 内部超时，见 opentelemetry_sdk
             // 0.32 provider.rs）。直接在 async fn 内调用会占住 tokio worker，且 bootstrap 的 per-resource
             // tokio::time::timeout 无法在同步阻塞点取消——故 spawn_blocking 移出 executor，`.await` 提供可被
-            // 外层 timeout 作用的让出点。错误（JoinError / OTelSdkError）经 diport::RedactedSource 脱敏。
+            // 外层 timeout 作用的让出点。错误（JoinError / OTelSdkError）经 rss_redact::RedactedSource 脱敏。
             let provider = self.provider.clone();
             diport::join_owned_task(move || provider.shutdown())
                 .await

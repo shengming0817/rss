@@ -23,6 +23,7 @@ test-support = []
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 secure = { path = "../secure" }
+rss-redact.workspace = true
 support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }

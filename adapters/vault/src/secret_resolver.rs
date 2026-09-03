@@ -72,7 +72,7 @@ struct MissingPayloadField;
 pub const SECRET_RESOLVER_READINESS_KEY: &str = ".rss-readiness";
 
 /// One canonical, allowlisted readiness target derived from the authorization map itself.
-#[derive(Clone, secure::Redact)]
+#[derive(Clone, rss_redact::Redact)]
 pub struct SecretResolverReadinessTarget {
     #[redact(sensitivity = internal)]
     tenant: TenantId,
@@ -106,7 +106,7 @@ impl SecretResolverReadinessTarget {
 /// 只能由 [`TenantStoreAllowlist::new`] 构造，且始终非空、没有重复 `(tenant, store)` 授权，
 /// 不同 tenant 的规范化 Vault 物理命名空间互不重叠。同 tenant 可用多个显式 store alias
 /// 指向同一命名空间。
-#[derive(secure::Redact)]
+#[derive(rss_redact::Redact)]
 pub struct TenantStoreAllowlist {
     #[redact(sensitivity = internal)]
     entries: HashMap<(TenantId, String), StoreBinding>,
@@ -119,7 +119,7 @@ pub struct TenantStoreAllowlist {
 /// 见 [`kv_resolve_impl`]）；`kv_path_prefix` 是 key 路径前缀（如 `"tenant-a/"`），后接
 /// `coord.key()` 的逐段路径。前缀可空字符串（无前缀直挂 key）。两者的穿越段均在
 /// [`TenantStoreAllowlist::new`] 构造期拒。
-#[derive(Clone, secure::Redact)]
+#[derive(Clone, rss_redact::Redact)]
 pub struct StoreBinding {
     /// Vault KV v2 mount 点（如 `"secret"` / `"team/secrets"`）；非空、各段非 `.` / `..`。
     #[redact(sensitivity = internal)]
@@ -760,7 +760,7 @@ mod backend_tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn authorization_coordinates_debug_are_redacted() {
-        fn assert_redact<T: secure::Redact>() {}
+        fn assert_redact<T: rss_redact::Redact>() {}
         assert_redact::<StoreBinding>();
         assert_redact::<TenantStoreAllowlist>();
         const TENANT: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";

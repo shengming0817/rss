@@ -184,7 +184,7 @@ impl AmqpRuntimeDeps {
                     tracing::warn!(
                         target: "amqp",
                         resource = publisher_name,
-                        error = %secure::redact_error(&cleanup),
+                        error = %rss_redact::redact_error(&cleanup),
                         "partial AMQP bundle cleanup failed; preserving subscriber connect error"
                     );
                 }
@@ -236,7 +236,7 @@ impl AmqpRuntimeDeps {
                     tracing::warn!(
                         target: "amqp",
                         resource = publisher_name,
-                        error = %secure::redact_error(&cleanup),
+                        error = %rss_redact::redact_error(&cleanup),
                         "partial AMQP bundle cleanup failed; preserving subscriber connect error"
                     );
                 }

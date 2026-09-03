@@ -105,6 +105,7 @@ dependencies = [
  "lapin",
  "primitives",
  "rss-eventing",
+ "rss-redact",
  "rss-request-context",
  "runctx",
  "rustls-pki-types",
@@ -1018,6 +1019,7 @@ dependencies = [
  "httpserve",
  "ids",
  "primitives",
+ "rss-redact",
  "runctx",
  "secure",
  "support",
@@ -1274,7 +1276,6 @@ dependencies = [
  "ids",
  "rss-request-context",
  "runctx",
- "secure",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1676,10 +1677,11 @@ dependencies = [
  "mockall",
  "primitives",
  "rss-contract",
+ "rss-data-protection",
  "rss-eventing",
+ "rss-redact",
  "rss-request-context",
  "sagaauthmint",
- "secure",
  "sha2 0.10.9",
  "thiserror",
  "tokio",
@@ -1714,9 +1716,9 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
+ "rss-redact",
  "rss-request-context",
  "runctx",
- "secure",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -1863,11 +1865,12 @@ dependencies = [
  "metrics-exporter-prometheus",
  "primitives",
  "rss-contract",
+ "rss-data-protection",
  "rss-diag-context",
  "rss-eventing",
+ "rss-redact",
  "rss-request-context",
  "rss-trace-context",
- "secure",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -3222,8 +3225,8 @@ dependencies = [
  "futures",
  "primitives",
  "rss-contract",
+ "rss-data-protection",
  "rss-request-context",
- "secure",
  "tokio",
  "tokio-util",
  "uuid",
@@ -3514,7 +3517,6 @@ dependencies = [
  "primitives",
  "rss-eventing",
  "runctx",
- "secure",
  "support",
  "tracing",
  "tracing-subscriber",
@@ -3617,8 +3619,8 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rss-redact",
  "rstest",
- "secure",
  "thiserror",
  "tokio",
  "tracing",
@@ -4308,6 +4310,7 @@ dependencies = [
  "consistency",
  "deadpool-redis",
  "diport",
+ "rss-redact",
  "rss-request-context",
  "rstest",
  "secure",
@@ -4521,6 +4524,22 @@ name = "rss-contract"
 version = "0.1.0"
 
 [[package]]
+name = "rss-data-protection"
+version = "0.1.0"
+dependencies = [
+ "hmac 0.12.1",
+ "rss-redact",
+ "rss-request-context",
+ "rstest",
+ "secrecy",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror",
+ "trybuild",
+ "zeroize",
+]
+
+[[package]]
 name = "rss-diag-context"
 version = "0.1.0"
 dependencies = [
@@ -4547,6 +4566,33 @@ dependencies = [
  "rss-contract",
  "rss-request-context",
  "tokio",
+ "trybuild",
+]
+
+[[package]]
+name = "rss-redact"
+version = "0.1.0"
+dependencies = [
+ "hmac 0.12.1",
+ "rss-contract",
+ "rss-redact-derive",
+ "rstest",
+ "sha2 0.10.9",
+ "thiserror",
+ "time",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-redact-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "rss-redact",
+ "syn",
  "trybuild",
 ]
 
@@ -4603,8 +4649,8 @@ dependencies = [
 name = "runctx"
 version = "0.0.0"
 dependencies = [
+ "rss-redact",
  "rss-request-context",
- "secure",
  "thiserror",
  "tokio",
  "uuid",
@@ -4624,8 +4670,8 @@ dependencies = [
  "primitives",
  "rss-eventing",
  "rss-platform",
+ "rss-redact",
  "runtimeinventorymint",
- "secure",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -4773,6 +4819,8 @@ dependencies = [
  "diport",
  "eventexec",
  "futures",
+ "rss-data-protection",
+ "rss-redact",
  "rss-request-context",
  "secure",
  "thiserror",
@@ -4789,6 +4837,7 @@ dependencies = [
  "aws-sdk-s3",
  "diport",
  "eventexec",
+ "rss-redact",
  "s3",
  "secure",
  "testkit",
@@ -4914,31 +4963,17 @@ dependencies = [
  "argon2",
  "base64",
  "hmac 0.12.1",
- "rss-contract",
+ "rss-redact",
  "rss-request-context",
  "rstest",
- "secrecy",
- "securederive",
  "sha2 0.10.9",
  "subtle",
  "thiserror",
- "time",
  "trybuild",
  "unicode-normalization",
  "url",
- "uuid",
  "vocab",
  "zeroize",
-]
-
-[[package]]
-name = "securederive"
-version = "0.0.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
- "trybuild",
 ]
 
 [[package]]
@@ -6348,8 +6383,9 @@ dependencies = [
  "diport",
  "rcgen",
  "reqwest",
+ "rss-data-protection",
+ "rss-redact",
  "rss-request-context",
- "secure",
  "serde",
  "serde_json",
  "sha2 0.10.9",

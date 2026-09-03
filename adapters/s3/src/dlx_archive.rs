@@ -19,9 +19,10 @@ use diport::{
     ArchiveChecksum, ArchiveVersionId, Clock, DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES,
     DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchiveObjectMetadata, DlxArchivePutOutcome,
     DlxArchivePutRequest, DlxArchiveStore, DlxLifecycleError, DlxLifecycleOperation,
-    DlxLifecycleReason, KeyRef, RedactedBytes,
+    DlxLifecycleReason, KeyRef,
 };
 use eventexec::DLX_HOT_RETENTION_SECONDS;
+use rss_redact::RedactedBytes;
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const CANARY_GENERATION_SECS: i64 = SECONDS_PER_DAY;
@@ -744,7 +745,7 @@ where
         target: "s3",
         resource = "dlx_archive",
         operation = "capability-probe",
-        error = %secure::redact_error(&error),
+        error = %rss_redact::redact_error(&error),
         "dlx archive S3 capability probe failed"
     );
     S3DlxArchiveCapabilityError::Provider
@@ -758,7 +759,7 @@ where
         target: "s3",
         resource = "dlx_archive",
         operation,
-        error = %secure::redact_error(&error),
+        error = %rss_redact::redact_error(&error),
         "dlx archive S3 operation failed"
     );
     RawOperationError::Provider

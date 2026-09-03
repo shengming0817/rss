@@ -146,8 +146,8 @@ impl StateCas {
             .store
             .compare_and_swap(diport::CasStoreRequest {
                 key,
-                expected: expected.map(diport::RedactedBytes::new),
-                new_value: diport::RedactedBytes::new(new_value),
+                expected: expected.map(rss_redact::RedactedBytes::new),
+                new_value: rss_redact::RedactedBytes::new(new_value),
                 expected_token,
             })
             .await

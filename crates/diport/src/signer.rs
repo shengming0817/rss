@@ -2,15 +2,15 @@
 
 use dynosaur::dynosaur;
 
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 /// 签名失败。
 ///
 /// PII 边界（替代 `anyhow` 暴露在公共 port，与 [`crate::ShutdownError`] 同范式）：`Display` 仅输出
 /// provider 无关的安全摘要常量（不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display`
 /// 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed），
-/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`secure::redact_error` funnel 取顶层 Display、不遍历 source 链。
+/// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`rss_redact::redact_error` funnel 取顶层 Display、不遍历 source 链。
 #[derive(Debug, thiserror::Error)]
 #[error("signing failed")]
 pub struct SignerError {

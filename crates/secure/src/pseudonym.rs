@@ -5,11 +5,11 @@ use std::num::NonZeroU16;
 use hmac::{Hmac, Mac as _};
 use rss_request_context::TenantId;
 use sha2::Sha256;
-
-use crate::RedactionHashKey;
+use zeroize::Zeroizing;
 
 const CONTEXT: &[u8] = b"rss.pseudonym.hmac-sha256.v1";
 const UUID_BYTES: usize = 16;
+const KEY_MIN_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PseudonymKeyId(NonZeroU16);
@@ -28,12 +28,16 @@ impl PseudonymKeyId {
 /// One zeroized HMAC key paired with its durable rotation identifier.
 pub struct VersionedPseudonymKey {
     id: PseudonymKeyId,
-    key: RedactionHashKey,
+    key: Zeroizing<Vec<u8>>,
 }
 
 impl VersionedPseudonymKey {
-    pub fn new(id: PseudonymKeyId, key: RedactionHashKey) -> Self {
-        Self { id, key }
+    pub fn from_bytes(id: PseudonymKeyId, key: impl Into<Vec<u8>>) -> Result<Self, PseudonymError> {
+        let key = Zeroizing::new(key.into());
+        if key.len() < KEY_MIN_BYTES {
+            return Err(PseudonymError::KeyTooShort);
+        }
+        Ok(Self { id, key })
     }
 }
 
@@ -49,6 +53,8 @@ impl std::fmt::Debug for VersionedPseudonymKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PseudonymError {
+    #[error("pseudonym key too short")]
+    KeyTooShort,
     #[error("pseudonym domain must not be empty")]
     EmptyDomain,
     #[error("pseudonym key ids must be unique")]
@@ -152,7 +158,7 @@ fn pseudonymize(
     push_length_prefixed(&mut message, &tenant.octets());
     push_length_prefixed(&mut message, domain.as_bytes());
     push_length_prefixed(&mut message, value);
-    let mut mac = match Hmac::<Sha256>::new_from_slice(key.key.as_bytes()) {
+    let mut mac = match Hmac::<Sha256>::new_from_slice(key.key.as_slice()) {
         Ok(mac) => mac,
         Err(_) => unreachable!("HMAC-SHA256 accepts every key length"),
     };
@@ -180,10 +186,10 @@ mod tests {
     fn key(id: u16, fill: u8) -> TestResult<VersionedPseudonymKey> {
         let id = NonZeroU16::new(id)
             .ok_or_else(|| std::io::Error::other("test key id must be non-zero"))?;
-        Ok(VersionedPseudonymKey::new(
+        Ok(VersionedPseudonymKey::from_bytes(
             PseudonymKeyId::new(id),
-            RedactionHashKey::from_bytes(vec![fill; 32])?,
-        ))
+            vec![fill; 32],
+        )?)
     }
 
     #[test]
@@ -209,6 +215,24 @@ mod tests {
             PseudonymKeyRing::new(key(1, 0x42)?, vec![key(1, 0x24)?]),
             Err(PseudonymError::DuplicateKeyId)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn short_key_is_rejected() {
+        let id = PseudonymKeyId::new(NonZeroU16::MIN);
+        assert!(matches!(
+            VersionedPseudonymKey::from_bytes(id, vec![0x42; 31]),
+            Err(PseudonymError::KeyTooShort)
+        ));
+    }
+
+    #[test]
+    fn key_material_is_owned_by_a_zeroizing_container() -> TestResult {
+        fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+        let key = key(1, 0x42)?;
+        assert_zeroizes_on_drop(&key.key);
         Ok(())
     }
 }

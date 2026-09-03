@@ -3,9 +3,10 @@
 use diport::key_provider::KeyProviderErrorKind;
 use diport::{
     DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES, DlxLifecycleError, DlxLifecycleOperation, DlxLifecycleReason,
-    KeyProvider, RedactedBytes,
+    KeyProvider,
 };
-use secure::{Plaintext, ProtectionContext};
+use rss_data_protection::{Plaintext, ProtectionContext};
+use rss_redact::RedactedBytes;
 
 use crate::dlx_lifecycle::{DlxArchiveKeyName, DlxArchiveObjectKey};
 use diport::DlxArchiveCiphertext;
@@ -92,7 +93,7 @@ fn archive_aad(
     tenant: rss_request_context::TenantId,
     object_key: &DlxArchiveObjectKey,
     operation: DlxLifecycleOperation,
-) -> Result<secure::DerivedAad, DlxLifecycleError> {
+) -> Result<rss_data_protection::DerivedAad, DlxLifecycleError> {
     const ARCHIVE_FIELD: &str = "canonical_archive";
     const ARCHIVE_SCHEMA_VERSION: u32 = 1;
     ProtectionContext::authorized_maintenance(
@@ -125,9 +126,10 @@ mod tests {
     use diport::key_provider::KeyProviderErrorKind;
     use diport::{
         DlxArchiveCiphertext, DlxLifecycleOperation, DlxLifecycleReason, EncryptOutput, KeyName,
-        KeyProvider, KeyProviderError, KeyRef, KeyVersion, RedactedBytes,
+        KeyProvider, KeyProviderError, KeyRef, KeyVersion,
     };
-    use secure::{DerivedAad, Plaintext};
+    use rss_data_protection::{DerivedAad, Plaintext};
+    use rss_redact::RedactedBytes;
 
     use super::{DlxArchiveCrypto, archive_aad, map_key_provider_error};
     use crate::{DeadLetterId, DlxArchiveKeyName, DlxArchiveObjectKey};

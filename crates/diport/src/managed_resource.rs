@@ -17,7 +17,7 @@ use futures::FutureExt as _;
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 /// per-resource 默认关闭超时预算。重 I/O 资源（如 outbox relay）可在
 /// [`ManagedResource::shutdown_timeout`] 覆盖为更长。
@@ -285,7 +285,7 @@ pub trait ManagedResourceLocal {
 ///
 /// **PII 边界**（替代 `anyhow` 暴露在公共 port）：`Display` 仅输出资源无关的安全摘要常量
 /// （不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、
-/// `Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed）。`secure::redact_error`
+/// `Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed）。`rss_redact::redact_error`
 /// funnel 取顶层 Display、不遍历 source 链；`bootstrap::ShutdownStack` 业务错误分支已采纳 `redact_error`
 /// 记录 redacted 顶层摘要。
 /// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。

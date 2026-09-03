@@ -117,7 +117,8 @@ use futures::future::BoxFuture;
 // 统一 delivery envelope（#1160）：`Message::metadata()` 返回的只读元数据从 broker header 透传，
 // handler 经 validated `EventMetadata` 读 tenant/time/correlation；raw bag 仅供 transport 边界逐键读取；
 // subjectId / actor 是 persisted-only，不从 broker header 回流。
-use diport::{Message, RedactedSource};
+use diport::Message;
+use rss_redact::RedactedSource;
 
 // ── 处理结论 ─────────────────────────────────────────────────────────────────
 

@@ -146,14 +146,14 @@ impl RedisRuntimeDeps {
     /// bundle, so composition code never reaches into `deadpool_redis::Pool` directly.
     pub async fn ping(&self) -> Result<(), RedisPingError> {
         let mut conn = self.store.pool().get().await.map_err(|e| {
-            tracing::warn!(error = %secure::redact_error(&e), "redis readiness pool checkout failed");
+            tracing::warn!(error = %rss_redact::redact_error(&e), "redis readiness pool checkout failed");
             RedisPingError
         })?;
         let pong: String = deadpool_redis::redis::cmd("PING")
             .query_async(&mut *conn)
             .await
             .map_err(|e| {
-                tracing::warn!(error = %secure::redact_error(&e), "redis readiness ping failed");
+                tracing::warn!(error = %rss_redact::redact_error(&e), "redis readiness ping failed");
                 RedisPingError
             })?;
         if pong == "PONG" {

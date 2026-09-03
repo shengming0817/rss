@@ -4,9 +4,9 @@ use dynosaur::dynosaur;
 use eventing::delivery::PublishErrorKind;
 
 use crate::envelope::{EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, MessageEnvelope};
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
 use crate::subscriber::MessageId;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 /// 发布失败（携 [`PublishErrorKind`] 决定 relay 按稳定事件 ID 重试 vs 首投 DLX）。
 ///

@@ -10,7 +10,7 @@ pub trait CookieCodec {
 
 /// Cookie 值（私有字段）。`Debug` 经 `#[derive(Redact)]` 字段级脱敏（渲染 `CookieValue(<redacted>)`），
 /// 替换手写 impl（#1360）。
-#[derive(Clone, PartialEq, Eq, secure::Redact)]
+#[derive(Clone, PartialEq, Eq, rss_redact::Redact)]
 pub struct CookieValue(#[redact(sensitivity = secret)] String);
 
 impl CookieValue {

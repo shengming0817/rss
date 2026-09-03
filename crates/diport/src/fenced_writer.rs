@@ -18,8 +18,8 @@
 
 use dynosaur::dynosaur;
 
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 /// 防护写结论（typed outcome，非 error——fence 是预期控制流，对标 `consistency::SeenState`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

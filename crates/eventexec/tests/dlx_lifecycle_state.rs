@@ -8,7 +8,7 @@ use diport::{
     DlxArchiveBacklog, DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchiveObjectMetadata,
     DlxArchivePutOutcome, DlxArchivePutRequest, DlxArchiveStore, DlxLifecycleError,
     DlxLifecycleOperation, DlxLifecycleReason, DlxLifecycleRepository, EncryptOutput, KeyName,
-    KeyProvider, KeyProviderError, KeyRef, KeyVersion, ReceiptCasOutcome, RedactedBytes,
+    KeyProvider, KeyProviderError, KeyRef, KeyVersion, ReceiptCasOutcome,
 };
 use eventexec::{
     ArchiveCanonicalRecord, DeadLetterId, DlxArchiveCandidate, DlxArchiveKeyName,
@@ -16,7 +16,8 @@ use eventexec::{
     DlxLifecycleHealth, DlxMetadataDigest, ExpiredArchiveReceipt, MissingArchiveProof,
     VerifiedArchiveReceipt,
 };
-use secure::Plaintext;
+use rss_data_protection::Plaintext;
+use rss_redact::RedactedBytes;
 
 const NOW: i64 = 1_800_000_000;
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -248,7 +249,7 @@ impl KeyProvider for VersionedKeyProvider {
         &self,
         key: KeyName,
         plaintext: Plaintext,
-        _aad: secure::DerivedAad,
+        _aad: rss_data_protection::DerivedAad,
     ) -> Result<EncryptOutput, KeyProviderError> {
         let version = self.current_version.load(Ordering::Acquire);
         let mut ciphertext = version.to_be_bytes().to_vec();
@@ -263,7 +264,7 @@ impl KeyProvider for VersionedKeyProvider {
         &self,
         ciphertext: RedactedBytes,
         key: KeyRef,
-        _aad: secure::DerivedAad,
+        _aad: rss_data_protection::DerivedAad,
     ) -> Result<Plaintext, KeyProviderError> {
         let bytes = ciphertext.into_bytes();
         let Some(version_bytes) = bytes.get(..4).and_then(|raw| raw.try_into().ok()) else {
@@ -283,7 +284,7 @@ impl KeyProvider for VersionedKeyProvider {
         &self,
         ciphertext: RedactedBytes,
         key: KeyRef,
-        _aad: secure::DerivedAad,
+        _aad: rss_data_protection::DerivedAad,
     ) -> Result<EncryptOutput, KeyProviderError> {
         Ok(EncryptOutput::new(ciphertext.into_bytes(), key))
     }
@@ -308,7 +309,7 @@ async fn lifecycle_key_provider_fake_rejects_mismatched_persisted_version() -> T
         .decrypt(
             RedactedBytes::new(ciphertext),
             KeyRef::new(KeyName::try_new("dlx-archive")?, KeyVersion::new(8)),
-            secure::ProtectionContext::authorized_maintenance(
+            rss_data_protection::ProtectionContext::authorized_maintenance(
                 tenant()?,
                 "dead-letter/018f31a8-893d-7a52-8e17-3ca9df50120b.v1.enc",
                 "canonical_archive",

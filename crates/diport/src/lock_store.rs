@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use dynosaur::dynosaur;
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 /// 锁 key（互斥 / fencing 维度）。provider 按 key **各自**维护单调 token。
 /// newtype funnel（私有字段，单一构造入口）——独立语义不复用裸 `String`。

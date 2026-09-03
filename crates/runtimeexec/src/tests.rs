@@ -1605,8 +1605,8 @@ fn shutdown_error_sinks_strip_url_credentials() {
     let cleanup = anyhow::anyhow!("cleanup postgres://runtime:{LEAK_MARKER}@db.internal/app");
 
     let fields = [
-        secure::redact_error(&failure).to_string(),
-        secure::redact_error(cleanup.as_ref()).to_string(),
+        rss_redact::redact_error(&failure).to_string(),
+        rss_redact::redact_error(cleanup.as_ref()).to_string(),
     ];
     assert!(fields.iter().all(|field| !field.contains(LEAK_MARKER)));
     assert!(fields.iter().all(|field| field.contains("<redacted>")));

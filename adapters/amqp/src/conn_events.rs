@@ -20,7 +20,7 @@ pub(crate) fn emit_connected(resource: &str, endpoint: &secure::AmqpEndpoint) {
     );
 }
 
-/// 记录 AMQP 连接失败事件。`endpoint` 经 typed Display；`error` 经 [`secure::redact_error`]。
+/// 记录 AMQP 连接失败事件。`endpoint` 经 typed Display；`error` 经 [`rss_redact::redact_error`]。
 pub(crate) fn emit_connect_failed(
     resource: &str,
     endpoint: &secure::AmqpEndpoint,
@@ -30,7 +30,7 @@ pub(crate) fn emit_connect_failed(
         target: "amqp",
         resource,
         endpoint = %endpoint,
-        error = %secure::redact_error(err),
+        error = %rss_redact::redact_error(err),
         "amqp connect failed",
     );
 }

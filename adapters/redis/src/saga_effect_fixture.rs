@@ -204,7 +204,7 @@ where
     E: std::error::Error,
 {
     tracing::warn!(
-        error = %secure::redact_error(&error),
+        error = %rss_redact::redact_error(&error),
         "redis saga effect fixture operation failed"
     );
     RedisSagaEffectError

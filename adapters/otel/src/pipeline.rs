@@ -3,11 +3,10 @@
 //! 拆离自 `lib.rs` 控制认知复杂度（对标 `adapters/s3/src/store.rs`）。提供：
 //! - [`OtelEndpoint`]：传输安全 typed opt-in（TLS 默认；明文仅本地 loopback 显式 opt-in，fail-closed）。
 //! - [`RedactingSpanExporter`]：导出边界 key-sweep + free-form URL-scrub 脱敏（**defense-in-depth 兜底**，#1361）；
-//!   首要防线是 call-site 字段策略（`secure::safe(&v, scope)` / 派生 `Debug`），在值变成 span 属性字符串前按声明
+//!   首要防线是 call-site 字段策略（`rss_redact::safe(&v, scope)` / 派生 `Debug`），在值变成 span 属性字符串前按声明
 //!   策略脱敏；兜底只见类型擦除后的 `String`：DSN 内联凭据经 URL-scrub 剥除，但非 URL 的 `email`/`subject` 原值仍透传。
 //! - [`build_otlp_provider`]：endpoint + required resource → 已建脱敏 `SdkTracerProvider` 的 fail-fast typed 构建步骤。
 
-use diport::RedactedSource;
 use observ::TelemetryResource;
 use opentelemetry::trace::Status;
 use opentelemetry::{KeyValue, Value};
@@ -15,7 +14,8 @@ use opentelemetry_otlp::{SpanExporter as OtlpSpanExporter, WithExportConfig as _
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
-use secure::redact_observation_field;
+use rss_redact::RedactedSource;
+use rss_redact::redact_observation_field;
 
 /// An OTLP provider requires the exact non-empty identity carried by [`TelemetryResource`].
 fn to_otel_resource(resource: &TelemetryResource) -> Resource {
@@ -61,7 +61,7 @@ impl OtelError {
 ///
 /// 生产只接受 [`OtelEndpoint::tls`]（`https://`）；明文导出（`http://`）必须经
 /// [`OtelEndpoint::insecure_localhost`] 显式 opt-in 且 host 限 loopback——把「非 TLS endpoint」从
-/// 「裸字符串约定 + warn 的隐式成功路径」收成**类型层显式选择**（零信任，`crates/observ`、`secure::redact_error` 与 typed metric enums
+/// 「裸字符串约定 + warn 的隐式成功路径」收成**类型层显式选择**（零信任，`crates/observ`、`rss_redact::redact_error` 与 typed metric enums
 /// 「生产禁 localhost fallback / 明文」；plaintext-prod-endpoint 不可表达）。
 #[derive(Debug, Clone)]
 pub enum OtelEndpoint {
@@ -135,14 +135,14 @@ fn is_loopback_http(endpoint: &str) -> bool {
 
 /// 导出边界脱敏 exporter wrapper（**defense-in-depth 兜底**，#1361）。
 ///
-/// 首要脱敏防线是 call-site 字段策略：调用方经 `secure::safe(&v, scope)` 或派生 `Debug` 在值变成 span
+/// 首要脱敏防线是 call-site 字段策略：调用方经 `rss_redact::safe(&v, scope)` 或派生 `Debug` 在值变成 span
 /// 属性字符串前按声明策略脱敏；本 exporter 的导出边界做 key-sweep + free-form URL-scrub 兜底——它只见
 /// 类型擦除后的 `String`：DSN 内联凭据经 URL-scrub 剥除（不依赖 key），但非 URL 的自由文本 PII（如
 /// `email`/`subject` 原值）仍透传，须由 call-site 字段策略覆盖（#1361）。
 ///
-/// [`secure::redact_observation_field`] 单源 funnel 清洗 span/event/link 属性中已知敏感 key
+/// [`rss_redact::redact_observation_field`] 单源 funnel 清洗 span/event/link 属性中已知敏感 key
 /// （`authorization`/`access_token`/`session`/`cookie`/`jwt`… → `<redacted>`），防凭据经 tracing→OTLP
-/// 裸传（`crates/observ`、`secure::redact_error` 与 typed metric enums；脱敏落在导出最外边界，fail-closed）。
+/// 裸传（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums；脱敏落在导出最外边界，fail-closed）。
 #[derive(Debug)]
 pub(crate) struct RedactingSpanExporter<E> {
     inner: E,
@@ -157,12 +157,12 @@ impl<E> RedactingSpanExporter<E> {
 
 /// 就地清洗一组属性的 string 值（非 string 值无自由文本 PII，跳过——避免把计数 / 布尔等 typed 值误改成字符串）。
 ///
-/// `secure::redact_observation_field` 在 secure 单源内按顺序执行 key-sweep 与 URL userinfo scrub；
+/// `rss_redact::redact_observation_field` 在 secure 单源内按顺序执行 key-sweep 与 URL userinfo scrub；
 /// `dsn`/`url` 等非敏感 key 携内联 DSN（`postgres://u:p@h/db`）也会剥成
 /// `postgres://<redacted>@h/db`。
 ///
 /// **defense-in-depth 兜底**（#1361）：仍有 key-sweep + URL-scrub 都不覆盖的盲区——非 URL 且非敏感 key 的
-/// 自由文本 PII（如 `email`/`subject` 原值），须由 call-site 字段策略（`secure::safe(&v, scope)` / 派生 `Debug`）覆盖。
+/// 自由文本 PII（如 `email`/`subject` 原值），须由 call-site 字段策略（`rss_redact::safe(&v, scope)` / 派生 `Debug`）覆盖。
 fn redact_attributes(attributes: &mut [KeyValue]) {
     for kv in attributes {
         if !matches!(kv.value, Value::String(_)) {
@@ -572,14 +572,14 @@ mod tests {
             "authorization 应被脱敏"
         );
         assert_eq!(attrs[1].value.as_str(), "<redacted>", "session_id 应被脱敏");
-        // 非 URL 自由文本 PII：key-sweep + URL-scrub 都不覆盖 → 透传（须 call-site secure::safe）。
+        // 非 URL 自由文本 PII：key-sweep + URL-scrub 都不覆盖 → 透传（须 call-site rss_redact::safe）。
         assert_eq!(
             attrs[2].value.as_str(),
             "alice@example.com",
             "email 非 URL 非敏感 key → 透传（盲区文档化）",
         );
         assert_eq!(attrs[3].value.as_str(), "sub-123", "subject 同上透传");
-        // F1：dsn 非敏感 key，但内联凭据经 free-form URL-scrub 剥（`crates/observ`、`secure::redact_error` 与 typed metric enums）。
+        // F1：dsn 非敏感 key，但内联凭据经 free-form URL-scrub 剥（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
         assert_eq!(
             attrs[4].value.as_str(),
             "postgres://<redacted>@h/db",
@@ -683,9 +683,9 @@ mod tests {
 
     #[test]
     fn field_policy_value_already_redacted_before_sink() {
-        // call-site 字段策略（secure::safe + Wire）在值变成 span 属性字符串前已脱敏——
+        // call-site 字段策略（rss_redact::safe + Wire）在值变成 span 属性字符串前已脱敏——
         // `email` 不在 key-sweep 白名单，但 #[derive(Redact)] + Wire scope 保证原邮箱从未进 sink。
-        #[derive(secure::Redact)]
+        #[derive(rss_redact::Redact)]
         #[allow(dead_code)]
         struct WithEmail {
             #[redact(sensitivity = pii_email)]
@@ -700,9 +700,9 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!(
                 "field-policy-span",
-                who = %secure::safe(
+                who = %rss_redact::safe(
                     &WithEmail { email: "alice@example.com".into() },
-                    secure::RedactScope::Wire,
+                    rss_redact::RedactScope::Wire,
                 )
             );
             let _enter = span.enter();

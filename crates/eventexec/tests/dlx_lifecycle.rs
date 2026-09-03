@@ -61,7 +61,7 @@ fn canonical_archive_envelope_matches_committed_bytes() -> TestResult {
         dead_letter_id()?,
         tenant,
         metadata,
-        secure::Plaintext::new(b"capsule-v3".to_vec()),
+        rss_data_protection::Plaintext::new(b"capsule-v3".to_vec()),
     );
     assert_eq!(
         record.encode().expose(),

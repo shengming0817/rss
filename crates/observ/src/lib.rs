@@ -80,7 +80,7 @@ pub enum CertLabel {
 ///
 /// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` 的公开裸
 /// `&'static str` 构造面尚未收敛成 sealed resolver / 闭值集枚举，
-/// 业务仍可写任意字面量，未满足 `crates/observ`、`secure::redact_error` 与 typed metric enums
+/// 业务仍可写任意字面量，未满足 `crates/observ`、`rss_redact::redact_error` 与 typed metric enums
 /// 必须冻结或经 typed enum 入口、禁止业务手写裸 string label」。本 crate（#1006）只兑现
 /// `key()/value()` 行为，**不改这些冻结公共接缝**（W 阶段铁律）；sealed resolver 依赖
 /// Join 阶段 assembly 声明的 closed set，由 #1076 承载。

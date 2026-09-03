@@ -1,0 +1,32 @@
+[package]
+name = "rss-data-protection"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Provider-neutral encrypted-data protection primitives for RSS"
+categories = ["cryptography", "data-structures"]
+keywords = ["encryption", "aead", "envelope", "blind-index"]
+publish = ["crates-io"]
+
+[features]
+default = []
+
+[dependencies]
+rss-request-context.workspace = true
+rss-redact.workspace = true
+hmac = { workspace = true }
+secrecy = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true, features = ["zeroize_derive"] }
+
+[dev-dependencies]
+rstest = { workspace = true }
+trybuild = { workspace = true }
+
+[lints]
+workspace = true

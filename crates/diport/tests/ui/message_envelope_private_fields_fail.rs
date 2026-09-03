@@ -1,7 +1,7 @@
 use diport::{
     EnvelopeHeader, EnvelopeMetadata, EnvelopeSchemaHash, EnvelopeSchemaVersion, MessageEnvelope,
-    RedactedBytes,
 };
+use rss_redact::RedactedBytes;
 
 fn main() {
     let tenant =

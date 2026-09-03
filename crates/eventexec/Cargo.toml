@@ -26,13 +26,14 @@ vocab = { path = "../vocab" }
 futures = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-# run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，`crates/observ`、`secure::redact_error` 与 typed metric enums）。
+# run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，`crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
 tracing = { workspace = true }
 # outbox relay/sweeper 引擎接缝（OutboxRelay/RetentionSweeper/Entry/Disposition）。
 consistency = { path = "../consistency" }
 # Keyed command idempotency aliases are derived inside the runtime boundary; raw business keys
 # never cross into persistence providers.
-secure = { path = "../secure" }
+rss-redact.workspace = true
+rss-data-protection.workspace = true
 # command consumer 侧 typed decode（serde_json::from_slice::<R>）——runtime 职责归位 eventexec（#1124）；
 # producer 侧 command::emit_async 仍收已编码 Vec<u8>（编码在组合根 bridge），emit 路径不经 eventexec serde。
 serde = { workspace = true, features = ["derive"] }
@@ -57,7 +58,7 @@ tokio-util = { workspace = true }
 metrics = { workspace = true }
 sha2 = { workspace = true }
 # Canonical archive scratch bytes are zeroized if encoding unwinds before ownership moves into
-# secure::Plaintext; no capsule-derived String/Vec may outlive this funnel.
+# rss_data_protection::Plaintext; no capsule-derived String/Vec may outlive this funnel.
 zeroize = { workspace = true }
 
 [dev-dependencies]

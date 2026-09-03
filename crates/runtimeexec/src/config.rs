@@ -65,8 +65,8 @@ impl SecretValue {
         Zeroizing::new(std::mem::take(&mut self.0))
     }
 
-    pub fn into_secret_text(mut self) -> secure::SecretText {
-        secure::SecretText::from_string(std::mem::take(&mut self.0))
+    pub fn into_secret_text(mut self) -> rss_redact::SecretText {
+        rss_redact::SecretText::from_string(std::mem::take(&mut self.0))
     }
 }
 

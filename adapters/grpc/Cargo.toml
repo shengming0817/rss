@@ -21,7 +21,7 @@ diport = { path = "../../crates/diport" }
 #   tokio-stream = TcpListenerStream（serve_with_incoming_shutdown 需 incoming stream）
 #   tokio-util = CancellationToken——graceful shutdown 经 bootstrap ShutdownStack token funnel
 #                （register_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
-#   tracing    = 结构化日志（`crates/observ`、`secure::redact_error` 与 typed metric enums 规范，禁 println!）
+#   tracing    = 结构化日志（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums 规范，禁 println!）
 #   thiserror  = 构造期 / shutdown 错误枚举（：&'static str message，无 PII）
 tonic        = { workspace = true, optional = true, features = ["server", "router"] }
 tonic-health = { workspace = true, optional = true }

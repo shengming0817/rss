@@ -6,6 +6,29 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-redact 0.1.0
+
+- Establish the sole public owner for diagnostic-output redaction, `SecretText`, `RedactedSource`,
+  and `RedactedBytes`, with the `Redact` derive re-exported from the same user-facing package.
+- Remove the former `secure` and `diport` owner paths without aliases, shims, deprecated re-exports,
+  or compatibility features.
+
+### rss-redact-derive 0.1.0
+
+- Establish the dedicated procedural-macro implementation package for `rss-redact`; workspace
+  consumers do not depend on it directly.
+- Resolve the consumer's actual `rss-redact` dependency name during expansion and remove the former
+  `securederive` package identity.
+
+### rss-data-protection 0.1.0
+
+- Establish the sole public owner for AEAD plaintext capsules, ciphertext envelopes, derived AAD,
+  protection contexts, Saga receipt protection coordinates, and blind indexes.
+- Reject schema version zero at the field AAD construction funnel for request and maintenance
+  contexts, matching the existing positive-version invariant for Saga receipt AAD.
+- Keep diagnostic redaction and Saga receipt workflow integrity outside the package, with no legacy
+  `secure` re-export or compatibility path.
+
 ### rss-device-security-contracts 0.1.0
 
 - Export generated authority-free HTTP operation descriptors for the policy PUT and status GET

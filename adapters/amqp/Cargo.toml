@@ -15,6 +15,7 @@ eventing.workspace = true
 vocab = { path = "../../crates/vocab" }
 ids = { path = "../../crates/ids" }
 secure = { path = "../../crates/secure" }
+rss-redact.workspace = true
 support = { path = "../../crates/support" }
 runctx = { path = "../../crates/runctx" }
 consistency = { path = "../../crates/consistency" }

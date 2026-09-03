@@ -305,7 +305,7 @@ impl std::fmt::Debug for EnvelopeHeader {
 pub struct MessageEnvelope {
     header: EnvelopeHeader,
     metadata: EnvelopeMetadata,
-    payload: crate::redacted_bytes::RedactedBytes,
+    payload: rss_redact::RedactedBytes,
 }
 
 impl MessageEnvelope {
@@ -314,7 +314,7 @@ impl MessageEnvelope {
         Self {
             header,
             metadata,
-            payload: crate::redacted_bytes::RedactedBytes::new(payload),
+            payload: rss_redact::RedactedBytes::new(payload),
         }
     }
 

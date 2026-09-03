@@ -24,7 +24,7 @@ pub(crate) const REPLY_SUCCESS: u16 = 200;
 /// **绝不含 URL / 凭据**；原始 lapin error 仅作 [`std::error::Error::source`] 内部保留，不进默认日志。
 /// `Debug` 手写（不 derive）——隐藏 `source`：lapin error 的 `Debug` 可能含 host/连接上下文，故 `{:?}`
 /// 也只输出安全摘要（与 `AmqpUrl` 同范式）。连接诊断经 `crate::conn_events`：`AmqpEndpoint` Display
-/// （Hard）+ `secure::redact_error`（顶层 Display）。
+/// （Hard）+ `rss_redact::redact_error`（顶层 Display）。
 #[derive(thiserror::Error)]
 #[error("amqp connect failed")]
 pub struct AmqpConnectError {

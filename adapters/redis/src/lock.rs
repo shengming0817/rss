@@ -65,7 +65,7 @@ where
     tracing::warn!(
         resource = RESOURCE,
         operation,
-        error = %secure::redact_error(&error),
+        error = %rss_redact::redact_error(&error),
         "redis distlock operation failed"
     );
     LockStoreError::new(error)

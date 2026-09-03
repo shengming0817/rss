@@ -5,8 +5,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use diport::key_provider::KeyProviderErrorKind;
-use diport::{EncryptOutput, KeyName, KeyProviderError, KeyRef, KeyVersion, RedactedBytes};
-use secure::{DerivedAad, Plaintext};
+use diport::{EncryptOutput, KeyName, KeyProviderError, KeyRef, KeyVersion};
+use rss_data_protection::{DerivedAad, Plaintext};
+use rss_redact::RedactedBytes;
 
 /// Vault token header（`X-Vault-Token`）。
 const VAULT_TOKEN_HEADER: &str = "X-Vault-Token";
@@ -506,8 +507,8 @@ mod tests {
     use base64::Engine as _;
     use diport::KeyName;
     use diport::key_provider::KeyProviderErrorKind;
+    use rss_data_protection::{Plaintext, ProtectionContext};
     use rss_request_context::TenantId;
-    use secure::{Plaintext, ProtectionContext};
 
     use super::{
         BASE64, build_decrypt_body, build_encrypt_body, build_rewrap_body, parse_decrypt_response,
@@ -515,7 +516,7 @@ mod tests {
     };
 
     #[allow(clippy::expect_used)]
-    fn sample_aad() -> secure::DerivedAad {
+    fn sample_aad() -> rss_data_protection::DerivedAad {
         let tenant =
             TenantId::parse("11111111-2222-4333-8444-555555555555").expect("canonical uuid");
         ProtectionContext::authenticated_request(tenant, "settings/db", "value", 7)
@@ -693,9 +694,10 @@ mod key_provider_impl_tests {
 
     use base64::Engine as _;
     use diport::key_provider::KeyProviderErrorKind;
-    use diport::{KeyName, KeyRef, KeyVersion, RedactedBytes};
+    use diport::{KeyName, KeyRef, KeyVersion};
+    use rss_data_protection::{DerivedAad, Plaintext, ProtectionContext};
+    use rss_redact::RedactedBytes;
     use rss_request_context::TenantId;
-    use secure::{DerivedAad, Plaintext, ProtectionContext};
     use tracing::field::{Field, Visit};
     use tracing::span::Attributes;
     use tracing_subscriber::layer::{Context as LayerContext, Layer};

@@ -9,11 +9,10 @@ use sha2::Sha256;
 use subtle::{Choice, ConstantTimeEq as _};
 use zeroize::Zeroizing;
 
-use crate::RedactionHashKey;
-
 const CONTEXT: &[u8] = b"rss.saga-receipt.integrity.v1";
 const SHA256_BYTES: usize = 32;
 const KEY_ID_MAX_BYTES: usize = 64;
+const KEY_MIN_BYTES: usize = 32;
 
 /// Stable non-secret identifier for one Saga receipt integrity key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,7 +42,7 @@ impl SagaReceiptIntegrityKeyId {
 /// One zeroized HMAC key paired with its durable rotation identifier.
 pub struct VersionedSagaReceiptIntegrityKey {
     id: SagaReceiptIntegrityKeyId,
-    key: RedactionHashKey,
+    key: Zeroizing<Vec<u8>>,
 }
 
 impl VersionedSagaReceiptIntegrityKey {
@@ -52,8 +51,15 @@ impl VersionedSagaReceiptIntegrityKey {
     /// The identifier is persisted beside fingerprints and must be unique within a keyring. The
     /// key remains owned by this value and is never exposed; [`SagaReceiptIntegrityKeyring::new`]
     /// enforces the identifier invariant when the key enters a rotation window.
-    pub fn new(id: SagaReceiptIntegrityKeyId, key: RedactionHashKey) -> Self {
-        Self { id, key }
+    pub fn from_bytes(
+        id: SagaReceiptIntegrityKeyId,
+        key: impl Into<Vec<u8>>,
+    ) -> Result<Self, SagaReceiptIntegrityError> {
+        let key = Zeroizing::new(key.into());
+        if key.len() < KEY_MIN_BYTES {
+            return Err(SagaReceiptIntegrityError::KeyTooShort);
+        }
+        Ok(Self { id, key })
     }
 }
 
@@ -168,6 +174,8 @@ impl std::fmt::Debug for SagaReceiptFingerprint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SagaReceiptIntegrityError {
+    #[error("saga receipt integrity key too short")]
+    KeyTooShort,
     #[error("saga receipt integrity key id is invalid")]
     InvalidKeyId,
     #[error("saga receipt integrity key ids must be unique")]
@@ -185,7 +193,7 @@ fn fingerprint(
     for component in components {
         push_length_prefixed(&mut message, component);
     }
-    let mut mac = match Hmac::<Sha256>::new_from_slice(key.key.as_bytes()) {
+    let mut mac = match Hmac::<Sha256>::new_from_slice(key.key.as_slice()) {
         Ok(mac) => mac,
         Err(_) => unreachable!("HMAC-SHA256 accepts every key length"),
     };
@@ -212,4 +220,29 @@ fn constant_time_key_id_eq(
     lhs_padded[1..=lhs.0.len()].copy_from_slice(lhs.0.as_bytes());
     rhs_padded[1..=rhs.0.len()].copy_from_slice(rhs.0.as_bytes());
     lhs_padded.ct_eq(&rhs_padded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_key_is_rejected() -> Result<(), SagaReceiptIntegrityError> {
+        let id = SagaReceiptIntegrityKeyId::parse("receipt-v1")?;
+        assert!(matches!(
+            VersionedSagaReceiptIntegrityKey::from_bytes(id, vec![0x42; KEY_MIN_BYTES - 1]),
+            Err(SagaReceiptIntegrityError::KeyTooShort)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn key_material_is_owned_by_a_zeroizing_container() -> Result<(), SagaReceiptIntegrityError> {
+        fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+        let id = SagaReceiptIntegrityKeyId::parse("receipt-v1")?;
+        let key = VersionedSagaReceiptIntegrityKey::from_bytes(id, vec![0x42; KEY_MIN_BYTES])?;
+        assert_zeroizes_on_drop(&key.key);
+        Ok(())
+    }
 }

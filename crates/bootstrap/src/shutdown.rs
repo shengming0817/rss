@@ -396,7 +396,7 @@ fn observe_returned_shutdown_error(source: ShutdownError) -> ShutdownFailureKind
 fn observe_operation_error(source: ShutdownError) -> ShutdownFailureKind {
     tracing::warn!(
         error_kind = ShutdownErrorKind::Operation.as_str(),
-        error = %secure::redact_error(&source),
+        error = %rss_redact::redact_error(&source),
         "resource shutdown returned error"
     );
     ShutdownFailureKind::Failed(source)
@@ -489,7 +489,7 @@ where
                 ShutdownStep::Exhausted(name)
             }
             // timeout → JoinError → shutdown 三层 Result：超时 / task 异常终止 / 业务错误。
-            // 日志级别按 `crates/observ`、`secure::redact_error` 与 typed metric enums：业务 Err 降级（warn）；超时 / panic 资源状态未知（error）。
+            // 日志级别按 `crates/observ`、`rss_redact::redact_error` 与 typed metric enums：业务 Err 降级（warn）；超时 / panic 资源状态未知（error）。
             Some(out) => {
                 let kind = match out {
                     Ok(Ok(Ok(()))) => {
@@ -497,7 +497,7 @@ where
                         None
                     }
                     // 业务错误：资源优雅上报 Err（typed `ShutdownError`，内部 source 经 `RedactedSource` 脱敏）。
-                    // 经 `secure::redact_error` 记录——funnel 只取顶层 Display（安全摘要常量、不遍历 source 链，
+                    // 经 `rss_redact::redact_error` 记录——funnel 只取顶层 Display（安全摘要常量、不遍历 source 链，
                     // 杜绝 adapter 原始错误 PII 经日志泄漏）；原始 source 由 `RedactedSource` owned 但 write-only
                     // 保留，不经 `Error::source()` 链暴露（fail-closed，DIPORT-ERR-SOURCE-REDACT-01）。
                     Ok(Ok(Err(source))) => Some(observe_returned_shutdown_error(source)),

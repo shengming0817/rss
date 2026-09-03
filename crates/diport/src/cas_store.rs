@@ -52,8 +52,8 @@
 
 use dynosaur::dynosaur;
 
-use crate::redacted::RedactedSource;
-use crate::redacted_bytes::RedactedBytes;
+use rss_redact::RedactedBytes;
+use rss_redact::RedactedSource;
 
 /// Closed global maintenance resource identity shared by lock and CAS projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

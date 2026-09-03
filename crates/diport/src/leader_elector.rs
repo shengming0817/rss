@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use dynosaur::dynosaur;
 
-use crate::redacted::RedactedSource;
+use rss_redact::RedactedSource;
 
 /// leader 选举失败（infra 故障，**非**「未当选」——未当选是 [`LeaderElectorLocal::acquire`] 的 `Ok(None)`）。
 ///
