@@ -79,18 +79,13 @@ pub(crate) enum Command {
     SourceSemanticGuard,
     /// Saga durable recovery 守卫。
     SagaDurableRecoveryGuard,
-    /// 固定摘要 promtool 规则门。
-    PromtoolRules,
-    /// same-ID SQL/Rust/ops 完整闭包门。
+    /// same-ID SQL/Rust 完整闭包门。
     OutboxSameIdGuard,
     /// consistency crash matrix fixture/DSL 治理门。
     ConsistencyFixtures,
     /// consistency / effect 治理与报告。
     #[command(subcommand)]
     Consistency(ConsistencyCommand),
-    /// LocalTx 静态证明报告。
-    #[command(subcommand)]
-    Localtx(LocaltxCommand),
     /// active LocalTx manifest/generated/route/test closure 门。
     LocaltxCoverage,
     /// 校验 active L2 producer/fact typed assurance closure。
@@ -236,16 +231,6 @@ pub(crate) enum ConsistencyCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
-pub(crate) enum LocaltxCommand {
-    /// active LocalTx static proof inventory。
-    Report {
-        /// Append + validate 拒绝重复。
-        #[arg(long, value_enum, required = true, action = clap::ArgAction::Append)]
-        format: Vec<ReportFormat>,
-    },
-}
-
-#[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum CiCommand {
     /// 原本地 CI lane 超集聚合。
     Full {
@@ -343,12 +328,6 @@ impl Command {
             Self::Consistency(ConsistencyCommand::Report { format }) => {
                 if format.len() != 1 {
                     bail!("consistency report 重复参数: --format");
-                }
-                Ok(())
-            }
-            Self::Localtx(LocaltxCommand::Report { format }) => {
-                if format.len() != 1 {
-                    bail!("localtx report 重复参数: --format");
                 }
                 Ok(())
             }
@@ -493,6 +472,8 @@ mod tests {
         assert!(parse(&[]).is_err());
         assert!(parse(&["no-such-command"]).is_err());
         assert!(parse(&["contract", "bogus"]).is_err());
+        assert!(parse(&["promtool-rules"]).is_err());
+        assert!(parse(&["localtx", "report", "--format", "json"]).is_err());
     }
 
     #[test]
@@ -502,7 +483,6 @@ mod tests {
             "wsdeps-drift",
             "localtx-coverage",
             "outbox-same-id-guard",
-            "promtool-rules",
             "consistency-fixtures",
             "source-semantic-guard",
             "saga-durable-recovery-guard",
@@ -643,15 +623,7 @@ mod tests {
                 format: vec![ReportFormat::Markdown],
             })
         );
-        assert_eq!(
-            parse(&["localtx", "report", "--format", "markdown"])?,
-            Command::Localtx(LocaltxCommand::Report {
-                format: vec![ReportFormat::Markdown],
-            })
-        );
         assert!(parse(&["consistency", "report"]).is_err());
-        assert!(parse(&["localtx", "report", "--format"]).is_err());
-        assert!(parse(&["localtx", "report", "--format", "json", "extra"]).is_err());
         assert!(
             parse(&[
                 "consistency",

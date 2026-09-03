@@ -6,10 +6,7 @@
 //! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-EXACTSET-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_exact_set_rejects_equal_count_wrong_set|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_exact_set" }.
 
 use crate::contract::governance::ContractGovernanceIr;
-use crate::contract::manifest::{
-    ConsistencyLevel, ContractKind, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
-    LocalTxRetry,
-};
+use crate::contract::manifest::{ConsistencyLevel, ContractKind, Lifecycle, LocalTxModel};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
@@ -120,13 +117,10 @@ struct Contract {
     subject: String,
     valid_owner: bool,
     tx_model: LocalTxModel,
-    boundary: LocalTxBoundary,
-    retry: LocalTxRetry,
-    commit_unknown: LocalTxCommitUnknown,
 }
 
-/// Canonical LocalTx proof input. Fields and construction stay private so the gate and report can
-/// only consume one fully collected, structurally validated inventory.
+/// Canonical LocalTx proof input. Fields and construction stay private so the gate can only
+/// consume one fully collected, structurally validated inventory.
 pub(crate) struct LocalTxProofInventory {
     summary: String,
     contracts: Vec<LocalTxProofContract>,
@@ -192,14 +186,6 @@ impl LocalTxProofInventory {
         let findings = evaluate_inventory(&self);
         (self.summary, findings)
     }
-
-    pub(crate) fn findings(&self) -> Vec<Finding> {
-        evaluate_inventory(self)
-    }
-
-    pub(crate) fn contracts(&self) -> &[LocalTxProofContract] {
-        &self.contracts
-    }
 }
 
 pub(crate) struct LocalTxProofContract {
@@ -211,11 +197,7 @@ pub(crate) struct LocalTxProofContract {
     owner_present: bool,
     test_markers: Vec<MarkerOccurrence>,
     opaque_triggers: Vec<OpaqueTrigger>,
-    boundary: LocalTxBoundary,
     tx_model: LocalTxModel,
-    retry: LocalTxRetry,
-    commit_unknown: LocalTxCommitUnknown,
-    manifest: LocalTxProofEvidence,
     generated: LocalTxProofEvidence,
     route: LocalTxProofEvidence,
     test: LocalTxProofEvidence,
@@ -223,74 +205,17 @@ pub(crate) struct LocalTxProofContract {
     journey: LocalTxProofJourney,
 }
 
-impl LocalTxProofContract {
-    pub(crate) fn contract_id(&self) -> &str {
-        &self.contract_id
-    }
-
-    pub(crate) fn owner(&self) -> &str {
-        &self.owner
-    }
-
-    pub(crate) fn boundary(&self) -> LocalTxBoundary {
-        self.boundary
-    }
-
-    pub(crate) fn tx_model(&self) -> LocalTxModel {
-        self.tx_model
-    }
-
-    pub(crate) fn retry(&self) -> LocalTxRetry {
-        self.retry
-    }
-
-    pub(crate) fn commit_unknown(&self) -> LocalTxCommitUnknown {
-        self.commit_unknown
-    }
-
-    pub(crate) fn manifest(&self) -> &LocalTxProofEvidence {
-        &self.manifest
-    }
-
-    pub(crate) fn generated(&self) -> &LocalTxProofEvidence {
-        &self.generated
-    }
-
-    pub(crate) fn route(&self) -> &LocalTxProofEvidence {
-        &self.route
-    }
-
-    pub(crate) fn test(&self) -> &LocalTxProofEvidence {
-        &self.test
-    }
-
-    pub(crate) fn backend_profiles(&self) -> &[LocalTxProofBackendProfile] {
-        &self.backend_profiles
-    }
-
-    pub(crate) fn journey(&self) -> &LocalTxProofJourney {
-        &self.journey
-    }
-}
-
 pub(crate) struct LocalTxProofEvidence {
     complete: bool,
-    sources: Vec<String>,
 }
 
 impl LocalTxProofEvidence {
-    fn new(complete: bool, mut sources: Vec<String>) -> Self {
-        sources.sort();
-        sources.dedup();
-        Self { complete, sources }
+    fn new(complete: bool) -> Self {
+        Self { complete }
     }
 
     pub(crate) fn complete(&self) -> bool {
         self.complete
-    }
-
-    pub(crate) fn sources(&self) -> &[String] {
-        &self.sources
     }
 }
 
@@ -299,47 +224,13 @@ pub(crate) struct LocalTxProofBackendProfile {
     fixture: String,
     valid_provider: bool,
     sources: Vec<String>,
-    required_probes: Vec<(BackendProbe, usize)>,
-    observed_probes: Vec<(BackendProbe, usize)>,
     missing_probes: Vec<(BackendProbe, usize, usize)>,
     carrier: Option<BackendCarrierIdentity>,
 }
 
 impl LocalTxProofBackendProfile {
-    pub(crate) fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    pub(crate) fn fixture(&self) -> &str {
-        &self.fixture
-    }
-
-    pub(crate) fn valid_provider(&self) -> bool {
-        self.valid_provider
-    }
-
     pub(crate) fn complete(&self) -> bool {
         self.valid_provider && self.missing_probes.is_empty()
-    }
-
-    pub(crate) fn sources(&self) -> &[String] {
-        &self.sources
-    }
-
-    pub(crate) fn required_probes(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.required_probes.iter().map(|(probe, _)| probe.label())
-    }
-
-    pub(crate) fn observed_probes(&self) -> impl Iterator<Item = (&'static str, usize)> + '_ {
-        self.observed_probes
-            .iter()
-            .map(|(probe, count)| (probe.label(), *count))
-    }
-
-    pub(crate) fn missing_probes(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.missing_probes
-            .iter()
-            .map(|(probe, _, _)| probe.label())
     }
 }
 
@@ -347,46 +238,6 @@ pub(crate) struct LocalTxProofJourney {
     spec: String,
     fixture: String,
     runner: String,
-    scenarios: Vec<LocalTxProofJourneyScenario>,
-}
-
-impl LocalTxProofJourney {
-    pub(crate) fn spec(&self) -> &str {
-        &self.spec
-    }
-
-    pub(crate) fn fixture(&self) -> &str {
-        &self.fixture
-    }
-
-    pub(crate) fn runner(&self) -> &str {
-        &self.runner
-    }
-
-    pub(crate) fn scenarios(&self) -> &[LocalTxProofJourneyScenario] {
-        &self.scenarios
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct LocalTxProofJourneyScenario {
-    kind: JourneyScenarioKind,
-    applicable: bool,
-    reason: Option<String>,
-}
-
-impl LocalTxProofJourneyScenario {
-    pub(crate) fn kind(&self) -> &'static str {
-        self.kind.label()
-    }
-
-    pub(crate) fn applicable(&self) -> bool {
-        self.applicable
-    }
-
-    pub(crate) fn reason(&self) -> Option<&str> {
-        self.reason.as_deref()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -637,7 +488,6 @@ struct JourneyClosureEntry {
     marker: String,
     marker_key: String,
     case_ids: BTreeSet<String>,
-    scenarios: Vec<LocalTxProofJourneyScenario>,
 }
 
 #[derive(Debug)]
@@ -815,7 +665,7 @@ pub(crate) fn verify_required_evidence_set(
     facts: &WorkspaceFacts,
 ) -> Result<VerifiedLocalTxContractSet> {
     let inventory = collect_workspace_inventory(root, facts)?;
-    let findings = inventory.findings();
+    let findings = evaluate_inventory(&inventory);
     if let Some(first) = findings.first() {
         bail!(
             "LocalTx required evidence inventory has {} finding(s); first={} {}: {}",
@@ -836,14 +686,6 @@ fn collect_inventory(
     local_tx_keys: &BTreeSet<String>,
 ) -> Result<LocalTxProofInventory> {
     collect_inventory_inner(root, facts, local_tx_keys).map_err(|error| sanitized(root, error))
-}
-
-#[cfg(test)]
-pub(crate) fn collect_fixture_inventory(
-    root: &Path,
-    facts: &WorkspaceFacts,
-) -> Result<LocalTxProofInventory> {
-    collect_fixture_inventory_with_keys(root, facts, &fixture_compiled_local_tx_keys()?)
 }
 
 #[cfg(test)]
@@ -1174,12 +1016,6 @@ fn build_proof_contracts(
     let mut proof_contracts = Vec::with_capacity(contracts.len());
     for contract in contracts {
         let evidence = inputs.owner_evidence.get(&contract.owner);
-        let route_sources = evidence
-            .and_then(|owner| owner.canonical_mounts.get(&contract.key))
-            .into_iter()
-            .flatten()
-            .map(|mount| mount.source.clone())
-            .collect();
         let marker_occurrences = inputs
             .markers
             .iter()
@@ -1188,16 +1024,7 @@ fn build_proof_contracts(
             .collect::<Vec<_>>();
         let test_complete =
             matches!(marker_occurrences.as_slice(), [only] if only.owner == contract.owner);
-        let test_sources = marker_occurrences
-            .iter()
-            .map(|occurrence| occurrence.path.clone())
-            .collect();
         let generated_complete = inputs.local_tx_keys.contains(&contract.key);
-        let generated_module = contract
-            .key
-            .split("::")
-            .next()
-            .ok_or_else(|| anyhow!("empty generated LocalTx identity"))?;
         let journey = inputs
             .journey_closure
             .entries
@@ -1222,34 +1049,17 @@ fn build_proof_contracts(
                 .into_iter()
                 .flat_map(|owner| owner.opaque_triggers.iter().cloned())
                 .collect(),
-            boundary: contract.boundary,
             tx_model: contract.tx_model,
-            retry: contract.retry,
-            commit_unknown: contract.commit_unknown,
-            manifest: LocalTxProofEvidence::new(true, vec![contract.subject.clone()]),
-            generated: LocalTxProofEvidence::new(
-                generated_complete,
-                vec![format!("generated/src/http/{generated_module}.rs")],
-            ),
+            generated: LocalTxProofEvidence::new(generated_complete),
             route: LocalTxProofEvidence::new(
                 evidence.is_some_and(|owner| owner.routes.contains(&contract.key)),
-                route_sources,
             ),
-            test: LocalTxProofEvidence::new(test_complete, test_sources),
+            test: LocalTxProofEvidence::new(test_complete),
             backend_profiles,
             journey: LocalTxProofJourney {
                 spec: journey.spec.clone(),
                 fixture: journey.fixture.clone(),
                 runner: journey.runner.clone(),
-                scenarios: journey
-                    .scenarios
-                    .iter()
-                    .map(|scenario| LocalTxProofJourneyScenario {
-                        kind: scenario.kind,
-                        applicable: scenario.applicable,
-                        reason: scenario.reason.clone(),
-                    })
-                    .collect(),
             },
         });
     }
@@ -1305,8 +1115,6 @@ fn normalize_backend_profiles(
                 provider,
                 fixture,
                 sources,
-                required_probes: required.clone(),
-                observed_probes: observed.into_iter().collect(),
                 missing_probes,
                 carrier,
             }
@@ -1366,15 +1174,6 @@ fn load_journey_closure(root: &Path) -> Result<JourneyClosure> {
             marker: entry.marker,
             marker_key: String::new(),
             case_ids: fixture.cases.iter().map(|case| case.id.clone()).collect(),
-            scenarios: spec
-                .scenarios
-                .into_iter()
-                .map(|scenario| LocalTxProofJourneyScenario {
-                    kind: scenario.kind,
-                    applicable: scenario.applicable,
-                    reason: scenario.reason,
-                })
-                .collect(),
         });
     }
     for (runner_path, expected) in &runner_expectations {
@@ -2332,30 +2131,10 @@ fn required_backend_probes(model: LocalTxModel) -> Vec<(BackendProbe, usize)> {
     required
 }
 
-pub(crate) const fn localtx_boundary_label(boundary: LocalTxBoundary) -> &'static str {
-    match boundary {
-        LocalTxBoundary::SingleDomain => "single-domain",
-    }
-}
-
 pub(crate) const fn localtx_model_label(model: LocalTxModel) -> &'static str {
     match model {
         LocalTxModel::TenantScopedUow => "tenant-scoped-uow",
         LocalTxModel::RepoAtomicCas => "repo-atomic-cas",
-    }
-}
-
-pub(crate) const fn localtx_retry_label(retry: LocalTxRetry) -> &'static str {
-    match retry {
-        LocalTxRetry::BoundedTransient => "bounded-transient",
-    }
-}
-
-pub(crate) const fn localtx_commit_unknown_label(
-    commit_unknown: LocalTxCommitUnknown,
-) -> &'static str {
-    match commit_unknown {
-        LocalTxCommitUnknown::NotRetryable => "not-retryable",
     }
 }
 
@@ -2585,9 +2364,6 @@ fn discover_from_contracts(
                         .as_ref()
                         .map(|capability| capability.tx_model)
                         .unwrap_or(LocalTxModel::TenantScopedUow),
-                    boundary: LocalTxBoundary::SingleDomain,
-                    retry: LocalTxRetry::BoundedTransient,
-                    commit_unknown: LocalTxCommitUnknown::NotRetryable,
                 });
                 continue;
             }
@@ -2604,9 +2380,6 @@ fn discover_from_contracts(
             subject: relative(root, item.manifest_path())?,
             valid_owner: true,
             tx_model: capability.tx_model,
-            boundary: capability.boundary,
-            retry: capability.retry,
-            commit_unknown: capability.commit_unknown,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -7139,9 +6912,6 @@ mod tests {
             subject: format!("contracts/demo/v1/{id}/contract.toml"),
             valid_owner: true,
             tx_model: LocalTxModel::TenantScopedUow,
-            boundary: LocalTxBoundary::SingleDomain,
-            retry: LocalTxRetry::BoundedTransient,
-            commit_unknown: LocalTxCommitUnknown::NotRetryable,
         };
         let contracts = [
             contract("demo.write", "demo_v1::write"),
@@ -7682,9 +7452,9 @@ mod tests {
         let invalid = inventory.contracts[0]
             .backend_profiles
             .iter()
-            .find(|profile| profile.provider() == "demo")
+            .find(|profile| profile.provider == "demo")
             .context("invalid non-adapter provider profile")?;
-        assert!(!invalid.valid_provider());
+        assert!(!invalid.valid_provider);
         assert!(!invalid.complete());
         Ok(())
     }
@@ -7715,9 +7485,6 @@ mod tests {
             subject: "contracts/demo/v1/write/contract.toml".to_string(),
             valid_owner: true,
             tx_model: LocalTxModel::TenantScopedUow,
-            boundary: LocalTxBoundary::SingleDomain,
-            retry: LocalTxRetry::BoundedTransient,
-            commit_unknown: LocalTxCommitUnknown::NotRetryable,
         };
         let enrollments = [
             BackendEnrollmentOccurrence {
@@ -8590,8 +8357,6 @@ impl ::bootstrap::Domain for Demo {
                 fixture: profile.fixture.clone(),
                 valid_provider: profile.valid_provider,
                 sources: profile.sources.clone(),
-                required_probes: profile.required_probes.clone(),
-                observed_probes: profile.observed_probes.clone(),
                 missing_probes: profile.missing_probes.clone(),
                 carrier: profile.carrier.clone(),
             }
@@ -8788,7 +8553,7 @@ impl ::bootstrap::Domain for Demo {
             let temp = FixtureCopy::new(&format!("localtx-inventory-parity-{name}"))?;
             mutate(&temp.path)?;
             let inventory = collect_fixture_inventory_under(&temp.path)?;
-            let inventory_findings = inventory.findings();
+            let inventory_findings = evaluate_inventory(&inventory);
             let (_, gate_findings) = check_fixture_root(&temp.path)?;
             assert_eq!(inventory_findings, gate_findings, "{name} finding parity");
             assert!(

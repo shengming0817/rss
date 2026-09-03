@@ -41,6 +41,19 @@ fn schema(source: &str) -> Value {
     serde_json::from_str(source).expect("committed contract schema must be valid JSON")
 }
 
+fn contract_validator(document: &Value) -> jsonschema::Validator {
+    let receipt_id = schema(include_str!(
+        "../../contracts/components/identity/v1/authorization-receipt-id.schema.json"
+    ));
+    jsonschema::options()
+        .with_document(
+            "rss://component/identity/v1/authorization-receipt-id".to_owned(),
+            receipt_id,
+        )
+        .build(document)
+        .expect("canonical contract schema must compile")
+}
+
 fn assert_fenced_command(command: &Value) {
     let request = serde_json::from_value::<
         certificate_command::IdentityApplyDeviceCertificateRequest,
@@ -115,50 +128,6 @@ fn device_certificate_candidate_registry_is_the_exact_draft_projection() {
                 .iter()
                 .any(|candidate| candidate.consistency_level() == consistency)
         );
-    }
-}
-
-#[test]
-fn device_command_and_fact_schemas_match_the_frozen_contract_set() {
-    for (live, frozen, dto_title) in [
-        (
-            include_str!("../../contracts/command/identity/v1/request.schema.json"),
-            include_str!(
-                "../../docs/spec/007-l4-device-latent-production-loop/contracts/apply-device-certificate.command.schema.json"
-            ),
-            "IdentityApplyDeviceCertificateRequest",
-        ),
-        (
-            include_str!(
-                "../../contracts/event/identity/v1/device-command-acked/payload.schema.json"
-            ),
-            include_str!(
-                "../../docs/spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json"
-            ),
-            "IdentityDeviceCommandAckedPayload",
-        ),
-        (
-            include_str!(
-                "../../contracts/event/identity/v1/device-certificate-reported/payload.schema.json"
-            ),
-            include_str!(
-                "../../docs/spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json"
-            ),
-            "IdentityDeviceCertificateReportedPayload",
-        ),
-        (
-            include_str!(
-                "../../contracts/event/identity/v1/device-ingress-receipted/payload.schema.json"
-            ),
-            include_str!(
-                "../../docs/spec/007-l4-device-latent-production-loop/contracts/application-receipt.schema.json"
-            ),
-            "IdentityDeviceIngressReceiptedPayload",
-        ),
-    ] {
-        let mut frozen = schema(frozen);
-        frozen["title"] = json!(dto_title);
-        assert_eq!(schema(live), frozen);
     }
 }
 
@@ -554,8 +523,7 @@ fn policy_response_only_represents_acceptance_not_convergence() {
     let schema = schema(include_str!(
         "../../contracts/http/identity/v2/device-certificate-policy-put/response.schema.json"
     ));
-    let validator =
-        jsonschema::validator_for(&schema).expect("policy response schema must compile");
+    let validator = contract_validator(&schema);
     assert!(validator.is_valid(&json!({
         "data": {
             "authorizationReceiptId": AUTHORIZATION_RECEIPT_ID,
@@ -591,14 +559,29 @@ fn policy_response_only_represents_acceptance_not_convergence() {
 fn policy_known_responses_are_typed_and_status_bound() {
     assert!(
         serde_json::from_value::<IdentityDeviceCertificatePolicyPutNotFoundResponse>(json!({
-            "error": {"code": "NotFound"}
+            "error": {
+                "code": "ERR_CORE_NOT_FOUND",
+                "message": "not found",
+                "retryable": false,
+                "details": [],
+                "requestId": "request-1"
+            }
         }))
         .is_ok()
     );
-    for code in ["ExpectedGenerationConflict", "IdempotencyKeyConflict"] {
+    for (code, message, retryable) in [
+        ("ERR_CORE_VERSION_CONFLICT", "version conflict", true),
+        ("ERR_CORE_CONFLICT", "conflict", false),
+    ] {
         assert!(
             serde_json::from_value::<IdentityDeviceCertificatePolicyPutConflictResponse>(json!({
-                "error": {"code": code}
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "retryable": retryable,
+                    "details": [],
+                    "requestId": "request-1"
+                }
             }))
             .is_ok()
         );
@@ -623,7 +606,7 @@ fn status_desired_lineage_is_atomic_and_active_command_is_nested() {
     let schema = schema(include_str!(
         "../../contracts/http/identity/v2/device-certificate-status-get/response.schema.json"
     ));
-    let validator = jsonschema::validator_for(&schema).expect("status schema must compile");
+    let validator = contract_validator(&schema);
     let without_command = json!({
         "data": {"desired": null, "observedGeneration": 0, "conditions": []}
     });

@@ -1,8 +1,7 @@
 # Cargo 仓库级配置。
 # build.target-dir：direct Cargo 的 worktree-local 默认值（linked worktree 各自一份，
-# 不共享可变构建产物）。受控入口 `hack/cargo.sh` 默认改走 N 槽租约池（见
-# docs/ops/202607171340-1851-local-target-pool-and-cleanup.md）；`RSS_TARGET_POOL_N=off`
-# 时回落到本配置。
+# 不共享可变构建产物）。受控入口 `hack/cargo.sh` 默认改走 N 槽租约池；
+# `RSS_TARGET_POOL_N=off` 时回落到本配置。
 # ref: https://doc.rust-lang.org/cargo/reference/config.html#buildtarget-dir
 [build]
 target-dir = ".cache/cargo-target"

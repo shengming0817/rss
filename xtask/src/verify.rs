@@ -133,9 +133,7 @@ enum InternalCheck {
     SourceSemanticGuard,
     /// Saga durable intent/permit/effect/completion and unknown-no-retry AST guard.
     SagaDurableRecoveryGuard,
-    /// digest-pinned promtool rules + consuming tests（PROMTOOL-RULES-01）。
-    PromtoolRules,
-    /// same-ID SQL/Rust/ops cross-carrier closure（OUTBOX-SAME-ID-WINDOW-01）。
+    /// same-ID SQL/Rust closure（OUTBOX-SAME-ID-WINDOW-01）。
     OutboxSameIdGuard,
     /// consistency crash matrix fixture/DSL 骨架门（CONSISTENCY-CRASH-FIXTURE-01）。
     ConsistencyFixtures,
@@ -346,14 +344,6 @@ fn step_saga_durable_recovery_guard() -> Step {
         id: GateId::SagaDurableRecoveryGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::SagaDurableRecoveryGuard),
-        env: &[],
-    }
-}
-fn step_promtool_rules() -> Step {
-    Step {
-        id: GateId::PromtoolRules,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::PromtoolRules),
         env: &[],
     }
 }
@@ -1534,7 +1524,6 @@ fn run_internal(
         InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
-        InternalCheck::PromtoolRules => crate::promtool::run(),
         InternalCheck::OutboxSameIdGuard => {
             run_check(&crate::outbox_same_id_guard::OutboxSameIdGuard)
         }
@@ -3315,7 +3304,6 @@ mod tests {
             "component-tests",
             "dylint",
             "dylint-test-no-bare-sleep",
-            "promtool-rules",
             "deny",
         ] {
             assert!(!labels(&plan).contains(&dropped), "fast 不应含 {dropped}");

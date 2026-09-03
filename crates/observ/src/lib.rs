@@ -21,10 +21,7 @@ mod telemetry;
 
 pub use device_latent::{DeviceLatentMetric, DeviceLatentObservation};
 pub use eventing::EventingTelemetryEmitter;
-pub use localtx::{
-    LocalTxActionableAlert, LocalTxMetric, LocalTxMetricPurpose, LocalTxObservation,
-    LocalTxOperationsDescriptor, LocalTxRetryPressureClassification, localtx_operations_descriptor,
-};
+pub use localtx::{LocalTxMetric, LocalTxObservation};
 pub use telemetry::{TelemetryResource, TelemetryResourceError};
 
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────

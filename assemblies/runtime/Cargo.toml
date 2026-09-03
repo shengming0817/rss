@@ -193,7 +193,6 @@ integration = [
 ]
 
 [dev-dependencies]
-jsonschema = { workspace = true }
 otel = { path = "../../adapters/otel", features = ["backend", "test-support"] }
 # Runtime inventory lib-test fixtures need a ready host without exposing lifecycle transitions
 # through the production dependency graph.
@@ -219,6 +218,7 @@ audit = { path = "../../crates/audit", features = ["test-support"] }
 identity = { path = "../../crates/identity", features = ["test-support"] }
 # dev-only 虚拟时间（JWKS poll 测试）；生产 tokio feature set 不引 `test-util`。
 tokio = { workspace = true, features = ["test-util"] }
+time = { workspace = true }
 # oneshot 驱动已组装 router（health/auth e2e 单元级断言；真实 socket serve 由 httpd + 冒烟 e2e 覆盖）。
 tower = { workspace = true, features = ["util"] }
 hmac = { workspace = true, features = ["std"] }

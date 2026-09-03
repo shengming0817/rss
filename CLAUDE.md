@@ -2,16 +2,16 @@
 
 > 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
 > workspace。
-> 本文件是项目最高协作规范（无独立宪法文件）；规则 owner 只从
-> [`docs/rules/README.md`](docs/rules/README.md) 入口发现。需求判断、方案设计和 review 不得越过其中索引的
-> `Freeze` / `External` 边界。
+> 本文件是项目最高协作规范（无独立宪法文件）；项目能力边界读取
+> [`docs/rules/project-scope.md`](docs/rules/project-scope.md)，其它稳定规则直接从 `docs/rules/*.md`
+> 发现。需求判断、方案设计和 review 不得越过其中的 `Freeze` / `External` 边界。
 
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
 ## 工作方式
 
 - 与用户的所有沟通默认使用中文（对话回复、方案讨论、PR / review 说明）
-- 修改前先查看 README.md 与 docs/
+- 修改前先查看目标文件与相关 `docs/rules/*.md`
 - 提交信息遵循 Conventional Commits
 - 涉及功能或行为变更时，同步更新对应文档
 - 被 `.gitignore` 忽略的文件禁止 `git add -f`
@@ -77,11 +77,9 @@ Rust 重写优先级：**能用类型系统 / crate 依赖图 / clippy lint 静�
 ## 参考框架
 
 新建或重构层内模块时，先用 `WebFetch` 读对标源码，commit message 注明 `ref: {framework} {file}`。
-读源码优先 Rust 工业对标；Go / Java / .NET 等框架仅作架构范式 / 概念出处，列于该文件文末「概念谱系」附录（优先级远低于 Rust 对标主表）。
+读源码优先 Rust 工业对标；Go / Java / .NET 等框架仅作低优先级的架构范式或概念出处。
 
-当前模块对标哪个开源项目——完整模块对标表（概念映射 + owner/repo 坐标 + 源码起点路径 + primary/secondary 优先级，
-含 reconcile / saga / 分布式 / 证书 PKI / 可观测 / 授权 等扩展模块）见**单一事实源**
-`docs/references/framework-comparison.md`，explorer / developer / ship / fix 均以该文件为入口。
+对标时按受影响模块直接选择 primary upstream 源码并记录可追溯 `ref:`；不以仓内说明文档代替源码证据。
 
 ## Sandbox 提权
 

@@ -12,7 +12,7 @@
 #
 # action 钉版：用 major-tag `@v4`（非 commit-SHA）——first-party GitHub org（actions/ + github/）+ TLS 信任，token
 # 权限收窄（见下 permissions）；`@v4` 自动收 v4.x 补丁让 SAST query 保持新鲜（本仓无 renovate/dependabot ⇒ 冻结 SHA
-# 反致 query 陈旧、削弱扫描）。与 CI 工具钉版同属 #1145 供应链硬化子项（详见 docs/ops ci-lane §交付边界，review #281 F-B2）。
+# 反致 query 陈旧、削弱扫描）。与 CI 工具钉版同属 #1145 供应链硬化子项（review #281 F-B2）。
 #
 # ref: github/codeql-action README.md@main（v4 latest major + languages:rust / build-mode:none）
 # ref: actions/starter-workflows code-scanning/codeql.yml@main（advanced setup 样板：init → analyze + security-events:write）

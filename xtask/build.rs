@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-const EXPECTED_TOOLS: [&str; 11] = [
+const EXPECTED_TOOLS: [&str; 10] = [
     "cargo-nextest",
     "cargo-llvm-cov",
     "cargo-deny",
@@ -16,7 +16,6 @@ const EXPECTED_TOOLS: [&str; 11] = [
     "cargo-semver-checks",
     "sccache",
     "ripgrep",
-    "promtool",
 ];
 
 fn invalid_catalog(row: usize, message: &str) -> io::Error {
@@ -63,36 +62,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             return Err(invalid_catalog(row, "invalid version").into());
         }
-        if !matches!(backend, "install-action" | "binstall" | "docker") {
+        if !matches!(backend, "install-action" | "binstall") {
             return Err(invalid_catalog(row, "invalid backend").into());
         }
-        if relative.is_empty()
-            || relative.starts_with('/')
-            || (backend == "docker"
-                && !(name == "promtool"
-                    && relative.starts_with("prom/prometheus@sha256:")
-                    && relative["prom/prometheus@sha256:".len()..].len() == 64
-                    && relative["prom/prometheus@sha256:".len()..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())))
-        {
+        if relative.is_empty() || relative.starts_with('/') {
             return Err(invalid_catalog(row, "invalid relative path").into());
         }
         if !matches!(
             probe,
-            "nextest"
-                | "llvm-cov"
-                | "dylint"
-                | "direct"
-                | "receipt"
-                | "sccache"
-                | "ripgrep"
-                | "promtool"
+            "nextest" | "llvm-cov" | "dylint" | "direct" | "receipt" | "sccache" | "ripgrep"
         ) {
             return Err(invalid_catalog(row, "invalid probe").into());
-        }
-        if (backend == "docker") != (name == "promtool" && probe == "promtool") {
-            return Err(invalid_catalog(row, "invalid docker policy").into());
         }
         if versions.insert(name, version).is_some() {
             return Err(invalid_catalog(row, "duplicate tool").into());

@@ -8,4 +8,3 @@ cargo-public-api|0.52.0|binstall|bin/cargo-public-api|direct
 cargo-semver-checks|0.49.0|binstall|bin/cargo-semver-checks|direct
 sccache|0.15.0|install-action|.install-action/bin/sccache|sccache
 ripgrep|15.2.0|binstall|bin/rg|ripgrep
-promtool|3.5.3|docker|prom/prometheus@sha256:ddc2493835a1509976d5e4e0c94199c4f843ce1f42dd6bcfc8231ba734a93ff7|promtool

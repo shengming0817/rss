@@ -32,7 +32,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 - **L2**：派 `explorer` 聚焦最关键的不确定点。
 - **L3**：并行探索现有实现与依赖、测试策略、边界与安全风险；任务互相独立，避免重复读取和结论重叠。
 
-所有等级都先读取 `README.md`、目标文件、测试、相关文档和仓库规则。是否需要开源对标按 `CLAUDE.md` 判断；需要时从 `docs/references/framework-comparison.md` 选择 primary 来源并记录可追溯参考。
+所有等级都先读取目标文件、测试、相关规则和 `CLAUDE.md`。需要开源对标时直接读取 primary upstream 源码并记录可追溯参考。
 
 汇总根因、建议方案、影响范围和风险并自检。存在实质歧义时集中请求一次决策；否则直接进入阶段 2。
 

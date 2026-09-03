@@ -1,8 +1,6 @@
-//! Migration / ops carrier 对账。
+//! Migration / executable carrier 对账。
 //!
-//! 只锁可执行 carrier：SQL migration、provisioning、capacity-gate 脚本，以及 runbook 中可复制执行的
-//! SQL probe。面向人的说明散文不做 `contains` 断言——要求散文包含某句话不增加 enforcement 强度，
-//! Markdown 文案不是生产证据。
+//! 只锁可执行 carrier：SQL migration、provisioning 和由测试直接执行的 SQL probe。
 
 #[path = "support/migration_contract.rs"]
 mod migration_contract;
@@ -46,10 +44,6 @@ const DEVICE_POLICY_AUTHORIZATION_RECEIPTS: &str =
 const DEVICE_ARTIFACT_RECEIPT_BINDING: &str =
     include_str!("../migrations/0111_bind_certificate_artifacts_to_authorization_receipts.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
-const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
-    include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
-const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
-    include_str!("../../../docs/ops/0069-account-security-capacity-gate.selftest.sh");
 const SERVICE_TOKEN_REPLAY_ADAPTER: &str = include_str!("../src/service_token_replay.rs");
 const L2_DR_RECOVERY_MIGRATION: &str =
     include_str!("../migrations/0100_install_l2_dr_recovery.sql");
@@ -1345,7 +1339,7 @@ fn account_security_migration_is_strict_closed_and_least_privilege() {
 }
 
 #[test]
-fn account_security_cutover_has_bounded_locking_and_executable_capacity_gate() {
+fn account_security_cutover_has_bounded_locking() {
     for required in [
         "SET LOCAL lock_timeout = '5s'",
         "SET LOCAL statement_timeout = '5min'",
@@ -1353,39 +1347,6 @@ fn account_security_cutover_has_bounded_locking_and_executable_capacity_gate() {
         assert!(
             ACCOUNT_SECURITY_MIGRATION.contains(required),
             "0069 omits bounded migration timeout: {required}"
-        );
-    }
-
-    for required in [
-        "set -eu",
-        "SELECT count(*) FROM public.credentials",
-        "pg_total_relation_size('public.credentials'::regclass)",
-        "DATA_BUDGET",
-        "WAL_BUDGET",
-        "ARCHIVE_BUDGET",
-        "SELECT count(*) FROM pg_stat_replication",
-        "sample.byte_lag = 0",
-        "sample.reply_time >= sample.checked_at - interval '60 seconds'",
-        "pg_switch_wal()",
-        "archive_target_present",
-        "MINIMUM_WINDOW_SECONDS=480",
-    ] {
-        assert!(
-            ACCOUNT_SECURITY_CAPACITY_GATE.contains(required),
-            "0069 capacity gate omits fail-closed carrier: {required}"
-        );
-    }
-    for required in [
-        "short maintenance window must fail closed",
-        "credential row overflow must fail closed",
-        "credential byte overflow must fail closed",
-        "replica inventory mismatch must fail closed",
-        "unhealthy replica must fail closed",
-        "archive failure-count change must fail closed",
-    ] {
-        assert!(
-            ACCOUNT_SECURITY_CAPACITY_SELFTEST.contains(required),
-            "0069 capacity selftest omits red case: {required}"
         );
     }
 }

@@ -8,8 +8,8 @@ convenience translation.
 - Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Report vulnerabilities privately according to [SECURITY.md](SECURITY.md); do not open a public
   issue for a suspected vulnerability.
-- Read [README.md](README.md) and [CLAUDE.md](CLAUDE.md); use their canonical index to discover
-  the current owner before changing code or behavior.
+- Read [CLAUDE.md](CLAUDE.md) and the applicable files under `docs/rules/` before changing code
+  or behavior.
 - Keep the change within the current project scope. Open or
   reference an issue that states the intended outcome.
 
@@ -45,8 +45,7 @@ or Developer Certificate of Origin sign-off.
 
 - 遵守[行为准则](CODE_OF_CONDUCT.md)。
 - 按 [SECURITY.md](SECURITY.md) 私密报告漏洞；疑似漏洞不得提交公开 issue。
-- 修改代码或行为前阅读 [README.md](README.md) 与 [CLAUDE.md](CLAUDE.md)，并从其中的
-  canonical index 找到当前 owner。
+- 修改代码或行为前阅读 [CLAUDE.md](CLAUDE.md) 与适用的 `docs/rules/*.md`。
 - 变更不得越过当前项目范围，并应创建或引用说明预期结果的
   issue。
 

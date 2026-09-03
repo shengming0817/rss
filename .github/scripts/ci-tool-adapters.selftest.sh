@@ -27,7 +27,7 @@ expect_failure() {
 }
 
 expect_output 'check owns the fixed source and supply-chain tools' \
-  'cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,cargo-semver-checks@0.49.0,sccache@0.15.0,promtool@3.5.3' \
+  'cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,cargo-semver-checks@0.49.0,sccache@0.15.0' \
   "$ADAPTER" specs --lane check --backend all
 expect_output 'preflight owns only the compiler cache tool' \
   'sccache@0.15.0' \
@@ -41,9 +41,6 @@ expect_output 'integration-critical owns integration tools' \
 expect_output 'audit owns pinned prose and supply-chain tools' \
   'cargo-deny@0.19.9,cargo-audit@0.22.2,sccache@0.15.0,ripgrep@15.2.0' \
   "$ADAPTER" specs --lane audit --backend all
-expect_output 'promtool remains digest-pinned and isolated to check' \
-  'promtool@3.5.3' \
-  "$ADAPTER" specs --lane check --backend docker
 expect_output 'sccache identity is derived from the catalog' \
   'sccache|0.15.0|install-action|.install-action/bin/sccache|sccache' \
   "$ADAPTER" sccache-spec

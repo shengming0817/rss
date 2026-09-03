@@ -1,8 +1,8 @@
-//! Cross-SQL/Rust/ops guard for the bounded same-ID outbox delivery funnel.
+//! Cross-SQL/Rust guard for the bounded same-ID outbox delivery funnel.
 //!
 //! INVARIANT: OUTBOX-SAME-ID-WINDOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::scan_content_rejects_same_id_funnel_bypasses", anti_vacuity = "tests::scan_content_accepts_complete_same_id_funnel" }——
 //! one no-compile gate binds the 0060/0061 schema, private typed policy, closed publish preflight,
-//! expired-resolution evidence/ACL, policy-bound inbox sweep, and executable alert consumer. Each
+//! expired-resolution evidence/ACL and policy-bound inbox sweep. Each
 //! local mechanism is Hard where the database or Rust type system can enforce it; only the
 //! cross-language carrier set remains Medium.
 
@@ -220,26 +220,6 @@ const CARRIERS: &[Carrier] = &[
         anchors: &[
             "operator capability `DlqOperatorAuthorization::issue`",
             "不要直接调用或保存 constructor 函数项",
-        ],
-    },
-    Carrier {
-        path: "docs/ops/outbox-relay-alerts.rules.yaml",
-        purpose: "same-ID expiry alert consumes the bounded label set",
-        anchors: &[
-            "alert: OutboxSameIdWindowExpired",
-            "outbox_same_id_window_expired_total",
-            "sum by (domain, phase)",
-        ],
-    },
-    Carrier {
-        path: "docs/ops/outbox-relay-alerts.test.yaml",
-        purpose: "promtool consumer exercises automatic and redrive expiry",
-        anchors: &[
-            "- outbox-relay-alerts.rules.yaml",
-            "alert_rule_test:",
-            "alertname: OutboxSameIdWindowExpired",
-            "phase=\"automatic\"",
-            "phase=\"redrive\"",
         ],
     },
 ];

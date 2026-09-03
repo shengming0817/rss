@@ -1,7 +1,8 @@
 
 See [CLAUDE.md](./CLAUDE.md)
 
-规则 owner 与项目能力边界只从 [docs/rules/README.md](./docs/rules/README.md) 入口发现。
+项目能力边界读取 [docs/rules/project-scope.md](./docs/rules/project-scope.md)；其它稳定规则直接从
+`docs/rules/*.md` 发现。
 
 使用系统自带git /usr/bin/git
 

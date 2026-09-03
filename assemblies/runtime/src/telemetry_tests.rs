@@ -3,6 +3,7 @@ use otel::TelemetryResource;
 use serde_json::Value;
 use std::io;
 use std::sync::{Arc, Mutex};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -50,6 +51,86 @@ fn resource() -> TelemetryResource {
         .expect("non-empty telemetry resource")
 }
 
+const ENVELOPE_KEYS: &[&str] = &[
+    "attributes",
+    "correlation",
+    "level",
+    "message",
+    "request_id",
+    "resource",
+    "schema_version",
+    "span_id",
+    "target",
+    "timestamp",
+    "trace_id",
+];
+const RESOURCE_KEYS: &[&str] = &[
+    "rss.assembly.fingerprint",
+    "rss.runtime_plan.fingerprint",
+    "service.name",
+];
+
+fn has_exact_keys(object: &serde_json::Map<String, Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+}
+
+fn is_rfc3339(value: &str) -> bool {
+    OffsetDateTime::parse(value, &Rfc3339).is_ok()
+}
+
+fn is_optional_string(value: &Value) -> bool {
+    value.is_null() || value.is_string()
+}
+
+fn is_optional_lower_hex_id(value: &Value, width: usize) -> bool {
+    value.is_null()
+        || value.as_str().is_some_and(|value| {
+            value.len() == width
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn structured_envelope_is_valid(value: &Value) -> bool {
+    let Some(log) = value.as_object() else {
+        return false;
+    };
+    let Some(resource) = log["resource"].as_object() else {
+        return false;
+    };
+    let Some(attributes) = log["attributes"].as_object() else {
+        return false;
+    };
+    has_exact_keys(log, ENVELOPE_KEYS)
+        && log["schema_version"] == 1
+        && log["timestamp"].as_str().is_some_and(is_rfc3339)
+        && matches!(
+            log["level"].as_str(),
+            Some("TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR")
+        )
+        && log["target"]
+            .as_str()
+            .is_some_and(|target| !target.is_empty())
+        && is_optional_string(&log["message"])
+        && is_optional_lower_hex_id(&log["trace_id"], 32)
+        && is_optional_lower_hex_id(&log["span_id"], 16)
+        && is_optional_string(&log["request_id"])
+        && is_optional_string(&log["correlation"])
+        && has_exact_keys(resource, RESOURCE_KEYS)
+        && resource
+            .values()
+            .all(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+        && attributes.values().all(|value| {
+            value.is_null() || value.is_string() || value.is_number() || value.is_boolean()
+        })
+}
+
+#[test]
+fn structured_json_rejects_non_rfc3339_timestamps() {
+    assert!(!is_rfc3339("not-a-dateTZ"));
+}
+
 #[test]
 #[allow(clippy::expect_used)] // reason: parser success/failure is the direct assertion subject.
 fn rust_log_filter_is_fail_fast_and_never_echoes_the_raw_directive() {
@@ -87,7 +168,7 @@ fn rust_log_filter_is_fail_fast_and_never_echoes_the_raw_directive() {
 
 #[test]
 #[allow(clippy::cognitive_complexity, clippy::expect_used)] // reason: one envelope contract matrix is easier to audit atomically.
-// INVARIANT: RUNTIME-JSON-SCHEMA-PARITY-01 { level = "Medium", exec = "test", source = "code", native = "committed JSON Schema validation plus exact envelope key assertions" }
+// INVARIANT: RUNTIME-JSON-ENVELOPE-01 { level = "Medium", exec = "test", source = "code", native = "exact envelope key and value assertions" }
 fn structured_json_has_a_closed_v1_envelope_and_null_context_without_otel() {
     let buffer = Buffer::default();
     let subscriber = tracing_subscriber::registry()
@@ -100,27 +181,7 @@ fn structured_json_has_a_closed_v1_envelope_and_null_context_without_otel() {
     let lines = buffer.lines();
     assert_eq!(lines.len(), 1);
     let log = lines[0].as_object().expect("JSON object");
-    assert_eq!(
-        log.keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>(),
-        [
-            "attributes",
-            "correlation",
-            "level",
-            "message",
-            "request_id",
-            "resource",
-            "schema_version",
-            "span_id",
-            "target",
-            "timestamp",
-            "trace_id",
-        ]
-        .map(str::to_owned)
-        .into_iter()
-        .collect()
-    );
+    assert!(has_exact_keys(log, ENVELOPE_KEYS));
     assert_eq!(log["schema_version"], 1);
     assert_eq!(log["level"], "INFO");
     assert_eq!(log["message"], "runtime ready");
@@ -133,32 +194,36 @@ fn structured_json_has_a_closed_v1_envelope_and_null_context_without_otel() {
     assert_eq!(log["resource"]["service.name"], "runtime");
     assert_eq!(log["resource"]["rss.assembly.fingerprint"], "assembly-fp");
     assert_eq!(log["resource"]["rss.runtime_plan.fingerprint"], "plan-fp");
-    assert!(
-        log["timestamp"]
-            .as_str()
-            .is_some_and(|value| value.contains('T') && value.ends_with('Z'))
-    );
+    assert!(structured_envelope_is_valid(&lines[0]));
 
-    let schema: Value = serde_json::from_str(include_str!(
-        "../../../docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json"
-    ))
-    .expect("structured log schema");
-    let validator = jsonschema::options()
-        .should_validate_formats(true)
-        .build(&schema)
-        .expect("valid JSON schema");
-    assert!(validator.is_valid(&lines[0]));
+    for (field, invalid) in [
+        ("timestamp", Value::String("not-a-dateTZ".to_owned())),
+        ("trace_id", Value::String("A".repeat(32))),
+        ("span_id", Value::String("0".repeat(15))),
+        (
+            "attributes",
+            serde_json::json!({"nested": {"forbidden": true}}),
+        ),
+    ] {
+        let mut invalid_log = lines[0].clone();
+        invalid_log[field] = invalid;
+        assert!(
+            !structured_envelope_is_valid(&invalid_log),
+            "invalid {field} must be rejected"
+        );
+    }
     let mut unknown = lines[0].clone();
     unknown["legacy_text"] = Value::String("forbidden".to_owned());
-    assert!(!validator.is_valid(&unknown));
-    let mut invalid_timestamp = lines[0].clone();
-    invalid_timestamp["timestamp"] = Value::String("2026-not-rfc3339Z".to_owned());
-    assert!(!validator.is_valid(&invalid_timestamp));
+    assert!(!structured_envelope_is_valid(&unknown));
+
+    let mut unknown_resource = lines[0].clone();
+    unknown_resource["resource"]["legacy"] = Value::String("forbidden".to_owned());
+    assert!(!structured_envelope_is_valid(&unknown_resource));
 }
 
 #[test]
-#[allow(clippy::expect_used)] // reason: committed schema and fixed fixture are test prerequisites.
-fn structured_json_normalizes_an_empty_target_before_schema_validation() {
+#[allow(clippy::expect_used)] // reason: fixed fixture capture is a test prerequisite.
+fn structured_json_normalizes_an_empty_target() {
     let buffer = Buffer::default();
     let subscriber =
         tracing_subscriber::registry().with(StructuredJsonLayer::new(buffer.clone(), resource()));
@@ -169,15 +234,7 @@ fn structured_json_normalizes_an_empty_target_before_schema_validation() {
     let lines = buffer.lines();
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["target"], "unknown");
-    let schema: Value = serde_json::from_str(include_str!(
-        "../../../docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json"
-    ))
-    .expect("structured log schema");
-    let validator = jsonschema::options()
-        .should_validate_formats(true)
-        .build(&schema)
-        .expect("valid JSON schema");
-    assert!(validator.is_valid(&lines[0]));
+    assert!(structured_envelope_is_valid(&lines[0]));
 }
 
 #[test]
@@ -289,6 +346,7 @@ fn explicit_unentered_parent_keeps_json_and_otel_ids_identical() {
     assert_eq!(logs[0]["span_id"], span.span_id());
     assert_eq!(logs[0]["request_id"], "req-explicit");
     assert_eq!(logs[0]["correlation"], "corr-explicit");
+    assert!(structured_envelope_is_valid(&logs[0]));
 }
 
 #[test]
@@ -347,6 +405,7 @@ fn structured_json_and_otel_share_ids_resource_and_redaction() {
     assert_eq!(logs[0]["span_id"], span.span_id());
     assert_eq!(logs[0]["request_id"], "req-otel");
     assert_eq!(logs[0]["correlation"], "corr-otel");
+    assert!(structured_envelope_is_valid(&logs[0]));
     assert_eq!(
         span.attributes().get("request_id").map(String::as_str),
         Some("req-otel")

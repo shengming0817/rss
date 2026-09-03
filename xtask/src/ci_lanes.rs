@@ -378,17 +378,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            PromtoolRules => (step_promtool_rules, Some("xtask/src/promtool.rs"),
-                gate(
-                        GateId::PromtoolRules,
-                        "promtool-rules",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             OutboxSameIdGuard => (step_outbox_same_id_guard, Some("xtask/src/outbox_same_id_guard.rs"),
                 gate(
                         GateId::OutboxSameIdGuard,

@@ -9,7 +9,7 @@ CATALOG=$SCRIPT_DIR/ci-tool-catalog.txt
 
 usage() {
   printf '%s\n' \
-    "usage: $0 specs --lane <lane|all> --backend <install-action|binstall|docker|all>" \
+    "usage: $0 specs --lane <lane|all> --backend <install-action|binstall|all>" \
     "       $0 sccache-spec" \
     "       $0 verify-sccache --candidate <absolute-sccache-path>" \
     "       $0 verify --mode <fresh|cache> --lane <lane> --root <absolute-profile-tool-root>" >&2
@@ -71,7 +71,7 @@ lane_has_tool() {
   case "$lane:$name" in
     all:* | \
     *:sccache | \
-    check:promtool | check:cargo-dylint | check:dylint-link | check:cargo-deny | \
+    check:cargo-dylint | check:dylint-link | check:cargo-deny | \
     check:cargo-audit | check:cargo-public-api | check:cargo-semver-checks | \
     test-affected:cargo-nextest | test-affected:cargo-llvm-cov | \
     integration-critical:cargo-nextest | \
@@ -87,13 +87,9 @@ validate_catalog() {
     [ -n "$name" ] && [ -z "$extra" ] || die 'invalid catalog row'
     [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die 'invalid catalog tool name'
     valid_semver "$version" || die 'invalid catalog SemVer'
-    case "$backend" in install-action|binstall|docker) ;; *) die 'invalid catalog backend' ;; esac
+    case "$backend" in install-action|binstall) ;; *) die 'invalid catalog backend' ;; esac
     case "$backend:$relative" in
       "install-action:.install-action/bin/$name"|"binstall:bin/$name"|"binstall:bin/rg") ;;
-      docker:prom/prometheus@sha256:*)
-        digest=${relative#prom/prometheus@sha256:}
-        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die 'invalid digest-pinned docker image'
-        ;;
       *) die 'catalog backend and binary path disagree' ;;
     esac
     if [ "$relative" = bin/rg ] && [ "$name" != ripgrep ]; then
@@ -102,11 +98,9 @@ validate_catalog() {
     if [ "$name" = ripgrep ] && { [ "$backend" != binstall ] || [ "$relative" != bin/rg ] || [ "$probe" != ripgrep ]; }; then
       die 'ripgrep catalog policy must use the pinned rg binary probe'
     fi
-    if [ "$backend" != docker ]; then
-      case "$relative" in *//*|*/./*|*/../*|*/..|/*) die 'invalid catalog binary path' ;; esac
-    fi
+    case "$relative" in *//*|*/./*|*/../*|*/..|/*) die 'invalid catalog binary path' ;; esac
     case "$backend:$probe" in
-      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|binstall:ripgrep|docker:promtool) ;;
+      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|binstall:ripgrep) ;;
       *) die 'invalid catalog probe/backend combination' ;;
     esac
     case "$seen" in *"|$name|"*) die 'duplicate catalog tool' ;; esac
@@ -155,7 +149,7 @@ emit_specs() {
     esac
   done
   valid_lane "$lane" || die 'unknown lane'
-  case "$backend" in install-action|binstall|docker|all) ;; *) die 'unknown backend' ;; esac
+  case "$backend" in install-action|binstall|all) ;; *) die 'unknown backend' ;; esac
   output=
   while IFS='|' read -r name version _backend _relative _probe; do
     [ -n "$name" ] || continue
@@ -195,7 +189,6 @@ verify_exact_layout() {
   actual=$(mktemp "${TMPDIR:-/tmp}/rss-tool-actual.XXXXXX") || { rm -f "$expected"; die 'cannot create layout list'; }
   while IFS='|' read -r name version backend relative probe; do
     [ -n "$name" ] || continue
-    [ "$backend" != docker ] || continue
     validate_binary "$root" "$relative" || {
       rm -f "$expected" "$actual"
       die "tool binary is unsafe or unavailable: $name@$version ($relative)"
@@ -331,11 +324,6 @@ fresh_probe() {
   binary=$root/$relative
   spec=$name@$version
   case "$probe" in
-    promtool)
-      command -v docker >/dev/null 2>&1 || die "required docker runner unavailable: $spec"
-      output=$(capture_probe docker "$spec" run --rm --network=none --entrypoint=/bin/promtool "$relative" --version)
-      printf '%s\n' "$output" | grep -Eq "^promtool, version $version([[:space:]]|$)" || die "tool version mismatch: $spec"
-      ;;
     nextest)
       output=$(capture_probe "$binary" "$spec" --version)
       verify_nextest_output "$version" "$output" || die "tool version mismatch: $spec"
@@ -385,13 +373,8 @@ EOF
     printf 'requests\t%s\n' "$requests"
     while IFS='|' read -r name version backend relative probe; do
       [ -n "$name" ] || continue
-      if [ "$backend" = docker ]; then
-        image_digest=${relative#*@sha256:}
-        printf 'tool\t%s\t%s@%s\t%s\t%s\n' "$backend" "$name" "$version" "$relative" "$image_digest"
-      else
-        binary_hash=$(hash_file "$root/$relative") || return 1
-        printf 'tool\t%s\t%s@%s\t%s\t%s\n' "$backend" "$name" "$version" "$relative" "$binary_hash"
-      fi
+      binary_hash=$(hash_file "$root/$relative") || return 1
+      printf 'tool\t%s\t%s@%s\t%s\t%s\n' "$backend" "$name" "$version" "$relative" "$binary_hash"
     done <<EOF
 $(selected_rows "$lane" all)
 EOF

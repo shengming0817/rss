@@ -474,10 +474,6 @@ fn collect_production_sources(root: &Path) -> Result<Vec<PathBuf>> {
             collect_sources_recursive(root, &directory, &mut files)?;
         }
     }
-    let rules = root.join("docs/rules");
-    if rules.exists() {
-        collect_sources_recursive(root, &rules, &mut files)?;
-    }
     files.sort();
     files.dedup();
     Ok(files)
@@ -525,7 +521,6 @@ fn is_production_source(path: &Path) -> bool {
                     .is_some_and(|name| name.ends_with("_tests.rs"))
         }
         Some("toml") => path.starts_with("assemblies"),
-        Some("md") => path.starts_with("docs/rules"),
         Some("sql") => is_migration_in_guard_scope(path),
         _ => false,
     }
@@ -1612,6 +1607,9 @@ mod tests {
         )));
         assert!(is_production_source(Path::new(
             "adapters/postgres/src/support/helpers.rs"
+        )));
+        assert!(!is_production_source(Path::new(
+            "docs/rules/event-delivery.md"
         )));
     }
 

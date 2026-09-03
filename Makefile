@@ -16,8 +16,7 @@
 #   make audit        供应链漏洞刷新 lane（与 security-audit.yml 的每日 UTC schedule 使用同一 typed audit plan）：
 #                     inner plan 只有 advisory-scoped `deny check advisories` + cargo-audit，
 #                     不包含 workspace 编译 gate；外层 Cargo 启动器边界同上。
-# CI 架构与运维状态见 docs/ops/202606231530-001-ci-lane.md；精确门集与缺工具策略见
-# xtask/src/verify.rs。
+# CI 精确门集与缺工具策略见 xtask/src/verify.rs。
 
 .PHONY: verify verify-fast ci ci-full cargo-selftest audit
 

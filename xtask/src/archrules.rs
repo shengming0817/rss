@@ -583,7 +583,7 @@ const FUNNELS: &[FunnelSpec] = &[
         upstream: &[invariant("OUTBOX-SAME-ID-WINDOW-01")],
         downstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
         residual: ResidualDisposition::AcceptedMedium {
-            risk: "automatic retry、operator redrive 与 receipt retention 跨 SQL/Rust/ops 的载体集合属于运行时事实",
+            risk: "automatic retry、operator redrive 与 receipt retention 跨 SQL/Rust 的载体集合属于运行时事实",
             why_no_low_cost_hardening: "DB CHECK/ACL 与 Rust 闭枚举各自为 Hard；跨语言闭包由 same-ID synthetic-red/anti-vacuity 守卫表达",
         },
     },

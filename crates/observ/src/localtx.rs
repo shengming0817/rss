@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use tracing::{Level, Span, field};
 use vocab::{HttpRouteBinding, http::LocalTx};
 
-/// Closed LocalTx metric identity and purpose, shared by the emitter and proof consumers.
+/// Closed LocalTx metric identity used by the emitter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTxMetric {
     RetryAttempts,
@@ -27,13 +27,6 @@ pub enum LocalTxMetric {
 }
 
 impl LocalTxMetric {
-    const ALL: [Self; 4] = [
-        Self::RetryAttempts,
-        Self::FinalSettlements,
-        Self::SettledAttempts,
-        Self::DeadlineExceeded,
-    ];
-
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -43,167 +36,6 @@ impl LocalTxMetric {
             Self::DeadlineExceeded => "localtx_deadline_exceeded_total",
         }
     }
-
-    #[must_use]
-    pub const fn purpose(self) -> LocalTxMetricPurpose {
-        match self {
-            Self::RetryAttempts => LocalTxMetricPurpose::RetryPressureDiagnostic,
-            Self::FinalSettlements => LocalTxMetricPurpose::SettlementFinalStatus,
-            Self::SettledAttempts => LocalTxMetricPurpose::SettledAttemptCount,
-            Self::DeadlineExceeded => LocalTxMetricPurpose::DeadlineDiagnostic,
-        }
-    }
-}
-
-/// Closed proof-report purpose for a LocalTx metric.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxMetricPurpose {
-    RetryPressureDiagnostic,
-    SettlementFinalStatus,
-    SettledAttemptCount,
-    DeadlineDiagnostic,
-}
-
-impl LocalTxMetricPurpose {
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::RetryPressureDiagnostic => "retry-pressure-diagnostic",
-            Self::SettlementFinalStatus => "settlement-final-status",
-            Self::SettledAttemptCount => "settled-attempt-count",
-            Self::DeadlineDiagnostic => "deadline-diagnostic",
-        }
-    }
-}
-
-/// Closed actionable LocalTx alert identity and routing contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxActionableAlert {
-    CommitUnknown,
-    RollbackFailed,
-}
-
-impl LocalTxActionableAlert {
-    const ALL: [Self; 2] = [Self::CommitUnknown, Self::RollbackFailed];
-
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::CommitUnknown => "LocalTxCommitUnknown",
-            Self::RollbackFailed => "LocalTxRollbackFailed",
-        }
-    }
-
-    #[must_use]
-    pub const fn final_status(self) -> LocalTxFinalStatus {
-        match self {
-            Self::CommitUnknown => LocalTxFinalStatus::CommitUnknown,
-            Self::RollbackFailed => LocalTxFinalStatus::RollbackFailed,
-        }
-    }
-
-    #[must_use]
-    pub const fn metric(self) -> LocalTxMetric {
-        LocalTxMetric::FinalSettlements
-    }
-
-    #[must_use]
-    pub const fn runbook_anchor(self) -> &'static str {
-        match self {
-            Self::CommitUnknown => "commit-unknown",
-            Self::RollbackFailed => "rollback-failed",
-        }
-    }
-}
-
-/// Closed retry-pressure policy classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxRetryPressureClassification {
-    DiagnosticOnly,
-}
-
-impl LocalTxRetryPressureClassification {
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        "diagnosticOnly"
-    }
-}
-
-/// Field-private owner inventory; construction remains confined to this module.
-pub struct LocalTxOperationsDescriptor {
-    metrics: &'static [LocalTxMetric],
-    alerts: &'static [LocalTxActionableAlert],
-    retry_metric: LocalTxMetric,
-    retry_classification: LocalTxRetryPressureClassification,
-    rules_path: &'static str,
-    runbook_path: &'static str,
-}
-
-impl LocalTxOperationsDescriptor {
-    #[must_use]
-    pub const fn metrics(&self) -> &'static [LocalTxMetric] {
-        self.metrics
-    }
-
-    #[must_use]
-    pub const fn alerts(&self) -> &'static [LocalTxActionableAlert] {
-        self.alerts
-    }
-
-    #[must_use]
-    pub const fn retry_metric(&self) -> LocalTxMetric {
-        self.retry_metric
-    }
-
-    #[must_use]
-    pub const fn retry_classification(&self) -> LocalTxRetryPressureClassification {
-        self.retry_classification
-    }
-
-    #[must_use]
-    pub const fn rules_path(&self) -> &'static str {
-        self.rules_path
-    }
-
-    #[must_use]
-    pub const fn runbook_path(&self) -> &'static str {
-        self.runbook_path
-    }
-
-    #[must_use]
-    pub fn is_consistent(&self) -> bool {
-        let unique = |items: &[LocalTxMetric]| {
-            items
-                .iter()
-                .enumerate()
-                .all(|(i, item)| !items[i + 1..].contains(item))
-        };
-        unique(self.metrics)
-            && self.metrics.contains(&self.retry_metric)
-            && self.retry_metric.purpose() == LocalTxMetricPurpose::RetryPressureDiagnostic
-            && self
-                .alerts
-                .iter()
-                .enumerate()
-                .all(|(i, alert)| !self.alerts[i + 1..].contains(alert))
-            && self.alerts.iter().all(|alert| {
-                unsafe_settlement(alert.final_status()) && self.metrics.contains(&alert.metric())
-            })
-    }
-}
-
-const LOCALTX_OPERATIONS: LocalTxOperationsDescriptor = LocalTxOperationsDescriptor {
-    metrics: &LocalTxMetric::ALL,
-    alerts: &LocalTxActionableAlert::ALL,
-    retry_metric: LocalTxMetric::RetryAttempts,
-    retry_classification: LocalTxRetryPressureClassification::DiagnosticOnly,
-    rules_path: "docs/ops/localtx-alerts.rules.yaml",
-    runbook_path: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
-};
-
-#[must_use]
-pub const fn localtx_operations_descriptor() -> &'static LocalTxOperationsDescriptor {
-    &LOCALTX_OPERATIONS
 }
 
 /// One LocalTx retry invocation's closed metrics and tracing façade.
@@ -477,66 +309,4 @@ const fn unsafe_settlement(status: LocalTxFinalStatus) -> bool {
         status,
         LocalTxFinalStatus::CommitUnknown | LocalTxFinalStatus::RollbackFailed
     )
-}
-
-#[cfg(test)]
-mod operations_descriptor_tests {
-    use super::*;
-
-    fn descriptor(
-        metrics: &'static [LocalTxMetric],
-        alerts: &'static [LocalTxActionableAlert],
-        retry_metric: LocalTxMetric,
-    ) -> LocalTxOperationsDescriptor {
-        LocalTxOperationsDescriptor {
-            metrics,
-            alerts,
-            retry_metric,
-            retry_classification: LocalTxRetryPressureClassification::DiagnosticOnly,
-            rules_path: "rules.yaml",
-            runbook_path: "runbook.md",
-        }
-    }
-
-    #[test]
-    fn real_descriptor_is_non_vacuous_and_consistent() {
-        let descriptor = localtx_operations_descriptor();
-        assert_eq!(descriptor.metrics().len(), 4);
-        assert_eq!(descriptor.alerts().len(), 2);
-        assert!(descriptor.is_consistent());
-    }
-
-    #[test]
-    fn missing_retry_membership_and_duplicate_identities_are_rejected() {
-        const ONLY_FINAL: [LocalTxMetric; 1] = [LocalTxMetric::FinalSettlements];
-        const DUPLICATE_FINAL: [LocalTxMetric; 2] = [
-            LocalTxMetric::FinalSettlements,
-            LocalTxMetric::FinalSettlements,
-        ];
-        const DUPLICATE_ALERT: [LocalTxActionableAlert; 2] = [
-            LocalTxActionableAlert::CommitUnknown,
-            LocalTxActionableAlert::CommitUnknown,
-        ];
-        const COMMIT_UNKNOWN: [LocalTxActionableAlert; 1] = [LocalTxActionableAlert::CommitUnknown];
-
-        assert!(
-            !descriptor(&ONLY_FINAL, &COMMIT_UNKNOWN, LocalTxMetric::RetryAttempts).is_consistent()
-        );
-        assert!(
-            !descriptor(
-                &DUPLICATE_FINAL,
-                &COMMIT_UNKNOWN,
-                LocalTxMetric::FinalSettlements,
-            )
-            .is_consistent()
-        );
-        assert!(
-            !descriptor(
-                &LocalTxMetric::ALL,
-                &DUPLICATE_ALERT,
-                LocalTxMetric::RetryAttempts,
-            )
-            .is_consistent()
-        );
-    }
 }

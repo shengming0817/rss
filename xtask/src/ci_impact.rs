@@ -102,20 +102,10 @@ impl LocalClock for SystemLocalClock {
         end.duration_since(start)
     }
 }
-/// 被 Rust `include_str!` / `include_bytes!` 消费的受支持机器输入：`docs/` 下的可执行
-/// carrier，以及 assembly-schema 的公开 schema 与跨实现 fingerprint fixture。
+/// 被 Rust `include_str!` / `include_bytes!` 消费的受支持机器输入。
 ///
-/// 面向人的 runbook / checklist / 报告说明不在此列——测试不得断言散文包含某句话
-/// 规则目录属于治理元数据，因此它们改动时只走 docs-only 快路径。
+/// 机器输入必须归属于代码 package；`docs/` 只承载面向人的说明。
 const MACHINE_INPUT_PATHS: &[&str] = &[
-    "docs/ops/0069-account-security-capacity-gate.selftest.sh",
-    "docs/ops/0069-account-security-capacity-gate.sh",
-    "docs/ops/localtx-alerts.rules.yaml",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/application-receipt.schema.json",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/apply-device-certificate.command.schema.json",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json",
-    "docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
     "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json",
@@ -3641,11 +3631,8 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
     ];
     const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] =
         &["crates/", "adapters/", "assemblies/", "journeys/"];
-    const RUNTIME_DOC_PREFIXES: &[&str] = &["docs/rules/"];
-    const OUTBOX_SAME_ID_CARRIER_PREFIXES: &[&str] = &[
-        "lints/rss_operator_authorization_callsite/",
-        "docs/ops/outbox-relay-alerts.",
-    ];
+    const OUTBOX_SAME_ID_CARRIER_PREFIXES: &[&str] =
+        &["lints/rss_operator_authorization_callsite/"];
     const ASSEMBLY_PREFIXES: &[&str] = &[
         "assemblies/",
         "generated/",
@@ -3725,7 +3712,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         || workspace_member_rust
         || path == "Cargo.toml"
         || (path.ends_with(".toml") && path.starts_with("assemblies/"))
-        || matches_any(RUNTIME_DOC_PREFIXES)
         || matches_any(OUTBOX_SAME_ID_CARRIER_PREFIXES)
     {
         domains.insert(Domain::RuntimeEventing);
@@ -4896,10 +4882,15 @@ mod tests {
                                         )
                                     })
                             }) {
+                                Ok(relative) if relative.starts_with("docs") => {
+                                    self.errors.push(format!(
+                                        "{}: documentation include is not a machine input: {}",
+                                        self.source.display(),
+                                        relative.display()
+                                    ));
+                                }
                                 Ok(relative)
-                                    if relative.starts_with("docs")
-                                        || relative
-                                            .starts_with("crates/assembly-schema/schemas")
+                                    if relative.starts_with("crates/assembly-schema/schemas")
                                         || relative
                                             == Path::new(
                                                 "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json",
@@ -5930,10 +5921,8 @@ externalPathPrefixes = [".external-tool/"]
             );
             assert_eq!(
                 LocalProjection::from(&impact),
-                LocalProjection::Meta(local_meta_gates(Some(&BTreeSet::from([
-                    LocalImpactDomain::RuntimeEventing,
-                ])))),
-                "{path} is a real dlx-lifecycle scanner input"
+                LocalProjection::Meta(local_meta_gates(None)),
+                "{path} must remain documentation-only"
             );
         }
 
@@ -6086,10 +6075,7 @@ externalPathPrefixes = [".external-tool/"]
                     Domain::CommandSymmetry,
                 ]),
             ),
-            (
-                "docs/rules/example.md",
-                BTreeSet::from([Domain::RuntimeEventing]),
-            ),
+            ("docs/rules/example.md", BTreeSet::new()),
             (
                 "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
                 BTreeSet::from([Domain::RuntimeEventing, Domain::TenancyPostgres]),
@@ -8043,6 +8029,10 @@ externalPathPrefixes = [".external-tool/"]
             .iter()
             .map(|path| (*path).to_owned())
             .collect::<BTreeSet<_>>();
+        assert!(
+            configured.iter().all(|path| !path.starts_with("docs/")),
+            "documentation must not be registered as a machine input"
+        );
         let golden = policy_golden()?
             .machine_inputs
             .into_iter()
@@ -8069,20 +8059,91 @@ externalPathPrefixes = [".external-tool/"]
     }
 
     #[test]
-    fn rust_consumed_machine_inputs_discovers_includes_in_expression_fragments() -> Result<()> {
+    fn documentation_tree_is_the_exact_rules_and_empty_directory_skeleton() -> Result<()> {
+        fn visit(root: &Path, directory: &Path, files: &mut BTreeSet<String>) -> Result<()> {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                let file_type = entry.file_type()?;
+                if file_type.is_symlink() {
+                    bail!("documentation tree rejects symlink {}", path.display());
+                }
+                if file_type.is_dir() {
+                    visit(root, &path, files)?;
+                } else {
+                    files.insert(
+                        path.strip_prefix(root)?
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        let root = crate::workspace_root()?;
+        let docs = root.join("docs");
+        let mut actual = BTreeSet::new();
+        visit(&root, &docs, &mut actual)?;
+        let expected = [
+            "docs/architecture/.gitkeep",
+            "docs/guides/.gitkeep",
+            "docs/ops/.gitkeep",
+            "docs/prd/.gitkeep",
+            "docs/references/.gitkeep",
+            "docs/rules/ai-robust.md",
+            "docs/rules/api-versioning.md",
+            "docs/rules/dependency-policy.md",
+            "docs/rules/error-handling.md",
+            "docs/rules/event-delivery.md",
+            "docs/rules/local-consistency.md",
+            "docs/rules/outbox.md",
+            "docs/rules/project-scope.md",
+            "docs/rules/rust-standards.md",
+            "docs/rules/verification-scope.md",
+            "docs/runbooks/.gitkeep",
+            "docs/spec/.gitkeep",
+            "docs/templates/.gitkeep",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "documentation tree drift");
+
+        for path in expected.iter().filter(|path| path.ends_with("/.gitkeep")) {
+            assert_eq!(
+                fs::metadata(root.join(path))?.len(),
+                0,
+                "{path} must be empty"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rust_consumed_machine_inputs_rejects_documentation_includes() -> Result<()> {
         let root = crate::testutil::unique_tmp("ci-impact-expression-fragment");
         fs::create_dir_all(root.join("docs"))?;
         fs::create_dir_all(root.join("src"))?;
         fs::write(root.join("docs/machine.json"), "{}")?;
-        fs::write(
-            root.join("src/included_expr.rs"),
-            r#"include_str!("../docs/machine.json")"#,
-        )?;
-
-        assert_eq!(
-            rust_consumed_machine_inputs(&root)?,
-            BTreeSet::from(["docs/machine.json".to_owned()])
-        );
+        for (name, expression) in [
+            ("string", r#"include_str!("../docs/machine.json")"#),
+            ("bytes", r#"include_bytes!("../docs/machine.json")"#),
+            (
+                "non_literal",
+                r#"include_str!(concat!("../", "docs/machine.json"))"#,
+            ),
+        ] {
+            let source = root.join("src/included_expr.rs");
+            fs::write(&source, expression)?;
+            let error = rust_consumed_machine_inputs(&root)
+                .expect_err("documentation includes must be rejected")
+                .to_string();
+            assert!(
+                error.contains("documentation include"),
+                "{name} include was not rejected: {error}"
+            );
+        }
         Ok(())
     }
 

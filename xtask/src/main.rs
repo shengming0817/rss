@@ -41,7 +41,6 @@ mod layers;
 mod localonly_evidence;
 mod localtx_coverage;
 mod localtx_evidence;
-mod localtx_report;
 mod outbox_same_id_guard;
 mod package_proof;
 mod pathsafe;
@@ -52,7 +51,6 @@ mod postgres_feature_matrix;
 mod producer_assurance;
 mod production_composition;
 mod projection_target_enrollment;
-mod promtool;
 mod provider_capabilities;
 mod publicapi;
 mod reconcile_outbox_command_guard;
@@ -78,8 +76,8 @@ mod wsdeps;
 use anyhow::{Context, Result};
 use cli::{
     ArchrulesCommand, AssemblyCommand, CdcConfigCommand, CiCommand, Command, ConsistencyCommand,
-    ContractCommand, GraphCommand, LocaltxCommand, NextestEvidenceCommand, RuntimeDepsCommand,
-    RuntimeEnvCommand, RuntimeRootCommand,
+    ContractCommand, GraphCommand, NextestEvidenceCommand, RuntimeDepsCommand, RuntimeEnvCommand,
+    RuntimeRootCommand,
 };
 pub(crate) use report_format::ReportFormat;
 use std::path::{Path, PathBuf};
@@ -168,7 +166,6 @@ fn dispatch(command: Command) -> Result<()> {
         Command::SagaDurableRecoveryGuard => {
             diagnostic::run_check(&saga_durable_recovery_guard::SagaDurableRecoveryGuard)
         }
-        Command::PromtoolRules => promtool::run(),
         Command::OutboxSameIdGuard => {
             diagnostic::run_check(&outbox_same_id_guard::OutboxSameIdGuard)
         }
@@ -190,9 +187,6 @@ fn dispatch(command: Command) -> Result<()> {
                 .get()
                 .context("consistency report: load command-scoped workspace facts")?;
             consistency_effects::run_report(&root, facts, format[0])
-        }
-        Command::Localtx(LocaltxCommand::Report { format }) => {
-            localtx_report::run_report(format[0])
         }
         Command::LocaltxCoverage => {
             let root = workspace_root()?;

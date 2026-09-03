@@ -1,14 +1,6 @@
 {
   "schemaVersion": 3,
   "machineInputs": [
-    "docs/ops/0069-account-security-capacity-gate.selftest.sh",
-    "docs/ops/0069-account-security-capacity-gate.sh",
-    "docs/ops/localtx-alerts.rules.yaml",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/application-receipt.schema.json",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/apply-device-certificate.command.schema.json",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json",
-    "docs/spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json",
-    "docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
     "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json"
@@ -17,26 +9,6 @@
     {
       "status": "modified",
       "path": "docs/guide.md",
-      "expected": {"kind": "adaptive"}
-    },
-    {
-      "status": "modified",
-      "path": "docs/ops/localtx-alerts.rules.yaml",
-      "expected": {"kind": "pr-complete", "cause": "global-impact"}
-    },
-    {
-      "status": "modified",
-      "path": "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
-      "expected": {"kind": "adaptive"}
-    },
-    {
-      "status": "modified",
-      "path": "docs/ops/localtx-proof-report.md",
-      "expected": {"kind": "adaptive"}
-    },
-    {
-      "status": "modified",
-      "path": "crates/observ/tests/localtx_ops_contract.rs",
       "expected": {"kind": "adaptive"}
     },
     {
