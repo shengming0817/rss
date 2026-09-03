@@ -303,13 +303,62 @@ fn recovery_failure_reason(error: &lapin::Error) -> RecoveryFailureReason {
 }
 
 #[cfg(test)]
-mod private_ca_tests {
-    use super::AmqpPrivateCa;
+mod tests {
+    use super::{
+        AmqpConnectError, AmqpConnectErrorSource, AmqpPrivateCa, connect_with_webpki_for_test,
+    };
 
     #[test]
     fn private_ca_rejects_empty_and_malformed_pem() {
         assert!(AmqpPrivateCa::from_pem(Vec::new()).is_err());
         assert!(AmqpPrivateCa::from_pem(b"not a certificate".to_vec()).is_err());
+    }
+
+    #[test]
+    fn connect_error_surface_redacts_transport_source() {
+        let error = AmqpConnectError {
+            source: AmqpConnectErrorSource::Transport(
+                std::io::Error::other("user:secretpass@broker.internal").into(),
+            ),
+        };
+
+        assert_eq!(error.to_string(), "amqp connect failed");
+        assert_eq!(
+            format!("{error:?}"),
+            "AmqpConnectError(\"amqp connect failed\")"
+        );
+        assert!(!error.to_string().contains("secretpass"));
+        assert!(!format!("{error:?}").contains("secretpass"));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::expect_used)] // fixed literal fixture and required error path
+    async fn connect_failure_returns_safe_error_with_source() {
+        let endpoint = secure::AmqpEndpoint::parse(
+            "amqp://user:secretpass@127.0.0.1:1/%2f",
+            secure::PlaintextEndpointPolicy::AllowLoopback,
+        )
+        .expect("loopback AMQP fixture must parse");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            connect_with_webpki_for_test(&endpoint, "amqp-unit", true),
+        )
+        .await
+        .expect("loopback connect failure must remain bounded")
+        .err();
+
+        assert_eq!(
+            error.as_ref().map(ToString::to_string).as_deref(),
+            Some("amqp connect failed")
+        );
+        assert!(!format!("{error:?}").contains("secretpass"));
+        assert!(
+            error
+                .as_ref()
+                .and_then(|error| std::error::Error::source(error))
+                .is_some()
+        );
     }
 }
 

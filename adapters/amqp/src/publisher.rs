@@ -1997,7 +1997,7 @@ mod publish_deadline_tests {
     use std::time::Duration;
 
     use super::{
-        MAX_PUBLISH_TIMEOUT_MILLIS, PublishDeadlineElapsed, PublishPhase,
+        AmqpPublisher, MAX_PUBLISH_TIMEOUT_MILLIS, PublishDeadlineElapsed, PublishPhase,
         PublishTimeoutConfigError, run_publish_pipeline, validate_publish_timeout,
     };
 
@@ -2037,6 +2037,34 @@ mod publish_deadline_tests {
                 max_millis: MAX_PUBLISH_TIMEOUT_MILLIS,
             })
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)] // fixed literal fixture and required error path
+    async fn invalid_publish_timeout_is_rejected_before_connect() {
+        let endpoint = secure::AmqpEndpoint::parse(
+            "amqp://user:secretpass@127.0.0.1:1/%2f",
+            secure::PlaintextEndpointPolicy::AllowLoopback,
+        )
+        .expect("loopback AMQP fixture must parse");
+        let error = AmqpPublisher::connect_with_webpki_for_test(
+            &endpoint,
+            "amqp-invalid-timeout",
+            Duration::ZERO,
+        )
+        .await
+        .err();
+        let source = error
+            .as_ref()
+            .and_then(|error| std::error::Error::source(error))
+            .map(ToString::to_string);
+
+        assert_eq!(
+            error.as_ref().map(ToString::to_string).as_deref(),
+            Some("amqp connect failed")
+        );
+        assert_eq!(source.as_deref(), Some("invalid amqp publisher timeout"));
+        assert!(!format!("{error:?}").contains("secretpass"));
     }
 
     #[tokio::test(start_paused = true)]

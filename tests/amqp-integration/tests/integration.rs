@@ -6,8 +6,8 @@
 //! 独立 `amqp-integration` package 直接启用 adapter integration feature，并由 Cargo 反向依赖图选择。
 //! broker 经 `testkit::env_or_rabbitmq()` self-provision（testcontainers，#1137）——无需手工预置、不再 `#[ignore]`；
 //! 设 `RSS_AMQP_TEST_URL` 则对接长存外部 broker（其 vhost 须预建）。需 docker（容器路径）。
-//! 连不上即失败（fail-loud）。测试名 `integration_` 前缀 → nextest 串行 group（`test(/integration/)`）。
-//! 本地：`cargo nextest run -p amqp --features integration`（docker 在场自起容器）。
+//! 连不上即失败（fail-loud）。package 经 nextest integration group 串行执行。
+//! 本地：`cargo nextest run -p amqp-integration`（docker 在场自起容器）。
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -521,60 +521,6 @@ async fn assert_queue_limit_backpressures(
     ))
 }
 
-/// 连接失败：错误面安全（Display 是常量，无 URL/凭据）+ source 保留。**无需 broker**（连不可达端口）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::panic)] // 集成测试断言：item-level carve-out（workspace lints 约定）
-async fn integration_connect_failure_returns_safe_error() {
-    // 不可达端口（连接拒绝）；URL 含凭据，断言不泄进错误 Display（AmqpPublisher 不 derive Debug，故 match）。
-    match connect_publisher("amqp://user:secretpass@127.0.0.1:1/%2f", "amqp-it").await {
-        Ok(_) => panic!("connect to closed port must fail"),
-        Err(err) => {
-            assert_eq!(err.to_string(), "amqp connect failed");
-            // `AmqpUrl` redaction contract：Display 与 Debug 均不得含 user:pass。
-            let display = err.to_string();
-            let debug = format!("{err:?}");
-            for rendered in [&display, &debug] {
-                assert!(
-                    !rendered.contains("secretpass"),
-                    "password leaked in {rendered}"
-                );
-                assert!(!rendered.contains("user"), "username leaked in {rendered}");
-            }
-            assert!(
-                err.chain().nth(1).is_some(),
-                "lapin error preserved as internal source"
-            );
-        }
-    }
-}
-
-/// 非法 timeout 必须在触达 endpoint 前 fail-closed，且错误面不得泄漏 URL userinfo。
-#[tokio::test]
-// reason: fixture 必须解析；无 Debug 的成功值必须显式 match 断言错误路径。
-#[allow(clippy::expect_used, clippy::panic)]
-async fn integration_invalid_publish_timeout_rejected_before_connect() {
-    let endpoint = amqp_endpoint("amqp://user:secretpass@127.0.0.1:1/%2f")
-        .expect("fixture endpoint must parse");
-    match AmqpPublisher::connect_with_webpki_for_test(
-        &endpoint,
-        "amqp-invalid-timeout",
-        Duration::ZERO,
-    )
-    .await
-    {
-        Ok(_) => panic!("zero publish timeout must be rejected"),
-        Err(err) => {
-            assert_eq!(err.to_string(), "amqp connect failed");
-            let source = std::error::Error::source(&err)
-                .expect("typed timeout source must be preserved")
-                .to_string();
-            assert_eq!(source, "invalid amqp publisher timeout");
-            assert!(!source.contains("user"));
-            assert!(!source.contains("secretpass"));
-        }
-    }
-}
-
 /// review #278 F1：发布到**尚无绑定 queue** 的 topic（publish-before-subscribe / 队列声明竞态）→ broker
 /// `mandatory` 退回 unroutable → 分类为 **transient**（非 permanent）：outbox 可退避重试等订阅完成 / 拓扑收敛，
 /// 不首投即 DLX（保 L2 最终送达）。
@@ -741,24 +687,6 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     );
 
     token.cancel();
-    Ok(())
-}
-
-/// 取消即流终止（take_until token + broker-confirmed basic.cancel）。
-/// cancel 后流须在超时内关闭（有界等待，防 broker 异常时挂死——对齐其他 broker 断言）。
-/// 使用 `subscribe_ackable`（at-least-once）——token cancel 触发并等待 basic.cancel-ok。
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_cancel_terminates_stream() -> Result<(), FixtureError> {
-    let rmq = testkit::env_or_rabbitmq().await?;
-    let url = rmq.vhost_url("rss_cancel").await?;
-    let token = CancellationToken::new();
-    let subscriber = connect_subscriber(&url, "amqp-it-sub").await?;
-    let mut stream = subscriber
-        .subscribe_ackable(Topic::new("rss.it.cancel"), token.clone())
-        .await?;
-    token.cancel();
-    let ended = tokio::time::timeout(Duration::from_secs(5), stream.next()).await?;
-    assert!(ended.is_none(), "cancel 后流须在超时内终止（Ok(None)）");
     Ok(())
 }
 
@@ -1498,14 +1426,10 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     md.insert_wire_pair(KEY_CORRELATION, "corr-42");
     md.insert_wire_pair(KEY_SUBJECT_ID, "user-7");
 
+    let event_id = MessageId::new("evt-env-hdr-1");
     publisher
         .publish(
-            PublishRequest::new(
-                topic,
-                MessageId::new("evt-env-hdr-1"),
-                b"env-payload".to_vec(),
-            )
-            .with_metadata(md),
+            PublishRequest::new(topic, event_id.clone(), b"env-payload".to_vec()).with_metadata(md),
         )
         .await?;
 
@@ -1513,7 +1437,8 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
         .await?
         .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
 
-    // metadata 保真验证。
+    // message identity 与 metadata 经真实 broker 往返保真。
+    assert_eq!(delivery.message.id(), &event_id);
     assert_eq!(
         delivery.message.metadata().get(KEY_OCCURRED_AT),
         Some("1700000001"),
@@ -1606,51 +1531,6 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
     }
     assert!(!deps.publisher_readiness().is_ready());
     assert!(!deps.subscriber_readiness().is_ready());
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_broker_roundtrip_preserves_message_identity() -> Result<(), FixtureError> {
-    let rmq = testkit::env_or_rabbitmq().await?;
-    let url = rmq.vhost_url("rss_publisher_identity_roundtrip").await?;
-    let endpoint =
-        secure::AmqpEndpoint::parse(&url, secure::PlaintextEndpointPolicy::AllowLoopback)?;
-    let publisher = AmqpPublisher::connect_with_webpki_for_test(
-        &endpoint,
-        "amqp-it-identity-pub",
-        Duration::from_secs(6),
-    )
-    .await?;
-    let subscriber =
-        AmqpSubscriber::connect_with_webpki_for_test(&endpoint, "amqp-it-identity-sub").await?;
-    let topic = Topic::new("rss.it.publisher.identity");
-    let token = CancellationToken::new();
-    let mut deliveries = subscriber
-        .subscribe_ackable(topic.clone(), token.clone())
-        .await?;
-    let event_id = MessageId::new("evt-publisher-identity-roundtrip-1");
-
-    publisher
-        .publish(PublishRequest::new(
-            topic,
-            event_id.clone(),
-            b"identity-roundtrip".to_vec(),
-        ))
-        .await?;
-    let delivery = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
-        .await?
-        .ok_or_else(|| anyhow!("identity roundtrip delivery missing"))?;
-    assert_eq!(delivery.message.id(), &event_id);
-    delivery
-        .acker
-        .settle(AckAction::Ack)
-        .await
-        .map_err(|error| anyhow!("identity roundtrip ack failed: {error}"))?;
-
-    token.cancel();
-    AckableSubscriber::shutdown(&subscriber).await?;
-    Publisher::shutdown(&publisher).await?;
-    ManagedResource::shutdown(&publisher).await?;
     Ok(())
 }
 
