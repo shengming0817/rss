@@ -1,4 +1,4 @@
-use consistency::LocalTxBoundary;
+use vocab::LocalTxBoundary;
 use observ::LocalTxObservation;
 use vocab::{
     ContractBinding, HttpContractOwner, HttpEffectKind, HttpEffectProfile, HttpIdempotency,

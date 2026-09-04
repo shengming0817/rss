@@ -40,9 +40,8 @@ mod maintenance;
 mod transport;
 pub use locker::Locker;
 pub use maintenance::{
-    CoordinatedRetentionSweeper, InboxBacklogMaintenance, MaintenanceCoordinator,
-    MaintenanceCoordinatorError, MaintenanceObservation, OutboxBacklogMaintenance,
-    OutboxRetentionMaintenance,
+    InboxBacklogMaintenance, MaintenanceCoordinator, MaintenanceCoordinatorError,
+    MaintenanceObservation, OutboxBacklogMaintenance, OutboxRetentionMaintenance,
 };
 pub use transport::{
     HttpContractMethod, HttpContractRequest, HttpContractResponse, HttpContractTarget,

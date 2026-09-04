@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `SettlementDecision` in the current scope
+ --> tests/ui/settlement_decision_clone_fail.rs:4:31
+  |
+4 |     let _duplicate = decision.clone();
+  |                               ^^^^^ method not found in `SettlementDecision`

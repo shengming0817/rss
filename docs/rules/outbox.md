@@ -20,11 +20,14 @@
 ## Relay
 
 - publish success 后 settle 前崩溃允许 duplicate；ambiguous outcome 必须用原 event ID 重试。
-- publish error 由 `eventing::delivery::PublishErrorKind` 闭合为 permanent/transient/ambiguous decision；只有
-  permanent 首投进入 terminal DLQ。
+- publish outcome 闭合为 `Confirmed | DefinitelyNotPublished(PublishFailure) | Ambiguous(PublishFailure)`；
+  `PublishFailure` 只携 closed kind/stage/reason，禁止丢弃诊断或暴露 provider 文本。只有 definite permanent
+  首投进入 terminal DLQ，ambiguous 固定复用原 `MessageId`。
 - claim 在同一数据库语句生成 token/deadline；settle CAS 必须匹配 token 与 deadline，过期租约拒绝。
 - 每次 publish 前按数据库当前时间检查 lease 与 absolute delivery budget；预算不足不得调用 broker。
-  canonical `eventing::delivery::DeliveryBudget` 只公开 `Duration`，PostgreSQL 的整毫秒投影只能在 adapter 内完成。
+  canonical `rss_transactional_messaging::policy::DeliveryBudget` 只公开 `Duration`，PostgreSQL 的整毫秒投影只能在 adapter 内完成。
+- lease 尚未到期但不足以覆盖 publish+settle 时必须 settle 为 `Retry`；不得把短租约伪装为业务 deadline
+  到期并永久 dead-letter。publish 与 settle 消费同一 attempt absolute deadline 的分阶段投影。
 - provider 在构造期绑定 typed domain，调用方不得传 raw domain。
 
 ## Same-ID window
@@ -39,7 +42,7 @@
 
 ## Partition order
 
-`INVARIANT: OUTBOX-PARTITION-ORDER-01`：同 `(domain, partition_key)` 只允许 head-of-partition admission；
+`INVARIANT: OUTBOX-PARTITION-ORDER-01`：同 `(tenant, domain, partition_key)` 只允许 head-of-partition admission；
 未 terminal settle/DLQ resolution 的 head 阻塞 successor。partition key 必须全局唯一或包含 tenant scope。
 
 ## Metadata funnel

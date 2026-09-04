@@ -12,9 +12,9 @@
 
 use dynosaur::dynosaur;
 
-use crate::envelope::EnvelopeMetadata;
 use rss_redact::RedactedBytes;
 use rss_redact::RedactedSource;
+use rss_transactional_messaging::message::TransportContext;
 
 // ── DeadLetterSummary ─────────────────────────────────────────────────────────
 
@@ -187,7 +187,7 @@ pub struct DeadLetterRecord {
     tenant: rss_request_context::TenantId,
     message_id: String,
     original_payload: RedactedBytes,
-    metadata: EnvelopeMetadata,
+    metadata: TransportContext,
     /// 安全摘要——类型层强制 `&'static str` const literal（经 [`DeadLetterSummary`] funnel），
     /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "content-test" }）。
     error_summary: &'static str,
@@ -232,7 +232,7 @@ impl DeadLetterRecord {
         original_payload: Vec<u8>,
         error_summary: DeadLetterSummary,
         num_attempts: u32,
-        metadata: EnvelopeMetadata,
+        metadata: TransportContext,
     ) -> Self {
         Self {
             provenance,
@@ -311,7 +311,7 @@ impl DeadLetterRecord {
     }
 
     /// 原始 delivery metadata（用于重放时保留 trace/correlation/tenant 等 envelope 信息）。
-    pub fn metadata(&self) -> &EnvelopeMetadata {
+    pub fn metadata(&self) -> &TransportContext {
         &self.metadata
     }
 
@@ -390,7 +390,7 @@ mod smoke {
         DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
         DeadLetterSummary, DynDeadLetterStore,
     };
-    use crate::EnvelopeMetadata;
+    use rss_transactional_messaging::message::TransportContext;
 
     fn sample_record() -> DeadLetterRecord {
         DeadLetterRecord::new(
@@ -403,7 +403,7 @@ mod smoke {
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            EnvelopeMetadata::empty(),
+            TransportContext::default(),
         )
     }
 
@@ -462,7 +462,7 @@ mod pii_debug {
     //! `DeadLetterRecord.original_payload`（原始消息字节，可能含 PII）Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SignRequest.message` / `Message` 内部的 `RedactedBytes` 持有）。
     use super::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSummary};
-    use crate::EnvelopeMetadata;
+    use rss_transactional_messaging::message::TransportContext;
 
     #[allow(clippy::expect_used)]
     fn tenant() -> rss_request_context::TenantId {
@@ -487,7 +487,7 @@ mod pii_debug {
             vec![0xDE, 0xAD, 0xBE, 0xEF],
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            EnvelopeMetadata::empty(),
+            TransportContext::default(),
         );
         let dbg = format!("{record:?}");
         assert!(!dbg.contains("222"), "payload 字节泄漏(0xDE=222): {dbg}");
@@ -522,12 +522,9 @@ mod pii_debug {
 
     #[test]
     fn dead_letter_record_debug_redacts_metadata_values() {
-        let mut metadata = EnvelopeMetadata::empty();
-        assert!(metadata.try_insert("email", "alice@example.test").is_ok());
-        assert!(
-            metadata
-                .try_insert("customerHeader", "secret-header")
-                .is_ok()
+        let metadata = TransportContext::new(
+            Some("alice@example.test".to_owned()),
+            Some("secret-header".to_owned()),
         );
 
         let record = DeadLetterRecord::new(
@@ -578,7 +575,7 @@ mod summary {
 mod tenant_scope {
     //! `DeadLetterRecord` 必须携 typed tenant + message_id。
     use super::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterSummary};
-    use crate::EnvelopeMetadata;
+    use rss_transactional_messaging::message::TransportContext;
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -595,7 +592,7 @@ mod tenant_scope {
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            EnvelopeMetadata::empty(),
+            TransportContext::default(),
         );
         assert_eq!(record.tenant(), tenant);
         assert_eq!(record.message_id(), "msg-tenant-1");

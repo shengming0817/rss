@@ -21,7 +21,7 @@ use dynosaur::dynosaur;
 use rss_redact::RedactedBytes;
 use rss_redact::RedactedSource;
 
-/// 防护写结论（typed outcome，非 error——fence 是预期控制流，对标 `consistency::SeenState`）。
+/// 防护写结论（typed outcome，非 error——fence 是预期控制流）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WriteOutcome {

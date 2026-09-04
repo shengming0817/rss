@@ -379,17 +379,21 @@ pub trait HttpContractTransport: Send + Sync {
     ) -> BoxFuture<'_, Result<HttpContractResponse, HttpContractTransportError>>;
 }
 
+pub trait TransportClock: Send + Sync {
+    fn now(&self) -> std::time::SystemTime;
+}
+
 /// Metrics/tracing wrapper for a concrete domain transport.
 pub struct InstrumentedHttpContractTransport<T> {
     inner: T,
     mode: TransportMode,
-    clock: Box<dyn diport::Clock>,
+    clock: Box<dyn TransportClock>,
 }
 
 impl<T> InstrumentedHttpContractTransport<T> {
     /// Construct an instrumented transport. `clock` is injected to satisfy workspace clock
     /// discipline; this crate never calls system time directly.
-    pub fn new(inner: T, mode: TransportMode, clock: Box<dyn diport::Clock>) -> Self {
+    pub fn new(inner: T, mode: TransportMode, clock: Box<dyn TransportClock>) -> Self {
         Self { inner, mode, clock }
     }
 
@@ -569,7 +573,7 @@ mod tests {
         }
     }
 
-    impl diport::Clock for StepClock {
+    impl TransportClock for StepClock {
         fn now(&self) -> SystemTime {
             let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
             let current = *next;

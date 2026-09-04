@@ -30,10 +30,6 @@ fn ui() {
     t.compile_fail("tests/ui/unsafe_forbid_fail.rs");
     t.compile_fail("tests/ui/arc_dyn_ports_not_send.rs");
     t.compile_fail("tests/ui/dead_letter_record_tenant_fail.rs");
-    t.compile_fail("tests/ui/envelope_header_private_fields_fail.rs");
-    t.compile_fail("tests/ui/message_envelope_private_fields_fail.rs");
-    t.compile_fail("tests/ui/message_envelope_constructor_private_fail.rs");
-    t.compile_fail("tests/ui/message_private_fields_fail.rs");
     t.compile_fail("tests/ui/saga_operator_authorization_forge_fail.rs");
     t.compile_fail("tests/ui/saga_operator_authorization_clone_fail.rs");
     t.compile_fail("tests/ui/saga_operator_claim_second_consume_fail.rs");

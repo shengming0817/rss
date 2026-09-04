@@ -11,7 +11,7 @@
 //!
 //! ## 派发策略（ADR-003）
 //!
-//! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `RateLimiter` / `ObjectStore` / `SecretResolver` …）：native AFIT + dynosaur
+//! - **async DI port**（`Signer` / `KeyProvider` / `RateLimiter` / `ObjectStore` / `SecretResolver` …）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
 //!   - **并发 bound**：dyn wrapper 的 boxed future 一律须 `Send`。默认端口用
@@ -20,7 +20,7 @@
 //!     bucket，base / variant 显式 `Send + Sync`，由 `classify_ports!` Hard（native
 //!     `assert_send_sync_bound`）锁定，trybuild `ui_assert_*` 仅 Medium 回归锁。本 crate
 //!     根仍只公开变体 `X` + `DynX`；base trait `XLocal` 不 re-export，避免方法解析歧义。
-//! - **sync DI port**（`Clock` / `MetricsExporter` / `SubscribeInitializer`，`sync_obj` bucket）：sync
+//! - **sync DI port**（`MetricsExporter`，`sync_obj` bucket）：sync
 //!   trait 天然 dyn-compatible，经 `Box<dyn _>` 注入，**不需** dynosaur（仅 async port 需要）。
 //!
 //! ## 注入形态
@@ -95,22 +95,17 @@
 //! `[lints] workspace = true`。dynosaur→diport 收敛改由 deny.toml wrapper 守（DI port 集中 + 单一
 //! dyn-dispatch 依赖点），与 unsafe 无关。dynosaur exact-pin `=0.3.0`：升级须复测本不变式 + 审 changelog。
 
-pub mod acker;
 pub mod cas_store;
 pub mod checkpoint_store;
-pub mod clock;
 pub mod dead_letter_store;
 pub mod dlx_lifecycle;
 mod effect;
-pub mod envelope;
 pub mod fenced_writer;
 pub mod key_provider;
 pub mod leader_elector;
 pub mod lock_store;
 pub mod metrics_exporter;
 pub mod object_store;
-pub mod outbox_emitter;
-pub mod publisher;
 pub mod rate_limiter;
 // provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进跨 crate 导出面）：`pub enum` 错误
 // （`ObjectStoreError`）变体字段恒 public，须持 public 类型避免 privacy leak（#1120 merge：PR215 RedactedSource
@@ -121,12 +116,6 @@ mod dlq_operator;
 pub mod saga_durable_store;
 pub mod secret_resolver;
 pub mod signer;
-pub mod subscriber;
-
-pub use acker::{
-    AckAction, AckError, AckableSubscriber, Acker, Delivery, DeliveryStream, DynAckableSubscriber,
-    DynAcker,
-};
 pub use cas_store::{
     CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, DynCasStore, GlobalCasResource,
     GlobalCasStoreKey,
@@ -135,7 +124,6 @@ pub use checkpoint_store::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,
 };
-pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterStore,
     DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
@@ -154,14 +142,8 @@ pub use dlx_lifecycle::{
 };
 pub use effect::{
     AsyncSend, AsyncSync, AuthEffect, BusinessWriteEffect, ConcurrencyBucket, CrossTenantPrivilege,
-    DiPortConcurrency, DiPortEffect, LocalPrivilege, OutboxEffect, PortEffectClass,
-    PortPrivilegeClass, ReadEffect, SyncObj, WorkflowEffect,
-};
-pub use envelope::{
-    EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSchemaHash,
-    EnvelopeSchemaVersion, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL,
-    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID,
-    KEY_TRACE, MessageEnvelope, MetadataError, RESERVED_METADATA_KEYS,
+    DiPortConcurrency, DiPortEffect, LocalPrivilege, PortEffectClass, PortPrivilegeClass,
+    ReadEffect, SyncObj, WorkflowEffect,
 };
 pub use fenced_writer::{
     DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
@@ -181,11 +163,6 @@ pub use metrics_exporter::MetricsExporter;
 pub use object_store::{
     DynObjectStore, ObjectByteStream, ObjectKey, ObjectPayload, ObjectStore, ObjectStoreError,
 };
-pub use outbox_emitter::{
-    DynOutboxEmitter, EnvelopeCausationId, EnvelopeIdentityError, EnvelopeSubjectId, OpaqueActorId,
-    OutboxActor, OutboxEmitError, OutboxEmitErrorKind, OutboxEmitter, OutboxEnvelopeParts,
-};
-pub use publisher::{DynPublisher, PublishRequest, Publisher, PublisherError, Topic};
 pub use rate_limiter::{
     DynRateLimiter, MAX_RATE_LIMIT_QUOTA, RateLimitDecision, RateLimitError, RateLimitKey,
     RateLimitQuota, RateLimitQuotaError, RateLimiter,
@@ -217,10 +194,6 @@ pub use secret_resolver::{
     DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
 };
 pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
-pub use subscriber::{
-    DynSubscriber, Message, MessageId, MessageStream, SubscribeInitError, SubscribeInitializer,
-    Subscriber, SubscriberError,
-};
 
 /// Test-only constructors for production-sealed DI values.
 #[cfg(any(feature = "test-support", feature = "dlq-test-support"))]

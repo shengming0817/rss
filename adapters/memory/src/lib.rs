@@ -18,21 +18,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    EngineError, EventEntry, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
-    LeaseToken as IdemLeaseToken, Lsn, SagaCompensationCause, SagaIdempotencyKey,
-    SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus,
-    SagaLease, SagaLeaseOutcome, SagaOperatorReason, SagaReceiptScope, SeenState,
+    Lsn, SagaCompensationCause, SagaIdempotencyKey, SagaInstanceRecord, SagaInstanceRef,
+    SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseOutcome,
+    SagaOperatorReason, SagaReceiptScope,
 };
 use diport::{
     CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, Checkpoint, CheckpointId,
-    CheckpointOwner, CheckpointStoreError, CheckpointVersion, Clock, DeadLetterRecord,
-    DeadLetterStore, DeadLetterStoreError, FencedWriteKey, FencedWriteRequest, FencedWriter,
-    FencedWriterError, GlobalCasStoreKey, LeaderElector, LeaderElectorError, LeaderId, LeaseToken,
-    LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey, Message,
-    MessageId, MessageStream, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
-    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, SagaClaimOutcome,
-    SagaClaimRequest, SagaCompensationProgress, SagaDurableMutation, SagaDurableMutationOutcome,
-    SagaDurableStore, SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardProgress,
+    CheckpointOwner, CheckpointStoreError, CheckpointVersion, FencedWriteKey, FencedWriteRequest,
+    FencedWriter, FencedWriterError, GlobalCasStoreKey, LeaderElector, LeaderElectorError,
+    LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError,
+    LockStoreKey, OwnerCheckpointStore, SagaClaimOutcome, SagaClaimRequest,
+    SagaCompensationProgress, SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore,
+    SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardProgress,
     SagaInstanceRegistration, SagaLeaseHolder, SagaLeaseTtl, SagaOperatorAuthorization,
     SagaOperatorCasOutcome, SagaOperatorClaimOutcome, SagaOperatorJournalExpectation,
     SagaOperatorRepair, SagaOperatorRepairClaim, SagaOperatorRepairReason,
@@ -41,11 +38,18 @@ use diport::{
     SagaTenantPage, SagaTenantSource, SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest,
     SagaUnresolvedObservation, SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SaveOutcome,
     SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, StoredSagaReceipt,
-    Subscriber, SubscriberError, Topic, WriteOutcome, saga_operator_action,
+    WriteOutcome, saga_operator_action,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
-use tokio_util::sync::CancellationToken;
+use rss_transactional_messaging::error::MessagingError;
+use rss_transactional_messaging::message::{MessageEnvelope, SubscriptionIdentity};
+use rss_transactional_messaging::policy::OperationDeadline;
+use rss_transactional_messaging::transaction::SettlementDecision;
+use rss_transactional_messaging::transport::{
+    Delivery, DeliverySettlement, DeliverySource, IncomingDelivery, ManagedDeliveryStream,
+    PublishOutcome, Publisher,
+};
 
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
 // 且 lib 代码禁 unwrap/expect（clippy deny）。`unwrap_or_else(into_inner)` 取回 guard，clippy-clean。
@@ -55,9 +59,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct BusInner {
     /// topic → 活跃订阅者 sender 列表（per-topic fan-out，对标 gochannel `subscribers map`）。
-    topics: HashMap<String, Vec<UnboundedSender<Message>>>,
-    /// 单调消息序号，派生 in-mem 消息 id（无系统时钟 / 随机）。
-    seq: u64,
+    topics: HashMap<String, Vec<UnboundedSender<MessageEnvelope<Vec<u8>>>>>,
 }
 
 /// in-mem 事件总线（克隆共享同一底座）。经 [`MemBus::publisher`] / [`MemBus::subscriber`] 取端口。
@@ -72,35 +74,24 @@ impl MemBus {
         Self::default()
     }
 
-    /// 取发布端口（impl [`diport::Publisher`]）。
+    /// 取发布端口（impl [`rss_transactional_messaging::transport::Publisher`]）。
     pub fn publisher(&self) -> MemPublisher {
         MemPublisher { bus: self.clone() }
     }
 
-    /// 取订阅端口（impl [`diport::Subscriber`]）。
+    /// 取订阅端口（impl [`rss_transactional_messaging::transport::DeliverySource`]）。
     pub fn subscriber(&self) -> MemSubscriber {
         MemSubscriber { bus: self.clone() }
     }
 
-    fn publish_sync(&self, request: PublishRequest) {
+    fn publish_sync(&self, message: &MessageEnvelope<Vec<u8>>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.seq += 1;
-        let id = if request.event_id().as_str().is_empty() {
-            format!("mem-{}", inner.seq)
-        } else {
-            request.event_id().as_str().to_string()
-        };
-        let topic = request.topic().as_str().to_string();
-        let metadata = transport_metadata(request.metadata());
-        let payload = request.into_payload();
-        inner.topics.entry(topic).or_default().retain(|tx| {
-            tx.unbounded_send(Message::new_with_metadata(
-                id.clone(),
-                payload.clone(),
-                metadata.clone(),
-            ))
-            .is_ok()
-        });
+        let topic = message.metadata().route().as_str().to_string();
+        inner
+            .topics
+            .entry(topic)
+            .or_default()
+            .retain(|tx| tx.unbounded_send(message.clone()).is_ok());
     }
 }
 
@@ -109,16 +100,16 @@ pub struct MemPublisher {
     bus: MemBus,
 }
 
-impl Publisher for MemPublisher {
-    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
-        request.try_header().map_err(PublisherError::permanent)?;
-        self.bus.publish_sync(request);
-        Ok(())
-    }
+impl Publisher<Vec<u8>> for MemPublisher {
+    type Receipt = ();
 
-    async fn shutdown(&self) -> Result<(), PublisherError> {
-        // reason: in-mem 无 infra 资源，关闭无需释放。
-        Ok(())
+    async fn publish(
+        &self,
+        message: &MessageEnvelope<Vec<u8>>,
+        _deadline: OperationDeadline,
+    ) -> PublishOutcome<Self::Receipt> {
+        self.bus.publish_sync(message);
+        PublishOutcome::Confirmed(())
     }
 }
 
@@ -127,432 +118,44 @@ pub struct MemSubscriber {
     bus: MemBus,
 }
 
-impl Subscriber for MemSubscriber {
-    async fn subscribe(
+pub struct MemSettlement;
+
+impl DeliverySettlement for MemSettlement {
+    async fn settle(
+        self,
+        _decision: SettlementDecision,
+        _deadline: OperationDeadline,
+    ) -> Result<(), MessagingError> {
+        Ok(())
+    }
+
+    async fn abandon(self, _deadline: OperationDeadline) -> Result<(), MessagingError> {
+        Ok(())
+    }
+}
+
+impl DeliverySource<Vec<u8>> for MemSubscriber {
+    type Settlement = MemSettlement;
+    type Deliveries = std::pin::Pin<
+        Box<dyn futures::Stream<Item = IncomingDelivery<Vec<u8>, Self::Settlement>> + Send>,
+    >;
+
+    async fn deliveries(
         &self,
-        topic: Topic,
-        token: CancellationToken,
-    ) -> Result<MessageStream, SubscriberError> {
-        let (tx, rx) = mpsc::unbounded::<Message>();
+        subscription: &SubscriptionIdentity,
+    ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
+        let (tx, rx) = mpsc::unbounded::<MessageEnvelope<Vec<u8>>>();
         self.bus
             .inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .topics
-            .entry(topic.as_str().to_string())
+            .entry(subscription.route().as_str().to_string())
             .or_default()
             .push(tx);
-        // token 取消即流终止（对标 gochannel `<-g.closing` 广播）。
-        let stream = rx.take_until(async move { token.cancelled().await });
-        Ok(Box::pin(stream))
-    }
-
-    async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // reason: in-mem 无 infra 资源，关闭无需释放。
-        Ok(())
-    }
-}
-
-// ── MemEmitter：in-mem durable outbox 发射替身（demo 拓扑）──────────────────────
-
-/// in-mem outbox 发射端口（impl [`diport::OutboxEmitter`]）：把 [`Entry`] 直接 fan-out 到 [`MemBus`]，
-/// **不持久化**——demo / 单进程 / 测试用；不能作为 durable production event writer。
-///
-/// 经 `MemBus::publisher()` 复用 [`MemPublisher`] 的发布路径：`Message::id() = entry.idem_key()`（EventId），
-/// 闭合 demo 侧 EventId 传播（消费侧 `run_consumer` 据此幂等去重）。
-pub struct MemEmitter {
-    bus: MemBus,
-    clock: Arc<dyn Clock>,
-    tenant_signer: Option<Arc<dyn TenantMetadataSigner>>,
-}
-
-impl MemEmitter {
-    /// 绑定 [`MemBus`] 构造（与 publisher / subscriber 共享同一总线底座）。
-    pub fn new(bus: MemBus, clock: Arc<dyn Clock>) -> Self {
-        Self {
-            bus,
-            clock,
-            tenant_signer: None,
-        }
-    }
-
-    /// 绑定 tenant metadata signer，供 demo/journey provider 演练 consumer fail-closed tenantAuthority 语义。
-    pub fn with_tenant_metadata_signer(
-        bus: MemBus,
-        signer: Arc<dyn TenantMetadataSigner>,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
-        Self {
-            bus,
-            clock,
-            tenant_signer: Some(signer),
-        }
-    }
-}
-
-/// tenantAuthority signing adapter for memory providers. The trait is defined in this adapter so
-/// `memory` does not depend on `eventexec`; composition roots bridge it to the real authority.
-pub trait TenantMetadataSigner: Send + Sync {
-    /// Sign the tenant/topic/message binding as broker-visible tenant authority metadata.
-    fn sign_tenant_metadata(
-        &self,
-        binding: TenantMetadataBinding<'_>,
-    ) -> Result<String, Box<dyn Error + Send + Sync>>;
-}
-
-#[derive(Debug)]
-struct TenantMetadataSignFailure {
-    source: Box<dyn Error + Send + Sync>,
-}
-
-impl std::fmt::Display for TenantMetadataSignFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("tenant metadata signing failed")
-    }
-}
-
-impl Error for TenantMetadataSignFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-/// Tenant authority binding passed to [`TenantMetadataSigner`].
-#[derive(Debug, Clone, Copy)]
-pub struct TenantMetadataBinding<'a> {
-    tenant: rss_request_context::TenantId,
-    domain: &'a str,
-    contract_id: &'a str,
-    topic: &'a str,
-    message_id: &'a str,
-}
-
-impl<'a> TenantMetadataBinding<'a> {
-    /// Construct a transport tenant metadata binding.
-    pub fn new(
-        tenant: rss_request_context::TenantId,
-        domain: &'a str,
-        contract_id: &'a str,
-        topic: &'a str,
-        message_id: &'a str,
-    ) -> Self {
-        Self {
-            tenant,
-            domain,
-            contract_id,
-            topic,
-            message_id,
-        }
-    }
-
-    pub fn tenant(&self) -> rss_request_context::TenantId {
-        self.tenant
-    }
-
-    pub fn domain(&self) -> &'a str {
-        self.domain
-    }
-
-    pub fn contract_id(&self) -> &'a str {
-        self.contract_id
-    }
-
-    pub fn topic(&self) -> &'a str {
-        self.topic
-    }
-
-    pub fn message_id(&self) -> &'a str {
-        self.message_id
-    }
-}
-
-/// Broker-visible envelope metadata emitted by in-mem outbox paths. Keep `MemEmitter` and
-/// `MemAuthGrantStore` aligned so demo providers exercise transport-safe tenant metadata.
-fn envelope_metadata(
-    envelope: &OutboxEnvelopeParts,
-    topic: &str,
-    message_id: &str,
-    signer: Option<&dyn TenantMetadataSigner>,
-    occurred_at: rss_contract::Timepoint,
-) -> Result<diport::EnvelopeMetadata, Box<dyn Error + Send + Sync>> {
-    let mut metadata = diport::EnvelopeMetadata::empty();
-    metadata.insert_wire_pair(diport::KEY_TENANT_ID, envelope.tenant().to_string());
-    metadata.insert_wire_pair(
-        diport::KEY_OCCURRED_AT,
-        occurred_at.unix_seconds().to_string(),
-    );
-    metadata.insert_wire_pair(diport::KEY_SCHEMA_VERSION, envelope.contract().version());
-    metadata.insert_wire_pair(diport::KEY_SCHEMA_HASH, envelope.contract().schema_hash());
-    if let Some(signer) = signer {
-        let token = signer.sign_tenant_metadata(TenantMetadataBinding::new(
-            envelope.tenant(),
-            envelope.contract().domain(),
-            envelope.contract().contract_id(),
-            topic,
-            message_id,
-        ))?;
-        metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
-    }
-    Ok(metadata)
-}
-
-fn transport_metadata(source: &diport::EnvelopeMetadata) -> diport::EnvelopeMetadata {
-    let mut metadata = diport::EnvelopeMetadata::empty();
-    for (key, value) in source.iter_transport_headers() {
-        metadata.insert_wire_pair(key, value);
-    }
-    metadata
-}
-
-impl OutboxEmitter for MemEmitter {
-    async fn emit(
-        &self,
-        entry: EventEntry,
-        envelope: OutboxEnvelopeParts,
-    ) -> Result<(), OutboxEmitError> {
-        let occurred_at =
-            rss_contract::Timepoint::try_from(self.clock.now()).map_err(OutboxEmitError::new)?;
-        let topic = entry.topic().as_str();
-        let message_id = entry.idem_key().as_str();
-        let request = PublishRequest::new(
-            Topic::new(topic),
-            MessageId::new(message_id),
-            entry.payload().to_vec(),
-        )
-        .with_metadata(
-            envelope_metadata(
-                &envelope,
-                topic,
-                message_id,
-                self.tenant_signer.as_deref(),
-                occurred_at,
-            )
-            .map_err(|source| OutboxEmitError::new(TenantMetadataSignFailure { source }))?,
-        );
-        self.bus
-            .publisher()
-            .publish(request)
-            .await
-            .map_err(OutboxEmitError::new)
-    }
-}
-
-// ── MemDeadLetterStore：累积 DeadLetterRecord 供 journey 断言 ─────────────────────────────
-
-/// in-mem 死信 sink（impl [`diport::DeadLetterStore`]）：把 [`diport::DeadLetterRecord`] 累积进 vec，
-/// 供一致性测试断言 DLX 分支；本替身仅测试 / demo 用。
-#[derive(Clone, Default)]
-pub struct MemDeadLetterStore {
-    records: Arc<Mutex<Vec<DeadLetterRecord>>>,
-}
-
-impl MemDeadLetterStore {
-    /// 新建空 store。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 当前累积的死信记录快照（克隆）。
-    pub fn records(&self) -> Vec<DeadLetterRecord> {
-        self.records
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    /// 已记录条数。
-    pub fn len(&self) -> usize {
-        self.records.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
-    /// 是否为空。
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-impl DeadLetterStore for MemDeadLetterStore {
-    async fn write_dead_letter(
-        &self,
-        record: DeadLetterRecord,
-    ) -> Result<(), DeadLetterStoreError> {
-        self.records
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(record);
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
-        // reason: in-mem 无 infra 资源，关闭无需释放。
-        Ok(())
-    }
-}
-
-// ── FixedClock：确定性测试时钟 ────────────────────────────────────────────────
-
-/// 固定时刻时钟（impl [`diport::Clock`]）：测试 / demo 确定性，不取系统时钟（不触 clippy disallowed-methods）。
-pub struct FixedClock {
-    at: SystemTime,
-}
-
-impl FixedClock {
-    /// 由指定时刻构造。
-    pub fn new(at: SystemTime) -> Self {
-        Self { at }
-    }
-
-    /// 由 UNIX epoch 秒构造。
-    pub fn at_unix_secs(secs: u64) -> Self {
-        Self {
-            at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
-        }
-    }
-}
-
-impl Clock for FixedClock {
-    fn now(&self) -> SystemTime {
-        self.at
-    }
-}
-
-// ── InMemClaimer：进程内幂等去重替身（demo 拓扑）─────────────────────────────
-
-/// 单个 claim 行：租约令牌 + 是否已 done。
-///
-/// 三态：absent（map 中无键）/ claimed(token)（`done = false`）/ done(token)（`done = true`）。
-struct ClaimEntry {
-    token: String,
-    done: bool,
-}
-
-type InboxMapKey = (String, String, String);
-type ClaimMap = HashMap<InboxMapKey, ClaimEntry>;
-type SharedClaimMap = Arc<Mutex<ClaimMap>>;
-
-/// in-mem 幂等 claimer（impl [`consistency::InboxStore`]）：以 `(tenant, group, key)` 为复合主键，
-/// 记 token-CAS 三态（absent / claimed(token) / done(token)），忠实实现 lease-CAS 围栏语义。
-/// demo / 单进程 / 测试用；生产走 redis/pg claimer。
-///
-/// TTL 重捞有意省略（无时间源）——crash-recovery + 重捞正确性由 PG adapter 集成测试守；
-/// in-mem 仅需忠实 token-CAS 语义，使 hard-fence 在 demo/test 中可行使。
-///
-/// INVARIANT: TOPO-INMEM-SEAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（拓扑封闭：生产 bin 经 cargo-deny 连 `memory` 都依赖不到 ⇒
-/// in-mem claimer 不可达生产；仅 demo/dev/journeys 组合根可构造）。
-pub struct InMemClaimer {
-    seen: SharedClaimMap,
-}
-
-impl InMemClaimer {
-    /// 新建空 claimer。
-    ///
-    /// `pub`：供 dev-root demo 组合根（`journeys` / `examples`）跨 crate 构造（生产 bin 经 cargo-deny 连
-    /// `memory` 都依赖不到 ⇒ in-mem 生产不可达，TOPO-INMEM-SEAL-01 主守卫 Hard）。生产使用方应选择
-    /// durable provider；本构造器只服务 dev/test consumer。
-    pub fn new() -> Self {
-        Self {
-            seen: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
-
-impl Default for InMemClaimer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn inbox_map_key(ctx: &InboxReceiptContext, key: &IdemKey) -> InboxMapKey {
-    (
-        ctx.tenant_id().to_string(),
-        ctx.consumer_group().as_str().to_string(),
-        key.as_str().to_string(),
-    )
-}
-
-impl InboxStore for InMemClaimer {
-    async fn try_claim(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &IdemLeaseToken,
-    ) -> Result<SeenState, EngineError> {
-        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        // reason: in-mem 操作恒成功，unwrap_or_else 处理 poisoned lock 后继续。
-        let map_key = inbox_map_key(ctx, key);
-        match map.entry(map_key) {
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(ClaimEntry {
-                    token: lease.as_str().to_string(),
-                    done: false,
-                });
-                Ok(SeenState::Fresh)
-            }
-            std::collections::hash_map::Entry::Occupied(e) if e.get().done => {
-                // 只有 durable done 才可幂等短路并 Ack。
-                Ok(SeenState::Duplicate)
-            }
-            std::collections::hash_map::Entry::Occupied(_) => {
-                // active claimed 必须保留 broker 投递；typed outcome 由 consumer lease-aware 延迟 Requeue。
-                // reason: TTL 重捞在此 in-mem demo 替身中有意省略——crash-recovery + 重捞正确性由
-                // PG adapter 集成测试守；in-mem 仅需忠实 token-CAS 语义，使 hard-fence 在 demo/test
-                // 中可行使。
-                Ok(SeenState::InProgress)
-            }
-        }
-    }
-
-    async fn extend(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &IdemLeaseToken,
-    ) -> Result<LeaseOutcome, EngineError> {
-        // reason: in-mem 恒 Ok；仅 claimed 且 token 匹配 → Held，否则（absent / done / token 不符）→ Lost。
-        let map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let map_key = inbox_map_key(ctx, key);
-        let held = matches!(
-            map.get(&map_key),
-            Some(e) if !e.done && e.token == lease.as_str()
-        );
-        Ok(if held {
-            LeaseOutcome::Held
-        } else {
-            LeaseOutcome::Lost
-        })
-    }
-
-    async fn commit(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &IdemLeaseToken,
-    ) -> Result<LeaseOutcome, EngineError> {
-        // reason: in-mem commit 恒 Ok；token 匹配 → done(Held)，不符/absent → Lost（hard-fence）。
-        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let map_key = inbox_map_key(ctx, key);
-        match map.get_mut(&map_key) {
-            Some(e) if e.token == lease.as_str() => {
-                e.done = true;
-                Ok(LeaseOutcome::Held)
-            }
-            _ => Ok(LeaseOutcome::Lost),
-        }
-    }
-
-    async fn release(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &IdemLeaseToken,
-    ) -> Result<(), EngineError> {
-        // reason: in-mem release 恒 Ok；仅 token 匹配的 claimed 行删除（CAS），否则 no-op（不误删他人 claim）。
-        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let map_key = inbox_map_key(ctx, key);
-        if matches!(map.get(&map_key), Some(e) if !e.done && e.token == lease.as_str()) {
-            map.remove(&map_key);
-        }
-        Ok(())
+        Ok(ManagedDeliveryStream::from_provider(Box::pin(rx.map(
+            |message| IncomingDelivery::Valid(Box::new(Delivery::new(message, MemSettlement))),
+        ))))
     }
 }
 
@@ -2482,72 +2085,11 @@ impl SecretResolver for MemSecretResolver {
 mod tests {
     use super::*;
 
-    #[allow(clippy::expect_used)]
-    fn receipt(tenant: &str) -> InboxReceiptContext {
-        InboxReceiptContext::new(
-            rss_request_context::TenantId::parse(tenant).expect("tenant"),
-            consistency::ConsumerGroup::parse("neutral-consumer").expect("group"),
-            "runtime",
-            "runtime.fact-recorded",
-            "runtime.fact-recorded",
-            "v1",
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            None,
-            None,
-        )
-        .expect("receipt")
-    }
-
-    #[test]
-    fn fixed_clock_is_deterministic() {
-        let clock = FixedClock::at_unix_secs(42);
-        assert_eq!(
-            clock.now(),
-            SystemTime::UNIX_EPOCH + Duration::from_secs(42)
-        );
-    }
-
     #[test]
     fn neutral_consistency_doubles_construct_without_domain_state() {
         let _ = MemBus::new();
-        let _ = InMemClaimer::new();
         let _ = MemFencedWriter::new();
         let _ = MemCasStore::new();
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn inbox_claim_is_tenant_scoped_and_token_fenced() {
-        let store = InMemClaimer::new();
-        let key = IdemKey::parse("event-1").expect("key");
-        let lease = IdemLeaseToken::mint();
-        let other = IdemLeaseToken::mint();
-        let a = receipt("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        let b = receipt("f47ac10b-58cc-4372-a567-0e02b2c3d480");
-        assert_eq!(
-            store.try_claim(&a, &key, &lease).await.expect("claim"),
-            SeenState::Fresh
-        );
-        assert_eq!(
-            store.try_claim(&a, &key, &other).await.expect("claim"),
-            SeenState::InProgress
-        );
-        assert_eq!(
-            store.try_claim(&b, &key, &other).await.expect("claim"),
-            SeenState::Fresh
-        );
-        assert_eq!(
-            store.commit(&a, &key, &other).await.expect("commit"),
-            LeaseOutcome::Lost
-        );
-        assert_eq!(
-            store.commit(&a, &key, &lease).await.expect("commit"),
-            LeaseOutcome::Held
-        );
-        assert_eq!(
-            store.try_claim(&a, &key, &other).await.expect("claim"),
-            SeenState::Duplicate
-        );
     }
 
     #[tokio::test]

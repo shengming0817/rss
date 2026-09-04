@@ -20,7 +20,7 @@ pub(crate) const REPLY_SUCCESS: u16 = 200;
 
 /// AMQP 连接 / 建 channel 失败。
 ///
-/// **PII 边界**（同 `diport::PublisherError` 范式）：`Display` 仅安全摘要常量 `"amqp connect failed"`，
+/// **PII 边界**（同 transactional messaging `MessagingError` 范式）：`Display` 仅安全摘要常量 `"amqp connect failed"`，
 /// **绝不含 URL / 凭据**；原始 lapin error 仅作 [`std::error::Error::source`] 内部保留，不进默认日志。
 /// `Debug` 手写（不 derive）——隐藏 `source`：lapin error 的 `Debug` 可能含 host/连接上下文，故 `{:?}`
 /// 也只输出安全摘要（与 `AmqpUrl` 同范式）。连接诊断经 `crate::conn_events`：`AmqpEndpoint` Display

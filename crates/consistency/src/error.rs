@@ -1,6 +1,6 @@
 //! 引擎层错误词汇（ADR-004 C10）。
 //!
-//! 引擎策略 trait（`InboxStore`/`OutboxRelay`/`Reconciler`/`Projector`）以及
+//! 引擎策略 trait（`Reconciler`/`Projector`）以及
 //! `eventexec::SagaStep<GeneratedStepMarker>` authoring seam 共用的失败通道。
 //! `kind` 的 message 是 `&'static str` const literal（禁 `format!` 拼 runtime 数据，遵 ADR-004 C10）。
 //! runtime 因由经 `vocab::CoreError` typed 通道（with_internal）落日志，引擎错误本身只携 kind。

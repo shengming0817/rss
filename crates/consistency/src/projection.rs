@@ -5,8 +5,8 @@
 //! ref: oxidecomputer/steno（saga journal 事件源对标）+ `contracts/**/contract.toml`、`generated` 与 `crates/consistency`）。
 
 use crate::error::EngineError;
-use crate::outbox::EventTopic;
 use rss_request_context::TenantId;
+use rss_transactional_messaging::message::MessageRoute;
 
 /// 日志序号 newtype（私有字段；单调递增，checkpoint 用于断点续投）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -90,7 +90,7 @@ pub enum ProjectionBatchLimitError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProjectionEventRecord {
     lsn: Lsn,
-    topic: EventTopic,
+    topic: MessageRoute,
     payload: Vec<u8>,
     metadata: ProjectionEventMetadata,
 }
@@ -99,7 +99,7 @@ impl ProjectionEventRecord {
     /// 由已验证 topic + 单调 lsn + encoded payload + 持久化 envelope metadata 构造投影事件记录。
     pub fn with_metadata(
         lsn: Lsn,
-        topic: EventTopic,
+        topic: MessageRoute,
         payload: impl Into<Vec<u8>>,
         metadata: ProjectionEventMetadata,
     ) -> Self {
@@ -112,7 +112,7 @@ impl ProjectionEventRecord {
     }
 
     /// 事件 topic（投影路由键）。
-    pub fn topic(&self) -> &EventTopic {
+    pub fn topic(&self) -> &MessageRoute {
         &self.topic
     }
 
@@ -145,7 +145,7 @@ impl std::fmt::Debug for ProjectionEventRecord {
 }
 
 impl ProjectionEvent for ProjectionEventRecord {
-    fn topic(&self) -> &EventTopic {
+    fn topic(&self) -> &MessageRoute {
         &self.topic
     }
 
@@ -286,7 +286,7 @@ impl std::fmt::Debug for ProjectionEventMetadata {
 /// 泛型 `<E: ProjectionEvent>` 消费，非 trait object。
 pub trait ProjectionEvent {
     /// 事件 topic（投影路由键）。
-    fn topic(&self) -> &crate::outbox::EventTopic;
+    fn topic(&self) -> &rss_transactional_messaging::message::MessageRoute;
 
     /// 日志序号（断点续投 checkpoint）。
     fn lsn(&self) -> Lsn;
@@ -638,7 +638,7 @@ impl SerialInOrder {
 
 #[cfg(test)]
 mod tests {
-    use crate::outbox::EventTopic;
+    use rss_transactional_messaging::message::MessageRoute;
 
     use super::{
         Lsn, ProjectionApplyError, ProjectionApplyErrorKind, ProjectionApplyErrorReason,
@@ -649,8 +649,8 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     // reason: test fixture uses a compile-time known canonical topic.
-    fn topic() -> EventTopic {
-        EventTopic::parse("projection.test.event").expect("valid projection topic")
+    fn topic() -> MessageRoute {
+        MessageRoute::parse("projection.test.event").expect("valid projection topic")
     }
 
     fn record(lsn: Lsn, payload: impl Into<Vec<u8>>) -> ProjectionEventRecord {

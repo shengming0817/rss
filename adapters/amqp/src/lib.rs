@@ -1,9 +1,9 @@
 //! amqp — RSS AMQP 事件传输 adapter（lapin）。
 //!
-//! impl `diport` 已冻 DI port：[`AmqpPublisher`]（`Publisher` + `ManagedResource`）+
-//! [`AmqpSubscriber`]（`AckableSubscriber` + `ManagedResource`）。
+//! 直接实现 transactional messaging native ports：[`AmqpPublisher`]（`Publisher`）+
+//! [`AmqpSubscriber`]（`DeliverySource`）；两者同时实现 `ManagedResource`。
 //! 生产事件主干——relay 经 `Publisher` 把已持久化 outbox entry 发到跨进程 broker；
-//! consumer 经 `AckableSubscriber`（at-least-once，manual-ack）收取。
+//! consumer 经 `DeliverySource`（at-least-once，manual-ack）收取。
 //!
 //! # per-domain vhost/credential 隔离
 //!
@@ -15,11 +15,11 @@
 //!
 //! # P7 传输边界（manual-ack，at-least-once）
 //!
-//! [`AmqpSubscriber`] 仅实现 [`diport::AckableSubscriber`]（at-least-once）：
+//! [`AmqpSubscriber`] 仅实现 [`rss_transactional_messaging::transport::DeliverySource`]（at-least-once）：
 //!
-//! - **[`diport::AckableSubscriber`]（manual-ack，`no_ack=false`，at-least-once）**：
-//!   每条 [`diport::Delivery`] 携 `AmqpAcker` 句柄，由 `eventexec::run_consumer_ackable` 据
-//!   [`diport::AckAction`] 结算（`Ack`→basic_ack、`Requeue`→basic_nack(requeue=true)、
+//! - **[`rss_transactional_messaging::transport::DeliverySource`]（manual-ack，`no_ack=false`，at-least-once）**：
+//!   每条 [`rss_transactional_messaging::transport::Delivery`] 携 move-only settlement receipt，由 `eventexec::run_consumer` 据
+//!   [`rss_transactional_messaging::transaction::SettlementKind`] 结算（`Ack`→basic_ack、`Requeue`→basic_nack(requeue=true)、
 //!   `Reject`→basic_nack(requeue=false)）。在途消息于消费者崩溃窗口 broker 自动 requeue——
 //!   channel close 即重投，兑现 **at-least-once**。
 //!   prefetch=1（channel 级单在途 delivery，保证排空期间不领取下一条消息）。
@@ -33,13 +33,13 @@
 //! - broker DLQ 只承接 ConsumerBase 的 fail-closed transport Reject，不是 app DLX 或 replay API。
 //!   handler 永久 Reject 仍由 ConsumerBase 写入加密 app DLX，成功后 broker Ack，避免双 owner。
 //!
-//! at-most-once 仅 demo 拓扑的 MemBus（`diport::Subscriber`）；AMQP 不实现该 trait。
+//! at-most-once 仅 demo 拓扑的 MemBus（`rss_transactional_messaging::transport::DeliverySource`）；AMQP 不实现该 trait。
 //!
 //! # Publisher transport replacement 与 ambiguous outcome
 //!
 //! Publisher 以 generation-scoped `connection + confirm channel` 为不可拆分 transport。只有 Ready generation
 //! 接受 publish；发送后/confirm 阶段的 IO reset、connection/channel close、confirm lost 与共享 deadline
-//! 都先退休整代 transport，再返回 `PublishErrorKind::Ambiguous`。relay 只能用原 event ID 重试，因此 transport
+//! 都先退休整代 transport，再返回 `PublishOutcome::Ambiguous`。relay 只能用原 message ID 重试，因此 transport
 //! 保持 at-least-once，broker duplicate 由 Inbox/ConsumerTx 收口事务内数据库副作用。
 //!
 //! RSS 独占 reconnect：同一 absolute recovery deadline 依次覆盖旧 confirms drain、旧 connection close、fresh
@@ -61,8 +61,8 @@
 //! ref: lapin examples/pubsub.rs@main（connect → create_channel → queue_declare → basic_publish →
 //! basic_consume → Consumer Stream），与 `adapters/memory` 的 `take_until(token)` 流取消范式一致。
 
-// feature-agnostic：AckAction→broker 结算模式映射（不依赖 lapin）。`cfg(any(test, backend))`：
-// 默认 `cargo test`（test cfg）下编译并跑表驱动测试（进 verify gate）；backend 下供 AmqpAcker 消费；
+// feature-agnostic：SettlementKind→broker 结算模式映射（不依赖 lapin）。`cfg(any(test, backend))`：
+// 默认 `cargo test`（test cfg）下编译并跑表驱动测试（进 verify gate）；backend 下提供 broker settlement；
 // 纯默认 lib build（无 test / 无 backend）无生产消费方 ⇒ 不编译，免 dead_code。
 #[cfg(any(test, feature = "backend"))]
 mod settle;
@@ -97,30 +97,35 @@ pub use conn::{AmqpConnectError, AmqpPrivateCa, AmqpPrivateCaError};
 pub use publisher::AmqpPublisher;
 #[cfg(feature = "backend")]
 pub use subscriber::AmqpSubscriber;
-#[cfg(feature = "integration-test-support")]
-pub use subscriber::BrokerDeadLetterObservation;
 
 #[cfg(not(feature = "backend"))]
 pub use fallback::{AmqpPublisher, AmqpSubscriber};
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：编译期断言 adapter 已 impl 冻结的 diport DI port（PhantomData 绑定检查，不构造、
+    //! build smoke：编译期断言 adapter 已 impl canonical native ports（PhantomData 绑定检查，不构造、
     //! 不执行 body）。两种 build 都过——默认 fallback（`todo!()`）/ `integration` 真实 lapin impl。
     //! INVARIANT: ADAPTER-PORT-FREEZE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— [`AmqpPublisher`] impl `Publisher`+`ManagedResource`、
-    //! [`AmqpSubscriber`] impl `AckableSubscriber`+`ManagedResource`；去掉任一 impl 即编译失败（anti-vacuity）。
-    //! `AmqpSubscriber` 不再 impl `Subscriber`（at-most-once 仅 MemBus）。
+    //! [`AmqpSubscriber`] impl `DeliverySource`+`ManagedResource`；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
     fn assert_managed_resource<T: rss_runtime::ManagedResource>(_: PhantomData<T>) {}
-    fn assert_publisher<T: diport::Publisher>(_: PhantomData<T>) {}
-    fn assert_ackable_subscriber<T: diport::AckableSubscriber>(_: PhantomData<T>) {}
+    fn assert_publisher<T: rss_transactional_messaging::transport::Publisher<Vec<u8>>>(
+        _: PhantomData<T>,
+    ) {
+    }
+    fn assert_delivery_source<
+        T: rss_transactional_messaging::transport::DeliverySource<Vec<u8>>,
+    >(
+        _: PhantomData<T>,
+    ) {
+    }
 
     #[test]
     fn impls_frozen_ports() {
         assert_publisher(PhantomData::<super::AmqpPublisher>);
         assert_managed_resource(PhantomData::<super::AmqpPublisher>);
         assert_managed_resource(PhantomData::<super::AmqpSubscriber>);
-        assert_ackable_subscriber(PhantomData::<super::AmqpSubscriber>);
+        assert_delivery_source(PhantomData::<super::AmqpSubscriber>);
     }
 }

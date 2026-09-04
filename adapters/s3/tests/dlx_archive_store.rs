@@ -22,12 +22,12 @@ use aws_sdk_s3::types::{
 use aws_smithy_mocks::{MockResponseInterceptor, Rule, RuleMode, create_mock_http_client, mock};
 use base64::Engine as _;
 use diport::{
-    ArchiveChecksum, ArchiveVersionId, Clock, DlxArchiveCiphertext, DlxArchiveHeadOutcome,
+    ArchiveChecksum, ArchiveVersionId, DlxArchiveCiphertext, DlxArchiveHeadOutcome,
     DlxArchivePutOutcome, DlxArchivePutRequest, DlxArchiveStore, DlxLifecycleErrorKind, KeyRef,
 };
 use eventexec::DeadLetterId;
 use rss_redact::RedactedBytes;
-use s3::{S3DlxArchiveCapabilityError, S3DlxArchiveStore, VerifiedS3DlxArchiveStore};
+use s3::{ArchiveClock, S3DlxArchiveCapabilityError, S3DlxArchiveStore, VerifiedS3DlxArchiveStore};
 
 const BUCKET: &str = "dlx-archive-test";
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
@@ -59,7 +59,7 @@ fn mock_client(rules: &[&Rule]) -> aws_sdk_s3::Client {
 
 struct FixedClock(i64);
 
-impl Clock for FixedClock {
+impl ArchiveClock for FixedClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(self.0 as u64)
     }

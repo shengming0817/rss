@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
-eventing.workspace = true
+rss-transactional-messaging.workspace = true
 # 注：审计 sink 迁 diport（#1075）后，本 crate 的 metrics label / MetricLabel 仅用 std；
 # vocab/futures/thiserror 随 AuditSink 一并移除。其余基础/引擎 path 依赖系服务冻结期预声明（#1050），
 # 非本 PR 引入，保持不动。

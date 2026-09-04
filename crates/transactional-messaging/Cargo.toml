@@ -1,0 +1,33 @@
+[package]
+name = "rss-transactional-messaging"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Provider-neutral transactional messaging core for RSS"
+categories = ["asynchronous"]
+keywords = ["messaging", "transactions", "outbox", "idempotency"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["consumer", "producer"]
+consumer = ["dep:futures"]
+producer = []
+
+[dependencies]
+futures = { workspace = true, optional = true }
+rss-contract.workspace = true
+rss-request-context.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+rss-redact.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+trybuild.workspace = true

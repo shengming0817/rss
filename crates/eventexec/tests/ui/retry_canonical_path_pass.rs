@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::num::NonZeroU32;
 
-use eventing::lifecycle::{RetryPolicy, RetryPolicyError};
+use rss_transactional_messaging::policy::{RetryPolicy, RetryPolicyError};
 
 fn main() {
     let policy: Result<RetryPolicy, RetryPolicyError> =

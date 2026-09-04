@@ -1,4 +1,5 @@
-use diport::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSummary, EnvelopeMetadata};
+use diport::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSummary};
+use rss_transactional_messaging::message::TransportContext;
 
 fn main() {
     let tenant =
@@ -13,7 +14,7 @@ fn main() {
         b"payload".to_vec(),
         DeadLetterSummary::new("max retries exhausted"),
         10,
-        EnvelopeMetadata::empty(),
+        TransportContext::new(None, None),
     );
     let _ = (record.tenant(), record.message_id());
 }

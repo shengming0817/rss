@@ -4,11 +4,12 @@ use std::time::SystemTime;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
 use diport::{
-    ArchiveChecksum, Clock, DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchivePutOutcome,
+    ArchiveChecksum, DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchivePutOutcome,
     DlxArchivePutRequest, DlxArchiveStore, KeyRef,
 };
 use eventexec::{DeadLetterId, DlxArchiveObjectKey};
 use rss_redact::RedactedBytes;
+use s3::ArchiveClock;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -36,7 +37,7 @@ fn live_factory(
 
 struct SystemClock;
 
-impl Clock for SystemClock {
+impl ArchiveClock for SystemClock {
     #[allow(clippy::disallowed_methods)] // Live WORM retention is measured against provider wall time.
     fn now(&self) -> SystemTime {
         SystemTime::now()

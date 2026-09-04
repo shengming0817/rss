@@ -96,27 +96,21 @@ name = "amqp"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "consistency",
- "diport",
- "eventexec",
  "futures",
- "ids",
  "lapin",
- "primitives",
- "rss-eventing",
+ "rss-contract",
+ "rss-diag-context",
  "rss-redact",
  "rss-request-context",
  "rss-runtime",
- "runctx",
+ "rss-transactional-messaging",
  "rustls-pki-types",
  "secure",
- "support",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "vocab",
 ]
 
 [[package]]
@@ -125,18 +119,13 @@ version = "0.0.0"
 dependencies = [
  "amqp",
  "anyhow",
- "consistency",
- "diport",
- "eventexec",
- "futures",
- "primitives",
- "rss-eventing",
+ "rss-contract",
  "rss-request-context",
  "rss-runtime",
+ "rss-transactional-messaging",
  "secure",
  "testkit",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -1211,13 +1200,10 @@ dependencies = [
 name = "consistency"
 version = "0.0.0"
 dependencies = [
- "ids",
  "rss-request-context",
- "runctx",
- "serde",
+ "rss-transactional-messaging",
  "serde_json",
  "sha2 0.10.9",
- "support",
  "thiserror",
  "tokio",
  "trybuild",
@@ -1616,14 +1602,13 @@ dependencies = [
  "primitives",
  "rss-contract",
  "rss-data-protection",
- "rss-eventing",
  "rss-redact",
  "rss-request-context",
+ "rss-transactional-messaging",
  "sagaauthmint",
  "sha2 0.10.9",
  "thiserror",
  "tokio",
- "tokio-util",
  "trait-variant",
  "trybuild",
  "url",
@@ -1656,6 +1641,7 @@ dependencies = [
  "primitives",
  "rss-redact",
  "rss-request-context",
+ "rss-transactional-messaging",
  "runctx",
  "serde",
  "serde_json",
@@ -1804,11 +1790,11 @@ dependencies = [
  "rss-contract",
  "rss-data-protection",
  "rss-diag-context",
- "rss-eventing",
  "rss-redact",
  "rss-request-context",
  "rss-runtime",
  "rss-trace-context",
+ "rss-transactional-messaging",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
@@ -3110,6 +3096,7 @@ dependencies = [
  "rss-contract",
  "rss-data-protection",
  "rss-request-context",
+ "rss-transactional-messaging",
  "tokio",
  "tokio-util",
  "uuid",
@@ -3392,7 +3379,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
- "rss-eventing",
+ "rss-transactional-messaging",
  "runctx",
  "support",
  "tracing",
@@ -3772,8 +3759,6 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 name = "postgres"
 version = "0.0.0"
 dependencies = [
- "consistency",
- "diport",
  "futures",
  "rcgen",
  "rss-request-context",
@@ -3781,7 +3766,6 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sqlx",
- "static_assertions",
  "thiserror",
  "zeroize",
 ]
@@ -4192,7 +4176,6 @@ dependencies = [
  "deadpool-redis",
  "diport",
  "rss-redact",
- "rss-request-context",
  "rss-runtime",
  "rstest",
  "secure",
@@ -4200,7 +4183,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "uuid",
  "vocab",
 ]
 
@@ -4212,8 +4194,10 @@ dependencies = [
  "deadpool-redis",
  "diport",
  "redis-adapter",
+ "rss-contract",
  "rss-request-context",
  "rss-runtime",
+ "rss-transactional-messaging",
  "secure",
  "sha2 0.10.9",
  "testkit",
@@ -4431,18 +4415,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rss-eventing"
-version = "0.1.0"
-dependencies = [
- "rss-conformance",
- "rss-contract",
- "rss-diag-context",
- "rss-request-context",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "rss-platform"
 version = "0.3.0"
 dependencies = [
@@ -4511,6 +4483,21 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rss-transactional-messaging"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-redact",
+ "rss-request-context",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "trybuild",
 ]
 
 [[package]]
@@ -5575,7 +5562,6 @@ dependencies = [
  "axum",
  "rcgen",
  "rss-conformance",
- "rss-eventing",
  "serde",
  "serde_json",
  "sqlx",

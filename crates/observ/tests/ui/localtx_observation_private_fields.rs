@@ -1,4 +1,4 @@
-use consistency::LocalTxBoundary;
+use vocab::LocalTxBoundary;
 use observ::LocalTxObservation;
 use std::marker::PhantomData;
 use tracing::Span;

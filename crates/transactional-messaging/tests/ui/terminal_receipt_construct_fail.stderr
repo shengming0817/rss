@@ -1,0 +1,21 @@
+warning: unreachable expression
+ --> tests/ui/terminal_receipt_construct_fail.rs:6:22
+  |
+5 |         consumer: panic!(),
+  |                   -------- any code following this expression is unreachable
+6 |         fingerprint: panic!(),
+  |                      ^^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `consumer`, `fingerprint` and `disposition` of struct `TerminalReceipt` are private
+ --> tests/ui/terminal_receipt_construct_fail.rs:5:9
+  |
+4 |     let _forged = TerminalReceipt {
+  |                   --------------- in this type
+5 |         consumer: panic!(),
+  |         ^^^^^^^^ private field
+6 |         fingerprint: panic!(),
+  |         ^^^^^^^^^^^ private field
+7 |         disposition: TerminalDisposition::Succeeded,
+  |         ^^^^^^^^^^^ private field

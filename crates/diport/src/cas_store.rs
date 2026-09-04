@@ -149,7 +149,7 @@ pub struct CasStoreRequest {
     pub expected_token: Option<vocab::Epoch>,
 }
 
-/// CAS 操作结论（typed outcome，非 error——conflict / fence 是预期控制流，对标 `consistency::SeenState` /
+/// CAS 操作结论（typed outcome，非 error——conflict / fence 是预期控制流；
 /// [`crate::WriteOutcome`]）。
 ///
 /// PII 边界（同 [`CasStoreRequest`]）：`Conflict.current`（当前状态 payload）经 [`RedactedBytes`] 持有

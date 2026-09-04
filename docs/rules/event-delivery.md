@@ -7,17 +7,18 @@
 - 每次 delivery 在 tenant-scoped `ConsumerTx` 内完成 Inbox idempotency、handler effect 与 settlement intent。
 - duplicate 必须返回既有 terminal result；不得再次执行 handler 或外部副作用。
 - handler 只能取得 typed context/ports，不得取得 raw broker acker、connection 或 transaction。
-- 唯一规范 outcome 是 `eventing::delivery::ConsumerTxOutcome<C>`；Postgres 用私有
-  `PgConsumerTxCommitProof` 绑定成功分支。禁止镜像枚举、转换桥、crate-root re-export 或 `()` proof。
+- 唯一规范 outcome 是 `rss_transactional_messaging::transaction::TransactionOutcome<C>`；provider 用私有
+  associated commit proof 绑定成功分支。禁止镜像枚举、转换桥、crate-root re-export 或生产 `()` proof。
 - commit outcome unknown 不得 success-ack；由同 ID redelivery 与 Inbox state 收敛。
-- subscriber 只能由生产订阅入口铸造字段私有的 `ManagedDeliveryStream`；stream 与派生 lifecycle token
-  是同一个 move-only receipt，不存在 raw `stream + token` compose-first API。每条 delivery 使用同源 child
-  token；强制取消同时 drop handler 与 renewal，且不 Ack、commit、写 DLX、伪造 Requeue 或释放无法证明
-  rollback-safe 的 claim，未结算 delivery 由 channel/session 关闭后交 broker redelivery。
+- `DeliverySource` 只交付字段私有的 `ManagedDeliveryStream`；stream item 携 typed envelope 与 move-only
+  settlement，消费者不能拆出 raw stream 重新组合 lifecycle。topology 不进入 ingress port，未结算 delivery
+  由 provider session 关闭后交 broker redelivery。
+- ingress validator 必须消费 core-issued `IngressChallenge` 并返回 `VerifiedIngress`；pipeline 在 claim 前再次
+  核对 subscription、tenant、message identity、contract 与 fingerprint，验证证据不得擦除为 `()`。
 
 ## Claim 与 lease
 
-- claim token/epoch/expiry 私有铸造；extend/commit/release 必须 CAS 匹配完整 lease identity。
+- claim token/epoch 私有铸造；extend/release 必须 CAS 匹配完整 lease identity；provider 事务内写 terminal receipt。
 - lease lost 是 hard fence：停止后续 effect/settlement，取消在途可取消工作，并让 broker redeliver。
 - 运行期可能在 TTL race 中重复执行，因此所有外部 side effect 必须幂等、可重入或由 fencing 保护。
 - subscriber 只能铸造字段私有、move-only 的 managed delivery stream；stream 与 lifecycle token 必须同源，
@@ -26,17 +27,20 @@
 
 ## Disposition 与 settlement
 
-Disposition 是闭值：成功结算、handler transient、infrastructure transient、commit unknown、rollback failed、
-fenced、rejected。自由字符串或 adapter-specific fallback 禁止。
+`TransactionOutcome` 是闭值：committed、not-started、rolled-back、rollback-failed、commit-unknown、fenced。
+自由字符串或 adapter-specific fallback 禁止。
 
 - broker ACK/NACK/Reject 只能由 transaction outcome 产生；handler 不直接控制。
 - success ACK 只能发生在 durable commit 明确成功之后。
 - 只有 handler transient 进入本地 retry budget；infrastructure transient、commit unknown、rollback failed 与
   fenced 立即重投，不得写 application DLQ 或提交 Inbox done。只有 rejected 可进入 terminal DLQ 流程。
-- 本地 retry loop 必须接收一个 `eventing::lifecycle::RetryPolicy`；尝试上限与指数 backoff 不得拆开传递或
+- 本地 retry loop 必须接收一个 `rss_transactional_messaging::policy::RetryPolicy`；尝试上限与指数 backoff 不得拆开传递或
   单独默认。标准值为三次总尝试、1 秒 base、60 秒 cap。
-- Eventing worker 构造必须显式接收 `eventing::lifecycle::ShutdownBudget`；标准值 45 秒，仅在 internal
+- TransactionalMessaging worker 构造必须显式接收 `rss_transactional_messaging::policy::ShutdownBudget`；标准值 45 秒，仅在 internal
   `ManagedResource` 边界投影为 `Duration`。
+- claim、extend、handler transaction、retry delay、settle、release 与 abandon 都消费从同一个
+  `AbsoluteDeadline` 投影的 `OperationDeadline`；provider 必须用 runtime timeout 实际约束 future，不得在各阶段
+  重置相对预算。
 - rollback success 才能按 retry disposition 结算；rollback failed/commit unknown 必须保守重投并保留诊断。
 - settlement transport failure 不改变 durable outcome；以相同 message ID 重投并读取 Inbox result。
 

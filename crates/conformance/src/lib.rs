@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 
 pub mod localtx;
+/// Transactional messaging ordering, uncertainty and identity assertions.
+pub mod messaging;
 
 /// Closed, low-cardinality provider error category shared by conformance helpers.
 ///

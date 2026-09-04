@@ -7,7 +7,7 @@
 //! ref: watermill message/router.go@master (stable message identity across redelivery); RSS adds a
 //! tenant-scoped, durably audited plan digest and keeps publication behind the normal outbox relay.
 
-use consistency::IdemKey;
+use rss_transactional_messaging::message::MessageId;
 use sha2::{Digest as _, Sha256};
 
 const PLAN_DIGEST_DOMAIN: &[u8] = b"rss.l2-dr-recovery-plan.v1";
@@ -127,14 +127,14 @@ impl RecoveryEpochId {
 
 /// Canonical, duplicate-free recovery event set.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoveryEventSet(Vec<IdemKey>);
+pub struct RecoveryEventSet(Vec<MessageId>);
 
 impl RecoveryEventSet {
     /// Maximum facts authorized by one recovery epoch.
     pub const MAX_EVENTS: usize = 500;
 
     /// Validate cardinality and sort exact UTF-8 identity bytes into canonical order.
-    pub fn new(mut events: Vec<IdemKey>) -> Result<Self, L2DrRecoveryError> {
+    pub fn new(mut events: Vec<MessageId>) -> Result<Self, L2DrRecoveryError> {
         if events.is_empty() {
             return Err(L2DrRecoveryError::EmptyEventSet);
         }
@@ -164,12 +164,12 @@ impl RecoveryEventSet {
     }
 
     /// Iterate in canonical byte order.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &IdemKey> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &MessageId> {
         self.0.iter()
     }
 
     /// Borrow the canonically ordered stable identities.
-    pub fn as_slice(&self) -> &[IdemKey] {
+    pub fn as_slice(&self) -> &[MessageId] {
         &self.0
     }
 }
@@ -854,7 +854,7 @@ pub trait L2DrRecoveryStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use consistency::IdemKey;
+    use rss_transactional_messaging::message::MessageId;
     use sha2::Sha256;
 
     const TENANT: &str = "15d35f5c-2e08-4eef-bdb1-a1164235d738";
@@ -871,8 +871,8 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     // reason: fixed literal fixtures must panic loudly on invariant failure in unit tests.
-    fn event(value: &str) -> IdemKey {
-        IdemKey::parse(value).expect("valid event id")
+    fn event(value: &str) -> MessageId {
+        MessageId::parse(value).expect("valid event id")
     }
 
     #[allow(clippy::expect_used)]
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn dr_recovery_event_set_uses_canonical_byte_order() {
         let set = events(&["event-2", "z", "event-10", "a"]);
-        let ordered: Vec<_> = set.iter().map(IdemKey::as_str).collect();
+        let ordered: Vec<_> = set.iter().map(MessageId::as_str).collect();
         assert_eq!(ordered, ["a", "event-10", "event-2", "z"]);
     }
 

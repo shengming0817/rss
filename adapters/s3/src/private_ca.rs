@@ -7,10 +7,9 @@ use std::sync::Arc;
 
 use aws_sdk_s3::config::{Credentials, ProvideCredentials, Region, SharedHttpClient};
 use aws_smithy_http_client::tls::{self, TrustStore};
-use diport::Clock;
 use secure::S3Endpoint;
 
-use crate::{S3DlxArchiveStore, VerifiedS3DlxArchiveStore};
+use crate::{ArchiveClock, S3DlxArchiveStore, VerifiedS3DlxArchiveStore};
 
 /// Typed factory for an S3 client that trusts exactly one caller-supplied private CA bundle.
 #[derive(Clone)]
@@ -71,7 +70,7 @@ impl PrivateCaS3ClientFactory {
     pub fn build_dlx_archive_store(
         &self,
         bucket: impl Into<String>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn ArchiveClock>,
         credentials_provider: impl ProvideCredentials + 'static,
     ) -> Result<S3DlxArchiveStore, PrivateCaS3BuildError> {
         Ok(S3DlxArchiveStore::new(
@@ -85,7 +84,7 @@ impl PrivateCaS3ClientFactory {
     pub async fn build_verified_dlx_archive_store(
         &self,
         bucket: impl Into<String>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn ArchiveClock>,
     ) -> Result<VerifiedS3DlxArchiveStore, PrivateCaS3BuildError> {
         Ok(self
             .build_dlx_archive_store(bucket, clock, self.credentials.clone())?

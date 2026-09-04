@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/settlement_decision_construct_fail.rs:4:19
+  |
+4 |     let _forged = SettlementDecision(SettlementKind::Acknowledge);
+  |                   ^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/transaction.rs
+  |
+  | pub struct SettlementDecision(SettlementKind);
+  |                               ^^^^^^^^^^^^^^ private field

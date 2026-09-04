@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use consistency::{EngineError, EngineErrorKind, RetentionSweeper};
+use consistency::{EngineError, EngineErrorKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -398,11 +398,11 @@ impl MaintenanceCoordinator<InboxBacklogMaintenance> {
         lock_store: Box<diport::DynLockStore<'static>>,
         cas_store: Box<diport::DynCasStore<'static>>,
         ttl: Duration,
-        groups: &[consistency::ConsumerGroup],
+        groups: &[rss_transactional_messaging::inbox::ConsumerGroup],
     ) -> Result<Self, MaintenanceCoordinatorError> {
         let labels = groups
             .iter()
-            .map(consistency::ConsumerGroup::as_str)
+            .map(rss_transactional_messaging::inbox::ConsumerGroup::as_str)
             .collect::<Vec<_>>();
         Self::from_scope_labels(lock_store, cas_store, ttl, &labels)
     }
@@ -423,35 +423,6 @@ impl MaintenanceCoordinator<OutboxRetentionMaintenance> {
 enum MaintenanceLease {
     Active { grant: LockGrant },
     Standby,
-}
-
-/// Distributed active/standby wrapper for outbox retention sweeping.
-pub struct CoordinatedRetentionSweeper<S> {
-    inner: S,
-    coordinator: MaintenanceCoordinator<OutboxRetentionMaintenance>,
-}
-
-impl<S> CoordinatedRetentionSweeper<S> {
-    /// Bind one retention implementation to the shared coordinator.
-    #[must_use]
-    pub fn new(inner: S, coordinator: MaintenanceCoordinator<OutboxRetentionMaintenance>) -> Self {
-        Self { inner, coordinator }
-    }
-}
-
-impl<S> RetentionSweeper for CoordinatedRetentionSweeper<S>
-where
-    S: RetentionSweeper + Send + Sync,
-{
-    async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
-        self.coordinator
-            .run_active(self.inner.sweep(retain_seconds))
-            .await
-            .map(|deleted| match deleted {
-                MaintenanceObservation::Active(deleted) => deleted,
-                MaintenanceObservation::Standby => 0,
-            })
-    }
 }
 
 #[cfg(test)]
@@ -537,8 +508,11 @@ mod tests {
     #[tokio::test]
     async fn distinct_topology_scopes_do_not_block_each_other() -> TestResult {
         let store = FakeDistributedStore::default();
-        let identity_group = consistency::ConsumerGroup::parse("audit.session-created")?;
-        let settings_group = consistency::ConsumerGroup::parse("settings.config-version-changed")?;
+        let identity_group =
+            rss_transactional_messaging::inbox::ConsumerGroup::parse("audit.session-created")?;
+        let settings_group = rss_transactional_messaging::inbox::ConsumerGroup::parse(
+            "settings.config-version-changed",
+        )?;
         let identity = MaintenanceCoordinator::<InboxBacklogMaintenance>::for_consumer_groups(
             diport::DynLockStore::new_box(store.clone()),
             diport::DynCasStore::new_box(store.clone()),
@@ -854,39 +828,5 @@ mod tests {
         async fn shutdown(&self) -> Result<(), diport::CasStoreError> {
             Ok(())
         }
-    }
-
-    #[derive(Clone, Default)]
-    struct CountingSweeper {
-        calls: Arc<StdMutex<u64>>,
-    }
-
-    impl CountingSweeper {
-        fn calls(&self) -> u64 {
-            *self.calls.lock().unwrap_or_else(|error| error.into_inner())
-        }
-    }
-
-    impl RetentionSweeper for CountingSweeper {
-        async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
-            *self.calls.lock().unwrap_or_else(|error| error.into_inner()) += 1;
-            Ok(retain_seconds)
-        }
-    }
-
-    #[tokio::test]
-    async fn retention_sweeper_runs_when_coordinator_is_active() -> TestResult {
-        let store = FakeDistributedStore::default();
-        let sweeper = CountingSweeper::default();
-        let wrapped = CoordinatedRetentionSweeper::new(
-            sweeper.clone(),
-            store.coordinator_for::<OutboxRetentionMaintenance>(),
-        );
-
-        let deleted = wrapped.sweep(42).await?;
-
-        assert_eq!(deleted, 42);
-        assert_eq!(sweeper.calls(), 1);
-        Ok(())
     }
 }

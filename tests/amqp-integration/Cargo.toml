@@ -6,20 +6,15 @@ rust-version.workspace = true
 publish = false
 
 [dev-dependencies]
+rss-contract.workspace = true
 amqp = { path = "../../adapters/amqp", features = ["integration"] }
 anyhow = { workspace = true }
-consistency = { path = "../../crates/consistency" }
-diport = { path = "../../crates/diport" }
 rss-runtime.workspace = true
-eventing = { workspace = true }
-eventexec = { path = "../../crates/eventexec", features = ["l2-test-support"] }
-futures = { workspace = true }
-primitives = { path = "../../crates/primitives" }
+rss-transactional-messaging = { workspace = true }
 rss-request-context = { workspace = true }
 secure = { path = "../../crates/secure" }
 testkit = { path = "../../crates/testkit", features = ["containers"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
-tokio-util = { workspace = true }
 
 [lints]
 workspace = true

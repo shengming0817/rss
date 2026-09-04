@@ -10,12 +10,12 @@
 //! `CONTRACT-BINDING-FUNNEL-01`; this façade does not claim to Hard-seal the public
 //! `HttpRouteBinding::from_static` source.
 
-use consistency::{
-    LocalTxBoundary, LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus,
+use rss_transactional_messaging::transaction::{
+    LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus,
 };
 use std::marker::PhantomData;
 use tracing::{Level, Span, field};
-use vocab::{HttpRouteBinding, http::LocalTx};
+use vocab::{HttpRouteBinding, LocalTxBoundary, http::LocalTx};
 
 /// Closed LocalTx metric identity used by the emitter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

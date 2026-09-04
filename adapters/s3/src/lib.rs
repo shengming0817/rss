@@ -20,7 +20,7 @@ mod store;
 
 #[cfg(feature = "backend")]
 pub use dlx_archive::{
-    S3DlxArchiveCapabilityError, S3DlxArchiveConfigError, S3DlxArchiveStore,
+    ArchiveClock, S3DlxArchiveCapabilityError, S3DlxArchiveConfigError, S3DlxArchiveStore,
     VerifiedS3DlxArchiveStore,
 };
 #[cfg(feature = "backend")]

@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish = false
 
 [dev-dependencies]
+rss-contract.workspace = true
+rss-transactional-messaging.workspace = true
 consistency = { path = "../../crates/consistency" }
 deadpool-redis = { workspace = true }
 diport = { path = "../../crates/diport" }

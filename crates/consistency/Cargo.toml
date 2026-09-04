@@ -9,15 +9,12 @@ publish = false
 workspace = true
 
 [dependencies]
+rss-transactional-messaging.workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }
-ids = { path = "../ids" }
-support = { path = "../support" }
-runctx = { path = "../runctx" }
 thiserror = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }   # LeaseToken::mint 内铸 uuid v4（#1354 F4）
+uuid = { workspace = true, features = ["v4"] }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
-serde = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]

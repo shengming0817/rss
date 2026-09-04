@@ -38,26 +38,6 @@ note: required by a bound in `assert_send`
    |                   ^^^^ required by this bound in `assert_send`
    = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: `(dyn acker::__dynosaur_macro_dynacker::ErasedAcker + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn acker::__dynosaur_macro_dynacker::ErasedAcker + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynAcker<'static>`, the trait `Sync` is not implemented for `(dyn acker::__dynosaur_macro_dynacker::ErasedAcker + 'static)`
-note: required because it appears within the type `DynAcker<'static>`
-  --> src/acker.rs
-   |
-   | #[dynosaur(pub DynAcker = dyn(box) Acker, bridge(dyn))]
-   |                ^^^^^^^^
-   = note: required for `Arc<DynAcker<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
 error[E0277]: `(dyn cas_store::__dynosaur_macro_dyncasstore::ErasedCasStore + 'static)` cannot be shared between threads safely
   --> tests/ui/arc_dyn_ports_not_send.rs:22:5
    |
@@ -151,86 +131,6 @@ note: required because it appears within the type `DynObjectStore<'static>`
    | #[dynosaur(pub DynObjectStore = dyn(box) ObjectStore, bridge(dyn))]
    |                ^^^^^^^^^^^^^^
    = note: required for `Arc<DynObjectStore<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynOutboxEmitter<'static>`, the trait `Sync` is not implemented for `(dyn outbox_emitter::__dynosaur_macro_dynoutboxemitter::ErasedOutboxEmitter + 'static)`
-note: required because it appears within the type `DynOutboxEmitter<'static>`
-  --> src/outbox_emitter.rs
-   |
-   | #[dynosaur(pub DynOutboxEmitter = dyn(box) OutboxEmitter, bridge(dyn))]
-   |                ^^^^^^^^^^^^^^^^
-   = note: required for `Arc<DynOutboxEmitter<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `(dyn publisher::__dynosaur_macro_dynpublisher::ErasedPublisher + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn publisher::__dynosaur_macro_dynpublisher::ErasedPublisher + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynPublisher<'static>`, the trait `Sync` is not implemented for `(dyn publisher::__dynosaur_macro_dynpublisher::ErasedPublisher + 'static)`
-note: required because it appears within the type `DynPublisher<'static>`
-  --> src/publisher.rs
-   |
-   | #[dynosaur(pub DynPublisher = dyn(box) Publisher, bridge(dyn))]
-   |                ^^^^^^^^^^^^
-   = note: required for `Arc<DynPublisher<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `(dyn acker::__dynosaur_macro_dynackablesubscriber::ErasedAckableSubscriber + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn acker::__dynosaur_macro_dynackablesubscriber::ErasedAckableSubscriber + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynAckableSubscriber<'static>`, the trait `Sync` is not implemented for `(dyn acker::__dynosaur_macro_dynackablesubscriber::ErasedAckableSubscriber + 'static)`
-note: required because it appears within the type `DynAckableSubscriber<'static>`
-  --> src/acker.rs
-   |
-   | #[dynosaur(pub DynAckableSubscriber = dyn(box) AckableSubscriber, bridge(dyn))]
-   |                ^^^^^^^^^^^^^^^^^^^^
-   = note: required for `Arc<DynAckableSubscriber<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `(dyn subscriber::__dynosaur_macro_dynsubscriber::ErasedSubscriber + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn subscriber::__dynosaur_macro_dynsubscriber::ErasedSubscriber + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynSubscriber<'static>`, the trait `Sync` is not implemented for `(dyn subscriber::__dynosaur_macro_dynsubscriber::ErasedSubscriber + 'static)`
-note: required because it appears within the type `DynSubscriber<'static>`
-  --> src/subscriber.rs
-   |
-   | #[dynosaur(pub DynSubscriber = dyn(box) Subscriber, bridge(dyn))]
-   |                ^^^^^^^^^^^^^
-   = note: required for `Arc<DynSubscriber<'static>>` to implement `Send`
 note: required by a bound in `assert_send`
   --> tests/ui/arc_dyn_ports_not_send.rs:18:19
    |

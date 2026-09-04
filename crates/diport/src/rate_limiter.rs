@@ -1,11 +1,11 @@
 //! `RateLimiter` —— 限流 provider DI port（production Redis / test-only in-memory governor）。
 //!
 //! 对标 GoCell `middleware.RateLimiter`（Go `x/time/rate` token bucket）。provider 各自管理单调时钟
-//! （in-mem governor 用 QuantaClock，redis 用服务端 TTL）——**不**经 [`crate::Clock`]（wall-clock，错的
+//! （in-mem governor 用 QuantaClock，redis 用服务端 TTL）——**不**经公共 wall-clock port（错的
 //! 时间基）。
 //!
 //! async 而非 sync：production Redis provider 走网络 I/O；provider 互换要求统一最宽签名
-//! （与 [`crate::Signer`] / [`crate::Publisher`] 同，区别于纯计算的 sync [`crate::Clock`]）。in-mem governor
+//! （与 [`crate::Signer`] 同，区别于纯计算 helper）。in-mem governor
 //! provider 内部同步即返，经 `async fn` 包裹零额外开销。
 //!
 //! 对标：**port 形状**照 [`crate::signer`]（ADR-003 dynosaur Send-变体范式，本 crate 的 async DI port 单一对标）；

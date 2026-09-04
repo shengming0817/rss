@@ -9,10 +9,10 @@ fn main() {
     );
     let _first = eventexec::DlqRedriveRequest::new(
         authorization,
-        consistency::IdemKey::parse("event-first").unwrap(),
+        rss_transactional_messaging::message::MessageId::parse("message-first").unwrap(),
     );
     let _second = eventexec::DlqRedriveRequest::new(
         authorization,
-        consistency::IdemKey::parse("event-second").unwrap(),
+        rss_transactional_messaging::message::MessageId::parse("message-second").unwrap(),
     );
 }

@@ -11,14 +11,14 @@ help: the trait `diport::effect::sealed::DiPortEffect` is not implemented for `F
   | ^^^^^^^^^^^^^^^^^
   = note: `ForgedPort` implements similarly named trait `DiPortEffect`, but not `diport::effect::sealed::DiPortEffect`
   = help: the following other types implement trait `diport::effect::sealed::DiPortEffect`:
-            (dyn Clock + 'a)
             (dyn MetricsExporter + 'a)
-            (dyn SubscribeInitializer + 'a)
             Arc<T>
             Box<T>
-            DynAckableSubscriber<'_>
-            DynAcker<'_>
             DynCasStore<'_>
+            DynDeadLetterStore<'_>
+            DynFencedWriter<'_>
+            DynKeyProvider<'_>
+            DynLeaderElector<'_>
           and $N others
 note: required by a bound in `DiPortEffect`
  --> src/effect.rs
@@ -34,5 +34,5 @@ note: required by a bound in `DiPortEffect`
             diport::DynSagaDurableStore<'_>
             diport::DynRateLimiter<'_>
             diport::DynSigner<'_>
-            diport::DynAcker<'_>
+            diport::DynCasStore<'_>
           and $N others

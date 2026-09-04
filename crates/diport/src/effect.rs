@@ -37,13 +37,7 @@ macro_rules! define_effect_classes {
     };
 }
 
-define_effect_classes!(
-    ReadEffect,
-    AuthEffect,
-    BusinessWriteEffect,
-    OutboxEffect,
-    WorkflowEffect,
-);
+define_effect_classes!(ReadEffect, AuthEffect, BusinessWriteEffect, WorkflowEffect,);
 
 /// Closed privilege vocabulary for canonical port injection types.
 pub trait PortPrivilegeClass: sealed::PortPrivilegeClass {}
@@ -223,25 +217,17 @@ classify_ports! {
     async_send DynRateLimiter => AuthEffect;
     async_send DynSigner => AuthEffect;
 
-    async_send DynAcker => BusinessWriteEffect;
     async_send DynCasStore => BusinessWriteEffect;
     async_send DynOwnerCheckpointStore => BusinessWriteEffect;
     async_send DynDeadLetterStore => BusinessWriteEffect;
     async_send DynFencedWriter => BusinessWriteEffect;
     async_send DynObjectStore => BusinessWriteEffect;
 
-    async_send DynOutboxEmitter => OutboxEffect;
-    async_send DynPublisher => OutboxEffect;
-
-    async_send DynAckableSubscriber => WorkflowEffect;
-    async_send DynSubscriber => WorkflowEffect;
     async_send DynLeaderElector => WorkflowEffect;
     async_send DynLockStore => WorkflowEffect;
     async_send DynSagaTenantSource => WorkflowEffect;
 
-    sync_obj Clock => ReadEffect;
     sync_obj MetricsExporter => ReadEffect;
-    sync_obj SubscribeInitializer => WorkflowEffect;
 }
 
 #[cfg(test)]
@@ -260,7 +246,6 @@ mod tests {
     fn arc_and_box_preserve_the_inner_effect() {
         assert_effect::<Arc<crate::DynSigner<'static>>, AuthEffect>();
         assert_effect::<Box<Arc<crate::DynSigner<'static>>>, AuthEffect>();
-        assert_effect::<Arc<dyn crate::Clock>, ReadEffect>();
     }
 
     #[test]
@@ -268,13 +253,11 @@ mod tests {
         assert_bucket::<crate::DynKeyProvider<'static>, AsyncSync>();
         assert_bucket::<crate::DynSecretResolver<'static>, AsyncSync>();
         assert_bucket::<crate::DynSigner<'static>, AsyncSend>();
-        assert_bucket::<dyn crate::Clock, SyncObj>();
     }
 
     #[test]
     fn arc_and_box_preserve_bucket() {
         assert_bucket::<Arc<crate::DynKeyProvider<'static>>, AsyncSync>();
         assert_bucket::<Box<crate::DynSigner<'static>>, AsyncSend>();
-        assert_bucket::<Arc<Box<dyn crate::Clock>>, SyncObj>();
     }
 }

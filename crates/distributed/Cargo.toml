@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+rss-transactional-messaging.workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }

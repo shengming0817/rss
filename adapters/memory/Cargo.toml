@@ -8,10 +8,11 @@ publish = false
 [lints]
 workspace = true
 
-# in-mem DI port provider（RW-G1 追踪弹）：impl diport 的 Publisher / Subscriber / AuditSink / Clock，
+# in-memory providers for transactional messaging plus the remaining DI audit and coordination ports.
 # 供 journeys 组合根注入验接缝。runtime-agnostic（futures channel，不绑 tokio runtime）。
 # adapter 只能被组合根依赖（deny.toml wrappers）。
 [dependencies]
+rss-transactional-messaging.workspace = true
 rss-request-context.workspace = true
 consistency = { path = "../../crates/consistency" }
 eventexec = { path = "../../crates/eventexec" }
@@ -27,7 +28,7 @@ uuid = { workspace = true }
 # 事件总线 fan-out + 订阅流：futures channel（receiver 即 Stream）+ take_until 取消。
 # ref: watermill pubsub/gochannel/pubsub.go@master（in-mem pub/sub 缓冲 channel）
 futures = { workspace = true }
-# 订阅取消信号：tokio_util CancellationToken（与 diport::Subscriber::subscribe 签名同源）。
+# 非消息类型的长生命周期能力共享 tokio_util CancellationToken。
 tokio-util = { workspace = true }
 zeroize = { workspace = true }
 

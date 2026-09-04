@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use eventing::delivery::DeliveryBudget;
+use rss_transactional_messaging::policy::DeliveryBudget;
 
 fn main() {
     let _budget = DeliveryBudget {

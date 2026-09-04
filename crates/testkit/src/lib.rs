@@ -1,5 +1,5 @@
-//! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）与可复用
-//! provider-neutral conformance assertions。
+//! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）。公共
+//! provider-neutral conformance assertions 由 `rss-conformance` 唯一拥有。
 //!
 //! 给 per-contract 契约测试提供可复用 harness：声明式构造请求、
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
@@ -53,9 +53,8 @@ pub use containers::{
     vault_tls,
 };
 
-// Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available
+// Provider-neutral transactional messaging assertions are dependency-free and intentionally available
 // without the container feature. Real provider runners remain integration-gated in each adapter.
-pub mod eventing_conformance;
 pub mod projection_conformance;
 
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。

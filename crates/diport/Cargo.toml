@@ -20,7 +20,7 @@ dlq-test-support = []
 workspace = true
 
 [dependencies]
-eventing.workspace = true
+rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 sagaauthmint = { path = "../sagaauthmint" }
@@ -36,7 +36,7 @@ rss-data-protection.workspace = true
 # AuditEvent.tenant_id: Option<vocab::TenantId>（基础层强类型租户标识；跨租户主体可为空）。DiPort 依赖基础合规。
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
-# OutboxEmitter port 签名引 consistency::outbox::Entry（引擎类型）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
+# Saga durable ports consume consistency engine types. DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
 consistency = { path = "../consistency" }
 # KeyProvider 的 KeyName/KeyVersion/KeyRef 常数时间 key-id 匹配复用 primitives::crypto::constant_time_eq
 # （防 timing oracle，ADR-011 §D3）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
@@ -45,7 +45,7 @@ primitives = { path = "../primitives" }
 uuid = { workspace = true }
 # PKI URI SANs require a standards-aware absolute-URI parser rather than delimiter-only checks.
 url = { workspace = true }
-# Subscriber port 返回 MessageStream = Pin<Box<dyn Stream + Send>>（futures::Stream）。
+# Non-messaging streaming ports use futures::Stream.
 futures = { workspace = true }
 # Service-token replay deadlines are typed, absolute Tokio deadlines so every adapter operation
 # shares one cancellation boundary instead of minting per-stage relative timeouts. `rt` exposes
@@ -53,8 +53,6 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # DLX archive provider observations carry a fixed SHA-256 integrity checksum.
 sha2 = { workspace = true }
-# Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 rss-runtime shutdown 同源）。
-tokio-util = { workspace = true }
 
 # SecretMaterial ZeroizeOnDrop：secret 材料 drop 时自动清零（零信任，类型层 Hard）。
 # `zeroize_derive` feature 启用 proc-macro derive（ZeroizeOnDrop）；`alloc` 已在 workspace 基础上开。

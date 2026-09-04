@@ -47,7 +47,7 @@ use rss_redact::RedactedSource;
 
 /// key provider 操作的失败分类（**in-process** 路由用：retry / no-retry / operator 告警 / 排障映射）。
 ///
-/// 对标同 crate `SecretResolverError` 变体 / `PublishErrorKind`。与脱敏正交：`kind` 供进程内调用方分类、
+/// 对标同 crate `SecretResolverError` 变体 / `PublishFailureKind`。与脱敏正交：`kind` 供进程内调用方分类、
 /// **不进 wire**（[`KeyProviderError`] 的 `Display` 仍是单一安全摘要常量、不泄漏 kind）。解密验证类失败
 /// （AAD-mismatch / 坏密文 / 错版本）**收敛单一 [`Rejected`](Self::Rejected)**、不区分维度（对标
 /// `rss_data_protection::AeadError::Open`，杜绝 downgrade oracle）。

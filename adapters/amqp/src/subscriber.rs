@@ -1,36 +1,64 @@
-//! amqp — RSS AMQP 事件订阅 adapter——impl `diport::AckableSubscriber` + `rss_runtime::ManagedResource`。
+//! amqp — RSS AMQP 事件订阅 adapter——impl `rss_transactional_messaging::transport::DeliverySource` + `rss_runtime::ManagedResource`。
 //!
-//! `basic_consume` 的 `Consumer`（`Stream<Item = Result<Delivery>>`）适配成 `diport::DeliveryStream`
-//! （manual-ack，`AckableSubscriber`）：`token` 取消即流终止（对标 `adapters/memory` 的 `take_until`）。
-//! P7 manual-ack：`no_ack=false` + `basic_qos(PREFETCH)`，每条 [`diport::Delivery`] 携 [`AmqpAcker`] 句柄。
-//! AMQP 仅 at-least-once（manual-ack）：经 `AckableSubscriber::subscribe_ackable`；
+//! `basic_consume` 的 `Consumer`（`Stream<Item = Result<Delivery>>`）适配成 canonical incoming delivery stream；
+//! settlement authority 随 delivery move（manual-ack）。
+//! P7 manual-ack：`no_ack=false` + `basic_qos(PREFETCH)`，每条 [`rss_transactional_messaging::transport::Delivery`] 携 [`AmqpSettlement`] 句柄。
+//! AMQP 仅 at-least-once（manual-ack）：经 `DeliverySource::deliveries`；
 //! at-most-once 仅 demo 拓扑的 MemBus。
 //! ref: lapin examples/pubsub.rs@main；rabbitmq docs/confirms。
 
 #[cfg(feature = "integration-test-support")]
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use diport::{
-    AckAction, AckError, AckableSubscriber, Delivery as DiDelivery, DeliveryStream,
-    EnvelopeMetadata, KEY_OCCURRED_AT, Message, SubscriberError, Topic,
-};
 use futures::StreamExt;
 use lapin::message::Delivery;
+#[cfg(feature = "integration-test-support")]
+use lapin::options::QueuePurgeOptions;
 use lapin::options::{
     BasicAckOptions, BasicCancelOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions,
     QueueBindOptions, QueueDeclareOptions,
 };
-#[cfg(feature = "integration-test-support")]
-use lapin::options::{BasicGetOptions, BasicPublishOptions, QueueDeleteOptions, QueuePurgeOptions};
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
+use rss_redact::RedactedSource;
 use rss_runtime::{ManagedResource, ShutdownError};
+use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
+use rss_transactional_messaging::message::{
+    AuthoredMessageMetadata, ContractIdentity, MessageEnvelope, MessageId, MessageMetadata,
+    MessageMetadataExtensions, MessageRoute, MessagingDomain, PartitionKey, SubscriptionIdentity,
+    TransportContext,
+};
+use rss_transactional_messaging::policy::OperationDeadline;
+use rss_transactional_messaging::transaction::{EnvelopeValidationFailure, SettlementDecision};
+use rss_transactional_messaging::transport::{
+    Delivery as CoreDelivery, DeliverySettlement, DeliverySource, IncomingDelivery,
+    ManagedDeliveryStream,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::conn::{self, REPLY_SUCCESS};
 use crate::settle::{SettleMode, settle_mode};
+
+#[derive(Debug, thiserror::Error)]
+#[error("amqp subscription failed")]
+struct SubscriberError {
+    #[source]
+    source: RedactedSource,
+}
+
+impl SubscriberError {
+    fn new<E: std::error::Error + Send + Sync + 'static>(source: E) -> Self {
+        Self {
+            source: RedactedSource::new(source),
+        }
+    }
+
+    fn into_messaging(self) -> MessagingError {
+        MessagingError::new(MessagingErrorKind::Transient, self)
+    }
+}
 
 /// channel 上最多 unacked 消息上限（限 channel 级 unacked window；at-least-once 背压）。
 /// 取值依据：RabbitMQ 推荐 100–300（ref: rabbitmq docs/confirms §prefetch / consumer-prefetch）。
@@ -238,15 +266,17 @@ fn topology_rpc_error(
 }
 
 /// AMQP 事件订阅 adapter（lapin）。raw `Arc<Connection>` **私有**——仅本 adapter 内部使用，不向 crate 内
-/// 其它模块暴露 raw 连接。impl `AckableSubscriber` + `ManagedResource`。
+/// 其它模块暴露 raw 连接。impl `DeliverySource` + `ManagedResource`。
 ///
-/// **每订阅独立 channel**（review #274 F4/C4）：`subscribe_ackable` 每次从 `conn` 新开一个 channel 承载该
+/// **每订阅独立 channel**（review #274 F4/C4）：`deliveries` 每次从 `conn` 新开一个 channel 承载该
 /// 订阅，token cancel 只对**本订阅** consumer 执行 `basic.cancel`，不连带终止同实例其它
 /// topic 的 consumer；subscriber 级 shutdown 关闭整个 `conn`（其下所有订阅 channel 随之关闭）。
 pub struct AmqpSubscriber {
     conn: Arc<Connection>,
     channels: std::sync::Mutex<Vec<Channel>>,
     operational: AtomicBool,
+    active_subscriptions: Arc<AtomicUsize>,
+    shutdown: CancellationToken,
     name: String,
     broker_queue_limits: BrokerQueueLimits,
 }
@@ -260,13 +290,15 @@ impl AmqpSubscriber {
     ) -> Result<Self, conn::AmqpConnectError> {
         let name = name.into();
         // confirm=false：subscriber 不需 publisher confirms。
-        // reason: 订阅 channel 由 subscribe_ackable 按需 per-subscription 新开（F4）；connect 借
+        // reason: 订阅 channel 由 deliveries 按需 per-subscription 新开（F4）；connect 借
         // connect helper 拿连接 + redaction 日志，其返回的初始 channel 不用于订阅，drop 即可。
         let (conn, _channel) = conn::connect_with_webpki_for_test(endpoint, &name, false).await?;
         Ok(Self {
             conn,
             channels: std::sync::Mutex::new(Vec::new()),
             operational: AtomicBool::new(true),
+            active_subscriptions: Arc::new(AtomicUsize::new(0)),
+            shutdown: CancellationToken::new(),
             name,
             broker_queue_limits: BrokerQueueLimits::PRODUCTION,
         })
@@ -302,6 +334,8 @@ impl AmqpSubscriber {
             conn,
             channels: std::sync::Mutex::new(Vec::new()),
             operational: AtomicBool::new(true),
+            active_subscriptions: Arc::new(AtomicUsize::new(0)),
+            shutdown: CancellationToken::new(),
             name,
             broker_queue_limits: BrokerQueueLimits::PRODUCTION,
         })
@@ -310,6 +344,7 @@ impl AmqpSubscriber {
     pub(crate) fn readiness_snapshot(&self) -> bool {
         self.operational.load(Ordering::Acquire)
             && self.conn.status().connected()
+            && self.active_subscriptions.load(Ordering::Acquire) > 0
             && self.channels.lock().is_ok_and(|channels| {
                 !channels.is_empty() && channels.iter().all(|channel| channel.status().connected())
             })
@@ -324,8 +359,39 @@ impl AmqpSubscriber {
     #[cfg(feature = "integration-test-support")]
     pub async fn purge_durable_queue_for_test(
         &self,
-        topic: &Topic,
-    ) -> Result<u32, SubscriberError> {
+        topic: &MessageRoute,
+    ) -> Result<u32, MessagingError> {
+        self.purge_durable_queue(topic)
+            .await
+            .map_err(SubscriberError::into_messaging)
+    }
+
+    /// Return the broker-observed terminal quarantine depth for one integration-test route.
+    #[cfg(feature = "integration-test-support")]
+    pub async fn dead_letter_depth_for_test(
+        &self,
+        topic: &MessageRoute,
+    ) -> Result<u32, MessagingError> {
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(|error| SubscriberError::new(error).into_messaging())?;
+        let topology = self
+            .broker_queue_topology(topic)
+            .map_err(SubscriberError::into_messaging)?;
+        let depth = declare_broker_queue_topology(&channel, &topology, &self.name)
+            .await
+            .map_err(SubscriberError::into_messaging)?;
+        channel
+            .close(REPLY_SUCCESS, "dead-letter depth observed".into())
+            .await
+            .map_err(|error| SubscriberError::new(error).into_messaging())?;
+        Ok(depth)
+    }
+
+    #[cfg(feature = "integration-test-support")]
+    async fn purge_durable_queue(&self, topic: &MessageRoute) -> Result<u32, SubscriberError> {
         let channel = self
             .conn
             .create_channel()
@@ -351,121 +417,10 @@ impl AmqpSubscriber {
         Ok(purged)
     }
 
-    /// Remove only the broker quarantine after the full topology has been declared. This narrow
-    /// fault seam lets a live test prove that the source quorum queue retains a rejected message
-    /// while its target is unavailable; the next typed declaration restores the same topology.
-    #[cfg(feature = "integration-test-support")]
-    pub async fn delete_broker_dead_letter_for_test(
+    fn broker_queue_topology(
         &self,
-        topic: &Topic,
-    ) -> Result<(), SubscriberError> {
-        let channel = self
-            .conn
-            .create_channel()
-            .await
-            .map_err(SubscriberError::new)?;
-        let topology = self.broker_queue_topology(topic)?;
-        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
-        channel
-            .queue_delete(
-                topology.dead_letter_queue().into(),
-                QueueDeleteOptions::default(),
-            )
-            .await
-            .map_err(SubscriberError::new)?;
-        channel
-            .close(REPLY_SUCCESS, "test DLQ target removal complete".into())
-            .await
-            .map_err(SubscriberError::new)?;
-        Ok(())
-    }
-
-    #[cfg(feature = "integration-test-support")]
-    pub async fn broker_dead_letter_depth_for_test(
-        &self,
-        topic: &Topic,
-    ) -> Result<u32, SubscriberError> {
-        let topology = self.broker_queue_topology(topic)?;
-        let channel = self
-            .conn
-            .create_channel()
-            .await
-            .map_err(SubscriberError::new)?;
-        let dead_letter_message_count =
-            declare_broker_queue_topology(&channel, &topology, &self.name).await?;
-        channel
-            .close(REPLY_SUCCESS, "test DLQ depth complete".into())
-            .await
-            .map_err(SubscriberError::new)?;
-        Ok(dead_letter_message_count)
-    }
-
-    #[cfg(feature = "integration-test-support")]
-    pub async fn take_broker_dead_letter_for_test(
-        &self,
-        topic: &Topic,
-    ) -> Result<Option<BrokerDeadLetterObservation>, SubscriberError> {
-        let topology = self.broker_queue_topology(topic)?;
-        let channel = self
-            .conn
-            .create_channel()
-            .await
-            .map_err(SubscriberError::new)?;
-        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
-        let observation = take_broker_dead_letter(&channel, &topology).await;
-        let close = channel
-            .close(REPLY_SUCCESS, "test DLQ observation complete".into())
-            .await;
-        match observation {
-            Ok(observation) => {
-                close.map_err(SubscriberError::new)?;
-                Ok(observation)
-            }
-            Err(error) => {
-                // Closing a channel with an unsettled basic.get delivery makes RabbitMQ requeue
-                // malformed evidence. Preserve the primary observation error if close also fails.
-                let _ = close;
-                Err(error)
-            }
-        }
-    }
-
-    /// Fixed negative ACL probe: attempts one publish through RabbitMQ's default exchange and uses
-    /// an ordered RPC as the broker-response barrier. No exchange/channel or payload is exposed to
-    /// callers; a correctly provisioned subscriber credential must return `true`.
-    #[cfg(feature = "integration-test-support")]
-    pub async fn default_exchange_publish_is_denied_for_test(
-        &self,
-        routing_key: &Topic,
-    ) -> Result<bool, SubscriberError> {
-        let channel = self
-            .conn
-            .create_channel()
-            .await
-            .map_err(SubscriberError::new)?;
-        let publish = channel
-            .basic_publish(
-                "".into(),
-                routing_key.as_str().into(),
-                BasicPublishOptions::default(),
-                b"acl-negative-probe",
-                lapin::BasicProperties::default(),
-            )
-            .await;
-        let denied = match publish {
-            Err(_) => true,
-            Ok(_) => channel
-                .basic_qos(PREFETCH, BasicQosOptions::default())
-                .await
-                .is_err(),
-        };
-        let _ = channel
-            .close(REPLY_SUCCESS, "default exchange ACL probe complete".into())
-            .await;
-        Ok(denied)
-    }
-
-    fn broker_queue_topology(&self, topic: &Topic) -> Result<BrokerQueueTopology, SubscriberError> {
+        topic: &MessageRoute,
+    ) -> Result<BrokerQueueTopology, SubscriberError> {
         if self.broker_queue_limits.dead_letter_ttl_ms == BROKER_DLQ_TTL_MS
             && self.broker_queue_limits.source_max_bytes == BROKER_SOURCE_MAX_BYTES
             && self.broker_queue_limits.dead_letter_max_bytes == BROKER_DLQ_MAX_BYTES
@@ -477,126 +432,8 @@ impl AmqpSubscriber {
     }
 }
 
-/// Narrow integration receipt for one broker-quarantined message. Raw lapin connection/channel
-/// handles and arbitrary broker operations remain private to the adapter.
-#[cfg(feature = "integration-test-support")]
-pub struct BrokerDeadLetterObservation {
-    message_id: Option<String>,
-    payload: Vec<u8>,
-    death_reason: String,
-    death_count: u64,
-    source_queue: String,
-    source_exchange: String,
-}
-
-#[cfg(feature = "integration-test-support")]
-impl BrokerDeadLetterObservation {
-    pub fn message_id(&self) -> Option<&str> {
-        self.message_id.as_deref()
-    }
-
-    pub fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
-    pub fn death_reason(&self) -> &str {
-        &self.death_reason
-    }
-
-    pub fn death_count(&self) -> u64 {
-        self.death_count
-    }
-
-    pub fn source_queue(&self) -> &str {
-        &self.source_queue
-    }
-
-    pub fn source_exchange(&self) -> &str {
-        &self.source_exchange
-    }
-
-    fn try_from(message: &lapin::message::BasicGetMessage) -> Result<Self, SubscriberError> {
-        let headers = message
-            .properties
-            .headers()
-            .as_ref()
-            .ok_or_else(|| invalid_topology("broker dead-letter is missing x-death headers"))?;
-        let deaths = match headers.inner().get("x-death") {
-            Some(AMQPValue::FieldArray(deaths)) => deaths,
-            _ => {
-                return Err(invalid_topology(
-                    "broker dead-letter has invalid x-death headers",
-                ));
-            }
-        };
-        let death = match deaths.as_slice().first() {
-            Some(AMQPValue::FieldTable(death)) => death,
-            _ => return Err(invalid_topology("broker dead-letter has no x-death entry")),
-        };
-        let death_reason = x_death_string(death, "reason")?;
-        let source_queue = x_death_string(death, "queue")?;
-        let source_exchange = x_death_string(death, "exchange")?;
-        let death_count = match death.inner().get("count") {
-            Some(AMQPValue::LongLongInt(count)) if *count >= 0 => *count as u64,
-            Some(AMQPValue::LongUInt(count)) => u64::from(*count),
-            _ => {
-                return Err(invalid_topology(
-                    "broker dead-letter has invalid x-death count",
-                ));
-            }
-        };
-        Ok(Self {
-            message_id: message
-                .properties
-                .message_id()
-                .as_ref()
-                .map(ToString::to_string),
-            payload: message.data.clone(),
-            death_reason,
-            death_count,
-            source_queue,
-            source_exchange,
-        })
-    }
-}
-
-#[cfg(feature = "integration-test-support")]
-async fn take_broker_dead_letter(
-    channel: &Channel,
-    topology: &BrokerQueueTopology,
-) -> Result<Option<BrokerDeadLetterObservation>, SubscriberError> {
-    let Some(message) = channel
-        .basic_get(
-            topology.dead_letter_queue().into(),
-            BasicGetOptions { no_ack: false },
-        )
-        .await
-        .map_err(SubscriberError::new)?
-    else {
-        return Ok(None);
-    };
-    let observation = BrokerDeadLetterObservation::try_from(&message)?;
-    message
-        .acker
-        .ack(BasicAckOptions::default())
-        .await
-        .map_err(SubscriberError::new)?;
-    Ok(Some(observation))
-}
-
-#[cfg(feature = "integration-test-support")]
-fn x_death_string(table: &FieldTable, key: &'static str) -> Result<String, SubscriberError> {
-    match table.inner().get(key) {
-        Some(AMQPValue::LongString(value)) => Ok(value.to_string()),
-        Some(AMQPValue::ShortString(value)) => Ok(value.to_string()),
-        _ => Err(invalid_topology(
-            "broker dead-letter has invalid x-death text",
-        )),
-    }
-}
-
 /// Declare the terminal quarantine first, then the source queue that routes rejected messages to
-/// it through the existing topic exchange and an exact `<topic>.dlq` routing key. Topic permissions
+/// it through the existing topic exchange and an exact `<topic>.dlq` routing key. MessageRoute permissions
 /// keep the subscriber credential from publishing to source or adjacent queues.
 async fn declare_broker_queue_topology(
     channel: &Channel,
@@ -675,12 +512,12 @@ async fn declare_broker_queue_topology(
 /// broker 的 `basic.cancel-ok`。只停止新 delivery，不关闭 channel，因此取消前已在途的
 /// manual-ack delivery 仍可由 worker settle。channel/connection 只由 subscriber shutdown 关闭；若排空
 /// 失败，该关闭语义使 broker 重投未 settle 消息。
-async fn cancel_ackable(channel: Channel, consumer_tag: String) {
+async fn cancel_delivery_source(channel: Channel, consumer_tag: String) {
     if let Err(error) = channel
         .basic_cancel(consumer_tag.into(), BasicCancelOptions::default())
         .await
     {
-        tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp ackable basic.cancel error");
+        tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp delivery source basic.cancel error");
         close_failed_subscription(&channel, "basic.cancel failed").await;
     }
 }
@@ -698,6 +535,7 @@ impl ManagedResource for AmqpSubscriber {
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.operational.store(false, Ordering::Release);
+        self.shutdown.cancel();
         self.conn
             .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
             .await
@@ -708,82 +546,175 @@ impl ManagedResource for AmqpSubscriber {
     }
 }
 
-/// AMQP [`lapin::BasicProperties`] → [`diport::EnvelopeMetadata`] rehydrate（adapter 透传路径）。
+/// AMQP [`lapin::BasicProperties`] → authored metadata attributes（adapter 透传路径）。
 /// - `timestamp` → `occurred_at`（unix 秒，十进制 string）。
 /// - transport-safe `headers` LongString pair → metadata pair（LongString 以 utf8_lossy Display 转 string）。
 /// - 非 LongString header 值跳过（不是本 adapter `build_properties` 产出的；透传外部生产者时静默忽略）。
 ///
 /// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
-fn extract_metadata(props: &lapin::BasicProperties) -> EnvelopeMetadata {
-    let mut md = EnvelopeMetadata::empty();
-    if let Some(ts) = props.timestamp() {
-        // reason: u64 unix secs 转 string；消费侧 occurred_at_secs() 再 parse 回 i64。
-        md.insert_wire_pair(KEY_OCCURRED_AT, ts.to_string());
+fn extract_metadata(props: &lapin::BasicProperties) -> std::collections::BTreeMap<String, String> {
+    let mut metadata = std::collections::BTreeMap::new();
+    if let Some(timestamp) = props.timestamp() {
+        metadata.insert("occurredAt".to_owned(), timestamp.to_string());
     }
     if let Some(table) = props.headers() {
         for (k, v) in table.inner() {
             if let AMQPValue::LongString(ls) = v {
-                // reason: LongString Display 用 String::from_utf8_lossy——非 utf8 字节以 U+FFFD 替换，
-                // 不 panic。仅本 adapter build_properties 产出 LongString，外部生产者的非 LongString
-                // header 在此跳过（非本 adapter 控制路径，不可信 roundtrip）。persisted-only
-                // subjectId/principal/actor 即使由外部 producer 伪造到 header，也不得进入消费侧 metadata。
-                if EnvelopeMetadata::is_transport_header_key(k.as_str()) {
-                    md.insert_wire_pair(k.as_str(), ls.to_string());
-                }
+                metadata.insert(k.to_string(), ls.to_string());
             }
         }
     }
-    md
+    metadata
 }
 
-/// lapin `Delivery` → `diport::Delivery`（携 [`AmqpAcker`] 结算句柄 + envelope metadata）。
+/// lapin `Delivery` → `rss_transactional_messaging::transport::Delivery`（携 [`AmqpSettlement`] 结算句柄 + envelope metadata）。
 /// 先取出 `acker`（lapin `Acker` 是 Arc handle，cheap clone）再 move `data`/`properties` 构造 Message，
 /// 避免借用冲突。clone 出的句柄随 `Delivery` owned 交给 driver——driver 须保证最终只一方 settle
 /// （settle-once；二次 settle 在 lapin 层返 Err、由 eventexec 的 settle 失败日志承接，不 panic）。
-fn delivery_to_ackable(
+fn delivery_to_core(
     delivery: Delivery,
     channel: Channel,
     subscription_rpc: Arc<SubscriptionRpc>,
-) -> DiDelivery {
+    subscription: &SubscriptionIdentity,
+) -> IncomingDelivery<Vec<u8>, AmqpSettlement> {
     let acker = delivery.acker.clone();
     let producer_id = delivery
         .properties
         .message_id()
         .as_ref()
         .map(ToString::to_string);
-    let id = pick_message_id(producer_id.as_deref(), delivery.delivery_tag);
+    let broker_route = delivery.routing_key.to_string();
     let metadata = extract_metadata(&delivery.properties);
-    let message = Message::new_with_metadata(id, delivery.data, metadata);
-    DiDelivery::new(
-        message,
-        diport::DynAcker::new_box(AmqpAcker {
-            inner: acker,
-            channel,
-            subscription_rpc,
-        }),
-    )
+    let settlement = AmqpSettlement {
+        inner: acker,
+        channel,
+        subscription_rpc,
+    };
+    match decode_message(
+        producer_id.as_deref().unwrap_or_default(),
+        delivery.data,
+        metadata,
+        subscription,
+        &broker_route,
+    ) {
+        Ok(message) => IncomingDelivery::Valid(Box::new(CoreDelivery::new(message, settlement))),
+        Err(failure) => IncomingDelivery::Invalid {
+            failure,
+            settlement,
+        },
+    }
 }
 
-/// 派生 message id：优先 producer 设置的 `message_id`（非空白），否则用 broker 的 `delivery_tag`。
-/// 纯函数——无 broker 单元可测。纯空白 `message_id` 视同缺失（退 delivery_tag）。
-fn pick_message_id(message_id: Option<&str>, delivery_tag: u64) -> String {
-    message_id
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| delivery_tag.to_string())
+fn decode_message(
+    id: &str,
+    payload: Vec<u8>,
+    mut headers: std::collections::BTreeMap<String, String>,
+    subscription: &SubscriptionIdentity,
+    broker_route: &str,
+) -> Result<MessageEnvelope<Vec<u8>>, EnvelopeValidationFailure> {
+    let message_id =
+        MessageId::parse(id).map_err(|_| EnvelopeValidationFailure::MalformedIdentity)?;
+    let tenant_id = rss_request_context::TenantId::parse(&take_required(&mut headers, "tenantId")?)
+        .map_err(|_| EnvelopeValidationFailure::MalformedMetadata)?;
+    let occurred_at = take_required(&mut headers, "occurredAt")?
+        .parse::<i64>()
+        .ok()
+        .and_then(|value| rss_contract::Timepoint::try_from(value).ok())
+        .ok_or(EnvelopeValidationFailure::MalformedMetadata)?;
+    let correlation = headers
+        .remove("correlation")
+        .map(|value| rss_diag_context::CorrelationId::parse(&value))
+        .transpose()
+        .map_err(|_| EnvelopeValidationFailure::MalformedMetadata)?;
+    let domain = MessagingDomain::parse(&take_required(&mut headers, "domain")?)
+        .map_err(|_| EnvelopeValidationFailure::MalformedMetadata)?;
+    let route = MessageRoute::parse(&take_required(&mut headers, "route")?)
+        .map_err(|_| EnvelopeValidationFailure::MalformedMetadata)?;
+    let contract = ContractIdentity::new(
+        rss_contract::ContractId::parse(&take_required(&mut headers, "contractId")?)
+            .map_err(|_| EnvelopeValidationFailure::UnsupportedContract)?,
+        rss_contract::ContractVersion::parse(&take_required(&mut headers, "schemaVersion")?)
+            .map_err(|_| EnvelopeValidationFailure::UnsupportedContract)?,
+        rss_contract::SchemaDigest::parse(&take_required(&mut headers, "schemaHash")?)
+            .map_err(|_| EnvelopeValidationFailure::UnsupportedContract)?,
+    );
+    let partition = decode_partition(&mut headers)?;
+    let causation = headers
+        .remove("causationId")
+        .map(|value| MessageId::parse(&value))
+        .transpose()
+        .map_err(|_| EnvelopeValidationFailure::MalformedMetadata)?;
+    let trace = headers.remove("trace");
+    let tenant_authority = headers.remove("tenantAuthority");
+    let attributes = headers
+        .into_iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("attribute.")
+                .map(|key| (key.to_owned(), value))
+        })
+        .collect();
+    let metadata = MessageMetadata::new(
+        AuthoredMessageMetadata::new(tenant_id, occurred_at, domain, route, contract),
+        MessageMetadataExtensions::new(correlation, partition, causation, attributes),
+    );
+    let message = MessageEnvelope::new(message_id, metadata, payload)
+        .with_transport_context(TransportContext::new(trace, tenant_authority));
+    if broker_route != subscription.route().as_str() || !subscription.accepts(&message) {
+        return Err(EnvelopeValidationFailure::UnsupportedContract);
+    }
+    Ok(message)
 }
 
-// ── AmqpAcker（impl diport::Acker）──────────────────────────────────────────
+fn take_required(
+    headers: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+) -> Result<String, EnvelopeValidationFailure> {
+    headers
+        .remove(key)
+        .filter(|value| !value.is_empty())
+        .ok_or(EnvelopeValidationFailure::MalformedMetadata)
+}
 
-/// lapin broker 结算句柄的 adapter 包装（impl [`diport::Acker`]）。
+fn decode_partition(
+    headers: &mut std::collections::BTreeMap<String, String>,
+) -> Result<Option<PartitionKey>, EnvelopeValidationFailure> {
+    let tenant = headers.remove("partitionTenantId");
+    let domain = headers.remove("partitionDomain");
+    let key = headers.remove("partitionKey");
+    match (tenant, domain, key) {
+        (None, None, None) => Ok(None),
+        (None, None, Some(key)) => {
+            Ok(Some(PartitionKey::parse(&key).map_err(|_| {
+                EnvelopeValidationFailure::MalformedMetadata
+            })?))
+        }
+        _ => Err(EnvelopeValidationFailure::MalformedMetadata),
+    }
+}
+
+// ── AmqpSettlement（impl rss_transactional_messaging::transport::DeliverySettlement）──────────────────────────────────────────
+
+/// lapin broker 结算句柄的 adapter 包装（impl [`rss_transactional_messaging::transport::DeliverySettlement`]）。
 ///
-/// 映射逻辑（`AckAction → SettleMode`）抽到 feature-agnostic 的 [`crate::settle`]（默认 build 可测、进 verify
+/// 映射逻辑（`SettlementKind → SettleMode`）抽到 feature-agnostic 的 [`crate::settle`]（默认 build 可测、进 verify
 /// gate）；本 impl 仅把 [`SettleMode`] 翻成 lapin `basic_ack` / `basic_nack(requeue)`。内部 lapin error 经
-/// `AckError::new` 包装（source 脱敏，不进 wire——见 `diport::AckError` PII 边界）。
-pub(crate) struct AmqpAcker {
+/// `MessagingError::provider` 包装（source 脱敏，不进 wire）。
+pub struct AmqpSettlement {
     inner: lapin::Acker,
     channel: Channel,
     subscription_rpc: Arc<SubscriptionRpc>,
+}
+
+pub type AmqpDeliveries = std::pin::Pin<
+    Box<dyn futures::Stream<Item = IncomingDelivery<Vec<u8>, AmqpSettlement>> + Send>,
+>;
+
+struct ActiveSubscription(Arc<AtomicUsize>);
+
+impl Drop for ActiveSubscription {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Serializes one subscription channel's cancel and settlement RPCs while giving an already
@@ -808,44 +739,67 @@ impl SubscriptionRpc {
     }
 }
 
-impl diport::Acker for AmqpAcker {
-    async fn settle(&self, action: AckAction) -> Result<(), AckError> {
+impl DeliverySettlement for AmqpSettlement {
+    async fn settle(
+        self,
+        decision: SettlementDecision,
+        deadline: OperationDeadline,
+    ) -> Result<(), MessagingError> {
         // If cancellation was requested before settlement acquires the gate, wait for cancel-ok
         // (or the failure-path channel close) before Ack/Nack can reopen the prefetch window. A
         // settlement already holding the gate remains linearized before cancellation.
-        let _rpc = self.subscription_rpc.settlement_guard().await;
-        let result = match settle_mode(action) {
-            SettleMode::Ack => self.inner.ack(BasicAckOptions::default()).await,
-            SettleMode::Nack { requeue } => {
-                self.inner
-                    .nack(BasicNackOptions {
-                        multiple: false,
-                        requeue,
-                    })
-                    .await
+        let result = tokio::time::timeout(deadline.timeout(), async {
+            let _rpc = self.subscription_rpc.settlement_guard().await;
+            match settle_mode(decision.kind()) {
+                SettleMode::Ack => self.inner.ack(BasicAckOptions::default()).await,
+                SettleMode::Nack { requeue } => {
+                    self.inner
+                        .nack(BasicNackOptions {
+                            multiple: false,
+                            requeue,
+                        })
+                        .await
+                }
             }
-        };
+        })
+        .await;
         match result {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let error = AckError::new(error);
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => {
+                let error = MessagingError::new(MessagingErrorKind::Transient, error);
                 close_failed_subscription(&self.channel, "delivery settle failed").await;
                 Err(error)
             }
+            Err(error) => {
+                close_failed_subscription(&self.channel, "delivery settle deadline elapsed").await;
+                Err(MessagingError::new(MessagingErrorKind::Transient, error))
+            }
         }
+    }
+
+    async fn abandon(self, deadline: OperationDeadline) -> Result<(), MessagingError> {
+        tokio::time::timeout(
+            deadline.timeout(),
+            close_failed_subscription(&self.channel, "delivery ownership abandoned"),
+        )
+        .await
+        .map_err(|error| MessagingError::new(MessagingErrorKind::Transient, error))
     }
 }
 
-// ── impl AckableSubscriber for AmqpSubscriber（P7 manual-ack）──────────────
+// ── impl DeliverySource for AmqpSubscriber（P7 manual-ack）──────────────
 
-impl AckableSubscriber for AmqpSubscriber {
-    async fn prepare_ackable(&self, topic: Topic) -> Result<(), SubscriberError> {
+impl AmqpSubscriber {
+    async fn prepare_delivery_route_inner(
+        &self,
+        topic: &MessageRoute,
+    ) -> Result<(), SubscriberError> {
         let channel = self
             .conn
             .create_channel()
             .await
             .map_err(SubscriberError::new)?;
-        let topology = self.broker_queue_topology(&topic)?;
+        let topology = self.broker_queue_topology(topic)?;
         declare_broker_queue_topology(&channel, &topology, &self.name).await?;
         channel
             .close(REPLY_SUCCESS, "durable topology prepared".into())
@@ -854,11 +808,12 @@ impl AckableSubscriber for AmqpSubscriber {
         Ok(())
     }
 
-    async fn subscribe_ackable(
+    async fn delivery_stream(
         &self,
-        topic: Topic,
+        subscription: &SubscriptionIdentity,
         token: CancellationToken,
-    ) -> Result<DeliveryStream, SubscriberError> {
+    ) -> Result<AmqpDeliveries, SubscriberError> {
+        let topic = subscription.route();
         let topic_name = topic.as_str();
         // 稳定 consumer tag（按 name+topic 派生）：重连/重订阅复用同一 tag，不变成新消费者
         // （由 `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 承载）。
@@ -875,7 +830,7 @@ impl AckableSubscriber for AmqpSubscriber {
             .basic_qos(PREFETCH, BasicQosOptions::default())
             .await
             .map_err(SubscriberError::new)?;
-        let topology = self.broker_queue_topology(&topic)?;
+        let topology = self.broker_queue_topology(topic)?;
         declare_broker_queue_topology(&channel, &topology, &self.name).await?;
         let consumer = channel
             .basic_consume(
@@ -913,10 +868,11 @@ impl AckableSubscriber for AmqpSubscriber {
         tokio::spawn(async move {
             token.cancelled().await;
             let _rpc = cancel_rpc.gate.lock().await;
-            cancel_ackable(cancel_channel, consumer_tag).await;
+            cancel_delivery_source(cancel_channel, consumer_tag).await;
             cancel_rpc.admission_stopped.cancel();
         });
         let delivery_rpc = Arc::clone(&subscription_rpc);
+        let delivery_subscription = subscription.clone();
         // A delivery can already be buffered client-side when token cancellation races the
         // in-flight Ack that reopens the prefetch window. Once cancellation is requested, never
         // expose that raced delivery to ConsumerTx. Dropping it leaves it unsettled; the later
@@ -925,19 +881,21 @@ impl AckableSubscriber for AmqpSubscriber {
             .filter_map(move |res| {
                 let delivery_channel = channel.clone();
                 let delivery_rpc = Arc::clone(&delivery_rpc);
+                let delivery_subscription = delivery_subscription.clone();
                 async move {
                     match res {
                         Ok(_delivery) if delivery_rpc.cancel_requested.is_cancelled() => None,
-                        Ok(delivery) => Some(delivery_to_ackable(
+                        Ok(delivery) => Some(delivery_to_core(
                             delivery,
                             delivery_channel,
                             delivery_rpc,
+                            &delivery_subscription,
                         )),
                         Err(error) => {
                             tracing::warn!(
                                 target: "amqp",
                                 error = %rss_redact::redact_error(&error),
-                                "amqp ackable delivery error; skipping",
+                                "amqp delivery source error; skipping",
                             );
                             None
                         }
@@ -947,21 +905,34 @@ impl AckableSubscriber for AmqpSubscriber {
             .take_until(async move {
                 cancel_confirmation.cancelled().await;
             });
-        tracing::info!(target: "amqp", resource = %self.name, topic = topic_name, "amqp ackable subscribe started");
-        Ok(Box::pin(stream))
+        tracing::info!(target: "amqp", resource = %self.name, topic = topic_name, "amqp delivery source started");
+        self.active_subscriptions.fetch_add(1, Ordering::AcqRel);
+        let guard = ActiveSubscription(Arc::clone(&self.active_subscriptions));
+        Ok(Box::pin(futures::stream::unfold(
+            (Box::pin(stream), guard),
+            |(mut stream, guard)| async move { stream.next().await.map(|item| (item, (stream, guard))) },
+        )))
     }
 
-    async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // subscriber 级关闭：关整个 connection（其下所有 per-subscription channel 随之关闭 → broker requeue
-        // 各 channel 上仍未 settle 的 in-flight delivery）。token cancel 只完成 consumer admission stop。
-        self.operational.store(false, Ordering::Release);
-        self.conn
-            .close(REPLY_SUCCESS, "ackable subscriber shutdown".into())
+    pub async fn prepare_delivery_route(&self, route: &MessageRoute) -> Result<(), MessagingError> {
+        self.prepare_delivery_route_inner(route)
             .await
-            .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(e), "amqp connection close error (ackable)");
-            })
-            .map_err(SubscriberError::new)
+            .map_err(SubscriberError::into_messaging)
+    }
+}
+
+impl DeliverySource<Vec<u8>> for AmqpSubscriber {
+    type Settlement = AmqpSettlement;
+    type Deliveries = AmqpDeliveries;
+
+    async fn deliveries(
+        &self,
+        subscription: &SubscriptionIdentity,
+    ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
+        self.delivery_stream(subscription, self.shutdown.child_token())
+            .await
+            .map(ManagedDeliveryStream::from_provider)
+            .map_err(SubscriberError::into_messaging)
     }
 }
 
@@ -980,7 +951,7 @@ mod tests {
 
     use super::{
         BROKER_DLQ_TTL_MS, BrokerQueueTopology, BrokerTopologyFailureKind, BrokerTopologyStage,
-        classify_topology_failure, pick_message_id, topology_rpc_error,
+        classify_topology_failure, decode_message, topology_rpc_error,
     };
 
     #[derive(Clone, Default)]
@@ -1182,134 +1153,99 @@ mod tests {
     }
 
     #[test]
-    fn prefers_non_empty_message_id() {
-        assert_eq!(pick_message_id(Some("evt-7"), 42), "evt-7");
-    }
-
-    #[test]
-    fn falls_back_to_delivery_tag_when_absent() {
-        assert_eq!(pick_message_id(None, 42), "42");
-    }
-
-    #[test]
-    fn falls_back_to_delivery_tag_when_empty() {
-        assert_eq!(pick_message_id(Some(""), 7), "7");
-    }
-
-    #[test]
-    fn falls_back_to_delivery_tag_when_whitespace() {
-        assert_eq!(pick_message_id(Some("   "), 9), "9");
-    }
-
-    // AckAction → broker 结算模式映射的表驱动测试迁至 feature-agnostic `crate::settle`（默认 build 可测、
-    // 进 verify gate），不再绑 lapin / integration feature。
-}
-
-/// `extract_metadata` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
-#[cfg(test)]
-mod extract_metadata_tests {
-    use diport::{
-        KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SCHEMA_HASH,
-        KEY_SCHEMA_VERSION, KEY_SUBJECT_ID,
-    };
-    use lapin::BasicProperties;
-    use lapin::types::{AMQPValue, FieldTable};
-
-    use super::extract_metadata;
-
-    #[test]
-    fn empty_properties_gives_empty_metadata() {
-        let props = BasicProperties::default();
-        let md = extract_metadata(&props);
-        assert!(md.is_empty());
-    }
-
-    #[test]
-    fn timestamp_maps_to_occurred_at() {
-        let props = BasicProperties::default().with_timestamp(1_700_000_000_u64);
-        let md = extract_metadata(&props);
-        assert_eq!(md.get(KEY_OCCURRED_AT), Some("1700000000"));
-    }
-
-    #[test]
-    fn transport_long_string_headers_transferred() {
-        let mut table = FieldTable::default();
-        table.insert(
-            KEY_CORRELATION.into(),
-            AMQPValue::LongString(b"corr-9".to_vec().into()),
-        );
-        table.insert(
-            KEY_SCHEMA_VERSION.into(),
-            AMQPValue::LongString(b"v1".to_vec().into()),
-        );
-        table.insert(
-            KEY_SCHEMA_HASH.into(),
-            AMQPValue::LongString(
-                b"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                    .to_vec()
-                    .into(),
+    fn missing_message_id_is_rejected_before_metadata_is_trusted() {
+        use rss_transactional_messaging::message::{
+            ContractIdentity, MessageRoute, MessagingDomain, SubscriptionIdentity,
+        };
+        use rss_transactional_messaging::transaction::EnvelopeValidationFailure;
+        let subscription = SubscriptionIdentity::new(
+            MessagingDomain::parse("runtime").expect("domain"),
+            MessageRoute::parse("runtime.message").expect("route"),
+            ContractIdentity::new(
+                rss_contract::ContractId::parse("runtime.message").expect("contract"),
+                rss_contract::ContractVersion::from_major(1).expect("version"),
+                rss_contract::SchemaDigest::parse(
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .expect("schema"),
             ),
         );
-        let props = BasicProperties::default().with_headers(table);
-        let md = extract_metadata(&props);
-        assert_eq!(md.get(KEY_CORRELATION), Some("corr-9"));
-        assert_eq!(md.get(KEY_SCHEMA_VERSION), Some("v1"));
-        assert_eq!(
-            md.get(KEY_SCHEMA_HASH),
-            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-        );
+        assert!(matches!(
+            decode_message(
+                "",
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+                &subscription,
+                subscription.route().as_str(),
+            ),
+            Err(EnvelopeValidationFailure::MalformedIdentity)
+        ));
     }
 
     #[test]
-    fn persisted_only_headers_are_dropped_on_rehydrate() {
-        let mut table = FieldTable::default();
-        table.insert(
-            KEY_SUBJECT_ID.into(),
-            AMQPValue::LongString(b"spoofed-subject".to_vec().into()),
-        );
-        table.insert(
-            KEY_PRINCIPAL.into(),
-            AMQPValue::LongString(b"spoofed-principal".to_vec().into()),
-        );
-        table.insert(
-            KEY_ACTOR.into(),
-            AMQPValue::LongString(b"spoofed-actor".to_vec().into()),
-        );
-        table.insert(
-            KEY_CORRELATION.into(),
-            AMQPValue::LongString(b"corr-safe".to_vec().into()),
-        );
-        let props = BasicProperties::default().with_headers(table);
-        let md = extract_metadata(&props);
+    fn broker_route_and_authored_contract_must_match_subscription() {
+        use rss_transactional_messaging::message::{
+            ContractIdentity, MessageRoute, MessagingDomain, SubscriptionIdentity,
+        };
+        use rss_transactional_messaging::transaction::EnvelopeValidationFailure;
 
-        assert_eq!(md.get(KEY_CORRELATION), Some("corr-safe"));
-        assert_eq!(md.get(KEY_SUBJECT_ID), None);
-        assert_eq!(md.get(KEY_PRINCIPAL), None);
-        assert_eq!(md.get(KEY_ACTOR), None);
+        let contract = ContractIdentity::new(
+            rss_contract::ContractId::parse("runtime.message").expect("contract"),
+            rss_contract::ContractVersion::from_major(1).expect("version"),
+            rss_contract::SchemaDigest::parse(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .expect("schema"),
+        );
+        let subscription = SubscriptionIdentity::new(
+            MessagingDomain::parse("runtime").expect("domain"),
+            MessageRoute::parse("runtime.message").expect("route"),
+            contract,
+        );
+        let headers = || {
+            std::collections::BTreeMap::from([
+                (
+                    "tenantId".to_owned(),
+                    "00000000-0000-0000-0000-000000000001".to_owned(),
+                ),
+                ("occurredAt".to_owned(), "1".to_owned()),
+                ("domain".to_owned(), "runtime".to_owned()),
+                ("route".to_owned(), "runtime.message".to_owned()),
+                ("contractId".to_owned(), "runtime.message".to_owned()),
+                ("schemaVersion".to_owned(), "1".to_owned()),
+                (
+                    "schemaHash".to_owned(),
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                ),
+            ])
+        };
+
+        assert!(matches!(
+            decode_message(
+                "message-1",
+                Vec::new(),
+                headers(),
+                &subscription,
+                "runtime.other",
+            ),
+            Err(EnvelopeValidationFailure::UnsupportedContract)
+        ));
+
+        let mut mismatched_contract = headers();
+        mismatched_contract.insert("contractId".to_owned(), "runtime.other".to_owned());
+        assert!(matches!(
+            decode_message(
+                "message-1",
+                Vec::new(),
+                mismatched_contract,
+                &subscription,
+                "runtime.message",
+            ),
+            Err(EnvelopeValidationFailure::UnsupportedContract)
+        ));
     }
 
-    #[test]
-    fn non_long_string_headers_skipped() {
-        // 非 LongString（非本 adapter 产出路径）应静默跳过，不 panic。
-        let mut table = FieldTable::default();
-        table.insert("bool-field".into(), AMQPValue::Boolean(true));
-        let props = BasicProperties::default().with_headers(table);
-        let md = extract_metadata(&props);
-        assert_eq!(md.get("bool-field"), None);
-    }
-
-    #[test]
-    fn full_roundtrip_timestamp_and_headers() {
-        let mut table = FieldTable::default();
-        table.insert(
-            KEY_CORRELATION.into(),
-            AMQPValue::LongString(b"corr-full".to_vec().into()),
-        );
-        let props = BasicProperties::default()
-            .with_timestamp(1_700_000_001_u64)
-            .with_headers(table);
-        let md = extract_metadata(&props);
-        assert_eq!(md.get(KEY_OCCURRED_AT), Some("1700000001"));
-        assert_eq!(md.get(KEY_CORRELATION), Some("corr-full"));
-    }
+    // SettlementKind → broker 结算模式映射的表驱动测试迁至 feature-agnostic `crate::settle`（默认 build 可测、
+    // 进 verify gate），不再绑 lapin / integration feature。
 }

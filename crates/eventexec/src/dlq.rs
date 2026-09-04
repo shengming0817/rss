@@ -5,12 +5,13 @@
 //! - replaying consumer `dead_letter` rows with a caller-supplied new outbox id;
 //! - redriving outbox relay `dlx` rows back to `pending`.
 
-use consistency::IdemKey;
 use diport::{DeadLetterSource, DlqOperatorAuthorization, dlq_operator_action};
-use eventing::observability::{
-    EventingDeadLetterReplayFailure, EventingDeadLetterReplayResult, EventingEmitter,
-    EventingObservation, EventingOutboxDlxRedriveFailure, EventingOutboxDlxRedriveResult,
-    EventingOutboxDlxResolveFailure, EventingOutboxDlxResolveResult,
+use rss_transactional_messaging::message::MessageId;
+use rss_transactional_messaging::observability::{
+    TransactionalMessagingDeadLetterReplayFailure, TransactionalMessagingDeadLetterReplayResult,
+    TransactionalMessagingEmitter, TransactionalMessagingObservation,
+    TransactionalMessagingOutboxDlxRedriveFailure, TransactionalMessagingOutboxDlxRedriveResult,
+    TransactionalMessagingOutboxDlxResolveFailure, TransactionalMessagingOutboxDlxResolveResult,
 };
 
 use crate::dead_letter::DeadLetterId;
@@ -51,7 +52,7 @@ pub enum DlqInspectTarget {
     /// Row in the unified `dead_letter` audit table.
     DeadLetter(DeadLetterId),
     /// Outbox row currently in `status='dlx'`.
-    OutboxDlx(IdemKey),
+    OutboxDlx(MessageId),
 }
 
 impl DlqInspectTarget {
@@ -418,14 +419,14 @@ impl DlqListResult {
 pub struct DlqReplayRequest {
     authorization: DlqOperatorAuthorization<dlq_operator_action::ReplayDeadLetter>,
     dead_letter_id: DeadLetterId,
-    replay_id: IdemKey,
+    replay_id: MessageId,
 }
 
 impl DlqReplayRequest {
     pub fn new(
         authorization: DlqOperatorAuthorization<dlq_operator_action::ReplayDeadLetter>,
         dead_letter_id: DeadLetterId,
-        replay_id: IdemKey,
+        replay_id: MessageId,
     ) -> Self {
         Self {
             authorization,
@@ -442,7 +443,7 @@ impl DlqReplayRequest {
         &self.dead_letter_id
     }
 
-    pub fn replay_id(&self) -> &IdemKey {
+    pub fn replay_id(&self) -> &MessageId {
         &self.replay_id
     }
 
@@ -459,7 +460,7 @@ impl DlqReplayRequest {
 #[derive(Debug)]
 pub struct DlqRedriveRequest {
     authorization: DlqOperatorAuthorization<dlq_operator_action::RedriveOutbox>,
-    event_id: IdemKey,
+    event_id: MessageId,
 }
 
 /// Audited change ticket authorizing an expired outbox terminal resolution.
@@ -516,16 +517,16 @@ impl OutboxExpiredResolutionKind {
 #[derive(Debug)]
 pub struct OutboxExpiredResolutionRequest {
     authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>,
-    event_id: IdemKey,
+    event_id: MessageId,
     kind: OutboxExpiredResolutionKind,
-    evidence_event_id: Option<IdemKey>,
+    evidence_event_id: Option<MessageId>,
     change_ticket: OutboxResolutionChangeTicket,
 }
 
 impl OutboxExpiredResolutionRequest {
     pub fn accepted_gap(
         authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>,
-        event_id: IdemKey,
+        event_id: MessageId,
         change_ticket: OutboxResolutionChangeTicket,
     ) -> Self {
         Self {
@@ -539,8 +540,8 @@ impl OutboxExpiredResolutionRequest {
 
     pub fn compensated(
         authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>,
-        event_id: IdemKey,
-        evidence_event_id: IdemKey,
+        event_id: MessageId,
+        evidence_event_id: MessageId,
         change_ticket: OutboxResolutionChangeTicket,
     ) -> Self {
         Self {
@@ -556,7 +557,7 @@ impl OutboxExpiredResolutionRequest {
         self.authorization.tenant()
     }
 
-    pub fn event_id(&self) -> &IdemKey {
+    pub fn event_id(&self) -> &MessageId {
         &self.event_id
     }
 
@@ -564,7 +565,7 @@ impl OutboxExpiredResolutionRequest {
         self.kind
     }
 
-    pub fn evidence_event_id(&self) -> Option<&IdemKey> {
+    pub fn evidence_event_id(&self) -> Option<&MessageId> {
         self.evidence_event_id.as_ref()
     }
 
@@ -584,7 +585,7 @@ impl OutboxExpiredResolutionRequest {
 impl DlqRedriveRequest {
     pub fn new(
         authorization: DlqOperatorAuthorization<dlq_operator_action::RedriveOutbox>,
-        event_id: IdemKey,
+        event_id: MessageId,
     ) -> Self {
         Self {
             authorization,
@@ -596,7 +597,7 @@ impl DlqRedriveRequest {
         self.authorization.tenant()
     }
 
-    pub fn event_id(&self) -> &IdemKey {
+    pub fn event_id(&self) -> &MessageId {
         &self.event_id
     }
 
@@ -734,7 +735,7 @@ pub enum DlqError {
     #[error("dlq payload key provider rejected configuration or authorization")]
     PayloadKeyForbidden,
     #[error("dlq replay outbox fact conflict")]
-    FactConflict(#[source] consistency::OutboxFactConflict),
+    FactConflict,
     #[error("dlq replay store failed at {0}")]
     ReplayStore(DlqReplayStoreStage),
     #[error("dlq store failed")]
@@ -753,7 +754,7 @@ impl DlqError {
             Self::InvalidSchemaHeaders => "invalid_schema_headers",
             Self::PayloadKeyUnavailable => "payload_key_unavailable",
             Self::PayloadKeyForbidden => "payload_key_forbidden",
-            Self::FactConflict(_) => "fact_conflict",
+            Self::FactConflict => "fact_conflict",
             Self::ReplayStore(stage) => stage.as_label(),
             Self::Store => "store",
             Self::InvalidResolutionInput => "invalid_resolution_input",
@@ -761,86 +762,115 @@ impl DlqError {
     }
 }
 
-pub fn record_dlq_replay(emitter: &dyn EventingEmitter, outcome: DlqReplayOutcome) {
+pub fn record_dlq_replay(emitter: &dyn TransactionalMessagingEmitter, outcome: DlqReplayOutcome) {
     let result = match outcome {
-        DlqReplayOutcome::Inserted => EventingDeadLetterReplayResult::Inserted,
-        DlqReplayOutcome::AlreadyExists => EventingDeadLetterReplayResult::AlreadyExists,
+        DlqReplayOutcome::Inserted => TransactionalMessagingDeadLetterReplayResult::Inserted,
+        DlqReplayOutcome::AlreadyExists => {
+            TransactionalMessagingDeadLetterReplayResult::AlreadyExists
+        }
     };
-    emitter.emit(EventingObservation::DeadLetterReplay { result });
+    emitter.emit(TransactionalMessagingObservation::DeadLetterReplay { result });
 }
 
-pub fn record_dlq_outbox_redrive(emitter: &dyn EventingEmitter, outcome: DlqRedriveOutcome) {
+pub fn record_dlq_outbox_redrive(
+    emitter: &dyn TransactionalMessagingEmitter,
+    outcome: DlqRedriveOutcome,
+) {
     let result = match outcome {
-        DlqRedriveOutcome::Redriven => EventingOutboxDlxRedriveResult::Redriven,
-        DlqRedriveOutcome::NotFound => EventingOutboxDlxRedriveResult::NotFound,
-        DlqRedriveOutcome::Expired => EventingOutboxDlxRedriveResult::Expired,
+        DlqRedriveOutcome::Redriven => TransactionalMessagingOutboxDlxRedriveResult::Redriven,
+        DlqRedriveOutcome::NotFound => TransactionalMessagingOutboxDlxRedriveResult::NotFound,
+        DlqRedriveOutcome::Expired => TransactionalMessagingOutboxDlxRedriveResult::Expired,
     };
-    emitter.emit(EventingObservation::OutboxDlxRedrive { result });
+    emitter.emit(TransactionalMessagingObservation::OutboxDlxRedrive { result });
 }
 
 pub fn record_outbox_expired_resolution(
-    emitter: &dyn EventingEmitter,
+    emitter: &dyn TransactionalMessagingEmitter,
     outcome: OutboxExpiredResolutionOutcome,
 ) {
     let result = match outcome {
-        OutboxExpiredResolutionOutcome::Resolved => EventingOutboxDlxResolveResult::Resolved,
-        OutboxExpiredResolutionOutcome::NotFound => EventingOutboxDlxResolveResult::NotFound,
-        OutboxExpiredResolutionOutcome::NotExpired => EventingOutboxDlxResolveResult::NotExpired,
+        OutboxExpiredResolutionOutcome::Resolved => {
+            TransactionalMessagingOutboxDlxResolveResult::Resolved
+        }
+        OutboxExpiredResolutionOutcome::NotFound => {
+            TransactionalMessagingOutboxDlxResolveResult::NotFound
+        }
+        OutboxExpiredResolutionOutcome::NotExpired => {
+            TransactionalMessagingOutboxDlxResolveResult::NotExpired
+        }
         OutboxExpiredResolutionOutcome::EvidenceRejected => {
-            EventingOutboxDlxResolveResult::EvidenceRejected
+            TransactionalMessagingOutboxDlxResolveResult::EvidenceRejected
         }
     };
-    emitter.emit(EventingObservation::OutboxDlxResolveExpired { result });
+    emitter.emit(TransactionalMessagingObservation::OutboxDlxResolveExpired { result });
 }
 
-pub fn record_dlq_replay_error(emitter: &dyn EventingEmitter, error: &DlqError) {
-    emitter.emit(EventingObservation::DeadLetterReplay {
-        result: EventingDeadLetterReplayResult::Failed(dlq_replay_failure(error)),
+pub fn record_dlq_replay_error(emitter: &dyn TransactionalMessagingEmitter, error: &DlqError) {
+    emitter.emit(TransactionalMessagingObservation::DeadLetterReplay {
+        result: TransactionalMessagingDeadLetterReplayResult::Failed(dlq_replay_failure(error)),
     });
 }
 
-pub fn record_dlq_outbox_redrive_error(emitter: &dyn EventingEmitter, error: &DlqError) {
-    emitter.emit(EventingObservation::OutboxDlxRedrive {
-        result: EventingOutboxDlxRedriveResult::Failed(dlq_redrive_failure(error)),
+pub fn record_dlq_outbox_redrive_error(
+    emitter: &dyn TransactionalMessagingEmitter,
+    error: &DlqError,
+) {
+    emitter.emit(TransactionalMessagingObservation::OutboxDlxRedrive {
+        result: TransactionalMessagingOutboxDlxRedriveResult::Failed(dlq_redrive_failure(error)),
     });
 }
 
-pub fn record_outbox_expired_resolution_error(emitter: &dyn EventingEmitter, error: &DlqError) {
-    emitter.emit(EventingObservation::OutboxDlxResolveExpired {
-        result: EventingOutboxDlxResolveResult::Failed(dlq_resolve_failure(error)),
+pub fn record_outbox_expired_resolution_error(
+    emitter: &dyn TransactionalMessagingEmitter,
+    error: &DlqError,
+) {
+    emitter.emit(TransactionalMessagingObservation::OutboxDlxResolveExpired {
+        result: TransactionalMessagingOutboxDlxResolveResult::Failed(dlq_resolve_failure(error)),
     });
 }
 
-fn dlq_replay_failure(error: &DlqError) -> EventingDeadLetterReplayFailure {
+fn dlq_replay_failure(error: &DlqError) -> TransactionalMessagingDeadLetterReplayFailure {
     match error {
         DlqError::InvalidCursor | DlqError::InvalidResolutionInput => {
-            EventingDeadLetterReplayFailure::Invariant
+            TransactionalMessagingDeadLetterReplayFailure::Invariant
         }
-        DlqError::NotFound => EventingDeadLetterReplayFailure::NotFound,
-        DlqError::NotReplayable => EventingDeadLetterReplayFailure::NotReplayable,
-        DlqError::InvalidPayload => EventingDeadLetterReplayFailure::InvalidPayload,
-        DlqError::InvalidSchemaHeaders => EventingDeadLetterReplayFailure::InvalidSchemaHeaders,
-        DlqError::PayloadKeyUnavailable => EventingDeadLetterReplayFailure::PayloadKeyUnavailable,
-        DlqError::PayloadKeyForbidden => EventingDeadLetterReplayFailure::PayloadKeyForbidden,
-        DlqError::FactConflict(_) => EventingDeadLetterReplayFailure::FactConflict,
+        DlqError::NotFound => TransactionalMessagingDeadLetterReplayFailure::NotFound,
+        DlqError::NotReplayable => TransactionalMessagingDeadLetterReplayFailure::NotReplayable,
+        DlqError::InvalidPayload => TransactionalMessagingDeadLetterReplayFailure::InvalidPayload,
+        DlqError::InvalidSchemaHeaders => {
+            TransactionalMessagingDeadLetterReplayFailure::InvalidSchemaHeaders
+        }
+        DlqError::PayloadKeyUnavailable => {
+            TransactionalMessagingDeadLetterReplayFailure::PayloadKeyUnavailable
+        }
+        DlqError::PayloadKeyForbidden => {
+            TransactionalMessagingDeadLetterReplayFailure::PayloadKeyForbidden
+        }
+        DlqError::FactConflict => TransactionalMessagingDeadLetterReplayFailure::FactConflict,
         DlqError::ReplayStore(stage) => match stage {
             DlqReplayStoreStage::FetchDeadLetter => {
-                EventingDeadLetterReplayFailure::FetchDeadLetter
+                TransactionalMessagingDeadLetterReplayFailure::FetchDeadLetter
             }
-            DlqReplayStoreStage::EncodeMetadata => EventingDeadLetterReplayFailure::EncodeMetadata,
-            DlqReplayStoreStage::AppendOutbox => EventingDeadLetterReplayFailure::AppendOutbox,
+            DlqReplayStoreStage::EncodeMetadata => {
+                TransactionalMessagingDeadLetterReplayFailure::EncodeMetadata
+            }
+            DlqReplayStoreStage::AppendOutbox => {
+                TransactionalMessagingDeadLetterReplayFailure::AppendOutbox
+            }
             DlqReplayStoreStage::ProjectionMirror => {
-                EventingDeadLetterReplayFailure::ProjectionMirror
+                TransactionalMessagingDeadLetterReplayFailure::ProjectionMirror
             }
-            DlqReplayStoreStage::Transaction => EventingDeadLetterReplayFailure::Transaction,
+            DlqReplayStoreStage::Transaction => {
+                TransactionalMessagingDeadLetterReplayFailure::Transaction
+            }
         },
-        DlqError::Store => EventingDeadLetterReplayFailure::Store,
+        DlqError::Store => TransactionalMessagingDeadLetterReplayFailure::Store,
     }
 }
 
-fn dlq_redrive_failure(error: &DlqError) -> EventingOutboxDlxRedriveFailure {
+fn dlq_redrive_failure(error: &DlqError) -> TransactionalMessagingOutboxDlxRedriveFailure {
     match error {
-        DlqError::Store => EventingOutboxDlxRedriveFailure::Store,
+        DlqError::Store => TransactionalMessagingOutboxDlxRedriveFailure::Store,
         DlqError::InvalidCursor
         | DlqError::NotFound
         | DlqError::NotReplayable
@@ -848,16 +878,20 @@ fn dlq_redrive_failure(error: &DlqError) -> EventingOutboxDlxRedriveFailure {
         | DlqError::InvalidSchemaHeaders
         | DlqError::PayloadKeyUnavailable
         | DlqError::PayloadKeyForbidden
-        | DlqError::FactConflict(_)
+        | DlqError::FactConflict
         | DlqError::ReplayStore(_)
-        | DlqError::InvalidResolutionInput => EventingOutboxDlxRedriveFailure::Invariant,
+        | DlqError::InvalidResolutionInput => {
+            TransactionalMessagingOutboxDlxRedriveFailure::Invariant
+        }
     }
 }
 
-fn dlq_resolve_failure(error: &DlqError) -> EventingOutboxDlxResolveFailure {
+fn dlq_resolve_failure(error: &DlqError) -> TransactionalMessagingOutboxDlxResolveFailure {
     match error {
-        DlqError::InvalidResolutionInput => EventingOutboxDlxResolveFailure::InvalidResolutionInput,
-        DlqError::Store => EventingOutboxDlxResolveFailure::Store,
+        DlqError::InvalidResolutionInput => {
+            TransactionalMessagingOutboxDlxResolveFailure::InvalidResolutionInput
+        }
+        DlqError::Store => TransactionalMessagingOutboxDlxResolveFailure::Store,
         DlqError::InvalidCursor
         | DlqError::NotFound
         | DlqError::NotReplayable
@@ -865,8 +899,8 @@ fn dlq_resolve_failure(error: &DlqError) -> EventingOutboxDlxResolveFailure {
         | DlqError::InvalidSchemaHeaders
         | DlqError::PayloadKeyUnavailable
         | DlqError::PayloadKeyForbidden
-        | DlqError::FactConflict(_)
-        | DlqError::ReplayStore(_) => EventingOutboxDlxResolveFailure::Invariant,
+        | DlqError::FactConflict
+        | DlqError::ReplayStore(_) => TransactionalMessagingOutboxDlxResolveFailure::Invariant,
     }
 }
 
@@ -921,7 +955,7 @@ mod tests {
 
     #[test]
     fn fact_conflict_has_closed_safe_label() {
-        let error = DlqError::FactConflict(consistency::OutboxFactConflict);
+        let error = DlqError::FactConflict;
         assert_eq!(error.as_label(), "fact_conflict");
         assert_eq!(error.to_string(), "dlq replay outbox fact conflict");
         assert!(!format!("{error:?}").contains("fingerprint"));
@@ -1253,11 +1287,11 @@ mod tests {
         let _replay: fn(
             diport::DlqOperatorAuthorization<dlq_operator_action::ReplayDeadLetter>,
             DeadLetterId,
-            IdemKey,
+            MessageId,
         ) -> DlqReplayRequest = DlqReplayRequest::new;
         let _redrive: fn(
             diport::DlqOperatorAuthorization<dlq_operator_action::RedriveOutbox>,
-            IdemKey,
+            MessageId,
         ) -> DlqRedriveRequest = DlqRedriveRequest::new;
     }
 
@@ -1267,8 +1301,8 @@ mod tests {
     fn expired_outbox_resolution_request_is_typed_and_shape_closed() {
         let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
-        let event_id = IdemKey::parse("evt-blocked").expect("canonical event id");
-        let evidence = IdemKey::parse("evt-compensation").expect("canonical evidence id");
+        let event_id = MessageId::parse("evt-blocked").expect("canonical event id");
+        let evidence = MessageId::parse("evt-compensation").expect("canonical evidence id");
         let ticket = OutboxResolutionChangeTicket::parse("CHG-1742").expect("valid ticket");
         let accepted = OutboxExpiredResolutionRequest::accepted_gap(
             authorization(tenant),
@@ -1305,9 +1339,9 @@ mod tests {
     #[test]
     fn dlq_redrive_uses_closed_typed_results() {
         #[derive(Default)]
-        struct Recorder(std::sync::Mutex<Vec<EventingObservation>>);
-        impl EventingEmitter for Recorder {
-            fn emit(&self, observation: EventingObservation) {
+        struct Recorder(std::sync::Mutex<Vec<TransactionalMessagingObservation>>);
+        impl TransactionalMessagingEmitter for Recorder {
+            fn emit(&self, observation: TransactionalMessagingObservation) {
                 self.0
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -1337,46 +1371,46 @@ mod tests {
         assert_eq!(
             *recorder.0.lock().unwrap_or_else(|error| error.into_inner()),
             vec![
-                EventingObservation::DeadLetterReplay {
-                    result: EventingDeadLetterReplayResult::Inserted,
+                TransactionalMessagingObservation::DeadLetterReplay {
+                    result: TransactionalMessagingDeadLetterReplayResult::Inserted,
                 },
-                EventingObservation::DeadLetterReplay {
-                    result: EventingDeadLetterReplayResult::AlreadyExists,
+                TransactionalMessagingObservation::DeadLetterReplay {
+                    result: TransactionalMessagingDeadLetterReplayResult::AlreadyExists,
                 },
-                EventingObservation::OutboxDlxRedrive {
-                    result: EventingOutboxDlxRedriveResult::Redriven,
+                TransactionalMessagingObservation::OutboxDlxRedrive {
+                    result: TransactionalMessagingOutboxDlxRedriveResult::Redriven,
                 },
-                EventingObservation::OutboxDlxRedrive {
-                    result: EventingOutboxDlxRedriveResult::NotFound,
+                TransactionalMessagingObservation::OutboxDlxRedrive {
+                    result: TransactionalMessagingOutboxDlxRedriveResult::NotFound,
                 },
-                EventingObservation::OutboxDlxRedrive {
-                    result: EventingOutboxDlxRedriveResult::Expired,
+                TransactionalMessagingObservation::OutboxDlxRedrive {
+                    result: TransactionalMessagingOutboxDlxRedriveResult::Expired,
                 },
-                EventingObservation::OutboxDlxResolveExpired {
-                    result: EventingOutboxDlxResolveResult::Resolved,
+                TransactionalMessagingObservation::OutboxDlxResolveExpired {
+                    result: TransactionalMessagingOutboxDlxResolveResult::Resolved,
                 },
-                EventingObservation::OutboxDlxResolveExpired {
-                    result: EventingOutboxDlxResolveResult::NotFound,
+                TransactionalMessagingObservation::OutboxDlxResolveExpired {
+                    result: TransactionalMessagingOutboxDlxResolveResult::NotFound,
                 },
-                EventingObservation::OutboxDlxResolveExpired {
-                    result: EventingOutboxDlxResolveResult::NotExpired,
+                TransactionalMessagingObservation::OutboxDlxResolveExpired {
+                    result: TransactionalMessagingOutboxDlxResolveResult::NotExpired,
                 },
-                EventingObservation::OutboxDlxResolveExpired {
-                    result: EventingOutboxDlxResolveResult::EvidenceRejected,
+                TransactionalMessagingObservation::OutboxDlxResolveExpired {
+                    result: TransactionalMessagingOutboxDlxResolveResult::EvidenceRejected,
                 },
-                EventingObservation::OutboxDlxRedrive {
-                    result: EventingOutboxDlxRedriveResult::Failed(
-                        EventingOutboxDlxRedriveFailure::Invariant,
+                TransactionalMessagingObservation::OutboxDlxRedrive {
+                    result: TransactionalMessagingOutboxDlxRedriveResult::Failed(
+                        TransactionalMessagingOutboxDlxRedriveFailure::Invariant,
                     ),
                 },
-                EventingObservation::DeadLetterReplay {
-                    result: EventingDeadLetterReplayResult::Failed(
-                        EventingDeadLetterReplayFailure::ProjectionMirror,
+                TransactionalMessagingObservation::DeadLetterReplay {
+                    result: TransactionalMessagingDeadLetterReplayResult::Failed(
+                        TransactionalMessagingDeadLetterReplayFailure::ProjectionMirror,
                     ),
                 },
-                EventingObservation::OutboxDlxResolveExpired {
-                    result: EventingOutboxDlxResolveResult::Failed(
-                        EventingOutboxDlxResolveFailure::InvalidResolutionInput,
+                TransactionalMessagingObservation::OutboxDlxResolveExpired {
+                    result: TransactionalMessagingOutboxDlxResolveResult::Failed(
+                        TransactionalMessagingOutboxDlxResolveFailure::InvalidResolutionInput,
                     ),
                 },
             ]
@@ -1409,40 +1443,43 @@ mod tests {
         let replay_cases = vec![
             (
                 DlqError::InvalidCursor,
-                EventingDeadLetterReplayFailure::Invariant,
+                TransactionalMessagingDeadLetterReplayFailure::Invariant,
             ),
             (
                 DlqError::NotFound,
-                EventingDeadLetterReplayFailure::NotFound,
+                TransactionalMessagingDeadLetterReplayFailure::NotFound,
             ),
             (
                 DlqError::NotReplayable,
-                EventingDeadLetterReplayFailure::NotReplayable,
+                TransactionalMessagingDeadLetterReplayFailure::NotReplayable,
             ),
             (
                 DlqError::InvalidPayload,
-                EventingDeadLetterReplayFailure::InvalidPayload,
+                TransactionalMessagingDeadLetterReplayFailure::InvalidPayload,
             ),
             (
                 DlqError::InvalidSchemaHeaders,
-                EventingDeadLetterReplayFailure::InvalidSchemaHeaders,
+                TransactionalMessagingDeadLetterReplayFailure::InvalidSchemaHeaders,
             ),
             (
                 DlqError::PayloadKeyUnavailable,
-                EventingDeadLetterReplayFailure::PayloadKeyUnavailable,
+                TransactionalMessagingDeadLetterReplayFailure::PayloadKeyUnavailable,
             ),
             (
                 DlqError::PayloadKeyForbidden,
-                EventingDeadLetterReplayFailure::PayloadKeyForbidden,
+                TransactionalMessagingDeadLetterReplayFailure::PayloadKeyForbidden,
             ),
             (
-                DlqError::FactConflict(consistency::OutboxFactConflict),
-                EventingDeadLetterReplayFailure::FactConflict,
+                DlqError::FactConflict,
+                TransactionalMessagingDeadLetterReplayFailure::FactConflict,
             ),
-            (DlqError::Store, EventingDeadLetterReplayFailure::Store),
+            (
+                DlqError::Store,
+                TransactionalMessagingDeadLetterReplayFailure::Store,
+            ),
             (
                 DlqError::InvalidResolutionInput,
-                EventingDeadLetterReplayFailure::Invariant,
+                TransactionalMessagingDeadLetterReplayFailure::Invariant,
             ),
         ];
         for (error, expected) in replay_cases {
@@ -1451,23 +1488,23 @@ mod tests {
         for (stage, expected) in [
             (
                 DlqReplayStoreStage::FetchDeadLetter,
-                EventingDeadLetterReplayFailure::FetchDeadLetter,
+                TransactionalMessagingDeadLetterReplayFailure::FetchDeadLetter,
             ),
             (
                 DlqReplayStoreStage::EncodeMetadata,
-                EventingDeadLetterReplayFailure::EncodeMetadata,
+                TransactionalMessagingDeadLetterReplayFailure::EncodeMetadata,
             ),
             (
                 DlqReplayStoreStage::AppendOutbox,
-                EventingDeadLetterReplayFailure::AppendOutbox,
+                TransactionalMessagingDeadLetterReplayFailure::AppendOutbox,
             ),
             (
                 DlqReplayStoreStage::ProjectionMirror,
-                EventingDeadLetterReplayFailure::ProjectionMirror,
+                TransactionalMessagingDeadLetterReplayFailure::ProjectionMirror,
             ),
             (
                 DlqReplayStoreStage::Transaction,
-                EventingDeadLetterReplayFailure::Transaction,
+                TransactionalMessagingDeadLetterReplayFailure::Transaction,
             ),
         ] {
             assert_eq!(dlq_replay_failure(&DlqError::ReplayStore(stage)), expected);
@@ -1481,34 +1518,34 @@ mod tests {
             DlqError::InvalidSchemaHeaders,
             DlqError::PayloadKeyUnavailable,
             DlqError::PayloadKeyForbidden,
-            DlqError::FactConflict(consistency::OutboxFactConflict),
+            DlqError::FactConflict,
             DlqError::ReplayStore(DlqReplayStoreStage::Transaction),
         ];
         for error in &invariant_errors {
             assert_eq!(
                 dlq_redrive_failure(error),
-                EventingOutboxDlxRedriveFailure::Invariant
+                TransactionalMessagingOutboxDlxRedriveFailure::Invariant
             );
             assert_eq!(
                 dlq_resolve_failure(error),
-                EventingOutboxDlxResolveFailure::Invariant
+                TransactionalMessagingOutboxDlxResolveFailure::Invariant
             );
         }
         assert_eq!(
             dlq_redrive_failure(&DlqError::InvalidResolutionInput),
-            EventingOutboxDlxRedriveFailure::Invariant
+            TransactionalMessagingOutboxDlxRedriveFailure::Invariant
         );
         assert_eq!(
             dlq_redrive_failure(&DlqError::Store),
-            EventingOutboxDlxRedriveFailure::Store
+            TransactionalMessagingOutboxDlxRedriveFailure::Store
         );
         assert_eq!(
             dlq_resolve_failure(&DlqError::InvalidResolutionInput),
-            EventingOutboxDlxResolveFailure::InvalidResolutionInput
+            TransactionalMessagingOutboxDlxResolveFailure::InvalidResolutionInput
         );
         assert_eq!(
             dlq_resolve_failure(&DlqError::Store),
-            EventingOutboxDlxResolveFailure::Store
+            TransactionalMessagingOutboxDlxResolveFailure::Store
         );
     }
 }

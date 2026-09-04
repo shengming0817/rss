@@ -16,10 +16,9 @@ use aws_sdk_s3::types::{
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use diport::{
-    ArchiveChecksum, ArchiveVersionId, Clock, DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES,
-    DlxArchiveCiphertext, DlxArchiveHeadOutcome, DlxArchiveObjectMetadata, DlxArchivePutOutcome,
-    DlxArchivePutRequest, DlxArchiveStore, DlxLifecycleError, DlxLifecycleOperation,
-    DlxLifecycleReason, KeyRef,
+    ArchiveChecksum, ArchiveVersionId, DLX_MAX_ARCHIVE_CIPHERTEXT_BYTES, DlxArchiveCiphertext,
+    DlxArchiveHeadOutcome, DlxArchiveObjectMetadata, DlxArchivePutOutcome, DlxArchivePutRequest,
+    DlxArchiveStore, DlxLifecycleError, DlxLifecycleOperation, DlxLifecycleReason, KeyRef,
 };
 use eventexec::DLX_HOT_RETENTION_SECONDS;
 use rss_redact::RedactedBytes;
@@ -29,6 +28,10 @@ const CANARY_GENERATION_SECS: i64 = SECONDS_PER_DAY;
 const CANARY_KEY_PREFIX: &str = "__rss_capability_probe/dlx-worm-v2";
 const CANARY_BODY: &[u8] = b"rss-dlx-worm-capability-v2";
 const ARCHIVE_KEY_REF_METADATA: &str = "rss-dlx-key-ref";
+
+pub trait ArchiveClock: Send + Sync {
+    fn now(&self) -> SystemTime;
+}
 
 /// Invalid construction parameters for the dedicated DLX archive provider.
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +73,7 @@ pub enum S3DlxArchiveCapabilityError {
 struct ArchiveCore {
     client: Client,
     bucket: String,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn ArchiveClock>,
 }
 
 /// Unverified S3 DLX archive provider.
@@ -107,7 +110,7 @@ impl S3DlxArchiveStore {
     pub fn new(
         client: Client,
         bucket: impl Into<String>,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn ArchiveClock>,
     ) -> Result<Self, S3DlxArchiveConfigError> {
         let bucket = bucket.into();
         if bucket.trim().is_empty() {

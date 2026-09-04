@@ -4,7 +4,7 @@
 //! 故同一 port 可被任意 S3-兼容 provider 实现（与 cert-manager / SPIFFE 的 provider-agnostic 范式一致）。
 //!
 //! async 而非 sync：对象存储是网络 I/O；provider 互换要求统一最宽签名（与 [`crate::Signer`] /
-//! [`crate::Publisher`] 同，区别于纯计算的 sync [`crate::Clock`]）。
+//! 其它 async infrastructure ports 相同，区别于纯计算 helper。
 //!
 //! 读取 **stream-first**：[`ObjectStore::get_object`] 命中返回 [`ObjectPayload`]（provider 字节流），消费域逐块
 //! 处理或经 [`ObjectPayload::collect_limited`] **显式有界**收集——port 不再固化「整对象进 `Vec<u8>`」，从类型层

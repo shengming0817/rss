@@ -1,10 +1,10 @@
 #![allow(clippy::expect_used)]
 
-use consistency::{
-    LocalTxBoundary, LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus,
-};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use observ::LocalTxObservation;
+use rss_transactional_messaging::transaction::{
+    LocalTxDeadlineStage, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -12,7 +12,7 @@ use std::{
 use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 use vocab::{
     ContractBinding, HttpContractOwner, HttpEffectKind, HttpEffectProfile, HttpIdempotency,
-    HttpRouteAuth, HttpRouteBinding, HttpSuccessStatus, http::LocalTx,
+    HttpRouteAuth, HttpRouteBinding, HttpSuccessStatus, LocalTxBoundary, http::LocalTx,
 };
 
 struct TestRoute;

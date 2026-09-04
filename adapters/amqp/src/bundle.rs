@@ -50,16 +50,14 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use diport::{
-    AckableSubscriber, DeliveryStream, DynAckableSubscriber, DynPublisher, PublishRequest,
-    Publisher, PublisherError, SubscriberError, Topic,
-};
 use rss_runtime::{DynManagedResource, ManagedResource, ShutdownError};
-use tokio_util::sync::CancellationToken;
+use rss_transactional_messaging::error::MessagingError;
+use rss_transactional_messaging::message::{MessageEnvelope, SubscriptionIdentity};
+use rss_transactional_messaging::transport::{DeliverySource, PublishOutcome, Publisher};
 
 use crate::conn::AmqpConnectError;
 use crate::publisher::AmqpPublisher;
-use crate::subscriber::AmqpSubscriber;
+use crate::subscriber::{AmqpDeliveries, AmqpSettlement, AmqpSubscriber};
 
 /// AMQP endpoint carrying only publisher authority. It is intentionally not interchangeable with
 /// [`AmqpSubscriberEndpoint`], so production assembly code must bind each credential to its role.
@@ -289,7 +287,7 @@ impl AmqpRuntimeDeps {
 /// framework/global amqp transport 能力句柄（`Clone`，provider-agnostic、非单域）。
 ///
 /// 私有持 `Arc<AmqpPublisher>` / `Arc<AmqpSubscriber>`，经 [`AmqpRuntimeDeps::infra`] 派发；派发 DI-ready
-/// `Box<DynPublisher>` / `Box<DynAckableSubscriber>`（经 delegating handle 共享 bundle 的 Arc，不泄漏 raw
+/// `Box<native Publisher capability>` / `Box<native DeliverySource capability>`（经 delegating handle 共享 bundle 的 Arc，不泄漏 raw
 /// connection，AMQP-BUNDLE-CONN-01）。port 句柄的 `shutdown` 关 channel（port-local）；connection lifecycle
 /// 由 [`AmqpRuntimeDeps::runtime_resources`] 的 guard 单源关闭。
 #[derive(Clone)]
@@ -299,73 +297,62 @@ pub struct AmqpInfraDeps {
 }
 
 impl AmqpInfraDeps {
-    /// 事件发布句柄（`Box<DynPublisher>`，注入 `eventexec` relay）。经 [`SharedAmqpPublisher`] 共享 bundle
+    /// 事件发布句柄（`Box<native Publisher capability>`，注入 `eventexec` relay）。经 [`SharedAmqpPublisher`] 共享 bundle
     /// 的 `Arc<AmqpPublisher>`——`Publisher::shutdown` 关 publisher channel（port-local）；connection 由
     /// runtime_resources guard 关。
     #[must_use]
-    pub fn publisher(&self) -> Box<DynPublisher<'static>> {
-        DynPublisher::new_box(SharedAmqpPublisher(Arc::clone(&self.publisher)))
+    pub fn publisher(&self) -> AmqpPublisherHandle {
+        AmqpPublisherHandle(Arc::clone(&self.publisher))
     }
 
-    /// 事件订阅句柄（`Box<DynAckableSubscriber>`，注入 `eventexec` consumer）。经 [`SharedAmqpSubscriber`]
+    /// 事件订阅句柄（`Box<native DeliverySource capability>`，注入 `eventexec` consumer）。经 [`SharedAmqpSubscriber`]
     /// 共享 bundle 的 `Arc<AmqpSubscriber>`——每订阅独立 channel（token cancel 等待本订阅
     /// `basic.cancel-ok`）；connection
     /// 由 runtime_resources guard 关。
     #[must_use]
-    pub fn subscriber(&self) -> Box<DynAckableSubscriber<'static>> {
-        DynAckableSubscriber::new_box(SharedAmqpSubscriber(Arc::clone(&self.subscriber)))
+    pub fn subscriber(&self) -> AmqpSubscriberHandle {
+        AmqpSubscriberHandle(Arc::clone(&self.subscriber))
     }
 }
 
-/// `Arc<AmqpPublisher>` 的 `Publisher` delegating handle——`DynPublisher::new_box` 需 owned `impl Publisher`，
+/// `Arc<AmqpPublisher>` 的 `Publisher` delegating handle——`native Publisher capability::new_box` 需 owned `impl Publisher`，
 /// 而 `Arc<AmqpPublisher>` 无 blanket impl，故经 newtype 委托（让 port dispatch 与 shutdown guard 共享同一 Arc，
 /// 不泄漏 Arc 本身）。`shutdown` 委托 publisher 的 **port-local** `Publisher::shutdown`（关 channel）。
-struct SharedAmqpPublisher(Arc<AmqpPublisher>);
+pub struct AmqpPublisherHandle(Arc<AmqpPublisher>);
 
-impl Publisher for SharedAmqpPublisher {
-    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
-        Publisher::publish(self.publisher(), request).await
-    }
+impl Publisher<Vec<u8>> for AmqpPublisherHandle {
+    type Receipt = ();
 
-    async fn shutdown(&self) -> Result<(), PublisherError> {
-        // UFCS 消歧：AmqpPublisher 同时 impl Publisher + ManagedResource（各有 shutdown）。port-local
-        // shutdown 关 channel；connection 由 AmqpPublisherGuard（ManagedResource）单源关。
-        Publisher::shutdown(self.publisher()).await
+    async fn publish(
+        &self,
+        message: &MessageEnvelope<Vec<u8>>,
+        deadline: rss_transactional_messaging::policy::OperationDeadline,
+    ) -> PublishOutcome<Self::Receipt> {
+        Publisher::publish(self.publisher(), message, deadline).await
     }
 }
 
-impl SharedAmqpPublisher {
+impl AmqpPublisherHandle {
     fn publisher(&self) -> &AmqpPublisher {
         self.0.as_ref()
     }
 }
 
-/// `Arc<S>` 的 `AckableSubscriber` delegating handle（同 [`SharedAmqpPublisher`] 范式）。
-struct SharedAmqpSubscriber<S>(Arc<S>);
+/// `Arc<S>` 的 `DeliverySource` delegating handle（同 [`SharedAmqpPublisher`] 范式）。
+pub struct AmqpSubscriberHandle(Arc<AmqpSubscriber>);
 
-impl<S> AckableSubscriber for SharedAmqpSubscriber<S>
-where
-    S: AckableSubscriber + Sync,
-{
-    fn prepare_ackable(
+impl DeliverySource<Vec<u8>> for AmqpSubscriberHandle {
+    type Settlement = AmqpSettlement;
+    type Deliveries = AmqpDeliveries;
+
+    async fn deliveries(
         &self,
-        topic: Topic,
-    ) -> impl std::future::Future<Output = Result<(), SubscriberError>> + Send {
-        AckableSubscriber::prepare_ackable(self.0.as_ref(), topic)
-    }
-
-    async fn subscribe_ackable(
-        &self,
-        topic: Topic,
-        token: CancellationToken,
-    ) -> Result<DeliveryStream, SubscriberError> {
-        AckableSubscriber::subscribe_ackable(self.0.as_ref(), topic, token).await
-    }
-
-    async fn shutdown(&self) -> Result<(), SubscriberError> {
-        // Shared port 不拥有 connection；token cancel 只停止订阅的新投递，connection 由
-        // AmqpSubscriberGuard（runtime_resources）单源关闭，避免 bundle 派发句柄与 guard double-close。
-        Ok(())
+        subscription: &SubscriptionIdentity,
+    ) -> Result<
+        rss_transactional_messaging::transport::ManagedDeliveryStream<Self::Deliveries>,
+        MessagingError,
+    > {
+        DeliverySource::deliveries(self.0.as_ref(), subscription).await
     }
 }
 
@@ -398,137 +385,5 @@ impl ManagedResource for AmqpSubscriberGuard {
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         ManagedResource::shutdown(self.0.as_ref()).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    use diport::{AckableSubscriber, DeliveryStream, SubscriberError, Topic};
-    use tokio_util::sync::CancellationToken;
-
-    use super::{SharedAmqpSubscriber, connect_second_or_rollback};
-
-    #[derive(Default)]
-    struct RecordingSubscriber {
-        prepare_called: AtomicBool,
-        subscribe_called: AtomicBool,
-        shutdown_calls: AtomicUsize,
-    }
-
-    impl AckableSubscriber for RecordingSubscriber {
-        fn prepare_ackable(
-            &self,
-            _topic: Topic,
-        ) -> impl std::future::Future<Output = Result<(), SubscriberError>> + Send {
-            self.prepare_called.store(true, Ordering::SeqCst);
-            std::future::ready(Ok(()))
-        }
-
-        async fn subscribe_ackable(
-            &self,
-            _topic: Topic,
-            _token: CancellationToken,
-        ) -> Result<DeliveryStream, SubscriberError> {
-            self.subscribe_called.store(true, Ordering::SeqCst);
-            Ok(Box::pin(futures::stream::empty()))
-        }
-
-        async fn shutdown(&self) -> Result<(), SubscriberError> {
-            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn shared_subscriber_port_delegates_subscribe() -> Result<(), SubscriberError> {
-        let inner = Arc::new(RecordingSubscriber::default());
-        let handle = SharedAmqpSubscriber(Arc::clone(&inner));
-
-        let _stream = AckableSubscriber::subscribe_ackable(
-            &handle,
-            Topic::new("session.created"),
-            CancellationToken::new(),
-        )
-        .await?;
-
-        assert!(inner.subscribe_called.load(Ordering::SeqCst));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn shared_subscriber_port_delegates_topology_preparation() -> Result<(), SubscriberError>
-    {
-        let inner = Arc::new(RecordingSubscriber::default());
-        let handle = SharedAmqpSubscriber(Arc::clone(&inner));
-
-        AckableSubscriber::prepare_ackable(&handle, Topic::new("session.created")).await?;
-
-        assert!(inner.prepare_called.load(Ordering::SeqCst));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn shared_subscriber_port_shutdown_is_noop() -> Result<(), SubscriberError> {
-        let inner = Arc::new(RecordingSubscriber::default());
-        let handle = SharedAmqpSubscriber(Arc::clone(&inner));
-
-        AckableSubscriber::shutdown(&handle).await?;
-
-        assert_eq!(inner.shutdown_calls.load(Ordering::SeqCst), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn second_connect_failure_rolls_back_first_and_preserves_primary()
-    -> Result<(), &'static str> {
-        let cleanup_called = Arc::new(AtomicBool::new(false));
-        let cleanup_evidence = Arc::clone(&cleanup_called);
-
-        let result = connect_second_or_rollback(
-            "publisher",
-            async { Err::<(), _>("subscriber-primary") },
-            move |first| async move {
-                assert_eq!(first, "publisher");
-                cleanup_evidence.store(true, Ordering::SeqCst);
-                Err(rss_runtime::ShutdownError::new(std::io::Error::other(
-                    "cleanup-secondary",
-                )))
-            },
-        )
-        .await;
-
-        let Err((primary, cleanup)) = result else {
-            return Err("second connect must fail");
-        };
-        assert_eq!(primary, "subscriber-primary");
-        assert!(cleanup.is_some(), "cleanup failure must remain diagnostic");
-        assert!(cleanup_called.load(Ordering::SeqCst));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn successful_second_connect_does_not_rollback_first() -> Result<(), &'static str> {
-        let cleanup_called = Arc::new(AtomicBool::new(false));
-        let cleanup_evidence = Arc::clone(&cleanup_called);
-
-        let result = connect_second_or_rollback(
-            "publisher",
-            async { Ok::<_, &'static str>("subscriber") },
-            move |_| async move {
-                cleanup_evidence.store(true, Ordering::SeqCst);
-                Ok(())
-            },
-        )
-        .await;
-
-        let Ok(pair) = result else {
-            return Err("pair must succeed");
-        };
-        assert_eq!(pair, ("publisher", "subscriber"));
-        assert!(!cleanup_called.load(Ordering::SeqCst));
-        Ok(())
     }
 }

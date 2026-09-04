@@ -3,8 +3,6 @@
 #[test]
 fn native_afit_ports_are_not_dyn_compatible() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/dyn_incompatible_inbox_store.rs");
-    t.compile_fail("tests/ui/dyn_incompatible_retention_sweeper.rs");
     t.compile_fail("tests/ui/dyn_incompatible_projection_event_source.rs");
     t.compile_fail("tests/ui/projection_serial_witness_non_serial_fail.rs");
     t.compile_fail("tests/ui/dyn_incompatible_reconciler.rs");
@@ -15,17 +13,6 @@ fn native_afit_ports_are_not_dyn_compatible() {
 fn reconcile_model_public_api_compiles() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/reconcile_model_public_api_pass.rs");
-}
-
-#[test]
-fn claimed_outbox_capability_is_type_enforced() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/claimed_outbox_relay_unclaimed_fail.rs");
-    t.compile_fail("tests/ui/claimed_outbox_missing_lease_fail.rs");
-    t.compile_fail("tests/ui/claimed_outbox_clone_fail.rs");
-    t.compile_fail("tests/ui/claimed_outbox_relay_twice_fail.rs");
-    t.compile_fail("tests/ui/claimed_outbox_raw_domain_fail.rs");
-    t.pass("tests/ui/claimed_outbox_relay_pass.rs");
 }
 
 #[test]

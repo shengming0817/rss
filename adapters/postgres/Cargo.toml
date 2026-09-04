@@ -9,8 +9,6 @@ publish = false
 workspace = true
 
 [dependencies]
-consistency = { path = "../../crates/consistency" }
-diport = { path = "../../crates/diport" }
 rss-runtime.workspace = true
 futures = { workspace = true }
 rss-request-context.workspace = true
@@ -26,4 +24,3 @@ test-support = []
 
 [dev-dependencies]
 rcgen = { workspace = true }
-static_assertions = { workspace = true }

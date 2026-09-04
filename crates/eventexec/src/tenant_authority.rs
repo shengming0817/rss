@@ -1,4 +1,4 @@
-//! Tenant authority token for broker-delivered event envelopes.
+//! Tenant authority token for broker-delivered message envelopes.
 //!
 //! The outbox relay signs the tenant/topic binding before publishing to broker. Consumers verify
 //! the token before using `tenantId` for DLX RLS scope, so broker headers are not trusted by
@@ -52,13 +52,20 @@ pub enum TenantAuthorityError {
 }
 
 impl TenantAuthorityError {
-    pub const fn skip_reason(self) -> eventing::observability::EventingDeadLetterSkipReason {
-        use eventing::observability::EventingDeadLetterSkipReason;
+    pub const fn skip_reason(
+        self,
+    ) -> rss_transactional_messaging::observability::TransactionalMessagingDeadLetterSkipReason
+    {
+        use rss_transactional_messaging::observability::TransactionalMessagingDeadLetterSkipReason;
         match self {
-            Self::Missing => EventingDeadLetterSkipReason::TenantAuthorityMissing,
-            Self::Malformed | Self::BadMac => EventingDeadLetterSkipReason::TenantAuthorityInvalid,
-            Self::Expired => EventingDeadLetterSkipReason::TenantAuthorityExpired,
-            Self::BindingMismatch => EventingDeadLetterSkipReason::TenantAuthorityBindingMismatch,
+            Self::Missing => TransactionalMessagingDeadLetterSkipReason::TenantAuthorityMissing,
+            Self::Malformed | Self::BadMac => {
+                TransactionalMessagingDeadLetterSkipReason::TenantAuthorityInvalid
+            }
+            Self::Expired => TransactionalMessagingDeadLetterSkipReason::TenantAuthorityExpired,
+            Self::BindingMismatch => {
+                TransactionalMessagingDeadLetterSkipReason::TenantAuthorityBindingMismatch
+            }
         }
     }
 }
@@ -140,10 +147,10 @@ impl TenantAuthority {
     pub fn verify(
         &self,
         binding: TenantAuthorityBinding<'_>,
-        metadata: &diport::EnvelopeMetadata,
+        context: &rss_transactional_messaging::message::TransportContext,
     ) -> Result<(), TenantAuthorityError> {
-        let token = metadata
-            .get(diport::KEY_TENANT_AUTHORITY)
+        let token = context
+            .tenant_authority()
             .ok_or(TenantAuthorityError::Missing)?;
         let payload = self.verify_token(token)?;
         let signed_tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
@@ -209,6 +216,39 @@ impl TenantAuthority {
             return Err(TenantAuthorityError::BadMac);
         }
         Ok(payload)
+    }
+}
+
+impl rss_transactional_messaging::transaction::IngressValidator<Vec<u8>> for TenantAuthority {
+    fn validate(
+        &self,
+        challenge: rss_transactional_messaging::transaction::IngressChallenge<'_, Vec<u8>>,
+    ) -> Result<
+        rss_transactional_messaging::transaction::VerifiedIngress,
+        rss_transactional_messaging::transaction::EnvelopeValidationFailure,
+    > {
+        let subscription = challenge.subscription();
+        let message = challenge.message();
+        if !subscription.accepts(message) {
+            return Err(
+                rss_transactional_messaging::transaction::EnvelopeValidationFailure::UnsupportedContract,
+            );
+        }
+        let metadata = message.metadata();
+        self.verify(
+            TenantAuthorityBinding::new(
+                metadata.tenant_id(),
+                metadata.domain().as_str(),
+                metadata.contract().id().as_str(),
+                metadata.route().as_str(),
+                message.id().as_str(),
+            ),
+            message.transport_context(),
+        )
+        .map_err(|_| {
+            rss_transactional_messaging::transaction::EnvelopeValidationFailure::MalformedMetadata
+        })?;
+        Ok(challenge.verified())
     }
 }
 
@@ -361,11 +401,8 @@ mod tests {
         )
     }
 
-    fn metadata(token: String) -> diport::EnvelopeMetadata {
-        let mut md = diport::EnvelopeMetadata::empty();
-        md.insert_wire_pair(diport::KEY_TENANT_ID, tenant().to_string());
-        md.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
-        md
+    fn metadata(token: String) -> rss_transactional_messaging::message::TransportContext {
+        rss_transactional_messaging::message::TransportContext::new(None, Some(token))
     }
 
     #[test]

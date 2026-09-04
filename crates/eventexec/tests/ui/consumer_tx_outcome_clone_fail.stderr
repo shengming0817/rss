@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for enum `ConsumerTxOutcome<C>` in the current scope
- --> tests/ui/consumer_tx_outcome_clone_fail.rs:5:30
-  |
-5 |     let _duplicate = outcome.clone();
-  |                              ^^^^^ method not found in `ConsumerTxOutcome<()>`

@@ -9,18 +9,18 @@
 //! 已迁 `diport`（issue #1075，ADR-003 DI port 收敛）——消费方经 `diport::AuditSink` 注入。
 //!
 //! 层级：服务层（依赖基础 + 引擎；不依赖域 / adapters）。
-//! Eventing telemetry 经 `rss_eventing::observability` 的闭合 observation seam 注入；本 crate 的
-//! [`EventingTelemetryEmitter`] 是唯一 production metrics/tracing 投影，不接收 domain/tenant/contract
+//! TransactionalMessaging telemetry 经 `rss_transactional_messaging::observability` 的闭合 observation seam 注入；本 crate 的
+//! [`TransactionalMessagingTelemetryEmitter`] 是唯一 production metrics/tracing 投影，不接收 domain/tenant/contract
 //! 等动态 label，也不向 eventexec 反向暴露 runtime implementation。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
 
-mod eventing;
 mod localtx;
 mod telemetry;
+mod transactional_messaging;
 
-pub use eventing::EventingTelemetryEmitter;
 pub use localtx::{LocalTxMetric, LocalTxObservation};
 pub use telemetry::{TelemetryResource, TelemetryResourceError};
+pub use transactional_messaging::TransactionalMessagingTelemetryEmitter;
 
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────
 
@@ -248,7 +248,7 @@ mod tests {
         assert_ne!(LabelValue::Static("a"), LabelValue::Static("b"));
     }
 
-    // 通用 HTTP/cert label 仍保持 static-only；Eventing 使用独立闭合 observation seam。
+    // 通用 HTTP/cert label 仍保持 static-only；TransactionalMessaging 使用独立闭合 observation seam。
     #[test]
     fn label_value_remains_static_only() {
         let labels = [

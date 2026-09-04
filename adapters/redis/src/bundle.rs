@@ -1,22 +1,19 @@
-//! redis capability bundle（#1498 / RW-W-hardening）：把 pool 构造 + inbox/distlock/CAS 能力派发 +
+//! redis capability bundle（#1498 / RW-W-hardening）：把 pool 构造 + distlock/CAS 能力派发 +
 //! managed-resource/rollback 单源派生收口到单一 funnel，作 redis provider 的**唯一装配出口**。
 //!
-//! 泛化自 pg `PgRuntimeDeps`/`PgInfraDeps`（#1422/#1423，ADR-010 §2.2）。redis 的 `InboxStore` /
-//! `LockStore` / `CasStore` 均是 provider-agnostic infra，故落 [`RedisInfraDeps`]。
+//! 泛化自 pg `PgRuntimeDeps`/`PgInfraDeps`（#1422/#1423，ADR-010 §2.2）。
 
 use core::time::Duration;
 use std::sync::Arc;
 
-use consistency::{IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState};
-use deadpool_redis::{Manager, Pool, Runtime};
-use diport::{DynCasStore, DynLockStore};
-use rss_runtime::{DynManagedResource, ManagedResource, ShutdownError};
-
-use crate::{InvalidClaimTtl, RedisStore, claimer};
+use crate::{InvalidLeaseTtl, RedisStore};
 use crate::{
     InvalidRateLimitNamespace, RedisRateLimitCapabilityError, RedisRateLimiter,
     RedisRateLimiterCapability,
 };
+use deadpool_redis::{Manager, Pool, Runtime};
+use diport::{DynCasStore, DynLockStore};
+use rss_runtime::{DynManagedResource, ManagedResource, ShutdownError};
 
 /// Explicit private trust anchor for a REDISS connection.
 #[derive(Clone)]
@@ -115,10 +112,9 @@ impl RedisRuntimeDeps {
         Self::from_pool(pool)
     }
 
-    /// 校验 Redis lease TTL：拒绝 `< 1ms`（亚毫秒丢精度、零非法），不静默钳制。
-    pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), InvalidClaimTtl> {
+    pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), InvalidLeaseTtl> {
         if ttl.as_millis() == 0 {
-            return Err(InvalidClaimTtl);
+            return Err(InvalidLeaseTtl);
         }
         Ok(())
     }
@@ -164,15 +160,6 @@ impl RedisRuntimeDeps {
             Err(RedisPingError)
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn setup_with_ttl_validation(
-        pool: Pool,
-        ttl: Duration,
-    ) -> Result<Self, InvalidClaimTtl> {
-        Self::validate_ttl(ttl)?;
-        Ok(Self::from_pool(pool))
-    }
 }
 
 /// framework/global redis 基建能力句柄（`Clone`，provider-agnostic、非单域）。
@@ -200,15 +187,6 @@ impl RedisInfraDeps {
         crate::RedisSagaEffectFixture::new(Arc::clone(&self.store))
     }
 
-    /// 幂等 claimer 句柄。tenant/group scope 来自每次调用的 [`InboxReceiptContext`]；`ttl` 由 Redis 服务端 `PX` 管过期。
-    pub fn inbox(&self, ttl: Duration) -> Result<RedisInboxStore, InvalidClaimTtl> {
-        RedisRuntimeDeps::validate_ttl(ttl)?;
-        Ok(RedisInboxStore {
-            store: Arc::clone(&self.store),
-            ttl,
-        })
-    }
-
     /// Redis distlock provider 句柄（DI-ready dyn port）。
     #[must_use]
     pub fn lock_store(&self) -> Box<DynLockStore<'static>> {
@@ -232,59 +210,6 @@ impl RedisInfraDeps {
         DynCasStore::new_box(RedisCasStore {
             store: Arc::clone(&self.store),
         })
-    }
-}
-
-/// Redis inbox claimer provider handle：能力配置随 handle 绑定，`RedisRuntimeDeps` 只承载 pool。
-#[derive(Clone)]
-pub struct RedisInboxStore {
-    store: Arc<RedisStore>,
-    ttl: Duration,
-}
-
-impl RedisInboxStore {
-    /// 供组合根派生续租周期，与后端 claim TTL 同源。
-    #[must_use]
-    pub fn lease_ttl(&self) -> Duration {
-        self.ttl
-    }
-}
-
-impl InboxStore for RedisInboxStore {
-    async fn try_claim(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<SeenState, consistency::EngineError> {
-        claimer::try_claim_impl(self.store.pool(), self.ttl, ctx, key, lease).await
-    }
-
-    async fn extend(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<LeaseOutcome, consistency::EngineError> {
-        claimer::extend_impl(self.store.pool(), self.ttl, ctx, key, lease).await
-    }
-
-    async fn commit(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<LeaseOutcome, consistency::EngineError> {
-        claimer::commit_impl(self.store.pool(), ctx, key, lease).await
-    }
-
-    async fn release(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<(), consistency::EngineError> {
-        claimer::release_impl(self.store.pool(), ctx, key, lease).await
     }
 }
 
@@ -342,44 +267,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_rejects_zero_ttl() {
-        assert!(RedisRuntimeDeps::validate_ttl(Duration::ZERO).is_err());
-    }
-
-    #[tokio::test]
-    async fn setup_accepts_valid_ttl() {
-        assert!(
-            RedisRuntimeDeps::setup_with_ttl_validation(lazy_pool(), Duration::from_millis(1))
-                .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn infra_inbox_shares_store_arc() {
-        let d = deps();
-        let store = d
-            .infra()
-            .inbox(Duration::from_millis(50))
-            .expect("valid ttl");
-        assert!(Arc::ptr_eq(&store.store, &d.store));
-    }
-
-    #[tokio::test]
     async fn clone_shares_store() {
         let d = deps();
         let c = d.clone();
         assert!(Arc::ptr_eq(&d.store, &c.store));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn lease_ttl_propagates() {
-        let idem = deps()
-            .infra()
-            .inbox(Duration::from_millis(123))
-            .expect("valid ttl");
-        assert_eq!(idem.lease_ttl(), Duration::from_millis(123));
     }
 
     #[tokio::test]

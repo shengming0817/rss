@@ -30,8 +30,8 @@ bounded-transient retry 与 commit-unknown non-retryable。
 
 结算是闭值 committed、rolled-back、rollback-failed、commit-unknown；retry class 与 settlement outcome 正交。
 
-- ConsumerTx 复用私有 opaque `LocalTxAttempt`，只通过穷尽 fold 投影到
-  `ConsumerTxOutcome<PgConsumerTxCommitProof>`。commit ACK 铸造 proof；缺失 commit ACK 为
+- ConsumerTx 复用 `rss_transactional_messaging::transaction::LocalTxAttempt`，只通过穷尽 fold 投影到
+  `TransactionOutcome<ProviderCommitProof>`。commit ACK 铸造 provider-private proof；缺失 commit ACK 为
   commit-unknown，缺失 rollback ACK 为 rollback-failed 并覆盖原错误分类，确认 rollback 后的 lease lost
   才是 fenced，其余 storage failure 是 infrastructure-transient。
 - 明确 commit/rollback ACK 才可释放 connection lease；取消、timeout、未结算或结算失败必须 quarantine/close。

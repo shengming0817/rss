@@ -1,4 +1,4 @@
-//! lapin AMQP 发布 adapter——impl `diport::Publisher` + `rss_runtime::ManagedResource`。
+//! lapin AMQP 发布 adapter——impl `rss_transactional_messaging::transport::Publisher` + `rss_runtime::ManagedResource`。
 //!
 //! ref: amqp-rs/lapin src/generated/channel.rs@v4.10.0（采纳 basic_publish → PublisherConfirm 生命周期；
 //! 偏离其可选 auto-recovery，由 RSS absolute deadline 独占整套 connection+confirm transport replacement）。
@@ -10,57 +10,95 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use diport::{
-    EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, KEY_OCCURRED_AT, PublishRequest,
-    Publisher, PublisherError,
-};
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable, ShortString, ShortStringError};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
 use rss_runtime::{ManagedResource, ShutdownError};
+use rss_transactional_messaging::message::MessageEnvelope;
+use rss_transactional_messaging::policy::OperationDeadline;
+use rss_transactional_messaging::transport::{
+    PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
+    Publisher,
+};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::conn::{self, REPLY_SUCCESS};
 
-/// 与 `eventing::delivery::DELIVERY_BUDGET_MAX` 和 PostgreSQL 0062 对齐的 adapter 二次防线。
+/// 与 `rss_transactional_messaging::policy::DELIVERY_BUDGET_MAX` 和 PostgreSQL 0062 对齐的 adapter 二次防线。
 const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;
 
-/// envelope metadata → [`BasicProperties`]：`event_id` 盖 `message_id`（去重锚点）；`occurred_at`
+/// envelope metadata → [`BasicProperties`]：`MessageId` 盖 `message_id`（去重锚点）；`occurred_at`
 /// 独占 AMQP typed `timestamp`（unix 秒 u64），不再重复进 headers；其余 pair 进 `FieldTable` LongString。
 ///
 /// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
 fn build_properties(
-    event_id: &str,
-    header: &EnvelopeHeader,
-    md: &EnvelopeMetadata,
+    message_id: &str,
+    envelope: &MessageEnvelope<Vec<u8>>,
 ) -> Result<BasicProperties, ShortStringError> {
-    let message_id = ShortString::try_new(event_id)?;
+    let message_id = ShortString::try_new(message_id)?;
     let props = BasicProperties::default()
         .with_message_id(message_id)
         .with_delivery_mode(2);
     // occurred_at 来自 validated `Timepoint`；畸形或负 wire 值在任何 broker I/O 前已 fail-closed。
-    let props = match u64::try_from(header.occurred_at().unix_seconds()) {
+    let props = match u64::try_from(envelope.metadata().occurred_at().unix_seconds()) {
         Ok(timestamp) => props.with_timestamp(timestamp),
         Err(_) => props,
     };
     let mut table = FieldTable::default();
-    for (k, v) in md.iter_transport_headers() {
-        if k == KEY_OCCURRED_AT {
-            // occurred_at 已进 timestamp 字段，不重复入 headers。
-            continue;
-        }
-        table.insert(
-            k.into(),
-            AMQPValue::LongString(v.as_bytes().to_vec().into()),
-        );
+    insert_header(
+        &mut table,
+        "tenantId",
+        &envelope.metadata().tenant_id().to_string(),
+    );
+    if let Some(value) = envelope.metadata().correlation() {
+        insert_header(&mut table, "correlation", value);
+    }
+    insert_header(&mut table, "domain", envelope.metadata().domain().as_str());
+    insert_header(&mut table, "route", envelope.metadata().route().as_str());
+    insert_header(
+        &mut table,
+        "contractId",
+        envelope.metadata().contract().id().as_str(),
+    );
+    insert_header(
+        &mut table,
+        "schemaVersion",
+        &format!("v{}", envelope.metadata().contract().version().major()),
+    );
+    insert_header(
+        &mut table,
+        "schemaHash",
+        envelope.metadata().contract().schema_digest().as_str(),
+    );
+    if let Some(partition) = envelope.metadata().partition() {
+        insert_header(&mut table, "partitionKey", partition.key().as_str());
+    }
+    if let Some(value) = envelope.metadata().causation() {
+        insert_header(&mut table, "causationId", value.as_str());
+    }
+    if let Some(value) = envelope.transport_context().trace() {
+        insert_header(&mut table, "trace", value);
+    }
+    if let Some(value) = envelope.transport_context().tenant_authority() {
+        insert_header(&mut table, "tenantAuthority", value);
+    }
+    for (key, value) in envelope.metadata().attributes() {
+        insert_header(&mut table, &format!("attribute.{key}"), value);
     }
     if table.inner().is_empty() {
         Ok(props)
     } else {
         Ok(props.with_headers(table))
     }
+}
+
+fn insert_header(table: &mut FieldTable, key: &str, value: &str) {
+    table.insert(
+        key.into(),
+        AMQPValue::LongString(value.as_bytes().to_vec().into()),
+    );
 }
 
 /// publish 被 broker 拒绝（durable publish-ok 语义失败）。internal source（不进 Display 凭据边界）。
@@ -74,7 +112,7 @@ enum PublishRejected {
     Unroutable,
 }
 
-/// AMQP 发布流水线所处阶段。仅进入低基数审计字段，不携 routing key / event id。
+/// AMQP 发布流水线所处阶段。仅进入低基数审计字段，不携 routing key / message id。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishPhase {
     PreSend,
@@ -450,29 +488,6 @@ where
         }
     }
 
-    fn begin_port_shutdown(&mut self) -> Option<RetiringTransport<T>> {
-        let retiring = match self {
-            Self::Ready {
-                transport,
-                admission,
-                ..
-            } => {
-                admission.close();
-                Some(RetiringTransport {
-                    transport: transport.clone(),
-                    admission: Arc::clone(admission),
-                })
-            }
-            Self::Recovering { retiring, .. } => retiring.clone(),
-            Self::ShuttingDown { retiring } => return retiring.clone(),
-            Self::Unavailable { .. } => None,
-        };
-        *self = Self::ShuttingDown {
-            retiring: retiring.clone(),
-        };
-        retiring
-    }
-
     fn take_for_resource_shutdown(&mut self) -> Option<RetiringTransport<T>> {
         let retiring = match self {
             Self::Ready {
@@ -551,12 +566,10 @@ enum PublisherTransportError {
     RecoveryTaskUnknown,
 }
 
-/// `Publisher::publish` 的唯一内部失败载体。Display 只含固定安全摘要；endpoint、routing key、event id、
-/// payload 与 lapin source 都不会越过 `PublisherError` 的 redacted source 边界。
+/// `Publisher::publish` 的唯一内部失败载体。Display 只含固定安全摘要；endpoint、routing key、message id、
+/// payload 与 lapin source 都不会越过 `MessagingError` 的 redacted source 边界。
 #[derive(Debug, thiserror::Error)]
 enum PublishAttemptFailure {
-    #[error("amqp publish envelope validation failed")]
-    Envelope(#[source] EnvelopeHeaderError),
     #[error("amqp publish message id validation failed")]
     MessageId(#[source] ShortStringError),
     #[error("amqp publish admission failed")]
@@ -595,7 +608,7 @@ impl PublishAttemptFailure {
 
     fn decision(&self) -> PublishFailureDecision {
         match self {
-            Self::Envelope(_) | Self::MessageId(_) => {
+            Self::MessageId(_) => {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
             }
             Self::Admission(_) | Self::Rejected(_) => {
@@ -620,11 +633,32 @@ impl PublishAttemptFailure {
 
     fn phase(&self) -> PublishPhase {
         match self {
-            Self::Envelope(_) | Self::MessageId(_) | Self::Admission(_) => PublishPhase::PreSend,
+            Self::MessageId(_) | Self::Admission(_) => PublishPhase::PreSend,
             Self::Client { phase, .. } => *phase,
             Self::Deadline { elapsed, .. } => elapsed.phase,
             Self::Rejected(_) => PublishPhase::Confirm,
         }
+    }
+
+    fn diagnostic(&self, kind: PublishFailureKind) -> PublishFailure {
+        let stage = match self {
+            Self::MessageId(_) => PublishFailureStage::Encode,
+            Self::Admission(_) => PublishFailureStage::Admission,
+            Self::Client {
+                phase: PublishPhase::PreSend,
+                ..
+            } => PublishFailureStage::Send,
+            Self::Client { .. } | Self::Deadline { .. } | Self::Rejected(_) => {
+                PublishFailureStage::Confirm
+            }
+        };
+        let reason = match self {
+            Self::MessageId(_) => PublishFailureReason::InvalidMessage,
+            Self::Deadline { .. } => PublishFailureReason::DeadlineElapsed,
+            Self::Rejected(_) => PublishFailureReason::ProviderRejected,
+            Self::Admission(_) | Self::Client { .. } => PublishFailureReason::TransportUnavailable,
+        };
+        PublishFailure::new(kind, stage, reason)
     }
 }
 
@@ -640,7 +674,7 @@ enum DefinitivePublishKind {
 /// Ambiguous 与 definitive retry 混成同一条隐式 bool 路径。
 ///
 /// 这是 Hard owner：类型系统锁定合法 decision 空间。Medium `AMQP-PUBLISH-BYPASS-01` 只补强
-/// `Publisher::publish` 不得直接绕过 decision 去构造 `PublisherError` / `retire_transport`；
+/// `Publisher::publish` 不得直接绕过 decision 去构造 `MessagingError` / `retire_transport`；
 /// budget/fencing/ambiguity 行为归 enrolled provider capability。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishFailureDecision {
@@ -670,7 +704,7 @@ impl PublishFailureDecision {
 struct AppliedPublishFailure {
     retirement_generation: Option<u64>,
     needs_ambiguous_audit: bool,
-    error: PublisherError,
+    outcome: PublishOutcome<()>,
 }
 
 fn apply_publish_failure_decision(
@@ -679,23 +713,29 @@ fn apply_publish_failure_decision(
 ) -> AppliedPublishFailure {
     let retirement_generation = decision.retirement_generation();
     let needs_ambiguous_audit = matches!(decision, PublishFailureDecision::RetireAmbiguous { .. });
-    let error = match decision {
+    let outcome = match decision {
         PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient)
         | PublishFailureDecision::RetireDefinitive {
             kind: DefinitivePublishKind::Transient,
             ..
-        } => PublisherError::transient(failure),
+        } => PublishOutcome::DefinitelyNotPublished(
+            failure.diagnostic(PublishFailureKind::Transient),
+        ),
         PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
         | PublishFailureDecision::RetireDefinitive {
             kind: DefinitivePublishKind::Permanent,
             ..
-        } => PublisherError::permanent(failure),
-        PublishFailureDecision::RetireAmbiguous { .. } => PublisherError::ambiguous(failure),
+        } => PublishOutcome::DefinitelyNotPublished(
+            failure.diagnostic(PublishFailureKind::Permanent),
+        ),
+        PublishFailureDecision::RetireAmbiguous { .. } => {
+            PublishOutcome::Ambiguous(failure.diagnostic(PublishFailureKind::Transient))
+        }
     };
     AppliedPublishFailure {
         retirement_generation,
         needs_ambiguous_audit,
-        error,
+        outcome,
     }
 }
 
@@ -770,7 +810,7 @@ fn validate_transport_admission(
     Ok(())
 }
 
-/// `lapin::Error` → [`PublisherError`]，按瞬态/永久分类（#1212：永久错误首投即 DLX，不熬满重试预算）。
+/// `lapin::Error` → [`MessagingError`]，按瞬态/永久分类（#1212：永久错误首投即 DLX，不熬满重试预算）。
 ///
 /// 分类策略（ref: amqp-rs/lapin src/error.rs@v4.10.0 `Error::can_be_recovered`）：
 /// - **AMQP soft（channel-level）非自愈错误** → permanent：重试同一消息必然再失败（权限拒绝、声明参数冲突、
@@ -782,7 +822,7 @@ fn validate_transport_admission(
 ///   `can_be_recovered()` 兜底，无需在此穷尽 match。
 ///
 /// **default-transient 取向（review #278 F1）**：「路由目标当前不存在」（NOROUTE/NOTFOUND/`basic.return`
-/// unroutable）**不**判永久——AMQP queue 由 `AmqpSubscriber::subscribe_ackable` 声明、无组合根级硬屏障保证
+/// unroutable）**不**判永久——AMQP queue 由 `AmqpSubscriber::deliveries` 声明、无组合根级硬屏障保证
 /// relay 发布前队列已就绪，启动/重启窗口的 unroutable 可经退避重试等订阅完成收敛。瞬态误判永久会跳过 outbox
 /// 自愈、破坏 L2 最终送达（代价高于「永久错误慢 DLX」）。彻底解（启动期声明 active subscriber 队列 + relay
 /// readiness 屏障 / topology provisioning port）属组合根，OOS follow-up。
@@ -822,7 +862,7 @@ fn is_permanent_soft_error(soft: &AMQPSoftError) -> bool {
 
 /// AMQP 事件发布 adapter（lapin）。raw client（`Arc<Connection>` + `Channel`）**私有**——仅本 adapter
 /// 内部（publish / shutdown）使用，不向 crate 内其它模块暴露 raw 连接。
-/// 同时 impl `Publisher` 与 `ManagedResource`（各有 `shutdown`）；消费经 `DynPublisher` /
+/// 同时 impl `Publisher` 与 `ManagedResource`（各有 `shutdown`）；消费经 `native Publisher capability` /
 /// `Box<DynManagedResource>` 无歧义，直接操作 raw struct 时用 UFCS 消歧。
 pub struct AmqpPublisher {
     connection_config: PublisherConnectionConfig,
@@ -984,7 +1024,7 @@ impl AmqpPublisher {
         lifecycle.recovery = Some(OwnedTransportRecovery { task });
     }
 
-    /// 将 [`PublishFailureDecision`] 落到 generation retirement 与三态 [`PublisherError`]。
+    /// 将 [`PublishFailureDecision`] 落到 generation retirement 与三态 [`MessagingError`]。
     ///
     /// Ownership 分界（不向后兼容；无旧 funnel shape 要求）：
     /// - **Hard**：private closed [`PublishFailureDecision`] / [`DefinitivePublishKind`] 使非法
@@ -995,9 +1035,9 @@ impl AmqpPublisher {
     ///   （ambiguous publish outcome 文案）+ required/forbidden fields 定位，不锁本 helper ident。
     /// - **Medium residual**（`AMQP-PUBLISH-BYPASS-01`）：仅禁止 production
     ///   `impl Publisher for AmqpPublisher::publish`（含 reachable nested local 与 live async/closure
-    ///   敏感面）直接构造 `PublisherError::{transient,permanent,ambiguous}`、直接 `retire_transport`、
+    ///   敏感面）直接构造 `MessagingError::{transient,permanent,ambiguous}`、直接 `retire_transport`、
     ///   外层 `?` 或 macro 隐藏上述敏感调用。
-    fn handle_publish_failure(&self, failure: PublishAttemptFailure) -> PublisherError {
+    fn handle_publish_failure(&self, failure: PublishAttemptFailure) -> PublishOutcome<()> {
         let phase = failure.phase();
         let applied = apply_publish_failure_decision(failure.decision(), failure);
         if let Some(generation) = applied.retirement_generation {
@@ -1017,44 +1057,7 @@ impl AmqpPublisher {
                 "amqp publish outcome is ambiguous",
             );
         }
-        applied.error
-    }
-
-    #[allow(clippy::disallowed_methods)]
-    // reason: one adapter-private monotonic deadline bounds recovery join plus admission drain during shutdown.
-    async fn shutdown_channels(&self) -> Result<(), PublisherTransportError> {
-        let shutdown_deadline = tokio::time::Instant::now() + self.publish_timeout;
-        let (recovery, retiring) = {
-            let mut lifecycle = self.lock_transports()?;
-            let retiring = lifecycle.slot.begin_port_shutdown();
-            (lifecycle.recovery.take(), retiring)
-        };
-        let recovery_result = if let Some(recovery) = recovery {
-            // ShuttingDown type-state and cancellation are established before joining. A pending
-            // connect is dropped; a simultaneously-ready connection wins the biased select and is
-            // then fenced by CAS and closed as an orphan within the original recovery deadline.
-            join_cancelled_recovery(recovery).await
-        } else {
-            Ok(())
-        };
-        let transport_result = if let Some(retiring) = retiring {
-            let admission_drained =
-                wait_for_shutdown_admission(&retiring.admission, shutdown_deadline).await;
-            let close_result = if retiring.transport.confirm_channel.status().connected() {
-                retiring
-                    .transport
-                    .confirm_channel
-                    .close(REPLY_SUCCESS, "publisher shutdown".into())
-                    .await
-                    .map_err(PublisherTransportError::Close)
-            } else {
-                Ok(())
-            };
-            close_result.and(admission_drained)
-        } else {
-            Ok(())
-        };
-        recovery_result.and(transport_result)
+        applied.outcome
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -1565,51 +1568,50 @@ async fn close_transport_bounded_at(
     }
 }
 
-impl Publisher for AmqpPublisher {
-    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
-        let header = match request.try_header() {
-            Ok(header) => header,
-            Err(error) => {
-                return Err(self.handle_publish_failure(PublishAttemptFailure::Envelope(error)));
-            }
-        };
-        let event_id = request.event_id().as_str().to_string();
-        let properties = match build_properties(&event_id, &header, request.metadata()) {
+impl Publisher<Vec<u8>> for AmqpPublisher {
+    type Receipt = ();
+
+    async fn publish(
+        &self,
+        message: &MessageEnvelope<Vec<u8>>,
+        deadline: OperationDeadline,
+    ) -> PublishOutcome<Self::Receipt> {
+        let message_id = message.id().as_str().to_string();
+        let properties = match build_properties(&message_id, message) {
             Ok(properties) => properties,
             Err(error) => {
-                return Err(self.handle_publish_failure(PublishAttemptFailure::MessageId(error)));
+                return self.handle_publish_failure(PublishAttemptFailure::MessageId(error));
             }
         };
         let snapshot = match self.transport_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));
+                return self.handle_publish_failure(PublishAttemptFailure::Admission(error));
             }
         };
         if let Err(source) = validate_transport_admission(
             snapshot.transport.connection.status().connected(),
             snapshot.transport.confirm_channel.status().connected(),
         ) {
-            return Err(self.handle_publish_failure(PublishAttemptFailure::Client {
+            return self.handle_publish_failure(PublishAttemptFailure::Client {
                 generation: snapshot.generation,
                 phase: PublishPhase::PreSend,
                 source,
-            }));
+            });
         }
         // Broker-owned topic exchange + routing key = topic：subscriber 声明同名 queue 并绑定 exact
         // key。per-domain 隔离仍经 vhost，broker topic permission 额外封闭契约 routing key。
         // mandatory=true + publisher confirms：不可路由（无绑定 queue）消息被 broker **退回**而非静默丢弃，
         // 经 confirm 检测为失败——durable publish-ok 语义闭合（不再依赖「subscriber 先启动」运行顺序约定）。
-        // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message::id()`（subscriber 的
+        // message_id = MessageId（去重锚点）：经 broker envelope 流到订阅侧 `Message::id()`（subscriber 的
         // `pick_message_id` 优先读 message_id 再回退 delivery_tag），实现跨进程「至少一次 + 幂等去重」。
         // envelope metadata 透传：occurred_at → AMQP timestamp；其余 → FieldTable LongString headers。
-        let topic = request.topic().as_str().to_string();
-        // into_payload()：move payload 出 request（event_id / topic / metadata 已借用完毕）。
-        let payload = request.into_payload();
+        let topic = message.metadata().route().as_str().to_string();
+        let payload = message.payload().clone();
         let inject_post_send_close = self.take_post_send_connection_close_fault();
         let transport = snapshot.transport.clone();
         let confirmation = run_publish_pipeline(
-            self.publish_timeout,
+            deadline.timeout(),
             async {
                 let pending = transport
                     .confirm_channel
@@ -1644,38 +1646,24 @@ impl Publisher for AmqpPublisher {
         let confirmation = match confirmation {
             Ok(confirmation) => confirmation,
             Err(error) => {
-                return Err(
-                    self.handle_publish_failure(PublishAttemptFailure::from_pipeline(
-                        snapshot.generation,
-                        error,
-                    )),
-                );
+                return self.handle_publish_failure(PublishAttemptFailure::from_pipeline(
+                    snapshot.generation,
+                    error,
+                ));
             }
         };
         if confirmation.is_nack() {
             // broker nack（队列错误 / 资源压力等）→ transient：退避后可能恢复，不首投即 DLX。
-            return Err(self.handle_publish_failure(PublishRejected::Nack.into()));
+            return self.handle_publish_failure(PublishRejected::Nack.into());
         }
         // unroutable（mandatory 退回，无绑定 queue）→ transient（review #278 F1）：queue 由
-        // AmqpSubscriber::subscribe_ackable 声明、无组合根级硬屏障保证 relay 发布前队列已就绪，启动/重启窗口
+        // AmqpSubscriber::deliveries 声明、无组合根级硬屏障保证 relay 发布前队列已就绪，启动/重启窗口
         // 「当前无绑定 queue」可经退避重试等订阅完成收敛。判永久会跳过 outbox 自愈、破坏 L2 最终送达——「路由
         // 目标当前不存在」≠ 永久非法（RabbitMQ basic.return 语义；与 NOROUTE/NOTFOUND 一致归 transient）。
         if confirmation.take_message().is_some() {
-            return Err(self.handle_publish_failure(PublishRejected::Unroutable.into()));
+            return self.handle_publish_failure(PublishRejected::Unroutable.into());
         }
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<(), PublisherError> {
-        // port-local 先停止 owned recovery，再关当前/retiring confirm channel；latest connection 保留在
-        // lifecycle 中，随后由 ManagedResource 单源取得并关闭。
-        self.shutdown_channels()
-            .await
-            .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(e), "amqp channel close error");
-            })
-            // shutdown 不经 relay settle，kind 无关——transient benign 默认（不夸大为永久）。
-            .map_err(PublisherError::transient)
+        PublishOutcome::Confirmed(())
     }
 }
 
@@ -1711,13 +1699,11 @@ mod classify_tests {
     //! 仅构造 `lapin::Error` 值检验分类逻辑（`Error::from(ErrorKind::..)` + `AMQPError::new(..)`）。
     use std::sync::Arc;
 
-    use eventing::delivery::PublishErrorKind;
-    use lapin::ErrorKind;
-    use lapin::protocol::{AMQPError, AMQPErrorKind, AMQPHardError, AMQPSoftError};
-
     use super::{
         DefinitivePublishKind, PublishRejected, classify_publish_kind, is_permanent_lapin,
     };
+    use lapin::ErrorKind;
+    use lapin::protocol::{AMQPError, AMQPErrorKind, AMQPHardError, AMQPSoftError};
 
     fn io() -> lapin::Error {
         lapin::Error::from(ErrorKind::IOError(Arc::new(std::io::Error::other("reset"))))
@@ -1823,172 +1809,18 @@ mod classify_tests {
     #[test]
     fn publish_rejected_dispositions() {
         assert_eq!(
-            diport::PublisherError::transient(PublishRejected::Nack).kind(),
-            PublishErrorKind::Transient
+            super::PublishAttemptFailure::Rejected(PublishRejected::Nack).decision(),
+            super::PublishFailureDecision::KeepDefinitive(super::DefinitivePublishKind::Transient)
         );
         assert_eq!(
-            diport::PublisherError::transient(PublishRejected::Unroutable).kind(),
-            PublishErrorKind::Transient
+            super::PublishAttemptFailure::Rejected(PublishRejected::Unroutable).decision(),
+            super::PublishFailureDecision::KeepDefinitive(super::DefinitivePublishKind::Transient)
         );
     }
 }
 
 /// `build_properties` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
 /// 验证 occurred_at → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
-#[cfg(test)]
-mod build_properties_tests {
-    #![allow(clippy::expect_used)]
-
-    use diport::{
-        EnvelopeHeader, EnvelopeMetadata, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
-        KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID,
-    };
-    use lapin::types::AMQPValue;
-
-    use super::build_properties;
-
-    const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    #[allow(clippy::expect_used)]
-    fn complete_metadata(occurred_at: &str) -> EnvelopeMetadata {
-        let mut metadata = EnvelopeMetadata::empty();
-        metadata.insert_wire_pair(KEY_TENANT_ID, TENANT);
-        metadata.insert_wire_pair(KEY_OCCURRED_AT, occurred_at);
-        metadata.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
-        metadata.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
-        metadata
-    }
-
-    #[allow(clippy::expect_used)]
-    fn header(metadata: &EnvelopeMetadata) -> EnvelopeHeader {
-        EnvelopeHeader::try_from_metadata(metadata, None).expect("complete envelope metadata")
-    }
-
-    #[test]
-    fn validated_metadata_sets_message_id_persistence_and_timestamp() {
-        let md = complete_metadata("0");
-        let header = header(&md);
-        let props = build_properties("evt-1", &header, &md).expect("valid message id");
-        assert_eq!(
-            props.message_id().as_ref().map(|s| s.as_str()),
-            Some("evt-1")
-        );
-        assert_eq!(props.delivery_mode(), &Some(2));
-        assert_eq!(props.timestamp(), &Some(0));
-    }
-
-    #[test]
-    fn message_id_property_is_fallible_at_the_short_string_boundary() {
-        let md = complete_metadata("0");
-        let header = header(&md);
-        assert!(build_properties(&"x".repeat(255), &header, &md).is_ok());
-        assert!(build_properties(&"x".repeat(256), &header, &md).is_err());
-    }
-
-    #[test]
-    fn negative_occurred_at_is_rejected_before_property_construction() {
-        let md = complete_metadata("-5");
-        assert!(EnvelopeHeader::try_from_metadata(&md, None).is_err());
-    }
-
-    #[test]
-    fn occurred_at_goes_to_timestamp_not_headers() {
-        let md = complete_metadata("1700000000");
-        let header = header(&md);
-        let props = build_properties("evt-2", &header, &md).expect("valid message id");
-        assert_eq!(props.timestamp(), &Some(1_700_000_000_u64));
-        // occurred_at 不得出现在 headers。
-        if let Some(table) = props.headers() {
-            let has_occurred_at = table
-                .inner()
-                .iter()
-                .any(|(k, _)| k.as_str() == KEY_OCCURRED_AT);
-            assert!(
-                !has_occurred_at,
-                "occurred_at must not be duplicated in headers"
-            );
-        }
-    }
-
-    #[test]
-    // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
-    #[allow(clippy::expect_used)]
-    fn transport_metadata_goes_to_headers_and_sensitive_metadata_is_excluded() {
-        let mut md = complete_metadata("1700000000");
-        md.insert_wire_pair(KEY_CORRELATION, "corr-9");
-        md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
-        md.insert_wire_pair(
-            KEY_SCHEMA_HASH,
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        md.insert_wire_pair(KEY_SUBJECT_ID, "user-42");
-        md.insert_wire_pair(KEY_PRINCIPAL, "principal-42");
-        md.insert_wire_pair(KEY_ACTOR, "actor-42");
-        let _ = md.try_insert("requestPath", "/login");
-        let header = header(&md);
-        let props = build_properties("evt-3", &header, &md).expect("valid message id");
-        assert_eq!(props.timestamp(), &Some(1_700_000_000));
-        let table = props.headers().as_ref().expect("headers should be set");
-        let get = |key: &str| {
-            table.inner().iter().find_map(|(k, v)| {
-                if k.as_str() == key {
-                    if let AMQPValue::LongString(ls) = v {
-                        Some(ls.to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-        };
-        assert_eq!(get(KEY_CORRELATION).as_deref(), Some("corr-9"));
-        assert_eq!(get(KEY_SCHEMA_VERSION).as_deref(), Some("v1"));
-        assert_eq!(
-            get(KEY_SCHEMA_HASH).as_deref(),
-            Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-        );
-        assert_eq!(get(KEY_SUBJECT_ID), None);
-        assert_eq!(get(KEY_PRINCIPAL), None);
-        assert_eq!(get(KEY_ACTOR), None);
-        assert_eq!(get("requestPath"), None);
-    }
-
-    #[test]
-    // reason: 测试断言 build_properties 在有 metadata 时必设 headers（非生产路径）。
-    #[allow(clippy::expect_used)]
-    fn full_roundtrip_occurred_at_and_other_fields() {
-        let mut md = complete_metadata("1700000001");
-        md.insert_wire_pair(KEY_CORRELATION, "corr-full");
-        let header = header(&md);
-        let props = build_properties("evt-full", &header, &md).expect("valid message id");
-        // message_id = event_id。
-        assert_eq!(
-            props.message_id().as_ref().map(|s| s.as_str()),
-            Some("evt-full")
-        );
-        // occurred_at → timestamp（不进 headers）。
-        assert_eq!(props.timestamp(), &Some(1_700_000_001_u64));
-        let table = props.headers().as_ref().expect("headers set");
-        // correlation 在 headers。
-        let has_correlation = table
-            .inner()
-            .iter()
-            .any(|(k, _)| k.as_str() == KEY_CORRELATION);
-        assert!(has_correlation, "correlation should be in headers");
-        // occurred_at 不在 headers。
-        let has_occurred_at = table
-            .inner()
-            .iter()
-            .any(|(k, _)| k.as_str() == KEY_OCCURRED_AT);
-        assert!(
-            !has_occurred_at,
-            "occurred_at must not be duplicated in headers"
-        );
-    }
-}
-
 #[cfg(test)]
 mod publish_deadline_tests {
     use std::convert::Infallible;
@@ -2006,7 +1838,14 @@ mod publish_deadline_tests {
             phase: PublishPhase::Confirm,
         };
         assert_eq!(elapsed.to_string(), "amqp publish deadline elapsed");
-        assert!(diport::PublisherError::ambiguous(elapsed).is_ambiguous());
+        let failure = super::PublishAttemptFailure::Deadline {
+            generation: 1,
+            elapsed,
+        };
+        assert!(matches!(
+            super::apply_publish_failure_decision(failure.decision(), failure).outcome,
+            rss_transactional_messaging::transport::PublishOutcome::Ambiguous(_)
+        ));
     }
 
     #[test]
@@ -2129,6 +1968,7 @@ mod publish_pipeline_red_tests {
     use std::time::Duration;
 
     use lapin::{ChannelState, ConnectionState, ErrorKind};
+    use rss_transactional_messaging::transport::{PublishFailureKind, PublishOutcome};
     use tokio_util::sync::CancellationToken;
 
     use super::{
@@ -2306,12 +2146,6 @@ mod publish_pipeline_red_tests {
     fn publish_attempt_failure_decision_covers_every_closed_variant() {
         let cases = [
             (
-                super::PublishAttemptFailure::Envelope(
-                    diport::EnvelopeHeaderError::MissingTenantId,
-                ),
-                PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent),
-            ),
-            (
                 super::PublishAttemptFailure::MessageId(
                     lapin::types::ShortString::try_new("x".repeat(256))
                         .expect_err("oversized message id"),
@@ -2415,18 +2249,30 @@ mod publish_pipeline_red_tests {
             );
             match expected_wire {
                 ExpectedWire::Ambiguous => {
-                    assert!(applied.error.is_ambiguous(), "{label}: wire");
+                    assert!(
+                        matches!(applied.outcome, PublishOutcome::Ambiguous(_)),
+                        "{label}: wire"
+                    );
                 }
                 ExpectedWire::Transient => {
                     assert!(
-                        applied.error.is_retryable()
-                            && !applied.error.is_ambiguous()
-                            && !applied.error.is_permanent(),
+                        matches!(
+                            applied.outcome,
+                            PublishOutcome::DefinitelyNotPublished(failure)
+                                if failure.kind() == PublishFailureKind::Transient
+                        ),
                         "{label}: wire"
                     );
                 }
                 ExpectedWire::Permanent => {
-                    assert!(applied.error.is_permanent(), "{label}: wire");
+                    assert!(
+                        matches!(
+                            applied.outcome,
+                            PublishOutcome::DefinitelyNotPublished(failure)
+                                if failure.kind() == PublishFailureKind::Permanent
+                        ),
+                        "{label}: wire"
+                    );
                 }
             }
         }
@@ -2704,7 +2550,7 @@ mod publisher_channel_state_tests {
     }
 
     #[test]
-    fn shutdown_between_reconnect_and_install_fences_replacement_as_orphan() {
+    fn resource_shutdown_between_reconnect_and_install_fences_replacement_as_orphan() {
         let mut slot = TransportSlot::ready("transport-0");
         let generation = slot
             .snapshot()
@@ -2714,7 +2560,7 @@ mod publisher_channel_state_tests {
             .expect("failure must start recovery");
 
         assert_eq!(
-            slot.begin_port_shutdown()
+            slot.take_for_resource_shutdown()
                 .as_ref()
                 .map(|retiring| retiring.transport),
             Some("transport-0")
@@ -2723,12 +2569,9 @@ mod publisher_channel_state_tests {
             !slot.install_replacement(generation, "transport-orphan"),
             "ShuttingDown must force the recovery task into bounded orphan close"
         );
-        assert_eq!(
-            slot.take_for_resource_shutdown()
-                .as_ref()
-                .map(|retiring| retiring.transport),
-            Some("transport-0"),
-            "runtime shutdown must still own the retiring connection"
+        assert!(
+            slot.take_for_resource_shutdown().is_none(),
+            "resource shutdown consumes the retiring connection exactly once"
         );
     }
 

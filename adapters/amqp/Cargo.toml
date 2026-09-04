@@ -11,26 +11,21 @@ workspace = true
 # adapter 依赖基础 + 引擎（W 阶段实现 body 时用）+ DI-infra（diport，见下，impl 其 port trait）；实现其上层 trait 的具体服务 crate 在落地该 trait 时按需添加，
 # 不预连全服务层；依赖面由 Cargo manifest 与 deny.toml 约束。
 [dependencies]
-eventing.workspace = true
-vocab = { path = "../../crates/vocab" }
-ids = { path = "../../crates/ids" }
+rss-transactional-messaging.workspace = true
+rss-contract.workspace = true
+rss-request-context.workspace = true
+rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
 secure = { path = "../../crates/secure" }
 rss-redact.workspace = true
-support = { path = "../../crates/support" }
-runctx = { path = "../../crates/runctx" }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
-# 实现 diport 已冻 DI port trait（Publisher + Subscriber + ManagedResource，native AFIT）。
-diport = { path = "../../crates/diport" }
 rss-runtime.workspace = true
-# Subscriber::subscribe 签名需 CancellationToken（fallback + 真实 impl 都用），取消即流终止。
+# AMQP resource shutdown and connection recovery use CancellationToken.
 tokio-util = { workspace = true }
 # 真实 broker I/O：lapin（AMQP client）+ futures（Consumer Stream 适配 take_until/filter_map）
 # + tracing（redacted 连接日志）。仅 `backend` feature 编译——默认 build 不拉 broker
 # 客户端树；独立 amqp-integration package 承载 live broker proof。ref: lapin examples/pubsub.rs@main
 lapin = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
+futures.workspace = true
 tracing = { workspace = true, optional = true }
 # publisher 的两阶段 await 由单一 Tokio deadline 约束；仅 backend 进入生产依赖面。
 tokio = { workspace = true, optional = true, features = ["time"] }
@@ -39,10 +34,10 @@ thiserror = { workspace = true, optional = true }
 
 [features]
 # 真实 AMQP broker I/O（lapin）。无此 feature 时 adapter 退化为 sealed-marker 签名冻结壳
-# （AmqpPublisher / AmqpSubscriber impl 冻结 DI port，body=todo!()），保 ADAPTER-PORT-FREEZE-01 默认绿。
+# （AmqpPublisher / AmqpSubscriber impl 冻结 native transactional-messaging ports），保 ADAPTER-PORT-FREEZE-01 默认绿。
 # 注：默认 build（无 backend）整 crate 无 lapin/tracing 链路——调试 AMQP 须 `--features backend`
 # （+ docker / `RSS_AMQP_TEST_URL` 跑集成测试），否则看不到任何 AMQP 日志。
-backend = ["dep:lapin", "dep:rustls-pki-types", "dep:futures", "dep:tracing", "dep:thiserror", "dep:tokio"]
+backend = ["dep:lapin", "dep:rustls-pki-types", "dep:tracing", "dep:thiserror", "dep:tokio"]
 # Deterministic post-send fault barrier + bounded reconnect readiness for cross-crate integration evidence.
 # Deliberately excludes container fixtures so runtime integration can enable this seam without pulling testcontainers.
 integration-test-support = ["backend"]
@@ -50,9 +45,6 @@ integration-test-support = ["backend"]
 integration = ["integration-test-support"]
 
 [dev-dependencies]
-eventexec = { path = "../../crates/eventexec", features = ["l2-test-support"] }
-consistency = { path = "../../crates/consistency" }
-primitives = { path = "../../crates/primitives" }
 rss-request-context.workspace = true
 # 集成测试 #[tokio::test]（仅 feature=integration 下编译执行）；time = 防挂的有界超时。
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }

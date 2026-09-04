@@ -17,10 +17,9 @@ workspace = true
 # adapter 真身（#1009 inbox claimer）：impl rss_runtime::ManagedResource + consistency::InboxStore。
 # 后端 deadpool-redis 经 `backend` feature 门控（default build 轻量、仍保 freeze smoke）。
 [dependencies]
-rss-request-context.workspace = true
 diport = { path = "../../crates/diport" }
 rss-runtime.workspace = true
-consistency = { path = "../../crates/consistency" }
+consistency = { path = "../../crates/consistency", optional = true }
 vocab = { path = "../../crates/vocab", optional = true }
 deadpool-redis = { workspace = true, optional = true }
 # redacted 结构化日志（仅 backend）：`rss_redact::redact_error` funnel + `tracing`（`crates/observ` 与 typed metric enums：错误经 redact）。
@@ -36,10 +35,9 @@ tokio = { workspace = true, features = ["time"], optional = true }
 default = []
 backend = ["dep:deadpool-redis", "dep:secure", "dep:rss-redact", "dep:tracing", "dep:thiserror", "dep:vocab", "dep:sha2", "dep:tokio"]
 # Live tests are owned by tests/redis-integration, which enables this existing feature directly.
-integration = ["backend"]
+integration = ["backend", "dep:consistency"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time"] }
 rstest = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
 vocab = { path = "../../crates/vocab" }

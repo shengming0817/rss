@@ -1,11 +1,10 @@
 use diport::{
-    AuthEffect, BusinessWriteEffect, Clock, DiPortEffect, DynAckableSubscriber, DynAcker,
+    AuthEffect, BusinessWriteEffect, DiPortEffect,
     DynCasStore, DynDeadLetterStore, DynFencedWriter, DynKeyProvider,
-    DynLeaderElector, DynLockStore, DynObjectStore, DynOutboxEmitter,
-    DynOwnerCheckpointStore, DynPublisher, DynRateLimiter, DynSagaDurableStore,
-    DynSagaTenantSource, DynSecretResolver, DynSigner, DynSubscriber, LocalPrivilege,
-    MetricsExporter, OutboxEffect, PortEffectClass,
-    PortPrivilegeClass, ReadEffect, SubscribeInitializer, WorkflowEffect,
+    DynLeaderElector, DynLockStore, DynObjectStore,
+    DynOwnerCheckpointStore, DynRateLimiter, DynSagaDurableStore,
+    DynSagaTenantSource, DynSecretResolver, DynSigner, LocalPrivilege,
+    MetricsExporter, PortEffectClass, PortPrivilegeClass, ReadEffect, WorkflowEffect,
 };
 
 fn assert_classification<T, E, P>()
@@ -23,7 +22,6 @@ macro_rules! assert_local_effect {
 }
 
 fn main() {
-    assert_local_effect!(dyn Clock, ReadEffect);
     assert_local_effect!(dyn MetricsExporter, ReadEffect);
 
     assert_local_effect!(DynKeyProvider<'static>, AuthEffect);
@@ -31,19 +29,12 @@ fn main() {
     assert_local_effect!(DynSecretResolver<'static>, AuthEffect);
     assert_local_effect!(DynSigner<'static>, AuthEffect);
 
-    assert_local_effect!(DynAcker<'static>, BusinessWriteEffect);
     assert_local_effect!(DynCasStore<'static>, BusinessWriteEffect);
     assert_local_effect!(DynOwnerCheckpointStore<'static>, BusinessWriteEffect);
     assert_local_effect!(DynDeadLetterStore<'static>, BusinessWriteEffect);
     assert_local_effect!(DynFencedWriter<'static>, BusinessWriteEffect);
     assert_local_effect!(DynObjectStore<'static>, BusinessWriteEffect);
 
-    assert_local_effect!(DynOutboxEmitter<'static>, OutboxEffect);
-    assert_local_effect!(DynPublisher<'static>, OutboxEffect);
-
-    assert_local_effect!(DynAckableSubscriber<'static>, WorkflowEffect);
-    assert_local_effect!(DynSubscriber<'static>, WorkflowEffect);
-    assert_local_effect!(dyn SubscribeInitializer, WorkflowEffect);
     assert_local_effect!(DynLeaderElector<'static>, WorkflowEffect);
     assert_local_effect!(DynLockStore<'static>, WorkflowEffect);
     assert_local_effect!(DynSagaDurableStore<'static>, WorkflowEffect);

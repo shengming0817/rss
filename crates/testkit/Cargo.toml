@@ -39,7 +39,6 @@ integration = ["containers"]
 
 # Live provider tests 由独立 integration workspace package 直接依赖本 feature；本 crate 不维护 test catalog。
 [dev-dependencies]
-eventing.workspace = true                              # public Eventing lifecycle external-crate T2 carrier
 uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度
 trybuild = { workspace = true }                      # provider owner-private receipt compile reds
 tokio = { workspace = true, features = ["test-util"] }  # wait 自测：start_paused 虚拟时钟验证 await_delay
