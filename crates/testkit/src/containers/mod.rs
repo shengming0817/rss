@@ -262,7 +262,8 @@ mod vault;
 pub use minio::{MinioCredentials, MinioTlsFixture, minio_tls_archive};
 pub use postgres::{
     ExternalPgFixture, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
-    PgConnParams, PgFixture, PgTlsFixture, env_or_postgres, owned_postgres, postgres_tls,
+    PgConnParams, PgFixture, PgTlsFixture, PgTlsServerIdentity, env_or_postgres, owned_postgres,
+    postgres_tls,
 };
 pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, env_or_rabbitmq, rabbitmq_tls};
 pub use redis::{RedisFixture, RedisTlsFixture, env_or_redis, redis_tls};

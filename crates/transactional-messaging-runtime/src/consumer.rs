@@ -278,7 +278,7 @@ where
     .and_then(std::convert::identity)
     {
         Ok(LeaseStatus::Held { remaining }) => {
-            if let Err(error) = validate_renewal_window(execution, remaining) {
+            if let Err(error) = validate_renewal_window(inbox, execution, remaining) {
                 return Err(abandon_after_error(
                     state.settlement,
                     state.deadlines.settlement(),
@@ -381,7 +381,7 @@ where
     E: TransactionalMessagingEmitter,
 {
     loop {
-        let wake = deadline.capped(execution.timer, execution.policy.lease_renewal().interval());
+        let wake = deadline.capped(execution.timer, inbox.lease_policy().interval());
         within(execution.timer, deadline, |_| {
             execution.timer.sleep_until(wake)
         })
@@ -393,7 +393,7 @@ where
         .and_then(std::convert::identity)
         {
             Ok(LeaseStatus::Held { remaining }) => {
-                validate_renewal_window(execution, remaining)?;
+                validate_renewal_window(inbox, execution, remaining)?;
                 tokio::task::yield_now().await;
             }
             Ok(LeaseStatus::Lost) => return Ok(RenewalExit::Lost),
@@ -409,7 +409,8 @@ where
     }
 }
 
-fn validate_renewal_window<V, R, E>(
+fn validate_renewal_window<I: InboxStore, V, R, E>(
+    inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     remaining: Duration,
 ) -> Result<(), MessagingError>
@@ -417,7 +418,7 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    if execution.policy.lease_renewal().fits(remaining) {
+    if inbox.lease_policy().fits(remaining) {
         return Ok(());
     }
     let error = MessagingError::new(

@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `rss_transactional_messaging_postgres::PgConsumerTxCommitProof`
+ --> tests/ui/proof_construct_fail.rs:1:5
+  |
+1 | use rss_transactional_messaging_postgres::PgConsumerTxCommitProof;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `PgConsumerTxCommitProof` in the root

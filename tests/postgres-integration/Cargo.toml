@@ -1,0 +1,22 @@
+[package]
+name = "postgres-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
+rss-transactional-messaging.workspace = true
+rss-transactional-messaging-runtime.workspace = true
+rss-transactional-messaging-testkit.workspace = true
+rss-contract.workspace = true
+rss-request-context.workspace = true
+rss-runtime.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+sqlx.workspace = true
+anyhow.workspace = true

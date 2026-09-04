@@ -503,6 +503,7 @@ pub enum LeaseRenewalPolicyError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Periodic renewal schedule derived from the provider-authoritative claim TTL.
 pub struct LeaseRenewalPolicy {
+    ttl: Duration,
     interval: Duration,
 }
 
@@ -517,8 +518,15 @@ impl LeaseRenewalPolicy {
             return Err(LeaseRenewalPolicyError::TooShort);
         }
         Ok(Self {
+            ttl,
             interval: (ttl / 3).max(LEASE_RENEWAL_INTERVAL_MIN),
         })
+    }
+
+    /// Return the authoritative TTL used by both the provider and renewal scheduler.
+    #[must_use]
+    pub const fn ttl(self) -> Duration {
+        self.ttl
     }
 
     /// Return the fixed renewal interval.
@@ -534,29 +542,20 @@ impl LeaseRenewalPolicy {
     }
 }
 
-/// Complete consumer execution policy: one absolute budget, bounded local retry, and lease renewal.
+/// Consumer execution budget and bounded retry. Renewal policy belongs to the inbox provider.
 #[cfg(feature = "consumer")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConsumerExecutionPolicy {
     retry: RetryPolicy,
     budget: ExecutionBudget,
-    lease_renewal: LeaseRenewalPolicy,
 }
 
 #[cfg(feature = "consumer")]
 impl ConsumerExecutionPolicy {
     #[must_use]
     /// `new` operation defined by this protocol type.
-    pub const fn new(
-        retry: RetryPolicy,
-        budget: ExecutionBudget,
-        lease_renewal: LeaseRenewalPolicy,
-    ) -> Self {
-        Self {
-            retry,
-            budget,
-            lease_renewal,
-        }
+    pub const fn new(retry: RetryPolicy, budget: ExecutionBudget) -> Self {
+        Self { retry, budget }
     }
 
     #[must_use]
@@ -569,11 +568,5 @@ impl ConsumerExecutionPolicy {
     /// `budget` operation defined by this protocol type.
     pub const fn budget(self) -> ExecutionBudget {
         self.budget
-    }
-
-    /// Return the provider-derived periodic lease renewal policy.
-    #[must_use]
-    pub const fn lease_renewal(self) -> LeaseRenewalPolicy {
-        self.lease_renewal
     }
 }

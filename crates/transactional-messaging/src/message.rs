@@ -530,6 +530,12 @@ impl<P> std::fmt::Debug for MessageEnvelope<P> {
 pub struct MessageFingerprint([u8; 32]);
 
 impl MessageFingerprint {
+    /// Restore a durable digest value. This does not establish receipt authenticity.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     #[must_use]
     /// `of` operation defined by this protocol type.
     pub fn of<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Self {

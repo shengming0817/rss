@@ -146,23 +146,31 @@ mod producer {
     /// Deterministic, non-durable implementation of the canonical outbox port.
     pub struct MemoryOutboxStore<P> {
         inner: Arc<Mutex<OutboxState<P>>>,
-        lease: Duration,
+        budget: rss_transactional_messaging::policy::DeliveryBudget,
     }
 
     impl<P> Clone for MemoryOutboxStore<P> {
         fn clone(&self) -> Self {
             Self {
                 inner: Arc::clone(&self.inner),
-                lease: self.lease,
+                budget: self.budget,
             }
         }
     }
 
     impl<P> Default for MemoryOutboxStore<P> {
+        #[allow(clippy::expect_used)]
+        // reason: these fixed test-only budgets satisfy the checked constructor by construction.
         fn default() -> Self {
             Self {
                 inner: Arc::new(Mutex::new(OutboxState::default())),
-                lease: Duration::from_secs(30),
+                budget: rss_transactional_messaging::policy::DeliveryBudget::new(
+                    Duration::from_secs(30),
+                    Duration::from_secs(2),
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                )
+                .expect("fixed test budget"),
             }
         }
     }
@@ -220,13 +228,16 @@ mod producer {
     where
         P: AsRef<[u8]> + Send + Sync,
     {
-        type Transaction = ();
+        fn delivery_budget(&self) -> rss_transactional_messaging::policy::DeliveryBudget {
+            self.budget
+        }
+        type Transaction<'tx> = ();
         type Claim = (Arc<PendingMessage<P>>, u64);
         type PublishReceipt = ();
 
         async fn append(
             &self,
-            _transaction: &mut Self::Transaction,
+            _transaction: &mut Self::Transaction<'_>,
             message: PendingMessage<P>,
         ) -> Result<AppendOutcome, MessagingError> {
             let mut state = self
@@ -309,7 +320,8 @@ mod producer {
             });
             Ok(if claim.1 == state.epoch && owned {
                 OutboxLeaseStatus::Held {
-                    remaining: self.lease,
+                    delivery_remaining: None,
+                    remaining: self.budget.lease_ttl(),
                 }
             } else {
                 OutboxLeaseStatus::Lost
@@ -581,6 +593,12 @@ mod consumer {
     }
 
     impl InboxStore for MemoryInboxStore {
+        #[allow(clippy::expect_used)]
+        // reason: this provider's fixed 30-second test lease always admits a renewal schedule.
+        fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+            rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(self.lease)
+                .expect("fixed test lease")
+        }
         type Claim = (ConsumerIdentity, u64);
 
         async fn claim(

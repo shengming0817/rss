@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `rss_transactional_messaging_postgres::consumer::PgConsumerTxCommitProof` is private
+  --> tests/ui/associated_proof_construct_fail.rs:16:27
+   |
+16 |     let _forged = Proof { _private: () };
+   |                           ^^^^^^^^ private field

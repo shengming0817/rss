@@ -6,7 +6,7 @@
 ## 项目目标
 
 RSS 是面向 Rust 社区的 provider-neutral 消息一致性 library workspace。它提供可独立消费的契约、事件、事务一致性、
-运行算法与 conformance 语义，不拥有消费方业务、provider 实现、应用装配或生产交付。
+运行算法与 conformance 语义，并接纳显式选择的独立 provider adapter；不拥有消费方业务、应用装配或生产交付。
 
 最终仓库只保留公共一致性语义所需的 library crates、最低充分 T1/T2、发布证明、法律文件和使用这些 crate 所必需的
 最小文档。当前目录或依赖存在不构成保留依据；最终 package 集合由职责唯一性、Cargo 闭合依赖和维护者接纳确认。
@@ -30,17 +30,18 @@ External 能力不得以 archive、legacy、plugin、compatibility façade 或�
 | 公共契约与事件 | provider/domain-neutral identity、envelope、metadata、显式 outcome 与算法必需的窄 event port | 业务 endpoint、领域 wire model、generated product binding |
 | 消息一致性 | LocalTx、Outbox/Inbox、幂等、settlement/ambiguity、lease/fencing、bounded retry 与窄 transaction/store port | 业务 Saga、projection、reconcile、command workflow 与领域状态机 |
 | 公共运行算法 | provider-neutral 处理顺序、ACK-after-commit、取消、bounded drain 与 settlement callback | 进程启动、配置、listener、health/readiness、assembly 与部署生命周期 |
-| Conformance | 黑盒、provider-neutral 的公共不变量 assertion 与最低充分 T1/T2 | provider fixture/driver、数据库或 broker 管理、产品 journey、T3 与 evidence 平台 |
+| Conformance | 黑盒公共不变量 assertion、已接纳 adapter 的真实后端 T2 与有界临时 fixture/driver | 生产数据库或 broker 管理、产品 journey、T3 与 evidence 平台 |
+| PostgreSQL adapter | 独立 PostgreSQL transactional messaging package、消息专属 schema 与 fresh-install SQL artifact | 迁移执行、角色预建/授权、业务表、operator、部署与数据库运营 |
 | 发布 | 独立 package、SemVer、文档、Release Surface、registry candidate 与人工发布 | 应用 binary/image、生产 profile、部署、迁移、运营与 release control plane |
 
 ## 仓库边界
 
-- 生产代码只允许存在于经最终发布闭包确认的 library crate；不得保留 domain、provider adapter、composition、assembly、
+- 生产代码只允许存在于经最终发布闭包确认的 library crate；不得保留 domain、未经接纳的 provider adapter、composition、assembly、
   binary、进程入口或承担产品装配职责的 executable example。
 - RSS 不拥有 Dockerfile、部署资产、业务 SQL migration、业务 contract/generated 代码、T3/profile/journey、消费者源码、
   git submodule、provider 管理脚本或自定义通用 CI/evidence 平台。
-- crate 自包含测试只证明其公共不变量。真实 provider、产品配置、生产 join 和消费者验收由仓外 owner 承担，并只通过
-  发布 artifact 消费 RSS。
+- crate 自包含测试只证明其公共不变量。已接纳 adapter 通过独立 integration package 验证真实后端语义；
+  产品配置、生产 join 和消费者验收由仓外 owner 承担，并只通过发布 artifact 消费 RSS。
 - 标准 Cargo/rustc、fmt、clippy、deny、SemVer、package/doc 与最小 CI 组合优先；不得为已删除产品面保留自定义 runner、
   inventory、snapshot 或兼容 gate。
 - 历史实现只通过不可变 Git 历史恢复；仓库不维护迁移副本、归档目录、双 owner、alias、shim、双读或 fallback。
@@ -58,7 +59,7 @@ External 能力不得以 archive、legacy、plugin、compatibility façade 或�
 
 ## 验证边界
 
-- T1 证明类型、状态机、API 与 package 不变量；T2 只覆盖公共语义无法由 T1 观察的 provider-neutral seam。
+- T1 证明类型、状态机、API 与 package 不变量；T2 覆盖公共语义无法由 T1 观察的 seam 与已接纳 adapter 的真实后端行为。
 - T3、production profile、binary/image、deployment 与产品级 recovery 不属于 RSS。
 - 结构边界最终由 Cargo metadata、target kind、依赖图、package proof 和 tracked-path audit 验证。
 - Markdown 只记录范围与决策，不充当 package inventory、删除完成证明或运行 receipt。
@@ -67,7 +68,7 @@ External 能力不得以 archive、legacy、plugin、compatibility façade 或�
 
 新增或保留能力必须同时回答：
 
-1. 是否唯一属于公共消息一致性语义，而不是应用、领域、provider、环境或交付事实？
+1. 是否属于公共消息一致性语义或其已明确接纳的 provider 实现，而不是应用、领域、环境或交付事实？
 2. 是否存在稳定 owner，且不能直接使用成熟上游或更小的现有公共类型？
 3. 是否被最终候选的公开 API 或明确的跨仓使用场景直接需要？
 4. 是否能在不依赖 workspace path、internal crate、业务 generated 类型或未发布 package 的情况下独立打包和消费？

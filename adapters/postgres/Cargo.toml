@@ -1,26 +1,40 @@
 [package]
-name = "postgres"
-version.workspace = true
+name = "rss-transactional-messaging-postgres"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-publish = false
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "PostgreSQL transactions, inbox and outbox for RSS transactional messaging"
 
 [lints]
 workspace = true
 
 [dependencies]
 rss-runtime.workspace = true
+rss-transactional-messaging.workspace = true
+rss-contract.workspace = true
+rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
+rss-redact.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 futures = { workspace = true }
 rss-request-context.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 sqlx = { workspace = true }
 thiserror = { workspace = true }
+tracing.workspace = true
 zeroize.workspace = true
 
 [features]
 default = []
 test-support = []
+integration = ["test-support"]
 
 [dev-dependencies]
 rcgen = { workspace = true }
+trybuild.workspace = true

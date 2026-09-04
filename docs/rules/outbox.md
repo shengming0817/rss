@@ -12,10 +12,11 @@
 
 ## 模式与 identity
 
-- PostgreSQL 只有 mutable outbox 与显式 opt-in append-only CDC ledger；不得 fallback 或双写。
-- 两模式共享稳定 fact identity；稳定字段相同为幂等，任一稳定字段不同为 typed conflict。
+- PostgreSQL v0.1 只有专属 schema 内的 mutable outbox；无 CDC ledger、fallback 或双写。
+- 稳定字段相同为幂等，任一稳定字段不同为 typed conflict；唯一 fingerprint 算法由 core 拥有。
 - event ID 是 at-least-once 幂等锚，不是 exactly-once 声明。事务外副作用仍需自己的 idem key/fencing。
-- CDC tenant 表必须 ENABLE/FORCE RLS、最小授权并拒绝 serving UPDATE/DELETE。
+- tenant 表必须 ENABLE/FORCE RLS；跨租 relay 仅通过专属 NOLOGIN/NOBYPASSRLS 函数角色和 Outbox
+  显式 policy 获得最小权限，runtime 不得成为该角色成员。
 
 ## Relay
 
@@ -35,13 +36,14 @@
 
 ## Same-ID window
 
-`INVARIANT: OUTBOX-SAME-ID-WINDOW-01`：retry/redrive/safety 与 inbox retention policy 由数据库约束，retention
-必须严格覆盖全部窗口；runtime 只接受同一 revision/value。
+`INVARIANT: OUTBOX-SAME-ID-WINDOW-01`：automatic retry/safety 与 inbox retention policy 由数据库约束，
+retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 receipt。
 
-- automatic/redrive absolute deadline 首次冻结，redrive 不延长或重算。
-- deadline 到期不得 publish，只能进入唯一 terminal resolution。
-- accepted gap 不携 evidence；compensated 必须引用同 tenant、已发布且 causation 匹配的 evidence。
-- resolution append-only，serving role 无写权限。Medium carrier 为 `outbox-same-id-guard` 与真实 provider proof。
+- 首次 claim 冻结 24 小时 automatic deadline；续租只延长 lease，不重置投递窗口。
+- 只有数据库确认窗口过期才 DeadLetter；尚未过期但预算不足时 Retry，均不得 publish。
+- provider 调用耗时从 lease/window 预算中扣除；无 publish 的结算只消费有效 lease 预算。
+- v0.1 无 redrive、resolve、retention worker；Medium carrier 为统一 conformance 与真实 PostgreSQL T2，
+  不使用源码 contains、文件数量或 SQL hash 正确性守卫。
 
 ## Partition order
 

@@ -7,7 +7,7 @@ use testcontainers_modules::postgres::Postgres;
 
 use super::{
     NetworkAttachment, Result, attach_network, copied_tls_image, environment_snapshot,
-    non_empty_external_value, process_external_value, runtime, tls_material,
+    non_empty_external_value, process_external_value, runtime,
 };
 
 const PG_PORT: u16 = 5432;
@@ -488,8 +488,23 @@ impl PgTlsFixture {
 }
 
 /// Starts PostgreSQL 16 with TLS required for every TCP client.
-pub async fn postgres_tls(attachment: NetworkAttachment<'_>) -> Result<PgTlsFixture> {
-    let material = tls_material(attachment.dns_name)?;
+#[derive(Clone, Copy)]
+pub enum PgTlsServerIdentity {
+    /// SANs match fixture loopback and bridge addresses.
+    MatchingHost,
+    /// The certificate is trusted but its SANs match none of the fixture addresses.
+    UnmatchedHost,
+}
+
+/// Starts PostgreSQL 16 with TLS required and an explicit test server-identity posture.
+pub async fn postgres_tls(
+    attachment: NetworkAttachment<'_>,
+    identity: PgTlsServerIdentity,
+) -> Result<PgTlsFixture> {
+    let material = super::tls::tls_material_for_host(
+        attachment.dns_name,
+        matches!(identity, PgTlsServerIdentity::MatchingHost),
+    )?;
     let startup = b"#!/bin/sh\nset -eu\nchown postgres:postgres /rss-tls/server-key.pem\nchmod 600 /rss-tls/server-key.pem\nexec /usr/local/bin/docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/rss-tls/server.pem -c ssl_key_file=/rss-tls/server-key.pem -c ssl_min_protocol_version=TLSv1.2\n";
     let require_tls = b"#!/bin/sh\nset -eu\nsed -i -E 's/^host([[:space:]])/hostssl\\1/' \"$PGDATA/pg_hba.conf\"\n";
     let image = GenericImage::new("postgres", "16-alpine")

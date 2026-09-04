@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/ui/connection_escape_fail.rs:4:37
+  |
+4 |     tx.with_connection(|connection| Box::pin(async move { Ok(connection) })).await
+  |                         ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                         |         |
+  |                         |         return type of closure is Pin<Box<dyn Future<Output = Result<&'2 mut PgConnection, sqlx::Error>> + Send>>
+  |                         has type `&'1 mut PgConnection`

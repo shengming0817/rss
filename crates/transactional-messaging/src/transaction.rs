@@ -254,6 +254,18 @@ pub struct ReceiptIntent {
 }
 
 impl ReceiptIntent {
+    /// Identity authorized by the core for this receipt intent.
+    #[must_use]
+    pub const fn consumer(&self) -> &ConsumerIdentity {
+        &self.consumer
+    }
+
+    /// Message digest authorized by the core for this receipt intent.
+    #[must_use]
+    pub const fn fingerprint(&self) -> MessageFingerprint {
+        self.fingerprint
+    }
+
     fn new(consumer: ConsumerIdentity, fingerprint: MessageFingerprint) -> Self {
         Self {
             consumer,
@@ -576,7 +588,7 @@ fn settlement_for_disposition(disposition: TerminalDisposition) -> SettlementDec
 /// outcome unknown.
 pub trait ConsumerTx<P>: Send + Sync {
     /// Provider-owned `Claim` capability used by this port.
-    type Claim: Send;
+    type Claim: Send + Sync;
     /// Provider-owned `CommitProof` capability used by this port.
     type CommitProof: Send;
 

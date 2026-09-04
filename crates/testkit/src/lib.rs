@@ -46,10 +46,10 @@ mod containers;
 pub use containers::{
     BridgeNetwork, ExternalPgFixture, FixtureError, MinioCredentials, MinioTlsFixture,
     NetworkAttachment, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
-    PgConnParams, PgFixture, PgTlsFixture, RabbitFixture, RabbitTlsFixture, RedisFixture,
-    RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres, env_or_rabbitmq,
-    env_or_redis, minio_tls_archive, owned_postgres, postgres_tls, rabbitmq_tls, redis_tls,
-    vault_tls,
+    PgConnParams, PgFixture, PgTlsFixture, PgTlsServerIdentity, RabbitFixture, RabbitTlsFixture,
+    RedisFixture, RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres,
+    env_or_rabbitmq, env_or_redis, minio_tls_archive, owned_postgres, postgres_tls, rabbitmq_tls,
+    redis_tls, vault_tls,
 };
 
 // Provider-neutral transactional messaging assertions are dependency-free and intentionally available

@@ -139,6 +139,9 @@ pub trait InboxStore: Send + Sync {
     /// Provider-owned `Claim` capability used by this port.
     type Claim: Send + Sync;
 
+    /// Single provider-owned lease policy used for durable TTL and runtime renewal scheduling.
+    fn lease_policy(&self) -> crate::policy::LeaseRenewalPolicy;
+
     /// Canonical operation owned by the transactional messaging core.
     fn claim(
         &self,

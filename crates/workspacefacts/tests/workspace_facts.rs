@@ -1720,7 +1720,12 @@ fn shipped_workspace_graph_projects_integration_reverse_dependencies() -> Result
             .any(|pkg| pkg.key().as_str() == "workspacefacts"),
         "anti-vacuous: workspacefacts must appear in shipped catalog"
     );
-    for package in ["amqp-integration", "redis-integration", "s3-integration"] {
+    for package in [
+        "amqp-integration",
+        "redis-integration",
+        "s3-integration",
+        "postgres-integration",
+    ] {
         assert!(
             catalog.iter().any(|entry| entry.key().as_str() == package),
             "integration package {package} must be a workspace member"
@@ -1735,6 +1740,14 @@ fn shipped_workspace_graph_projects_integration_reverse_dependencies() -> Result
             .iter()
             .any(|package| package.as_str() == "amqp-integration"),
         "adapter changes must select their live integration package"
+    );
+    let postgres = facts.package_key("rss-transactional-messaging-postgres")?;
+    let closure = facts.reverse_workspace_closure(&BTreeSet::from([postgres]))?;
+    assert!(
+        closure
+            .iter()
+            .any(|package| package.as_str() == "postgres-integration"),
+        "PostgreSQL adapter changes must select their live integration package"
     );
     Ok(())
 }

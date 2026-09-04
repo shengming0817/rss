@@ -3755,18 +3755,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
-name = "postgres"
+name = "postgres-integration"
 version = "0.0.0"
 dependencies = [
- "futures",
- "rcgen",
+ "anyhow",
+ "rss-contract",
  "rss-request-context",
  "rss-runtime",
- "rustls",
- "rustls-pki-types",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "rss-transactional-messaging-runtime",
+ "rss-transactional-messaging-testkit",
  "sqlx",
- "thiserror",
- "zeroize",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -4489,6 +4491,30 @@ dependencies = [
  "thiserror",
  "tokio",
  "trybuild",
+]
+
+[[package]]
+name = "rss-transactional-messaging-postgres"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "rcgen",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-redact",
+ "rss-request-context",
+ "rss-runtime",
+ "rss-transactional-messaging",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "trybuild",
+ "zeroize",
 ]
 
 [[package]]

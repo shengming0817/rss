@@ -33,6 +33,9 @@ pub enum OutboxLeaseStatus {
     Held {
         /// Provider-authoritative time remaining before the claim expires.
         remaining: Duration,
+        /// Remaining same-ID delivery window. `None` means no provider window;
+        /// `Some(Duration::ZERO)` means provider-authoritative expiry.
+        delivery_remaining: Option<Duration>,
     },
     /// `Lost` state in the closed protocol.
     Lost,
@@ -269,8 +272,10 @@ impl<C> IntoIterator for OutboxClaimBatch<C> {
 
 /// Closed `OutboxStore` protocol type.
 pub trait OutboxStore<P>: Send + Sync {
+    /// Single provider-owned budget used for durable lease TTL and runtime delivery admission.
+    fn delivery_budget(&self) -> crate::policy::DeliveryBudget;
     /// Provider-owned `Transaction` capability used by this port.
-    type Transaction;
+    type Transaction<'tx>;
     /// Provider-owned `Claim` capability used by this port.
     type Claim: Send;
     /// Provider-owned `PublishReceipt` capability used by this port.
@@ -279,7 +284,7 @@ pub trait OutboxStore<P>: Send + Sync {
     /// Canonical operation owned by the transactional messaging core.
     fn append(
         &self,
-        transaction: &mut Self::Transaction,
+        transaction: &mut Self::Transaction<'_>,
         message: PendingMessage<P>,
     ) -> impl Future<Output = Result<AppendOutcome, MessagingError>> + Send;
 

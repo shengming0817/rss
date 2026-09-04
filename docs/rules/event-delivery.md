@@ -6,7 +6,8 @@
 
 - 每次 delivery 在 tenant-scoped `ConsumerTx` 内完成 Inbox idempotency、handler effect 与 settlement intent。
 - duplicate 必须返回既有 terminal result；不得再次执行 handler 或外部副作用。
-- handler 只能取得 typed context/ports，不得取得 raw broker acker、connection 或 transaction。
+- 应用 handler 只能取得 typed context/repositories，不得取得 raw broker acker、connection 或 transaction。
+  可信 companion 基础设施可实现 PG-specific effect 并借用 SQLx connection；此能力不是恶意 SQL 沙箱。
 - 唯一规范 outcome 是 `rss_transactional_messaging::transaction::TransactionOutcome<C>`；provider 用私有
   associated commit proof 绑定成功分支。禁止镜像枚举、转换桥、crate-root re-export 或生产 `()` proof。
 - commit outcome unknown 不得 success-ack；由同 ID redelivery 与 Inbox state 收敛。
@@ -33,7 +34,8 @@
 - broker ACK/NACK/Reject 只能由 transaction outcome 产生；handler 不直接控制。
 - success ACK 只能发生在 durable commit 明确成功之后。
 - 只有 handler transient 进入本地 retry budget；infrastructure transient、commit unknown、rollback failed 与
-  fenced 立即重投，不得写 application DLQ 或提交 Inbox done。只有 rejected 可进入 terminal DLQ 流程。
+  fenced 立即重投，不得写 application DLQ 或提交 Inbox done。Rejected 先回滚 effect savepoint，
+  再在同一事务提交完整 terminal receipt；v0.1 不提供 application DLQ。
 - 本地 retry loop 必须接收一个 `rss_transactional_messaging::policy::RetryPolicy`；尝试上限与指数 backoff 不得拆开传递或
   单独默认。标准值为三次总尝试、1 秒 base、60 秒 cap。
 - TransactionalMessaging worker 构造必须显式接收 `rss_transactional_messaging::policy::ShutdownBudget`；标准值 45 秒，仅在 internal
@@ -55,15 +57,11 @@
 
 ## Dead letter
 
-- application DLQ 写入前必须验证 tenant authority，并在 tenant transaction 内持久化加密 replay capsule；
-  payload 不得以 plaintext JSON/bytes 落库。
-- list/inspect/replay/redrive/resolve 必须消费 action/tenant/caller/audit 绑定的 move-only operator authorization。
-- replay/redrive 使用新 idem key，但保持原 contract/message lineage；不得重置原 delivery deadline。
-- mutation 与 finish audit 必须同 transaction；audit 失败回滚 mutation。
-- 缺 tenant authority 时跳过 application DLQ，释放 claim 并使用 broker rejection；不得伪造 tenant。
+- v0.1 仅记录闭值 terminal disposition；application DLQ、replay/redrive/resolve、operator authorization
+  与 audit 属于消费者，不提供仓内实现或隐式恢复入口。
 
 ## Carrier
 
 - Hard：private lease/authorization types、managed delivery stream、closed Disposition、typed `ConsumerTx` 与
   no-raw-acker boundary，以及 typed retry/shutdown budget。
-- Medium：provider conformance、transaction fault tests、DLQ lifecycle/tenant gates 与真实 broker/database integration。
+- Medium：provider conformance、transaction fault tests、tenant gates 与真实 broker/database integration。

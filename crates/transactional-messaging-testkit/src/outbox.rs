@@ -41,6 +41,11 @@ pub trait OutboxDriver: Send + Sync {
     fn stale_lease(&self) -> impl Future<Output = Result<OutboxLeaseStatus, MessagingError>>;
     /// Observe an expired settlement deadline.
     fn expired_lease(&self) -> impl Future<Output = Result<OutboxLeaseStatus, MessagingError>>;
+    /// For windowed providers, observe first claim, renewal and DB-confirmed window expiry
+    /// while retaining a valid lease. Providers without a same-ID window return `None`.
+    fn delivery_window(
+        &self,
+    ) -> impl Future<Output = Result<Option<[OutboxLeaseStatus; 3]>, MessagingError>>;
     /// Map a definite permanent publication failure to dead letter.
     fn permanent_publish(&self)
     -> impl Future<Output = Result<PublishOutcome<()>, MessagingError>>;
@@ -272,7 +277,46 @@ pub async fn run_outbox_conformance<D: OutboxDriver>(
         )
         .await?,
         false,
+    )?;
+    driver.reset();
+    let window = within_budget(
+        timer,
+        deadline,
+        "outbox.window.budget",
+        driver.delivery_window(),
     )
+    .await?
+    .map_err(|error| ConformanceError::provider("outbox.window", error.kind()))?;
+    expect_window(window)
+}
+
+fn expect_window(window: Option<[OutboxLeaseStatus; 3]>) -> Result<(), ConformanceError> {
+    if let Some(states) = window {
+        let mut remaining = Vec::new();
+        for state in states {
+            match state {
+                OutboxLeaseStatus::Held {
+                    remaining: lease,
+                    delivery_remaining: Some(window),
+                } if !lease.is_zero() => remaining.push(window),
+                _ => {
+                    return Err(ConformanceError::mismatch(
+                        "outbox.window",
+                        "held-with-window",
+                        "missing-or-lost",
+                    ));
+                }
+            }
+        }
+        if remaining[0].is_zero() || remaining[1] > remaining[0] || !remaining[2].is_zero() {
+            return Err(ConformanceError::mismatch(
+                "outbox.window",
+                "frozen-then-expired",
+                "reset-or-not-expired",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn expect_publish(

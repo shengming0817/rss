@@ -47,6 +47,7 @@ struct Store {
     lease: OutboxLeaseStatus,
     respect_limit: bool,
     claim_calls: AtomicUsize,
+    extend_delay: Option<(FakeClock, Duration)>,
 }
 
 impl Store {
@@ -56,6 +57,7 @@ impl Store {
             lease,
             respect_limit: true,
             claim_calls: AtomicUsize::new(0),
+            extend_delay: None,
         }
     }
 
@@ -69,6 +71,7 @@ impl Store {
             lease,
             respect_limit: true,
             claim_calls: AtomicUsize::new(0),
+            extend_delay: None,
         }
     }
 
@@ -80,13 +83,16 @@ impl Store {
 }
 
 impl OutboxStore<Vec<u8>> for Store {
-    type Transaction = ();
+    fn delivery_budget(&self) -> DeliveryBudget {
+        budget()
+    }
+    type Transaction<'tx> = ();
     type Claim = Claim;
     type PublishReceipt = ();
 
     async fn append(
         &self,
-        _transaction: &mut Self::Transaction,
+        _transaction: &mut Self::Transaction<'_>,
         _message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
         Ok(AppendOutcome::Inserted)
@@ -121,6 +127,9 @@ impl OutboxStore<Vec<u8>> for Store {
         _claim: &Self::Claim,
         _deadline: OperationDeadline,
     ) -> Result<OutboxLeaseStatus, MessagingError> {
+        if let Some((clock, delay)) = &self.extend_delay {
+            clock.advance(*delay);
+        }
         Ok(self.lease)
     }
 
@@ -240,6 +249,7 @@ impl Publisher<Vec<u8>> for ConcurrentPublisher {
 async fn relay_once_dispatches_claimed_batch_concurrently_with_hard_limit() {
     let store = Arc::new(Store::with_count(
         OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         },
         2,
@@ -253,7 +263,6 @@ async fn relay_once_dispatches_claimed_batch_concurrently_with_hard_limit() {
                 store.as_ref(),
                 publisher.as_ref(),
                 &FakeClock::new(),
-                budget(),
                 &NoopEmitter,
                 RelayBatchLimit::new(NonZeroUsize::new(2).expect("limit")).expect("bounded"),
             )
@@ -283,6 +292,7 @@ async fn relay_once_dispatches_claimed_batch_concurrently_with_hard_limit() {
 async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
     let store = Store::over_returning(
         OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         },
         3,
@@ -293,7 +303,6 @@ async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
         &store,
         &publisher,
         &FakeClock::new(),
-        budget(),
         &NoopEmitter,
         RelayBatchLimit::new(NonZeroUsize::new(2).expect("limit")).expect("bounded"),
     )
@@ -322,11 +331,11 @@ async fn relay_deadline_overflow_emits_a_closed_failure_phase() {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let error = relay_once(
         &Store::new(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         }),
         &ScriptedPublisher::new([]),
         &OverflowClock,
-        budget(),
         &RecordingEmitter(Arc::clone(&observations)),
         limit(),
     )
@@ -356,13 +365,16 @@ struct AuditedStore {
 }
 
 impl OutboxStore<Vec<u8>> for AuditedStore {
-    type Transaction = ();
+    fn delivery_budget(&self) -> DeliveryBudget {
+        budget()
+    }
+    type Transaction<'tx> = ();
     type Claim = Claim;
     type PublishReceipt = ();
 
     async fn append(
         &self,
-        _transaction: &mut Self::Transaction,
+        _transaction: &mut Self::Transaction<'_>,
         _message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
         Ok(AppendOutcome::Inserted)
@@ -385,6 +397,7 @@ impl OutboxStore<Vec<u8>> for AuditedStore {
         _deadline: OperationDeadline,
     ) -> Result<OutboxLeaseStatus, MessagingError> {
         Ok(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         })
     }
@@ -395,6 +408,7 @@ impl OutboxStore<Vec<u8>> for AuditedStore {
         _deadline: OperationDeadline,
     ) -> Result<OutboxLeaseStatus, MessagingError> {
         Ok(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         })
     }
@@ -463,7 +477,6 @@ async fn relay_drains_partial_failures_and_returns_first_error_in_claim_order() 
         &store,
         &AuditedPublisher(Arc::clone(&events)),
         &FakeClock::new(),
-        budget(),
         &RecordingEmitter(Arc::clone(&observations)),
         RelayBatchLimit::new(NonZeroUsize::new(3).expect("non-zero")).expect("limit"),
     )
@@ -513,13 +526,13 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
     let publisher = Arc::new(ConcurrentPublisher::new());
     let worker = RelayWorker::<Vec<u8>, _, _, _, _>::new(
         Arc::new(Store::new(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         })),
         Arc::clone(&publisher),
         Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
-        budget(),
     );
     let (registration, status) = worker.into_registration(
         "relay-drain",
@@ -557,6 +570,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
     let worker = RelayWorker::<Vec<u8>, _, _, _, _>::new(
         Arc::new(Store::with_count(
             OutboxLeaseStatus::Held {
+                delivery_remaining: None,
                 remaining: Duration::from_secs(10),
             },
             0,
@@ -565,7 +579,6 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
         Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
-        budget(),
     );
     let (registration, status) = worker.into_registration(
         "relay-test",
@@ -594,6 +607,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
 async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
     let store = Arc::new(Store::with_count(
         OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         },
         0,
@@ -604,7 +618,6 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
         Arc::new(ScriptedTimer::new([1])),
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
-        budget(),
     );
     let (registration, status) = worker.into_registration(
         "relay-deadline-recovery",
@@ -637,6 +650,7 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
 #[tokio::test]
 async fn ambiguous_retry_reuses_the_persisted_message_id() {
     let store = Store::new(OutboxLeaseStatus::Held {
+        delivery_remaining: None,
         remaining: Duration::from_secs(10),
     });
     let publisher = ScriptedPublisher::new([
@@ -648,26 +662,12 @@ async fn ambiguous_retry_reuses_the_persisted_message_id() {
         PublishOutcome::Confirmed(()),
     ]);
 
-    let first = relay_once(
-        &store,
-        &publisher,
-        &FakeClock::new(),
-        budget(),
-        &NoopEmitter,
-        limit(),
-    )
-    .await
-    .expect("first relay");
-    let second = relay_once(
-        &store,
-        &publisher,
-        &FakeClock::new(),
-        budget(),
-        &NoopEmitter,
-        limit(),
-    )
-    .await
-    .expect("second relay");
+    let first = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
+        .await
+        .expect("first relay");
+    let second = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
+        .await
+        .expect("second relay");
 
     assert_eq!(first.retried(), 1);
     assert_eq!(second.published(), 1);
@@ -691,7 +691,6 @@ async fn lost_lease_fences_before_publication() {
         &store,
         &publisher,
         &FakeClock::new(),
-        budget(),
         &RecordingEmitter(Arc::clone(&observations)),
         limit(),
     )
@@ -741,11 +740,11 @@ async fn publication_evidence_maps_to_the_complete_settlement_matrix() {
     for (outcome, expected) in cases {
         let report = relay_once(
             &Store::new(OutboxLeaseStatus::Held {
+                delivery_remaining: None,
                 remaining: Duration::from_secs(10),
             }),
             &ScriptedPublisher::new([outcome]),
             &FakeClock::new(),
-            budget(),
             &NoopEmitter,
             limit(),
         )
@@ -759,22 +758,58 @@ async fn publication_evidence_maps_to_the_complete_settlement_matrix() {
 }
 
 #[tokio::test]
+async fn delivery_window_controls_publication_without_consuming_settlement_budget() {
+    for (window, expected) in [(Duration::ZERO, (0, 1)), (Duration::from_millis(1), (1, 0))] {
+        let store = Store::new(OutboxLeaseStatus::Held {
+            remaining: Duration::from_secs(120),
+            delivery_remaining: Some(window),
+        });
+        let publisher = ScriptedPublisher::new([]);
+        let report = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
+            .await
+            .expect("valid lease must permit no-publish settlement");
+        assert_eq!((report.retried(), report.dead_lettered()), expected);
+        assert!(publisher.message_ids().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn provider_elapsed_time_reduces_budgets_without_claiming_database_expiry() {
+    for window in [
+        Duration::from_millis(100),
+        budget().required_budget() + Duration::from_millis(100),
+    ] {
+        let clock = FakeClock::new();
+        let mut store = Store::new(OutboxLeaseStatus::Held {
+            remaining: Duration::from_secs(60),
+            delivery_remaining: Some(window),
+        });
+        store.extend_delay = Some((clock.clone(), Duration::from_millis(500)));
+        let publisher = ScriptedPublisher::new([]);
+        let report = relay_once(&store, &publisher, &clock, &NoopEmitter, limit())
+            .await
+            .expect("retry retains settlement budget");
+        assert_eq!(report.retried(), 1);
+        assert_eq!(
+            report.dead_lettered(),
+            0,
+            "only database-confirmed expiry is terminal"
+        );
+        assert!(publisher.message_ids().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn insufficient_authoritative_lease_budget_retries_without_publish() {
     let store = Store::new(OutboxLeaseStatus::Held {
+        delivery_remaining: None,
         remaining: budget().required_budget(),
     });
     let publisher = ScriptedPublisher::new([]);
 
-    let report = relay_once(
-        &store,
-        &publisher,
-        &FakeClock::new(),
-        budget(),
-        &NoopEmitter,
-        limit(),
-    )
-    .await
-    .expect("relay");
+    let report = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
+        .await
+        .expect("relay");
 
     assert_eq!(report.retried(), 1);
     assert!(publisher.message_ids().is_empty());
@@ -783,19 +818,15 @@ async fn insufficient_authoritative_lease_budget_retries_without_publish() {
 #[tokio::test]
 async fn exhausted_authoritative_lease_window_is_recoverable_not_invariant() {
     for remaining in [budget().safety_margin(), Duration::from_millis(500)] {
-        let store = Store::new(OutboxLeaseStatus::Held { remaining });
+        let store = Store::new(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
+            remaining,
+        });
         let publisher = ScriptedPublisher::new([]);
 
-        let error = relay_once(
-            &store,
-            &publisher,
-            &FakeClock::new(),
-            budget(),
-            &NoopEmitter,
-            limit(),
-        )
-        .await
-        .expect_err("no provider-authoritative settlement window remains");
+        let error = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
+            .await
+            .expect_err("no provider-authoritative settlement window remains");
 
         assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
         assert!(publisher.message_ids().is_empty());
@@ -829,13 +860,16 @@ impl PendingStore {
 }
 
 impl OutboxStore<Vec<u8>> for PendingStore {
-    type Transaction = ();
+    fn delivery_budget(&self) -> DeliveryBudget {
+        budget()
+    }
+    type Transaction<'tx> = ();
     type Claim = Claim;
     type PublishReceipt = ();
 
     async fn append(
         &self,
-        _transaction: &mut Self::Transaction,
+        _transaction: &mut Self::Transaction<'_>,
         _message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
         Ok(AppendOutcome::Inserted)
@@ -866,6 +900,7 @@ impl OutboxStore<Vec<u8>> for PendingStore {
             return std::future::pending().await;
         }
         Ok(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         })
     }
@@ -880,6 +915,7 @@ impl OutboxStore<Vec<u8>> for PendingStore {
             return std::future::pending().await;
         }
         Ok(OutboxLeaseStatus::Held {
+            delivery_remaining: None,
             remaining: Duration::from_secs(10),
         })
     }
@@ -961,7 +997,6 @@ async fn never_ready_relay_provider_stages_are_bounded_and_stop_downstream_work(
                     store.as_ref(),
                     publisher.as_ref(),
                     timer.as_ref(),
-                    budget(),
                     &NoopEmitter,
                     limit(),
                 )
@@ -1010,7 +1045,6 @@ async fn publish_timeout_is_ambiguous_retry_and_reuses_the_same_message_id() {
                 store.as_ref(),
                 publisher.as_ref(),
                 timer.as_ref(),
-                budget(),
                 &RecordingEmitter(observations),
                 limit(),
             )
@@ -1042,7 +1076,6 @@ async fn publish_timeout_is_ambiguous_retry_and_reuses_the_same_message_id() {
         store.as_ref(),
         publisher.as_ref(),
         timer.as_ref(),
-        budget(),
         &NoopEmitter,
         limit(),
     )

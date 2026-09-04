@@ -12,13 +12,17 @@ durable claims and concurrent publication work in the public batch API.
 Every relay store/publisher future passes through the core-owned absolute-deadline race. Publish
 timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; claim, lease and
 settlement timeout stop downstream work without inventing durable state.
+The store's `delivery_budget()` is the single lease/admission budget source; relay callers do not
+supply a second budget that could disagree with durable lease TTL.
 
 The consumer side owns `consume_once`: validate, claim, periodic lease renewal, bounded handler
 retry, transaction outcome, release/abandon, and commit-before-ACK settlement. Renewal runs across
 handler execution and retry backoff. Explicit lease loss cancels the in-flight transaction and
 abandons the provider session without settlement. Renewal errors, rollback failure, commit unknown,
 and fencing never ACK. Every renewal is checked against the provider-reported remaining lease, so
-an unsafe configured interval hard-fences execution. A matching durable terminal receipt bypasses
+an unsafe provider report hard-fences execution. The inbox supplies `lease_policy()` for both its
+durable TTL and the runtime renewal schedule; `ConsumerExecutionPolicy` only controls execution
+and retry budgets. A matching durable terminal receipt bypasses
 the handler.
 Claim, lease, transaction, release, settlement and abandon futures share one pair of operation and
 settlement cutoffs minted from one clock observation. A transaction timeout maps to commit outcome
@@ -42,6 +46,8 @@ tokens are private. Applications stage registrations through `rss-runtime::Start
 or `LaunchTransaction`.
 
 ```rust,no_run
+# #[cfg(feature = "producer")]
+# mod producer_example {
 use rss_runtime::{ManagedTaskRegistration, TaskStatus};
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
 use rss_transactional_messaging::outbox::OutboxStore;
@@ -64,6 +70,7 @@ where
     let shutdown = ShutdownBudget::new(Duration::from_secs(30)).expect("valid budget");
     worker.into_registration("transactional-relay", shutdown)
 }
+# }
 ```
 
 The returned registration is then staged once through the application's existing

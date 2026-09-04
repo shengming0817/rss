@@ -118,6 +118,9 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 - auth、tenant 和 credential 作为必填 typed input 进入执行路径。
 - RLS/ACL、tenant transaction、revocation/replay 与 negative authorization 使用 T1/T2 证明。
 - consumer-owned assembly identity、provider selection/attestation 与 production join 均属于 External。
+- PostgreSQL 借用接口只约束引用生命周期，不阻止可信 companion 执行 `COMMIT` 或切换 tenant。
+  不得把 SQL 能力声明为类型系统的事务/租户隔离保证；应用 handler 分层由消费者负责，RLS、CAS、
+  receipt 与连接 quarantine 通过真实最小权限 PostgreSQL T2 验证。
 
 ### 一致性、事务与 fencing
 
@@ -132,7 +135,7 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 - single cancellation root 与 positive total budget 约束 reverse-order drain。
 - process signal、配置、listener/readiness composition、provider selection、inventory 与 production join
   由 External consumer 负责。
-- 仓内 T2 只证明 provider-neutral public seam；真实 provider capability/durability 由仓外集成验证。
+- 仓内 T2 证明 public seam 与已接纳 adapter 的真实 provider capability/durability；不代证生产配置。
 
 ## Proof 收敛
 

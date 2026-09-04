@@ -71,7 +71,9 @@
 - redaction、audit 或 trace continuity；
 - 上游错误到稳定 RSS 错误模型的映射。
 
-外部 adapter 与 composition root 持有上游 API；RSS 公开 contract 只暴露 provider-neutral 语义。
+Core 公开 contract 只暴露 provider-neutral 语义，不依赖 SQLx。经 Release Surface 接纳的 PostgreSQL
+adapter 可以向可信 companion 基础设施暴露 provider-specific SQLx 借用接口；应用 handler 仅接收 typed
+repositories。事务生命周期和连接归还由 adapter 唯一拥有，不增加通用 effect 框架或兼容桥。
 
 Tooling 的 Cargo facts 遵循同一边界：复用 `workspacefacts` 时，catalog / feature selection 经 guppy
 `PackageGraph` / `CargoSet`，declaration-granularity provenance 经同一 `cargo metadata` JSON 的私有 raw

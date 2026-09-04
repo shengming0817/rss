@@ -41,6 +41,7 @@ enum Defect {
     OutboxPermanentPublishFailure,
     OutboxStaleLeaseContender,
     OutboxLeaseDeadlineExpired,
+    OutboxWindowReset,
     InboxClaimCrashBeforeCommit,
     InboxCommitBeforeAckCrash,
     InboxLeaseLostBeforeCommit,
@@ -62,6 +63,14 @@ enum ExpectedError {
 }
 
 const CASES: &[FaultCase] = &[
+    FaultCase {
+        id: "outbox-renew-resets-window",
+        crash_point: "renew",
+        expected_invariant: "same-id-window-never-renewed",
+        expected_stage: "outbox.window",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::OutboxWindowReset,
+    },
     FaultCase {
         id: "outbox-after-publish-before-settle",
         crash_point: "after-publish-before-settle",
@@ -188,6 +197,19 @@ impl OutboxFixture {
 }
 
 impl OutboxDriver for OutboxFixture {
+    async fn delivery_window(&self) -> Result<Option<[OutboxLeaseStatus; 3]>, MessagingError> {
+        let renewed = if matches!(self.defect, Some(Defect::OutboxWindowReset)) {
+            20
+        } else {
+            9
+        };
+        Ok(Some([10, renewed, 0].map(|seconds| {
+            OutboxLeaseStatus::Held {
+                remaining: Duration::from_secs(60),
+                delivery_remaining: Some(Duration::from_secs(seconds)),
+            }
+        })))
+    }
     fn reset(&self) {
         self.settlement_calls.store(0, Ordering::SeqCst);
         self.consumer_effects.store(0, Ordering::SeqCst);
@@ -257,6 +279,7 @@ impl OutboxDriver for OutboxFixture {
     async fn stale_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
         Ok(if self.is(Defect::OutboxStaleLeaseContender) {
             OutboxLeaseStatus::Held {
+                delivery_remaining: None,
                 remaining: Duration::from_secs(1),
             }
         } else {
@@ -267,6 +290,7 @@ impl OutboxDriver for OutboxFixture {
     async fn expired_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
         Ok(if self.is(Defect::OutboxLeaseDeadlineExpired) {
             OutboxLeaseStatus::Held {
+                delivery_remaining: None,
                 remaining: Duration::ZERO,
             }
         } else {

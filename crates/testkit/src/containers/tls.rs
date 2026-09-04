@@ -12,6 +12,10 @@ pub(super) fn tls_dns_names(dns_name: &str) -> [&str; 2] {
 }
 
 pub(super) fn tls_material(dns_name: &str) -> Result<TlsMaterial> {
+    tls_material_for_host(dns_name, true)
+}
+
+pub(super) fn tls_material_for_host(dns_name: &str, matching_host: bool) -> Result<TlsMaterial> {
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, SanType,
@@ -32,11 +36,18 @@ pub(super) fn tls_material(dns_name: &str) -> Result<TlsMaterial> {
     server.is_ca = IsCa::ExplicitNoCa;
     server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let mut sans = Vec::with_capacity(4);
-    for name in tls_dns_names(dns_name) {
+    let names = if matching_host {
+        tls_dns_names(dns_name)
+    } else {
+        ["unmatched.invalid", "other.invalid"]
+    };
+    for name in names {
         sans.push(SanType::DnsName(name.try_into()?));
     }
-    sans.push(SanType::IpAddress("127.0.0.1".parse()?));
-    sans.push(SanType::IpAddress("::1".parse()?));
+    if matching_host {
+        sans.push(SanType::IpAddress("127.0.0.1".parse()?));
+        sans.push(SanType::IpAddress("::1".parse()?));
+    }
     server.subject_alt_names = sans;
     let server_cert = server.signed_by(&server_key, &ca)?;
     Ok(TlsMaterial {

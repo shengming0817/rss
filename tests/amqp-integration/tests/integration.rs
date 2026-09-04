@@ -34,7 +34,7 @@ use rss_transactional_messaging::outbox::{
 };
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, ExecutionTimer,
-    LeaseRenewalPolicy, MonotonicInstant, OperationDeadline, RetryPolicy, ShutdownBudget,
+    MonotonicInstant, OperationDeadline, RetryPolicy, ShutdownBudget,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, SettlementDecision,
@@ -76,11 +76,7 @@ fn provider_deadline() -> OperationDeadline {
 }
 
 fn consumer_policy() -> ConsumerExecutionPolicy {
-    ConsumerExecutionPolicy::new(
-        RetryPolicy::STANDARD,
-        ExecutionBudget::STANDARD,
-        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
-    )
+    ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD)
 }
 
 fn envelope(route: &MessageRoute, id: &str) -> MessageEnvelope<Vec<u8>> {
@@ -167,6 +163,10 @@ impl ConsumerTx<Vec<u8>> for BlockingLiveTx {
 struct LiveInbox;
 
 impl InboxStore for LiveInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = ();
 
     async fn claim(
@@ -208,6 +208,10 @@ impl InboxStore for LiveInbox {
 struct LostInbox;
 
 impl InboxStore for LostInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = ();
 
     async fn claim(
@@ -1120,6 +1124,9 @@ impl Default for AmqpOutboxDriver {
 }
 
 impl OutboxDriver for AmqpOutboxDriver {
+    async fn delivery_window(&self) -> Result<Option<[OutboxLeaseStatus; 3]>, MessagingError> {
+        Ok(None)
+    }
     fn reset(&self) {
         *self
             .append_store

@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `PgInboxClaim` in the current scope
+ --> tests/ui/claim_clone_fail.rs:4:25
+  |
+4 |     let _replay = claim.clone();
+  |                         ^^^^^ method not found in `PgInboxClaim`

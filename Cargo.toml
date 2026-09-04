@@ -69,6 +69,7 @@ members = [
   "adapters/memory",
   # Live provider tests are ordinary reverse-dependency workspace packages.
   "tests/amqp-integration",
+  "tests/postgres-integration",
   "tests/redis-integration",
   "tests/s3-integration",
 ]
@@ -87,18 +88,24 @@ packages = [
   { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-testkit", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging"
-baseline-rev = "9cee2de2baf57eaf7d2f1422a47db37d41716d28"
-issue = 2275
+baseline-rev = "a227ea93227431206fde0e5f81d1a1c1fb45a048"
+issue = 2264
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging-runtime"
-baseline-rev = "9cee2de2baf57eaf7d2f1422a47db37d41716d28"
-issue = 2275
+baseline-rev = "a227ea93227431206fde0e5f81d1a1c1fb45a048"
+issue = 2264
+
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-testkit"
+baseline-rev = "a227ea93227431206fde0e5f81d1a1c1fb45a048"
+issue = 2264
 
 [workspace.package]
 version = "0.0.0"
@@ -116,6 +123,7 @@ rss-platform = { path = "crates/platform", version = "0.3.0" }
 rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
 rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
 rss-transactional-messaging-testkit = { path = "crates/transactional-messaging-testkit", version = "0.1.0" }
+rss-transactional-messaging-postgres = { path = "adapters/postgres", version = "0.1.0" }
 rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }

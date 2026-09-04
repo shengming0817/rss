@@ -147,7 +147,6 @@ pub async fn relay_once<P, S, U, C, E>(
     store: &S,
     publisher: &U,
     clock: &C,
-    budget: DeliveryBudget,
     emitter: &E,
     limit: RelayBatchLimit,
 ) -> Result<RelayReport, MessagingError>
@@ -158,6 +157,7 @@ where
     C: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
+    let budget = store.delivery_budget();
     let claim_started = clock.now();
     let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
     let claims = match within(clock, claim_deadline, |deadline| {
@@ -252,12 +252,13 @@ where
         return Ok(None);
     }
     let extend_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
+    let extend_started = clock.now();
     let extended = within(clock, extend_deadline, |deadline| {
         store.extend(&claim, deadline)
     })
     .await
     .and_then(std::convert::identity);
-    let remaining = match extended {
+    let (remaining, delivery_remaining) = match extended {
         Err(error) => {
             emit_runtime_failure(
                 emitter,
@@ -266,12 +267,21 @@ where
             );
             return Err(error);
         }
-        Ok(OutboxLeaseStatus::Held { remaining }) => remaining,
+        Ok(OutboxLeaseStatus::Held {
+            remaining,
+            delivery_remaining,
+        }) => (remaining, delivery_remaining),
         Ok(OutboxLeaseStatus::Lost) => {
             emitter.emit(TransactionalMessagingObservation::RelayLeaseLost);
             return Ok(None);
         }
     };
+    let elapsed = clock.now().saturating_duration_since(extend_started);
+    let remaining = remaining.saturating_sub(elapsed);
+    let expired = delivery_remaining.is_some_and(|value| value.is_zero());
+    let delivery_budget = delivery_remaining.map_or(remaining, |value| {
+        value.saturating_sub(elapsed).min(remaining)
+    });
     let publish_started = clock.now();
     let attempt_deadline =
         AbsoluteDeadline::from_timeout(clock, remaining.saturating_sub(budget.safety_margin()))
@@ -284,7 +294,9 @@ where
                 );
                 error
             })?;
-    let settlement = if budget.can_start_attempt(remaining) {
+    let settlement = if expired {
+        OutboxSettlement::DeadLetter
+    } else if budget.can_start_attempt(delivery_budget) {
         let publish_deadline = attempt_deadline.capped(clock, budget.publish_timeout());
         let outcome = match within(clock, publish_deadline, |deadline| {
             publisher.publish(S::message(&claim).envelope(), deadline)
@@ -376,7 +388,6 @@ pub struct RelayWorker<P, S, U, C, E> {
     clock: Arc<C>,
     emitter: Arc<E>,
     config: RelayConfig,
-    budget: DeliveryBudget,
     payload: PhantomData<fn() -> P>,
 }
 
@@ -397,7 +408,6 @@ where
         clock: Arc<C>,
         emitter: Arc<E>,
         config: RelayConfig,
-        budget: DeliveryBudget,
     ) -> Self {
         Self {
             store,
@@ -405,7 +415,6 @@ where
             clock,
             emitter,
             config,
-            budget,
             payload: PhantomData,
         }
     }
@@ -448,7 +457,6 @@ where
             worker.store.as_ref(),
             worker.publisher.as_ref(),
             worker.clock.as_ref(),
-            worker.budget,
             worker.emitter.as_ref(),
             worker.config.max_in_flight(),
         )

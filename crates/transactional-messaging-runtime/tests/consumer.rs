@@ -31,8 +31,8 @@ use rss_transactional_messaging::observability::{
 use rss_transactional_messaging::outbox::{OutboxDisposition, PartitionHead, PartitionHeadState};
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ConsumerExecutionPolicy, DeliveryBudget, DeliveryBudgetError,
-    ExecutionBudget, ExecutionBudgetError, ExecutionDeadlines, ExecutionTimer, LeaseRenewalPolicy,
-    MonotonicInstant, OperationDeadline, RetryPolicy,
+    ExecutionBudget, ExecutionBudgetError, ExecutionDeadlines, ExecutionTimer, MonotonicInstant,
+    OperationDeadline, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, FailureClass, LocalTxAttempt, RejectKind, SettlementKind, TerminalDisposition,
@@ -206,11 +206,7 @@ impl TransactionalMessagingEmitter for NoopEmitter {
 }
 
 fn consumer_policy() -> ConsumerExecutionPolicy {
-    ConsumerExecutionPolicy::new(
-        RetryPolicy::STANDARD,
-        ExecutionBudget::STANDARD,
-        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
-    )
+    ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD)
 }
 
 #[test]
@@ -423,6 +419,10 @@ struct ExtendErrorInbox;
 struct ClaimErrorInbox;
 
 impl InboxStore for ClaimErrorInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -464,6 +464,10 @@ impl InboxStore for ClaimErrorInbox {
 }
 
 impl InboxStore for ExtendErrorInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -506,6 +510,10 @@ impl InboxStore for ExtendErrorInbox {
 }
 
 impl InboxStore for FakeInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -1346,6 +1354,10 @@ struct PendingInbox {
 }
 
 impl InboxStore for PendingInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -1446,7 +1458,6 @@ fn deadline_policy(total: Duration, reserve: Duration) -> ConsumerExecutionPolic
     ConsumerExecutionPolicy::new(
         RetryPolicy::STANDARD,
         ExecutionBudget::new(total, reserve).expect("execution budget"),
-        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
     )
 }
 
@@ -1881,6 +1892,10 @@ struct RenewingInbox {
 }
 
 impl InboxStore for RenewingInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -1937,7 +1952,6 @@ fn renewing_consumer_policy() -> ConsumerExecutionPolicy {
         RetryPolicy::STANDARD,
         ExecutionBudget::new(Duration::from_secs(40), Duration::from_secs(2))
             .expect("execution budget"),
-        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
     )
 }
 
@@ -2166,6 +2180,10 @@ struct RenewalErrorAfterInitialInbox {
 }
 
 impl InboxStore for RenewalErrorAfterInitialInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -2299,6 +2317,10 @@ impl DeliverySource<Vec<u8>> for RedeliverySource {
 struct TransientThenAcquiredInbox(AtomicUsize);
 
 impl InboxStore for TransientThenAcquiredInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -2504,6 +2526,10 @@ async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
 }
 
 impl InboxStore for BlockingClaimInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
@@ -3147,6 +3173,10 @@ async fn provider_panic_maps_to_typed_worker_failure() {
 struct UnlimitedInbox;
 
 impl InboxStore for UnlimitedInbox {
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
+            .expect("test lease")
+    }
     type Claim = Claim;
 
     async fn claim(
