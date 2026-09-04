@@ -1,7 +1,11 @@
 //! Monotonic time and bounded execution policies.
 
+use std::future::{Future, poll_fn};
 use std::num::NonZeroU32;
+use std::task::Poll;
 use std::time::Duration;
+
+use crate::error::{MessagingError, MessagingErrorKind};
 
 /// Canonical operation owned by the transactional messaging core.
 pub const RETRY_ATTEMPTS_MAX: NonZeroU32 = NonZeroU32::MIN.saturating_add(127);
@@ -190,11 +194,6 @@ impl DeliveryBudget {
     pub fn can_start_attempt(&self, remaining: Duration) -> bool {
         remaining > self.required_budget()
     }
-    #[must_use]
-    /// `publisher_watchdog_timeout` operation defined by this protocol type.
-    pub fn publisher_watchdog_timeout(&self) -> Duration {
-        self.publish_timeout.saturating_add(self.safety_margin)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -265,15 +264,14 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> MonotonicInstant;
 }
 
-/// Monotonic timer used by provider-neutral local retry orchestration.
-#[cfg(feature = "consumer")]
-pub trait RetryTimer: Clock {
-    /// Delay without exceeding the unchanged delivery execution deadline.
-    fn delay(
-        &self,
-        duration: Duration,
-        deadline: OperationDeadline,
-    ) -> impl Future<Output = ()> + Send;
+/// Monotonic timer used by provider-neutral execution orchestration.
+///
+/// The timer and its [`Clock`] implementation must share one monotonic time domain. Provider
+/// operations are raced by [`within`]; implementations only supply the sleep primitive and cannot
+/// replace the core-owned arbitration.
+pub trait ExecutionTimer: Clock {
+    /// Sleep until the supplied core-owned absolute deadline becomes ready.
+    fn sleep_until(&self, deadline: AbsoluteDeadline) -> impl Future<Output = ()> + Send;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -331,10 +329,49 @@ impl ExecutionBudget {
     pub const fn settlement_reserve(self) -> Duration {
         self.settlement_reserve
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Operation and settlement cutoffs minted from one monotonic clock observation.
+///
+/// The private representation prevents callers from resetting the operation budget independently
+/// of the settlement reserve.
+pub struct ExecutionDeadlines {
+    operation: AbsoluteDeadline,
+    settlement: AbsoluteDeadline,
+}
+
+impl ExecutionDeadlines {
+    /// Freeze both execution phases from one clock read and one validated budget.
+    pub fn from_budget(
+        clock: &impl Clock,
+        budget: ExecutionBudget,
+    ) -> Result<Self, ExecutionBudgetError> {
+        let now = clock.now();
+        let operation = now
+            .checked_add(budget.total - budget.settlement_reserve)
+            .map(AbsoluteDeadline)
+            .ok_or(ExecutionBudgetError::DeadlineOverflow)?;
+        let settlement = now
+            .checked_add(budget.total)
+            .map(AbsoluteDeadline)
+            .ok_or(ExecutionBudgetError::DeadlineOverflow)?;
+        Ok(Self {
+            operation,
+            settlement,
+        })
+    }
+
+    /// Return the cutoff for claim, lease, transaction, and retry work.
     #[must_use]
-    /// `operation` operation defined by this protocol type.
-    pub fn operation(self) -> Duration {
-        self.total - self.settlement_reserve
+    pub const fn operation(self) -> AbsoluteDeadline {
+        self.operation
+    }
+
+    /// Return the later cutoff reserved for release, settlement, and abandon work.
+    #[must_use]
+    pub const fn settlement(self) -> AbsoluteDeadline {
+        self.settlement
     }
 }
 
@@ -363,9 +400,6 @@ impl AbsoluteDeadline {
         clock: &impl Clock,
         timeout: Duration,
     ) -> Result<Self, ExecutionBudgetError> {
-        if timeout.is_zero() {
-            return Err(ExecutionBudgetError::ZeroTotal);
-        }
         clock
             .now()
             .checked_add(timeout)
@@ -373,17 +407,6 @@ impl AbsoluteDeadline {
             .ok_or(ExecutionBudgetError::DeadlineOverflow)
     }
 
-    /// `from_budget` operation defined by this protocol type.
-    pub fn from_budget(
-        clock: &impl Clock,
-        budget: ExecutionBudget,
-    ) -> Result<Self, ExecutionBudgetError> {
-        clock
-            .now()
-            .checked_add(budget.total())
-            .map(Self)
-            .ok_or(ExecutionBudgetError::DeadlineOverflow)
-    }
     #[must_use]
     /// `instant` operation defined by this protocol type.
     pub const fn instant(self) -> MonotonicInstant {
@@ -401,11 +424,67 @@ impl AbsoluteDeadline {
         OperationDeadline(self.remaining(clock))
     }
 
-    /// Project this deadline while reserving a smaller phase-specific provider timeout.
+    /// Derive an absolute phase deadline that can only shorten this deadline.
     #[must_use]
-    pub fn operation_capped(self, clock: &impl Clock, cap: Duration) -> OperationDeadline {
-        OperationDeadline(self.remaining(clock).min(cap))
+    pub fn capped(self, clock: &impl Clock, cap: Duration) -> Self {
+        let capped = clock.now().checked_add(cap).map(Self);
+        capped.map_or(self, |capped| self.min(capped))
     }
+}
+
+impl AbsoluteDeadline {
+    fn min(self, other: Self) -> Self {
+        if self.0.elapsed() <= other.0.elapsed() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
+/// Race one provider future against a core-owned absolute deadline.
+///
+/// The deadline branch is always polled first. An already elapsed deadline does not invoke
+/// `start`; after a timeout, dropping the provider future requests cancellation but does not prove
+/// that an external effect did not occur. The [`OperationDeadline`] passed to `start` is the
+/// adapter's second-layer I/O watchdog for the exact same cutoff.
+pub async fn within<'a, T, S, F>(
+    timer: &'a T,
+    deadline: AbsoluteDeadline,
+    start: S,
+) -> Result<F::Output, MessagingError>
+where
+    T: ExecutionTimer + 'a,
+    S: FnOnce(OperationDeadline) -> F + 'a,
+    F: Future + Send + 'a,
+    F::Output: Send + 'a,
+{
+    let operation_deadline = deadline.operation(timer);
+    if operation_deadline.timeout().is_zero() {
+        return Err(deadline_elapsed());
+    }
+
+    let delay = timer.sleep_until(deadline);
+    let operation = start(operation_deadline);
+    let mut delay = std::pin::pin!(delay);
+    let mut operation = std::pin::pin!(operation);
+    poll_fn(|context| {
+        if delay.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(deadline_elapsed()));
+        }
+        operation.as_mut().poll(context).map(Ok)
+    })
+    .await
+}
+
+fn deadline_elapsed() -> MessagingError {
+    MessagingError::new(
+        MessagingErrorKind::DeadlineElapsed,
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "core-owned operation deadline elapsed",
+        ),
+    )
 }
 
 #[cfg(feature = "consumer")]

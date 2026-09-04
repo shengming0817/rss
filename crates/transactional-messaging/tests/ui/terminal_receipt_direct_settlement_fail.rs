@@ -3,20 +3,20 @@ use rss_transactional_messaging::message::MessageFingerprint;
 use rss_transactional_messaging::transaction::{TerminalDisposition, TerminalReceipt};
 
 fn main() {
-    let consumer = forged_consumer();
-    let fingerprint = forged_fingerprint();
-    let forged = TerminalReceipt::from_durable(
+    let consumer = provider_consumer();
+    let fingerprint = provider_fingerprint();
+    let provider_receipt = TerminalReceipt::from_durable(
         consumer,
         fingerprint,
         TerminalDisposition::Succeeded,
     );
-    let _ack = forged.into_settlement();
+    let _settlement = provider_receipt.into_settlement();
 }
 
-fn forged_consumer() -> ConsumerIdentity {
+fn provider_consumer() -> ConsumerIdentity {
     unimplemented!()
 }
 
-fn forged_fingerprint() -> MessageFingerprint {
+fn provider_fingerprint() -> MessageFingerprint {
     unimplemented!()
 }

@@ -27,8 +27,8 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, LeaseRenewalPolicy,
-    MonotonicInstant, OperationDeadline, RetryPolicy, RetryTimer, ShutdownBudget,
+    AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, ExecutionTimer,
+    LeaseRenewalPolicy, MonotonicInstant, OperationDeadline, RetryPolicy, ShutdownBudget,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, TerminalDisposition,
@@ -90,23 +90,37 @@ fn envelope(route: &MessageRoute, id: &str) -> MessageEnvelope<Vec<u8>> {
     )
 }
 
-impl RetryTimer for TestClock {
-    async fn delay(&self, _duration: Duration, _deadline: OperationDeadline) {}
-}
-
-struct TokioClock(AtomicUsize);
-
-impl Clock for TokioClock {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::from_millis(
-            self.0.fetch_add(1, Ordering::SeqCst) as u64
-        ))
+impl ExecutionTimer for TestClock {
+    async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
+        std::future::pending().await
     }
 }
 
-impl RetryTimer for TokioClock {
-    async fn delay(&self, duration: Duration, deadline: OperationDeadline) {
-        tokio::time::sleep(duration.min(deadline.timeout())).await;
+struct TokioClock {
+    origin: tokio::time::Instant,
+}
+
+impl TokioClock {
+    #[allow(clippy::disallowed_methods)]
+    // reason: this integration adapter is the injected Clock owner for real Tokio I/O.
+    fn new() -> Self {
+        Self {
+            origin: tokio::time::Instant::now(),
+        }
+    }
+}
+
+impl Clock for TokioClock {
+    #[allow(clippy::disallowed_methods)]
+    // reason: the injected adapter projects its single Tokio monotonic origin into core time.
+    fn now(&self) -> MonotonicInstant {
+        MonotonicInstant::from_elapsed(tokio::time::Instant::now() - self.origin)
+    }
+}
+
+impl ExecutionTimer for TokioClock {
+    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+        tokio::time::sleep_until(self.origin + deadline.instant().elapsed()).await;
     }
 }
 
@@ -511,7 +525,7 @@ async fn integration_managed_forced_cancel_redelivers_the_same_message_id() -> a
         ConsumerGroup::parse("managed-cancel-consumer").expect("group"),
         Arc::new(LiveIngress),
         subscription.clone(),
-        Arc::new(TokioClock(AtomicUsize::new(0))),
+        Arc::new(TokioClock::new()),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,

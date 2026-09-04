@@ -28,6 +28,9 @@
   canonical `rss_transactional_messaging::policy::DeliveryBudget` 只公开 `Duration`，PostgreSQL 的整毫秒投影只能在 adapter 内完成。
 - lease 尚未到期但不足以覆盖 publish+settle 时必须 settle 为 `Retry`；不得把短租约伪装为业务 deadline
   到期并永久 dead-letter。publish 与 settle 消费同一 attempt absolute deadline 的分阶段投影。
+- relay claim、lease、extend、publish 与 settle provider future 全部经 algorithm-owner `within` race；provider
+  继续以同一 cutoff 的 `OperationDeadline` 执行第二层 watchdog。publish race timeout 固定映射为
+  `Ambiguous(DeadlineElapsed)`，只允许原 `MessageId` retry；settle timeout 不得伪造 durable disposition。
 - provider 在构造期绑定 typed domain，调用方不得传 raw domain。
 
 ## Same-ID window

@@ -15,6 +15,8 @@ pub enum MessagingErrorKind {
     OwnershipLost,
     /// Trusted internal state contradicted a core invariant.
     Invariant,
+    /// The core-owned absolute operation deadline elapsed.
+    DeadlineElapsed,
 }
 
 impl MessagingErrorKind {
@@ -27,6 +29,7 @@ impl MessagingErrorKind {
             Self::Conflict => "conflict",
             Self::OwnershipLost => "ownership_lost",
             Self::Invariant => "invariant",
+            Self::DeadlineElapsed => "deadline_elapsed",
         }
     }
 }

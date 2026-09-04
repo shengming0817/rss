@@ -1,0 +1,5 @@
+error[E0599]: no method named `into_settlement` found for struct `TerminalReceipt` in the current scope
+  --> tests/ui/terminal_receipt_direct_settlement_fail.rs:13:40
+   |
+13 |     let _settlement = provider_receipt.into_settlement();
+   |                                        ^^^^^^^^^^^^^^^ method not found in `TerminalReceipt`

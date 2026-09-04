@@ -129,7 +129,12 @@ pub enum LeaseStatus {
     Lost,
 }
 
-/// Closed `InboxStore` protocol type.
+/// Trusted durable-state provider for inbox identity, leases, and terminal receipts.
+///
+/// Implementations are a semantic trust boundary: a terminal succeeded receipt must be rehydrated
+/// only from provider-authoritative state committed atomically with the handler effect. The core
+/// validates identity and fingerprint before granting settlement authority, but cannot prove that a
+/// provider reported durable state truthfully.
 pub trait InboxStore: Send + Sync {
     /// Provider-owned `Claim` capability used by this port.
     type Claim: Send + Sync;
@@ -141,7 +146,7 @@ pub trait InboxStore: Send + Sync {
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<IdempotencyDisposition<Self::Claim>, MessagingError>> + Send;
 
-    /// Read the durable terminal receipt without acquiring an execution claim.
+    /// Read a provider-authoritative durable terminal receipt without acquiring a claim.
     fn read_terminal(
         &self,
         identity: &ConsumerIdentity,

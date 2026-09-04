@@ -184,7 +184,11 @@ impl TerminalDisposition {
     }
 }
 
-/// Durable terminal fact for exactly one consumer/message/fingerprint tuple.
+/// Provider-authoritative durable terminal fact for one consumer/message/fingerprint tuple.
+///
+/// Private fields prevent business callers from relabeling the fact or projecting settlement
+/// authority directly. They do not establish the truthfulness of the trusted provider that
+/// rehydrates it.
 pub struct TerminalReceipt {
     consumer: ConsumerIdentity,
     fingerprint: MessageFingerprint,
@@ -193,6 +197,9 @@ pub struct TerminalReceipt {
 
 impl TerminalReceipt {
     /// Rehydrate a receipt read from provider-authoritative durable storage.
+    ///
+    /// `Succeeded` is valid only when the provider committed this receipt atomically with the
+    /// handler effect. Provider conformance, not this constructor, proves that obligation.
     #[must_use]
     pub const fn from_durable(
         consumer: ConsumerIdentity,
@@ -562,7 +569,11 @@ fn settlement_for_disposition(disposition: TerminalDisposition) -> SettlementDec
     }
 }
 
-/// Closed `ConsumerTx` protocol type.
+/// Trusted transaction provider that atomically binds handler effects and terminal receipt state.
+///
+/// A timeout may occur after commit begins, so implementations must quarantine or close an attempt
+/// without an explicit commit/rollback acknowledgement; callers conservatively treat it as commit
+/// outcome unknown.
 pub trait ConsumerTx<P>: Send + Sync {
     /// Provider-owned `Claim` capability used by this port.
     type Claim: Send;

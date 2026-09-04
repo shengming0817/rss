@@ -8,6 +8,9 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ### rss-transactional-messaging-runtime 0.1.0
 
+- Bound every consumer and relay provider future through the core-owned absolute-deadline race;
+  preserve settlement reserve, map transaction timeout to commit-unknown, and retain same-ID
+  ambiguous publish recovery.
 - Establish the sole provider-neutral owner for bounded relay and consumer execution, periodic
   lease renewal, subscription recovery, backpressure, and managed worker registration.
 - Preserve publish-before-settlement, commit-before-ACK, same-ID ambiguous retry, lease-loss
@@ -19,6 +22,15 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ### rss-transactional-messaging 0.2.0
 
+- Replace `RetryTimer` and relative phase projections with one `ExecutionTimer`, typed
+  operation/settlement deadlines, and a deadline-first `within` funnel; distinguish elapsed budget
+  from retryable provider failures without compatibility aliases.
+  Migrate `RetryTimer::delay` to `ExecutionTimer::sleep_until`, budget projection to
+  `ExecutionDeadlines::from_budget`, and phase caps to `AbsoluteDeadline::capped` followed by
+  `within`. Runtime worker payloads and relay claim capabilities used by spawned concurrent work
+  must also be `Sync`.
+- Document inbox/transaction providers as the trusted durable receipt boundary while keeping direct
+  settlement authority unavailable to business callers.
 - Narrow the core to message, transaction, receipt, policy, port, and opaque transition semantics;
   move every relay and consumer execution entry point to `rss-transactional-messaging-runtime`.
 - Add a lease renewal schedule checked against provider-authoritative remaining-time evidence and

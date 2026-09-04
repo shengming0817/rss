@@ -9,6 +9,9 @@ is drained before a batch error is returned. Cancellation stops new claims; the 
 finish within the explicit worker `ShutdownBudget`. `RelayConfig` accepts polling intervals from
 100ms through 300s and a validated `RelayBatchLimit` no greater than 64; the same limit bounds both
 durable claims and concurrent publication work in the public batch API.
+Every relay store/publisher future passes through the core-owned absolute-deadline race. Publish
+timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; claim, lease and
+settlement timeout stop downstream work without inventing durable state.
 
 The consumer side owns `consume_once`: validate, claim, periodic lease renewal, bounded handler
 retry, transaction outcome, release/abandon, and commit-before-ACK settlement. Renewal runs across
@@ -17,6 +20,11 @@ abandons the provider session without settlement. Renewal errors, rollback failu
 and fencing never ACK. Every renewal is checked against the provider-reported remaining lease, so
 an unsafe configured interval hard-fences execution. A matching durable terminal receipt bypasses
 the handler.
+Claim, lease, transaction, release, settlement and abandon futures share one pair of operation and
+settlement cutoffs minted from one clock observation. A transaction timeout maps to commit outcome
+unknown and never ACKs; the reserved cutoff remains available for bounded cleanup. A settlement
+timeout means its transport outcome is unknown, so the runtime never issues a second or
+contradictory action.
 Provider-decoding failures carry a core-minted, move-only rejection capability and are rejected
 without exposing a general-purpose Reject constructor.
 
@@ -37,7 +45,7 @@ or `LaunchTransaction`.
 use rss_runtime::{ManagedTaskRegistration, TaskStatus};
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
 use rss_transactional_messaging::outbox::OutboxStore;
-use rss_transactional_messaging::policy::{Clock, ShutdownBudget};
+use rss_transactional_messaging::policy::{ExecutionTimer, ShutdownBudget};
 use rss_transactional_messaging::transport::Publisher;
 use rss_transactional_messaging_runtime::relay::RelayWorker;
 use std::time::Duration;
@@ -48,8 +56,9 @@ fn prepare_relay<P, S, U, C, E>(
 where
     P: Send + Sync + 'static,
     S: OutboxStore<P> + 'static,
+    S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
-    C: Clock + 'static,
+    C: ExecutionTimer + 'static,
     E: TransactionalMessagingEmitter + 'static,
 {
     let shutdown = ShutdownBudget::new(Duration::from_secs(30)).expect("valid budget");

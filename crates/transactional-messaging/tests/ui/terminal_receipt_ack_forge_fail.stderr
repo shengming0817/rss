@@ -1,5 +1,0 @@
-error[E0599]: no method named `into_settlement` found for struct `TerminalReceipt` in the current scope
-  --> tests/ui/terminal_receipt_ack_forge_fail.rs:13:23
-   |
-13 |     let _ack = forged.into_settlement();
-   |                       ^^^^^^^^^^^^^^^ method not found in `TerminalReceipt`

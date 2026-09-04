@@ -17,9 +17,12 @@ use rss_transactional_messaging::outbox::{
     OutboxDisposition, OutboxLeaseStatus, OutboxSettlement, OutboxStore,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, DeliveryBudget, OperationDeadline, ShutdownBudget,
+    AbsoluteDeadline, DeliveryBudget, ExecutionTimer, ShutdownBudget, within,
 };
-use rss_transactional_messaging::transport::Publisher;
+use rss_transactional_messaging::transport::{
+    PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
+    Publisher,
+};
 use tokio::time::MissedTickBehavior;
 
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -149,18 +152,19 @@ pub async fn relay_once<P, S, U, C, E>(
     limit: RelayBatchLimit,
 ) -> Result<RelayReport, MessagingError>
 where
+    P: Sync,
     S: OutboxStore<P>,
     U: Publisher<P, Receipt = S::PublishReceipt>,
-    C: Clock,
+    C: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     let claim_started = clock.now();
-    let claims = match store
-        .claim_partition_heads(
-            limit.get(),
-            operation_deadline(clock, budget.settle_timeout(), emitter)?,
-        )
-        .await
+    let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
+    let claims = match within(clock, claim_deadline, |deadline| {
+        store.claim_partition_heads(limit.get(), deadline)
+    })
+    .await
+    .and_then(std::convert::identity)
     {
         Ok(claims) => claims,
         Err(error) => {
@@ -220,17 +224,18 @@ async fn relay_claim<P, S, U, C, E>(
     claim: S::Claim,
 ) -> Result<Option<OutboxDisposition>, MessagingError>
 where
+    P: Sync,
     S: OutboxStore<P>,
     U: Publisher<P, Receipt = S::PublishReceipt>,
-    C: Clock,
+    C: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let lease = store
-        .lease_status(
-            &claim,
-            operation_deadline(clock, budget.settle_timeout(), emitter)?,
-        )
-        .await;
+    let lease_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
+    let lease = within(clock, lease_deadline, |deadline| {
+        store.lease_status(&claim, deadline)
+    })
+    .await
+    .and_then(std::convert::identity);
     let lease = match lease {
         Ok(lease) => lease,
         Err(error) => {
@@ -246,12 +251,12 @@ where
         emitter.emit(TransactionalMessagingObservation::RelayLeaseLost);
         return Ok(None);
     }
-    let extended = store
-        .extend(
-            &claim,
-            operation_deadline(clock, budget.settle_timeout(), emitter)?,
-        )
-        .await;
+    let extend_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
+    let extended = within(clock, extend_deadline, |deadline| {
+        store.extend(&claim, deadline)
+    })
+    .await
+    .and_then(std::convert::identity);
     let remaining = match extended {
         Err(error) => {
             emit_runtime_failure(
@@ -268,47 +273,46 @@ where
         }
     };
     let publish_started = clock.now();
-    let attempt_deadline = if budget.can_start_attempt(remaining) {
-        Some(
-            AbsoluteDeadline::from_timeout(clock, remaining.saturating_sub(budget.safety_margin()))
-                .map_err(|error| {
-                    let error = MessagingError::new(MessagingErrorKind::Invariant, error);
-                    emit_runtime_failure(
-                        emitter,
-                        TransactionalMessagingRuntimePhase::RelayDeadline,
-                        &error,
-                    );
-                    error
-                })?,
-        )
-    } else {
-        None
-    };
-    let settlement = match attempt_deadline {
-        Some(deadline) => {
-            let outcome = publisher
-                .publish(
-                    S::message(&claim).envelope(),
-                    deadline.operation_capped(clock, budget.publish_timeout()),
-                )
-                .await;
-            if let Some(failure) = outcome.failure() {
-                emitter.emit(TransactionalMessagingObservation::OutboxPublishFailure {
-                    stage: failure.stage(),
-                    reason: failure.reason(),
-                    ambiguous: outcome.is_ambiguous(),
-                });
-            }
-            outcome.into_settlement()
+    let attempt_deadline =
+        AbsoluteDeadline::from_timeout(clock, remaining.saturating_sub(budget.safety_margin()))
+            .map_err(|error| {
+                let error = MessagingError::new(MessagingErrorKind::Invariant, error);
+                emit_runtime_failure(
+                    emitter,
+                    TransactionalMessagingRuntimePhase::RelayDeadline,
+                    &error,
+                );
+                error
+            })?;
+    let settlement = if budget.can_start_attempt(remaining) {
+        let publish_deadline = attempt_deadline.capped(clock, budget.publish_timeout());
+        let outcome = match within(clock, publish_deadline, |deadline| {
+            publisher.publish(S::message(&claim).envelope(), deadline)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => deadline_elapsed_publish_outcome(),
+        };
+        if let Some(failure) = outcome.failure() {
+            emitter.emit(TransactionalMessagingObservation::OutboxPublishFailure {
+                stage: failure.stage(),
+                reason: failure.reason(),
+                ambiguous: outcome.is_ambiguous(),
+            });
         }
-        None => OutboxSettlement::Retry,
+        outcome.into_settlement()
+    } else {
+        OutboxSettlement::Retry
     };
     let disposition = settlement.disposition();
-    let settlement_deadline = match attempt_deadline {
-        Some(deadline) => deadline.operation_capped(clock, budget.settle_timeout()),
-        None => operation_deadline(clock, budget.settle_timeout(), emitter)?,
-    };
-    if let Err(error) = store.settle(claim, settlement, settlement_deadline).await {
+    let settlement_deadline = attempt_deadline.capped(clock, budget.settle_timeout());
+    if let Err(error) = within(clock, settlement_deadline, |deadline| {
+        store.settle(claim, settlement, deadline)
+    })
+    .await
+    .and_then(std::convert::identity)
+    {
         emit_runtime_failure(
             emitter,
             TransactionalMessagingRuntimePhase::RelaySettlement,
@@ -330,22 +334,28 @@ where
     Ok(Some(disposition))
 }
 
-fn operation_deadline(
-    clock: &impl Clock,
+fn deadline_elapsed_publish_outcome<R>() -> PublishOutcome<R> {
+    PublishOutcome::Ambiguous(PublishFailure::new(
+        PublishFailureKind::Transient,
+        PublishFailureStage::Confirm,
+        PublishFailureReason::DeadlineElapsed,
+    ))
+}
+
+fn absolute_deadline(
+    clock: &impl ExecutionTimer,
     timeout: Duration,
     emitter: &impl TransactionalMessagingEmitter,
-) -> Result<OperationDeadline, MessagingError> {
-    AbsoluteDeadline::from_timeout(clock, timeout)
-        .map(|deadline| deadline.operation(clock))
-        .map_err(|error| {
-            let error = MessagingError::new(MessagingErrorKind::Invariant, error);
-            emit_runtime_failure(
-                emitter,
-                TransactionalMessagingRuntimePhase::RelayDeadline,
-                &error,
-            );
-            error
-        })
+) -> Result<AbsoluteDeadline, MessagingError> {
+    AbsoluteDeadline::from_timeout(clock, timeout).map_err(|error| {
+        let error = MessagingError::new(MessagingErrorKind::Invariant, error);
+        emit_runtime_failure(
+            emitter,
+            TransactionalMessagingRuntimePhase::RelayDeadline,
+            &error,
+        );
+        error
+    })
 }
 
 fn emit_runtime_failure(
@@ -374,8 +384,9 @@ impl<P, S, U, C, E> RelayWorker<P, S, U, C, E>
 where
     P: Send + Sync + 'static,
     S: OutboxStore<P> + 'static,
+    S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
-    C: Clock + 'static,
+    C: ExecutionTimer + 'static,
     E: TransactionalMessagingEmitter + 'static,
 {
     /// Bind all mandatory relay dependencies without defaults or optional runtime paths.
@@ -420,8 +431,9 @@ async fn relay_loop<P, S, U, C, E>(
 where
     P: Send + Sync + 'static,
     S: OutboxStore<P> + 'static,
+    S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
-    C: Clock + 'static,
+    C: ExecutionTimer + 'static,
     E: TransactionalMessagingEmitter + 'static,
 {
     let mut ticker = tokio::time::interval(worker.config.poll_interval());
@@ -442,7 +454,10 @@ where
         )
         .await;
         if let Err(error) = result {
-            if error.kind() != MessagingErrorKind::Transient {
+            if !matches!(
+                error.kind(),
+                MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed
+            ) {
                 return Err(error);
             }
             tracing::warn!(
@@ -450,5 +465,24 @@ where
                 "relay batch will retry"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_publish_outcome_is_the_closed_ambiguous_transient_tuple() {
+        let outcome = deadline_elapsed_publish_outcome::<()>();
+        assert!(outcome.is_ambiguous());
+        let failure = outcome.failure().unwrap_or(PublishFailure::new(
+            PublishFailureKind::Permanent,
+            PublishFailureStage::Encode,
+            PublishFailureReason::InvalidMessage,
+        ));
+        assert_eq!(failure.kind(), PublishFailureKind::Transient);
+        assert_eq!(failure.stage(), PublishFailureStage::Confirm);
+        assert_eq!(failure.reason(), PublishFailureReason::DeadlineElapsed);
     }
 }

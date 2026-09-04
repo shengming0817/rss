@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used)]
 // reason: fixed canonical fixtures must fail loudly if their identity or protocol invariants drift.
 
+mod support;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,8 +31,8 @@ use rss_transactional_messaging::observability::{
 use rss_transactional_messaging::outbox::{OutboxDisposition, PartitionHead, PartitionHeadState};
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ConsumerExecutionPolicy, DeliveryBudget, DeliveryBudgetError,
-    ExecutionBudget, ExecutionBudgetError, LeaseRenewalPolicy, MonotonicInstant, OperationDeadline,
-    RetryPolicy, RetryTimer,
+    ExecutionBudget, ExecutionBudgetError, ExecutionDeadlines, ExecutionTimer, LeaseRenewalPolicy,
+    MonotonicInstant, OperationDeadline, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, FailureClass, LocalTxAttempt, RejectKind, SettlementKind, TerminalDisposition,
@@ -43,6 +45,7 @@ use rss_transactional_messaging_runtime::consumer::{
     ConsumerExecution, ConsumerWorker, ProcessingDisposition, SubscriptionBackoffPolicy,
     consume_once,
 };
+use support::{AdvancingTimer as ManualTimer, ScriptedTimer};
 
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TENANT_B: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d480";
@@ -147,24 +150,52 @@ impl Clock for FixedClock {
     }
 }
 
-impl RetryTimer for FixedClock {
-    async fn delay(&self, _duration: Duration, _deadline: OperationDeadline) {}
+impl ExecutionTimer for FixedClock {
+    async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
+        std::future::pending().await
+    }
 }
 
-struct RealtimeClock(AtomicUsize);
+struct RealtimeClock {
+    origin: tokio::time::Instant,
+}
+
+impl RealtimeClock {
+    #[allow(clippy::disallowed_methods)]
+    // reason: this test adapter is the injected Clock owner; Tokio time also supports pause/advance.
+    fn new() -> Self {
+        Self {
+            origin: tokio::time::Instant::now(),
+        }
+    }
+}
 
 impl Clock for RealtimeClock {
+    #[allow(clippy::disallowed_methods)]
+    // reason: the injected adapter projects its single Tokio monotonic origin into core time.
     fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::from_millis(
-            self.0.fetch_add(1, Ordering::SeqCst) as u64
-        ))
+        MonotonicInstant::from_elapsed(tokio::time::Instant::now() - self.origin)
     }
 }
 
-impl RetryTimer for RealtimeClock {
-    async fn delay(&self, duration: Duration, deadline: OperationDeadline) {
-        tokio::time::sleep(duration.min(deadline.timeout())).await;
+impl ExecutionTimer for RealtimeClock {
+    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+        tokio::time::sleep_until(self.origin + deadline.instant().elapsed()).await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn realtime_clock_sleep_and_now_share_one_monotonic_domain() {
+    let timer = RealtimeClock::new();
+    let deadline =
+        AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
+
+    let sleeping = timer.sleep_until(deadline);
+    tokio::pin!(sleeping);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    sleeping.await;
+
+    assert_eq!(deadline.remaining(&timer), Duration::ZERO);
 }
 
 struct NoopEmitter;
@@ -216,11 +247,18 @@ fn policy_budgets_are_strict_and_monotonic() {
     let execution = ExecutionBudget::new(Duration::from_secs(5), Duration::from_secs(1))
         .expect("execution budget");
     let clock = FixedClock(MonotonicInstant::from_elapsed(Duration::from_secs(10)));
-    let deadline = AbsoluteDeadline::from_budget(&clock, execution).expect("deadline");
-    assert_eq!(deadline.remaining(&clock), Duration::from_secs(5));
+    let deadlines = ExecutionDeadlines::from_budget(&clock, execution).expect("deadlines");
+    assert_eq!(
+        deadlines.operation().remaining(&clock),
+        Duration::from_secs(4)
+    );
+    assert_eq!(
+        deadlines.settlement().remaining(&clock),
+        Duration::from_secs(5)
+    );
     let overflow_clock = FixedClock(MonotonicInstant::from_elapsed(Duration::MAX));
     assert_eq!(
-        AbsoluteDeadline::from_budget(&overflow_clock, execution),
+        ExecutionDeadlines::from_budget(&overflow_clock, execution),
         Err(ExecutionBudgetError::DeadlineOverflow)
     );
 }
@@ -1002,29 +1040,42 @@ async fn only_confirmed_transient_rollback_retries_locally() {
     };
     let expected = subscription(&message);
     let actions = Arc::new(Mutex::new(Vec::new()));
-
-    let outcome = consume_once(
-        &inbox,
-        &transaction,
-        &ConsumerExecution::new(
-            group,
-            &TrustedIngress,
-            &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
-            consumer_policy(),
-            &NoopEmitter,
-        ),
-        Delivery::new(
-            message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::new(AtomicUsize::new(0)),
-            },
-        ),
-    )
+    let timer = Arc::new(ManualTimer::new());
+    let task = tokio::spawn({
+        let timer = Arc::clone(&timer);
+        let actions = Arc::clone(&actions);
+        async move {
+            consume_once(
+                &inbox,
+                &transaction,
+                &ConsumerExecution::new(
+                    group,
+                    &TrustedIngress,
+                    &expected,
+                    timer.as_ref(),
+                    consumer_policy(),
+                    &NoopEmitter,
+                ),
+                Delivery::new(
+                    message,
+                    FakeSettlement {
+                        actions,
+                        fail: false,
+                        abandoned: Arc::new(AtomicUsize::new(0)),
+                    },
+                ),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        support::wait_for_count(calls.as_ref(), 1).await;
+        timer.wait_registered(Duration::from_secs(1)).await;
+    })
     .await
-    .expect("retry commits");
+    .expect("retry backoff starts");
+    timer.advance(Duration::from_secs(1));
+    let outcome = task.await.expect("consumer task").expect("retry commits");
 
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -1244,33 +1295,59 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
         let actions = Arc::new(Mutex::new(Vec::new()));
         let abandoned = Arc::new(AtomicUsize::new(0));
         let observations = Arc::new(Mutex::new(Vec::new()));
+        let timer = Arc::new(ManualTimer::new());
         let message = envelope(|_| {});
         let expected = subscription(&message);
-        consume_once(
-            &inbox,
-            &MatrixTx {
-                outcome: kind,
-                calls: Arc::clone(&calls),
-            },
-            &ConsumerExecution::new(
-                ConsumerGroup::parse("matrix").expect("group"),
-                &TrustedIngress,
-                &expected,
-                &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
-                consumer_policy(),
-                &RecordingEmitter(Arc::clone(&observations)),
-            ),
-            Delivery::new(
-                message,
-                FakeSettlement {
-                    actions: Arc::clone(&actions),
-                    fail: false,
-                    abandoned: Arc::clone(&abandoned),
-                },
-            ),
-        )
-        .await
-        .expect("matrix outcome");
+        let task = tokio::spawn({
+            let calls = Arc::clone(&calls);
+            let actions = Arc::clone(&actions);
+            let abandoned = Arc::clone(&abandoned);
+            let observations = Arc::clone(&observations);
+            let timer = Arc::clone(&timer);
+            async move {
+                consume_once(
+                    &inbox,
+                    &MatrixTx {
+                        outcome: kind,
+                        calls,
+                    },
+                    &ConsumerExecution::new(
+                        ConsumerGroup::parse("matrix").expect("group"),
+                        &TrustedIngress,
+                        &expected,
+                        timer.as_ref(),
+                        consumer_policy(),
+                        &RecordingEmitter(observations),
+                    ),
+                    Delivery::new(
+                        message,
+                        FakeSettlement {
+                            actions,
+                            fail: false,
+                            abandoned,
+                        },
+                    ),
+                )
+                .await
+            }
+        });
+        if matches!(kind, MatrixOutcome::HandlerTransient) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                support::wait_for_count(calls.as_ref(), 1).await;
+                timer.wait_registered(Duration::from_secs(1)).await;
+            })
+            .await
+            .expect("first backoff");
+            timer.advance(Duration::from_secs(1));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                support::wait_for_count(calls.as_ref(), 2).await;
+                timer.wait_registered(Duration::from_secs(3)).await;
+            })
+            .await
+            .expect("second backoff");
+            timer.advance(Duration::from_secs(2));
+        }
+        task.await.expect("consumer task").expect("matrix outcome");
         assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
         assert_eq!(abandoned.load(Ordering::SeqCst), expected_abandon);
         assert_eq!(*actions.lock().expect("actions"), expected_actions);
@@ -1288,6 +1365,581 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
                 })
         );
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PendingInboxStage {
+    None,
+    Claim,
+    Extend,
+    Renewal,
+    Release,
+}
+
+struct PendingInbox {
+    stage: PendingInboxStage,
+    started: Arc<AtomicUsize>,
+}
+
+impl InboxStore for PendingInbox {
+    type Claim = Claim;
+
+    async fn claim(
+        &self,
+        _identity: &ConsumerIdentity,
+        _deadline: OperationDeadline,
+    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        if self.stage == PendingInboxStage::Claim {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            return std::future::pending().await;
+        }
+        Ok(IdempotencyDisposition::Acquired(Claim))
+    }
+
+    async fn read_terminal(
+        &self,
+        _identity: &ConsumerIdentity,
+        _deadline: OperationDeadline,
+    ) -> Result<Option<TerminalReceipt>, MessagingError> {
+        Ok(None)
+    }
+
+    async fn extend(
+        &self,
+        _claim: &Self::Claim,
+        _deadline: OperationDeadline,
+    ) -> Result<LeaseStatus, MessagingError> {
+        if self.stage == PendingInboxStage::Extend {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            return std::future::pending().await;
+        }
+        if self.stage == PendingInboxStage::Renewal {
+            let call = self.started.fetch_add(1, Ordering::SeqCst);
+            if call > 0 {
+                return std::future::pending().await;
+            }
+        }
+        Ok(LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        })
+    }
+
+    async fn release(
+        &self,
+        _claim: Self::Claim,
+        _deadline: OperationDeadline,
+    ) -> Result<(), MessagingError> {
+        if self.stage == PendingInboxStage::Release {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            return std::future::pending().await;
+        }
+        Ok(())
+    }
+}
+
+struct NeverReadyTx(Arc<AtomicUsize>);
+
+impl ConsumerTx<Vec<u8>> for NeverReadyTx {
+    type Claim = Claim;
+    type CommitProof = Proof;
+
+    async fn execute(
+        &self,
+        _claim: &Self::Claim,
+        _message: &MessageEnvelope<Vec<u8>>,
+        _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+        _deadline: OperationDeadline,
+    ) -> TransactionOutcome<Self::CommitProof> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+struct PendingSettlement {
+    actions: Arc<Mutex<Vec<SettlementKind>>>,
+    settle_started: Arc<AtomicUsize>,
+    abandon_started: Arc<AtomicUsize>,
+}
+
+impl DeliverySettlement for PendingSettlement {
+    async fn settle(
+        self,
+        decision: rss_transactional_messaging::transaction::SettlementDecision,
+        _deadline: OperationDeadline,
+    ) -> Result<(), MessagingError> {
+        self.actions.lock().expect("actions").push(decision.kind());
+        self.settle_started.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
+    async fn abandon(self, _deadline: OperationDeadline) -> Result<(), MessagingError> {
+        self.abandon_started.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+fn deadline_policy(total: Duration, reserve: Duration) -> ConsumerExecutionPolicy {
+    ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::new(total, reserve).expect("execution budget"),
+        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
+    )
+}
+
+#[tokio::test]
+async fn never_ready_claim_and_extend_stop_before_handler_and_ack() {
+    for stage in [PendingInboxStage::Claim, PendingInboxStage::Extend] {
+        let timer = Arc::new(ManualTimer::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let tx_calls = Arc::new(AtomicUsize::new(0));
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let abandoned = Arc::new(AtomicUsize::new(0));
+        let message = envelope(|_| {});
+        let expected = subscription(&message);
+        let task = tokio::spawn({
+            let timer = Arc::clone(&timer);
+            let started = Arc::clone(&started);
+            let tx_calls = Arc::clone(&tx_calls);
+            let actions = Arc::clone(&actions);
+            let abandoned = Arc::clone(&abandoned);
+            async move {
+                consume_once(
+                    &PendingInbox { stage, started },
+                    &NeverReadyTx(tx_calls),
+                    &ConsumerExecution::new(
+                        ConsumerGroup::parse("deadline-stage").expect("group"),
+                        &TrustedIngress,
+                        &expected,
+                        timer.as_ref(),
+                        deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
+                        &NoopEmitter,
+                    ),
+                    Delivery::new(
+                        message,
+                        FakeSettlement {
+                            actions,
+                            fail: false,
+                            abandoned,
+                        },
+                    ),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            support::wait_for_count(started.as_ref(), 1).await;
+            timer.wait_registered(Duration::from_millis(80)).await;
+        })
+        .await
+        .expect("provider stage starts");
+        timer.advance(Duration::from_millis(80));
+
+        let error = task
+            .await
+            .expect("consumer task")
+            .expect_err("deadline elapsed");
+        assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
+        assert_eq!(tx_calls.load(Ordering::SeqCst), 0);
+        assert!(actions.lock().expect("actions").is_empty());
+        assert_eq!(abandoned.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn never_ready_execute_maps_to_commit_unknown_and_uses_settlement_reserve() {
+    let timer = Arc::new(ManualTimer::new());
+    let tx_calls = Arc::new(AtomicUsize::new(0));
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let message = envelope(|_| {});
+    let expected = subscription(&message);
+    let task = tokio::spawn({
+        let timer = Arc::clone(&timer);
+        let tx_calls = Arc::clone(&tx_calls);
+        let actions = Arc::clone(&actions);
+        let abandoned = Arc::clone(&abandoned);
+        let observations = Arc::clone(&observations);
+        async move {
+            consume_once(
+                &PendingInbox {
+                    stage: PendingInboxStage::None,
+                    started: Arc::new(AtomicUsize::new(0)),
+                },
+                &NeverReadyTx(tx_calls),
+                &ConsumerExecution::new(
+                    ConsumerGroup::parse("execute-deadline").expect("group"),
+                    &TrustedIngress,
+                    &expected,
+                    timer.as_ref(),
+                    deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
+                    &RecordingEmitter(observations),
+                ),
+                Delivery::new(
+                    message,
+                    FakeSettlement {
+                        actions,
+                        fail: false,
+                        abandoned,
+                    },
+                ),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        support::wait_for_count(tx_calls.as_ref(), 1).await;
+        timer.wait_registered(Duration::from_millis(80)).await;
+    })
+    .await
+    .expect("transaction starts");
+    timer.advance(Duration::from_millis(80));
+
+    assert_eq!(
+        task.await.expect("consumer task").expect("deferred"),
+        ProcessingDisposition::Deferred
+    );
+    assert!(actions.lock().expect("actions").is_empty());
+    assert_eq!(abandoned.load(Ordering::SeqCst), 1);
+    assert!(observations.lock().expect("observations").iter().any(|entry| {
+        matches!(
+            entry,
+            TransactionalMessagingObservation::ConsumerTransaction {
+                status: rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::CommitUnknown
+            }
+        )
+    }));
+    assert!(observations.lock().expect("observations").contains(
+        &TransactionalMessagingObservation::RuntimeFailure {
+            phase: TransactionalMessagingRuntimePhase::ConsumerTransaction,
+            kind: MessagingErrorKind::DeadlineElapsed,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn never_ready_periodic_extend_fences_execute_at_the_operation_cutoff() {
+    let timer = Arc::new(ManualTimer::new());
+    let extend_calls = Arc::new(AtomicUsize::new(0));
+    let tx_calls = Arc::new(AtomicUsize::new(0));
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let message = envelope(|_| {});
+    let expected = subscription(&message);
+    let task = tokio::spawn({
+        let timer = Arc::clone(&timer);
+        let extend_calls = Arc::clone(&extend_calls);
+        let tx_calls = Arc::clone(&tx_calls);
+        let actions = Arc::clone(&actions);
+        let abandoned = Arc::clone(&abandoned);
+        async move {
+            consume_once(
+                &PendingInbox {
+                    stage: PendingInboxStage::Renewal,
+                    started: extend_calls,
+                },
+                &NeverReadyTx(tx_calls),
+                &ConsumerExecution::new(
+                    ConsumerGroup::parse("renewal-deadline").expect("group"),
+                    &TrustedIngress,
+                    &expected,
+                    timer.as_ref(),
+                    renewing_consumer_policy(),
+                    &NoopEmitter,
+                ),
+                Delivery::new(
+                    message,
+                    FakeSettlement {
+                        actions,
+                        fail: false,
+                        abandoned,
+                    },
+                ),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        support::wait_for_count(tx_calls.as_ref(), 1).await;
+        timer.wait_registered(Duration::from_secs(10)).await;
+    })
+    .await
+    .expect("transaction and renewal start");
+    timer.advance(Duration::from_secs(10));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        support::wait_for_count(extend_calls.as_ref(), 2).await;
+    })
+    .await
+    .expect("periodic extend starts");
+    timer.advance(Duration::from_secs(28));
+
+    assert_eq!(
+        task.await.expect("consumer task").expect("deferred"),
+        ProcessingDisposition::Deferred
+    );
+    assert!(actions.lock().expect("actions").is_empty());
+    assert_eq!(abandoned.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn never_ready_release_settle_and_abandon_are_bounded_without_second_action() {
+    let cases = [PendingInboxStage::Release];
+    for stage in cases {
+        let timer = Arc::new(ManualTimer::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let abandoned = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let message = envelope(|_| {});
+        let expected = subscription(&message);
+        let task = tokio::spawn({
+            let timer = Arc::clone(&timer);
+            let started = Arc::clone(&started);
+            let actions = Arc::clone(&actions);
+            let abandoned = Arc::clone(&abandoned);
+            let calls = Arc::clone(&calls);
+            async move {
+                consume_once(
+                    &PendingInbox { stage, started },
+                    &MatrixTx {
+                        outcome: MatrixOutcome::Infrastructure,
+                        calls,
+                    },
+                    &ConsumerExecution::new(
+                        ConsumerGroup::parse("release-deadline").expect("group"),
+                        &TrustedIngress,
+                        &expected,
+                        timer.as_ref(),
+                        deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
+                        &NoopEmitter,
+                    ),
+                    Delivery::new(
+                        message,
+                        FakeSettlement {
+                            actions,
+                            fail: false,
+                            abandoned,
+                        },
+                    ),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            support::wait_for_count(started.as_ref(), 1).await;
+            timer.wait_registered(Duration::from_millis(100)).await;
+        })
+        .await
+        .expect("release starts");
+        timer.advance(Duration::from_millis(100));
+        let error = task
+            .await
+            .expect("consumer task")
+            .expect_err("release deadline");
+        assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
+        assert!(actions.lock().expect("actions").is_empty());
+        assert_eq!(abandoned.load(Ordering::SeqCst), 0);
+    }
+
+    for commit_unknown in [false, true] {
+        let timer = Arc::new(ManualTimer::new());
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let settle_started = Arc::new(AtomicUsize::new(0));
+        let abandon_started = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let message = envelope(|_| {});
+        let expected = subscription(&message);
+        let task = tokio::spawn({
+            let timer = Arc::clone(&timer);
+            let actions = Arc::clone(&actions);
+            let settle_started = Arc::clone(&settle_started);
+            let abandon_started = Arc::clone(&abandon_started);
+            let calls = Arc::clone(&calls);
+            async move {
+                consume_once(
+                    &PendingInbox {
+                        stage: PendingInboxStage::None,
+                        started: Arc::new(AtomicUsize::new(0)),
+                    },
+                    &MatrixTx {
+                        outcome: if commit_unknown {
+                            MatrixOutcome::CommitUnknown
+                        } else {
+                            MatrixOutcome::Permanent
+                        },
+                        calls,
+                    },
+                    &ConsumerExecution::new(
+                        ConsumerGroup::parse("settlement-deadline").expect("group"),
+                        &TrustedIngress,
+                        &expected,
+                        timer.as_ref(),
+                        deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
+                        &NoopEmitter,
+                    ),
+                    Delivery::new(
+                        message,
+                        PendingSettlement {
+                            actions,
+                            settle_started,
+                            abandon_started,
+                        },
+                    ),
+                )
+                .await
+            }
+        });
+        let active = if commit_unknown {
+            Arc::clone(&abandon_started)
+        } else {
+            Arc::clone(&settle_started)
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            support::wait_for_count(active.as_ref(), 1).await;
+            timer.wait_registered(Duration::from_millis(100)).await;
+        })
+        .await
+        .expect("settlement action starts");
+        timer.advance(Duration::from_millis(100));
+        let error = task
+            .await
+            .expect("consumer task")
+            .expect_err("settlement deadline");
+        assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
+        assert_eq!(
+            settle_started.load(Ordering::SeqCst),
+            usize::from(!commit_unknown)
+        );
+        assert_eq!(
+            abandon_started.load(Ordering::SeqCst),
+            usize::from(commit_unknown)
+        );
+        let recorded = actions.lock().expect("actions");
+        if commit_unknown {
+            assert!(recorded.is_empty());
+        } else {
+            assert_eq!(recorded.as_slice(), &[SettlementKind::Requeue]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn duplicate_ack_timeout_attempts_exactly_one_settlement_without_handler() {
+    let timer = Arc::new(ManualTimer::new());
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let settle_started = Arc::new(AtomicUsize::new(0));
+    let abandon_started = Arc::new(AtomicUsize::new(0));
+    let tx_calls = Arc::new(AtomicUsize::new(0));
+    let message = envelope(|_| {});
+    let group = ConsumerGroup::parse("duplicate-deadline").expect("group");
+    let receipt = TerminalReceipt::from_durable(
+        consumer_identity(group.clone(), &message),
+        MessageFingerprint::of(&message),
+        TerminalDisposition::Succeeded,
+    );
+    let expected = subscription(&message);
+    let task = tokio::spawn({
+        let timer = Arc::clone(&timer);
+        let actions = Arc::clone(&actions);
+        let settle_started = Arc::clone(&settle_started);
+        let abandon_started = Arc::clone(&abandon_started);
+        let tx_calls = Arc::clone(&tx_calls);
+        async move {
+            consume_once(
+                &FakeInbox {
+                    disposition: Mutex::new(Some(IdempotencyDisposition::Terminal(receipt))),
+                    lease: LeaseStatus::Lost,
+                },
+                &FakeTx {
+                    calls: tx_calls,
+                    disposition: TerminalDisposition::Succeeded,
+                },
+                &ConsumerExecution::new(
+                    group,
+                    &TrustedIngress,
+                    &expected,
+                    timer.as_ref(),
+                    deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
+                    &NoopEmitter,
+                ),
+                Delivery::new(
+                    message,
+                    PendingSettlement {
+                        actions,
+                        settle_started,
+                        abandon_started,
+                    },
+                ),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        support::wait_for_count(settle_started.as_ref(), 1).await;
+        timer.wait_registered(Duration::from_millis(100)).await;
+    })
+    .await
+    .expect("duplicate ack starts");
+    timer.advance(Duration::from_millis(100));
+    let error = task
+        .await
+        .expect("consumer task")
+        .expect_err("settlement deadline");
+
+    assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
+    assert_eq!(tx_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        actions.lock().expect("actions").as_slice(),
+        &[SettlementKind::Acknowledge]
+    );
+    assert_eq!(settle_started.load(Ordering::SeqCst), 1);
+    assert_eq!(abandon_started.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn backoff_equal_to_operation_budget_does_not_start_another_attempt() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let message = envelope(|_| {});
+    let expected = subscription(&message);
+
+    let disposition = consume_once(
+        &PendingInbox {
+            stage: PendingInboxStage::None,
+            started: Arc::new(AtomicUsize::new(0)),
+        },
+        &MatrixTx {
+            outcome: MatrixOutcome::HandlerTransient,
+            calls: Arc::clone(&calls),
+        },
+        &ConsumerExecution::new(
+            ConsumerGroup::parse("backoff-cutoff").expect("group"),
+            &TrustedIngress,
+            &expected,
+            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            deadline_policy(Duration::from_millis(1_200), Duration::from_millis(200)),
+            &NoopEmitter,
+        ),
+        Delivery::new(
+            message,
+            FakeSettlement {
+                actions: Arc::clone(&actions),
+                fail: false,
+                abandoned: Arc::clone(&abandoned),
+            },
+        ),
+    )
+    .await
+    .expect("deferred");
+
+    assert_eq!(disposition, ProcessingDisposition::Deferred);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        actions.lock().expect("actions").as_slice(),
+        &[SettlementKind::Requeue]
+    );
+    assert_eq!(abandoned.load(Ordering::SeqCst), 0);
 }
 
 struct RenewingInbox {
@@ -1348,24 +2000,13 @@ impl InboxStore for RenewingInbox {
     }
 }
 
-struct ManualTimer {
-    permits: tokio::sync::Semaphore,
-}
-
-impl Clock for ManualTimer {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::ZERO)
-    }
-}
-
-impl RetryTimer for ManualTimer {
-    async fn delay(&self, _duration: Duration, _deadline: OperationDeadline) {
-        self.permits
-            .acquire()
-            .await
-            .expect("timer semaphore")
-            .forget();
-    }
+fn renewing_consumer_policy() -> ConsumerExecutionPolicy {
+    ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::new(Duration::from_secs(40), Duration::from_secs(2))
+            .expect("execution budget"),
+        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
+    )
 }
 
 struct BlockingCommitTx {
@@ -1397,9 +2038,7 @@ async fn long_handler_is_periodically_renewed_then_commits_before_ack() {
         extends: AtomicUsize::new(0),
         lose_at: None,
     });
-    let timer = Arc::new(ManualTimer {
-        permits: tokio::sync::Semaphore::new(0),
-    });
+    let timer = Arc::new(ManualTimer::new());
     let started = Arc::new(AtomicUsize::new(0));
     let complete = Arc::new(tokio::sync::Notify::new());
     let actions = Arc::new(Mutex::new(Vec::new()));
@@ -1423,7 +2062,7 @@ async fn long_handler_is_periodically_renewed_then_commits_before_ack() {
                     &TrustedIngress,
                     &expected,
                     timer.as_ref(),
-                    consumer_policy(),
+                    renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
                 Delivery::new(
@@ -1449,7 +2088,15 @@ async fn long_handler_is_periodically_renewed_then_commits_before_ack() {
     assert_eq!(inbox.extends.load(Ordering::SeqCst), 1);
 
     for expected_extends in [2, 3] {
-        timer.permits.add_permits(1);
+        let wake = Duration::from_secs(10 * (expected_extends - 1) as u64);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !timer.registered(wake) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("renewal sleep registers");
+        timer.advance(Duration::from_secs(10));
         tokio::time::timeout(Duration::from_secs(1), async {
             while inbox.extends.load(Ordering::SeqCst) < expected_extends {
                 tokio::task::yield_now().await;
@@ -1477,9 +2124,7 @@ async fn lease_lost_during_handler_cancels_effect_and_abandons_without_settlemen
         extends: AtomicUsize::new(0),
         lose_at: Some(2),
     });
-    let timer = Arc::new(ManualTimer {
-        permits: tokio::sync::Semaphore::new(0),
-    });
+    let timer = Arc::new(ManualTimer::new());
     let started = Arc::new(AtomicUsize::new(0));
     let actions = Arc::new(Mutex::new(Vec::new()));
     let abandoned = Arc::new(AtomicUsize::new(0));
@@ -1503,7 +2148,7 @@ async fn lease_lost_during_handler_cancels_effect_and_abandons_without_settlemen
                     &TrustedIngress,
                     &expected,
                     timer.as_ref(),
-                    consumer_policy(),
+                    renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
                 Delivery::new(
@@ -1525,7 +2170,14 @@ async fn lease_lost_during_handler_cancels_effect_and_abandons_without_settlemen
     })
     .await
     .expect("handler starts");
-    timer.permits.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !timer.registered(Duration::from_secs(10)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("renewal sleep registers");
+    timer.advance(Duration::from_secs(10));
 
     assert_eq!(
         task.await.expect("consumer task").expect("fenced result"),
@@ -1537,45 +2189,63 @@ async fn lease_lost_during_handler_cancels_effect_and_abandons_without_settlemen
 
 #[tokio::test]
 async fn lease_loss_wins_when_a_terminal_transaction_is_also_ready() {
-    let inbox = RenewingInbox {
+    let inbox = Arc::new(RenewingInbox {
         claim: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
         extends: AtomicUsize::new(0),
         lose_at: Some(2),
-    };
-    let calls = Arc::new(AtomicUsize::new(0));
+    });
+    let timer = Arc::new(ManualTimer::new());
+    let started = Arc::new(AtomicUsize::new(0));
+    let complete = Arc::new(tokio::sync::Notify::new());
     let actions = Arc::new(Mutex::new(Vec::new()));
     let abandoned = Arc::new(AtomicUsize::new(0));
     let message = envelope(|_| {});
     let expected = subscription(&message);
 
-    let disposition = consume_once(
-        &inbox,
-        &FakeTx {
-            calls: Arc::clone(&calls),
-            disposition: TerminalDisposition::Succeeded,
-        },
-        &ConsumerExecution::new(
-            ConsumerGroup::parse("simultaneous-fence").expect("group"),
-            &TrustedIngress,
-            &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
-            consumer_policy(),
-            &NoopEmitter,
-        ),
-        Delivery::new(
-            message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
-        ),
-    )
+    let task = tokio::spawn({
+        let inbox = Arc::clone(&inbox);
+        let timer = Arc::clone(&timer);
+        let started = Arc::clone(&started);
+        let complete = Arc::clone(&complete);
+        let actions = Arc::clone(&actions);
+        let abandoned = Arc::clone(&abandoned);
+        async move {
+            consume_once(
+                inbox.as_ref(),
+                &BlockingCommitTx { started, complete },
+                &ConsumerExecution::new(
+                    ConsumerGroup::parse("simultaneous-fence").expect("group"),
+                    &TrustedIngress,
+                    &expected,
+                    timer.as_ref(),
+                    renewing_consumer_policy(),
+                    &NoopEmitter,
+                ),
+                Delivery::new(
+                    message,
+                    FakeSettlement {
+                        actions,
+                        fail: false,
+                        abandoned,
+                    },
+                ),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while started.load(Ordering::SeqCst) == 0 || !timer.registered(Duration::from_secs(10)) {
+            tokio::task::yield_now().await;
+        }
+    })
     .await
-    .expect("fenced outcome");
+    .expect("both branches pending");
+    complete.notify_one();
+    timer.advance(Duration::from_secs(10));
+    let disposition = task.await.expect("consumer task").expect("fenced outcome");
 
     assert_eq!(disposition, ProcessingDisposition::Fenced);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(started.load(Ordering::SeqCst), 1);
     assert!(actions.lock().expect("actions").is_empty());
     assert_eq!(abandoned.load(Ordering::SeqCst), 1);
 }
@@ -1634,43 +2304,64 @@ impl InboxStore for RenewalErrorAfterInitialInbox {
 
 #[tokio::test]
 async fn renewal_error_wins_when_a_terminal_transaction_is_also_ready() {
-    let inbox = RenewalErrorAfterInitialInbox {
+    let inbox = Arc::new(RenewalErrorAfterInitialInbox {
         extends: AtomicUsize::new(0),
-    };
-    let calls = Arc::new(AtomicUsize::new(0));
+    });
+    let timer = Arc::new(ManualTimer::new());
+    let started = Arc::new(AtomicUsize::new(0));
+    let complete = Arc::new(tokio::sync::Notify::new());
     let actions = Arc::new(Mutex::new(Vec::new()));
     let abandoned = Arc::new(AtomicUsize::new(0));
     let message = envelope(|_| {});
     let expected = subscription(&message);
 
-    let error = consume_once(
-        &inbox,
-        &FakeTx {
-            calls: Arc::clone(&calls),
-            disposition: TerminalDisposition::Succeeded,
-        },
-        &ConsumerExecution::new(
-            ConsumerGroup::parse("simultaneous-renewal-error").expect("group"),
-            &TrustedIngress,
-            &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
-            consumer_policy(),
-            &NoopEmitter,
-        ),
-        Delivery::new(
-            message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
-        ),
-    )
+    let task = tokio::spawn({
+        let inbox = Arc::clone(&inbox);
+        let timer = Arc::clone(&timer);
+        let started = Arc::clone(&started);
+        let complete = Arc::clone(&complete);
+        let actions = Arc::clone(&actions);
+        let abandoned = Arc::clone(&abandoned);
+        async move {
+            consume_once(
+                inbox.as_ref(),
+                &BlockingCommitTx { started, complete },
+                &ConsumerExecution::new(
+                    ConsumerGroup::parse("simultaneous-renewal-error").expect("group"),
+                    &TrustedIngress,
+                    &expected,
+                    timer.as_ref(),
+                    renewing_consumer_policy(),
+                    &NoopEmitter,
+                ),
+                Delivery::new(
+                    message,
+                    FakeSettlement {
+                        actions,
+                        fail: false,
+                        abandoned,
+                    },
+                ),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while started.load(Ordering::SeqCst) == 0 || !timer.registered(Duration::from_secs(10)) {
+            tokio::task::yield_now().await;
+        }
+    })
     .await
-    .expect_err("renewal error must fence settlement");
+    .expect("both branches pending");
+    complete.notify_one();
+    timer.advance(Duration::from_secs(10));
+    let error = task
+        .await
+        .expect("consumer task")
+        .expect_err("renewal error must fence settlement");
 
     assert_eq!(error.kind(), MessagingErrorKind::Transient);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(started.load(Ordering::SeqCst), 1);
     assert!(actions.lock().expect("actions").is_empty());
     assert_eq!(abandoned.load(Ordering::SeqCst), 1);
 }
@@ -1799,7 +2490,7 @@ async fn transient_delivery_failure_replaces_stream_and_resubscribes() {
         ConsumerGroup::parse("transient-redelivery").expect("group"),
         Arc::new(TrustedIngress),
         expected,
-        Arc::new(RealtimeClock(AtomicUsize::new(0))),
+        Arc::new(RealtimeClock::new()),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(1))
@@ -1825,6 +2516,81 @@ async fn transient_delivery_failure_replaces_stream_and_resubscribes() {
     })
     .await
     .expect("redelivery committed");
+
+    assert!(source.subscriptions.load(Ordering::SeqCst) >= 2);
+    assert_eq!(abandoned.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        actions.lock().expect("actions").as_slice(),
+        &[SettlementKind::Acknowledge]
+    );
+    assert!(stack.shutdown().await.expect("shutdown").is_clean());
+    assert_eq!(
+        status.wait_stopped().await,
+        rss_runtime::TaskExit::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
+    let first = envelope(|_| {});
+    let expected = subscription(&first);
+    let second = envelope(|fixture| fixture.id = "message-2");
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let settlement = || FakeSettlement {
+        actions: Arc::clone(&actions),
+        fail: false,
+        abandoned: Arc::clone(&abandoned),
+    };
+    let source = Arc::new(RedeliverySource {
+        deliveries: Mutex::new(VecDeque::from([
+            IncomingDelivery::Valid(Box::new(Delivery::new(first, settlement()))),
+            IncomingDelivery::Valid(Box::new(Delivery::new(second, settlement()))),
+        ])),
+        subscriptions: AtomicUsize::new(0),
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = ConsumerWorker::new(
+        Arc::clone(&source),
+        Arc::new(FakeInbox {
+            disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
+            lease: LeaseStatus::Held {
+                remaining: Duration::from_secs(30),
+            },
+        }),
+        Arc::new(FakeTx {
+            calls: Arc::clone(&calls),
+            disposition: TerminalDisposition::Succeeded,
+        }),
+        ConsumerGroup::parse("deadline-redelivery").expect("group"),
+        Arc::new(TrustedIngress),
+        expected,
+        Arc::new(ScriptedTimer::new([1, 3])),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(1))
+            .expect("backoff"),
+    );
+    let (registration, status) = worker.into_registration(
+        "deadline-redelivery",
+        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
+            .expect("budget"),
+    );
+    let mut stack = rss_runtime::ShutdownStack::try_new(
+        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
+    )
+    .expect("stack");
+    let mut startup = stack.startup().expect("startup");
+    startup.stage_task_with_token(registration);
+    startup.commit().finish();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("redelivery committed under a fresh budget");
 
     assert!(source.subscriptions.load(Ordering::SeqCst) >= 2);
     assert_eq!(abandoned.load(Ordering::SeqCst), 1);
@@ -1970,9 +2736,7 @@ async fn provider_decoding_failure_uses_core_minted_reject() {
         ConsumerGroup::parse("invalid-provider-delivery").expect("group"),
         Arc::new(TrustedIngress),
         subscription(&message),
-        Arc::new(ManualTimer {
-            permits: tokio::sync::Semaphore::new(0),
-        }),
+        Arc::new(ManualTimer::new()),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -2031,9 +2795,7 @@ async fn forced_worker_shutdown_drops_handler_without_settlement() {
         extends: AtomicUsize::new(0),
         lose_at: None,
     });
-    let timer = Arc::new(ManualTimer {
-        permits: tokio::sync::Semaphore::new(0),
-    });
+    let timer = Arc::new(ManualTimer::new());
     let started = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
         source,
@@ -2108,9 +2870,7 @@ async fn terminal_outcome_completing_during_cancellation_is_settled() {
         ConsumerGroup::parse("terminal-cancel").expect("group"),
         Arc::new(TrustedIngress),
         expected,
-        Arc::new(ManualTimer {
-            permits: tokio::sync::Semaphore::new(0),
-        }),
+        Arc::new(ManualTimer::new()),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -2385,9 +3145,7 @@ async fn cancellation_interrupts_subscription_backoff() {
         ConsumerGroup::parse("cancel-backoff").expect("group"),
         Arc::new(TrustedIngress),
         subscription(&message),
-        Arc::new(ManualTimer {
-            permits: tokio::sync::Semaphore::new(0),
-        }),
+        Arc::new(ManualTimer::new()),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -2626,9 +3384,7 @@ async fn consumer_does_not_process_the_next_delivery_before_settlement() {
         ConsumerGroup::parse("backpressure").expect("group"),
         Arc::new(TrustedIngress),
         expected,
-        Arc::new(ManualTimer {
-            permits: tokio::sync::Semaphore::new(0),
-        }),
+        Arc::new(ManualTimer::new()),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -2685,9 +3441,12 @@ impl Clock for RecordingTimer {
     }
 }
 
-impl RetryTimer for RecordingTimer {
-    async fn delay(&self, duration: Duration, _deadline: OperationDeadline) {
-        self.delays.lock().expect("delays").push(duration);
+impl ExecutionTimer for RecordingTimer {
+    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+        self.delays
+            .lock()
+            .expect("delays")
+            .push(deadline.remaining(self));
         self.permits
             .acquire()
             .await

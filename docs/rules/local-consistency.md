@@ -37,7 +37,9 @@ bounded-transient retry 与 commit-unknown non-retryable。
 - 明确 commit/rollback ACK 才可释放 connection lease；取消、timeout、未结算或结算失败必须 quarantine/close。
 - validation/unauthenticated 路径 no-write；授权拒绝只允许契约明确要求的 durable denial audit。
 - conflict/permanent error 恰好一次且零业务写；unknown outcome 只能断言 attempt=1，禁止伪造 no-write。
-- execution budget 使用一次 mint 的 monotonic absolute deadline，跨 attempt 不得重置。
+- execution budget 从一次 monotonic clock observation 同时 mint operation cutoff 与 settlement cutoff，跨 attempt
+  不得重置；provider future 必须同时受 algorithm-owner race 与 provider I/O watchdog 约束。execute race timeout
+  固定为 commit-unknown，不得解释为 not-started。
 
 ## Proof closure
 

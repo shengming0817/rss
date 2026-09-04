@@ -17,7 +17,8 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRuntimePhase, TransactionalMessagingSubscribeOutcome,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, ConsumerExecutionPolicy, OperationDeadline, RetryTimer, ShutdownBudget,
+    AbsoluteDeadline, ConsumerExecutionPolicy, ExecutionDeadlines, ExecutionTimer, ShutdownBudget,
+    within,
 };
 use rss_transactional_messaging::transaction::{
     CommittedTransaction, ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressValidator,
@@ -94,22 +95,20 @@ impl<'a, V, R, E> ConsumerExecution<'a, V, R, E> {
         self.policy
     }
 
-    fn operation_deadline(&self) -> Result<OperationDeadline, MessagingError>
+    fn deadlines(&self) -> Result<ExecutionDeadlines, MessagingError>
     where
-        R: RetryTimer,
+        R: ExecutionTimer,
         E: TransactionalMessagingEmitter,
     {
-        AbsoluteDeadline::from_budget(self.timer, self.policy.budget())
-            .map(|deadline| deadline.operation(self.timer))
-            .map_err(|error| {
-                let error = MessagingError::new(MessagingErrorKind::Invariant, error);
-                emit_runtime_failure(
-                    self.emitter,
-                    TransactionalMessagingRuntimePhase::ConsumerDeadline,
-                    &error,
-                );
-                error
-            })
+        ExecutionDeadlines::from_budget(self.timer, self.policy.budget()).map_err(|error| {
+            let error = MessagingError::new(MessagingErrorKind::Invariant, error);
+            emit_runtime_failure(
+                self.emitter,
+                TransactionalMessagingRuntimePhase::ConsumerDeadline,
+                &error,
+            );
+            error
+        })
     }
 }
 
@@ -121,25 +120,16 @@ pub async fn consume_once<P, S, I, T, V, R, E>(
     delivery: Delivery<P, S>,
 ) -> Result<ProcessingDisposition, MessagingError>
 where
-    P: AsRef<[u8]> + Send,
+    P: AsRef<[u8]> + Send + Sync,
     S: DeliverySettlement,
     I: InboxStore,
     T: ConsumerTx<P, Claim = I::Claim>,
     V: IngressValidator<P>,
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     let (message, settlement) = delivery.into_parts();
-    let deadline = AbsoluteDeadline::from_budget(execution.timer, execution.policy.budget())
-        .map_err(|error| {
-            let error = MessagingError::new(MessagingErrorKind::Invariant, error);
-            emit_runtime_failure(
-                execution.emitter,
-                TransactionalMessagingRuntimePhase::ConsumerDeadline,
-                &error,
-            );
-            error
-        })?;
+    let deadlines = execution.deadlines()?;
     let binding =
         match verify_ingress(
             execution.validator,
@@ -156,7 +146,8 @@ where
                 settle_observed(
                     settlement,
                     rejection.into_decision(),
-                    deadline.operation(execution.timer),
+                    deadlines.settlement(),
+                    execution.timer,
                     execution.emitter,
                 )
                 .await?;
@@ -164,9 +155,11 @@ where
             }
         };
 
-    let claimed = match inbox
-        .claim(binding.identity(), deadline.operation(execution.timer))
-        .await
+    let claimed = match within(execution.timer, deadlines.operation(), |deadline| {
+        inbox.claim(binding.identity(), deadline)
+    })
+    .await
+    .and_then(std::convert::identity)
     {
         Ok(claimed) => claimed,
         Err(error) => {
@@ -177,7 +170,8 @@ where
             );
             return Err(abandon_after_error(
                 settlement,
-                deadline.operation(execution.timer),
+                deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
                 error,
             )
@@ -192,7 +186,8 @@ where
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
-                deadline.operation(execution.timer),
+                deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
             )
             .await?;
@@ -204,7 +199,8 @@ where
                 settle_observed(
                     settlement,
                     terminal.into_decision(),
-                    deadline.operation(execution.timer),
+                    deadlines.settlement(),
+                    execution.timer,
                     execution.emitter,
                 )
                 .await?;
@@ -218,7 +214,8 @@ where
                 settle_observed(
                     settlement,
                     rejection.into_decision(),
-                    deadline.operation(execution.timer),
+                    deadlines.settlement(),
+                    execution.timer,
                     execution.emitter,
                 )
                 .await?;
@@ -235,7 +232,7 @@ where
                     settlement,
                     claim,
                     binding,
-                    deadline,
+                    deadlines,
                 },
             )
             .await
@@ -248,7 +245,7 @@ struct AcquiredDelivery<P, S, C> {
     settlement: S,
     claim: C,
     binding: VerifiedConsumerBinding,
-    deadline: AbsoluteDeadline,
+    deadlines: ExecutionDeadlines,
 }
 
 enum RenewalExit {
@@ -267,22 +264,25 @@ async fn process_acquired<P, S, I, T, V, R, E>(
     state: AcquiredDelivery<P, S, I::Claim>,
 ) -> Result<ProcessingDisposition, MessagingError>
 where
-    P: AsRef<[u8]> + Send,
+    P: AsRef<[u8]> + Send + Sync,
     S: DeliverySettlement,
     I: InboxStore,
     T: ConsumerTx<P, Claim = I::Claim>,
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    match inbox
-        .extend(&state.claim, state.deadline.operation(execution.timer))
-        .await
+    match within(execution.timer, state.deadlines.operation(), |deadline| {
+        inbox.extend(&state.claim, deadline)
+    })
+    .await
+    .and_then(std::convert::identity)
     {
         Ok(LeaseStatus::Held { remaining }) => {
             if let Err(error) = validate_renewal_window(execution, remaining) {
                 return Err(abandon_after_error(
                     state.settlement,
-                    state.deadline.operation(execution.timer),
+                    state.deadlines.settlement(),
+                    execution.timer,
                     execution.emitter,
                     error,
                 )
@@ -295,7 +295,8 @@ where
                 .emit(TransactionalMessagingObservation::ConsumerLeaseLost);
             abandon_observed(
                 state.settlement,
-                state.deadline.operation(execution.timer),
+                state.deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
             )
             .await?;
@@ -309,7 +310,8 @@ where
             );
             return Err(abandon_after_error(
                 state.settlement,
-                state.deadline.operation(execution.timer),
+                state.deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
                 error,
             )
@@ -323,14 +325,19 @@ where
             &state.claim,
             &state.message,
             &state.binding,
-            state.deadline,
+            state.deadlines.operation(),
         );
-        let renewal = renewal_loop(inbox, execution, &state.claim, state.deadline);
+        let renewal = renewal_loop(inbox, execution, &state.claim, state.deadlines.operation());
         tokio::pin!(transaction_flow);
         tokio::pin!(renewal);
         tokio::select! {
             biased;
-            renewed = &mut renewal => AcquiredRace::Renewal(renewed),
+            renewed = &mut renewal => match renewed {
+                Err(error) if error.kind() == MessagingErrorKind::DeadlineElapsed => {
+                    AcquiredRace::Transaction(transaction_flow.await)
+                }
+                renewed => AcquiredRace::Renewal(renewed),
+            },
             outcome = &mut transaction_flow => AcquiredRace::Transaction(outcome),
         }
     };
@@ -344,7 +351,8 @@ where
                 .emit(TransactionalMessagingObservation::ConsumerLeaseLost);
             abandon_observed(
                 state.settlement,
-                state.deadline.operation(execution.timer),
+                state.deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
             )
             .await?;
@@ -352,7 +360,8 @@ where
         }
         AcquiredRace::Renewal(Err(error)) => Err(abandon_after_error(
             state.settlement,
-            state.deadline.operation(execution.timer),
+            state.deadlines.settlement(),
+            execution.timer,
             execution.emitter,
             error,
         )
@@ -368,20 +377,20 @@ async fn renewal_loop<I, V, R, E>(
 ) -> Result<RenewalExit, MessagingError>
 where
     I: InboxStore,
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     loop {
-        execution
-            .timer
-            .delay(
-                execution.policy.lease_renewal().interval(),
-                deadline.operation(execution.timer),
-            )
-            .await;
-        match inbox
-            .extend(claim, deadline.operation(execution.timer))
-            .await
+        let wake = deadline.capped(execution.timer, execution.policy.lease_renewal().interval());
+        within(execution.timer, deadline, |_| {
+            execution.timer.sleep_until(wake)
+        })
+        .await?;
+        match within(execution.timer, deadline, |deadline| {
+            inbox.extend(claim, deadline)
+        })
+        .await
+        .and_then(std::convert::identity)
         {
             Ok(LeaseStatus::Held { remaining }) => {
                 validate_renewal_window(execution, remaining)?;
@@ -405,7 +414,7 @@ fn validate_renewal_window<V, R, E>(
     remaining: Duration,
 ) -> Result<(), MessagingError>
 where
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     if execution.policy.lease_renewal().fits(remaining) {
@@ -432,25 +441,32 @@ async fn transaction_loop<P, C, T, V, R, E>(
     deadline: AbsoluteDeadline,
 ) -> TransactionOutcome<T::CommitProof>
 where
-    P: AsRef<[u8]> + Send,
+    P: AsRef<[u8]> + Send + Sync,
     C: Send + Sync,
     T: ConsumerTx<P, Claim = C>,
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     let mut attempt = NonZeroU32::MIN;
     loop {
-        if deadline.remaining(execution.timer) <= execution.policy.budget().settlement_reserve() {
+        if deadline.remaining(execution.timer).is_zero() {
             return TransactionOutcome::not_started(FailureClass::Infrastructure);
         }
-        let outcome = transaction
-            .execute(
-                claim,
-                message,
-                binding.receipt_intent(),
-                deadline.operation(execution.timer),
-            )
-            .await;
+        let outcome = match within(execution.timer, deadline, |deadline| {
+            transaction.execute(claim, message, binding.receipt_intent(), deadline)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                emit_runtime_failure(
+                    execution.emitter,
+                    TransactionalMessagingRuntimePhase::ConsumerTransaction,
+                    &error,
+                );
+                TransactionOutcome::commit_unknown()
+            }
+        };
         execution
             .emitter
             .emit(TransactionalMessagingObservation::ConsumerTransaction {
@@ -465,15 +481,18 @@ where
             return outcome;
         }
         let delay = execution.policy.retry().delay_after(attempt);
-        if deadline.remaining(execution.timer)
-            <= delay.saturating_add(execution.policy.budget().settlement_reserve())
+        if deadline.remaining(execution.timer) <= delay {
+            return outcome;
+        }
+        let wake = deadline.capped(execution.timer, delay);
+        if within(execution.timer, deadline, |_| {
+            execution.timer.sleep_until(wake)
+        })
+        .await
+        .is_err()
         {
             return outcome;
         }
-        execution
-            .timer
-            .delay(delay, deadline.operation(execution.timer))
-            .await;
         attempt = attempt.saturating_add(1);
     }
 }
@@ -496,7 +515,7 @@ async fn finalize_outcome<P, S, I, Proof, V, R, E>(
 where
     S: DeliverySettlement,
     I: InboxStore,
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     let outcome = outcome.fold(
@@ -515,7 +534,8 @@ where
             settle_observed(
                 state.settlement,
                 terminal.into_decision(),
-                state.deadline.operation(execution.timer),
+                state.deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
             )
             .await?;
@@ -528,7 +548,8 @@ where
         FoldedOutcome::RollbackFailed | FoldedOutcome::CommitUnknown => {
             abandon_observed(
                 state.settlement,
-                state.deadline.operation(execution.timer),
+                state.deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
             )
             .await?;
@@ -540,7 +561,8 @@ where
                 .emit(TransactionalMessagingObservation::ConsumerLeaseLost);
             abandon_observed(
                 state.settlement,
-                state.deadline.operation(execution.timer),
+                state.deadlines.settlement(),
+                execution.timer,
                 execution.emitter,
             )
             .await?;
@@ -557,16 +579,22 @@ async fn release_or_abandon<P, S, I, V, R, E>(
 where
     S: DeliverySettlement,
     I: InboxStore,
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let deadline = state.deadline.operation(execution.timer);
-    match inbox.release(state.claim, deadline).await {
+    let deadline = state.deadlines.settlement();
+    match within(execution.timer, deadline, |deadline| {
+        inbox.release(state.claim, deadline)
+    })
+    .await
+    .and_then(std::convert::identity)
+    {
         Ok(()) => {
             settle_observed(
                 state.settlement,
                 SettlementDecision::requeue(),
                 deadline,
+                execution.timer,
                 execution.emitter,
             )
             .await
@@ -580,7 +608,14 @@ where
                 TransactionalMessagingRuntimePhase::ConsumerRelease,
                 &error,
             );
-            Err(abandon_after_error(state.settlement, deadline, execution.emitter, error).await)
+            Err(abandon_after_error(
+                state.settlement,
+                deadline,
+                execution.timer,
+                execution.emitter,
+                error,
+            )
+            .await)
         }
     }
 }
@@ -588,18 +623,27 @@ where
 async fn reject_invalid<S: DeliverySettlement>(
     rejection: rss_transactional_messaging::transaction::DecodeRejection,
     settlement: S,
-    deadline: OperationDeadline,
+    deadline: AbsoluteDeadline,
+    timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
 ) -> Result<(), MessagingError> {
     let failure = rejection.reason();
     emitter.emit(TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure });
-    settle_observed(settlement, rejection.into_decision(), deadline, emitter).await
+    settle_observed(
+        settlement,
+        rejection.into_decision(),
+        deadline,
+        timer,
+        emitter,
+    )
+    .await
 }
 
 async fn settle_observed<S: DeliverySettlement>(
     settlement: S,
     decision: SettlementDecision,
-    deadline: OperationDeadline,
+    deadline: AbsoluteDeadline,
+    timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
 ) -> Result<(), MessagingError> {
     let action = match decision.kind() {
@@ -607,7 +651,11 @@ async fn settle_observed<S: DeliverySettlement>(
         SettlementKind::Requeue => TransactionalMessagingDisposition::Requeue,
         SettlementKind::Reject => TransactionalMessagingDisposition::Reject,
     };
-    let result = settlement.settle(decision, deadline).await;
+    let result = within(timer, deadline, |deadline| {
+        settlement.settle(decision, deadline)
+    })
+    .await
+    .and_then(std::convert::identity);
     emitter.emit(TransactionalMessagingObservation::ConsumerSettlement {
         action,
         outcome: if result.is_ok() {
@@ -628,10 +676,13 @@ async fn settle_observed<S: DeliverySettlement>(
 
 async fn abandon_observed<S: DeliverySettlement>(
     settlement: S,
-    deadline: OperationDeadline,
+    deadline: AbsoluteDeadline,
+    timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
 ) -> Result<(), MessagingError> {
-    let result = settlement.abandon(deadline).await;
+    let result = within(timer, deadline, |deadline| settlement.abandon(deadline))
+        .await
+        .and_then(std::convert::identity);
     if let Err(error) = &result {
         emit_runtime_failure(
             emitter,
@@ -644,11 +695,12 @@ async fn abandon_observed<S: DeliverySettlement>(
 
 async fn abandon_after_error<S: DeliverySettlement>(
     settlement: S,
-    deadline: OperationDeadline,
+    deadline: AbsoluteDeadline,
+    timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
     primary: MessagingError,
 ) -> MessagingError {
-    let _ = abandon_observed(settlement, deadline, emitter).await;
+    let _ = abandon_observed(settlement, deadline, timer, emitter).await;
     primary
 }
 
@@ -735,7 +787,7 @@ where
     I: InboxStore + 'static,
     T: ConsumerTx<P, Claim = I::Claim> + 'static,
     V: IngressValidator<P> + 'static,
-    R: RetryTimer + 'static,
+    R: ExecutionTimer + 'static,
     E: TransactionalMessagingEmitter + 'static,
 {
     /// Bind every mandatory consumer dependency and policy.
@@ -793,7 +845,7 @@ where
     I: InboxStore + 'static,
     T: ConsumerTx<P, Claim = I::Claim> + 'static,
     V: IngressValidator<P> + 'static,
-    R: RetryTimer + 'static,
+    R: ExecutionTimer + 'static,
     E: TransactionalMessagingEmitter + 'static,
 {
     let mut recovery_attempt = NonZeroU32::MIN;
@@ -810,7 +862,7 @@ where
                 recovery_attempt = NonZeroU32::MIN;
                 deliveries
             }
-            Err(error) if error.kind() == MessagingErrorKind::Transient => {
+            Err(error) if is_recoverable(error.kind()) => {
                 emit_runtime_failure(
                     worker.emitter.as_ref(),
                     TransactionalMessagingRuntimePhase::ConsumerSubscribe,
@@ -875,7 +927,8 @@ where
                         reject_invalid(
                             rejection,
                             settlement,
-                            execution.operation_deadline()?,
+                            execution.deadlines()?.settlement(),
+                            execution.timer,
                             execution.emitter(),
                         )
                         .await?;
@@ -894,7 +947,7 @@ where
             };
             match result {
                 Ok(()) => {}
-                Err(error) if error.kind() == MessagingErrorKind::Transient => {
+                Err(error) if is_recoverable(error.kind()) => {
                     worker.emitter.emit(
                         TransactionalMessagingObservation::ConsumerSubscribeRetry {
                             outcome: TransactionalMessagingSubscribeOutcome::DeliveryError,
@@ -918,7 +971,7 @@ async fn wait_for_recovery<P, S, I, T, V, R, E>(
     attempt: NonZeroU32,
 ) -> Result<bool, MessagingError>
 where
-    R: RetryTimer,
+    R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     let delay = worker.subscription_backoff.delay_after(attempt);
@@ -932,13 +985,18 @@ where
             );
             error
         })?;
-    let waiting = worker
-        .timer
-        .delay(delay, deadline.operation(worker.timer.as_ref()));
+    let waiting = worker.timer.sleep_until(deadline);
     tokio::pin!(waiting);
     Ok(tokio::select! {
         biased;
         () = token.cancelled() => true,
         () = &mut waiting => false,
     })
+}
+
+const fn is_recoverable(kind: MessagingErrorKind) -> bool {
+    matches!(
+        kind,
+        MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed
+    )
 }

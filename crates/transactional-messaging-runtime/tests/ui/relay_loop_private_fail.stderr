@@ -12,6 +12,6 @@ note: the function `relay_loop` is defined here
   | |     token: tokio_util::sync::CancellationToken,
   | | ) -> Result<(), MessagingError>
 ... |
-  | |     C: Clock + 'static,
+  | |     C: ExecutionTimer + 'static,
   | |     E: TransactionalMessagingEmitter + 'static,
   | |_______________________________________________^

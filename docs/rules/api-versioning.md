@@ -14,6 +14,9 @@ release catalog、schema 与 Cargo facts 派生，文档不复制。
 
 - 首次发布前冻结已接纳的 major/minor 版本线，版本更新只修改 patch；改变版本线需要独立架构决策。该阶段的
   public API replacement 不要求兼容或 minor bump。
+- 首次发布前的 intentional breaking replacement 若触发本地 SemVer gate，授权必须在 workspace metadata 中
+  精确绑定 package、baseline commit 与 issue；gate 仅在当前 base 完全匹配时按 major diff 验证，base 漂移即
+  自动恢复普通 SemVer 检查。禁止无 baseline、通配 package 或环境变量豁免。
 - 首次发布后各 crate 独立遵循 SemVer：1.0 前的 breaking public API change 至少升级 minor，1.0 起升级 major。
 - 删除或改签受保护 symbol 按 SemVer/breaking policy 处理；未接纳 internal package 可直接 breaking refactor。
 - package rename、facade、re-export 或 shim 不得隐式延续旧 identity；replacement 原子切 consumer 并删旧路径。

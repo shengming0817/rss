@@ -90,6 +90,16 @@ packages = [
   { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
 
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging"
+baseline-rev = "9cee2de2baf57eaf7d2f1422a47db37d41716d28"
+issue = 2275
+
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-runtime"
+baseline-rev = "9cee2de2baf57eaf7d2f1422a47db37d41716d28"
+issue = 2275
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"

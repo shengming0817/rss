@@ -183,7 +183,10 @@ impl<R> PublishOutcome<R> {
 }
 
 #[cfg(feature = "producer")]
-/// Closed `Publisher` protocol type.
+/// Provider publisher with a mandatory second-layer I/O watchdog.
+///
+/// Runtime orchestration independently races this future against the same absolute deadline. A
+/// dropped future requests cancellation but does not prove that publication did not occur.
 pub trait Publisher<P>: Send + Sync {
     /// Provider-owned `Receipt` capability used by this port.
     type Receipt: Send;
@@ -196,7 +199,10 @@ pub trait Publisher<P>: Send + Sync {
 }
 
 #[cfg(feature = "consumer")]
-/// Closed `DeliverySettlement` protocol type.
+/// One-shot provider settlement with a mandatory second-layer I/O watchdog.
+///
+/// A timed-out settlement has unknown transport outcome. Callers must not issue a second or
+/// contradictory decision through another path.
 pub trait DeliverySettlement: Send {
     /// Canonical operation owned by the transactional messaging core.
     fn settle(

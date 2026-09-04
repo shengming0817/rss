@@ -120,6 +120,8 @@ pub enum TransactionalMessagingRuntimePhase {
     ConsumerClaim,
     /// Checking or renewing an inbox lease.
     ConsumerLease,
+    /// Executing the provider transaction that owns handler effects and the terminal receipt.
+    ConsumerTransaction,
     /// Abandoning a provider delivery/session after a hard fence or primary error.
     ConsumerAbandon,
     /// Releasing a safely rolled-back inbox claim.
@@ -145,6 +147,7 @@ impl TransactionalMessagingRuntimePhase {
             Self::ConsumerSubscribe => "consumer_subscribe",
             Self::ConsumerClaim => "consumer_claim",
             Self::ConsumerLease => "consumer_lease",
+            Self::ConsumerTransaction => "consumer_transaction",
             Self::ConsumerAbandon => "consumer_abandon",
             Self::ConsumerRelease => "consumer_release",
             Self::ConsumerSettlement => "consumer_settlement",

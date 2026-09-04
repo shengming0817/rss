@@ -12,6 +12,6 @@ note: the function `consumer_loop` is defined here
   | |     token: tokio_util::sync::CancellationToken,
   | | ) -> Result<(), MessagingError>
 ... |
-  | |     R: RetryTimer + 'static,
+  | |     R: ExecutionTimer + 'static,
   | |     E: TransactionalMessagingEmitter + 'static,
   | |_______________________________________________^

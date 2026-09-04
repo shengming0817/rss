@@ -38,9 +38,12 @@
   单独默认。标准值为三次总尝试、1 秒 base、60 秒 cap。
 - TransactionalMessaging worker 构造必须显式接收 `rss_transactional_messaging::policy::ShutdownBudget`；标准值 45 秒，仅在 internal
   `ManagedResource` 边界投影为 `Duration`。
-- claim、extend、handler transaction、retry delay、settle、release 与 abandon 都消费从同一个
-  `AbsoluteDeadline` 投影的 `OperationDeadline`；provider 必须用 runtime timeout 实际约束 future，不得在各阶段
-  重置相对预算。
+- claim、extend、handler transaction、retry delay、settle、release 与 abandon 都消费同一次 clock observation
+  mint 的 operation/settlement absolute deadline。algorithm owner 必须通过唯一 `within` funnel race provider
+  future；provider 同时消费该 cutoff 投影的 `OperationDeadline` 作为第二层 I/O watchdog，任一层不得重置预算。
+- execute deadline elapsed 一律按 commit outcome unknown 处理，并在 settlement reserve 内尝试 abandon；
+  release/settlement/abandon timeout 不得触发第二个或矛盾 broker decision。drop future 只请求取消，不证明
+  provider effect 未发生。
 - rollback success 才能按 retry disposition 结算；rollback failed/commit unknown 必须保守重投并保留诊断。
 - settlement transport failure 不改变 durable outcome；以相同 message ID 重投并读取 Inbox result。
 
