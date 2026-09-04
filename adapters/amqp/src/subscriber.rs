@@ -598,10 +598,7 @@ fn delivery_to_core(
         &broker_route,
     ) {
         Ok(message) => IncomingDelivery::Valid(Box::new(CoreDelivery::new(message, settlement))),
-        Err(failure) => IncomingDelivery::Invalid {
-            failure,
-            settlement,
-        },
+        Err(failure) => IncomingDelivery::invalid_from_provider(failure, settlement),
     }
 }
 

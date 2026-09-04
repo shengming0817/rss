@@ -16,11 +16,8 @@ pub mod observability;
 pub mod outbox;
 /// Deadline, retry, delivery-budget, and monotonic-time policies.
 pub mod policy;
-#[cfg(feature = "producer")]
-/// Canonical provider-neutral outbox relay algorithm.
-pub mod relay;
 #[cfg(feature = "consumer")]
-/// Consumer transaction outcomes and the core delivery state machine.
+/// Consumer transaction outcomes and opaque transition capabilities.
 pub mod transaction;
 /// Narrow publisher and delivery-source transport ports.
 pub mod transport;

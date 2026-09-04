@@ -1,0 +1,16 @@
+warning: unreachable expression
+ --> tests/ui/terminal_settlement_construct_fail.rs:4:19
+  |
+4 |     let _forged = TerminalSettlement { receipt: panic!() };
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------^^
+  |                   |                             |
+  |                   |                             any code following this expression is unreachable
+  |                   unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: field `receipt` of struct `TerminalSettlement` is private
+ --> tests/ui/terminal_settlement_construct_fail.rs:4:40
+  |
+4 |     let _forged = TerminalSettlement { receipt: panic!() };
+  |                                        ^^^^^^^ private field

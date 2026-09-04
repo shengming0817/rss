@@ -1,0 +1,5 @@
+error[E0599]: no method named `into_settlement` found for enum `EnvelopeValidationFailure` in the current scope
+ --> tests/ui/validation_failure_settlement_fail.rs:4:64
+  |
+4 |     let _forged = EnvelopeValidationFailure::MalformedIdentity.into_settlement();
+  |                                                                ^^^^^^^^^^^^^^^ method not found in `EnvelopeValidationFailure`

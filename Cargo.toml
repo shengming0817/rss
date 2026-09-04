@@ -10,6 +10,8 @@ members = [
   "crates/platform",
   # Transactional Messaging Public：provider-neutral message/transaction/receipt/settlement core。
   "crates/transactional-messaging",
+  # Transactional Messaging Runtime Public：provider-neutral relay/consumer algorithms + managed task glue。
+  "crates/transactional-messaging-runtime",
   # Provider-neutral public LocalTx conformance assertions.
   "crates/conformance",
   # 基础（仅 std + 外部 crate）
@@ -83,7 +85,8 @@ packages = [
   { package = "rss-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental" },
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
 
@@ -100,7 +103,8 @@ repository = "https://github.com/shengming0817/rss"
 rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }
-rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.1.0" }
+rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
+rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
 rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }

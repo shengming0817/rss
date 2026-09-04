@@ -1,8 +1,5 @@
 //! Provider-neutral orchestration for transactional messaging and retained recovery workflows.
 
-pub mod consumer;
-pub use consumer::run_consumer;
-
 pub mod dead_letter;
 pub use dead_letter::{DeadLetterId, DeadLetterIdError};
 pub mod tenant_authority;

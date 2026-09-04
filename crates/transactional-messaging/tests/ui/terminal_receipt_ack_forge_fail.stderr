@@ -1,10 +1,5 @@
-error[E0624]: method `into_settlement` is private
+error[E0599]: no method named `into_settlement` found for struct `TerminalReceipt` in the current scope
   --> tests/ui/terminal_receipt_ack_forge_fail.rs:13:23
    |
 13 |     let _ack = forged.into_settlement();
-   |                       ^^^^^^^^^^^^^^^ private method
-   |
-  ::: src/transaction.rs
-   |
-   |     pub(crate) fn into_settlement(self) -> SettlementDecision {
-   |     --------------------------------------------------------- private method defined here
+   |                       ^^^^^^^^^^^^^^^ method not found in `TerminalReceipt`

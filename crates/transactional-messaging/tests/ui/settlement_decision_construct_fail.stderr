@@ -9,3 +9,8 @@ note: constructor is not visible here due to private fields
   |
   | pub struct SettlementDecision(SettlementKind);
   |                               ^^^^^^^^^^^^^^ private field
+help: you might have meant to use the `requeue` associated function
+  |
+4 -     let _forged = SettlementDecision(SettlementKind::Acknowledge);
+4 +     let _forged = SettlementDecision::requeue();
+  |

@@ -1,0 +1,17 @@
+error[E0603]: function `relay_loop` is private
+ --> tests/ui/relay_loop_private_fail.rs:1:49
+  |
+1 | use rss_transactional_messaging_runtime::relay::relay_loop;
+  |                                                 ^^^^^^^^^^ private function
+  |
+note: the function `relay_loop` is defined here
+ --> src/relay.rs
+  |
+  | / async fn relay_loop<P, S, U, C, E>(
+  | |     worker: RelayWorker<P, S, U, C, E>,
+  | |     token: tokio_util::sync::CancellationToken,
+  | | ) -> Result<(), MessagingError>
+... |
+  | |     C: Clock + 'static,
+  | |     E: TransactionalMessagingEmitter + 'static,
+  | |_______________________________________________^

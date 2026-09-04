@@ -6,6 +6,29 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-transactional-messaging-runtime 0.1.0
+
+- Establish the sole provider-neutral owner for bounded relay and consumer execution, periodic
+  lease renewal, subscription recovery, backpressure, and managed worker registration.
+- Preserve publish-before-settlement, commit-before-ACK, same-ID ambiguous retry, lease-loss
+  fencing, and bounded graceful shutdown without provider or product dependencies.
+- Enforce one validated relay batch/claim bound, cancellation-first admission, closed runtime
+  failure phases, and feature-specific dependency/test surfaces.
+- Replace delivery-processing failures by reconnecting the provider session, use a distinct
+  unbounded subscription backoff policy, and expose relay lease-loss observations.
+
+### rss-transactional-messaging 0.2.0
+
+- Narrow the core to message, transaction, receipt, policy, port, and opaque transition semantics;
+  move every relay and consumer execution entry point to `rss-transactional-messaging-runtime`.
+- Add a lease renewal schedule checked against provider-authoritative remaining-time evidence and
+  opaque verified binding/terminal settlement phases without aliases, re-exports, shims, or
+  compatibility features.
+- Make ingress rejection and bounded provider claim batches opaque core transitions so callers
+  cannot forge Reject authority or over-admit durable relay work.
+- Mint a move-only decode rejection at the trusted transport boundary so malformed provider
+  deliveries terminate without exposing a general Reject constructor.
+
 ### rss-runtime 0.1.0
 
 - Establish the sole provider-neutral owner for managed resources and tasks, phase-typed startup

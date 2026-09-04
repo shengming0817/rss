@@ -4,6 +4,7 @@ use crate::error::MessagingError;
 use crate::message::{ContractIdentity, MessageId};
 use crate::policy::OperationDeadline;
 use crate::transaction::TerminalReceipt;
+use std::time::Duration;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 /// Closed `ConsumerGroup` protocol type.
@@ -119,8 +120,11 @@ pub enum IdempotencyDisposition<C> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Closed `LeaseStatus` protocol type.
 pub enum LeaseStatus {
-    /// `Held` state in the closed protocol.
-    Held,
+    /// Provider-authoritative remaining lease time for a held claim.
+    Held {
+        /// Remaining duration observed after the provider renewed or checked the lease.
+        remaining: Duration,
+    },
     /// `Lost` state in the closed protocol.
     Lost,
 }
@@ -128,7 +132,7 @@ pub enum LeaseStatus {
 /// Closed `InboxStore` protocol type.
 pub trait InboxStore: Send + Sync {
     /// Provider-owned `Claim` capability used by this port.
-    type Claim: Send;
+    type Claim: Send + Sync;
 
     /// Canonical operation owned by the transactional messaging core.
     fn claim(

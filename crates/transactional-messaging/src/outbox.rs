@@ -3,6 +3,7 @@
 use crate::error::MessagingError;
 use crate::message::{MessageEnvelope, MessageFingerprint, MessageId, PartitionIdentity};
 use crate::policy::OperationDeadline;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,6 +203,70 @@ impl<P> PendingMessage<P> {
     }
 }
 
+/// Provider-returned claim batch whose size was checked against the requested hard bound.
+pub struct OutboxClaimBatch<C> {
+    claims: Vec<C>,
+}
+
+/// A provider returned more durable claims than the caller admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("outbox provider returned {actual} claims for a requested limit of {limit}")]
+pub struct OutboxClaimBatchError {
+    limit: usize,
+    actual: usize,
+}
+
+impl OutboxClaimBatchError {
+    /// Requested maximum number of durable claims.
+    #[must_use]
+    pub const fn limit(self) -> usize {
+        self.limit
+    }
+
+    /// Actual number of claims returned by the provider.
+    #[must_use]
+    pub const fn actual(self) -> usize {
+        self.actual
+    }
+}
+
+impl<C> OutboxClaimBatch<C> {
+    /// Validate claims at the provider boundary before exposing them to runtime execution.
+    pub fn try_from_provider(
+        claims: Vec<C>,
+        limit: NonZeroUsize,
+    ) -> Result<Self, OutboxClaimBatchError> {
+        if claims.len() > limit.get() {
+            return Err(OutboxClaimBatchError {
+                limit: limit.get(),
+                actual: claims.len(),
+            });
+        }
+        Ok(Self { claims })
+    }
+
+    /// Number of admitted claims.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.claims.len()
+    }
+
+    /// Whether the provider returned no claims.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.claims.is_empty()
+    }
+}
+
+impl<C> IntoIterator for OutboxClaimBatch<C> {
+    type Item = C;
+    type IntoIter = std::vec::IntoIter<C>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.claims.into_iter()
+    }
+}
+
 /// Closed `OutboxStore` protocol type.
 pub trait OutboxStore<P>: Send + Sync {
     /// Provider-owned `Transaction` capability used by this port.
@@ -222,9 +287,9 @@ pub trait OutboxStore<P>: Send + Sync {
     /// unresolved dead-letter head is not eligible and must continue blocking its successor.
     fn claim_partition_heads(
         &self,
-        limit: usize,
+        limit: NonZeroUsize,
         deadline: OperationDeadline,
-    ) -> impl Future<Output = Result<Vec<Self::Claim>, MessagingError>> + Send;
+    ) -> impl Future<Output = Result<OutboxClaimBatch<Self::Claim>, MessagingError>> + Send;
 
     /// Check ownership using provider-authoritative time and fencing state.
     fn lease_status(

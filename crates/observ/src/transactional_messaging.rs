@@ -15,6 +15,21 @@ impl TransactionalMessagingEmitter for TransactionalMessagingTelemetryEmitter {
     )]
     fn emit(&self, observation: TransactionalMessagingObservation) {
         match observation {
+            TransactionalMessagingObservation::RuntimeFailure { phase, kind } => {
+                metrics::counter!(
+                    "transactional_messaging_runtime_failure_total",
+                    "phase" => phase.as_label(),
+                    "kind" => kind.as_label(),
+                )
+                .increment(1);
+                tracing::event!(
+                    name: "transactional_messaging.runtime.failure",
+                    target: "rss.transactional_messaging",
+                    tracing::Level::ERROR,
+                    phase = phase.as_label(),
+                    kind = kind.as_label(),
+                );
+            }
             TransactionalMessagingObservation::OutboxPublish { status } => {
                 metrics::counter!(
                     "outbox_publish_total",
@@ -205,6 +220,15 @@ impl TransactionalMessagingEmitter for TransactionalMessagingTelemetryEmitter {
                 metrics::counter!("consumer_lease_lost_total").increment(1);
                 tracing::event!(
                     name: "transactional_messaging.consumer.lease_lost",
+                    target: "rss.transactional_messaging",
+                    tracing::Level::DEBUG,
+                    {}
+                );
+            }
+            TransactionalMessagingObservation::RelayLeaseLost => {
+                metrics::counter!("outbox_relay_lease_lost_total").increment(1);
+                tracing::event!(
+                    name: "transactional_messaging.outbox.relay_lease_lost",
                     target: "rss.transactional_messaging",
                     tracing::Level::DEBUG,
                     {}

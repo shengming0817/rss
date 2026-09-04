@@ -123,6 +123,7 @@ dependencies = [
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
+ "rss-transactional-messaging-runtime",
  "secure",
  "testkit",
  "tokio",
@@ -1792,7 +1793,6 @@ dependencies = [
  "rss-diag-context",
  "rss-redact",
  "rss-request-context",
- "rss-runtime",
  "rss-trace-context",
  "rss-transactional-messaging",
  "serde",
@@ -4487,7 +4487,7 @@ dependencies = [
 
 [[package]]
 name = "rss-transactional-messaging"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "rss-contract",
@@ -4497,6 +4497,23 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "tokio",
+ "trybuild",
+]
+
+[[package]]
+name = "rss-transactional-messaging-runtime"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-request-context",
+ "rss-runtime",
+ "rss-transactional-messaging",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "trybuild",
 ]
 

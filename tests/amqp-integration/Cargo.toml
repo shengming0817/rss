@@ -11,6 +11,7 @@ amqp = { path = "../../adapters/amqp", features = ["integration"] }
 anyhow = { workspace = true }
 rss-runtime.workspace = true
 rss-transactional-messaging = { workspace = true }
+rss-transactional-messaging-runtime.workspace = true
 rss-request-context = { workspace = true }
 secure = { path = "../../crates/secure" }
 testkit = { path = "../../crates/testkit", features = ["containers"] }

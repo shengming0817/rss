@@ -20,7 +20,6 @@ rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 # 非消息 DLQ / saga 能力仍由 diport 提供；消息 runtime 直接消费 transactional messaging native ports。
 diport = { path = "../diport" }
-rss-runtime.workspace = true
 # reconcile harness 经 vocab::Epoch 传递 lease epoch（Context::epoch / LeaseToken.epoch 同源，#1123）。
 vocab = { path = "../vocab" }
 futures = { workspace = true }
@@ -46,7 +45,7 @@ primitives = { path = "../primitives" }
 # consumer Fresh 路径还原 producer 透传的 W3C traceparent（#1224，handle_fresh build_consume_span）；
 # 只依赖此 helper、不直接 import otel（otel 收口在 tracewire/adapters-otel）。
 tracewire = { package = "rss-trace-context", path = "../tracewire", version = "0.1.0" }
-# 非消息 runtime 的 Tokio execution support。
+# 非消息 eventexec algorithms 的 Tokio execution support。
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（非消息 runtime 取消信号）。
 tokio-util = { workspace = true }

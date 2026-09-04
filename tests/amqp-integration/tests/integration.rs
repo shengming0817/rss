@@ -4,6 +4,8 @@
 // reason: canonical live-provider fixtures must fail loudly when typed identities drift.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use amqp::{
@@ -12,7 +14,7 @@ use amqp::{
 };
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
-use rss_runtime::ManagedResource;
+use rss_runtime::{ManagedResource, ShutdownFailureKind, ShutdownStack, TotalDrainBudget};
 use rss_transactional_messaging::error::MessagingError;
 use rss_transactional_messaging::inbox::{
     ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
@@ -25,16 +27,19 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, MonotonicInstant,
-    OperationDeadline, RetryPolicy, RetryTimer,
+    AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, LeaseRenewalPolicy,
+    MonotonicInstant, OperationDeadline, RetryPolicy, RetryTimer, ShutdownBudget,
 };
 use rss_transactional_messaging::transaction::{
-    ConsumerExecution, ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator,
-    ProcessingDisposition, TerminalDisposition, TransactionOutcome, VerifiedIngress,
-    process_delivery,
+    ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, TerminalDisposition,
+    TransactionOutcome, VerifiedIngress,
 };
 use rss_transactional_messaging::transport::{
-    DeliverySource, IncomingDelivery, PublishOutcome, Publisher,
+    Delivery, DeliverySource, IncomingDelivery, PublishOutcome, Publisher,
+};
+use rss_transactional_messaging_runtime::consumer::{
+    ConsumerExecution, ConsumerWorker, ProcessingDisposition, SubscriptionBackoffPolicy,
+    consume_once,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(40);
@@ -53,6 +58,14 @@ fn provider_deadline() -> OperationDeadline {
     AbsoluteDeadline::from_timeout(&TestClock, TIMEOUT)
         .expect("bounded integration deadline")
         .operation(&TestClock)
+}
+
+fn consumer_policy() -> ConsumerExecutionPolicy {
+    ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::STANDARD,
+        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30)).expect("lease policy"),
+    )
 }
 
 fn envelope(route: &MessageRoute, id: &str) -> MessageEnvelope<Vec<u8>> {
@@ -79,6 +92,40 @@ fn envelope(route: &MessageRoute, id: &str) -> MessageEnvelope<Vec<u8>> {
 
 impl RetryTimer for TestClock {
     async fn delay(&self, _duration: Duration, _deadline: OperationDeadline) {}
+}
+
+struct TokioClock(AtomicUsize);
+
+impl Clock for TokioClock {
+    fn now(&self) -> MonotonicInstant {
+        MonotonicInstant::from_elapsed(Duration::from_millis(
+            self.0.fetch_add(1, Ordering::SeqCst) as u64
+        ))
+    }
+}
+
+impl RetryTimer for TokioClock {
+    async fn delay(&self, duration: Duration, deadline: OperationDeadline) {
+        tokio::time::sleep(duration.min(deadline.timeout())).await;
+    }
+}
+
+struct BlockingLiveTx(Arc<AtomicUsize>);
+
+impl ConsumerTx<Vec<u8>> for BlockingLiveTx {
+    type Claim = ();
+    type CommitProof = ();
+
+    async fn execute(
+        &self,
+        _claim: &Self::Claim,
+        _message: &MessageEnvelope<Vec<u8>>,
+        _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+        _deadline: OperationDeadline,
+    ) -> TransactionOutcome<Self::CommitProof> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
 }
 
 struct LiveInbox;
@@ -108,7 +155,9 @@ impl InboxStore for LiveInbox {
         _claim: &Self::Claim,
         _deadline: OperationDeadline,
     ) -> Result<LeaseStatus, MessagingError> {
-        Ok(LeaseStatus::Held)
+        Ok(LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        })
     }
 
     async fn release(
@@ -181,6 +230,11 @@ fn endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
     )?)
 }
 
+async fn shutdown_bounded(resource: &impl ManagedResource) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), ManagedResource::shutdown(resource)).await??;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_publish_delivery_and_settle_once() -> anyhow::Result<()> {
     let rabbit = testkit::env_or_rabbitmq().await?;
@@ -209,7 +263,7 @@ async fn integration_publish_delivery_and_settle_once() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("delivery stream ended"))?;
     let delivery = match incoming {
         IncomingDelivery::Valid(delivery) => delivery,
-        IncomingDelivery::Invalid { .. } => {
+        IncomingDelivery::Invalid(_) => {
             return Err(anyhow::anyhow!("valid envelope was rejected"));
         }
     };
@@ -220,11 +274,11 @@ async fn integration_publish_delivery_and_settle_once() -> anyhow::Result<()> {
         &LiveIngress,
         &subscription,
         &timer,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        consumer_policy(),
         &emitter,
     );
     assert_eq!(
-        process_delivery(
+        consume_once(
             &LiveInbox,
             &LiveTx(LiveTxOutcome::Succeeded),
             &execution,
@@ -297,7 +351,7 @@ async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow
         .ok_or_else(|| anyhow::anyhow!("reject delivery stream ended"))?
     {
         IncomingDelivery::Valid(delivery) => delivery,
-        IncomingDelivery::Invalid { .. } => {
+        IncomingDelivery::Invalid(_) => {
             return Err(anyhow::anyhow!("reject fixture envelope was invalid"));
         }
     };
@@ -308,11 +362,11 @@ async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow
         &LiveIngress,
         &subscription,
         &timer,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        consumer_policy(),
         &emitter,
     );
     assert_eq!(
-        process_delivery(
+        consume_once(
             &LiveInbox,
             &LiveTx(LiveTxOutcome::Rejected),
             &execution,
@@ -361,7 +415,7 @@ async fn integration_commit_unknown_abandons_and_redelivers_same_message() -> an
         .ok_or_else(|| anyhow::anyhow!("unknown delivery stream ended"))?
     {
         IncomingDelivery::Valid(delivery) => delivery,
-        IncomingDelivery::Invalid { .. } => {
+        IncomingDelivery::Invalid(_) => {
             return Err(anyhow::anyhow!("unknown fixture envelope was invalid"));
         }
     };
@@ -372,11 +426,11 @@ async fn integration_commit_unknown_abandons_and_redelivers_same_message() -> an
         &LiveIngress,
         &subscription,
         &timer,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        consumer_policy(),
         &emitter,
     );
     assert_eq!(
-        process_delivery(
+        consume_once(
             &LiveInbox,
             &LiveTx(LiveTxOutcome::CommitUnknown),
             &execution,
@@ -393,7 +447,7 @@ async fn integration_commit_unknown_abandons_and_redelivers_same_message() -> an
         .ok_or_else(|| anyhow::anyhow!("abandoned delivery was not redelivered"))?;
     let redelivery = match redelivery {
         IncomingDelivery::Valid(delivery) => delivery,
-        IncomingDelivery::Invalid { .. } => {
+        IncomingDelivery::Invalid(_) => {
             return Err(anyhow::anyhow!("redelivered envelope was invalid"));
         }
     };
@@ -402,11 +456,11 @@ async fn integration_commit_unknown_abandons_and_redelivers_same_message() -> an
         &LiveIngress,
         &subscription,
         &timer,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        consumer_policy(),
         &emitter,
     );
     assert_eq!(
-        process_delivery(
+        consume_once(
             &LiveInbox,
             &LiveTx(LiveTxOutcome::Succeeded),
             &execution,
@@ -418,6 +472,108 @@ async fn integration_commit_unknown_abandons_and_redelivers_same_message() -> an
     ManagedResource::shutdown(&publisher).await?;
     ManagedResource::shutdown(&first).await?;
     ManagedResource::shutdown(&second).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_managed_forced_cancel_redelivers_the_same_message_id() -> anyhow::Result<()> {
+    let rabbit = testkit::env_or_rabbitmq().await?;
+    let url = rabbit.vhost_url("rss_transactional_managed_cancel").await?;
+    let route = MessageRoute::parse("rss.integration.managed-cancel").expect("route");
+    let first = Arc::new(
+        AmqpSubscriber::connect_with_webpki_for_test(&endpoint(&url)?, "managed-cancel-sub-1")
+            .await?,
+    );
+    first.prepare_delivery_route(&route).await?;
+    first.purge_durable_queue_for_test(&route).await?;
+    let publisher = AmqpPublisher::connect_with_webpki_for_test(
+        &endpoint(&url)?,
+        "managed-cancel-pub",
+        TIMEOUT,
+    )
+    .await?;
+    let message = envelope(&route, "integration-managed-cancel-1");
+    let subscription = SubscriptionIdentity::new(
+        message.metadata().domain().clone(),
+        route.clone(),
+        message.metadata().contract().clone(),
+    );
+    assert!(matches!(
+        Publisher::publish(&publisher, &message, provider_deadline()).await,
+        PublishOutcome::Confirmed(())
+    ));
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let worker = ConsumerWorker::new(
+        Arc::clone(&first),
+        Arc::new(LiveInbox),
+        Arc::new(BlockingLiveTx(Arc::clone(&started))),
+        ConsumerGroup::parse("managed-cancel-consumer").expect("group"),
+        Arc::new(LiveIngress),
+        subscription.clone(),
+        Arc::new(TokioClock(AtomicUsize::new(0))),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let (registration, _status) = worker.into_registration(
+        "managed-cancel-consumer",
+        ShutdownBudget::new(Duration::from_millis(50)).expect("budget"),
+    );
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(2)).expect("total budget"),
+    )?;
+    let mut startup = stack.startup()?;
+    startup.stage_task_with_token(registration);
+    startup.commit().finish();
+    tokio::time::timeout(TIMEOUT, async {
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+
+    let receipt = stack.shutdown().await?;
+    assert!(matches!(
+        receipt.failures()[0].kind,
+        ShutdownFailureKind::TimedOut(_)
+    ));
+    shutdown_bounded(first.as_ref()).await?;
+
+    let second =
+        AmqpSubscriber::connect_with_webpki_for_test(&endpoint(&url)?, "managed-cancel-sub-2")
+            .await?;
+    let mut redeliveries = DeliverySource::deliveries(&second, &subscription).await?;
+    let redelivery = tokio::time::timeout(TIMEOUT, redeliveries.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("forced cancellation was not redelivered"))?;
+    let delivery = match redelivery {
+        IncomingDelivery::Valid(delivery) => delivery,
+        IncomingDelivery::Invalid(_) => return Err(anyhow::anyhow!("redelivery was invalid")),
+    };
+    let (redelivered_message, settlement) = delivery.into_parts();
+    assert_eq!(redelivered_message.id().as_str(), message.id().as_str());
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("managed-cancel-consumer").expect("group"),
+        &LiveIngress,
+        &subscription,
+        &TestClock,
+        consumer_policy(),
+        &NoopEmitter,
+    );
+    assert_eq!(
+        consume_once(
+            &LiveInbox,
+            &LiveTx(LiveTxOutcome::Succeeded),
+            &execution,
+            Delivery::new(redelivered_message, settlement),
+        )
+        .await?,
+        ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+    );
+
+    shutdown_bounded(&publisher).await?;
+    shutdown_bounded(&second).await?;
     Ok(())
 }
 

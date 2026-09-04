@@ -11,17 +11,12 @@ use crate::error::MessagingError;
 use crate::message::MessageEnvelope;
 #[cfg(feature = "consumer")]
 use crate::message::SubscriptionIdentity;
-#[cfg(feature = "consumer")]
-use crate::observability::{
-    TransactionalMessagingDisposition, TransactionalMessagingEmitter,
-    TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
-};
 #[cfg(feature = "producer")]
 use crate::outbox::OutboxSettlement;
 #[cfg(any(feature = "consumer", feature = "producer"))]
 use crate::policy::OperationDeadline;
 #[cfg(feature = "consumer")]
-use crate::transaction::{EnvelopeValidationFailure, SettlementDecision};
+use crate::transaction::{DecodeRejection, EnvelopeValidationFailure, SettlementDecision};
 
 #[cfg(feature = "producer")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,12 +241,36 @@ pub enum IncomingDelivery<P, S> {
     /// `Valid` state in the closed protocol.
     Valid(Box<Delivery<P, S>>),
     /// `Invalid` state in the closed protocol.
-    Invalid {
-        /// `failure` state in the closed protocol.
-        failure: EnvelopeValidationFailure,
-        /// `settlement` state in the closed protocol.
-        settlement: S,
-    },
+    Invalid(InvalidDelivery<S>),
+}
+
+#[cfg(feature = "consumer")]
+impl<P, S> IncomingDelivery<P, S> {
+    /// Construct a fail-closed delivery at the trusted provider decode boundary.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn invalid_from_provider(failure: EnvelopeValidationFailure, settlement: S) -> Self {
+        Self::Invalid(InvalidDelivery {
+            rejection: DecodeRejection::new(failure),
+            settlement,
+        })
+    }
+}
+
+/// Move-only invalid delivery carrying core-minted Reject authority.
+#[cfg(feature = "consumer")]
+pub struct InvalidDelivery<S> {
+    rejection: DecodeRejection,
+    settlement: S,
+}
+
+#[cfg(feature = "consumer")]
+impl<S> InvalidDelivery<S> {
+    /// Consume the invalid delivery into its opaque rejection and provider settlement.
+    #[must_use]
+    pub fn into_parts(self) -> (DecodeRejection, S) {
+        (self.rejection, self.settlement)
+    }
 }
 
 /// Move-only ownership receipt for one provider delivery stream.
@@ -294,25 +313,4 @@ pub trait DeliverySource<P>: Send + Sync {
         &self,
         subscription: &SubscriptionIdentity,
     ) -> impl Future<Output = Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError>> + Send;
-}
-
-#[cfg(feature = "consumer")]
-/// `settle_invalid` operation defined by this protocol type.
-pub async fn settle_invalid<S: DeliverySettlement>(
-    failure: EnvelopeValidationFailure,
-    settlement: S,
-    deadline: OperationDeadline,
-    emitter: &impl TransactionalMessagingEmitter,
-) -> Result<(), MessagingError> {
-    emitter.emit(TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure });
-    let result = settlement.settle(failure.into_settlement(), deadline).await;
-    emitter.emit(TransactionalMessagingObservation::ConsumerSettlement {
-        action: TransactionalMessagingDisposition::Reject,
-        outcome: if result.is_ok() {
-            TransactionalMessagingIoOutcome::Ok
-        } else {
-            TransactionalMessagingIoOutcome::Error
-        },
-    });
-    result
 }

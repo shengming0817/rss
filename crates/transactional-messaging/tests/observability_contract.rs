@@ -8,12 +8,13 @@ fn descriptor_closes_metric_and_event_exact_sets() {
     let descriptor = transactional_messaging_observability_descriptor();
     assert_eq!(descriptor.metrics(), &TransactionalMessagingMetric::ALL);
     assert_eq!(descriptor.events(), &TransactionalMessagingEvent::ALL);
-    assert_eq!(TransactionalMessagingMetric::ALL.len(), 18);
-    assert_eq!(TransactionalMessagingEvent::ALL.len(), 17);
+    assert_eq!(TransactionalMessagingMetric::ALL.len(), 20);
+    assert_eq!(TransactionalMessagingEvent::ALL.len(), 19);
 
     assert_eq!(
         TransactionalMessagingMetric::ALL.map(TransactionalMessagingMetric::name),
         [
+            "transactional_messaging_runtime_failure_total",
             "outbox_publish_total",
             "outbox_publish_failure_total",
             "outbox_pending_depth",
@@ -30,6 +31,7 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "consumer_dlx_write_total",
             "consumer_subscribe_retry_total",
             "consumer_lease_lost_total",
+            "outbox_relay_lease_lost_total",
             "consumer_release_failed_total",
             "dlq_redrive_total",
         ]
@@ -60,6 +62,7 @@ fn descriptor_closes_metric_and_event_exact_sets() {
     assert_eq!(
         TransactionalMessagingEvent::ALL.map(TransactionalMessagingEvent::name),
         [
+            "transactional_messaging.runtime.failure",
             "transactional_messaging.outbox.publish",
             "transactional_messaging.outbox.publish_failure",
             "transactional_messaging.outbox.backlog",
@@ -75,6 +78,7 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "transactional_messaging.consumer.dead_letter_write",
             "transactional_messaging.consumer.subscribe_retry",
             "transactional_messaging.consumer.lease_lost",
+            "transactional_messaging.outbox.relay_lease_lost",
             "transactional_messaging.consumer.release_failed",
             "transactional_messaging.dlq.mutation",
         ]

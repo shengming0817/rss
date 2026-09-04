@@ -1,0 +1,65 @@
+[package]
+name = "rss-transactional-messaging-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Provider-neutral relay and consumer runtime for RSS transactional messaging"
+categories = ["asynchronous", "concurrency"]
+keywords = ["messaging", "transactions", "outbox", "runtime"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["consumer", "producer"]
+consumer = [
+  "dep:futures",
+  "dep:rss-runtime",
+  "dep:rss-transactional-messaging",
+  "dep:tokio",
+  "dep:tokio-util",
+  "dep:thiserror",
+  "rss-transactional-messaging/consumer",
+]
+producer = [
+  "dep:futures",
+  "dep:rss-runtime",
+  "dep:rss-transactional-messaging",
+  "dep:thiserror",
+  "dep:tokio",
+  "dep:tokio-util",
+  "dep:tracing",
+  "rss-transactional-messaging/producer",
+]
+
+[dependencies]
+futures = { workspace = true, optional = true }
+rss-runtime = { workspace = true, optional = true }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"], optional = true }
+tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+rss-contract.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+rss-request-context.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
+trybuild.workspace = true
+
+[[test]]
+name = "consumer"
+required-features = ["consumer"]
+
+[[test]]
+name = "relay"
+required-features = ["producer"]
+
+[[test]]
+name = "trybuild"
+required-features = ["consumer", "producer"]

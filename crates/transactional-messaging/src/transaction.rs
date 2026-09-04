@@ -1,15 +1,9 @@
 //! Closed transaction outcomes, durable terminal receipts, and settlement projection.
 
-use crate::error::MessagingError;
-use crate::inbox::{ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore};
+use crate::inbox::{ConsumerGroup, ConsumerIdentity};
 use crate::message::{MessageEnvelope, MessageFingerprint, MessageId, SubscriptionIdentity};
-use crate::observability::{
-    TransactionalMessagingDisposition, TransactionalMessagingEmitter,
-    TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
-    TransactionalMessagingTransactionStatus,
-};
-use crate::policy::{AbsoluteDeadline, ConsumerExecutionPolicy, OperationDeadline, RetryTimer};
-use crate::transport::{Delivery, DeliverySettlement};
+use crate::observability::TransactionalMessagingTransactionStatus;
+use crate::policy::OperationDeadline;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Closed `FailureClass` protocol type.
@@ -237,11 +231,6 @@ impl TerminalReceipt {
     pub fn matches(&self, consumer: &ConsumerIdentity, fingerprint: MessageFingerprint) -> bool {
         self.consumer == *consumer && self.fingerprint == fingerprint
     }
-
-    /// `into_settlement` operation defined by this protocol type.
-    pub(crate) fn into_settlement(self) -> SettlementDecision {
-        settlement_for_disposition(self.disposition)
-    }
 }
 
 impl std::fmt::Debug for TerminalReceipt {
@@ -269,14 +258,16 @@ impl ReceiptIntent {
     #[must_use]
     pub fn committed<P>(self, proof: P, disposition: TerminalDisposition) -> TransactionOutcome<P> {
         TransactionOutcome {
-            state: TransactionOutcomeState::Committed {
+            state: TransactionOutcomeState::Committed(CommittedTransaction {
                 proof,
-                receipt: TerminalReceipt {
-                    consumer: self.consumer,
-                    fingerprint: self.fingerprint,
-                    disposition,
+                settlement: TerminalSettlement {
+                    receipt: TerminalReceipt {
+                        consumer: self.consumer,
+                        fingerprint: self.fingerprint,
+                        disposition,
+                    },
                 },
-            },
+            }),
         }
     }
 }
@@ -293,7 +284,7 @@ pub struct TransactionOutcome<P> {
 }
 
 enum TransactionOutcomeState<P> {
-    Committed { proof: P, receipt: TerminalReceipt },
+    Committed(CommittedTransaction<P>),
     NotStarted(FailureClass),
     RolledBack(FailureClass),
     RollbackFailed,
@@ -346,6 +337,88 @@ impl<P> TransactionOutcome<P> {
             TransactionOutcomeState::NotStarted(FailureClass::Transient)
                 | TransactionOutcomeState::RolledBack(FailureClass::Transient)
         )
+    }
+
+    /// Return the closed, low-cardinality transaction status without exposing the private state.
+    #[must_use]
+    pub const fn status(&self) -> TransactionalMessagingTransactionStatus {
+        match &self.state {
+            TransactionOutcomeState::Committed(_) => {
+                TransactionalMessagingTransactionStatus::Committed
+            }
+            TransactionOutcomeState::NotStarted(FailureClass::Transient)
+            | TransactionOutcomeState::RolledBack(FailureClass::Transient) => {
+                TransactionalMessagingTransactionStatus::HandlerTransient
+            }
+            TransactionOutcomeState::NotStarted(FailureClass::Permanent)
+            | TransactionOutcomeState::RolledBack(FailureClass::Permanent) => {
+                TransactionalMessagingTransactionStatus::RejectedPermanent
+            }
+            TransactionOutcomeState::NotStarted(FailureClass::Infrastructure)
+            | TransactionOutcomeState::RolledBack(FailureClass::Infrastructure) => {
+                TransactionalMessagingTransactionStatus::InfrastructureTransient
+            }
+            TransactionOutcomeState::RollbackFailed => {
+                TransactionalMessagingTransactionStatus::RollbackFailed
+            }
+            TransactionOutcomeState::CommitUnknown => {
+                TransactionalMessagingTransactionStatus::CommitUnknown
+            }
+            TransactionOutcomeState::Fenced => TransactionalMessagingTransactionStatus::Fenced,
+        }
+    }
+
+    /// Exhaustively consume the private outcome state.
+    pub fn fold<R>(
+        self,
+        committed: impl FnOnce(CommittedTransaction<P>) -> R,
+        not_started: impl FnOnce(FailureClass) -> R,
+        rolled_back: impl FnOnce(FailureClass) -> R,
+        rollback_failed: impl FnOnce() -> R,
+        commit_unknown: impl FnOnce() -> R,
+        fenced: impl FnOnce() -> R,
+    ) -> R {
+        match self.state {
+            TransactionOutcomeState::Committed(value) => committed(value),
+            TransactionOutcomeState::NotStarted(class) => not_started(class),
+            TransactionOutcomeState::RolledBack(class) => rolled_back(class),
+            TransactionOutcomeState::RollbackFailed => rollback_failed(),
+            TransactionOutcomeState::CommitUnknown => commit_unknown(),
+            TransactionOutcomeState::Fenced => fenced(),
+        }
+    }
+}
+
+/// A committed provider proof paired with its one-shot terminal settlement authority.
+pub struct CommittedTransaction<P> {
+    proof: P,
+    settlement: TerminalSettlement,
+}
+
+impl<P> CommittedTransaction<P> {
+    /// Consume the committed result into the provider proof and terminal settlement.
+    #[must_use]
+    pub fn into_parts(self) -> (P, TerminalSettlement) {
+        (self.proof, self.settlement)
+    }
+}
+
+/// A verified terminal result that can be projected into broker settlement exactly once.
+pub struct TerminalSettlement {
+    receipt: TerminalReceipt,
+}
+
+impl TerminalSettlement {
+    /// Return the durable terminal disposition.
+    #[must_use]
+    pub const fn disposition(&self) -> TerminalDisposition {
+        self.receipt.disposition
+    }
+
+    /// Consume the terminal authority into the corresponding ACK or Reject decision.
+    #[must_use]
+    pub fn into_decision(self) -> SettlementDecision {
+        settlement_for_disposition(self.receipt.disposition)
     }
 }
 
@@ -443,6 +516,12 @@ pub enum SettlementKind {
 pub struct SettlementDecision(SettlementKind);
 
 impl SettlementDecision {
+    /// Construct the conservative redelivery decision available to runtime orchestration.
+    #[must_use]
+    pub const fn requeue() -> Self {
+        Self(SettlementKind::Requeue)
+    }
+
     #[must_use]
     /// `kind` operation defined by this protocol type.
     pub const fn kind(&self) -> SettlementKind {
@@ -473,13 +552,6 @@ impl EnvelopeValidationFailure {
             Self::UnsupportedContract => "unsupported_contract",
             Self::FingerprintConflict => "fingerprint_conflict",
         }
-    }
-
-    #[must_use]
-    /// `into_settlement` operation defined by this protocol type.
-    pub const fn into_settlement(self) -> SettlementDecision {
-        let _ = self;
-        SettlementDecision(SettlementKind::Reject)
     }
 }
 
@@ -575,481 +647,121 @@ pub trait IngressValidator<P>: Send + Sync {
     ) -> Result<VerifiedIngress, EnvelopeValidationFailure>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `ProcessingDisposition` protocol type.
-pub enum ProcessingDisposition {
-    /// `InProgress` state in the closed protocol.
-    InProgress,
-    /// `Duplicate` state in the closed protocol.
-    Duplicate(TerminalDisposition),
-    /// `Committed` state in the closed protocol.
-    Committed(TerminalDisposition),
-    /// Delivery rejected with a stable validation or identity-conflict reason.
-    Rejected(EnvelopeValidationFailure),
-    /// `Fenced` state in the closed protocol.
-    Fenced,
-    /// `Deferred` state in the closed protocol.
-    Deferred,
+/// Exact consumer identity and fingerprint proven by one ingress validation.
+pub struct VerifiedConsumerBinding {
+    identity: ConsumerIdentity,
+    fingerprint: MessageFingerprint,
 }
 
-/// Immutable consumer execution inputs shared by every delivery from one subscription.
-pub struct ConsumerExecution<'a, V, R, E> {
-    group: ConsumerGroup,
-    validator: &'a V,
-    subscription: &'a SubscriptionIdentity,
-    timer: &'a R,
-    policy: ConsumerExecutionPolicy,
-    emitter: &'a E,
+/// Opaque authority proving that core ingress verification rejected the exact challenge.
+pub struct IngressRejection {
+    reason: EnvelopeValidationFailure,
 }
 
-impl<'a, V, R, E> ConsumerExecution<'a, V, R, E> {
-    /// Bind identity, ingress authority, time policy, and telemetry for one consumer subscription.
-    #[must_use]
-    pub const fn new(
-        group: ConsumerGroup,
-        validator: &'a V,
-        subscription: &'a SubscriptionIdentity,
-        timer: &'a R,
-        policy: ConsumerExecutionPolicy,
-        emitter: &'a E,
-    ) -> Self {
-        Self {
-            group,
-            validator,
-            subscription,
-            timer,
-            policy,
-            emitter,
-        }
-    }
-
-    /// Return the exact ingress identity bound to this execution context.
-    #[must_use]
-    pub const fn subscription(&self) -> &SubscriptionIdentity {
-        self.subscription
-    }
-
-    /// Return the mandatory telemetry sink bound to this execution context.
-    #[must_use]
-    pub const fn emitter(&self) -> &E {
-        self.emitter
-    }
-
-    /// Mint a provider-operation deadline from this execution's single configured budget.
-    pub fn operation_deadline(&self) -> Result<OperationDeadline, MessagingError>
-    where
-        R: RetryTimer,
-    {
-        AbsoluteDeadline::from_budget(self.timer, self.policy.budget())
-            .map(|deadline| deadline.operation(self.timer))
-            .map_err(|error| {
-                MessagingError::new(crate::error::MessagingErrorKind::Invariant, error)
-            })
-    }
-}
-
-/// Execute the canonical claim → transaction → one-shot settlement pipeline.
+/// Core-minted authority to reject a delivery that a trusted provider adapter could not decode.
 ///
-/// A duplicate terminal receipt bypasses `ConsumerTx`; transaction uncertainty and fencing never
-/// acknowledge the delivery; settlement I/O occurs after durable outcome selection and cannot
-/// rewrite it.
-pub async fn process_delivery<P, S, I, T, V, R, E>(
-    inbox: &I,
-    transaction: &T,
-    execution: &ConsumerExecution<'_, V, R, E>,
-    delivery: Delivery<P, S>,
-) -> Result<ProcessingDisposition, MessagingError>
-where
-    P: AsRef<[u8]> + Send,
-    S: DeliverySettlement,
-    I: InboxStore,
-    T: ConsumerTx<P, Claim = I::Claim>,
-    V: IngressValidator<P>,
-    R: RetryTimer,
-    E: TransactionalMessagingEmitter,
-{
-    let (message, settlement) = delivery.into_parts();
-    let deadline = match AbsoluteDeadline::from_budget(execution.timer, execution.policy.budget()) {
-        Ok(deadline) => deadline,
-        Err(error) => {
-            drop(settlement);
-            return Err(MessagingError::new(
-                crate::error::MessagingErrorKind::Invariant,
-                error,
-            ));
+/// The private constructor prevents application code from manufacturing arbitrary Reject
+/// decisions; only the transport boundary can mint this capability while constructing an invalid
+/// incoming delivery.
+pub struct DecodeRejection {
+    reason: EnvelopeValidationFailure,
+}
+
+impl DecodeRejection {
+    pub(crate) const fn new(reason: EnvelopeValidationFailure) -> Self {
+        Self { reason }
+    }
+
+    /// Return the closed provider-neutral decode failure.
+    #[must_use]
+    pub const fn reason(&self) -> EnvelopeValidationFailure {
+        self.reason
+    }
+
+    /// Consume the capability into the core-owned Reject decision.
+    #[must_use]
+    pub fn into_decision(self) -> SettlementDecision {
+        SettlementDecision(SettlementKind::Reject)
+    }
+}
+
+impl IngressRejection {
+    /// Return the closed rejection reason for diagnostics and processing disposition.
+    #[must_use]
+    pub const fn reason(&self) -> EnvelopeValidationFailure {
+        self.reason
+    }
+
+    /// Consume verified rejection authority into a one-shot broker Reject decision.
+    #[must_use]
+    pub fn into_decision(self) -> SettlementDecision {
+        SettlementDecision(SettlementKind::Reject)
+    }
+}
+
+impl VerifiedConsumerBinding {
+    /// Return the exact durable inbox identity bound to the validated message.
+    #[must_use]
+    pub const fn identity(&self) -> &ConsumerIdentity {
+        &self.identity
+    }
+
+    /// Mint a move-only receipt intent for one transaction attempt.
+    #[must_use]
+    pub fn receipt_intent(&self) -> ReceiptIntent {
+        ReceiptIntent::new(self.identity.clone(), self.fingerprint)
+    }
+
+    /// Validate a provider-rehydrated terminal receipt before projecting settlement.
+    pub fn validate_terminal(
+        &self,
+        receipt: TerminalReceipt,
+    ) -> Result<TerminalSettlement, IngressRejection> {
+        if receipt.matches(&self.identity, self.fingerprint) {
+            Ok(TerminalSettlement { receipt })
+        } else {
+            Err(IngressRejection {
+                reason: EnvelopeValidationFailure::FingerprintConflict,
+            })
         }
-    };
-    let verified =
-        match execution
-            .validator
-            .validate(IngressChallenge::new(execution.subscription, &message))
-        {
-            Ok(verified) => verified,
-            Err(failure) => {
-                execution.emitter.emit(
-                    TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure },
-                );
-                settle_observed(
-                    settlement,
-                    failure.into_settlement(),
-                    deadline.operation(execution.timer),
-                    execution.emitter,
-                )
-                .await?;
-                return Ok(ProcessingDisposition::Rejected(failure));
-            }
-        };
-    let delivered_fingerprint = MessageFingerprint::of(&message);
-    if verified.subscription != *execution.subscription
+    }
+}
+
+/// Validate one exact ingress envelope and bind it to a durable consumer identity.
+///
+/// The challenge constructor and verified fields remain private; callers receive an opaque binding
+/// only when the validator's evidence matches the supplied subscription and message exactly.
+pub fn verify_ingress<P, V>(
+    validator: &V,
+    group: ConsumerGroup,
+    subscription: &SubscriptionIdentity,
+    message: &MessageEnvelope<P>,
+) -> Result<VerifiedConsumerBinding, IngressRejection>
+where
+    P: AsRef<[u8]>,
+    V: IngressValidator<P>,
+{
+    let verified = validator
+        .validate(IngressChallenge::new(subscription, message))
+        .map_err(|reason| IngressRejection { reason })?;
+    let fingerprint = MessageFingerprint::of(message);
+    if verified.subscription != *subscription
         || verified.tenant_id != message.metadata().tenant_id()
         || verified.message_id != *message.id()
         || verified.contract != *message.metadata().contract()
-        || verified.fingerprint != delivered_fingerprint
+        || verified.fingerprint != fingerprint
     {
-        execution
-            .emitter
-            .emit(TransactionalMessagingObservation::ConsumerIngressRejected {
-                reason: EnvelopeValidationFailure::FingerprintConflict,
-            });
-        settle_observed(
-            settlement,
-            EnvelopeValidationFailure::FingerprintConflict.into_settlement(),
-            deadline.operation(execution.timer),
-            execution.emitter,
-        )
-        .await?;
-        return Ok(ProcessingDisposition::Rejected(
-            EnvelopeValidationFailure::FingerprintConflict,
-        ));
+        return Err(IngressRejection {
+            reason: EnvelopeValidationFailure::FingerprintConflict,
+        });
     }
-    let fingerprint = verified.fingerprint;
-    let identity = ConsumerIdentity::new(
-        verified.tenant_id,
-        execution.group.clone(),
-        verified.message_id,
-        verified.contract,
-    );
-
-    let claimed = match inbox
-        .claim(&identity, deadline.operation(execution.timer))
-        .await
-    {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            settlement
-                .abandon(deadline.operation(execution.timer))
-                .await?;
-            return Err(error);
-        }
-    };
-    match claimed {
-        IdempotencyDisposition::InProgress => {
-            execution
-                .emitter
-                .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
-            settle_observed(
-                settlement,
-                SettlementDecision(SettlementKind::Requeue),
-                deadline.operation(execution.timer),
-                execution.emitter,
-            )
-            .await?;
-            Ok(ProcessingDisposition::InProgress)
-        }
-        IdempotencyDisposition::Terminal(receipt) => {
-            if !receipt.matches(&identity, fingerprint) {
-                settle_observed(
-                    settlement,
-                    EnvelopeValidationFailure::FingerprintConflict.into_settlement(),
-                    deadline.operation(execution.timer),
-                    execution.emitter,
-                )
-                .await?;
-                return Ok(ProcessingDisposition::Rejected(
-                    EnvelopeValidationFailure::FingerprintConflict,
-                ));
-            }
-            let disposition = receipt.disposition();
-            settle_observed(
-                settlement,
-                receipt.into_settlement(),
-                deadline.operation(execution.timer),
-                execution.emitter,
-            )
-            .await?;
-            Ok(ProcessingDisposition::Duplicate(disposition))
-        }
-        IdempotencyDisposition::Acquired(claim) => {
-            process_acquired(
-                inbox,
-                transaction,
-                execution,
-                AcquiredDelivery {
-                    message,
-                    settlement,
-                    claim,
-                    identity,
-                    fingerprint,
-                    deadline,
-                },
-            )
-            .await
-        }
-    }
-}
-
-struct AcquiredDelivery<P, S, C> {
-    message: MessageEnvelope<P>,
-    settlement: S,
-    claim: C,
-    identity: ConsumerIdentity,
-    fingerprint: MessageFingerprint,
-    deadline: AbsoluteDeadline,
-}
-
-async fn process_acquired<P, S, I, T, V, R, E>(
-    inbox: &I,
-    transaction: &T,
-    execution: &ConsumerExecution<'_, V, R, E>,
-    state: AcquiredDelivery<P, S, I::Claim>,
-) -> Result<ProcessingDisposition, MessagingError>
-where
-    P: AsRef<[u8]> + Send,
-    S: DeliverySettlement,
-    I: InboxStore,
-    T: ConsumerTx<P, Claim = I::Claim>,
-    R: RetryTimer,
-    E: TransactionalMessagingEmitter,
-{
-    let mut attempt = std::num::NonZeroU32::MIN;
-    loop {
-        if state.deadline.remaining(execution.timer)
-            <= execution.policy.budget().settlement_reserve()
-        {
-            release_or_abandon(
-                inbox,
-                state.claim,
-                state.settlement,
-                state.deadline.operation(execution.timer),
-                execution.emitter,
-            )
-            .await?;
-            return Ok(ProcessingDisposition::Deferred);
-        }
-        let lease_status = match inbox
-            .extend(&state.claim, state.deadline.operation(execution.timer))
-            .await
-        {
-            Ok(status) => status,
-            Err(error) => {
-                state
-                    .settlement
-                    .abandon(state.deadline.operation(execution.timer))
-                    .await?;
-                return Err(error);
-            }
-        };
-        if lease_status == crate::inbox::LeaseStatus::Lost {
-            execution
-                .emitter
-                .emit(TransactionalMessagingObservation::ConsumerLeaseLost);
-            state
-                .settlement
-                .abandon(state.deadline.operation(execution.timer))
-                .await?;
-            return Ok(ProcessingDisposition::Fenced);
-        }
-        let outcome = transaction
-            .execute(
-                &state.claim,
-                &state.message,
-                ReceiptIntent::new(state.identity.clone(), state.fingerprint),
-                state.deadline.operation(execution.timer),
-            )
-            .await;
-        execution
-            .emitter
-            .emit(TransactionalMessagingObservation::ConsumerTransaction {
-                status: transaction_status(&outcome),
-            });
-        if should_retry(&outcome, attempt, execution, &state).await {
-            attempt = attempt.saturating_add(1);
-            continue;
-        }
-        return finalize_outcome(inbox, execution.timer, execution.emitter, state, outcome).await;
-    }
-}
-
-async fn should_retry<P, S, C, Proof, V, R, E>(
-    outcome: &TransactionOutcome<Proof>,
-    attempt: std::num::NonZeroU32,
-    execution: &ConsumerExecution<'_, V, R, E>,
-    state: &AcquiredDelivery<P, S, C>,
-) -> bool
-where
-    R: RetryTimer,
-{
-    if !outcome.may_retry()
-        || !execution
-            .policy
-            .retry()
-            .allows_attempt(attempt.saturating_add(1))
-    {
-        return false;
-    }
-    let delay = execution.policy.retry().delay_after(attempt);
-    if state.deadline.remaining(execution.timer)
-        <= delay.saturating_add(execution.policy.budget().settlement_reserve())
-    {
-        return false;
-    }
-    execution
-        .timer
-        .delay(delay, state.deadline.operation(execution.timer))
-        .await;
-    true
-}
-
-async fn finalize_outcome<P, S, I, Proof, E>(
-    inbox: &I,
-    clock: &impl crate::policy::Clock,
-    emitter: &E,
-    state: AcquiredDelivery<P, S, I::Claim>,
-    outcome: TransactionOutcome<Proof>,
-) -> Result<ProcessingDisposition, MessagingError>
-where
-    S: DeliverySettlement,
-    I: InboxStore,
-    E: TransactionalMessagingEmitter,
-{
-    match outcome.state {
-        TransactionOutcomeState::Committed { proof, receipt } => {
-            drop(proof);
-            if !receipt.matches(&state.identity, state.fingerprint) {
-                settle_observed(
-                    state.settlement,
-                    SettlementDecision(SettlementKind::Requeue),
-                    state.deadline.operation(clock),
-                    emitter,
-                )
-                .await?;
-                Ok(ProcessingDisposition::Rejected(
-                    EnvelopeValidationFailure::FingerprintConflict,
-                ))
-            } else {
-                let disposition = receipt.disposition();
-                settle_observed(
-                    state.settlement,
-                    receipt.into_settlement(),
-                    state.deadline.operation(clock),
-                    emitter,
-                )
-                .await?;
-                Ok(ProcessingDisposition::Committed(disposition))
-            }
-        }
-        TransactionOutcomeState::NotStarted(_) | TransactionOutcomeState::RolledBack(_) => {
-            release_or_abandon(
-                inbox,
-                state.claim,
-                state.settlement,
-                state.deadline.operation(clock),
-                emitter,
-            )
-            .await?;
-            Ok(ProcessingDisposition::Deferred)
-        }
-        TransactionOutcomeState::RollbackFailed | TransactionOutcomeState::CommitUnknown => {
-            state
-                .settlement
-                .abandon(state.deadline.operation(clock))
-                .await?;
-            Ok(ProcessingDisposition::Deferred)
-        }
-        TransactionOutcomeState::Fenced => {
-            emitter.emit(TransactionalMessagingObservation::ConsumerLeaseLost);
-            state
-                .settlement
-                .abandon(state.deadline.operation(clock))
-                .await?;
-            Ok(ProcessingDisposition::Fenced)
-        }
-    }
-}
-
-fn transaction_status<P>(
-    outcome: &TransactionOutcome<P>,
-) -> TransactionalMessagingTransactionStatus {
-    match &outcome.state {
-        TransactionOutcomeState::Committed { .. } => {
-            TransactionalMessagingTransactionStatus::Committed
-        }
-        TransactionOutcomeState::NotStarted(FailureClass::Transient)
-        | TransactionOutcomeState::RolledBack(FailureClass::Transient) => {
-            TransactionalMessagingTransactionStatus::HandlerTransient
-        }
-        TransactionOutcomeState::NotStarted(FailureClass::Permanent)
-        | TransactionOutcomeState::RolledBack(FailureClass::Permanent) => {
-            TransactionalMessagingTransactionStatus::RejectedPermanent
-        }
-        TransactionOutcomeState::NotStarted(FailureClass::Infrastructure)
-        | TransactionOutcomeState::RolledBack(FailureClass::Infrastructure) => {
-            TransactionalMessagingTransactionStatus::InfrastructureTransient
-        }
-        TransactionOutcomeState::RollbackFailed => {
-            TransactionalMessagingTransactionStatus::RollbackFailed
-        }
-        TransactionOutcomeState::CommitUnknown => {
-            TransactionalMessagingTransactionStatus::CommitUnknown
-        }
-        TransactionOutcomeState::Fenced => TransactionalMessagingTransactionStatus::Fenced,
-    }
-}
-
-async fn settle_observed<S: DeliverySettlement>(
-    settlement: S,
-    decision: SettlementDecision,
-    deadline: OperationDeadline,
-    emitter: &impl TransactionalMessagingEmitter,
-) -> Result<(), MessagingError> {
-    let action = match decision.kind() {
-        SettlementKind::Acknowledge => TransactionalMessagingDisposition::Ack,
-        SettlementKind::Requeue => TransactionalMessagingDisposition::Requeue,
-        SettlementKind::Reject => TransactionalMessagingDisposition::Reject,
-    };
-    let result = settlement.settle(decision, deadline).await;
-    emitter.emit(TransactionalMessagingObservation::ConsumerSettlement {
-        action,
-        outcome: if result.is_ok() {
-            TransactionalMessagingIoOutcome::Ok
-        } else {
-            TransactionalMessagingIoOutcome::Error
-        },
-    });
-    result
-}
-
-async fn release_or_abandon<I: InboxStore, S: DeliverySettlement>(
-    inbox: &I,
-    claim: I::Claim,
-    settlement: S,
-    deadline: OperationDeadline,
-    emitter: &impl TransactionalMessagingEmitter,
-) -> Result<(), MessagingError> {
-    match inbox.release(claim, deadline).await {
-        Ok(()) => {
-            settle_observed(
-                settlement,
-                SettlementDecision(SettlementKind::Requeue),
-                deadline,
-                emitter,
-            )
-            .await
-        }
-        Err(error) => {
-            emitter.emit(TransactionalMessagingObservation::ConsumerReleaseFailed);
-            settlement.abandon(deadline).await?;
-            Err(error)
-        }
-    }
+    Ok(VerifiedConsumerBinding {
+        identity: ConsumerIdentity::new(
+            verified.tenant_id,
+            group,
+            verified.message_id,
+            verified.contract,
+        ),
+        fingerprint,
+    })
 }

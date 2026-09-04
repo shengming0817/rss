@@ -18,7 +18,7 @@
 //! [`AmqpSubscriber`] 仅实现 [`rss_transactional_messaging::transport::DeliverySource`]（at-least-once）：
 //!
 //! - **[`rss_transactional_messaging::transport::DeliverySource`]（manual-ack，`no_ack=false`，at-least-once）**：
-//!   每条 [`rss_transactional_messaging::transport::Delivery`] 携 move-only settlement receipt，由 `eventexec::run_consumer` 据
+//!   每条 [`rss_transactional_messaging::transport::Delivery`] 携 move-only settlement receipt，由 `rss_transactional_messaging_runtime::consumer::consume_once` 据
 //!   [`rss_transactional_messaging::transaction::SettlementKind`] 结算（`Ack`→basic_ack、`Requeue`→basic_nack(requeue=true)、
 //!   `Reject`→basic_nack(requeue=false)）。在途消息于消费者崩溃窗口 broker 自动 requeue——
 //!   channel close 即重投，兑现 **at-least-once**。

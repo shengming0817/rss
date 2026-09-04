@@ -1,0 +1,5 @@
+error[E0599]: no method named `cancellation_token` found for struct `ManagedTaskRegistration` in the current scope
+ --> tests/ui/registration_token_private_fail.rs:4:31
+  |
+4 |     let _token = registration.cancellation_token();
+  |                               ^^^^^^^^^^^^^^^^^^ method not found in `ManagedTaskRegistration`

@@ -9,6 +9,8 @@
 
 use std::time::Duration;
 
+use crate::error::MessagingErrorKind;
+
 /// Broker disposition used by publication and settlement telemetry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingDisposition {
@@ -107,6 +109,53 @@ impl TransactionalMessagingIoOutcome {
     }
 }
 
+/// Closed provider-I/O phase used to diagnose managed runtime failures without identity or text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionalMessagingRuntimePhase {
+    /// Constructing a consumer absolute deadline.
+    ConsumerDeadline,
+    /// Establishing a consumer subscription.
+    ConsumerSubscribe,
+    /// Claiming an inbox identity.
+    ConsumerClaim,
+    /// Checking or renewing an inbox lease.
+    ConsumerLease,
+    /// Abandoning a provider delivery/session after a hard fence or primary error.
+    ConsumerAbandon,
+    /// Releasing a safely rolled-back inbox claim.
+    ConsumerRelease,
+    /// Applying a broker settlement decision.
+    ConsumerSettlement,
+    /// Claiming a bounded outbox batch.
+    RelayClaim,
+    /// Checking or extending an outbox lease.
+    RelayLease,
+    /// Persisting an outbox settlement.
+    RelaySettlement,
+    /// Constructing a relay operation deadline.
+    RelayDeadline,
+}
+
+impl TransactionalMessagingRuntimePhase {
+    /// Stable low-cardinality phase label.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::ConsumerDeadline => "consumer_deadline",
+            Self::ConsumerSubscribe => "consumer_subscribe",
+            Self::ConsumerClaim => "consumer_claim",
+            Self::ConsumerLease => "consumer_lease",
+            Self::ConsumerAbandon => "consumer_abandon",
+            Self::ConsumerRelease => "consumer_release",
+            Self::ConsumerSettlement => "consumer_settlement",
+            Self::RelayClaim => "relay_claim",
+            Self::RelayLease => "relay_lease",
+            Self::RelaySettlement => "relay_settlement",
+            Self::RelayDeadline => "relay_deadline",
+        }
+    }
+}
+
 /// Closed subscription recovery reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingSubscribeOutcome {
@@ -114,6 +163,8 @@ pub enum TransactionalMessagingSubscribeOutcome {
     SubscribeError,
     /// An established delivery stream ended unexpectedly.
     StreamEnd,
+    /// Processing a delivery failed transiently and forced session replacement.
+    DeliveryError,
 }
 
 impl TransactionalMessagingSubscribeOutcome {
@@ -123,6 +174,7 @@ impl TransactionalMessagingSubscribeOutcome {
         match self {
             Self::SubscribeError => "subscribe_error",
             Self::StreamEnd => "stream_end",
+            Self::DeliveryError => "delivery_error",
         }
     }
 }
@@ -393,6 +445,13 @@ impl TransactionalMessagingOutboxDlxResolveResult {
 /// Closed TransactionalMessaging observation. No variant can carry identity or free-form data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingObservation {
+    /// A runtime port boundary failed with a closed phase and error kind.
+    RuntimeFailure {
+        /// Provider-neutral phase that failed.
+        phase: TransactionalMessagingRuntimePhase,
+        /// Closed error classification without provider text.
+        kind: MessagingErrorKind,
+    },
     /// One outbox settlement.
     OutboxPublish {
         /// `status` state in the closed protocol.
@@ -472,6 +531,8 @@ pub enum TransactionalMessagingObservation {
     },
     /// Consumer ownership was fenced.
     ConsumerLeaseLost,
+    /// Relay ownership was fenced before publication or settlement.
+    RelayLeaseLost,
     /// Inbox claim release failed after another failure.
     ConsumerReleaseFailed,
     /// One application dead-letter replay result.
@@ -496,6 +557,7 @@ impl TransactionalMessagingObservation {
     #[must_use]
     pub const fn event(self) -> TransactionalMessagingEvent {
         match self {
+            Self::RuntimeFailure { .. } => TransactionalMessagingEvent::RuntimeFailure,
             Self::OutboxPublish { .. } => TransactionalMessagingEvent::OutboxPublish,
             #[cfg(feature = "producer")]
             Self::OutboxPublishFailure { .. } => TransactionalMessagingEvent::OutboxPublishFailure,
@@ -521,6 +583,7 @@ impl TransactionalMessagingObservation {
                 TransactionalMessagingEvent::ConsumerSubscribeRetry
             }
             Self::ConsumerLeaseLost => TransactionalMessagingEvent::ConsumerLeaseLost,
+            Self::RelayLeaseLost => TransactionalMessagingEvent::RelayLeaseLost,
             Self::ConsumerReleaseFailed => TransactionalMessagingEvent::ConsumerReleaseFailed,
             Self::DeadLetterReplay { .. }
             | Self::OutboxDlxRedrive { .. }
@@ -538,6 +601,8 @@ pub trait TransactionalMessagingEmitter: Send + Sync {
 /// Closed canonical metric identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingMetric {
+    /// Count of runtime port failures by phase and closed error kind.
+    RuntimeFailureTotal,
     /// Count of outbox publish outcomes.
     OutboxPublishTotal,
     /// Count of safe outbox publication failure diagnostics.
@@ -570,6 +635,8 @@ pub enum TransactionalMessagingMetric {
     ConsumerSubscribeRetryTotal,
     /// Count of consumer lease-loss detections.
     ConsumerLeaseLostTotal,
+    /// Count of relay lease-loss detections.
+    RelayLeaseLostTotal,
     /// Count of failed consumer releases.
     ConsumerReleaseFailedTotal,
     /// Count of dead-letter queue redrive outcomes by mutation kind.
@@ -578,7 +645,8 @@ pub enum TransactionalMessagingMetric {
 
 impl TransactionalMessagingMetric {
     /// Complete metric inventory in stable order.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
+        Self::RuntimeFailureTotal,
         Self::OutboxPublishTotal,
         Self::OutboxPublishFailureTotal,
         Self::OutboxPendingDepth,
@@ -595,6 +663,7 @@ impl TransactionalMessagingMetric {
         Self::ConsumerDeadLetterWriteTotal,
         Self::ConsumerSubscribeRetryTotal,
         Self::ConsumerLeaseLostTotal,
+        Self::RelayLeaseLostTotal,
         Self::ConsumerReleaseFailedTotal,
         Self::DlqRedriveTotal,
     ];
@@ -603,6 +672,7 @@ impl TransactionalMessagingMetric {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::RuntimeFailureTotal => "transactional_messaging_runtime_failure_total",
             Self::OutboxPublishTotal => "outbox_publish_total",
             Self::OutboxPublishFailureTotal => "outbox_publish_failure_total",
             Self::OutboxPendingDepth => "outbox_pending_depth",
@@ -619,6 +689,7 @@ impl TransactionalMessagingMetric {
             Self::ConsumerDeadLetterWriteTotal => "consumer_dlx_write_total",
             Self::ConsumerSubscribeRetryTotal => "consumer_subscribe_retry_total",
             Self::ConsumerLeaseLostTotal => "consumer_lease_lost_total",
+            Self::RelayLeaseLostTotal => "outbox_relay_lease_lost_total",
             Self::ConsumerReleaseFailedTotal => "consumer_release_failed_total",
             Self::DlqRedriveTotal => "dlq_redrive_total",
         }
@@ -628,6 +699,7 @@ impl TransactionalMessagingMetric {
     #[must_use]
     pub const fn label_keys(self) -> &'static [&'static str] {
         match self {
+            Self::RuntimeFailureTotal => &["phase", "kind"],
             Self::OutboxPublishTotal => &["status"],
             Self::OutboxPublishFailureTotal => &["stage", "reason", "ambiguous"],
             Self::OutboxRelayTickDurationSeconds => &["phase"],
@@ -644,6 +716,7 @@ impl TransactionalMessagingMetric {
             | Self::InboxOldestStaleClaimAgeSeconds
             | Self::ConsumerClaimInProgressTotal
             | Self::ConsumerLeaseLostTotal
+            | Self::RelayLeaseLostTotal
             | Self::ConsumerReleaseFailedTotal => &[],
         }
     }
@@ -652,6 +725,8 @@ impl TransactionalMessagingMetric {
 /// Closed canonical structured-event identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingEvent {
+    /// One managed runtime provider-I/O failure.
+    RuntimeFailure,
     /// One outbox publish outcome.
     OutboxPublish,
     /// One safe outbox publication failure diagnostic.
@@ -682,6 +757,8 @@ pub enum TransactionalMessagingEvent {
     ConsumerSubscribeRetry,
     /// A consumer lease-loss detection.
     ConsumerLeaseLost,
+    /// A relay lease-loss detection.
+    RelayLeaseLost,
     /// A failed consumer release.
     ConsumerReleaseFailed,
     /// One dead-letter queue mutation outcome.
@@ -690,7 +767,8 @@ pub enum TransactionalMessagingEvent {
 
 impl TransactionalMessagingEvent {
     /// Complete event inventory in stable order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
+        Self::RuntimeFailure,
         Self::OutboxPublish,
         Self::OutboxPublishFailure,
         Self::OutboxBacklog,
@@ -706,6 +784,7 @@ impl TransactionalMessagingEvent {
         Self::ConsumerDeadLetterWrite,
         Self::ConsumerSubscribeRetry,
         Self::ConsumerLeaseLost,
+        Self::RelayLeaseLost,
         Self::ConsumerReleaseFailed,
         Self::DlqMutation,
     ];
@@ -714,6 +793,7 @@ impl TransactionalMessagingEvent {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::RuntimeFailure => "transactional_messaging.runtime.failure",
             Self::OutboxPublish => "transactional_messaging.outbox.publish",
             Self::OutboxPublishFailure => "transactional_messaging.outbox.publish_failure",
             Self::OutboxBacklog => "transactional_messaging.outbox.backlog",
@@ -729,6 +809,7 @@ impl TransactionalMessagingEvent {
             Self::ConsumerDeadLetterWrite => "transactional_messaging.consumer.dead_letter_write",
             Self::ConsumerSubscribeRetry => "transactional_messaging.consumer.subscribe_retry",
             Self::ConsumerLeaseLost => "transactional_messaging.consumer.lease_lost",
+            Self::RelayLeaseLost => "transactional_messaging.outbox.relay_lease_lost",
             Self::ConsumerReleaseFailed => "transactional_messaging.consumer.release_failed",
             Self::DlqMutation => "transactional_messaging.dlq.mutation",
         }
@@ -738,6 +819,7 @@ impl TransactionalMessagingEvent {
     #[must_use]
     pub const fn field_keys(self) -> &'static [&'static str] {
         match self {
+            Self::RuntimeFailure => &["phase", "kind"],
             Self::OutboxPublish => &["status"],
             Self::OutboxPublishFailure => &["stage", "reason", "ambiguous"],
             Self::OutboxBacklog => &[
@@ -757,6 +839,7 @@ impl TransactionalMessagingEvent {
             | Self::InboxBacklogUnavailable
             | Self::ConsumerClaimInProgress
             | Self::ConsumerLeaseLost
+            | Self::RelayLeaseLost
             | Self::ConsumerReleaseFailed => &[],
         }
     }

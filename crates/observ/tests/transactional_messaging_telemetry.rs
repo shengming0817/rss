@@ -1,11 +1,13 @@
 use observ::TransactionalMessagingTelemetryEmitter;
+use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDeadLetterReplayResult, TransactionalMessagingDeadLetterSkipReason,
     TransactionalMessagingDisposition, TransactionalMessagingEmitter, TransactionalMessagingEvent,
     TransactionalMessagingIoOutcome, TransactionalMessagingMetric,
     TransactionalMessagingObservation, TransactionalMessagingOutboxDlxRedriveResult,
     TransactionalMessagingOutboxDlxResolveResult, TransactionalMessagingRelayPhase,
-    TransactionalMessagingSubscribeOutcome, TransactionalMessagingTransactionStatus,
+    TransactionalMessagingRuntimePhase, TransactionalMessagingSubscribeOutcome,
+    TransactionalMessagingTransactionStatus,
 };
 use rss_transactional_messaging::transport::{PublishFailureReason, PublishFailureStage};
 use std::collections::BTreeSet;
@@ -95,6 +97,10 @@ fn unavailable_backlog_retires_every_global_gauge_with_nan() {
 
 fn every_observation_branch() -> Vec<TransactionalMessagingObservation> {
     vec![
+        TransactionalMessagingObservation::RuntimeFailure {
+            phase: TransactionalMessagingRuntimePhase::ConsumerClaim,
+            kind: MessagingErrorKind::Transient,
+        },
         TransactionalMessagingObservation::OutboxPublish {
             status: TransactionalMessagingDisposition::Ack,
         },
@@ -139,6 +145,7 @@ fn every_observation_branch() -> Vec<TransactionalMessagingObservation> {
             outcome: TransactionalMessagingSubscribeOutcome::SubscribeError,
         },
         TransactionalMessagingObservation::ConsumerLeaseLost,
+        TransactionalMessagingObservation::RelayLeaseLost,
         TransactionalMessagingObservation::ConsumerReleaseFailed,
         TransactionalMessagingObservation::DeadLetterReplay {
             result: TransactionalMessagingDeadLetterReplayResult::Inserted,
@@ -156,6 +163,10 @@ fn expected_metrics(
     observation: TransactionalMessagingObservation,
 ) -> Vec<(&'static str, &'static [&'static str])> {
     match observation {
+        TransactionalMessagingObservation::RuntimeFailure { .. } => vec![(
+            "transactional_messaging_runtime_failure_total",
+            &["kind=\"transient\"", "phase=\"consumer_claim\""],
+        )],
         TransactionalMessagingObservation::OutboxPublish { .. } => {
             vec![("outbox_publish_total", &["status=\"ack\""])]
         }
@@ -209,6 +220,9 @@ fn expected_metrics(
         )],
         TransactionalMessagingObservation::ConsumerLeaseLost => {
             vec![("consumer_lease_lost_total", &[])]
+        }
+        TransactionalMessagingObservation::RelayLeaseLost => {
+            vec![("outbox_relay_lease_lost_total", &[])]
         }
         TransactionalMessagingObservation::ConsumerReleaseFailed => {
             vec![("consumer_release_failed_total", &[])]
@@ -346,12 +360,19 @@ fn every_branch_emits_the_exact_static_event_descriptor() {
     });
 
     let captured = captured.lock().unwrap_or_else(|error| error.into_inner());
-    assert_eq!(captured.len(), 19, "captured events: {captured:?}");
+    assert_eq!(captured.len(), 21, "captured events: {captured:?}");
     let actual = captured
         .iter()
         .map(|(name, target, level, fields)| {
             assert_eq!(target, "rss.transactional_messaging");
-            assert_eq!(level, "DEBUG");
+            assert_eq!(
+                level,
+                if name == "transactional_messaging.runtime.failure" {
+                    "ERROR"
+                } else {
+                    "DEBUG"
+                }
+            );
             (name.as_str(), fields.clone())
         })
         .collect::<Vec<_>>();

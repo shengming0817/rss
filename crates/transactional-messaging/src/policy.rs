@@ -10,6 +10,10 @@ pub const DELIVERY_BUDGET_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 /// Canonical operation owned by the transactional messaging core.
 pub const SHUTDOWN_BUDGET_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Minimum supported periodic lease-renewal interval.
+#[cfg(feature = "consumer")]
+pub const LEASE_RENEWAL_INTERVAL_MIN: Duration = Duration::from_millis(1);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 /// Closed `RetryPolicyError` protocol type.
 pub enum RetryPolicyError {
@@ -262,6 +266,7 @@ pub trait Clock: Send + Sync {
 }
 
 /// Monotonic timer used by provider-neutral local retry orchestration.
+#[cfg(feature = "consumer")]
 pub trait RetryTimer: Clock {
     /// Delay without exceeding the unchanged delivery execution deadline.
     fn delay(
@@ -403,18 +408,76 @@ impl AbsoluteDeadline {
     }
 }
 
-/// Complete consumer execution policy: one absolute budget and one bounded local retry schedule.
+#[cfg(feature = "consumer")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+/// Closed validation error for consumer lease renewal.
+pub enum LeaseRenewalPolicyError {
+    /// A provider lease must have positive duration.
+    #[error("consumer lease ttl must be non-zero")]
+    ZeroTtl,
+    /// The lease cannot accommodate the minimum renewal interval.
+    #[error("consumer lease ttl must exceed the minimum renewal interval")]
+    TooShort,
+}
+
+#[cfg(feature = "consumer")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Periodic renewal schedule derived from the provider-authoritative claim TTL.
+pub struct LeaseRenewalPolicy {
+    interval: Duration,
+}
+
+#[cfg(feature = "consumer")]
+impl LeaseRenewalPolicy {
+    /// Derive the renewal interval as one third of the claim TTL with a one millisecond floor.
+    pub fn from_ttl(ttl: Duration) -> Result<Self, LeaseRenewalPolicyError> {
+        if ttl.is_zero() {
+            return Err(LeaseRenewalPolicyError::ZeroTtl);
+        }
+        if ttl <= LEASE_RENEWAL_INTERVAL_MIN {
+            return Err(LeaseRenewalPolicyError::TooShort);
+        }
+        Ok(Self {
+            interval: (ttl / 3).max(LEASE_RENEWAL_INTERVAL_MIN),
+        })
+    }
+
+    /// Return the fixed renewal interval.
+    #[must_use]
+    pub const fn interval(self) -> Duration {
+        self.interval
+    }
+
+    /// Verify this schedule against provider-authoritative remaining lease evidence.
+    #[must_use]
+    pub fn fits(self, remaining: Duration) -> bool {
+        self.interval < remaining
+    }
+}
+
+/// Complete consumer execution policy: one absolute budget, bounded local retry, and lease renewal.
+#[cfg(feature = "consumer")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConsumerExecutionPolicy {
     retry: RetryPolicy,
     budget: ExecutionBudget,
+    lease_renewal: LeaseRenewalPolicy,
 }
 
+#[cfg(feature = "consumer")]
 impl ConsumerExecutionPolicy {
     #[must_use]
     /// `new` operation defined by this protocol type.
-    pub const fn new(retry: RetryPolicy, budget: ExecutionBudget) -> Self {
-        Self { retry, budget }
+    pub const fn new(
+        retry: RetryPolicy,
+        budget: ExecutionBudget,
+        lease_renewal: LeaseRenewalPolicy,
+    ) -> Self {
+        Self {
+            retry,
+            budget,
+            lease_renewal,
+        }
     }
 
     #[must_use]
@@ -427,5 +490,11 @@ impl ConsumerExecutionPolicy {
     /// `budget` operation defined by this protocol type.
     pub const fn budget(self) -> ExecutionBudget {
         self.budget
+    }
+
+    /// Return the provider-derived periodic lease renewal policy.
+    #[must_use]
+    pub const fn lease_renewal(self) -> LeaseRenewalPolicy {
+        self.lease_renewal
     }
 }
