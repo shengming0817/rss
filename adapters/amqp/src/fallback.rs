@@ -14,9 +14,10 @@
 //! 不得误删签名面。
 
 use diport::{
-    AckableSubscriber, DeliveryStream, ManagedResource, PublishRequest, Publisher, PublisherError,
-    ShutdownError, SubscriberError, Topic,
+    AckableSubscriber, DeliveryStream, PublishRequest, Publisher, PublisherError, SubscriberError,
+    Topic,
 };
+use rss_runtime::{ManagedResource, ShutdownError};
 use tokio_util::sync::CancellationToken;
 
 /// AMQP 发布 adapter（sealed-marker；真实 lapin impl 见 `backend` feature）。私有字段 ⇒ 外部不可构造。

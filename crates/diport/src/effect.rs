@@ -237,7 +237,6 @@ classify_ports! {
     async_send DynSubscriber => WorkflowEffect;
     async_send DynLeaderElector => WorkflowEffect;
     async_send DynLockStore => WorkflowEffect;
-    async_send DynManagedResource => WorkflowEffect;
     async_send DynSagaTenantSource => WorkflowEffect;
 
     sync_obj Clock => ReadEffect;

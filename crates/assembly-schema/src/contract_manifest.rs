@@ -11,7 +11,7 @@
 //! duration 用 `u64` 使「负 duration」不可表达、嵌套结构 `deny_unknown_fields`。
 //!
 //! event 订阅声明（#1120/#1822）：`[[subscriptions]]` 声明 event 契约的 consumer 域、consumer group
-//! 与非可选 closed `externalEffectPolicy`，由 consumer tooling 派生 typed `SubscriptionSpec`，供 bootstrap 接线消费
+//! 与非可选 closed `externalEffectPolicy`，由仓外 consumer tooling 派生 typed `SubscriptionSpec` 并接线
 //! （EVENT-ACTIVE-SUB-01 / SUBSCRIPTION-EXTERNAL-EFFECT-POLICY-01 守）。
 //! `#[serde(default)]` 将未声明 subscriptions 精确表达为空集合；active 非空约束由 validate R14 承担。
 
@@ -574,7 +574,7 @@ pub enum HttpHeaderMode {
 // reason: 三标准投递保证的规范命名天然共享后缀 "Once"（at-least/most/exactly-once），enum_variant_names
 // 在此为误报；保留全描述式命名（同 ConsistencyLevel）优先于改名（改名须连带改 serde wire 值，得不偿失）。
 // stock 风格 lint、非 RSS 自定义治理的 item-level carve-out。carve-out 登记：
-// 项目 ADR registry 尚未建立（同 crates/bootstrap/src/shutdown.rs 既有先例），暂记于此，待 registry 落地迁入。
+// 项目 ADR registry 尚未建立，暂记于此，待 registry 落地迁入。
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -680,7 +680,7 @@ pub struct SagaStep {
 /// `[subscriptions.topology]`：该 consumer 的 L2 topology gate，声明 partition key 策略与 readiness 要求。
 /// 三者均为必填，未知子键由 `deny_unknown_fields` 拒（CONTRACT-FREEZE-01 扩展）。
 ///
-/// 供 consumer tooling 派生订阅注册 glue（`SUBSCRIPTIONS: &[SubscriptionSpec]`）；bootstrap 消费 glue 接线。
+/// 供仓外 consumer tooling 派生并接线订阅注册 glue（`SUBSCRIPTIONS: &[SubscriptionSpec]`）。
 /// EVENT-ACTIVE-SUB-01（R12）：active event 必须 `!subscriptions.is_empty()`。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

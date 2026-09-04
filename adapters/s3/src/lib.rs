@@ -1,7 +1,7 @@
 //! s3 adapter —— RSS workspace（W 阶段真身，#1011 对象存储切片）。
 //!
 //! 单一 `S3Store`：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-10）。
+//! - 始终 `impl rss_runtime::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-10）。
 //! - `backend` feature 开时增补 `impl diport::ObjectStore`（aws-sdk-s3 put/get/delete）。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入 aws-sdk 依赖。
@@ -30,8 +30,8 @@ pub use private_ca::{PrivateCaS3BuildError, PrivateCaS3ClientFactory};
 use std::sync::Arc;
 
 #[cfg(feature = "backend")]
-use diport::DynManagedResource;
-use diport::{ManagedResource, ShutdownError};
+use rss_runtime::DynManagedResource;
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// S3 对象存储 adapter（sealed-marker）。
 ///
@@ -145,7 +145,7 @@ impl diport::ObjectStore for S3Store {
     }
 
     async fn shutdown(&self) -> Result<(), diport::ObjectStoreError> {
-        // reason: 同 ManagedResource::shutdown——无 infra 句柄需释放。port-local 关闭路径（参 diport rustdoc）。
+        // reason: 同 ManagedResource::shutdown——无 infra 句柄需释放。port-local 关闭路径。
         Ok(())
     }
 }
@@ -158,7 +158,7 @@ mod smoke {
     //! 始终；ObjectStore 于 backend）；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
-    fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
+    fn assert_managed_resource<T: rss_runtime::ManagedResource>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_managed_resource() {
@@ -189,7 +189,8 @@ mod backend_tests {
     use aws_smithy_mocks::{
         MockResponseInterceptor, Rule, RuleMode, create_mock_http_client, mock,
     };
-    use diport::{ManagedResource, ObjectKey, ObjectPayload, ObjectStore};
+    use diport::{ObjectKey, ObjectPayload, ObjectStore};
+    use rss_runtime::ManagedResource;
 
     const BUCKET: &str = "test-bucket";
 

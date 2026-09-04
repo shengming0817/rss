@@ -53,7 +53,7 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # DLX archive provider observations carry a fixed SHA-256 integrity checksum.
 sha2 = { workspace = true }
-# Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 bootstrap shutdown 同源）。
+# Subscriber::subscribe 取消信号：tokio_util::sync::CancellationToken（与 rss-runtime shutdown 同源）。
 tokio-util = { workspace = true }
 
 # SecretMaterial ZeroizeOnDrop：secret 材料 drop 时自动清零（零信任，类型层 Hard）。

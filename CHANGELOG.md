@@ -6,6 +6,16 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-runtime 0.1.0
+
+- Establish the sole provider-neutral owner for managed resources and tasks, phase-typed startup
+  and launch registration, fallible dedicated-thread workers, and bounded LIFO
+  shutdown.
+- Require one positive total drain budget and preserve exactly-once background draining when the
+  stack, or a caller waiting for shutdown, is cancelled.
+- Remove every former lifecycle owner path and the obsolete composition crates without aliases,
+  deprecated re-exports, shims, conversions, or compatibility features.
+
 ### rss-redact 0.1.0
 
 - Establish the sole public owner for diagnostic-output redaction, `SecretText`, `RedactedSource`,

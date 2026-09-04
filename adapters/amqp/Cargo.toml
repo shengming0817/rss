@@ -22,6 +22,7 @@ consistency = { path = "../../crates/consistency" }
 primitives = { path = "../../crates/primitives" }
 # 实现 diport 已冻 DI port trait（Publisher + Subscriber + ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 # Subscriber::subscribe 签名需 CancellationToken（fallback + 真实 impl 都用），取消即流终止。
 tokio-util = { workspace = true }
 # 真实 broker I/O：lapin（AMQP client）+ futures（Consumer Stream 适配 take_until/filter_map）

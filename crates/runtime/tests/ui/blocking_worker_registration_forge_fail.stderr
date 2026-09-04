@@ -1,0 +1,11 @@
+error[E0451]: fields `name`, `shutdown_timeout` and `run` of struct `ManagedBlockingWorkerRegistration` are private
+ --> tests/ui/blocking_worker_registration_forge_fail.rs:3:9
+  |
+2 |     let _forged = rss_runtime::ManagedBlockingWorkerRegistration {
+  |                   ---------------------------------------------- in this type
+3 |         name: "forged".to_owned(),
+  |         ^^^^ private field
+4 |         shutdown_timeout: std::time::Duration::from_secs(1),
+  |         ^^^^^^^^^^^^^^^^ private field
+5 |         run: None,
+  |         ^^^ private field

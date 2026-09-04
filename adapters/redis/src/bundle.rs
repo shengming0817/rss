@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use consistency::{IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState};
 use deadpool_redis::{Manager, Pool, Runtime};
-use diport::{DynCasStore, DynLockStore, DynManagedResource, ManagedResource, ShutdownError};
+use diport::{DynCasStore, DynLockStore};
+use rss_runtime::{DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::{InvalidClaimTtl, RedisStore, claimer};
 use crate::{

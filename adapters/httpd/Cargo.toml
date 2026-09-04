@@ -9,16 +9,17 @@ publish = false
 workspace = true
 
 # HTTP 传输 adapter（对标 adapters/grpc 的 GrpcServer）：bind TcpListener + axum::serve + graceful
-# shutdown，impl diport::ManagedResource。adapter 是 DI port impl 的 blessed 站点（rss_diport_impl_allowlist
-# DIPORT-IMPL-ALLOWLIST-01：crates/* 服务层不可 impl ManagedResource）。组合根经 ShutdownStack 注入 token。
+# shutdown，impl rss_runtime::ManagedResource。adapter 是 infra port impl 的 blessed 站点（rss_diport_impl_allowlist
+# DIPORT-IMPL-ALLOWLIST-01：crates/* 服务层不可 impl ManagedResource）。组合根经 rss-runtime transaction 注入 token。
 #   axum       = serve（axum::serve(TcpListener, IntoMakeService).with_graceful_shutdown）；默认含 tokio backend
 #   tokio      = rt（spawn serve task）+ net（TcpListener::bind）+ sync（Mutex<Option<JoinHandle>>）
-#   tokio-util = CancellationToken——graceful shutdown 经 bootstrap ShutdownStack token funnel
-#                （register_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
+#   tokio-util = CancellationToken——graceful shutdown 经 rss-runtime transaction token funnel
+#                （stage_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
 #   tracing    = 结构化日志（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums 规范，禁 println!）
 #   thiserror  = 构造期 / shutdown 错误枚举（：&'static str message，无 PII）
 [dependencies]
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 listenerlifecycle = { path = "../../crates/listenerlifecycle" }
 httpserve = { path = "../../crates/httpserve" }
 tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0" }

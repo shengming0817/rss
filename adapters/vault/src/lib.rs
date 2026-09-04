@@ -1,7 +1,7 @@
 //! vault adapter —— RSS workspace（Transit 与 caller-owned CSR PKI transport）。See `Cargo.toml` and `deny.toml`.
 //!
 //! `VaultSigner` / `VaultKeyProvider`（sealed-marker）：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-12）。
+//! - 始终 `impl rss_runtime::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-12）。
 //! - `backend` feature 开时增补 `impl diport::Signer`（HashiCorp Vault Transit `sign`，见 `transit` 模块）。
 //! - `backend` feature 开时增补 `impl diport::KeyProvider`（HashiCorp Vault Transit `encrypt`/`decrypt`/
 //!   `rewrap`，见 `transit` 模块）。
@@ -75,7 +75,7 @@ pub use secret_resolver::{
 #[cfg(feature = "backend")]
 use std::time::Duration;
 
-use diport::{ManagedResource, ShutdownError};
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// Vault 认证 token（opaque newtype）。底层 `Zeroizing<String>` 在 drop 时清零密钥物料（F5，杜绝 token 残留
 /// 进程内存）；`Debug` 恒输出 `VaultToken(<redacted>)`——即便 [`VaultSigner`] 将来误加 `#[derive(Debug)]` 也不
@@ -378,7 +378,7 @@ impl diport::KeyProvider for VaultKeyProvider {
 mod tests {
     use super::*;
 
-    fn assert_managed<T: diport::ManagedResource>() {}
+    fn assert_managed<T: rss_runtime::ManagedResource>() {}
 
     #[test]
     fn generic_key_provider_is_a_managed_resource() {

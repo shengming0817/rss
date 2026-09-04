@@ -531,11 +531,6 @@ impl RuntimePlanFingerprint {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn from_validated(value: CanonicalSha256Digest) -> Self {
-        Self(value)
-    }
 }
 
 /// Closed RuntimePlan protocol error. Values from candidate facts are never formatted.

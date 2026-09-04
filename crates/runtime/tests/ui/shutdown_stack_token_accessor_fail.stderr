@@ -1,0 +1,10 @@
+error[E0624]: method `root_token` is private
+ --> tests/ui/shutdown_stack_token_accessor_fail.rs:8:27
+  |
+8 |     let _raw_root = stack.root_token();
+  |                           ^^^^^^^^^^ private method
+  |
+ ::: src/shutdown.rs
+  |
+  |     fn root_token(&self) -> &CancellationToken {
+  |     ------------------------------------------ private method defined here

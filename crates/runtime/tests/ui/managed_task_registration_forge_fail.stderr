@@ -1,0 +1,21 @@
+warning: unreachable expression
+ --> tests/ui/managed_task_registration_forge_fail.rs:4:15
+  |
+3 |         start: todo!(),
+  |                ------- any code following this expression is unreachable
+4 |         make: todo!(),
+  |               ^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `start`, `make` and `status` of struct `ManagedTaskRegistration` are private
+ --> tests/ui/managed_task_registration_forge_fail.rs:3:9
+  |
+2 |     let _forged = rss_runtime::ManagedTaskRegistration {
+  |                   ------------------------------------ in this type
+3 |         start: todo!(),
+  |         ^^^^^ private field
+4 |         make: todo!(),
+  |         ^^^^ private field
+5 |         status: todo!(),
+  |         ^^^^^^ private field

@@ -1,7 +1,7 @@
 //! redis adapter —— RSS workspace（W 阶段真身，#1009 幂等 claimer 切片）。
 //!
 //! 单一 `RedisStore` 资源 + typed handles：
-//! - `RedisStore` 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-09）。
+//! - `RedisStore` 始终 `impl rss_runtime::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-09）。
 //! - `backend` feature 开时暴露 `RedisInboxStore: consistency::InboxStore`（`SET NX PX` claimer）。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入任何 infra 依赖。
@@ -37,7 +37,7 @@ pub use saga_effect_fixture::{
     RedisSagaEffectObservation, RedisSagaEffectProbeOutcome,
 };
 
-use diport::{ManagedResource, ShutdownError};
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// Redis adapter store（sealed-marker）。
 ///
@@ -93,7 +93,7 @@ mod smoke {
     //! 去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
-    fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
+    fn assert_managed_resource<T: rss_runtime::ManagedResource>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {

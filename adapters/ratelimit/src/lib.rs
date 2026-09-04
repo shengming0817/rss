@@ -1,7 +1,7 @@
 //! ratelimit — in-mem keyed 限流 DI port provider（W 阶段，#1011）。
 //!
 //! impl `diport::RateLimiter`（GCRA keyed 限流，对标 GoCell `middleware.RateLimiter` / Go `x/time/rate`
-//! token bucket）+ `diport::ManagedResource`（in-mem 无 infra 资源，shutdown=Ok，对标 `adapters/memory`）。
+//! token bucket）+ `rss_runtime::ManagedResource`（in-mem 无 infra 资源，shutdown=Ok，对标 `adapters/memory`）。
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints；不 invoke dynosaur 宏——只 import diport trait）。
 //!
 //! 时钟：用 governor 自带 monotonic 时钟（`DefaultClock`=QuantaClock），**不**经 `diport::Clock`
@@ -9,15 +9,13 @@
 //! disallowed-methods。测试经 `FakeRelativeClock` 注入确定性时间。
 //! ref: antifuchs/governor src/state/keyed.rs@v0.8.1
 
-use diport::{
-    ManagedResource, RateLimitDecision, RateLimitError, RateLimitKey, RateLimitQuota, RateLimiter,
-    ShutdownError,
-};
+use diport::{RateLimitDecision, RateLimitError, RateLimitKey, RateLimitQuota, RateLimiter};
 use governor::Quota;
 use governor::RateLimiter as GovRateLimiter;
 use governor::clock::{Clock, DefaultClock};
 use governor::middleware::NoOpMiddleware;
 use governor::state::keyed::DashMapStateStore;
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// keyed governor 限流器（DashMap 状态 + per-clock NoOp 中间件）。MW 须显式 `NoOpMiddleware<C::Instant>`
 /// （struct 默认 `NoOpMiddleware<QuantaInstant>` 不满足泛型 `C` 的 `RateLimitingMiddleware<C::Instant>` 约束）。

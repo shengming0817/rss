@@ -8,19 +8,20 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 实现 DI-infra port（diport：ManagedResource 始终）。W 阶段真身只用 diport（必填）+
+# adapter 实现 DI-infra port，并由 rss-runtime 持有 ManagedResource。W 阶段真身只用 diport（必填）+
 # backend 门控的 tonic 后端；G0 stub 预连的基础/引擎 crate（vocab/ids/secure/…）本切片不用，
 # 已裁；不预连全层（cargo-udeps 守）。
 [dependencies]
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 # gRPC server scaffold（plaintext，无 TLS）；`serve_with_token` 默认拒绝 non-loopback，
 # 非 loopback 只能通过显式命名的 `serve_insecure_with_token` opt-in：
 #   tonic      = server+router（Server::builder / add_service / serve_with_incoming_shutdown）
 #   tonic-health = 标准 gRPC 健康服务（health_reporter，无需直接依赖 prost）
 #   tokio      = rt（spawn serve task）+ net（TcpListener::bind）+ sync（Mutex<Option<JoinHandle>>）
 #   tokio-stream = TcpListenerStream（serve_with_incoming_shutdown 需 incoming stream）
-#   tokio-util = CancellationToken——graceful shutdown 经 bootstrap ShutdownStack token funnel
-#                （register_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
+#   tokio-util = CancellationToken——graceful shutdown 经 rss-runtime transaction token funnel
+#                （stage_with_token 注入 child token，阶段1 广播即 serve 退出，SHUTDOWN-TOKEN-FUNNEL-01）
 #   tracing    = 结构化日志（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums 规范，禁 println!）
 #   thiserror  = 构造期 / shutdown 错误枚举（：&'static str message，无 PII）
 tonic        = { workspace = true, optional = true, features = ["server", "router"] }

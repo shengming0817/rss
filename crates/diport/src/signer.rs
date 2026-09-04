@@ -7,7 +7,7 @@ use rss_redact::RedactedSource;
 
 /// 签名失败。
 ///
-/// PII 边界（替代 `anyhow` 暴露在公共 port，与 [`crate::ShutdownError`] 同范式）：`Display` 仅输出
+/// PII 边界（替代 `anyhow` 暴露在公共 port，与 `rss_runtime::ShutdownError` 同范式）：`Display` 仅输出
 /// provider 无关的安全摘要常量（不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display`
 /// 固定 `<redacted>`、`Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed），
 /// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。`rss_redact::redact_error` funnel 取顶层 Display、不遍历 source 链。
@@ -118,8 +118,8 @@ pub trait SignerLocal {
 
     /// 异步释放 provider 资源（无 async Drop；infra teardown 显式异步）。
     ///
-    /// 与 [`crate::ManagedResource::shutdown`] 的关系：有 infra 资源（连接 / 句柄）的 signer adapter
-    /// 应**同时** `impl ManagedResource`，由 `bootstrap::ShutdownStack` 统一逆序编排关闭；本方法是
+    /// 与 `rss_runtime::ManagedResource::shutdown` 的关系：有 infra 资源（连接 / 句柄）的 signer adapter
+    /// 应**同时** `impl ManagedResource`，由 `rss_runtime::ShutdownStack` 统一逆序编排关闭；本方法是
     /// port-local 关闭路径（非 ShutdownStack 编排场景，或 provider 自身的轻量释放）。
     async fn shutdown(&self) -> Result<(), SignerError>;
 }

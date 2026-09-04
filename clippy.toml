@@ -14,14 +14,7 @@ disallowed-methods = [
   { path = "std::time::Instant::duration_since", reason = "同上：禁绕过 Clock 的时延计算" },
   { path = "std::time::SystemTime::elapsed", reason = "同上：禁直接 elapsed" },
   { path = "tokio::time::Instant::elapsed", reason = "同上（tokio 变体）", allow-invalid = true },
-  # 凭据出口收口（Medium）：AmqpUrl::expose() 返回含 user:pass 的原始 broker URL，仅组合根交 lapin
-  # 连接时受控调用；域/服务 crate 禁调（默认拒，组合根/sanctioned 测试 callsite item-level #[allow]）。
-  # 见 bootstrap::eventtransport rustdoc。allow-invalid：非依赖 bootstrap 的 crate 解析不到此路径。
-  { path = "bootstrap::eventtransport::AmqpUrl::expose", reason = "凭据原文出口仅组合根受控调用；见 eventtransport rustdoc", allow-invalid = true },
   { path = "secure::AmqpEndpoint::expose", reason = "凭据原文出口仅 AMQP adapter connect callsite 受控调用；生产路径必须先经 typed endpoint", allow-invalid = true },
-  # 对称守卫：RedisUrl::expose() 返回含 user:pass 的原始 Redis URL，仅组合根交 redis adapter 连接时受控调用。
-  # 见 bootstrap::replaydeps rustdoc。allow-invalid：非依赖 bootstrap 的 crate 解析不到此路径。
-  { path = "bootstrap::replaydeps::RedisUrl::expose", reason = "凭据原文出口仅组合根受控调用；见 replaydeps rustdoc", allow-invalid = true },
   { path = "secure::RedisEndpoint::expose", reason = "凭据原文出口仅 Redis pool builder callsite 受控调用；生产路径必须先经 typed endpoint", allow-invalid = true },
 ]
 

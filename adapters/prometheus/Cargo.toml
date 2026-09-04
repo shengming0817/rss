@@ -22,6 +22,7 @@ workspace = true
 # dev-dependencies——lib 不直接引用 `metrics::`，避免 cargo-udeps 多余依赖。
 [dependencies]
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 metrics-exporter-prometheus = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 

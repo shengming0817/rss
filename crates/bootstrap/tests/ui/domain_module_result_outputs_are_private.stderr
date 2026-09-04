@@ -1,5 +1,0 @@
-error[E0616]: field `outputs` of struct `DomainModuleResult` is private
- --> tests/ui/domain_module_result_outputs_are_private.rs:5:20
-  |
-5 |     let _ = result.outputs;
-  |                    ^^^^^^^ private field

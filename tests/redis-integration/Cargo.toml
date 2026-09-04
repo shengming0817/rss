@@ -9,6 +9,7 @@ publish = false
 consistency = { path = "../../crates/consistency" }
 deadpool-redis = { workspace = true }
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 redis-adapter = { path = "../../adapters/redis", features = ["integration"] }
 rss-request-context = { workspace = true }
 secure = { path = "../../crates/secure" }

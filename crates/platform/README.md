@@ -6,7 +6,7 @@ typed `Contract` markers and async `Handler` implementations; the host supplies 
 
 The crate deliberately contains no JWT/JWKS verification, provider catalog, process lifecycle,
 runtime plan, cancellation authority, or inventory publisher. Those remain owned by official
-integrations, RuntimeExec, and the composition root.
+integrations and the composition root.
 Building an application yields a dispatcher and an instance-bound `TrustedContextMinter`. The
 integration keeps that non-cloneable minter private and uses it only after validating input. Dispatch
 requires the resulting move-only `AdmittedRequest`; callers cannot enter dispatch by assembling an

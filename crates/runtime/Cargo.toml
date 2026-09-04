@@ -1,0 +1,32 @@
+[package]
+name = "rss-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Provider-neutral lifecycle ownership and bounded shutdown for RSS"
+categories = ["asynchronous", "concurrency"]
+keywords = ["lifecycle", "shutdown", "cancellation", "runtime"]
+publish = ["crates-io"]
+
+[features]
+default = []
+
+[dependencies]
+dynosaur = { workspace = true }
+futures = { workspace = true }
+rss-redact.workspace = true
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+trait-variant = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+trybuild = { workspace = true }
+
+[lints]
+workspace = true

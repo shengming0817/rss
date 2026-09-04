@@ -1,7 +1,7 @@
 //! otel adapter —— RSS workspace（W 阶段真身，#1011 可观测性导出切片）。
 //!
 //! 单一 `OtelExporter`：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-05）。
+//! - 始终 `impl rss_runtime::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-05）。
 //! - `backend` feature 开时增补 OTLP/gRPC trace 导出 pipeline（持有 `SdkTracerProvider`）+
 //!   `tracing-opentelemetry` 桥接 [`OtelExporter::layer`] + `observ::MetricLabel` → otel `KeyValue` 映射。
 //!
@@ -80,7 +80,7 @@ pub fn trace_ids_for_span(
     })
 }
 
-use diport::{ManagedResource, ShutdownError};
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// OpenTelemetry 导出 adapter（sealed-marker）。
 ///
@@ -138,11 +138,11 @@ impl ManagedResource for OtelExporter {
         {
             // 关 exporter pipeline：SdkTracerProvider::shutdown 内部先 flush 未导出 span 再关传输。
             // 它是**同步阻塞**调用（等 batch worker thread flush+ack，自带 5s 内部超时，见 opentelemetry_sdk
-            // 0.32 provider.rs）。直接在 async fn 内调用会占住 tokio worker，且 bootstrap 的 per-resource
+            // 0.32 provider.rs）。直接在 async fn 内调用会占住 tokio worker，且 rss-runtime 的 per-resource
             // tokio::time::timeout 无法在同步阻塞点取消——故 spawn_blocking 移出 executor，`.await` 提供可被
             // 外层 timeout 作用的让出点。错误（JoinError / OTelSdkError）经 rss_redact::RedactedSource 脱敏。
             let provider = self.provider.clone();
-            diport::join_owned_task(move || provider.shutdown())
+            rss_runtime::join_owned_task(move || provider.shutdown())
                 .await
                 .map_err(ShutdownError::from_join_error)?
                 .map_err(ShutdownError::new)?;
@@ -162,7 +162,7 @@ mod smoke {
     //! （ManagedResource 始终）；去掉该 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
-    fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
+    fn assert_managed_resource<T: rss_runtime::ManagedResource>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_managed_resource() {
@@ -178,8 +178,8 @@ mod backend_tests {
     //! tracing span → 桥接 Layer → OTLP 导出 round-trip / observ::MetricLabel→KeyValue 映射 /
     //! OTLP/gRPC provider 构建 + 生命周期（name + shutdown）。
     use super::{OtelEndpoint, OtelExporter, TelemetryResource, build_otlp_provider, to_key_value};
-    use diport::ManagedResource;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
+    use rss_runtime::ManagedResource;
     use rstest::rstest;
     use tracing_subscriber::layer::SubscriberExt as _;
 

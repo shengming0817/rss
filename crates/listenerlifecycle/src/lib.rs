@@ -8,7 +8,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use diport::{ManagedTask, ManagedTaskRegistration, ShutdownError};
+use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -37,28 +37,27 @@ impl BoundTcpListener {
         self.local_addr
     }
 
-    /// Consume the socket and mint the only registration accepted by RuntimeExec's listener funnel.
-    pub fn spawn<F, Make>(
+    /// Consume the socket and mint an unstarted registration for the runtime task funnel.
+    pub fn into_registration<F, Make>(
         self,
-        token: CancellationToken,
         shutdown_timeout: Duration,
         make: Make,
     ) -> ListenerTaskRegistration
     where
         F: Future<Output = Result<(), ShutdownError>> + Send + 'static,
-        Make: FnOnce(TcpListener, CancellationToken) -> F,
+        Make: FnOnce(TcpListener, CancellationToken) -> F + Send + 'static,
     {
         let (start, _) = ManagedTask::prepare(self.name, shutdown_timeout);
         let listener = self.listener;
-        let task = start.spawn(token, move |managed_token| make(listener, managed_token));
         ListenerTaskRegistration {
-            registration: task.into_registration(),
+            registration: start
+                .into_registration(move |managed_token| make(listener, managed_token)),
         }
     }
 }
 
 /// Opaque proof that a managed task consumed a real bound TCP listener.
-#[must_use = "listener registration must enter RuntimeExec's listener funnel"]
+#[must_use = "listener registration must enter the runtime task funnel"]
 pub struct ListenerTaskRegistration {
     registration: ManagedTaskRegistration,
 }

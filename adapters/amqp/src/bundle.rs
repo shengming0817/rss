@@ -22,8 +22,8 @@
 //!
 //! ## 单源装配（`runtime_resources`）
 //!
-//! adapter **不依赖 `bootstrap`**（与 pg adapter 一致），故经 [`AmqpRuntimeDeps::runtime_resources`] 单源
-//! 派生 `Vec<Box<DynManagedResource>>`（仅 `diport` 类型），组合根
+//! adapter 不依赖 composition owner（与 pg adapter 一致），故经 [`AmqpRuntimeDeps::runtime_resources`] 单源
+//! 派生 `Vec<Box<DynManagedResource>>`（仅 `rss-runtime` 生命周期类型），组合根
 //! `module.resources.extend(deps.amqp.runtime_resources())` 装配进 `DomainModuleResult.resources`。
 //! 当前产 publisher-guard + subscriber-guard（各关其 connection）；杜绝逐 channel 手写。
 //!
@@ -35,9 +35,8 @@
 //!
 //! ## Live 接入
 //!
-//! amqp bundle live 接入已落地（#1251）：组合根 `runtime` 经 topology-gated resolver
-//! （`bootstrap::eventtransport::resolve`）注入 publisher（outbox relay 发布）+ subscriber（consumer 订阅）
-//! 到 `eventexec`。
+//! 消费方负责选择 topology，并把 publisher（outbox relay 发布）与 subscriber（consumer 订阅）
+//! 注入其 runtime。
 //!
 //! ## 测试覆盖
 //!
@@ -52,10 +51,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diport::{
-    AckableSubscriber, DeliveryStream, DynAckableSubscriber, DynManagedResource, DynPublisher,
-    ManagedResource, PublishRequest, Publisher, PublisherError, ShutdownError, SubscriberError,
-    Topic,
+    AckableSubscriber, DeliveryStream, DynAckableSubscriber, DynPublisher, PublishRequest,
+    Publisher, PublisherError, SubscriberError, Topic,
 };
+use rss_runtime::{DynManagedResource, ManagedResource, ShutdownError};
 use tokio_util::sync::CancellationToken;
 
 use crate::conn::AmqpConnectError;
@@ -277,7 +276,7 @@ impl AmqpRuntimeDeps {
 
     /// **单源** managed-resource/rollback 派生：组合根
     /// `module.resources.extend(deps.amqp.runtime_resources())` 即装配该 vhost 全部受管连接
-    /// （publisher-guard + subscriber-guard，各关其 connection），杜绝逐 channel 手写 `register_detached`（D5）。
+    /// （publisher-guard + subscriber-guard，各关其 connection），杜绝逐 channel 手写生命周期注册（D5）。
     #[must_use]
     pub fn runtime_resources(&self) -> Vec<Box<DynManagedResource<'static>>> {
         vec![
@@ -494,7 +493,7 @@ mod tests {
             move |first| async move {
                 assert_eq!(first, "publisher");
                 cleanup_evidence.store(true, Ordering::SeqCst);
-                Err(diport::ShutdownError::new(std::io::Error::other(
+                Err(rss_runtime::ShutdownError::new(std::io::Error::other(
                     "cleanup-secondary",
                 )))
             },

@@ -8,12 +8,13 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 真身（#1011 可观测性导出）：始终 impl diport::ManagedResource；`backend` feature 开时增补
+# adapter 真身（#1011 可观测性导出）：始终 impl rss_runtime::ManagedResource；`backend` feature 开时增补
 # OTLP/gRPC trace 导出 pipeline + tracing-opentelemetry 桥接 Layer + observ::MetricLabel→KeyValue 映射。
 # 后端经 feature 门控（default build 轻量、仍保 freeze smoke 类型断言），与 s3/redis/amqp 同范式
 # （仅声明真正用到的 dep，cargo-udeps 守；冻结期预声明的未用基础 path 依赖在 W 阶段按 s3 先例剪除）。
 [dependencies]
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 # OTLP/gRPC trace 导出后端（仅 backend feature）：exporter pipeline + SDK provider + tracing 桥接 Layer。
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
@@ -32,7 +33,7 @@ url = { workspace = true, optional = true }
 # pipeline 构建失败的 typed 错误（fail-fast，经 rss_redact::RedactedSource 脱敏）。
 thiserror = { workspace = true, optional = true }
 # ManagedResource::shutdown：SdkTracerProvider::shutdown 是同步阻塞（batch worker flush）；spawn_blocking
-# 移出 async executor，使 bootstrap 的 per-resource timeout 可在 .await 让出点生效（见 lib.rs shutdown）。
+# 移出 async executor，使 rss-runtime 的 per-resource timeout 可在 .await 让出点生效（见 lib.rs shutdown）。
 tokio = { workspace = true, optional = true }
 
 [features]

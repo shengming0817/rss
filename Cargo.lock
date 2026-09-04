@@ -107,6 +107,7 @@ dependencies = [
  "rss-eventing",
  "rss-redact",
  "rss-request-context",
+ "rss-runtime",
  "runctx",
  "rustls-pki-types",
  "secure",
@@ -132,6 +133,7 @@ dependencies = [
  "primitives",
  "rss-eventing",
  "rss-request-context",
+ "rss-runtime",
  "secure",
  "testkit",
  "tokio",
@@ -231,7 +233,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "jsonschema",
- "runtimeinventorymint",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -1007,29 +1008,6 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "time",
-]
-
-[[package]]
-name = "bootstrap"
-version = "0.0.0"
-dependencies = [
- "axum",
- "consistency",
- "diport",
- "httpserve",
- "ids",
- "primitives",
- "rss-redact",
- "runctx",
- "secure",
- "support",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "trybuild",
- "vocab",
 ]
 
 [[package]]
@@ -1870,6 +1848,7 @@ dependencies = [
  "rss-eventing",
  "rss-redact",
  "rss-request-context",
+ "rss-runtime",
  "rss-trace-context",
  "serde",
  "serde_json",
@@ -2250,6 +2229,7 @@ name = "grpc"
 version = "0.0.0"
 dependencies = [
  "diport",
+ "rss-runtime",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -2576,6 +2556,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
+ "rss-runtime",
  "rss-trace-context",
  "thiserror",
  "tokio",
@@ -3121,6 +3102,7 @@ name = "listenerlifecycle"
 version = "0.0.0"
 dependencies = [
  "diport",
+ "rss-runtime",
  "tokio",
  "tokio-util",
 ]
@@ -3620,6 +3602,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "rss-redact",
+ "rss-runtime",
  "rstest",
  "thiserror",
  "tokio",
@@ -3899,6 +3882,7 @@ dependencies = [
  "futures",
  "rcgen",
  "rss-request-context",
+ "rss-runtime",
  "rustls",
  "rustls-pki-types",
  "sqlx",
@@ -4013,6 +3997,7 @@ dependencies = [
  "diport",
  "metrics",
  "metrics-exporter-prometheus",
+ "rss-runtime",
  "thiserror",
  "tokio",
 ]
@@ -4240,6 +4225,7 @@ version = "0.0.0"
 dependencies = [
  "diport",
  "governor",
+ "rss-runtime",
  "tokio",
 ]
 
@@ -4312,6 +4298,7 @@ dependencies = [
  "diport",
  "rss-redact",
  "rss-request-context",
+ "rss-runtime",
  "rstest",
  "secure",
  "sha2 0.10.9",
@@ -4331,6 +4318,7 @@ dependencies = [
  "diport",
  "redis-adapter",
  "rss-request-context",
+ "rss-runtime",
  "secure",
  "sha2 0.10.9",
  "testkit",
@@ -4604,6 +4592,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-runtime"
+version = "0.1.0"
+dependencies = [
+ "dynosaur",
+ "futures",
+ "rss-redact",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "trait-variant",
+ "trybuild",
+]
+
+[[package]]
 name = "rss-trace-context"
 version = "0.1.0"
 dependencies = [
@@ -4656,39 +4659,6 @@ dependencies = [
  "uuid",
  "vocab",
 ]
-
-[[package]]
-name = "runtimeexec"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "assembly-schema",
- "bootstrap",
- "diport",
- "eventexec",
- "listenerlifecycle",
- "primitives",
- "rss-eventing",
- "rss-platform",
- "rss-redact",
- "runtimeinventorymint",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "sha2 0.10.9",
- "static_assertions",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "trybuild",
- "zeroize",
-]
-
-[[package]]
-name = "runtimeinventorymint"
-version = "0.0.0"
 
 [[package]]
 name = "rustc-hash"
@@ -4822,6 +4792,7 @@ dependencies = [
  "rss-data-protection",
  "rss-redact",
  "rss-request-context",
+ "rss-runtime",
  "secure",
  "thiserror",
  "tokio",
@@ -6194,16 +6165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6213,15 +6174,12 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]
@@ -6386,6 +6344,7 @@ dependencies = [
  "rss-data-protection",
  "rss-redact",
  "rss-request-context",
+ "rss-runtime",
  "serde",
  "serde_json",
  "sha2 0.10.9",

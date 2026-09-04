@@ -27,15 +27,8 @@ mod retry;
 
 pub mod consumer_worker;
 pub use consumer_worker::{
-    EVENT_CONSUMER_PROBE, run_ackable_subscription_loop, spawn_consumer_ackable_subscriber,
-    spawn_relay,
-};
-
-pub mod managed_blocking_worker;
-pub use managed_blocking_worker::{
-    ManagedBlockingWorker, managed_panic_scope_active, spawn_on_dedicated_runtime,
-    spawn_on_dedicated_runtime_with_build_failure,
-    spawn_on_dedicated_runtime_with_failure_observers,
+    EVENT_CONSUMER_PROBE, consumer_ackable_subscriber_registration, relay_registration,
+    run_ackable_subscription_loop,
 };
 
 pub mod relay;

@@ -19,7 +19,7 @@ test-group = "trybuild"
 [[profile.default.overrides]]
 filter = 'package(/-integration$/)'
 test-group = "integration"
-# Live-provider assertions complete well within one minute. Image preparation must not turn one
-# stuck fixture command into a 300-second wait followed by an identical retry.
+# Live-provider assertions normally complete well within one minute, but container and broker
+# startup can cross that boundary under coverage load. Keep the fixture bounded without retrying.
 retries = 0
-slow-timeout = { period = "60s", terminate-after = 1 }
+slow-timeout = { period = "60s", terminate-after = 2 }

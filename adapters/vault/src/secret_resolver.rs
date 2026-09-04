@@ -31,11 +31,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use diport::{
-    ManagedResource, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
-    ShutdownError,
-};
+use diport::{SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError};
 use rss_request_context::TenantId;
+use rss_runtime::{ManagedResource, ShutdownError};
 
 use crate::{VaultBaseUrlError, VaultToken, validate_vault_base_url};
 
@@ -722,8 +720,9 @@ mod backend_tests {
         StoreBinding, TenantStoreAllowlist, TenantStoreAllowlistError, VaultSecretResolver,
         VaultSecretResolverConfigError,
     };
-    use diport::{ManagedResource, SecretCoordinate, SecretResolver, SecretResolverError};
+    use diport::{SecretCoordinate, SecretResolver, SecretResolverError};
     use rss_request_context::TenantId;
+    use rss_runtime::ManagedResource;
 
     // ── 常量 / helper ───────────────────────────────────────────────────────────────────
 

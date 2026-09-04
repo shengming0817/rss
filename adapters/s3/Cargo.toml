@@ -8,12 +8,13 @@ publish = false
 [lints]
 workspace = true
 
-# adapter 真身（#1011 对象存储）：始终 impl diport::ManagedResource；`backend` feature 开时增补
+# adapter 真身（#1011 对象存储）：始终 impl rss_runtime::ManagedResource；`backend` feature 开时增补
 # impl diport::ObjectStore（aws-sdk-s3 put/get/delete）。后端 aws-sdk-s3 经 feature 门控（default
 # build 轻量、仍保 freeze smoke 类型断言），与 redis/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守）。
 [dependencies]
 rss-request-context.workspace = true
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 # DLX lifecycle typed archive capability. The adapter only implements the port after its S3
 # bucket has passed the WORM startup probe.
 eventexec = { path = "../../crates/eventexec", optional = true }

@@ -1,7 +1,0 @@
-error[E0560]: struct `LaunchRegistrar<'_>` has no field named `listener_count`
- --> tests/ui/launch_registrar_fields_private_fail.rs:6:9
-  |
-6 |         listener_count: 0,
-  |         ^^^^^^^^^^^^^^ `LaunchRegistrar<'_>` does not have this field
-  |
-  = note: all struct fields are already assigned

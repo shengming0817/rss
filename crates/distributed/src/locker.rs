@@ -100,7 +100,7 @@ impl Locker {
         })
     }
 
-    /// 委派注入的 provider 释放 infra 资源（生产 adapter 经 `bootstrap::ShutdownStack` 编排；本方法是 port-local 关闭路径）。
+    /// 委派注入的 provider 释放 infra 资源（生产 adapter 经 `rss_runtime::ShutdownStack` 编排；本方法是 port-local 关闭路径）。
     pub async fn shutdown(&self) -> Result<(), diport::LockStoreError> {
         self.store.shutdown().await
     }

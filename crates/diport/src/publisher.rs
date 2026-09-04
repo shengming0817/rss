@@ -14,7 +14,7 @@ use rss_redact::RedactedSource;
 /// [`PublisherError::ambiguous`] 三选一显式声明 disposition——类型层杜绝「构造发布失败却不分类」
 /// （typed function choice，Hard）。
 ///
-/// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
+/// PII 边界（与 `rss_runtime::ShutdownError` 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]
 /// 脱敏。注意主语——`PublisherError::source()` 因 `#[source]` 返回 `Some(&RedactedSource)`（非 `None`），而
 /// **`RedactedSource` 自身**的 `Debug`/`Display` 固定 `<redacted>`、`RedactedSource::source()` 恒 `None`：
 /// 通用 source 链遍历在 `RedactedSource` 处终止于 `<redacted>`，原始错误不经任何 `Error` 接口暴露
@@ -195,7 +195,7 @@ pub trait PublisherLocal {
     async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError>;
 
     /// 异步释放 provider 资源（无 async Drop）。有 infra 资源的 adapter 应同时 `impl ManagedResource`
-    /// 由 `bootstrap::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Signer::shutdown`]）。
+    /// 由 `rss_runtime::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Signer::shutdown`]）。
     async fn shutdown(&self) -> Result<(), PublisherError>;
 }
 

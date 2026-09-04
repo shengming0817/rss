@@ -19,11 +19,12 @@ use amqp::{
 use anyhow::anyhow;
 use diport::{
     AckAction, AckableSubscriber, Acker, EnvelopeMetadata, KEY_CORRELATION, KEY_OCCURRED_AT,
-    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, ManagedResource, MessageId,
+    KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, MessageId,
     PublishRequest as DiPublishRequest, Publisher, Topic,
 };
 use eventing::delivery::PublishErrorKind;
 use futures::StreamExt;
+use rss_runtime::ManagedResource;
 use testkit::FixtureError;
 use tokio_util::sync::CancellationToken;
 
@@ -1310,7 +1311,6 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
     let url = rmq.vhost_url("rss_ack_forced_cancel").await?;
     let topic = Topic::new("rss.it.ack-forced-cancel");
     let sub1 = connect_subscriber(&url, "amqp-it-forced-cancel-sub1").await?;
-    let token1 = CancellationToken::new();
     let publisher = connect_publisher(&url, "amqp-it-forced-cancel-pub").await?;
     let message_id = "evt-forced-cancel";
     let (meta, metadata) = forced_cancel_consumer_contract(&topic, message_id)?;
@@ -1335,7 +1335,7 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
     admission_control.start_running()?;
     let health = Arc::new(eventexec::WorkerHealth::starting());
     let subscription_health = Arc::clone(&health);
-    let worker = eventexec::spawn_consumer_ackable_subscriber(
+    let registration = eventexec::consumer_ackable_subscriber_registration(
         "amqp-it-forced-cancel-worker".to_owned(),
         diport::DynAckableSubscriber::new_box(sub1),
         topic.clone(),
@@ -1344,7 +1344,6 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
         meta,
         handler,
         eventexec::LeaseConfig::from_ttl(Duration::from_secs(60)),
-        token1,
         health,
         eventing::lifecycle::RetryPolicy::new(
             std::num::NonZeroU32::MIN.saturating_add(2),
@@ -1354,6 +1353,15 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
         admission,
         eventing::lifecycle::ShutdownBudget::STANDARD,
     );
+    let budget = rss_runtime::TotalDrainBudget::new(Duration::from_secs(5))
+        .map_err(|error| anyhow!("managed consumer shutdown budget: {error}"))?;
+    let mut stack = rss_runtime::ShutdownStack::try_new(budget)
+        .map_err(|error| anyhow!("managed consumer shutdown stack: {error}"))?;
+    stack
+        .startup()
+        .map_err(|error| anyhow!("managed consumer startup transaction: {error}"))?
+        .try_stage_blocking_with_token(registration)
+        .map_err(|error| anyhow!("managed consumer worker startup: {error}"))?;
     while subscription_health.status() != primitives::healthz::HealthStatus::Healthy {
         tokio::task::yield_now().await;
     }
@@ -1371,12 +1379,10 @@ async fn integration_ackable_forced_cancel_unsettled_delivery_redelivers()
     tokio::time::timeout(Duration::from_secs(5), handler_notified)
         .await
         .map_err(|_| anyhow!("timeout waiting for managed handler"))?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        diport::ManagedResource::shutdown(&worker),
-    )
-    .await
-    .map_err(|_| anyhow!("managed consumer did not stop after owner shutdown"))??;
+    tokio::time::timeout(Duration::from_secs(5), stack.shutdown())
+        .await
+        .map_err(|_| anyhow!("managed consumer did not stop after owner shutdown"))?
+        .map_err(|error| anyhow!("managed consumer shutdown driver: {error}"))?;
     assert_eq!(store.claims.load(Ordering::Acquire), 1);
     assert_eq!(store.commits.load(Ordering::Acquire), 0);
     assert_eq!(store.releases.load(Ordering::Acquire), 0);

@@ -200,7 +200,7 @@ pub trait SubscriberLocal {
     ) -> Result<MessageStream, SubscriberError>;
 
     /// 异步释放 provider 资源（无 async Drop）。有 infra 资源的 adapter 应同时 `impl ManagedResource`
-    /// 由 `bootstrap::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Publisher::shutdown`]）。
+    /// 由 `rss_runtime::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Publisher::shutdown`]）。
     async fn shutdown(&self) -> Result<(), SubscriberError>;
 }
 

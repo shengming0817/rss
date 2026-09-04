@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `ManagedTask: ManagedResource` is not satisfied
+ --> tests/ui/managed_task_detached_registration_fail.rs:9:47
+  |
+9 |     let _bypass = DynManagedResource::new_box(task);
+  |                   --------------------------- ^^^^ the trait `ManagedResource` is not implemented for `ManagedTask`
+  |                   |
+  |                   required by a bound introduced by this call
+  |
+help: the following other types implement trait `ManagedResource`
+ --> src/resource.rs
+  |
+  | #[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | `&DynManagedResource<'dynosaur_struct>`
+  | `&mut DynManagedResource<'dynosaur_struct>`
+  | `Box<DynManagedResource<'dynosaur_struct>>`
+  | `DynManagedResource<'dynosaur_struct>`
+note: required by a bound in `DynManagedResource::<'dynosaur_struct>::new_box`
+ --> src/resource.rs
+  |
+  | #[trait_variant::make(ManagedResource: Send)]
+  |                       ^^^^^^^^^^^^^^^ required by this bound in `DynManagedResource::<'dynosaur_struct>::new_box`
+  | #[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]
+  | --------------------------------------------------------------------------- required by a bound in this associated function
+  = note: this error originates in the attribute macro `dynosaur` (in Nightly builds, run with -Z macro-backtrace for more info)

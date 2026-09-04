@@ -1,0 +1,11 @@
+error[E0451]: fields `registered_resources`, `completion` and `failures` of struct `ShutdownReceipt` are private
+ --> tests/ui/shutdown_receipt_forge_fail.rs:3:9
+  |
+2 |     let _forged = rss_runtime::ShutdownReceipt {
+  |                   ---------------------------- in this type
+3 |         registered_resources: 0,
+  |         ^^^^^^^^^^^^^^^^^^^^ private field
+4 |         completion: rss_runtime::DrainCompletion::Complete,
+  |         ^^^^^^^^^^ private field
+5 |         failures: Vec::new(),
+  |         ^^^^^^^^ private field

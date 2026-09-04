@@ -1,5 +1,0 @@
-error[E0599]: no method named `register_detached` found for mutable reference `&mut LaunchRegistrar<'_>` in the current scope
- --> tests/ui/launch_registrar_no_detached_fail.rs:6:15
-  |
-6 |     registrar.register_detached(resource());
-  |               ^^^^^^^^^^^^^^^^^ method not found in `&mut LaunchRegistrar<'_>`

@@ -2,7 +2,7 @@
 //!
 //! 三态严重度 + typed `ProbeName`。探针求值本身（I/O、背景并发）是 DI port → diport；
 //! 此处只冻**纯聚合**：单条 report 的合成 + 多条 worst-of。
-//! 生命周期 Hook（fx lifecycle，LIFO stop）是 `ManagedResource` DI port，**不在 primitives**。
+//! 生命周期 Hook（LIFO stop）由 `rss-runtime` 持有，**不在 primitives**。
 //! ref: uber-go/fx lifecycle.go@master（生命周期边界——确认 Hook 是 DI port 故排除）。
 
 /// 健康严重度（三态闭值集；Copy）。worst-of 聚合用全序：Healthy < Degraded < Unhealthy。

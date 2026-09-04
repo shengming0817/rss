@@ -1,7 +1,0 @@
-error: cannot construct `Activated<_>` with struct literal syntax due to private fields
- --> tests/ui/activated_fields_private_fail.rs:2:19
-  |
-2 |     let _forged = runtimeexec::Activated { inventory: () };
-  |                   ^^^^^^^^^^^^^^^^^^^^^^   ------------- private field
-  |
-  = note: ...and other private field `listeners` that was not provided

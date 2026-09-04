@@ -84,7 +84,7 @@ pub trait HostView: Send + Sync + 'static {
     fn condition(&self, name: &str) -> Option<ConditionStatus>;
 }
 
-/// Move-only lease issued by the RuntimeExec-owned admission gate.
+/// Move-only lease issued by the composition-owned admission gate.
 pub trait AdmissionPermit: Send {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

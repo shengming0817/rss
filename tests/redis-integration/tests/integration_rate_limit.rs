@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use deadpool_redis::{Config, Pool, Runtime};
-use diport::{ManagedResource, RateLimitDecision, RateLimitKey, RateLimitQuota, RateLimiter};
+use diport::{RateLimitDecision, RateLimitKey, RateLimitQuota, RateLimiter};
 use redis::{RedisRateLimiter, RedisRuntimeDeps};
+use rss_runtime::ManagedResource;
 use sha2::{Digest as _, Sha256};
 use testkit::FixtureError;
 

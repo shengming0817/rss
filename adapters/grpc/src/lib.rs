@@ -1,7 +1,7 @@
 //! grpc adapter —— RSS workspace（W 阶段真身，#1011 gRPC 切片）。
 //!
 //! 单一 `GrpcServer`：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-02）。
+//! - 始终 `impl rss_runtime::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-02）。
 //! - `backend` feature 开时：tonic 0.14 plaintext gRPC server + 标准健康服务（tonic-health）+ graceful shutdown。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入 tonic 依赖。
@@ -11,7 +11,7 @@
 //!
 //! # graceful shutdown：经 ShutdownStack token funnel
 //!
-//! 后台 serve task 的关闭信号是组合根经 `bootstrap::ShutdownStack::register_with_token` 注入的 child
+//! 后台 serve task 的关闭信号是组合根经 `StartupTransaction::stage_with_token` 注入的 child
 //! `tokio_util::sync::CancellationToken`（SHUTDOWN-TOKEN-FUNNEL-01）：阶段 1 广播 `cancel()` 即 serve 退出，阶段 2
 //! `shutdown()` await task 收敛。`serve(addr)` 是 detached 便捷构造（内部 token，不接外部广播；测试 /
 //! 简单 caller 用）。**不**自建 oneshot 绕过 funnel。
@@ -34,7 +34,7 @@
 //! crate 保持 `forbid(unsafe_code)`（继承 workspace lints，不 invoke dynosaur 宏）。
 //! ref: hyperium/tonic examples/src/health/server.rs@master
 
-use diport::{ManagedResource, ShutdownError};
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// gRPC 传输 adapter。
 ///
@@ -46,7 +46,7 @@ pub struct GrpcServer {
     /// 驱动 serve task 退出的 token：组合根经 funnel 注入（或 `serve` 的内部 detached token）。
     /// `shutdown()` `cancel()` 它触发 graceful 退出（幂等：阶段 1 广播已 cancel 则 no-op）。
     #[cfg(feature = "backend")]
-    task: diport::ManagedTask,
+    task: rss_runtime::ManagedTask,
 }
 
 /// gRPC server 启动失败（构造期 fail-fast，不静默 noop）。
@@ -73,7 +73,7 @@ pub enum GrpcServeError {
 impl GrpcServer {
     /// 启动 plaintext gRPC server（托管标准健康服务），serve task 监听注入的 `token`。
     ///
-    /// 这是**生产路径**：组合根经 `bootstrap::ShutdownStack::register_with_token` 注入 child token，
+    /// 这是**生产路径**：组合根经 `StartupTransaction::stage_with_token` 注入 child token，
     /// 阶段 1 关闭广播 `cancel()` 即触发 serve 退出（SHUTDOWN-TOKEN-FUNNEL-01）。
     ///
     /// **fail-closed**：拒绝非 loopback 地址（plaintext 不对外，见 [`GrpcServeError::NonLoopbackPlaintext`]）。
@@ -121,8 +121,9 @@ impl GrpcServer {
         reporter
             .set_service_status("", tonic_health::ServingStatus::Serving)
             .await;
-        let (start, _) = diport::ManagedTask::prepare("grpc", diport::DEFAULT_SHUTDOWN_TIMEOUT);
-        let task = start.spawn(token, |serve_token| async move {
+        let (start, _) =
+            rss_runtime::ManagedTask::prepare("grpc", rss_runtime::DEFAULT_SHUTDOWN_TIMEOUT);
+        let task = start.spawn_detached(token, |serve_token| async move {
             tonic::transport::Server::builder()
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(incoming, async move {
@@ -191,7 +192,7 @@ impl ManagedResource for GrpcServer {
 #[cfg(feature = "backend")]
 impl GrpcServer {
     async fn shutdown_backend(&self) -> Result<(), ShutdownError> {
-        diport::ManagedResource::shutdown(&self.task).await?;
+        self.task.shutdown().await?;
         tracing::info!(name = self.name(), "grpc server shutdown complete");
         Ok(())
     }
@@ -204,7 +205,7 @@ mod smoke {
     //! ADAPTER-PORT-FREEZE-02 support：sealed-marker impl 的编译期 anti-vacuity。
     use core::marker::PhantomData;
 
-    fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
+    fn assert_managed_resource<T: rss_runtime::ManagedResource>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_frozen_ports() {
@@ -217,7 +218,7 @@ mod backend_tests {
     //! gRPC server 行为矩阵（tonic 0.14 + tonic-health，plaintext）：
     //! name / roundtrip / shutdown（idempotent + via token）/ fail-closed 非 loopback / liveness-only。
     use super::GrpcServer;
-    use diport::ManagedResource;
+    use rss_runtime::ManagedResource;
     use tokio_util::sync::CancellationToken;
 
     // parse_addr：测试内 SocketAddr 字面量解析，静态字符串必然成功，item-level expect carve-out。

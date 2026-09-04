@@ -20,6 +20,8 @@ members = [
   "crates/redact",
   # Provider-neutral storage protection primitives.
   "crates/data-protection",
+  # Provider-neutral lifecycle ownership and bounded shutdown.
+  "crates/runtime",
   "crates/secure",
   "crates/support",
   "crates/runctx",
@@ -28,9 +30,6 @@ members = [
   "crates/sagaauthmint",
   "crates/dlqauthmint",
   "crates/requestidmint",
-  # Runtime inventory live-evidence mint capability; only assembly-schema declares the receipt
-  # signature and runtimeexec holds the mint token.
-  "crates/runtimeinventorymint",
   # contract authoring/provenance schema；仅依赖更低位 vocab（typed StepName/DomainName）+ 外部 crate。
   "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）
@@ -47,9 +46,6 @@ members = [
   "crates/listenerlifecycle",
   # 服务（依赖基础 + 引擎 + DI-infra）
   "crates/httpserve",
-  "crates/bootstrap",
-  # provider-independent runtime launch/shutdown kernel shared by assembly roots (#1795).
-  "crates/runtimeexec",
   "crates/eventexec",
   "crates/observ",
   "crates/distributed",
@@ -86,6 +82,7 @@ packages = [
   { package = "rss-redact-derive", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-redact", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-data-protection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental" },
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-eventing", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -109,9 +106,10 @@ eventing = { package = "rss-eventing", path = "crates/eventing", version = "0.1.
 rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }
+rss-runtime = { path = "crates/runtime", version = "0.1.0" }
 # 运行时 / 序列化 / 错误 / 日志
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken（tokio_util::sync::CancellationToken，cargo feature = "rt"）；见 bootstrap shutdown 范式
+tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken / TaskTracker（cargo feature = "rt"）
 tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（adapters/grpc serve_with_incoming_shutdown：自绑 listener 读回 ephemeral 端口供测试）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

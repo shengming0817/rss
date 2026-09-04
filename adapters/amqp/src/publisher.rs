@@ -1,4 +1,4 @@
-//! lapin AMQP 发布 adapter——impl `diport::Publisher` + `diport::ManagedResource`。
+//! lapin AMQP 发布 adapter——impl `diport::Publisher` + `rss_runtime::ManagedResource`。
 //!
 //! ref: amqp-rs/lapin src/generated/channel.rs@v4.10.0（采纳 basic_publish → PublisherConfirm 生命周期；
 //! 偏离其可选 auto-recovery，由 RSS absolute deadline 独占整套 connection+confirm transport replacement）。
@@ -11,13 +11,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use diport::{
-    EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, KEY_OCCURRED_AT, ManagedResource,
-    PublishRequest, Publisher, PublisherError, ShutdownError,
+    EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, KEY_OCCURRED_AT, PublishRequest,
+    Publisher, PublisherError,
 };
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable, ShortString, ShortStringError};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
+use rss_runtime::{ManagedResource, ShutdownError};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -502,7 +503,7 @@ struct PublisherTransportLifecycle {
 }
 
 struct OwnedTransportRecovery {
-    task: diport::ManagedTask,
+    task: rss_runtime::ManagedTask,
 }
 
 impl PublisherTransportLifecycle {
@@ -963,11 +964,11 @@ impl AmqpPublisher {
         let connection_config = self.connection_config.clone();
         let transports = Arc::clone(&self.transports);
         let name = self.name.clone();
-        let (start, _) = diport::ManagedTask::prepare(
+        let (start, _) = rss_runtime::ManagedTask::prepare(
             "amqp-publisher-transport-recovery",
-            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+            rss_runtime::DEFAULT_SHUTDOWN_TIMEOUT,
         );
-        let task = start.spawn(cancellation, |cancellation| async move {
+        let task = start.spawn_detached(cancellation, |cancellation| async move {
             run_transport_recovery(
                 connection_config,
                 transports,
@@ -1155,17 +1156,15 @@ async fn wait_for_shutdown_admission(
 async fn join_cancelled_recovery(
     recovery: OwnedTransportRecovery,
 ) -> Result<(), PublisherTransportError> {
-    diport::ManagedResource::shutdown(&recovery.task)
-        .await
-        .map_err(|error| {
-            if error.kind() == diport::ShutdownErrorKind::TaskPanicked {
-                PublisherTransportError::RecoveryTaskPanicked
-            } else if error.kind() == diport::ShutdownErrorKind::TaskCancelled {
-                PublisherTransportError::RecoveryTaskCancelled
-            } else {
-                PublisherTransportError::RecoveryTaskUnknown
-            }
-        })
+    recovery.task.shutdown().await.map_err(|error| {
+        if error.kind() == rss_runtime::ShutdownErrorKind::TaskPanicked {
+            PublisherTransportError::RecoveryTaskPanicked
+        } else if error.kind() == rss_runtime::ShutdownErrorKind::TaskCancelled {
+            PublisherTransportError::RecoveryTaskCancelled
+        } else {
+            PublisherTransportError::RecoveryTaskUnknown
+        }
+    })
 }
 
 /// ambiguous/client failure 后的资源恢复在 owned task 中执行，避免 Postgres 外层 publisher watchdog drop

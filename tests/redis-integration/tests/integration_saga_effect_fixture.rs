@@ -4,8 +4,8 @@
 
 use consistency::{SagaEffectPhase, SagaIdempotencyKey};
 use deadpool_redis::{Config, Runtime};
-use diport::ManagedResource;
 use redis::{RedisRuntimeDeps, RedisSagaEffectApplyOutcome, RedisSagaEffectProbeOutcome};
+use rss_runtime::ManagedResource;
 use testkit::FixtureError;
 
 fn unique_key() -> SagaIdempotencyKey {

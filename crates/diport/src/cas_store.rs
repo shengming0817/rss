@@ -210,7 +210,7 @@ pub trait CasStoreLocal {
     ) -> Result<CasStoreOutcome, CasStoreError>;
 
     /// 异步释放 provider 资源（无 async Drop）。有 infra 资源的 adapter 应同时 `impl ManagedResource`
-    /// 由 `bootstrap::ShutdownStack` 统一编排；本方法是 port-local 关闭路径。
+    /// 由 `rss_runtime::ShutdownStack` 统一编排；本方法是 port-local 关闭路径。
     async fn shutdown(&self) -> Result<(), CasStoreError>;
 }
 

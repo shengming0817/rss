@@ -11,9 +11,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use axum::serve::{IncomingStream, Listener};
-use diport::ShutdownError;
+use rss_runtime::ShutdownError;
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 pub use listenerlifecycle::ListenerTaskRegistration;
@@ -189,15 +188,10 @@ impl BoundHttpServer {
         self.local_addr
     }
 
-    pub fn serve(
-        self,
-        service: httpserve::ServerService,
-        token: CancellationToken,
-    ) -> ListenerTaskRegistration {
+    pub fn serve(self, service: httpserve::ServerService) -> ListenerTaskRegistration {
         let listener = self.listener;
-        let registration = listener.spawn(
-            token,
-            diport::DEFAULT_SHUTDOWN_TIMEOUT,
+        let registration = listener.into_registration(
+            rss_runtime::DEFAULT_SHUTDOWN_TIMEOUT,
             move |listener, serve_token| async move {
                 axum::serve(listener, TransportMakeService::plaintext(service))
                     .with_graceful_shutdown(async move { serve_token.cancelled().await })

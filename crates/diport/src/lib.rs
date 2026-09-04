@@ -11,7 +11,7 @@
 //!
 //! ## 派发策略（ADR-003）
 //!
-//! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `AuditSink` / `RateLimiter` / `ObjectStore` / `Pdp` / `ServiceTokenReplayStore` / `SecretResolver` / `ManagedResource` …）：native AFIT + dynosaur
+//! - **async DI port**（`Signer` / `KeyProvider` / `Publisher` / `Subscriber` / `RateLimiter` / `ObjectStore` / `SecretResolver` …）：native AFIT + dynosaur
 //!   `#[dynosaur(DynX = dyn(box) X, bridge(dyn))]` 生成 dyn-compatible wrapper；static 路径零开销、
 //!   dyn 路径才 box。组合根经 `Box<DynX>` / `Arc<DynX>` 注入（必填构造器位置参，缺失即编译错误）。
 //!   - **并发 bound**：dyn wrapper 的 boxed future 一律须 `Send`。默认端口用
@@ -84,8 +84,7 @@
 //! 只在 `diport` 定义，DIPORT-MACRO-CONFINE-01）——它**不**约束「谁可 **impl** port trait」：
 //! cargo-deny 只能限依赖、不能限 impl 站点，且域 crate 也合法依赖 `diport`（为**消费**端口而非 impl）。
 //! 当前没有自定义 impl-site lint；实现站点由 Cargo dependency visibility、类型测试与 review 约束。
-//! `ManagedResource` / `ManagedResourceLocal` 是同置于本 crate 的 lifecycle seam，adapter resource、服务
-//! worker 与 runtime wrapper 均可实现。
+//! Lifecycle ownership is separate and belongs to `rss-runtime`.
 //!
 //! ## INVARIANT: DIPORT-UNSAFE-HYGIENE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
@@ -108,7 +107,6 @@ pub mod fenced_writer;
 pub mod key_provider;
 pub mod leader_elector;
 pub mod lock_store;
-pub mod managed_resource;
 pub mod metrics_exporter;
 pub mod object_store;
 pub mod outbox_emitter;
@@ -178,11 +176,6 @@ pub use leader_elector::{
 };
 pub use lock_store::{
     DynLockStore, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey,
-};
-pub use managed_resource::{
-    DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ManagedTask,
-    ManagedTaskRegistration, ShutdownError, ShutdownErrorKind, TaskExit, TaskStart, TaskState,
-    TaskStatus, join_owned_task,
 };
 pub use metrics_exporter::MetricsExporter;
 pub use object_store::{

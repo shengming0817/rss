@@ -1,8 +1,0 @@
-error[E0308]: mismatched types
- --> tests/ui/launch_registrar_raw_resource_fail.rs:6:48
-  |
-6 |     registrar.register_listener_with_token(|_| raw());
-  |                                                ^^^^^ expected `ListenerTaskRegistration`, found `Box<DynManagedResource<'_>>`
-  |
-  = note: expected struct `listenerlifecycle::ListenerTaskRegistration`
-             found struct `Box<DynManagedResource<'static>>`

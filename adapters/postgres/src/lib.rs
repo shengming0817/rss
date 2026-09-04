@@ -382,11 +382,11 @@ WITH required(relation_name, column_name, data_type, nullable) AS (VALUES
 ) SELECT columns_ok.ok AND unique_ok.ok FROM columns_ok, unique_ok
 "#;
 
-impl diport::ManagedResource for PgRuntime {
+impl rss_runtime::ManagedResource for PgRuntime {
     fn name(&self) -> &str {
         "postgres"
     }
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+    async fn shutdown(&self) -> Result<(), rss_runtime::ShutdownError> {
         self.pool.close().await;
         Ok(())
     }

@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 # 实现 diport DI port trait（RateLimiter + ManagedResource）。
 diport = { path = "../../crates/diport" }
+rss-runtime.workspace = true
 # keyed GCRA 限流器（x/time/rate token-bucket 的 Rust 工业等价），自带 monotonic 时钟。
 # ref: antifuchs/governor src/state/keyed.rs
 governor = { workspace = true }

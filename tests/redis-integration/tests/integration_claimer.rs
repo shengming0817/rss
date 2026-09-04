@@ -16,9 +16,10 @@ use consistency::{
 use deadpool_redis::{Config, Runtime};
 use diport::{
     CasStore, CasStoreOutcome, CasStoreRequest, GlobalCasStoreKey, LockAcquireOutcome,
-    LockRenewOutcome, LockStore, LockStoreKey, ManagedResource,
+    LockRenewOutcome, LockStore, LockStoreKey,
 };
 use redis::{RedisInboxStore, RedisPrivateCa, RedisRuntimeDeps};
+use rss_runtime::ManagedResource;
 use sha2::{Digest, Sha256};
 use testkit::{FixtureError, await_try};
 use tokio::sync::Barrier;

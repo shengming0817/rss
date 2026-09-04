@@ -61,7 +61,7 @@ impl RateLimitQuota {
 
 /// 限流判定失败（provider 后端不可用等；**非** over-limit——over-limit 是 `Ok(RateLimitDecision::Limited)`）。
 ///
-/// PII 边界（**类型层 Hard**，与 [`crate::ShutdownError`] 同范式）：`Display` 仅 provider 无关安全
+/// PII 边界（**类型层 Hard**，与 `rss_runtime::ShutdownError` 同范式）：`Display` 仅 provider 无关安全
 /// 摘要常量；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`{err:?}` 与
 /// `%err` 同样不泄漏 source 凭据——把原 Soft 消费侧约定上移为类型层保证）。adapter 原始错误经
 /// [`RateLimitError::new`] 由 [`RedactedSource`] **owned 但 write-only** 保留（redis-distributed provider 的
@@ -150,7 +150,7 @@ pub trait RateLimiterLocal {
     async fn check(&self, key: RateLimitKey) -> Result<RateLimitDecision, RateLimitError>;
 
     /// 异步释放 provider 资源（无 async Drop）。有 infra 资源的 adapter 应**同时** `impl ManagedResource`
-    /// 由 `bootstrap::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Signer::shutdown`]）。
+    /// 由 `rss_runtime::ShutdownStack` 统一编排；本方法是 port-local 关闭路径（参 [`crate::Signer::shutdown`]）。
     async fn shutdown(&self) -> Result<(), RateLimitError>;
 }
 

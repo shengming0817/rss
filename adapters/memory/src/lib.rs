@@ -447,9 +447,8 @@ impl InMemClaimer {
     /// 新建空 claimer。
     ///
     /// `pub`：供 dev-root demo 组合根（`journeys` / `examples`）跨 crate 构造（生产 bin 经 cargo-deny 连
-    /// `memory` 都依赖不到 ⇒ in-mem 生产不可达，TOPO-INMEM-SEAL-01 主守卫 Hard）。dev root **须**经
-    /// `bootstrap::replaydeps::resolve(Topology::Demo, ..)` 决策臂构造、**不**直接 raw-new——把 in-mem 构造
-    /// 收束到已校验的拓扑决策（决策绑定纪律 Medium，review #274 F6/C6）；生产走 redis/pg claimer。
+    /// `memory` 都依赖不到 ⇒ in-mem 生产不可达，TOPO-INMEM-SEAL-01 主守卫 Hard）。生产使用方应选择
+    /// durable provider；本构造器只服务 dev/test consumer。
     pub fn new() -> Self {
         Self {
             seen: Arc::new(Mutex::new(HashMap::new())),

@@ -74,8 +74,8 @@ deny = [
   # 注：实测 dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（无 unsafe 例外），
   #   故本 wrapper 是「DI port 定义点集中」架构守卫（Medium），非 unsafe 收敛——放宽白名单零安全代价。
   # Cargo-deny constrains dependency parents, not Rust impl sites.
-  { crate = "dynosaur", wrappers = ["diport"] },
-  { crate = "trait-variant", wrappers = ["diport"] },
+  { crate = "dynosaur", wrappers = ["diport", "rss-runtime"] },
+  { crate = "trait-variant", wrappers = ["diport", "rss-runtime"] },
   # REDACT-DERIVE-CONFINEMENT-01：proc-macro 是 rss-redact 的私有实现层；workspace 消费者只依赖
   # 用户入口 rss-redact，并从该入口取得 derive re-export。
   { crate = "rss-redact-derive", wrappers = ["rss-redact"] },
@@ -92,9 +92,6 @@ deny = [
   { crate = "dlqauthmint", wrappers = ["diport"] },
   # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint opaque carrier。
   { crate = "requestidmint", wrappers = ["httpserve"] },
-  # RUNTIME-INVENTORY-MINT-01：assembly-schema only names the token in the private-field receipt
-  # constructor; runtimeexec mints full-plan receipts and live observations.
-  { crate = "runtimeinventorymint", wrappers = ["assembly-schema", "runtimeexec"] },
   # 注：testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层 test-support 库，
   # 不在此 ban；integration packages only enable containers through dev-dependencies.
 ]

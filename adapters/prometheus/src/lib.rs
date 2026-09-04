@@ -1,7 +1,7 @@
 //! prometheus adapter —— RSS workspace（W 阶段真身，#1011 指标导出切片）。
 //!
 //! 单一 `PromExporter`：
-//! - 始终 `impl diport::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-07）。
+//! - 始终 `impl rss_runtime::ManagedResource`（已冻结，ADAPTER-PORT-FREEZE-07）。
 //! - `backend` feature 开时增补 `impl diport::MetricsExporter`（Prometheus exposition 渲染）。
 //!
 //! feature-off（default build）：空壳编译、freeze smoke 类型断言仍有效；不引入 metrics 后端依赖。
@@ -12,7 +12,7 @@
 //! 保持 `forbid(unsafe_code)`（继承 workspace lints）。
 //! ref: metrics-rs/metrics metrics-exporter-prometheus/src/exporter/builder.rs@metrics-exporter-prometheus-v0.18.3
 
-use diport::{ManagedResource, ShutdownError};
+use rss_runtime::{ManagedResource, ShutdownError};
 
 /// Prometheus 指标导出 adapter（sealed-marker）。
 ///
@@ -75,7 +75,7 @@ mod smoke {
     //! 始终；MetricsExporter 于 backend）；去掉任一 impl 即编译失败（anti-vacuity）。
     use core::marker::PhantomData;
 
-    fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
+    fn assert_managed_resource<T: rss_runtime::ManagedResource>(_: PhantomData<T>) {}
 
     #[test]
     fn impls_managed_resource() {
@@ -97,8 +97,9 @@ mod backend_tests {
     //! Prometheus 导出行为矩阵（确定性，非全局）：本地 `PrometheusRecorder` + `with_local_recorder` 发射
     //! counter / gauge，断言 render exposition 含指标名 + 值；`install()` 全局装载 + 生命周期（name / shutdown）。
     use super::PromExporter;
-    use diport::{ManagedResource, MetricsExporter};
+    use diport::MetricsExporter;
     use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+    use rss_runtime::ManagedResource;
 
     impl PromExporter {
         /// test-only 构造（不暴露到 production API——本 impl 块在 `#[cfg(all(test, feature = "backend"))]` 内）：

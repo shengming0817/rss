@@ -772,7 +772,7 @@ fn log_sample_failed(domain: &str, e: &impl std::fmt::Display) {
 /// public worker 仍是**具体类型**——relay_loop/sweeper_loop/backlog_sampler_loop 是泛型非-Send，spawn 在
 /// 具体 call site 单态化后 future 才 Send（见本文件 §设计摘要），故不能合并成单一 generic worker。
 struct ManagedRelayWorker {
-    task: diport::ManagedTask,
+    task: rss_runtime::ManagedTask,
     health: Arc<WorkerHealth>,
     shutdown_budget: eventing::lifecycle::ShutdownBudget,
 }
@@ -789,8 +789,8 @@ impl ManagedRelayWorker {
         F: Future<Output = ()> + Send + 'static,
         Make: FnOnce(CancellationToken) -> F + Send + 'static,
     {
-        let (start, _status) = diport::ManagedTask::prepare(name, shutdown_budget.timeout());
-        let task = start.spawn(token, |managed_token| async move {
+        let (start, _status) = rss_runtime::ManagedTask::prepare(name, shutdown_budget.timeout());
+        let task = start.spawn_detached(token, |managed_token| async move {
             make(managed_token).await;
             Ok(())
         });
@@ -805,8 +805,8 @@ impl ManagedRelayWorker {
         self.health.clone()
     }
 
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        diport::ManagedResource::shutdown(&self.task).await
+    async fn shutdown(&self) -> Result<(), rss_runtime::ShutdownError> {
+        self.task.shutdown().await
     }
 }
 
@@ -845,7 +845,7 @@ macro_rules! adopt_worker {
             }
         }
 
-        impl diport::ManagedResource for $worker {
+        impl rss_runtime::ManagedResource for $worker {
             fn name(&self) -> &str {
                 $name_const
             }
@@ -854,7 +854,7 @@ macro_rules! adopt_worker {
                 self.0.shutdown_budget.timeout()
             }
 
-            async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+            async fn shutdown(&self) -> Result<(), rss_runtime::ShutdownError> {
                 self.0.shutdown().await
             }
         }
@@ -906,7 +906,7 @@ impl SweeperWorker {
     }
 }
 
-impl diport::ManagedResource for SweeperWorker {
+impl rss_runtime::ManagedResource for SweeperWorker {
     fn name(&self) -> &str {
         self.name
     }
@@ -915,7 +915,7 @@ impl diport::ManagedResource for SweeperWorker {
         self.inner.shutdown_budget.timeout()
     }
 
-    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+    async fn shutdown(&self) -> Result<(), rss_runtime::ShutdownError> {
         self.inner.shutdown().await
     }
 }
@@ -934,11 +934,11 @@ mod tests {
         BacklogMetricSample, BacklogSample, Disposition, OutboxContractId, OutboxMetricSubject,
     };
     use consistency::{OutboxBacklog, OutboxRelay, RetentionSweeper};
-    use diport::ManagedResource;
     use eventing::observability::{
         EventingDisposition, EventingEmitter, EventingObservation, EventingRelayPhase,
     };
     use primitives::healthz::{HealthStatus, ProbeName};
+    use rss_runtime::ManagedResource;
     use tokio::sync::{Barrier, Notify};
     use tokio_util::sync::CancellationToken;
     use vocab::DomainName;

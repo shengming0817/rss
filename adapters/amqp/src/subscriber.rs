@@ -1,4 +1,4 @@
-//! amqp — RSS AMQP 事件订阅 adapter——impl `diport::AckableSubscriber` + `diport::ManagedResource`。
+//! amqp — RSS AMQP 事件订阅 adapter——impl `diport::AckableSubscriber` + `rss_runtime::ManagedResource`。
 //!
 //! `basic_consume` 的 `Consumer`（`Stream<Item = Result<Delivery>>`）适配成 `diport::DeliveryStream`
 //! （manual-ack，`AckableSubscriber`）：`token` 取消即流终止（对标 `adapters/memory` 的 `take_until`）。
@@ -14,8 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use diport::{
     AckAction, AckError, AckableSubscriber, Delivery as DiDelivery, DeliveryStream,
-    EnvelopeMetadata, KEY_OCCURRED_AT, ManagedResource, Message, ShutdownError, SubscriberError,
-    Topic,
+    EnvelopeMetadata, KEY_OCCURRED_AT, Message, SubscriberError, Topic,
 };
 use futures::StreamExt;
 use lapin::message::Delivery;
@@ -27,6 +26,7 @@ use lapin::options::{
 use lapin::options::{BasicGetOptions, BasicPublishOptions, QueueDeleteOptions, QueuePurgeOptions};
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
+use rss_runtime::{ManagedResource, ShutdownError};
 use tokio_util::sync::CancellationToken;
 
 use crate::conn::{self, REPLY_SUCCESS};

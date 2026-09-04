@@ -1,7 +1,7 @@
 //! primitives — RSS 引擎层原语（crypto / healthz / circuitbreaker / DR admission）。
 //!
 //! 引擎层 L0：trait 均 sync 静态分发、非 DI port（ADR-004 C1）；值类型字段私有、不 derive serde（C6）。
-//! DI port（`Clock` 位参禁默认系统时钟、`ManagedResource` LIFO，ADR-001/ADR-003）**不在此**——
+//! DI port 与 `rss-runtime::ManagedResource` 生命周期 LIFO **不在此**——
 //! 归未来的 diport crate（spec tasks.md T012 / TD01）。
 //!
 //! ref: sony/gobreaker v2/gobreaker.go@master（circuitbreaker 三态状态机）；

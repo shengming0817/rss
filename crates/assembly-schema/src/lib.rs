@@ -5,7 +5,6 @@ mod lock;
 mod provider;
 #[doc(hidden)]
 pub mod repository_contract;
-pub mod runtime_inventory;
 mod runtime_plan;
 
 pub use contract_owner::ContractOwner;
