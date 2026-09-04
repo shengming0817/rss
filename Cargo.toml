@@ -30,8 +30,6 @@ members = [
   "crates/sagaauthmint",
   "crates/dlqauthmint",
   "crates/requestidmint",
-  # contract authoring/provenance schema；仅依赖更低位 vocab（typed StepName/DomainName）+ 外部 crate。
-  "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）
   "crates/consistency",
   "crates/primitives",
@@ -114,7 +112,6 @@ tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（a
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
-jsonschema = { version = "=0.20.0", default-features = false }
 serde_json_canonicalizer = "=0.3.2"
 regex = "1"
 thiserror = "2"
@@ -248,7 +245,6 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # SemVer 由 workspacefacts 消费；time parsing 由 secure 的 typed redaction 字段支持消费。
 semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
-schemars = "0.8.22"          # reason: 钉 0.8——typify 0.7 消费 schemars::schema::RootSchema（0.8 形态），勿误升 1.x
 syn = { version = "2", features = ["full", "parsing"] }
 # rss-redact-derive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
 # 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。

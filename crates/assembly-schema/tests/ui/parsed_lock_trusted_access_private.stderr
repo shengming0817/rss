@@ -1,5 +1,0 @@
-error[E0599]: no method named `as_lock` found for reference `&ParsedAssemblyLock` in the current scope
- --> tests/ui/parsed_lock_trusted_access_private.rs:4:12
-  |
-4 |     parsed.as_lock()
-  |            ^^^^^^^ method not found in `&ParsedAssemblyLock`

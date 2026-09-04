@@ -3,7 +3,7 @@
 //! 提供：
 //! - metrics label 闭值集（HttpLabel / CertLabel），编译期防高基数扩散
 //! - provider-agnostic MetricLabel 出口（adapters/otel 负责映射 KeyValue；本 crate 不引 otel）
-//! - sink-neutral [`TelemetryResource`]（RuntimePlan 铸造一次，JSON/OTLP 只做具名映射）
+//! - sink-neutral [`TelemetryResource`]（消费方一次性提供部署身份，JSON/OTLP 只做具名映射）
 //!
 //! 注：审计 sink（`AuditEvent` / `AuditOutcome` / `AuditSink`）是可替换-provider DI 注入端口，
 //! 已迁 `diport`（issue #1075，ADR-003 DI port 收敛）——消费方经 `diport::AuditSink` 注入。
@@ -78,12 +78,10 @@ pub enum CertLabel {
 /// 只保留 `Static(&'static str)`（compile-time literal），防止 runtime 动态字符串
 /// 进入 label value 导致高基数扩散（F10，Medium）。
 ///
-/// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` 的公开裸
-/// `&'static str` 构造面尚未收敛成 sealed resolver / 闭值集枚举，
-/// 业务仍可写任意字面量，未满足 `crates/observ`、`rss_redact::redact_error` 与 typed metric enums
-/// 必须冻结或经 typed enum 入口、禁止业务手写裸 string label」。本 crate（#1006）只兑现
-/// `key()/value()` 行为，**不改这些冻结公共接缝**（W 阶段铁律）；sealed resolver 依赖
-/// Join 阶段 assembly 声明的 closed set，由 #1076 承载。
+/// `RouteTemplate` / `Domain` 接受 `&'static str`，因此 runtime 动态身份不能进入
+/// [`LabelValue`]；这不声明仓内拥有 route/domain catalog 或 assembly-derived closed set。
+/// 外部消费者负责把自身 routing/domain facts 映射为稳定的低基数 literal，本 crate 只保留
+/// sink-neutral 的具名投影边界。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LabelValue {
     Static(&'static str),

@@ -1,9 +1,0 @@
-error[E0451]: fields `dir`, `path_kind`, `path_domain`, `path_version`, `slug`, `owner`, `manifest` and `source` of struct `assembly_schema::repository_contract::RepositoryContract` are private
- --> tests/ui/repository_contract_private.rs:5:9
-  |
-4 |     RepositoryContract {
-  |     ------------------ in this type
-5 |         path_domain: "forged".to_owned(),
-  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
-6 |         ..base
-  |           ^^^^ fields `dir`, `path_kind`, `path_version`, `slug`, `owner`, `manifest` and `source` are private

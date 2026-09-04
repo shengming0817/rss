@@ -5,8 +5,8 @@ typed `Contract` markers and async `Handler` implementations; the host supplies 
 `HostView`, while authenticated request values arrive as `rss-request-context` views.
 
 The crate deliberately contains no JWT/JWKS verification, provider catalog, process lifecycle,
-runtime plan, cancellation authority, or inventory publisher. Those remain owned by official
-integrations and the composition root.
+runtime planning, cancellation authority, or inventory publisher. Those remain owned by external
+consumers and their composition roots.
 Building an application yields a dispatcher and an instance-bound `TrustedContextMinter`. The
 integration keeps that non-cloneable minter private and uses it only after validating input. Dispatch
 requires the resulting move-only `AdmittedRequest`; callers cannot enter dispatch by assembling an

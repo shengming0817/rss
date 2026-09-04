@@ -18,8 +18,8 @@
 
 - 普通 PR 运行 affected T1 与必要 T2；rename/copy、全局输入、未知路径或分析异常必须 fail-full。
 - 完整 conformance、fault/recovery、coverage 与 performance 属于 develop/release 或显式 full。
-- committed AssemblyLock/RuntimePlan 的 repository raw-byte drift 属于 candidate/release final-HEAD identity
-  验证；普通 PR 依赖 assembly build-time repository verification 与 RuntimePlan bound parse。
+- candidate/release final-HEAD identity 验证只覆盖已接纳的 package artifact 与 release metadata；
+  消费方应用装配、配置和运行计划漂移属于 External。
 - performance 必须绑定已接纳的 library SLO；Markdown、聚合 receipt 和静态 inventory 不得冒充运行证据。
 
 ## No-new-work closeout

@@ -1,9 +1,0 @@
-error[E0451]: fields `canonical`, `repository_root`, `assembly_dir`, `source_label` and `source_text` of struct `RepositoryAssemblyManifestV2` are private
- --> tests/ui/repository_manifest_private.rs:5:9
-  |
-4 |     RepositoryAssemblyManifestV2 {
-  |     ---------------------------- in this type
-5 |         source_label: "assemblies/forged/assembly.toml".to_owned(),
-  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
-6 |         ..base
-  |           ^^^^ fields `canonical`, `repository_root`, `assembly_dir` and `source_text` are private

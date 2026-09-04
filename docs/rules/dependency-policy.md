@@ -66,13 +66,12 @@
 薄适配至少承载一项 RSS 语义：
 
 - `TenantContext`、Principal 或 Device Identity 传播；
-- fail-closed、timeout、readiness、health 或 lifecycle posture；
+- fail-closed、timeout、cancellation 或 bounded-drain posture；
 - LocalTx、outbox、idempotency、settlement、checkpoint 或 fencing；
 - redaction、audit 或 trace continuity；
-- config、assembly 或 production support 约束；
 - 上游错误到稳定 RSS 错误模型的映射。
 
-adapter 与 composition root 持有上游 API；domain 与公开 contract 暴露 RSS 语义。
+外部 adapter 与 composition root 持有上游 API；RSS 公开 contract 只暴露 provider-neutral 语义。
 
 Tooling 的 Cargo facts 遵循同一边界：复用 `workspacefacts` 时，catalog / feature selection 经 guppy
 `PackageGraph` / `CargoSet`，declaration-granularity provenance 经同一 `cargo metadata` JSON 的私有 raw
@@ -96,8 +95,7 @@ RSS port 用于：
 - L0–L4 typed semantic、receipt、idempotency、fencing/checkpoint 与 recovery；
 - tenant-safe transaction/RLS funnel；
 - Verified Principal/Tenant/Device/credential 与 authorization obligation；
-- AssemblyLock、RuntimePlan、assembly composition 与 runtime inventory；
-- startup/readiness/drain/shutdown lifecycle；
+- provider-neutral execution ordering、cancellation 与 bounded drain lifecycle primitive；
 - conformance、fault/recovery 与 upgrade evidence。
 
 自研 ADR 记录 invariant、上游组合评估、owner、consumer、正确性/安全/性能/互操作证据，以及替换触发条件。

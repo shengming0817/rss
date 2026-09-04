@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// Sink-neutral application identity projected once from a verified runtime plan.
+/// Sink-neutral application identity supplied once by the consumer-owned composition root.
 ///
 /// All fields are private and validated as non-empty. Telemetry sinks consume the named accessors
 /// and cannot depend on positional attribute ordering.

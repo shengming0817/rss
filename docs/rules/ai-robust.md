@@ -11,7 +11,7 @@ RSS 的 AI-robust 治理保护安全、正确性、兼容性和生产运行不�
 | 契约与兼容性 | contract identity、wire schema、codegen/binding、公开 API | schema、typed binding、deterministic codegen、breaking/deprecation |
 | 安全、租户与可信 evidence | verified identity、tenant authority、credential、RLS、receipt | 私有构造、newtype、sealed receipt、真实 verifier/provider conformance |
 | 一致性状态转换 | commit/rollback/unknown、idempotency、settlement、checkpoint、fencing | typed state、transaction conformance、fault/recovery proof |
-| Runtime 与 production posture | config、plan/lock、provider durability、startup/readiness/drain | typed config、AssemblyLock/RuntimePlan、lifecycle 与 production join |
+| Library runtime lifecycle | task/resource ownership、startup transaction、cancellation、bounded drain | typestate、private construction、single cancellation root、lifecycle tests |
 
 ## 强度
 
@@ -117,7 +117,7 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 - Verified Principal、TenantContext、DeviceCredential 与 receipt 使用私有构造或 sealed 类型。
 - auth、tenant 和 credential 作为必填 typed input 进入执行路径。
 - RLS/ACL、tenant transaction、revocation/replay 与 negative authorization 使用 T1/T2 证明。
-- assembly library 的 identity/provider closure 使用最低充分 T2；production join 属于 External。
+- consumer-owned assembly identity、provider selection/attestation 与 production join 均属于 External。
 
 ### 一致性、事务与 fencing
 
@@ -128,10 +128,11 @@ ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并�
 
 ### Library runtime 与 consumer posture
 
-- runtime phase 接收 typed configuration snapshot。
-- assembly provider、AssemblyLock、RuntimePlan、generated binding 与 inventory 保持同一 identity chain。
-- lifecycle output 表达 startup rollback、readiness、drain、shutdown 与 restart。
-- provider capability/durability 使用 T2 证明；产品 image/runtime join 由 External consumer 负责。
+- managed task/resource 经 phase-typed startup/launch transaction 转移所有权。
+- single cancellation root 与 positive total budget 约束 reverse-order drain。
+- process signal、配置、listener/readiness composition、provider selection、inventory 与 production join
+  由 External consumer 负责。
+- 仓内 T2 只证明 provider-neutral public seam；真实 provider capability/durability 由仓外集成验证。
 
 ## Proof 收敛
 

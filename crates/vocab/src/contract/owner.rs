@@ -1,5 +1,4 @@
-//! Canonical domain-name vocabulary. Manifest-backed contract ownership lives in
-//! `assembly_schema::ContractOwner`, where repository discovery can enforce provenance.
+//! Canonical domain-name vocabulary for internal typed identifiers.
 
 /// `DomainName` 解析错误。空值 / 非法字符（非 crate-name 形）非法。
 #[derive(Debug, thiserror::Error)]

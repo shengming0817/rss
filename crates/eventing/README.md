@@ -11,9 +11,9 @@ waist. It exposes five modules and no crate-root shortcuts:
 
 The package does not expose topics, provider SPI, broker administration, AMQP or PostgreSQL
 implementation details, generated bindings, dependency injection, runtime drivers, composition,
-`RuntimePlan`, L3/L4 behavior, or a test platform. Production routing remains derived from the
-generated `EventFactBinding`; adapters project provider-specific values only after the public
-boundary.
+consumer-owned runtime plans, L3/L4 behavior, or a test platform. Consumers own production routing
+and any generated bindings used to derive it; adapters project provider-specific values only after
+the public boundary.
 
 The package is selected as an immutable release candidate. Candidate selection does not mean that
 the package has been published, promoted to an RC, attached to an official profile, proven by an
