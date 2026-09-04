@@ -4,7 +4,7 @@
 //! settlement authority 随 delivery move（manual-ack）。
 //! P7 manual-ack：`no_ack=false` + `basic_qos(PREFETCH)`，每条 [`rss_transactional_messaging::transport::Delivery`] 携 [`AmqpSettlement`] 句柄。
 //! AMQP 仅 at-least-once（manual-ack）：经 `DeliverySource::deliveries`；
-//! at-most-once 仅 demo 拓扑的 MemBus。
+//! Provider-neutral delivery doubles live in `rss-transactional-messaging-testkit`.
 //! ref: lapin examples/pubsub.rs@main；rabbitmq docs/confirms。
 
 #[cfg(feature = "integration-test-support")]

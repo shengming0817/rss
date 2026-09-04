@@ -92,8 +92,9 @@ deny = [
   { crate = "dlqauthmint", wrappers = ["diport"] },
   # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint opaque carrier。
   { crate = "requestidmint", wrappers = ["httpserve"] },
-  # 注：testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层 test-support 库，
-  # 不在此 ban；integration packages only enable containers through dev-dependencies.
+  # 注：旧通用 testkit（crates/testkit，含 #1137 容器 fixture + #1136 契约 harness）是 Service 层
+  # test-support 库；transactional messaging conformance 由独立的纯 core/runtime testkit 持有。
+  # 两者不构成依赖或 re-export；integration packages only enable containers through dev-dependencies.
 ]
 
 [sources]

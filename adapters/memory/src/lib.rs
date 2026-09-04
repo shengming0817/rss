@@ -1,15 +1,9 @@
-//! Provider-neutral in-memory bus, clock, and consistency test doubles.
+//! Provider-neutral in-memory coordination and consistency test doubles.
 //!
 //! This crate is test/demo infrastructure only. Durable deployments use external providers.
 //!
-//! 设计对标 watermill 的 in-mem pub/sub（gochannel）：per-topic 订阅者列表 + 缓冲 channel fan-out，
-//! `CancellationToken` 取消即流终止（替代 watermill `close(g.closing)` 广播）。
-//! ref: watermill pubsub/gochannel/pubsub.go@fbce4d6cd13c8657c668c7e7990fef90d2471b8a
-//!
-//! RSS 偏离（与对标分析一致）：fire-and-forget publish（不阻塞等 subscriber Ack，对标
-//! `BlockPublishUntilSubscriberAck=false`）；无 `Persistent` 重放（订阅须先于发布）；async `Stream` +
-//! `take_until(token)` 替代 Go channel + `<-closing`。runtime-agnostic：用 `futures::channel::mpsc`
-//! （receiver 即 `Stream`），不绑 tokio runtime。
+//! Transactional messaging stores, publishers, settlements, and clocks live in the dedicated
+//! `rss-transactional-messaging-testkit` package.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -40,124 +34,8 @@ use diport::{
     SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, StoredSagaReceipt,
     WriteOutcome, saga_operator_action,
 };
-use futures::StreamExt;
-use futures::channel::mpsc::{self, UnboundedSender};
-use rss_transactional_messaging::error::MessagingError;
-use rss_transactional_messaging::message::{MessageEnvelope, SubscriptionIdentity};
-use rss_transactional_messaging::policy::OperationDeadline;
-use rss_transactional_messaging::transaction::SettlementDecision;
-use rss_transactional_messaging::transport::{
-    Delivery, DeliverySettlement, DeliverySource, IncomingDelivery, ManagedDeliveryStream,
-    PublishOutcome, Publisher,
-};
-
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
 // 且 lib 代码禁 unwrap/expect（clippy deny）。`unwrap_or_else(into_inner)` 取回 guard，clippy-clean。
-
-// ── MemBus：publisher / subscriber 共享的 in-mem 事件总线 ──────────────────────
-
-#[derive(Default)]
-struct BusInner {
-    /// topic → 活跃订阅者 sender 列表（per-topic fan-out，对标 gochannel `subscribers map`）。
-    topics: HashMap<String, Vec<UnboundedSender<MessageEnvelope<Vec<u8>>>>>,
-}
-
-/// in-mem 事件总线（克隆共享同一底座）。经 [`MemBus::publisher`] / [`MemBus::subscriber`] 取端口。
-#[derive(Clone, Default)]
-pub struct MemBus {
-    inner: Arc<Mutex<BusInner>>,
-}
-
-impl MemBus {
-    /// 新建空总线。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 取发布端口（impl [`rss_transactional_messaging::transport::Publisher`]）。
-    pub fn publisher(&self) -> MemPublisher {
-        MemPublisher { bus: self.clone() }
-    }
-
-    /// 取订阅端口（impl [`rss_transactional_messaging::transport::DeliverySource`]）。
-    pub fn subscriber(&self) -> MemSubscriber {
-        MemSubscriber { bus: self.clone() }
-    }
-
-    fn publish_sync(&self, message: &MessageEnvelope<Vec<u8>>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let topic = message.metadata().route().as_str().to_string();
-        inner
-            .topics
-            .entry(topic)
-            .or_default()
-            .retain(|tx| tx.unbounded_send(message.clone()).is_ok());
-    }
-}
-
-/// in-mem 发布端口。
-pub struct MemPublisher {
-    bus: MemBus,
-}
-
-impl Publisher<Vec<u8>> for MemPublisher {
-    type Receipt = ();
-
-    async fn publish(
-        &self,
-        message: &MessageEnvelope<Vec<u8>>,
-        _deadline: OperationDeadline,
-    ) -> PublishOutcome<Self::Receipt> {
-        self.bus.publish_sync(message);
-        PublishOutcome::Confirmed(())
-    }
-}
-
-/// in-mem 订阅端口。
-pub struct MemSubscriber {
-    bus: MemBus,
-}
-
-pub struct MemSettlement;
-
-impl DeliverySettlement for MemSettlement {
-    async fn settle(
-        self,
-        _decision: SettlementDecision,
-        _deadline: OperationDeadline,
-    ) -> Result<(), MessagingError> {
-        Ok(())
-    }
-
-    async fn abandon(self, _deadline: OperationDeadline) -> Result<(), MessagingError> {
-        Ok(())
-    }
-}
-
-impl DeliverySource<Vec<u8>> for MemSubscriber {
-    type Settlement = MemSettlement;
-    type Deliveries = std::pin::Pin<
-        Box<dyn futures::Stream<Item = IncomingDelivery<Vec<u8>, Self::Settlement>> + Send>,
-    >;
-
-    async fn deliveries(
-        &self,
-        subscription: &SubscriptionIdentity,
-    ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
-        let (tx, rx) = mpsc::unbounded::<MessageEnvelope<Vec<u8>>>();
-        self.bus
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .topics
-            .entry(subscription.route().as_str().to_string())
-            .or_default()
-            .push(tx);
-        Ok(ManagedDeliveryStream::from_provider(Box::pin(rx.map(
-            |message| IncomingDelivery::Valid(Box::new(Delivery::new(message, MemSettlement))),
-        ))))
-    }
-}
 
 // ── MemLeaseStore / MemLeaderElector：进程内 leader 选举替身（reconcile harness 测试 / demo）──────────
 
@@ -2087,7 +1965,6 @@ mod tests {
 
     #[test]
     fn neutral_consistency_doubles_construct_without_domain_state() {
-        let _ = MemBus::new();
         let _ = MemFencedWriter::new();
         let _ = MemCasStore::new();
     }

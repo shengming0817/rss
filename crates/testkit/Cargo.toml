@@ -9,10 +9,9 @@ publish = false
 workspace = true
 
 # 服务层 test-support 脚手架：HTTP 契约测试 harness（per-contract 测试模板，#1136）。
-# 唯一 workspace shipped 出边为 rss-conformance，且保持零 adapter 依赖：域 crate 经 [dev-dependencies] 消费本 crate
-# 写契约测试，不拉任何 adapter crate；由 workspace lints、`clippy.toml` 与 contract tests 约束。
+# 保持零 adapter 依赖：域 crate 经 [dev-dependencies] 消费本 crate写契约测试，不拉任何 adapter crate；
+# provider-neutral transactional messaging conformance 由独立 public testkit 持有。
 [dependencies]
-rss_conformance = { package = "rss-conformance", path = "../conformance", version = "0.1.0" }
 axum = { workspace = true }                          # Router / Body / Request / to_bytes（被测 router 类型）
 tower = { workspace = true, features = ["util"] }    # ServiceExt::oneshot 驱动（in-process，无 TCP）
 serde = { workspace = true }                         # ContractRequest.json 的 Serialize 约束 + WireError derive
@@ -33,7 +32,7 @@ rcgen = { workspace = true, optional = true }
 default = []
 # 容器 fixture（#1137）+ tenant-scope conformance 骨架（#1437）：adapter 集成测试 + journeys durable journey
 # 经各自 `integration` feature 传递激活（`testkit/containers`）。契约 harness（#1136，axum oneshot）始终可用。
-# conformance 骨架对 tenant 类型泛型化；testkit 的唯一内部 shipped 出边为 rss-conformance，仍为零 adapter 依赖。
+# conformance 骨架对 tenant 类型泛型化，仍为零 adapter 依赖。
 containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:url", "dep:sqlx", "dep:rcgen"]
 integration = ["containers"]
 

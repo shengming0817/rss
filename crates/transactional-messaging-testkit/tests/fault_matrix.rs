@@ -1,0 +1,739 @@
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
+use rss_request_context::TenantId;
+use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
+use rss_transactional_messaging::inbox::{
+    ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, LeaseStatus,
+};
+use rss_transactional_messaging::message::{
+    AuthoredMessageMetadata, ContractIdentity, MessageEnvelope, MessageFingerprint, MessageId,
+    MessageMetadata, MessageMetadataExtensions, MessageRoute, MessagingDomain,
+};
+use rss_transactional_messaging::observability::{
+    TransactionalMessagingDisposition, TransactionalMessagingIoOutcome,
+    TransactionalMessagingObservation, TransactionalMessagingTransactionStatus,
+};
+use rss_transactional_messaging::outbox::{AppendOutcome, OutboxLeaseStatus, OutboxSettlement};
+use rss_transactional_messaging::policy::ExecutionBudget;
+use rss_transactional_messaging::transaction::{
+    SettlementKind, TerminalDisposition, TerminalReceipt,
+};
+use rss_transactional_messaging::transport::{
+    PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
+};
+use rss_transactional_messaging_testkit::ConformanceError;
+use rss_transactional_messaging_testkit::consumer::{ConsumerTxDriver, run_consumer_conformance};
+use rss_transactional_messaging_testkit::inbox::{InboxDriver, run_inbox_conformance};
+use rss_transactional_messaging_testkit::memory::FakeClock;
+use rss_transactional_messaging_testkit::outbox::{OutboxDriver, run_outbox_conformance};
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[derive(Clone, Copy)]
+enum Defect {
+    OutboxAfterPublishBeforeSettle,
+    OutboxTransientPublishFailure,
+    OutboxConfirmLostChannelClose,
+    OutboxPermanentPublishFailure,
+    OutboxStaleLeaseContender,
+    OutboxLeaseDeadlineExpired,
+    InboxClaimCrashBeforeCommit,
+    InboxCommitBeforeAckCrash,
+    InboxLeaseLostBeforeCommit,
+}
+
+struct FaultCase {
+    id: &'static str,
+    crash_point: &'static str,
+    expected_invariant: &'static str,
+    expected_stage: &'static str,
+    expected_error: ExpectedError,
+    defect: Defect,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedError {
+    Mismatch,
+    Count,
+}
+
+const CASES: &[FaultCase] = &[
+    FaultCase {
+        id: "outbox-after-publish-before-settle",
+        crash_point: "after-publish-before-settle",
+        expected_invariant: "outbox-publish-settled-once",
+        expected_stage: "outbox.publish-before-settle.settlement-calls",
+        expected_error: ExpectedError::Count,
+        defect: Defect::OutboxAfterPublishBeforeSettle,
+    },
+    FaultCase {
+        id: "outbox-transient-publish-failure",
+        crash_point: "during-transient-publish",
+        expected_invariant: "outbox-transient-remains-retryable",
+        expected_stage: "outbox.publish.transient",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::OutboxTransientPublishFailure,
+    },
+    FaultCase {
+        id: "outbox-confirm-lost-channel-close",
+        crash_point: "post-send-close-before-confirm",
+        expected_invariant: "outbox-ambiguous-retry-consumer-effect-once",
+        expected_stage: "outbox.publish.ambiguous.identity",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::OutboxConfirmLostChannelClose,
+    },
+    FaultCase {
+        id: "outbox-permanent-publish-failure",
+        crash_point: "during-permanent-publish",
+        expected_invariant: "outbox-dlx-summary-redacted",
+        expected_stage: "outbox.publish.permanent",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::OutboxPermanentPublishFailure,
+    },
+    FaultCase {
+        id: "outbox-stale-contender-settle",
+        crash_point: "stale-contender-settle",
+        expected_invariant: "outbox-stale-lease-settle-rejected",
+        expected_stage: "outbox.lease.stale",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::OutboxStaleLeaseContender,
+    },
+    FaultCase {
+        id: "outbox-deadline-expired-settle",
+        crash_point: "deadline-expired-settle",
+        expected_invariant: "outbox-expired-deadline-settle-rejected",
+        expected_stage: "outbox.lease.expired",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::OutboxLeaseDeadlineExpired,
+    },
+    FaultCase {
+        id: "inbox-claim-crash-before-commit",
+        crash_point: "after-claim-before-commit",
+        expected_invariant: "inbox-stale-claim-reclaimable",
+        expected_stage: "inbox.crash-before-commit.reclaim",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::InboxClaimCrashBeforeCommit,
+    },
+    FaultCase {
+        id: "inbox-commit-before-ack-crash",
+        crash_point: "after-commit-before-ack",
+        expected_invariant: "inbox-redelivery-dedupes-once",
+        expected_stage: "consumer.commit-before-ack",
+        expected_error: ExpectedError::Mismatch,
+        defect: Defect::InboxCommitBeforeAckCrash,
+    },
+    FaultCase {
+        id: "inbox-lease-lost-before-commit",
+        crash_point: "lease-lost-before-commit",
+        expected_invariant: "inbox-stale-lease-cannot-commit",
+        expected_stage: "consumer.lease-lost.settlement",
+        expected_error: ExpectedError::Count,
+        defect: Defect::InboxLeaseLostBeforeCommit,
+    },
+];
+
+#[derive(Debug, thiserror::Error)]
+#[error("synthetic provider conflict")]
+struct Conflict;
+
+#[derive(Debug, thiserror::Error)]
+#[error("amqp://operator:super-secret@provider.invalid")]
+struct SecretDiagnostic;
+
+struct OutboxFixture {
+    defect: Option<Defect>,
+    settlement_calls: AtomicUsize,
+    consumer_effects: AtomicUsize,
+    published_ids: Mutex<Vec<MessageId>>,
+}
+
+impl OutboxFixture {
+    fn new(defect: Option<Defect>) -> Self {
+        Self {
+            defect,
+            settlement_calls: AtomicUsize::new(0),
+            consumer_effects: AtomicUsize::new(0),
+            published_ids: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn is(&self, defect: Defect) -> bool {
+        matches!(
+            (self.defect, defect),
+            (
+                Some(Defect::OutboxAfterPublishBeforeSettle),
+                Defect::OutboxAfterPublishBeforeSettle
+            ) | (
+                Some(Defect::OutboxTransientPublishFailure),
+                Defect::OutboxTransientPublishFailure
+            ) | (
+                Some(Defect::OutboxConfirmLostChannelClose),
+                Defect::OutboxConfirmLostChannelClose
+            ) | (
+                Some(Defect::OutboxPermanentPublishFailure),
+                Defect::OutboxPermanentPublishFailure
+            ) | (
+                Some(Defect::OutboxStaleLeaseContender),
+                Defect::OutboxStaleLeaseContender
+            ) | (
+                Some(Defect::OutboxLeaseDeadlineExpired),
+                Defect::OutboxLeaseDeadlineExpired
+            )
+        )
+    }
+}
+
+impl OutboxDriver for OutboxFixture {
+    fn reset(&self) {
+        self.settlement_calls.store(0, Ordering::SeqCst);
+        self.consumer_effects.store(0, Ordering::SeqCst);
+        self.published_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    async fn append_first(&self) -> Result<AppendOutcome, MessagingError> {
+        Ok(AppendOutcome::Inserted)
+    }
+
+    async fn append_same(&self) -> Result<AppendOutcome, MessagingError> {
+        Ok(AppendOutcome::AlreadyPresent)
+    }
+
+    async fn append_conflict(&self) -> Result<AppendOutcome, MessagingError> {
+        Err(MessagingError::new(MessagingErrorKind::Conflict, Conflict))
+    }
+
+    async fn partition_head_claims(&self) -> Result<usize, MessagingError> {
+        Ok(1)
+    }
+
+    async fn blocked_partition_claims(&self) -> Result<usize, MessagingError> {
+        Ok(0)
+    }
+
+    async fn confirmed_publish(
+        &self,
+    ) -> Result<(PublishOutcome<()>, OutboxSettlement<()>), ConformanceError> {
+        Ok((
+            PublishOutcome::Confirmed(()),
+            OutboxSettlement::Published(()),
+        ))
+    }
+
+    async fn transient_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
+        Ok(if self.is(Defect::OutboxTransientPublishFailure) {
+            PublishOutcome::Confirmed(())
+        } else {
+            PublishOutcome::DefinitelyNotPublished(transient_failure())
+        })
+    }
+
+    async fn ambiguous_publish(&self) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
+        let first = MessageId::parse("fault-message")
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
+        let second = MessageId::parse(if self.is(Defect::OutboxConfirmLostChannelClose) {
+            "changed-message"
+        } else {
+            "fault-message"
+        })
+        .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
+        *self
+            .published_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = vec![first, second];
+        self.consumer_effects.store(1, Ordering::SeqCst);
+        Ok(vec![
+            PublishOutcome::Ambiguous(transient_failure()),
+            PublishOutcome::Confirmed(()),
+        ])
+    }
+
+    async fn stale_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
+        Ok(if self.is(Defect::OutboxStaleLeaseContender) {
+            OutboxLeaseStatus::Held {
+                remaining: Duration::from_secs(1),
+            }
+        } else {
+            OutboxLeaseStatus::Lost
+        })
+    }
+
+    async fn expired_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
+        Ok(if self.is(Defect::OutboxLeaseDeadlineExpired) {
+            OutboxLeaseStatus::Held {
+                remaining: Duration::ZERO,
+            }
+        } else {
+            OutboxLeaseStatus::Lost
+        })
+    }
+
+    async fn permanent_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
+        if self.is(Defect::OutboxPermanentPublishFailure) {
+            return Err(MessagingError::new(
+                MessagingErrorKind::Permanent,
+                SecretDiagnostic,
+            ));
+        }
+        Ok(PublishOutcome::DefinitelyNotPublished(permanent_failure()))
+    }
+
+    async fn publish_before_settle_recovery(
+        &self,
+    ) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
+        let id = MessageId::parse("fault-message")
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
+        *self
+            .published_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = vec![id.clone(), id];
+        self.settlement_calls.store(
+            usize::from(!self.is(Defect::OutboxAfterPublishBeforeSettle)),
+            Ordering::SeqCst,
+        );
+        self.consumer_effects.store(1, Ordering::SeqCst);
+        Ok(vec![
+            PublishOutcome::Ambiguous(transient_failure()),
+            PublishOutcome::Confirmed(()),
+        ])
+    }
+
+    fn published_message_ids(&self) -> Vec<MessageId> {
+        self.published_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn settlement_dispositions(
+        &self,
+    ) -> Vec<rss_transactional_messaging::outbox::OutboxDisposition> {
+        vec![
+            rss_transactional_messaging::outbox::OutboxDisposition::Published;
+            self.settlement_calls.load(Ordering::SeqCst)
+        ]
+    }
+
+    fn consumer_effects(&self) -> usize {
+        self.consumer_effects.load(Ordering::SeqCst)
+    }
+}
+
+fn transient_failure() -> PublishFailure {
+    PublishFailure::new(
+        PublishFailureKind::Transient,
+        PublishFailureStage::Confirm,
+        PublishFailureReason::TransportUnavailable,
+    )
+}
+
+fn permanent_failure() -> PublishFailure {
+    PublishFailure::new(
+        PublishFailureKind::Permanent,
+        PublishFailureStage::Admission,
+        PublishFailureReason::ProviderRejected,
+    )
+}
+
+struct InboxFixture {
+    defect: Option<Defect>,
+}
+
+impl InboxFixture {
+    fn is(&self, defect: Defect) -> bool {
+        matches!(
+            (self.defect, defect),
+            (
+                Some(Defect::InboxClaimCrashBeforeCommit),
+                Defect::InboxClaimCrashBeforeCommit
+            )
+        )
+    }
+}
+
+impl InboxDriver for InboxFixture {
+    type Claim = ();
+
+    fn reset(&self) {}
+
+    async fn first_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        Ok(IdempotencyDisposition::Acquired(()))
+    }
+
+    async fn active_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        Ok(IdempotencyDisposition::InProgress)
+    }
+
+    async fn other_group_claim(
+        &self,
+    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        Ok(IdempotencyDisposition::Acquired(()))
+    }
+
+    async fn terminal_duplicate(
+        &self,
+    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        Ok(IdempotencyDisposition::Terminal(terminal_receipt()?))
+    }
+
+    async fn extend_owned(&self) -> Result<LeaseStatus, MessagingError> {
+        Ok(LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        })
+    }
+
+    async fn reclaim_after_expiry(
+        &self,
+    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        Ok(if self.is(Defect::InboxClaimCrashBeforeCommit) {
+            IdempotencyDisposition::InProgress
+        } else {
+            IdempotencyDisposition::Acquired(())
+        })
+    }
+
+    async fn reclaim_after_release(
+        &self,
+    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        Ok(IdempotencyDisposition::Acquired(()))
+    }
+
+    async fn stale_lease(&self) -> Result<LeaseStatus, MessagingError> {
+        Ok(LeaseStatus::Lost)
+    }
+}
+
+fn terminal_receipt() -> Result<TerminalReceipt, MessagingError> {
+    let message =
+        message().map_err(|_| MessagingError::new(MessagingErrorKind::Invariant, Conflict))?;
+    Ok(TerminalReceipt::from_durable(
+        ConsumerIdentity::new(
+            message.metadata().tenant_id(),
+            ConsumerGroup::parse("fault-consumer")
+                .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?,
+            message.id().clone(),
+            message.metadata().contract().clone(),
+        ),
+        MessageFingerprint::of(&message),
+        TerminalDisposition::Succeeded,
+    ))
+}
+
+struct ConsumerFixture {
+    defect: Option<Defect>,
+    committed_error: Option<ConformanceError>,
+    commit_unknown_abandon: bool,
+    handlers: AtomicUsize,
+    commits: AtomicUsize,
+    abandons: AtomicUsize,
+    settlements: Mutex<Vec<SettlementKind>>,
+    observations: Mutex<Vec<TransactionalMessagingObservation>>,
+}
+
+impl ConsumerFixture {
+    fn new(defect: Option<Defect>) -> Self {
+        Self {
+            defect,
+            committed_error: None,
+            commit_unknown_abandon: true,
+            handlers: AtomicUsize::new(0),
+            commits: AtomicUsize::new(0),
+            abandons: AtomicUsize::new(0),
+            settlements: Mutex::new(Vec::new()),
+            observations: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn settlement_log(&self) -> std::sync::MutexGuard<'_, Vec<SettlementKind>> {
+        self.settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn without_commit_unknown_abandon(mut self) -> Self {
+        self.commit_unknown_abandon = false;
+        self
+    }
+
+    fn with_committed_error(mut self, error: ConformanceError) -> Self {
+        self.committed_error = Some(error);
+        self
+    }
+}
+
+impl ConsumerTxDriver for ConsumerFixture {
+    fn reset(&self) {
+        self.handlers.store(0, Ordering::SeqCst);
+        self.commits.store(0, Ordering::SeqCst);
+        self.abandons.store(0, Ordering::SeqCst);
+        self.settlement_log().clear();
+        self.observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    async fn committed_delivery(
+        &self,
+    ) -> Result<Vec<TransactionalMessagingObservation>, ConformanceError> {
+        if let Some(error) = self.committed_error {
+            return Err(error);
+        }
+        self.handlers.store(1, Ordering::SeqCst);
+        self.commits.store(1, Ordering::SeqCst);
+        self.settlement_log().push(SettlementKind::Acknowledge);
+        let mut observations = self
+            .observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let commit = TransactionalMessagingObservation::ConsumerTransaction {
+            status: TransactionalMessagingTransactionStatus::Committed,
+        };
+        let ack = TransactionalMessagingObservation::ConsumerSettlement {
+            action: TransactionalMessagingDisposition::Ack,
+            outcome: TransactionalMessagingIoOutcome::Ok,
+        };
+        if matches!(self.defect, Some(Defect::InboxCommitBeforeAckCrash)) {
+            observations.extend([ack, commit]);
+        } else {
+            observations.extend([commit, ack]);
+        }
+        Ok(observations.clone())
+    }
+
+    async fn duplicate_delivery(
+        &self,
+    ) -> Result<(TerminalDisposition, Vec<TransactionalMessagingObservation>), ConformanceError>
+    {
+        self.settlement_log().push(SettlementKind::Acknowledge);
+        let observations = vec![TransactionalMessagingObservation::ConsumerSettlement {
+            action: TransactionalMessagingDisposition::Ack,
+            outcome: TransactionalMessagingIoOutcome::Ok,
+        }];
+        Ok((TerminalDisposition::Succeeded, observations))
+    }
+
+    async fn commit_unknown_delivery(
+        &self,
+    ) -> Result<(Vec<TransactionalMessagingObservation>, usize), ConformanceError> {
+        self.handlers.store(1, Ordering::SeqCst);
+        let abandons = usize::from(self.commit_unknown_abandon);
+        self.abandons.store(abandons, Ordering::SeqCst);
+        Ok((
+            vec![TransactionalMessagingObservation::ConsumerTransaction {
+                status: TransactionalMessagingTransactionStatus::CommitUnknown,
+            }],
+            abandons,
+        ))
+    }
+
+    async fn lease_lost_delivery(
+        &self,
+    ) -> Result<(Vec<TransactionalMessagingObservation>, usize), ConformanceError> {
+        let mut observations = vec![TransactionalMessagingObservation::ConsumerLeaseLost];
+        if matches!(self.defect, Some(Defect::InboxLeaseLostBeforeCommit)) {
+            self.settlement_log().push(SettlementKind::Acknowledge);
+            observations.push(TransactionalMessagingObservation::ConsumerSettlement {
+                action: TransactionalMessagingDisposition::Ack,
+                outcome: TransactionalMessagingIoOutcome::Ok,
+            });
+        } else {
+            self.abandons.store(1, Ordering::SeqCst);
+        }
+        Ok((observations, 1))
+    }
+}
+
+fn message() -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+    let metadata = MessageMetadata::new(
+        AuthoredMessageMetadata::new(
+            tenant,
+            Timepoint::try_from(1_700_000_000_i64)?,
+            MessagingDomain::parse("orders")?,
+            MessageRoute::parse("orders.created")?,
+            ContractIdentity::new(
+                ContractId::parse("orders.created")?,
+                ContractVersion::from_major(1)?,
+                SchemaDigest::parse(
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )?,
+            ),
+        ),
+        MessageMetadataExtensions::new(None, None, None, BTreeMap::new()),
+    );
+    Ok(MessageEnvelope::new(
+        MessageId::parse("fault-message")?,
+        metadata,
+        vec![],
+    ))
+}
+
+#[tokio::test]
+async fn conforming_drivers_pass_all_suites() -> TestResult {
+    run_outbox_conformance(
+        &OutboxFixture::new(None),
+        &FakeClock::new(),
+        ExecutionBudget::STANDARD,
+    )
+    .await?;
+    run_inbox_conformance(
+        &InboxFixture { defect: None },
+        &FakeClock::new(),
+        ExecutionBudget::STANDARD,
+    )
+    .await?;
+    run_consumer_conformance(
+        &ConsumerFixture::new(None),
+        &FakeClock::new(),
+        ExecutionBudget::STANDARD,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_unknown_without_an_abandon_call_is_rejected() {
+    let result = run_consumer_conformance(
+        &ConsumerFixture::new(None).without_commit_unknown_abandon(),
+        &FakeClock::new(),
+        ExecutionBudget::STANDARD,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "Deferred without a real abandon observation must fail"
+    );
+    let Some(error) = result.err() else {
+        return;
+    };
+    assert!(error.is_count());
+    assert_eq!(error.stage(), "consumer.commit-unknown.abandon");
+}
+
+#[tokio::test]
+async fn closed_provider_phase_survives_the_public_runner() {
+    for (failure, expected_phase) in [
+        (
+            ConformanceError::fixture(MessagingErrorKind::Transient),
+            "fixture",
+        ),
+        (
+            ConformanceError::connect(MessagingErrorKind::Transient),
+            "connect",
+        ),
+        (
+            ConformanceError::publish(MessagingErrorKind::Transient),
+            "publish",
+        ),
+        (
+            ConformanceError::delivery(MessagingErrorKind::Transient),
+            "delivery",
+        ),
+        (
+            ConformanceError::settlement(MessagingErrorKind::Transient),
+            "settlement",
+        ),
+        (
+            ConformanceError::shutdown(MessagingErrorKind::Transient),
+            "shutdown",
+        ),
+    ] {
+        let result = run_consumer_conformance(
+            &ConsumerFixture::new(None).with_committed_error(failure),
+            &FakeClock::new(),
+            ExecutionBudget::STANDARD,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "provider phase failure must reach the runner"
+        );
+        let Some(error) = result.err() else {
+            continue;
+        };
+        assert_eq!(error.stage(), "consumer.committed.outcome");
+        assert_eq!(error.provider_phase_label(), Some(expected_phase));
+        assert!(error.to_string().contains(expected_phase));
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn every_historical_fault_has_a_synthetic_red() {
+    for case in CASES {
+        assert!(
+            !case.id.is_empty()
+                && !case.crash_point.is_empty()
+                && !case.expected_invariant.is_empty()
+        );
+        let result = match case.defect {
+            Defect::InboxClaimCrashBeforeCommit => {
+                run_inbox_conformance(
+                    &InboxFixture {
+                        defect: Some(case.defect),
+                    },
+                    &FakeClock::new(),
+                    ExecutionBudget::STANDARD,
+                )
+                .await
+            }
+            Defect::InboxCommitBeforeAckCrash | Defect::InboxLeaseLostBeforeCommit => {
+                run_consumer_conformance(
+                    &ConsumerFixture::new(Some(case.defect)),
+                    &FakeClock::new(),
+                    ExecutionBudget::STANDARD,
+                )
+                .await
+            }
+            _ => {
+                run_outbox_conformance(
+                    &OutboxFixture::new(Some(case.defect)),
+                    &FakeClock::new(),
+                    ExecutionBudget::STANDARD,
+                )
+                .await
+            }
+        };
+        let Err(error) = result else {
+            assert!(
+                result.is_err(),
+                "synthetic defect escaped oracle: {} ({})",
+                case.id,
+                case.expected_invariant
+            );
+            continue;
+        };
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("super-secret"));
+        assert!(!rendered.contains("provider.invalid"));
+        let actual_error = if error.is_count() {
+            ExpectedError::Count
+        } else {
+            ExpectedError::Mismatch
+        };
+        assert!(
+            matches!(
+                (case.expected_error, actual_error),
+                (ExpectedError::Mismatch, ExpectedError::Mismatch)
+                    | (ExpectedError::Count, ExpectedError::Count)
+            ),
+            "wrong error variant rejected {} ({})",
+            case.id,
+            case.expected_invariant
+        );
+        assert_eq!(
+            error.stage(),
+            case.expected_stage,
+            "wrong oracle rejected {} ({})",
+            case.id,
+            case.expected_invariant
+        );
+    }
+}

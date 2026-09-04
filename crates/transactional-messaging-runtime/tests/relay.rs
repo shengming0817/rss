@@ -3,7 +3,7 @@
 
 mod support;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,9 @@ use rss_transactional_messaging::transport::{
 };
 use rss_transactional_messaging_runtime::relay::{
     RelayBatchLimit, RelayConfig, RelayConfigError, RelayWorker, relay_once,
+};
+use rss_transactional_messaging_testkit::memory::{
+    FakeClock, MemoryPublisher as ScriptedPublisher,
 };
 use support::{AdvancingTimer, ScriptedTimer};
 
@@ -136,54 +139,6 @@ impl OutboxStore<Vec<u8>> for Store {
             self.claims.lock().expect("claim mutex").push(claim);
         }
         Ok(())
-    }
-}
-
-struct ScriptedPublisher {
-    outcomes: Mutex<VecDeque<PublishOutcome<()>>>,
-    message_ids: Mutex<Vec<String>>,
-}
-
-impl ScriptedPublisher {
-    fn new(outcomes: impl IntoIterator<Item = PublishOutcome<()>>) -> Self {
-        Self {
-            outcomes: Mutex::new(outcomes.into_iter().collect()),
-            message_ids: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl Publisher<Vec<u8>> for ScriptedPublisher {
-    type Receipt = ();
-
-    async fn publish(
-        &self,
-        message: &MessageEnvelope<Vec<u8>>,
-        _deadline: OperationDeadline,
-    ) -> PublishOutcome<Self::Receipt> {
-        self.message_ids
-            .lock()
-            .expect("ids mutex")
-            .push(message.id().as_str().to_owned());
-        self.outcomes
-            .lock()
-            .expect("outcome mutex")
-            .pop_front()
-            .expect("scripted outcome")
-    }
-}
-
-struct FixedClock;
-
-impl Clock for FixedClock {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::ZERO)
-    }
-}
-
-impl ExecutionTimer for FixedClock {
-    async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
-        std::future::pending().await
     }
 }
 
@@ -297,7 +252,7 @@ async fn relay_once_dispatches_claimed_batch_concurrently_with_hard_limit() {
             relay_once(
                 store.as_ref(),
                 publisher.as_ref(),
-                &FixedClock,
+                &FakeClock::new(),
                 budget(),
                 &NoopEmitter,
                 RelayBatchLimit::new(NonZeroUsize::new(2).expect("limit")).expect("bounded"),
@@ -337,7 +292,7 @@ async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
     let error = relay_once(
         &store,
         &publisher,
-        &FixedClock,
+        &FakeClock::new(),
         budget(),
         &NoopEmitter,
         RelayBatchLimit::new(NonZeroUsize::new(2).expect("limit")).expect("bounded"),
@@ -346,7 +301,7 @@ async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
     .expect_err("provider over-return must fail closed");
 
     assert_eq!(error.kind(), MessagingErrorKind::Invariant);
-    assert!(publisher.message_ids.lock().expect("ids mutex").is_empty());
+    assert!(publisher.message_ids().is_empty());
 }
 
 #[tokio::test]
@@ -507,7 +462,7 @@ async fn relay_drains_partial_failures_and_returns_first_error_in_claim_order() 
     let error = relay_once(
         &store,
         &AuditedPublisher(Arc::clone(&events)),
-        &FixedClock,
+        &FakeClock::new(),
         budget(),
         &RecordingEmitter(Arc::clone(&observations)),
         RelayBatchLimit::new(NonZeroUsize::new(3).expect("non-zero")).expect("limit"),
@@ -561,7 +516,7 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
             remaining: Duration::from_secs(10),
         })),
         Arc::clone(&publisher),
-        Arc::new(FixedClock),
+        Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
         budget(),
@@ -607,7 +562,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
             0,
         )),
         Arc::new(ScriptedPublisher::new([])),
-        Arc::new(FixedClock),
+        Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
         budget(),
@@ -696,7 +651,7 @@ async fn ambiguous_retry_reuses_the_persisted_message_id() {
     let first = relay_once(
         &store,
         &publisher,
-        &FixedClock,
+        &FakeClock::new(),
         budget(),
         &NoopEmitter,
         limit(),
@@ -706,7 +661,7 @@ async fn ambiguous_retry_reuses_the_persisted_message_id() {
     let second = relay_once(
         &store,
         &publisher,
-        &FixedClock,
+        &FakeClock::new(),
         budget(),
         &NoopEmitter,
         limit(),
@@ -717,7 +672,11 @@ async fn ambiguous_retry_reuses_the_persisted_message_id() {
     assert_eq!(first.retried(), 1);
     assert_eq!(second.published(), 1);
     assert_eq!(
-        publisher.message_ids.lock().expect("ids mutex").as_slice(),
+        publisher
+            .message_ids()
+            .iter()
+            .map(MessageId::as_str)
+            .collect::<Vec<_>>(),
         ["message-1", "message-1"]
     );
 }
@@ -731,7 +690,7 @@ async fn lost_lease_fences_before_publication() {
     let report = relay_once(
         &store,
         &publisher,
-        &FixedClock,
+        &FakeClock::new(),
         budget(),
         &RecordingEmitter(Arc::clone(&observations)),
         limit(),
@@ -740,7 +699,7 @@ async fn lost_lease_fences_before_publication() {
     .expect("relay");
 
     assert_eq!(report.fenced(), 1);
-    assert!(publisher.message_ids.lock().expect("ids mutex").is_empty());
+    assert!(publisher.message_ids().is_empty());
     assert!(
         observations
             .lock()
@@ -785,7 +744,7 @@ async fn publication_evidence_maps_to_the_complete_settlement_matrix() {
                 remaining: Duration::from_secs(10),
             }),
             &ScriptedPublisher::new([outcome]),
-            &FixedClock,
+            &FakeClock::new(),
             budget(),
             &NoopEmitter,
             limit(),
@@ -809,7 +768,7 @@ async fn insufficient_authoritative_lease_budget_retries_without_publish() {
     let report = relay_once(
         &store,
         &publisher,
-        &FixedClock,
+        &FakeClock::new(),
         budget(),
         &NoopEmitter,
         limit(),
@@ -818,7 +777,7 @@ async fn insufficient_authoritative_lease_budget_retries_without_publish() {
     .expect("relay");
 
     assert_eq!(report.retried(), 1);
-    assert!(publisher.message_ids.lock().expect("ids mutex").is_empty());
+    assert!(publisher.message_ids().is_empty());
 }
 
 #[tokio::test]
@@ -830,7 +789,7 @@ async fn exhausted_authoritative_lease_window_is_recoverable_not_invariant() {
         let error = relay_once(
             &store,
             &publisher,
-            &FixedClock,
+            &FakeClock::new(),
             budget(),
             &NoopEmitter,
             limit(),
@@ -839,7 +798,7 @@ async fn exhausted_authoritative_lease_window_is_recoverable_not_invariant() {
         .expect_err("no provider-authoritative settlement window remains");
 
         assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
-        assert!(publisher.message_ids.lock().expect("ids mutex").is_empty());
+        assert!(publisher.message_ids().is_empty());
     }
 }
 

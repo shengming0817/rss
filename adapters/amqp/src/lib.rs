@@ -33,7 +33,7 @@
 //! - broker DLQ 只承接 ConsumerBase 的 fail-closed transport Reject，不是 app DLX 或 replay API。
 //!   handler 永久 Reject 仍由 ConsumerBase 写入加密 app DLX，成功后 broker Ack，避免双 owner。
 //!
-//! at-most-once 仅 demo 拓扑的 MemBus（`rss_transactional_messaging::transport::DeliverySource`）；AMQP 不实现该 trait。
+//! Provider-neutral test doubles live in `rss-transactional-messaging-testkit`.
 //!
 //! # Publisher transport replacement 与 ambiguous outcome
 //!

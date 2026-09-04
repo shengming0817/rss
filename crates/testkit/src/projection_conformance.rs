@@ -9,7 +9,7 @@
 //! INVARIANT: PROJECTION-TARGET-CONFORMANCE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed exact tuple rejects missing, duplicate, reordered, or unknown projection scenarios and fixes the behavior output type" }.
 //! INVARIANT: PROJECTION-CONFORMANCE-FIXTURE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and no raw constructor limit external carriers to the canonical primary and foreign test identities" }.
 
-use rss_conformance::ConformanceErrorCategory;
+use crate::TestProviderErrorKind;
 
 /// One complete provider-neutral Projection input identity.
 ///
@@ -282,7 +282,7 @@ pub enum ProjectionConformanceError {
     #[error("projection conformance provider failure at {stage}: {category}")]
     Provider {
         stage: &'static str,
-        category: ConformanceErrorCategory,
+        category: TestProviderErrorKind,
     },
     #[error(
         "projection conformance {case} violated {invariant}: expected {expected}, got {actual}"
@@ -296,7 +296,7 @@ pub enum ProjectionConformanceError {
 }
 
 impl ProjectionConformanceError {
-    pub const fn provider(stage: &'static str, category: ConformanceErrorCategory) -> Self {
+    pub const fn provider(stage: &'static str, category: TestProviderErrorKind) -> Self {
         Self::Provider { stage, category }
     }
 }

@@ -12,8 +12,8 @@ members = [
   "crates/transactional-messaging",
   # Transactional Messaging Runtime Public：provider-neutral relay/consumer algorithms + managed task glue。
   "crates/transactional-messaging-runtime",
-  # Provider-neutral public LocalTx conformance assertions.
-  "crates/conformance",
+  # Transactional Messaging Testkit Public：provider-neutral conformance + deterministic memory doubles。
+  "crates/transactional-messaging-testkit",
   # 基础（仅 std + 外部 crate）
   "crates/vocab",
   "crates/ids",
@@ -76,7 +76,6 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
-  { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
   { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
   { package = "rss-redact-derive", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -87,6 +86,7 @@ packages = [
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging-testkit", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
 
@@ -115,6 +115,7 @@ rss-request-context = { path = "crates/request-context", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }
 rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
 rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
+rss-transactional-messaging-testkit = { path = "crates/transactional-messaging-testkit", version = "0.1.0" }
 rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }

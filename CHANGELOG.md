@@ -6,6 +6,15 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-transactional-messaging-testkit 0.1.0
+
+- Establish the sole provider-neutral owner for transactional messaging conformance drivers and
+  deterministic in-memory outbox, inbox, publisher, settlement, and clock test doubles.
+- Preserve the historical local transaction, outbox, inbox, consumer transaction, and nine-case
+  crash matrix invariants while consuming core/runtime production outcomes directly.
+- Remove the former `rss-conformance` package and messaging doubles from the memory adapter without
+  aliases, re-exports, shims, provider catalogs, discovery DSLs, or compatibility features.
+
 ### rss-transactional-messaging-runtime 0.1.0
 
 - Bound every consumer and relay provider future through the core-owned absolute-deadline race;

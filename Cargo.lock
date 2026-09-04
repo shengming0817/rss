@@ -124,6 +124,7 @@ dependencies = [
  "rss-runtime",
  "rss-transactional-messaging",
  "rss-transactional-messaging-runtime",
+ "rss-transactional-messaging-testkit",
  "secure",
  "testkit",
  "tokio",
@@ -3096,9 +3097,7 @@ dependencies = [
  "rss-contract",
  "rss-data-protection",
  "rss-request-context",
- "rss-transactional-messaging",
  "tokio",
- "tokio-util",
  "uuid",
  "vocab",
  "zeroize",
@@ -4379,14 +4378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rss-conformance"
-version = "0.1.0"
-dependencies = [
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "rss-contract"
 version = "0.1.0"
 
@@ -4510,11 +4501,23 @@ dependencies = [
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
+ "rss-transactional-messaging-testkit",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
  "trybuild",
+]
+
+[[package]]
+name = "rss-transactional-messaging-testkit"
+version = "0.1.0"
+dependencies = [
+ "rss-contract",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -5578,7 +5581,6 @@ dependencies = [
  "anyhow",
  "axum",
  "rcgen",
- "rss-conformance",
  "serde",
  "serde_json",
  "sqlx",

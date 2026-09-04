@@ -15,7 +15,7 @@
 //!
 //! ref: docs/references/framework-comparison.md（repo conformance：oxidecomputer/omicron 手写 DI 测试范式）。
 
-use rss_conformance::ConformanceErrorCategory;
+use crate::TestProviderErrorKind;
 use std::future::Future;
 
 /// Typed provider stage used in safe diagnostics.
@@ -60,15 +60,14 @@ pub enum TenantConformanceError {
     #[error("tenant conformance: provider op failed during {stage} ({category})")]
     Provider {
         stage: TenantConformanceStage,
-        category: ConformanceErrorCategory,
+        category: TestProviderErrorKind,
     },
 }
 
 /// 断言 repo 满足最小租户隔离（round-trip + 跨租不可见 + 跨租不干扰）。
 ///
 /// 对租户标识类型 `T` 泛型（`Copy + PartialEq`，如 `rss_request_context::TenantId`）——harness 不依赖 adapter crate，
-/// 调用方传入自己的 tenant 类型 + 按租户的写/读闭包（testkit 的唯一内部 shipped 出边为
-/// `rss-conformance`，仍为零 adapter 依赖）。
+/// 调用方传入自己的 tenant 类型 + 按租户的写/读闭包（旧通用 testkit 仍为零 adapter 依赖）。
 ///
 /// - `tenant_a` / `tenant_b`：两个**不同**租户（调用方保证不等）。
 /// - `save(tenant)`：在该租户 scope 下写一行（多次调用安全：幂等或唯一键由调用方自理）。
@@ -89,7 +88,7 @@ where
     R: Fn(T) -> RF,
     SF: Future<Output = Result<(), E>>,
     RF: Future<Output = Result<bool, E>>,
-    C: Fn(&E) -> ConformanceErrorCategory,
+    C: Fn(&E) -> TestProviderErrorKind,
 {
     // 前置：两租户必须不同，否则断言 2（跨租不可见）会以误导性的 CrossTenantVisible 失败，掩盖调用方传参错误。
     debug_assert!(
@@ -172,7 +171,7 @@ mod tests {
             async move { Ok::<bool, std::convert::Infallible>(store.borrow().contains(&t)) }
         };
         assert_tenant_isolation(TENANT_A, TENANT_B, save, exists, |_| {
-            ConformanceErrorCategory::Other
+            TestProviderErrorKind::Other
         })
         .await
         .expect("isolating repo passes");
@@ -196,7 +195,7 @@ mod tests {
             async move { Ok::<bool, std::convert::Infallible>(*store.borrow()) }
         };
         let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists, |_| {
-            ConformanceErrorCategory::Other
+            TestProviderErrorKind::Other
         })
         .await
         .expect_err("leaking repo must fail");
@@ -223,7 +222,7 @@ mod tests {
             async move { Ok::<bool, std::convert::Infallible>(*current.borrow() == Some(t)) }
         };
         let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists, |_| {
-            ConformanceErrorCategory::Other
+            TestProviderErrorKind::Other
         })
         .await
         .expect_err("interfering repo must fail");
@@ -242,7 +241,7 @@ mod tests {
             TENANT_B,
             |_| async { Err::<(), _>(SensitiveError) },
             |_| async { Ok::<_, SensitiveError>(false) },
-            |_| ConformanceErrorCategory::Storage,
+            |_| TestProviderErrorKind::Storage,
         )
         .await;
 
@@ -250,7 +249,7 @@ mod tests {
             result,
             Err(TenantConformanceError::Provider {
                 stage: TenantConformanceStage::SaveTenantA,
-                category: ConformanceErrorCategory::Storage,
+                category: TestProviderErrorKind::Storage,
             })
         ));
     }

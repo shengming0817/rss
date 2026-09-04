@@ -45,6 +45,7 @@ use rss_transactional_messaging_runtime::consumer::{
     ConsumerExecution, ConsumerWorker, ProcessingDisposition, SubscriptionBackoffPolicy,
     consume_once,
 };
+use rss_transactional_messaging_testkit::memory::RecordingSettlement;
 use support::{AdvancingTimer as ManualTimer, ScriptedTimer};
 
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -593,12 +594,6 @@ impl ConsumerTx<Vec<u8>> for FakeTx {
     }
 }
 
-struct FakeSettlement {
-    actions: Arc<Mutex<Vec<SettlementKind>>>,
-    fail: bool,
-    abandoned: Arc<AtomicUsize>,
-}
-
 struct FailingAbandonSettlement {
     abandoned: Arc<AtomicUsize>,
 }
@@ -621,29 +616,6 @@ impl DeliverySettlement for FailingAbandonSettlement {
             MessagingErrorKind::Transient,
             std::io::Error::other("cleanup failure"),
         ))
-    }
-}
-
-impl DeliverySettlement for FakeSettlement {
-    async fn settle(
-        self,
-        decision: rss_transactional_messaging::transaction::SettlementDecision,
-        _deadline: OperationDeadline,
-    ) -> Result<(), MessagingError> {
-        self.actions.lock().expect("lock").push(decision.kind());
-        if self.fail {
-            Err(MessagingError::new(
-                MessagingErrorKind::Transient,
-                std::io::Error::other("settlement unavailable"),
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn abandon(self, _deadline: OperationDeadline) -> Result<(), MessagingError> {
-        self.abandoned.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 }
 
@@ -708,11 +680,7 @@ async fn duplicate_returns_original_terminal_receipt_without_handler_call() {
     let expected = subscription(&message);
     let delivery = Delivery::new(
         message,
-        FakeSettlement {
-            actions: Arc::clone(&actions),
-            fail: false,
-            abandoned: Arc::new(AtomicUsize::new(0)),
-        },
+        RecordingSettlement::observing(Arc::clone(&actions), Arc::new(AtomicUsize::new(0))),
     );
 
     let outcome = consume_once(
@@ -779,11 +747,7 @@ async fn duplicate_authored_drift_rejects_without_handler_call() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::new(AtomicUsize::new(0)),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::new(AtomicUsize::new(0))),
         ),
     )
     .await
@@ -835,11 +799,7 @@ async fn stale_claim_abandons_without_effect_or_broker_settlement() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ),
     )
     .await
@@ -877,11 +837,7 @@ async fn lease_check_failure_abandons_without_effect_or_broker_settlement() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ),
     )
     .await;
@@ -920,11 +876,7 @@ async fn provider_lease_shorter_than_the_renewal_schedule_is_a_hard_fence() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ),
     )
     .await
@@ -1005,11 +957,10 @@ async fn deadline_overflow_emits_a_closed_failure_phase() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::new(Mutex::new(Vec::new())),
-                fail: false,
-                abandoned: Arc::new(AtomicUsize::new(0)),
-            },
+            RecordingSettlement::observing(
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(AtomicUsize::new(0)),
+            ),
         ),
     )
     .await
@@ -1058,11 +1009,7 @@ async fn only_confirmed_transient_rollback_retries_locally() {
                 ),
                 Delivery::new(
                     message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned: Arc::new(AtomicUsize::new(0)),
-                    },
+                    RecordingSettlement::observing(actions, Arc::new(AtomicUsize::new(0))),
                 ),
             )
             .await
@@ -1119,11 +1066,7 @@ async fn rejected_effect_commits_receipt_before_reject_settlement() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::new(AtomicUsize::new(0)),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::new(AtomicUsize::new(0))),
         ),
     )
     .await
@@ -1168,11 +1111,10 @@ async fn settlement_io_failure_does_not_reexecute_or_change_durable_outcome() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: true,
-                abandoned: Arc::new(AtomicUsize::new(0)),
-            },
+            RecordingSettlement::failing_with_observers(
+                Arc::clone(&actions),
+                Arc::new(AtomicUsize::new(0)),
+            ),
         ),
     )
     .await;
@@ -1185,18 +1127,47 @@ async fn settlement_io_failure_does_not_reexecute_or_change_durable_outcome() {
     );
 }
 
-#[derive(Clone, Copy)]
-enum MatrixOutcome {
-    HandlerTransient,
-    Permanent,
-    Infrastructure,
-    RollbackFailed,
-    CommitUnknown,
-    Fenced,
+type OutcomeFactory =
+    fn(rss_transactional_messaging::transaction::ReceiptIntent) -> TransactionOutcome<Proof>;
+
+fn handler_transient_outcome(
+    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+) -> TransactionOutcome<Proof> {
+    TransactionOutcome::rolled_back(FailureClass::Transient)
+}
+
+fn permanent_outcome(
+    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+) -> TransactionOutcome<Proof> {
+    TransactionOutcome::not_started(FailureClass::Permanent)
+}
+
+fn infrastructure_outcome(
+    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+) -> TransactionOutcome<Proof> {
+    TransactionOutcome::not_started(FailureClass::Infrastructure)
+}
+
+fn rollback_failed_outcome(
+    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+) -> TransactionOutcome<Proof> {
+    TransactionOutcome::rollback_failed()
+}
+
+fn commit_unknown_outcome(
+    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+) -> TransactionOutcome<Proof> {
+    TransactionOutcome::commit_unknown()
+}
+
+fn fenced_outcome(
+    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+) -> TransactionOutcome<Proof> {
+    TransactionOutcome::fenced()
 }
 
 struct MatrixTx {
-    outcome: MatrixOutcome,
+    outcome: OutcomeFactory,
     calls: Arc<AtomicUsize>,
 }
 
@@ -1208,22 +1179,11 @@ impl ConsumerTx<Vec<u8>> for MatrixTx {
         &self,
         _claim: &Self::Claim,
         _message: &MessageEnvelope<Vec<u8>>,
-        _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+        receipt: rss_transactional_messaging::transaction::ReceiptIntent,
         _deadline: OperationDeadline,
     ) -> TransactionOutcome<Self::CommitProof> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        match self.outcome {
-            MatrixOutcome::HandlerTransient => {
-                TransactionOutcome::rolled_back(FailureClass::Transient)
-            }
-            MatrixOutcome::Permanent => TransactionOutcome::not_started(FailureClass::Permanent),
-            MatrixOutcome::Infrastructure => {
-                TransactionOutcome::not_started(FailureClass::Infrastructure)
-            }
-            MatrixOutcome::RollbackFailed => TransactionOutcome::rollback_failed(),
-            MatrixOutcome::CommitUnknown => TransactionOutcome::commit_unknown(),
-            MatrixOutcome::Fenced => TransactionOutcome::fenced(),
-        }
+        (self.outcome)(receipt)
     }
 }
 
@@ -1241,42 +1201,48 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
 
     let cases = [
         (
-            MatrixOutcome::HandlerTransient,
+            handler_transient_outcome as OutcomeFactory,
+            true,
             3,
             TransactionalMessagingTransactionStatus::HandlerTransient,
             0,
             vec![SettlementKind::Requeue],
         ),
         (
-            MatrixOutcome::Permanent,
+            permanent_outcome as OutcomeFactory,
+            false,
             1,
             TransactionalMessagingTransactionStatus::RejectedPermanent,
             0,
             vec![SettlementKind::Requeue],
         ),
         (
-            MatrixOutcome::Infrastructure,
+            infrastructure_outcome as OutcomeFactory,
+            false,
             1,
             TransactionalMessagingTransactionStatus::InfrastructureTransient,
             0,
             vec![SettlementKind::Requeue],
         ),
         (
-            MatrixOutcome::RollbackFailed,
+            rollback_failed_outcome as OutcomeFactory,
+            false,
             1,
             TransactionalMessagingTransactionStatus::RollbackFailed,
             1,
             vec![],
         ),
         (
-            MatrixOutcome::CommitUnknown,
+            commit_unknown_outcome as OutcomeFactory,
+            false,
             1,
             TransactionalMessagingTransactionStatus::CommitUnknown,
             1,
             vec![],
         ),
         (
-            MatrixOutcome::Fenced,
+            fenced_outcome as OutcomeFactory,
+            false,
             1,
             TransactionalMessagingTransactionStatus::Fenced,
             1,
@@ -1284,7 +1250,15 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
         ),
     ];
 
-    for (kind, expected_calls, expected_status, expected_abandon, expected_actions) in cases {
+    for (
+        outcome,
+        retries_locally,
+        expected_calls,
+        expected_status,
+        expected_abandon,
+        expected_actions,
+    ) in cases
+    {
         let inbox = FakeInbox {
             disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
             lease: LeaseStatus::Held {
@@ -1307,10 +1281,7 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
             async move {
                 consume_once(
                     &inbox,
-                    &MatrixTx {
-                        outcome: kind,
-                        calls,
-                    },
+                    &MatrixTx { outcome, calls },
                     &ConsumerExecution::new(
                         ConsumerGroup::parse("matrix").expect("group"),
                         &TrustedIngress,
@@ -1319,19 +1290,12 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
                         consumer_policy(),
                         &RecordingEmitter(observations),
                     ),
-                    Delivery::new(
-                        message,
-                        FakeSettlement {
-                            actions,
-                            fail: false,
-                            abandoned,
-                        },
-                    ),
+                    Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
                 )
                 .await
             }
         });
-        if matches!(kind, MatrixOutcome::HandlerTransient) {
+        if retries_locally {
             tokio::time::timeout(Duration::from_secs(1), async {
                 support::wait_for_count(calls.as_ref(), 1).await;
                 timer.wait_registered(Duration::from_secs(1)).await;
@@ -1514,14 +1478,7 @@ async fn never_ready_claim_and_extend_stop_before_handler_and_ack() {
                         deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
                         &NoopEmitter,
                     ),
-                    Delivery::new(
-                        message,
-                        FakeSettlement {
-                            actions,
-                            fail: false,
-                            abandoned,
-                        },
-                    ),
+                    Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
                 )
                 .await
             }
@@ -1575,14 +1532,7 @@ async fn never_ready_execute_maps_to_commit_unknown_and_uses_settlement_reserve(
                     deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
                     &RecordingEmitter(observations),
                 ),
-                Delivery::new(
-                    message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned,
-                    },
-                ),
+                Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
             )
             .await
         }
@@ -1647,14 +1597,7 @@ async fn never_ready_periodic_extend_fences_execute_at_the_operation_cutoff() {
                     renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
-                Delivery::new(
-                    message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned,
-                    },
-                ),
+                Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
             )
             .await
         }
@@ -1702,7 +1645,7 @@ async fn never_ready_release_settle_and_abandon_are_bounded_without_second_actio
                 consume_once(
                     &PendingInbox { stage, started },
                     &MatrixTx {
-                        outcome: MatrixOutcome::Infrastructure,
+                        outcome: infrastructure_outcome,
                         calls,
                     },
                     &ConsumerExecution::new(
@@ -1713,14 +1656,7 @@ async fn never_ready_release_settle_and_abandon_are_bounded_without_second_actio
                         deadline_policy(Duration::from_millis(100), Duration::from_millis(20)),
                         &NoopEmitter,
                     ),
-                    Delivery::new(
-                        message,
-                        FakeSettlement {
-                            actions,
-                            fail: false,
-                            abandoned,
-                        },
-                    ),
+                    Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
                 )
                 .await
             }
@@ -1763,9 +1699,9 @@ async fn never_ready_release_settle_and_abandon_are_bounded_without_second_actio
                     },
                     &MatrixTx {
                         outcome: if commit_unknown {
-                            MatrixOutcome::CommitUnknown
+                            commit_unknown_outcome
                         } else {
-                            MatrixOutcome::Permanent
+                            permanent_outcome
                         },
                         calls,
                     },
@@ -1910,7 +1846,7 @@ async fn backoff_equal_to_operation_budget_does_not_start_another_attempt() {
             started: Arc::new(AtomicUsize::new(0)),
         },
         &MatrixTx {
-            outcome: MatrixOutcome::HandlerTransient,
+            outcome: handler_transient_outcome,
             calls: Arc::clone(&calls),
         },
         &ConsumerExecution::new(
@@ -1923,11 +1859,7 @@ async fn backoff_equal_to_operation_budget_does_not_start_another_attempt() {
         ),
         Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ),
     )
     .await
@@ -2065,14 +1997,7 @@ async fn long_handler_is_periodically_renewed_then_commits_before_ack() {
                     renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
-                Delivery::new(
-                    message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned,
-                    },
-                ),
+                Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
             )
             .await
         }
@@ -2151,14 +2076,7 @@ async fn lease_lost_during_handler_cancels_effect_and_abandons_without_settlemen
                     renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
-                Delivery::new(
-                    message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned,
-                    },
-                ),
+                Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
             )
             .await
         }
@@ -2221,14 +2139,7 @@ async fn lease_loss_wins_when_a_terminal_transaction_is_also_ready() {
                     renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
-                Delivery::new(
-                    message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned,
-                    },
-                ),
+                Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
             )
             .await
         }
@@ -2334,14 +2245,7 @@ async fn renewal_error_wins_when_a_terminal_transaction_is_also_ready() {
                     renewing_consumer_policy(),
                     &NoopEmitter,
                 ),
-                Delivery::new(
-                    message,
-                    FakeSettlement {
-                        actions,
-                        fail: false,
-                        abandoned,
-                    },
-                ),
+                Delivery::new(message, RecordingSettlement::observing(actions, abandoned)),
             )
             .await
         }
@@ -2367,16 +2271,16 @@ async fn renewal_error_wins_when_a_terminal_transaction_is_also_ready() {
 }
 
 struct OneDeliverySource {
-    delivery: Mutex<Option<IncomingDelivery<Vec<u8>, FakeSettlement>>>,
+    delivery: Mutex<Option<IncomingDelivery<Vec<u8>, RecordingSettlement>>>,
 }
 
 struct RedeliverySource {
-    deliveries: Mutex<VecDeque<IncomingDelivery<Vec<u8>, FakeSettlement>>>,
+    deliveries: Mutex<VecDeque<IncomingDelivery<Vec<u8>, RecordingSettlement>>>,
     subscriptions: AtomicUsize,
 }
 
 impl DeliverySource<Vec<u8>> for RedeliverySource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries =
         futures::stream::Iter<std::vec::IntoIter<IncomingDelivery<Vec<u8>, Self::Settlement>>>;
 
@@ -2440,7 +2344,7 @@ impl InboxStore for TransientThenAcquiredInbox {
 }
 
 impl DeliverySource<Vec<u8>> for OneDeliverySource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries =
         futures::stream::Iter<std::vec::IntoIter<IncomingDelivery<Vec<u8>, Self::Settlement>>>;
 
@@ -2467,11 +2371,8 @@ async fn transient_delivery_failure_replaces_stream_and_resubscribes() {
     let second = envelope(|_| {});
     let actions = Arc::new(Mutex::new(Vec::new()));
     let abandoned = Arc::new(AtomicUsize::new(0));
-    let settlement = || FakeSettlement {
-        actions: Arc::clone(&actions),
-        fail: false,
-        abandoned: Arc::clone(&abandoned),
-    };
+    let settlement =
+        || RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned));
     let source = Arc::new(RedeliverySource {
         deliveries: Mutex::new(VecDeque::from([
             IncomingDelivery::Valid(Box::new(Delivery::new(first, settlement()))),
@@ -2537,11 +2438,8 @@ async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
     let second = envelope(|fixture| fixture.id = "message-2");
     let actions = Arc::new(Mutex::new(Vec::new()));
     let abandoned = Arc::new(AtomicUsize::new(0));
-    let settlement = || FakeSettlement {
-        actions: Arc::clone(&actions),
-        fail: false,
-        abandoned: Arc::clone(&abandoned),
-    };
+    let settlement =
+        || RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned));
     let source = Arc::new(RedeliverySource {
         deliveries: Mutex::new(VecDeque::from([
             IncomingDelivery::Valid(Box::new(Delivery::new(first, settlement()))),
@@ -2654,11 +2552,7 @@ async fn forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
     let source = Arc::new(OneDeliverySource {
         delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ))))),
     });
     let claim_started = Arc::new(AtomicUsize::new(0));
@@ -2721,11 +2615,7 @@ async fn provider_decoding_failure_uses_core_minted_reject() {
         Arc::new(OneDeliverySource {
             delivery: Mutex::new(Some(IncomingDelivery::invalid_from_provider(
                 rss_transactional_messaging::transaction::EnvelopeValidationFailure::MalformedMetadata,
-                FakeSettlement {
-                    actions: Arc::clone(&actions),
-                    fail: false,
-                    abandoned: Arc::clone(&abandoned),
-                },
+                RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
             ))),
         }),
         idle_inbox(),
@@ -2783,11 +2673,7 @@ async fn forced_worker_shutdown_drops_handler_without_settlement() {
     let source = Arc::new(OneDeliverySource {
         delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ))))),
     });
     let inbox = Arc::new(RenewingInbox {
@@ -2851,11 +2737,7 @@ async fn terminal_outcome_completing_during_cancellation_is_settled() {
     let source = Arc::new(OneDeliverySource {
         delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
             message,
-            FakeSettlement {
-                actions: Arc::clone(&actions),
-                fail: false,
-                abandoned: Arc::clone(&abandoned),
-            },
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
         ))))),
     });
     let started = Arc::new(AtomicUsize::new(0));
@@ -2913,7 +2795,7 @@ async fn terminal_outcome_completing_during_cancellation_is_settled() {
 }
 
 type BoxDeliveries =
-    Pin<Box<dyn futures::Stream<Item = IncomingDelivery<Vec<u8>, FakeSettlement>> + Send>>;
+    Pin<Box<dyn futures::Stream<Item = IncomingDelivery<Vec<u8>, RecordingSettlement>> + Send>>;
 
 struct BlockingSubscribeSource {
     started: Arc<AtomicUsize>,
@@ -2921,7 +2803,7 @@ struct BlockingSubscribeSource {
 }
 
 impl DeliverySource<Vec<u8>> for BlockingSubscribeSource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries = BoxDeliveries;
 
     async fn deliveries(
@@ -2939,11 +2821,11 @@ impl DeliverySource<Vec<u8>> for BlockingSubscribeSource {
 struct GatedDeliverySource {
     subscribed: Arc<AtomicUsize>,
     gate: Arc<tokio::sync::Notify>,
-    delivery: Mutex<Option<IncomingDelivery<Vec<u8>, FakeSettlement>>>,
+    delivery: Mutex<Option<IncomingDelivery<Vec<u8>, RecordingSettlement>>>,
 }
 
 impl DeliverySource<Vec<u8>> for GatedDeliverySource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries = BoxDeliveries;
 
     async fn deliveries(
@@ -2968,7 +2850,7 @@ struct FailingSubscribeSource {
 }
 
 impl DeliverySource<Vec<u8>> for FailingSubscribeSource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries = BoxDeliveries;
 
     async fn deliveries(
@@ -2986,7 +2868,7 @@ impl DeliverySource<Vec<u8>> for FailingSubscribeSource {
 struct PanickingSubscribeSource;
 
 impl DeliverySource<Vec<u8>> for PanickingSubscribeSource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries = BoxDeliveries;
 
     #[allow(clippy::panic)]
@@ -3073,11 +2955,7 @@ async fn cancellation_wins_over_a_simultaneously_ready_new_delivery() {
             gate: Arc::clone(&gate),
             delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
                 message,
-                FakeSettlement {
-                    actions: Arc::clone(&actions),
-                    fail: false,
-                    abandoned: Arc::clone(&abandoned),
-                },
+                RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
             ))))),
         }),
         idle_inbox(),
@@ -3465,7 +3343,7 @@ struct RecoverySource {
 }
 
 impl DeliverySource<Vec<u8>> for RecoverySource {
-    type Settlement = FakeSettlement;
+    type Settlement = RecordingSettlement;
     type Deliveries = futures::stream::Empty<IncomingDelivery<Vec<u8>, Self::Settlement>>;
 
     async fn deliveries(

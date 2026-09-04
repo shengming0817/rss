@@ -1,13 +1,13 @@
 //! repository conformance helpers（#1426）。
 //!
 //! 本模块只表达 provider-agnostic 的 repo 行为断言：CAS、tombstone、tenant scope、storage error、
-//! co-tx both-or-neither。调用方用闭包适配具体域类型、错误枚举和存储探针；testkit 仅经唯一内部 shipped
-//! 出边 `rss-conformance` 复用 provider-neutral 错误分类，因而本 conformance 是 Medium 机器门，
+//! co-tx both-or-neither。调用方用闭包适配具体域类型、错误枚举和存储探针；错误分类由旧通用
+//! testkit 本包自有，因而本 conformance 是 Medium 机器门，
 //! 不替代生产 API 的类型层 Hard 约束。
 //!
 //! ref: launchbadge/sqlx examples/postgres/transaction/src/main.rs@v0.8.6
 
-use rss_conformance::ConformanceErrorCategory;
+use crate::TestProviderErrorKind;
 use std::fmt::Debug;
 use std::future::Future;
 
@@ -23,13 +23,13 @@ pub enum RepoConformanceError {
     #[error("repo conformance: provider op failed during {stage} ({category})")]
     ClassifiedProvider {
         stage: &'static str,
-        category: ConformanceErrorCategory,
+        category: TestProviderErrorKind,
     },
     #[error("repo conformance: {stage} returned {actual}; expected {expected}")]
     WrongErrorCategory {
         stage: &'static str,
-        expected: ConformanceErrorCategory,
-        actual: ConformanceErrorCategory,
+        expected: TestProviderErrorKind,
+        actual: TestProviderErrorKind,
     },
     #[error("repo conformance: {path} retry threshold must be at least {minimum}; got {actual}")]
     InvalidRetryThreshold {
@@ -740,7 +740,7 @@ where
     PWF: Future<Output = Result<usize, E>>,
     EAF: Future<Output = Result<(), E>>,
     EWF: Future<Output = Result<usize, E>>,
-    EC: Fn(&E) -> ConformanceErrorCategory,
+    EC: Fn(&E) -> TestProviderErrorKind,
 {
     let RetryBoundaryCase {
         transient_success,
@@ -781,7 +781,7 @@ where
     expect_safe_error(
         "retry conflict action",
         (conflict.action)().await,
-        ConformanceErrorCategory::Conflict,
+        TestProviderErrorKind::Conflict,
         &classify_error,
     )?;
     expect_attempts("retry conflict attempts", (conflict.attempts)(), 1)?;
@@ -793,7 +793,7 @@ where
     expect_safe_error(
         "retry permanent action",
         (permanent.action)().await,
-        ConformanceErrorCategory::Permanent,
+        TestProviderErrorKind::Permanent,
         &classify_error,
     )?;
     expect_attempts("retry permanent attempts", (permanent.attempts)(), 1)?;
@@ -805,7 +805,7 @@ where
     expect_safe_error(
         "retry transient exhaustion action",
         (transient_exhaustion.action)().await,
-        ConformanceErrorCategory::Transient,
+        TestProviderErrorKind::Transient,
         &classify_error,
     )?;
     expect_attempts(
@@ -831,7 +831,7 @@ where
 
 fn classified_provider<E, C>(stage: &'static str, error: &E, category: &C) -> RepoConformanceError
 where
-    C: Fn(&E) -> ConformanceErrorCategory,
+    C: Fn(&E) -> TestProviderErrorKind,
 {
     RepoConformanceError::ClassifiedProvider {
         stage,
@@ -842,11 +842,11 @@ where
 fn expect_safe_error<E, C>(
     stage: &'static str,
     result: Result<(), E>,
-    expected: ConformanceErrorCategory,
+    expected: TestProviderErrorKind,
     category: &C,
 ) -> Result<(), RepoConformanceError>
 where
-    C: Fn(&E) -> ConformanceErrorCategory,
+    C: Fn(&E) -> TestProviderErrorKind,
 {
     match result {
         Ok(()) => Err(RepoConformanceError::ExpectedErrorMissing { stage }),
@@ -1016,13 +1016,13 @@ mod tests {
         matches!(e, FakeError::Conflict)
     }
 
-    fn error_category(e: &FakeError) -> ConformanceErrorCategory {
+    fn error_category(e: &FakeError) -> TestProviderErrorKind {
         match e {
-            FakeError::Transient => ConformanceErrorCategory::Transient,
-            FakeError::Conflict => ConformanceErrorCategory::Conflict,
-            FakeError::Permanent => ConformanceErrorCategory::Permanent,
-            FakeError::Storage => ConformanceErrorCategory::Storage,
-            FakeError::Other => ConformanceErrorCategory::Other,
+            FakeError::Transient => TestProviderErrorKind::Transient,
+            FakeError::Conflict => TestProviderErrorKind::Conflict,
+            FakeError::Permanent => TestProviderErrorKind::Permanent,
+            FakeError::Storage => TestProviderErrorKind::Storage,
+            FakeError::Other => TestProviderErrorKind::Other,
         }
     }
 
@@ -1653,7 +1653,7 @@ mod tests {
                     || async { Ok::<_, SensitiveError>(0) },
                 ),
             ),
-            |_| ConformanceErrorCategory::Storage,
+            |_| TestProviderErrorKind::Storage,
         )
         .await
         .expect_err("provider failure must be surfaced");
@@ -1662,7 +1662,7 @@ mod tests {
             error,
             RepoConformanceError::ClassifiedProvider {
                 stage: "retry transient then success",
-                category: ConformanceErrorCategory::Storage,
+                category: TestProviderErrorKind::Storage,
             }
         ));
     }
@@ -1778,7 +1778,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn retry_boundary_rejects_threshold_one_before_running_actions() {
-        use rss_conformance::ConformanceErrorCategory;
+        use crate::TestProviderErrorKind;
 
         let ran = Cell::new(false);
         let case = RetryBoundaryCase::new(
@@ -1809,7 +1809,7 @@ mod tests {
             ),
         );
 
-        let error = assert_retry_boundary_policy(case, |_| ConformanceErrorCategory::Other)
+        let error = assert_retry_boundary_policy(case, |_| TestProviderErrorKind::Other)
             .await
             .expect_err("success threshold one must be rejected");
         assert!(matches!(

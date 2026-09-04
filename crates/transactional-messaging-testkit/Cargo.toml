@@ -1,0 +1,39 @@
+[package]
+name = "rss-transactional-messaging-testkit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Provider-neutral conformance and deterministic test doubles for RSS transactional messaging"
+categories = ["development-tools::testing", "asynchronous"]
+keywords = ["messaging", "transactions", "conformance", "testing"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["consumer", "producer"]
+consumer = []
+producer = [
+  "rss-transactional-messaging/producer",
+]
+
+[dependencies]
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["consumer"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+rss-contract.workspace = true
+rss-request-context.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
+
+[[test]]
+name = "fault_matrix"
+required-features = ["consumer", "producer"]
+
+[[test]]
+name = "memory"
+required-features = ["consumer", "producer"]

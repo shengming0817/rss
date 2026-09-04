@@ -1,5 +1,5 @@
 //! testkit — RSS HTTP 契约测试脚手架（`tower::ServiceExt::oneshot` 薄封装）。公共
-//! provider-neutral conformance assertions 由 `rss-conformance` 唯一拥有。
+//! transactional messaging conformance 由 `rss-transactional-messaging-testkit` 唯一拥有。
 //!
 //! 给 per-contract 契约测试提供可复用 harness：声明式构造请求、
 //! oneshot 驱动**已构建好的** axum [`Router`](axum::Router)、收集完整响应，并断言状态码 / 反序列化进
@@ -13,8 +13,7 @@
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉
-//!   adapter。本 crate 唯一内部 shipped 出边为 `rss-conformance`，其余
-//!   出边为外部 crate（axum/tower/serde…）。
+//!   adapter。本 crate 不依赖 transactional messaging testkit。
 //! - 不参与认证装配；harness 只驱动调用方已组装好的 `Router`。
 //!
 //! 用法见 `crates/testkit/tests/harness.rs`（合成 router 演示四维断言）。
@@ -39,7 +38,7 @@ pub use wait::{await_delay, await_map, await_notified, await_try, await_try_ever
 // 容器 fixture（#1137，仅 `containers` feature）：legacy `env_or_*` resolver 仅覆盖
 // postgres/redis/rabbitmq；MQTT 与其它安全敏感 provider 使用 hermetic TLS guard。
 // 供 adapter 集成测试 + journeys durable journey 经 [dev-dependencies] 消费。唯一内部 shipped 出边为
-// rss-conformance，仍为零 adapter 依赖（只回 typed 连接坐标与信任材料，不构造 adapter 类型）。
+// 仍为零 adapter 依赖（只回 typed 连接坐标与信任材料，不构造 adapter 类型）。
 // default 构建 / 契约 harness 消费方不拉 testcontainers 树。
 #[cfg(feature = "containers")]
 mod containers;
@@ -56,6 +55,38 @@ pub use containers::{
 // Provider-neutral transactional messaging assertions are dependency-free and intentionally available
 // without the container feature. Real provider runners remain integration-gated in each adapter.
 pub mod projection_conformance;
+
+/// Closed diagnostic classification owned only by the legacy, unpublished generic testkit.
+///
+/// Transactional messaging conformance uses the production core classifications instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TestProviderErrorKind {
+    Storage,
+    Transient,
+    Conflict,
+    Permanent,
+    Other,
+}
+
+impl TestProviderErrorKind {
+    /// Stable low-cardinality diagnostic label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Transient => "transient",
+            Self::Conflict => "conflict",
+            Self::Permanent => "permanent",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for TestProviderErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
 // 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。
