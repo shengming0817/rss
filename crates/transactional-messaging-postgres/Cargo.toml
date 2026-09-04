@@ -16,7 +16,7 @@ workspace = true
 rss-runtime.workspace = true
 rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
-rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 rss-redact.workspace = true
 tokio = { workspace = true, features = ["time", "sync"] }
 serde = { workspace = true, features = ["derive"] }

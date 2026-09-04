@@ -592,7 +592,7 @@ impl SerialInOrderGuarantor for SerialInOrder {}
 
 /// 串行有序投递契约 trait：impl 者的 read/poll 路径保证 per-`(domain, partition_key)` 串行有序投递。
 ///
-/// **NOT sealed**——真实 adapter（`adapters/postgres`，外部 crate）须能 impl 来铸造 witness。这层 open 是
+/// **NOT sealed**——消费者选择的真实 provider（外部 crate）须能 impl 来铸造 witness。这层 open 是
 /// witness「真实性」的 **Medium** 边界（类型系统看不进 SQL head-of-partition gating，「此投递串行」是
 /// 实现的语义属性、非结构属性）：调用方必须显式选择串行策略（
 /// 仅放行 allowlist adapter/组合根类型，INVARIANT: PARTITION-SERIAL-IMPL-ALLOWLIST-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）守，`#[cfg(test)]`

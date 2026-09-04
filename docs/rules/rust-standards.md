@@ -47,7 +47,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - 已提交 migration 只增不改；例外必须有 ADR 说明。
 - 新字段必须有默认值或允许 NULL。
 - 索引形态按阶段：pre-GA / 有序 migration 集 / 新建或空表用普通 `CREATE INDEX`（留在事务型 migration）；
-  `CONCURRENTLY` 仅用于 post-GA 给已填充、有在线流量的生产表加索引。详见 `adapters/postgres/migrations/` 的 README（迁移规范，随 postgres adapter 落地）。
+  `CONCURRENTLY` 仅用于 post-GA 给已填充、有在线流量的生产表加索引。消息专属 SQL artifact 与外部执行边界见 `crates/transactional-messaging-postgres/README.md`。
 - 文件命名：`{序号}_{动词}_{对象}.sql`。
 
 ## 安全检查点

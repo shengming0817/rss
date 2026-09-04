@@ -53,7 +53,7 @@ members = [
   "crates/testkit",
   # 域（依赖基础 + 引擎 + 服务 + generated；互不依赖）
   # adapters（实现基础 / 引擎 / 服务 trait；不被域依赖）
-  "adapters/postgres",
+  "crates/transactional-messaging-postgres",
   "adapters/redis",
   "adapters/amqp",
   "adapters/s3",
@@ -123,7 +123,7 @@ rss-platform = { path = "crates/platform", version = "0.3.0" }
 rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
 rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
 rss-transactional-messaging-testkit = { path = "crates/transactional-messaging-testkit", version = "0.1.0" }
-rss-transactional-messaging-postgres = { path = "adapters/postgres", version = "0.1.0" }
+rss-transactional-messaging-postgres = { path = "crates/transactional-messaging-postgres", version = "0.1.0" }
 rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }

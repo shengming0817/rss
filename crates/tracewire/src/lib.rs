@@ -7,7 +7,7 @@
 //! producer 经 [`capture_current`] 把当前 `tracing` span 的 OTel 上下文导出为 W3C carrier（落 outbox
 //! `metadata` 保留键 `trace`），consumer 经 [`restore_remote_parent`] 还原成 remote parent 挂到消费 span，使 handler
 //! 与 producer **同一 `trace_id`**。HTTP server 入口也经同一 API 恢复 `traceparent` + `tracestate`。
-//! `adapters/postgres`（emit）、`crates/eventexec`（consume）与 `adapters/httpd`（HTTP server）只依赖本 crate、
+//! emit、consume 与 HTTP server 的传播调用方只依赖本 crate、
 //! **不直接 import otel**，延续 RSS「otel 收口」治理（`adapters/otel` / `diagctx` / `observ` 同思路）。
 //!
 //! **fail-open**：诊断信道缺失从不阻塞投递——未装 otel 层 / span context 无效 ⇒ [`capture_current`] 返
@@ -149,8 +149,8 @@ impl W3cTraceContext {
 /// (`is_valid()==false`) ⇒ propagator 不写 `traceparent` ⇒ 返 `None`。未采样不是无效 context，
 /// 因此仍传播 flags `00`。
 ///
-/// 生产 caller：`adapters/postgres` 的 `metadata_with_ambient`（emit 与 handler 同 task 同步执行 ⇒
-/// `Span::current()` 即请求 span），把结果写入 outbox `metadata` 保留键 `trace`。
+/// emit 调用方应在请求 span 所在的 task 中捕获，再将返回 carrier 放入消息的 trace context；
+/// 数据库存储本身不负责读取 ambient tracing 状态。
 #[must_use]
 pub fn capture_current() -> Option<W3cTraceContext> {
     // 当前 span 的 OTel 上下文（无 tracing-opentelemetry 层时为 default Context，span context 无效）。

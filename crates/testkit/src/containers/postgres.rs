@@ -74,7 +74,7 @@ where
     }))
 }
 
-/// postgres 连接参数（与 adapters/postgres `config_from_env` 同形）。
+/// PostgreSQL fixture 连接参数，供消费者显式构造其 provider 配置。
 /// password 字段 Debug 输出脱敏（输出 `<redacted>`），防日志泄露凭证。
 #[derive(Clone)]
 pub struct PgConnParams {
