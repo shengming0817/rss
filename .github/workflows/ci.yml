@@ -34,7 +34,7 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal --component clippy --component llvm-tools-preview
           rustup default 1.96.0
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-nextest@0.9.137,cargo-semver-checks@0.49.0,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9
           fallback: none

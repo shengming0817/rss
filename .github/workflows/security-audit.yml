@@ -31,7 +31,7 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
       - name: Install pinned audit tools
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-deny@0.19.9,cargo-audit@0.22.2
           fallback: none
