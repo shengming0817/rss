@@ -5611,14 +5611,12 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
- "sqlx",
  "testcontainers",
  "testcontainers-modules",
  "thiserror",
  "tokio",
  "tower",
  "trybuild",
- "url",
  "uuid",
 ]
 

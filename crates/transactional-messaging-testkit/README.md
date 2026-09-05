@@ -70,3 +70,7 @@ transitions retain independent real-database proofs.
 
 The old OutboxDriver publication scenarios and observation getters have been removed. Callers
 implement the appropriate capability driver directly; no old-API adapter is supplied.
+
+Transport driver failures retain their provider phase and identify the exact scenario through
+`ConformanceError::stage()` (for example `publisher.confirmed` or `delivery.requeue`).
+Budget failures retain the corresponding `.budget` stage.

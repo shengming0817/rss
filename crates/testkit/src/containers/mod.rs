@@ -1,14 +1,8 @@
 //! 真容器 fixtures（testcontainers 0.27 + testcontainers-modules 0.15）。
 //!
-//! `env_or_*` resolver 回传**不透明 fixture guard**（`PgFixture` / `RedisFixture` / `RabbitFixture`）：
-//! **默认起容器**（fail-closed 安全语义）；仅当满足显式 opt-in 条件时走外部路径：
-//! - postgres：`RSS_TEST_ALLOW_EXTERNAL_POSTGRES` 存在（非空）+ endpoint 三元组
-//!   `PGHOST`/`PGPORT`/`PGDATABASE` 全在；外部 owner 凭据从不读取或暴露；
-//! - redis：`REDIS_TEST_URL` 存在且非空；
-//! - rabbitmq：`RSS_AMQP_TEST_URL` 存在且非空（须为 base broker URL，无非空 vhost 段；明文仅 loopback）。
+//! Fixtures own temporary containers; callers share a guard within one bounded test suite.
+//! Provider endpoints and credentials are returned explicitly, never selected from environment.
 //!
-//! **严格库名（单源在 testkit）**：外部 postgres 路径的 `PGDATABASE` 须 `ends_with("_test")` 或 `== "test"`
-//! 才被接受；不满足直接报错（防 `prod_contest` 这类 substring 误命中）。
 //! **guard 须绑定到测试作用域结束**——其 `Drop` 停容器（提前 drop 后续连接失败）。
 //! 不透明 guard 把 `testcontainers` 类型挡在消费方签名外（消费方只 name `testkit::{*Fixture,FixtureError}`）。
 //!
@@ -18,14 +12,12 @@
 //!
 //! ref: testcontainers/testcontainers-rs-modules-community modules/{postgres,redis,rabbitmq}
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use testcontainers::ImageExt;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage};
-use url::Url;
 
 #[cfg(test)]
 use testcontainers_modules::redis::REDIS_PORT;
@@ -205,50 +197,6 @@ fn is_safe_label_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn environment_snapshot(keys: &[&str]) -> Result<BTreeMap<String, String>> {
-    let mut values = BTreeMap::new();
-    for key in keys {
-        if let Some(value) = std::env::var_os(key) {
-            let value = value
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("environment variable {key} 不是合法 UTF-8"))?;
-            values.insert((*key).to_string(), value);
-        }
-    }
-    Ok(values)
-}
-
-fn non_empty_external_value<F>(lookup: F, key: &str) -> Result<Option<String>>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    Ok(lookup(key).filter(|value| !value.is_empty()))
-}
-
-fn process_external_value(key: &str) -> Result<Option<String>> {
-    let values = environment_snapshot(&[key])?;
-    non_empty_external_value(|name| values.get(name).cloned(), key)
-}
-
-fn validate_redis_url(value: &str) -> Result<()> {
-    let parsed = Url::parse(value)
-        .map_err(|_| anyhow::anyhow!("REDIS_TEST_URL 不是合法的 absolute Redis URL"))?;
-    if !matches!(parsed.scheme(), "redis" | "rediss") {
-        return Err(anyhow::anyhow!(
-            "REDIS_TEST_URL scheme 须为 redis:// 或 rediss://"
-        ));
-    }
-    if parsed.host().is_none() {
-        return Err(anyhow::anyhow!("REDIS_TEST_URL 须包含合法 host"));
-    }
-    if !matches!(parsed.port(), Some(1..=u16::MAX)) {
-        return Err(anyhow::anyhow!(
-            "REDIS_TEST_URL 须包含 1..=65535 的显式 port"
-        ));
-    }
-    Ok(())
-}
-
 mod runtime;
 mod tls;
 use tls::*;
@@ -260,15 +208,9 @@ mod redis;
 mod vault;
 
 pub use minio::{MinioCredentials, MinioTlsFixture, minio_tls_archive};
-pub use postgres::{
-    ExternalPgFixture, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
-    PgConnParams, PgFixture, PgTlsFixture, PgTlsServerIdentity, env_or_postgres, owned_postgres,
-    postgres_tls,
-};
-pub use rabbitmq::{
-    RabbitFixture, RabbitTlsFixture, env_or_rabbitmq, managed_rabbitmq, rabbitmq_tls,
-};
-pub use redis::{RedisFixture, RedisTlsFixture, env_or_redis, redis_tls};
+pub use postgres::{PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls};
+pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, managed_rabbitmq, rabbitmq_tls};
+pub use redis::{RedisFixture, RedisTlsFixture, managed_redis, redis_tls};
 pub use vault::{VaultTlsFixture, vault_tls};
 
 #[cfg(test)]

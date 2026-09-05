@@ -7,7 +7,6 @@ use std::time::Duration;
 use deadpool_redis::{Config, Pool, Runtime};
 use diport::{RateLimitDecision, RateLimitKey, RateLimitQuota, RateLimiter};
 use redis::{RedisRateLimiter, RedisRuntimeDeps};
-use rss_runtime::ManagedResource;
 use sha2::{Digest as _, Sha256};
 use testkit::FixtureError;
 
@@ -58,10 +57,10 @@ fn expected_redis_key(namespace: &str, quota: RateLimitQuota, key: &RateLimitKey
     )
 }
 
-#[tokio::test]
-async fn integration_two_handles_share_atomic_buckets_and_expire() -> Result<(), FixtureError> {
-    let fixture = testkit::env_or_redis().await?;
-    let (pool, deps) = setup(fixture.url())?;
+pub(super) async fn two_handles_share_atomic_buckets_and_expire(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let (pool, deps) = setup(url)?;
     let left = limiter(&deps, "integration_rate_limit", 1, 3).await;
     let right = limiter(&deps, "integration_rate_limit", 1, 3).await;
     let shared = RateLimitKey::new(unique("shared"));
@@ -72,15 +71,7 @@ async fn integration_two_handles_share_atomic_buckets_and_expire() -> Result<(),
         &shared,
     );
 
-    assert!(is_allowed(&left.check(shared.clone()).await?));
-    assert!(is_allowed(&right.check(shared.clone()).await?));
-    assert!(is_allowed(&left.check(shared.clone()).await?));
-    let limited = right.check(shared.clone()).await?;
-    assert!(matches!(
-        limited,
-        RateLimitDecision::Limited { retry_after }
-            if retry_after > Duration::ZERO && retry_after <= Duration::from_secs(1)
-    ));
+    assert_shared_burst(&left, &right, &shared).await?;
 
     let isolated = RateLimitKey::new(unique("isolated"));
     assert!(is_allowed(&right.check(isolated).await?));
@@ -92,31 +83,23 @@ async fn integration_two_handles_share_atomic_buckets_and_expire() -> Result<(),
         .await?;
     assert!(ttl_millis > 0, "bucket must own a finite recovery TTL");
 
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-    assert!(is_allowed(&right.check(shared).await?));
+    testkit::await_try(Duration::from_secs(3), async || {
+        let decision = right.check(shared.clone()).await?;
+        Ok::<_, FixtureError>(is_allowed(&decision).then_some(()))
+    })
+    .await?;
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_policy_changes_have_independent_bucket_identity() -> Result<(), FixtureError> {
-    let fixture = testkit::env_or_redis().await?;
-    let (pool, deps) = setup(fixture.url())?;
+pub(super) async fn policy_changes_have_independent_bucket_identity(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let (pool, deps) = setup(url)?;
     let strict = limiter(&deps, "integration_rate_policy", 1, 1).await;
     let fast = limiter(&deps, "integration_rate_policy", 10, 2).await;
     let key = RateLimitKey::new(unique("policy"));
 
-    assert!(is_allowed(&strict.check(key.clone()).await?));
-    assert!(matches!(
-        strict.check(key.clone()).await?,
-        RateLimitDecision::Limited { .. }
-    ));
-    assert!(is_allowed(&fast.check(key.clone()).await?));
-    assert!(is_allowed(&fast.check(key.clone()).await?));
-    assert!(matches!(
-        fast.check(key.clone()).await?,
-        RateLimitDecision::Limited { retry_after }
-            if retry_after > Duration::ZERO && retry_after <= Duration::from_millis(100)
-    ));
+    assert_policy_bursts(&strict, &fast, &key).await?;
 
     let strict_quota = RateLimitQuota::try_new(1, 1)
         .unwrap_or_else(|_| unreachable!("fixed integration quota is valid"));
@@ -134,15 +117,16 @@ async fn integration_policy_changes_have_independent_bucket_identity() -> Result
         .map(|count: i64| (count >= 1, count == 2))?;
     assert_eq!(exists, (true, true));
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    assert!(is_allowed(&fast.check(key).await?));
+    testkit::await_try(Duration::from_secs(3), async || {
+        let decision = fast.check(key.clone()).await?;
+        Ok::<_, FixtureError>(is_allowed(&decision).then_some(()))
+    })
+    .await?;
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_concurrent_burst_is_exactly_atomic() -> Result<(), FixtureError> {
-    let fixture = testkit::env_or_redis().await?;
-    let (_, deps) = setup(fixture.url())?;
+pub(super) async fn concurrent_burst_is_exactly_atomic(url: &str) -> Result<(), FixtureError> {
+    let (_, deps) = setup(url)?;
     let limiter = Arc::new(limiter(&deps, "integration_rate_atomic", 1, 1).await);
     let key = RateLimitKey::new(unique("atomic"));
     let mut tasks = Vec::new();
@@ -161,33 +145,12 @@ async fn integration_concurrent_burst_is_exactly_atomic() -> Result<(), FixtureE
     Ok(())
 }
 
-#[tokio::test]
-#[allow(clippy::expect_used)]
-// reason: a closed pool must return the stable error; success is the assertion failure path.
-async fn integration_closed_pool_returns_only_redacted_error() -> Result<(), FixtureError> {
-    let fixture = testkit::env_or_redis().await?;
-    let (_, deps) = setup(fixture.url())?;
-    let limiter = limiter(&deps, "integration_rate_failure", 1, 1).await;
-    for resource in deps.runtime_resources() {
-        resource.shutdown().await?;
-    }
-    let error = limiter
-        .check(RateLimitKey::new("sensitive-client"))
-        .await
-        .expect_err("closed pool must fail");
-    let message = error.to_string();
-    assert_eq!(message, "rate limit check failed");
-    assert!(!message.contains("sensitive-client"));
-    assert!(!message.contains(fixture.url()));
-    Ok(())
-}
-
-#[tokio::test]
 #[allow(clippy::disallowed_methods)]
 // reason: this T2 wall-clock assertion verifies the real pool wait is bounded; no domain time is modeled.
-async fn integration_saturated_pool_fails_within_limiter_budget() -> Result<(), FixtureError> {
-    let fixture = testkit::env_or_redis().await?;
-    let mut config = Config::from_url(fixture.url());
+pub(super) async fn saturated_pool_fails_within_limiter_budget(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let mut config = Config::from_url(url);
     config.pool = Some(deadpool_redis::PoolConfig::new(1));
     let pool = config.create_pool(Some(Runtime::Tokio1))?;
     let deps = RedisRuntimeDeps::setup_for_test(pool.clone());
@@ -221,10 +184,10 @@ async fn integration_saturated_pool_fails_within_limiter_budget() -> Result<(), 
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_acl_without_time_rejects_startup_capability() -> Result<(), FixtureError> {
-    let fixture = testkit::env_or_redis().await?;
-    let (admin_pool, admin_deps) = setup(fixture.url())?;
+pub(super) async fn acl_without_time_rejects_startup_capability(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let (admin_pool, admin_deps) = setup(url)?;
     let user = unique("rate-limit-acl");
     let password = unique("rate-limit-secret");
     let mut admin = admin_pool.get().await?;
@@ -239,10 +202,7 @@ async fn integration_acl_without_time_rejects_startup_capability() -> Result<(),
         .query_async(&mut *admin)
         .await?;
 
-    let authenticated_url =
-        fixture
-            .url()
-            .replacen("redis://", &format!("redis://{user}:{password}@"), 1);
+    let authenticated_url = url.replacen("redis://", &format!("redis://{user}:{password}@"), 1);
     let (_, restricted) = setup(&authenticated_url)?;
     let quota = RateLimitQuota::try_new(1, 1)
         .unwrap_or_else(|_| unreachable!("fixed integration quota is valid"));
@@ -284,7 +244,7 @@ async fn integration_acl_without_time_rejects_startup_capability() -> Result<(),
         .arg("-script")
         .query_async(&mut *admin)
         .await?;
-    let script_url = fixture.url().replacen(
+    let script_url = url.replacen(
         "redis://",
         &format!("redis://{script_user}:{script_password}@"),
         1,
@@ -303,5 +263,44 @@ async fn integration_acl_without_time_rejects_startup_capability() -> Result<(),
         .arg(&script_user)
         .query_async(&mut *admin)
         .await?;
+    Ok(())
+}
+
+async fn assert_shared_burst(
+    left: &RedisRateLimiter,
+    right: &RedisRateLimiter,
+    shared: &RateLimitKey,
+) -> Result<(), FixtureError> {
+    assert!(is_allowed(&left.check(shared.clone()).await?));
+    assert!(is_allowed(&right.check(shared.clone()).await?));
+    assert!(is_allowed(&left.check(shared.clone()).await?));
+    let limited = right.check(shared.clone()).await?;
+    assert!(matches!(
+        limited,
+        RateLimitDecision::Limited { retry_after }
+            if retry_after > Duration::ZERO && retry_after <= Duration::from_secs(1)
+    ));
+
+    Ok(())
+}
+
+async fn assert_policy_bursts(
+    strict: &RedisRateLimiter,
+    fast: &RedisRateLimiter,
+    key: &RateLimitKey,
+) -> Result<(), FixtureError> {
+    assert!(is_allowed(&strict.check(key.clone()).await?));
+    assert!(matches!(
+        strict.check(key.clone()).await?,
+        RateLimitDecision::Limited { .. }
+    ));
+    assert!(is_allowed(&fast.check(key.clone()).await?));
+    assert!(is_allowed(&fast.check(key.clone()).await?));
+    assert!(matches!(
+        fast.check(key.clone()).await?,
+        RateLimitDecision::Limited { retry_after }
+            if retry_after > Duration::ZERO && retry_after <= Duration::from_millis(100)
+    ));
+
     Ok(())
 }

@@ -724,3 +724,52 @@ impl PublisherTransportDriver for PublisherFixture {
         ])
     }
 }
+
+struct FailingPublisher(&'static str);
+impl PublisherTransportDriver for FailingPublisher {
+    async fn confirmed(&self) -> Result<PublishAttempt, ConformanceError> {
+        if self.0 == "publisher.confirmed" {
+            return Err(ConformanceError::publish(MessagingErrorKind::Transient));
+        }
+        PublisherFixture(None).confirmed().await
+    }
+    async fn transient(&self) -> Result<PublishAttempt, ConformanceError> {
+        if self.0 == "publisher.transient" {
+            return Err(ConformanceError::publish(MessagingErrorKind::Transient));
+        }
+        PublisherFixture(None).transient().await
+    }
+    async fn permanent(&self) -> Result<PublishAttempt, ConformanceError> {
+        if self.0 == "publisher.permanent" {
+            return Err(ConformanceError::publish(MessagingErrorKind::Transient));
+        }
+        PublisherFixture(None).permanent().await
+    }
+    async fn ambiguous_retry(&self) -> Result<Vec<PublishAttempt>, ConformanceError> {
+        if self.0 == "publisher.ambiguous" {
+            return Err(ConformanceError::publish(MessagingErrorKind::Transient));
+        }
+        PublisherFixture(None).ambiguous_retry().await
+    }
+}
+#[tokio::test]
+#[allow(clippy::expect_used)]
+// reason: fixture provider failures must remain visible at their exact scenario boundary.
+async fn provider_failures_identify_the_publisher_scenario() {
+    for stage in [
+        "publisher.confirmed",
+        "publisher.transient",
+        "publisher.permanent",
+        "publisher.ambiguous",
+    ] {
+        let result = run_publisher_transport_conformance(
+            &FailingPublisher(stage),
+            &FakeClock::new(),
+            ExecutionBudget::STANDARD,
+        )
+        .await;
+        let error = result.expect_err("provider failure must propagate");
+        assert_eq!(error.stage(), stage);
+        assert_eq!(error.provider_phase_label(), Some("publish"));
+    }
+}

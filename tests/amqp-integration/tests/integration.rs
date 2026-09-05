@@ -4,8 +4,8 @@
 // reason: canonical live-provider fixtures must fail loudly when typed identities drift.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
@@ -23,7 +23,6 @@ use rss_transactional_messaging::message::{
 use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
-use rss_transactional_messaging::outbox::OutboxSettlement;
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, ExecutionTimer,
     MonotonicInstant, OperationDeadline, RetryPolicy, ShutdownBudget,
@@ -216,12 +215,6 @@ fn rejected(
     )
 }
 
-fn commit_unknown(
-    _receipt: rss_transactional_messaging::transaction::ReceiptIntent,
-) -> TransactionOutcome<()> {
-    TransactionOutcome::commit_unknown()
-}
-
 struct LiveTx(LiveTxFactory);
 
 impl ConsumerTx<Vec<u8>> for LiveTx {
@@ -286,43 +279,6 @@ impl TransactionalMessagingEmitter for NoopEmitter {
     fn emit(&self, _observation: TransactionalMessagingObservation) {}
 }
 
-struct RecordingEmitter(Arc<Mutex<Vec<TransactionalMessagingObservation>>>);
-
-impl TransactionalMessagingEmitter for RecordingEmitter {
-    fn emit(&self, observation: TransactionalMessagingObservation) {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(observation);
-    }
-}
-
-struct ObservingSettlement<S> {
-    inner: S,
-    abandons: Arc<AtomicUsize>,
-}
-
-impl<S> ObservingSettlement<S> {
-    fn new(inner: S, abandons: Arc<AtomicUsize>) -> Self {
-        Self { inner, abandons }
-    }
-}
-
-impl<S: DeliverySettlement> DeliverySettlement for ObservingSettlement<S> {
-    async fn settle(
-        self,
-        decision: SettlementDecision,
-        deadline: OperationDeadline,
-    ) -> Result<(), MessagingError> {
-        self.inner.settle(decision, deadline).await
-    }
-
-    async fn abandon(self, deadline: OperationDeadline) -> Result<(), MessagingError> {
-        self.abandons.fetch_add(1, Ordering::SeqCst);
-        self.inner.abandon(deadline).await
-    }
-}
-
 async fn shutdown_bounded(resource: &impl ManagedResource) -> Result<(), LiveConformanceFailure> {
     match tokio::time::timeout(Duration::from_secs(5), ManagedResource::shutdown(resource)).await {
         Ok(Ok(())) => Ok(()),
@@ -342,8 +298,6 @@ type AmqpDelivery = Delivery<Vec<u8>, <AmqpSubscriber as DeliverySource<Vec<u8>>
 
 async fn next_valid_delivery(
     deliveries: &mut ManagedDeliveryStream<AmqpDeliveries>,
-    missing: &'static str,
-    invalid: &'static str,
 ) -> Result<Box<AmqpDelivery>, LiveConformanceFailure> {
     match tokio::time::timeout(TIMEOUT, deliveries.next())
         .await
@@ -351,27 +305,21 @@ async fn next_valid_delivery(
         .ok_or_else(|| live_failure(LivePhase::Delivery, MessagingErrorKind::Transient))?
     {
         IncomingDelivery::Valid(delivery) => Ok(delivery),
-        IncomingDelivery::Invalid(_) => {
-            let _ = (missing, invalid);
-            Err(live_failure(
-                LivePhase::Delivery,
-                MessagingErrorKind::Permanent,
-            ))
-        }
+        IncomingDelivery::Invalid(_) => Err(live_failure(
+            LivePhase::Delivery,
+            MessagingErrorKind::Permanent,
+        )),
     }
 }
 
-async fn isolated_rabbit(
+async fn isolated_url(
+    rabbit: &testkit::RabbitFixture,
     prefix: &str,
-) -> Result<(testkit::RabbitFixture, String), LiveConformanceFailure> {
-    let rabbit = testkit::env_or_rabbitmq()
-        .await
-        .map_err(|_| live_failure(LivePhase::Fixture, MessagingErrorKind::Transient))?;
-    let url = rabbit
+) -> Result<String, LiveConformanceFailure> {
+    rabbit
         .vhost_url(&isolated_vhost(prefix))
         .await
-        .map_err(|_| live_failure(LivePhase::Fixture, MessagingErrorKind::Transient))?;
-    Ok((rabbit, url))
+        .map_err(|_| live_failure(LivePhase::Fixture, MessagingErrorKind::Transient))
 }
 
 async fn prepared_subscriber(
@@ -434,37 +382,6 @@ async fn consume_live_delivery<S: DeliverySettlement>(
         .map_err(|error| live_failure(LivePhase::Settlement, error.kind()))
 }
 
-async fn assert_committed_redelivery(
-    url: &str,
-    route: &MessageRoute,
-    subscription: &SubscriptionIdentity,
-    subscriber_name: &'static str,
-    missing: &'static str,
-    invalid: &'static str,
-) -> Result<(), LiveConformanceFailure> {
-    let (subscriber, subscriber_resource) =
-        prepared_subscriber(url, route, subscriber_name, false).await?;
-    let mut deliveries = DeliverySource::deliveries(&subscriber, subscription)
-        .await
-        .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
-    let delivery = next_valid_delivery(&mut deliveries, missing, invalid).await?;
-    let disposition = consume_live_delivery(
-        delivery,
-        "unknown-consumer",
-        subscription,
-        committed,
-        &NoopEmitter,
-    )
-    .await?;
-    if disposition != ProcessingDisposition::Committed(TerminalDisposition::Succeeded) {
-        return Err(live_failure(
-            LivePhase::Settlement,
-            MessagingErrorKind::Invariant,
-        ));
-    }
-    shutdown_bounded(&subscriber_resource).await
-}
-
 async fn assert_same_id_redelivery(
     url: &str,
     route: &MessageRoute,
@@ -476,12 +393,7 @@ async fn assert_same_id_redelivery(
     let mut deliveries = DeliverySource::deliveries(&subscriber, subscription)
         .await
         .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
-    let delivery = next_valid_delivery(
-        &mut deliveries,
-        "forced cancellation was not redelivered",
-        "redelivery was invalid",
-    )
-    .await?;
+    let delivery = next_valid_delivery(&mut deliveries).await?;
     let (message, settlement) = delivery.into_parts();
     if message.id() != expected_id {
         return Err(live_failure(
@@ -506,70 +418,6 @@ async fn assert_same_id_redelivery(
     shutdown_bounded(&subscriber_resource).await
 }
 
-async fn run_publish_delivery_and_settle_once() -> Result<
-    (
-        PublishOutcome<()>,
-        OutboxSettlement<()>,
-        Vec<TransactionalMessagingObservation>,
-    ),
-    LiveConformanceFailure,
-> {
-    let (_rabbit, url) = isolated_rabbit("rss_transactional_core").await?;
-    let route = MessageRoute::parse("rss.integration.message").expect("route");
-    let (subscriber, subscriber_resource) =
-        prepared_subscriber(&url, &route, "core-sub", true).await?;
-    let message = envelope(&route, "integration-message-1");
-    let subscription = subscription_for(&message, &route);
-    let mut deliveries = DeliverySource::deliveries(&subscriber, &subscription)
-        .await
-        .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
-    let (publisher, publisher_resource) = connected_publisher(&url, "core-pub").await?;
-
-    let outcome = Publisher::publish(&publisher, &message, provider_deadline()).await;
-    if !matches!(outcome, PublishOutcome::Confirmed(())) {
-        return Err(live_failure(
-            LivePhase::Publish,
-            MessagingErrorKind::Invariant,
-        ));
-    }
-    let delivery = next_valid_delivery(
-        &mut deliveries,
-        "delivery stream ended",
-        "valid envelope was rejected",
-    )
-    .await?;
-    let observations = Arc::new(Mutex::new(Vec::new()));
-    let emitter = RecordingEmitter(Arc::clone(&observations));
-    let disposition = consume_live_delivery(
-        delivery,
-        "integration-consumer",
-        &subscription,
-        committed,
-        &emitter,
-    )
-    .await?;
-    if disposition != ProcessingDisposition::Committed(TerminalDisposition::Succeeded) {
-        return Err(live_failure(
-            LivePhase::Settlement,
-            MessagingErrorKind::Invariant,
-        ));
-    }
-
-    shutdown_bounded(&publisher_resource).await?;
-    shutdown_bounded(&subscriber_resource).await?;
-    let observations = observations
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    Ok((outcome, OutboxSettlement::Published(()), observations))
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_publish_delivery_and_settle_once() -> anyhow::Result<()> {
-    run_publish_delivery_and_settle_once().await?;
-    Ok(())
-}
-
 async fn consume_ambiguous_retries(
     deliveries: &mut ManagedDeliveryStream<AmqpDeliveries>,
     subscription: &SubscriptionIdentity,
@@ -590,12 +438,7 @@ async fn consume_ambiguous_retries(
         consumer_policy(),
         &emitter,
     );
-    let first = next_valid_delivery(
-        deliveries,
-        "ambiguous first delivery was not observed",
-        "ambiguous first delivery was invalid",
-    )
-    .await?;
+    let first = next_valid_delivery(deliveries).await?;
     let first = consume_once(&store, &transaction, &execution, *first)
         .await
         .map_err(|error| live_failure(LivePhase::Settlement, error.kind()))?;
@@ -605,12 +448,7 @@ async fn consume_ambiguous_retries(
             MessagingErrorKind::Invariant,
         ));
     }
-    let duplicate = next_valid_delivery(
-        deliveries,
-        "ambiguous retry delivery was not observed",
-        "ambiguous retry delivery was invalid",
-    )
-    .await?;
+    let duplicate = next_valid_delivery(deliveries).await?;
     let duplicate = consume_once(&store, &transaction, &execution, *duplicate)
         .await
         .map_err(|error| live_failure(LivePhase::Settlement, error.kind()))?;
@@ -623,9 +461,10 @@ async fn consume_ambiguous_retries(
     Ok(effects.load(Ordering::SeqCst))
 }
 
-async fn run_ambiguous_publish_retries_the_same_message_identity()
--> Result<(Vec<MessageId>, Vec<PublishOutcome<()>>, usize), LiveConformanceFailure> {
-    let (_rabbit, url) = isolated_rabbit("rss_transactional_ambiguity").await?;
+async fn run_ambiguous_publish_retries_the_same_message_identity(
+    rabbit: &testkit::RabbitFixture,
+) -> Result<(Vec<MessageId>, Vec<PublishOutcome<()>>, usize), LiveConformanceFailure> {
+    let url = isolated_url(rabbit, "rss_transactional_ambiguity").await?;
     let route = MessageRoute::parse("rss.integration.ambiguity").expect("route");
     let (subscriber, subscriber_resource) =
         prepared_subscriber(&url, &route, "ambiguous-sub", false).await?;
@@ -672,15 +511,9 @@ async fn run_ambiguous_publish_retries_the_same_message_identity()
     ))
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_ambiguous_publish_retries_the_same_message_identity() -> anyhow::Result<()> {
-    run_ambiguous_publish_retries_the_same_message_identity().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow::Result<()> {
-    let rabbit = testkit::env_or_rabbitmq().await?;
+async fn rejected_commit_enters_broker_dead_letter_queue(
+    rabbit: &testkit::RabbitFixture,
+) -> anyhow::Result<()> {
     let url = rabbit.vhost_url("rss_transactional_reject").await?;
     let route = MessageRoute::parse("rss.integration.reject").expect("route");
     let (subscriber, subscriber_resource) = AmqpSubscriber::connect_for_test(
@@ -707,12 +540,7 @@ async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow
         Publisher::publish(&publisher, &message, provider_deadline()).await,
         PublishOutcome::Confirmed(())
     ));
-    let delivery = next_valid_delivery(
-        &mut deliveries,
-        "reject delivery stream ended",
-        "reject fixture envelope was invalid",
-    )
-    .await?;
+    let delivery = next_valid_delivery(&mut deliveries).await?;
     assert_eq!(
         consume_live_delivery(
             delivery,
@@ -736,77 +564,10 @@ async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow
     Ok(())
 }
 
-async fn run_commit_unknown_abandons_and_redelivers_same_message()
--> Result<(Vec<TransactionalMessagingObservation>, usize), LiveConformanceFailure> {
-    let (_rabbit, url) = isolated_rabbit("rss_transactional_unknown").await?;
-    let route = MessageRoute::parse("rss.integration.unknown").expect("route");
-    let (first, first_resource) = prepared_subscriber(&url, &route, "unknown-sub-1", true).await?;
-    let (publisher, publisher_resource) = connected_publisher(&url, "unknown-pub").await?;
-    let message = envelope(&route, "integration-unknown-1");
-    let subscription = subscription_for(&message, &route);
-    let mut deliveries = DeliverySource::deliveries(&first, &subscription)
-        .await
-        .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
-    let publish = Publisher::publish(&publisher, &message, provider_deadline()).await;
-    if !matches!(publish, PublishOutcome::Confirmed(())) {
-        return Err(live_failure(
-            LivePhase::Publish,
-            MessagingErrorKind::Invariant,
-        ));
-    }
-    let delivery = next_valid_delivery(
-        &mut deliveries,
-        "unknown delivery stream ended",
-        "unknown fixture envelope was invalid",
-    )
-    .await?;
-    let observations = Arc::new(Mutex::new(Vec::new()));
-    let abandons = Arc::new(AtomicUsize::new(0));
-    let (message, settlement) = (*delivery).into_parts();
-    let outcome = consume_live_delivery(
-        Box::new(Delivery::new(
-            message,
-            ObservingSettlement::new(settlement, Arc::clone(&abandons)),
-        )),
-        "unknown-consumer",
-        &subscription,
-        commit_unknown,
-        &RecordingEmitter(Arc::clone(&observations)),
-    )
-    .await?;
-    if outcome != ProcessingDisposition::Deferred {
-        return Err(live_failure(
-            LivePhase::Settlement,
-            MessagingErrorKind::Invariant,
-        ));
-    }
-    assert_committed_redelivery(
-        &url,
-        &route,
-        &subscription,
-        "unknown-sub-2",
-        "abandoned delivery was not redelivered",
-        "redelivered envelope was invalid",
-    )
-    .await?;
-    shutdown_bounded(&publisher_resource).await?;
-    shutdown_bounded(&first_resource).await?;
-    let observations = observations
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    Ok((observations, abandons.load(Ordering::SeqCst)))
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_commit_unknown_abandons_and_redelivers_same_message() -> anyhow::Result<()> {
-    run_commit_unknown_abandons_and_redelivers_same_message().await?;
-    Ok(())
-}
-
-async fn run_managed_forced_cancel_redelivers_the_same_message_id()
--> Result<(), LiveConformanceFailure> {
-    let (_rabbit, url) = isolated_rabbit("rss_transactional_managed_cancel").await?;
+async fn run_managed_forced_cancel_redelivers_the_same_message_id(
+    rabbit: &testkit::RabbitFixture,
+) -> Result<(), LiveConformanceFailure> {
+    let url = isolated_url(rabbit, "rss_transactional_managed_cancel").await?;
     let route = MessageRoute::parse("rss.integration.managed-cancel").expect("route");
     let (first, first_resource) =
         prepared_subscriber(&url, &route, "managed-cancel-sub-1", true).await?;
@@ -877,12 +638,6 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id()
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_managed_forced_cancel_redelivers_the_same_message_id() -> anyhow::Result<()> {
-    run_managed_forced_cancel_redelivers_the_same_message_id().await?;
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug)]
 enum LivePhase {
     Fixture,
@@ -945,19 +700,10 @@ fn live_failure(phase: LivePhase, kind: MessagingErrorKind) -> LiveConformanceFa
     LiveConformanceFailure::new(phase, kind)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_private_ca_and_split_roles_fail_closed() -> anyhow::Result<()> {
-    let network = testkit::bridge_network("rss-transactional-amqp-tls").await?;
-    let dns_name = format!("{}-node", network.name());
-    let route = "rss.integration.private-ca";
-    let fixture = testkit::rabbitmq_tls(
-        route,
-        testkit::NetworkAttachment {
-            network: network.name(),
-            dns_name: &dns_name,
-        },
-    )
-    .await?;
+async fn private_ca_and_split_roles_fail_closed(
+    fixture: &testkit::RabbitTlsFixture,
+) -> anyhow::Result<()> {
+    let route = TLS_ROUTE;
     let publisher_endpoint = AmqpPublisherEndpoint::parse(fixture.publisher_url())?;
     let subscriber_endpoint = AmqpSubscriberEndpoint::parse(fixture.subscriber_url())?;
     let ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
@@ -979,17 +725,192 @@ async fn integration_private_ca_and_split_roles_fail_closed() -> anyhow::Result<
             .await
             .is_err()
     );
+    assert_tls_startup_rollback(&publisher_endpoint, &subscriber_endpoint, &ca, &wrong_ca).await?;
+
+    let route = MessageRoute::parse(route)?;
+
+    assert_tls_roundtrip(&publisher, &subscriber, &route).await?;
+    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(&subscriber_resource).await?;
+    Ok(())
+}
+
+const TLS_ROUTE: &str = "rss.integration.private-ca";
+
+// One inherited deadline includes fixture startup and all phases, leaving nextest 10s for cleanup.
+const SUITE_BUDGET: Duration = Duration::from_secs(110);
+#[allow(clippy::disallowed_methods)]
+// reason: this fixture orchestration owns the wall-clock deadline for real Docker and broker I/O.
+fn suite_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + SUITE_BUDGET
+}
+
+async fn suite_phase<T, E: Into<anyhow::Error>>(
+    deadline: tokio::time::Instant,
+    phase: &'static str,
+    operation: impl Future<Output = Result<T, E>>,
+) -> anyhow::Result<T> {
+    use anyhow::Context as _;
+    tokio::time::timeout_at(deadline, operation)
+        .await
+        .with_context(|| format!("{phase}: 110s suite deadline elapsed"))?
+        .map_err(Into::into)
+        .with_context(|| phase)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publisher_and_security_suite() -> anyhow::Result<()> {
+    let deadline = suite_deadline();
+    let rabbit = suite_phase(
+        deadline,
+        "publisher broker startup",
+        testkit::managed_rabbitmq(),
+    )
+    .await?;
+    let network = suite_phase(
+        deadline,
+        "TLS network",
+        testkit::bridge_network("rss-amqp-security"),
+    )
+    .await?;
+    let dns = format!("{}-node", network.name());
+    let tls = suite_phase(
+        deadline,
+        "TLS broker startup",
+        testkit::rabbitmq_tls(
+            TLS_ROUTE,
+            testkit::NetworkAttachment {
+                network: network.name(),
+                dns_name: &dns,
+            },
+        ),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "publisher conformance",
+        transport::publisher_conformance(&rabbit, &tls),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "cancelled publish",
+        transport::cancelled_publish_retires_generation_and_owner_cannot_revive(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "confirm deadline",
+        transport::confirmation_deadline_retires_generation_and_preserves_retry_identity(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "private CA and split roles",
+        private_ca_and_split_roles_fail_closed(&tls),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settlement_and_runtime_suite() -> anyhow::Result<()> {
+    let deadline = suite_deadline();
+    let rabbit = suite_phase(
+        deadline,
+        "settlement broker startup",
+        testkit::managed_rabbitmq(),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "delivery conformance",
+        transport::delivery_conformance(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "zero-deadline settlement",
+        transport::expired_settlement_never_acks_and_redelivers(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "rejected commit / DLQ",
+        rejected_commit_enters_broker_dead_letter_queue(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "forced runtime cancellation",
+        run_managed_forced_cancel_redelivers_the_same_message_id(&rabbit),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subscriber_lifecycle_suite() -> anyhow::Result<()> {
+    let deadline = suite_deadline();
+    let rabbit = suite_phase(
+        deadline,
+        "subscriber broker startup",
+        testkit::managed_rabbitmq(),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "headers / route isolation",
+        transport::headers_roundtrip_and_subscription_cancel_is_isolated(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "registration / shutdown",
+        transport::subscription_cannot_register_after_resource_shutdown(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "subscriber recovery",
+        transport::subscriber_recovers_after_broker_connection_loss(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "recovery installation fencing",
+        transport::subscriber_recovery_cancellation_and_shutdown_fence_installation(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "missing queue",
+        transport::subscriber_never_provisions_a_missing_queue(&rabbit),
+    )
+    .await?;
+    Ok(())
+}
+
+mod topology;
+mod transport;
+
+async fn assert_tls_startup_rollback(
+    publisher_endpoint: &AmqpPublisherEndpoint,
+    subscriber_endpoint: &AmqpSubscriberEndpoint,
+    ca: &AmqpPrivateCa,
+    wrong_ca: &AmqpPrivateCa,
+) -> anyhow::Result<()> {
     let mut rollback_stack =
         ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?)?;
     let mut startup = rollback_stack.startup()?;
     let (rollback_handle, rollback_resource) =
-        AmqpPublisher::connect(&publisher_endpoint, "rollback-publisher", &ca, TIMEOUT).await?;
+        AmqpPublisher::connect(publisher_endpoint, "rollback-publisher", ca, TIMEOUT).await?;
     startup.stage_resource(rss_runtime::DynManagedResource::new_box(rollback_resource));
     assert!(
         AmqpSubscriber::connect(
-            &subscriber_endpoint,
+            subscriber_endpoint,
             "rollback-subscriber",
-            &wrong_ca,
+            wrong_ca,
             TIMEOUT
         )
         .await
@@ -1000,28 +921,29 @@ async fn integration_private_ca_and_split_roles_fail_closed() -> anyhow::Result<
     assert!(rollback.failures().is_empty());
     assert!(rollback_handle.transport_generation_for_test().is_none());
 
-    let route = MessageRoute::parse(route)?;
+    Ok(())
+}
 
+async fn assert_tls_roundtrip(
+    publisher: &AmqpPublisher,
+    subscriber: &AmqpSubscriber,
+    route: &MessageRoute,
+) -> anyhow::Result<()> {
     assert!(matches!(
         publisher
-            .publish(&envelope(&route, "private-ca-valid"), provider_deadline())
+            .publish(&envelope(route, "private-ca-valid"), provider_deadline())
             .await,
         PublishOutcome::Confirmed(())
     ));
-    let message = envelope(&route, "private-ca-valid");
-    let subscription = subscription_for(&message, &route);
+    let message = envelope(route, "private-ca-valid");
+    let subscription = subscription_for(&message, route);
     let mut stream = subscriber.deliveries(&subscription).await?;
-    let delivery = next_valid_delivery(&mut stream, "private CA delivery", "invalid").await?;
+    let delivery = next_valid_delivery(&mut stream).await?;
     let (received, settlement) = (*delivery).into_parts();
     transport::acknowledge(settlement, &received, &subscription).await?;
     let forbidden = MessageRoute::parse("rss.integration.forbidden")?;
     assert!(
         matches!(publisher.publish(&envelope(&forbidden, "private-ca-forbidden"), provider_deadline()).await, PublishOutcome::DefinitelyNotPublished(failure) if failure.kind() == PublishFailureKind::Permanent)
     );
-    shutdown_bounded(&publisher_resource).await?;
-    shutdown_bounded(&subscriber_resource).await?;
     Ok(())
 }
-
-mod topology;
-mod transport;

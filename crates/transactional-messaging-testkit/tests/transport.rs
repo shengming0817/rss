@@ -103,3 +103,66 @@ async fn transport_oracle_rejects_loss_duplicates_and_wrong_identity() {
         }
     }
 }
+
+struct FailingDelivery(&'static str);
+impl DeliveryTransportDriver for FailingDelivery {
+    async fn acknowledged(&self) -> Result<DeliveryEvidence, ConformanceError> {
+        if self.0 == "delivery.ack" {
+            return Err(ConformanceError::settlement(MessagingErrorKind::Transient));
+        }
+        Driver(None).acknowledged().await
+    }
+    async fn requeued(&self) -> Result<DeliveryEvidence, ConformanceError> {
+        if self.0 == "delivery.requeue" {
+            return Err(ConformanceError::settlement(MessagingErrorKind::Transient));
+        }
+        Driver(None).requeued().await
+    }
+    async fn rejected(&self) -> Result<DeliveryEvidence, ConformanceError> {
+        if self.0 == "delivery.reject" {
+            return Err(ConformanceError::settlement(MessagingErrorKind::Transient));
+        }
+        Driver(None).rejected().await
+    }
+    async fn abandoned(&self) -> Result<DeliveryEvidence, ConformanceError> {
+        if self.0 == "delivery.abandon" {
+            return Err(ConformanceError::settlement(MessagingErrorKind::Transient));
+        }
+        Driver(None).abandoned().await
+    }
+    async fn settlement_failed(&self) -> Result<DeliveryEvidence, ConformanceError> {
+        if self.0 == "delivery.failure" {
+            return Err(ConformanceError::settlement(MessagingErrorKind::Transient));
+        }
+        Driver(None).settlement_failed().await
+    }
+    async fn cancelled(&self) -> Result<CancellationEvidence, ConformanceError> {
+        if self.0 == "delivery.cancel" {
+            return Err(ConformanceError::settlement(MessagingErrorKind::Transient));
+        }
+        Driver(None).cancelled().await
+    }
+}
+#[tokio::test]
+#[allow(clippy::expect_used)]
+// reason: fixture provider failures must remain visible at their exact scenario boundary.
+async fn provider_failures_identify_the_delivery_scenario() {
+    for stage in [
+        "delivery.ack",
+        "delivery.requeue",
+        "delivery.reject",
+        "delivery.abandon",
+        "delivery.failure",
+        "delivery.cancel",
+    ] {
+        let result = run_delivery_transport_conformance(
+            &FailingDelivery(stage),
+            &FakeClock::new(),
+            ExecutionBudget::STANDARD,
+        )
+        .await;
+        let error = result.expect_err("provider failure must propagate");
+        assert_eq!(error.stage(), stage);
+        assert_eq!(error.provider_phase_label(), Some("settlement"));
+    }
+}

@@ -197,6 +197,32 @@ impl RateLimiter for RedisRateLimiter {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: a closed lazy pool must fail without any Redis I/O and without exposing inputs.
+    async fn closed_pool_returns_only_redacted_error_without_connecting() {
+        let url = "redis://private-user:private-password@127.0.0.1:1";
+        let pool = deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy pool");
+        let limiter = RedisRateLimiter::new(
+            Arc::new(RedisStore::new(pool.clone())),
+            "closed_pool",
+            RateLimitQuota::try_new(1, 1).expect("quota"),
+        )
+        .expect("limiter");
+        pool.close();
+        let message = limiter
+            .check(RateLimitKey::new("sensitive-client"))
+            .await
+            .expect_err("closed pool must fail")
+            .to_string();
+        assert_eq!(message, "rate limit check failed");
+        for secret in ["sensitive-client", "private-user", "private-password", url] {
+            assert!(!message.contains(secret));
+        }
+    }
+
     #[test]
     fn namespace_rejects_empty_and_ambiguous_values() {
         fn validates(namespace: &'static str) -> bool {

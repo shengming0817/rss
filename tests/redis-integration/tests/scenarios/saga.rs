@@ -21,10 +21,10 @@ fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
     Ok(RedisRuntimeDeps::setup_for_test(pool))
 }
 
-#[tokio::test]
-async fn integration_saga_effect_apply_duplicate_conflict_and_probe() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = make_deps(redis.url())?;
+pub(super) async fn saga_effect_apply_duplicate_conflict_and_probe(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let deps = make_deps(url)?;
     let fixture = deps.infra().saga_effect_fixture();
     let effect_key = unique_key();
     let effect = b"provider receipt alpha";
@@ -52,6 +52,14 @@ async fn integration_saga_effect_apply_duplicate_conflict_and_probe() -> Result<
         RedisSagaEffectApplyOutcome::Conflict
     );
 
+    assert_observation(&fixture, &effect_key);
+    for resource in deps.runtime_resources().into_iter().rev() {
+        resource.shutdown().await?;
+    }
+    Ok(())
+}
+
+fn assert_observation(fixture: &redis::RedisSagaEffectFixture, effect_key: &SagaIdempotencyKey) {
     let observation = fixture.observation();
     assert_eq!(observation.apply_count(), 3);
     assert_eq!(observation.write_count(), 1);
@@ -65,8 +73,4 @@ async fn integration_saga_effect_apply_duplicate_conflict_and_probe() -> Result<
     assert!(!fixture_debug.contains("provider receipt"));
     assert!(!observation_debug.contains(&effect_key.to_hex()));
     assert!(!observation_debug.contains("provider receipt"));
-    for resource in deps.runtime_resources().into_iter().rev() {
-        resource.shutdown().await?;
-    }
-    Ok(())
 }

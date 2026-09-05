@@ -6,8 +6,8 @@ use testcontainers_modules::redis::REDIS_PORT;
 
 use super::{
     NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS, PUBLISHED_PORT_RETRY_BACKOFF_MS, Result,
-    attach_network, copied_tls_image, force_remove_named_container, process_external_value,
-    retry_published_port_resolution, runtime, tls_material, validate_redis_url,
+    attach_network, copied_tls_image, force_remove_named_container,
+    retry_published_port_resolution, runtime, tls_material,
 };
 
 const REDISS_PORT: u16 = 6379;
@@ -16,7 +16,7 @@ const REDISS_PORT: u16 = 6379;
 
 /// redis fixture guard：持容器句柄（自起路径）到 `Drop` + `redis://` URL。**须绑定到测试结束**。
 pub struct RedisFixture {
-    pub(super) _container: Option<Box<ContainerAsync<GenericImage>>>,
+    pub(super) _container: Box<ContainerAsync<GenericImage>>,
     pub(super) url: String,
 }
 
@@ -27,23 +27,8 @@ impl RedisFixture {
     }
 }
 
-/// `REDIS_TEST_URL` 非空且为带 host/port 的 `redis://` 或 `rediss://` URL → env 路径；
-/// 空或未设置 → self-provision 容器，非法非空值 fail-closed。
-///
-/// # Example
-///
-/// ```ignore
-/// let redis = testkit::env_or_redis().await?;
-/// // redis.url() 返回 "redis://host:port"
-/// ```
-pub async fn env_or_redis() -> Result<RedisFixture> {
-    if let Some(url) = process_external_value("REDIS_TEST_URL")? {
-        validate_redis_url(&url)?;
-        return Ok(RedisFixture {
-            _container: None,
-            url,
-        });
-    }
+/// Starts an owned Redis container. Keep the guard alive for the entire scenario suite.
+pub async fn managed_redis() -> Result<RedisFixture> {
     for attempt in 1..=PUBLISHED_PORT_MAX_ATTEMPTS {
         let image = GenericImage::new("redis", "7.4-alpine")
             .with_exposed_port(REDIS_PORT.tcp())
@@ -53,7 +38,7 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
         match container.get_host_port_ipv4(REDIS_PORT).await {
             Ok(port) => {
                 return Ok(RedisFixture {
-                    _container: Some(Box::new(container)),
+                    _container: Box::new(container),
                     url: format!("redis://{host}:{port}"),
                 });
             }

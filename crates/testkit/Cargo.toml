@@ -22,10 +22,8 @@ tokio = { workspace = true, features = ["time", "sync", "macros", "rt"] }
 # 容器 fixture（#1137，仅 `containers` feature）：testcontainers 起真 pg/redis/rabbitmq；
 # anyhow = FixtureError（测试体 `?` 组合）。默认构建 / 契约 harness 消费方不拉此树。
 testcontainers = { workspace = true, optional = true }
-testcontainers-modules = { workspace = true, optional = true, features = ["postgres", "redis", "rabbitmq", "minio"] }
+testcontainers-modules = { workspace = true, optional = true, features = ["redis"] }
 anyhow = { workspace = true, optional = true }
-url = { workspace = true, optional = true }
-sqlx = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 
 [features]
@@ -33,7 +31,7 @@ default = []
 # 容器 fixture（#1137）+ tenant-scope conformance 骨架（#1437）：adapter 集成测试 + journeys durable journey
 # 经各自 `integration` feature 传递激活（`testkit/containers`）。契约 harness（#1136，axum oneshot）始终可用。
 # conformance 骨架对 tenant 类型泛型化，仍为零 adapter 依赖。
-containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:url", "dep:sqlx", "dep:rcgen"]
+containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:rcgen"]
 integration = ["containers"]
 
 # Live provider tests 由独立 integration workspace package 直接依赖本 feature；本 crate 不维护 test catalog。

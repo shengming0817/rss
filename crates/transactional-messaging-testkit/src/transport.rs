@@ -44,7 +44,8 @@ pub async fn run_publisher_transport_conformance(
         "publisher.confirmed.budget",
         driver.confirmed(),
     )
-    .await??;
+    .await?
+    .map_err(|error| error.at_stage("publisher.confirmed"))?;
     expect_publish("publisher.confirmed", &confirmed.outcome, "confirmed")?;
     let transient = within_budget(
         timer,
@@ -52,7 +53,8 @@ pub async fn run_publisher_transport_conformance(
         "publisher.transient.budget",
         driver.transient(),
     )
-    .await??;
+    .await?
+    .map_err(|error| error.at_stage("publisher.transient"))?;
     expect_publish("publisher.transient", &transient.outcome, "transient")?;
     let permanent = within_budget(
         timer,
@@ -60,7 +62,8 @@ pub async fn run_publisher_transport_conformance(
         "publisher.permanent.budget",
         driver.permanent(),
     )
-    .await??;
+    .await?
+    .map_err(|error| error.at_stage("publisher.permanent"))?;
     expect_publish("publisher.permanent", &permanent.outcome, "permanent")?;
     let retry = within_budget(
         timer,
@@ -68,7 +71,8 @@ pub async fn run_publisher_transport_conformance(
         "publisher.ambiguous.budget",
         driver.ambiguous_retry(),
     )
-    .await??;
+    .await?
+    .map_err(|error| error.at_stage("publisher.ambiguous"))?;
     if retry.len() != 2 {
         return Err(ConformanceError::count(
             "publisher.ambiguous.attempts",
@@ -159,7 +163,8 @@ pub async fn run_delivery_transport_conformance(
             "delivery.ack.budget",
             driver.acknowledged(),
         )
-        .await??,
+        .await?
+        .map_err(|error| error.at_stage("delivery.ack"))?,
         false,
     )?;
     expect_delivery(
@@ -170,12 +175,15 @@ pub async fn run_delivery_transport_conformance(
             "delivery.requeue.budget",
             driver.requeued(),
         )
-        .await??,
+        .await?
+        .map_err(|error| error.at_stage("delivery.requeue"))?,
         true,
     )?;
     expect_delivery(
         "delivery.reject",
-        within_budget(timer, deadline, "delivery.reject.budget", driver.rejected()).await??,
+        within_budget(timer, deadline, "delivery.reject.budget", driver.rejected())
+            .await?
+            .map_err(|error| error.at_stage("delivery.reject"))?,
         false,
     )?;
     expect_delivery(
@@ -186,7 +194,8 @@ pub async fn run_delivery_transport_conformance(
             "delivery.abandon.budget",
             driver.abandoned(),
         )
-        .await??,
+        .await?
+        .map_err(|error| error.at_stage("delivery.abandon"))?,
         true,
     )?;
     expect_delivery(
@@ -197,7 +206,8 @@ pub async fn run_delivery_transport_conformance(
             "delivery.failure.budget",
             driver.settlement_failed(),
         )
-        .await??,
+        .await?
+        .map_err(|error| error.at_stage("delivery.failure"))?,
         true,
     )?;
     let cancelled = within_budget(
@@ -206,7 +216,8 @@ pub async fn run_delivery_transport_conformance(
         "delivery.cancel.budget",
         driver.cancelled(),
     )
-    .await??;
+    .await?
+    .map_err(|error| error.at_stage("delivery.cancel"))?;
     if cancelled.drained_id == cancelled.pending_id
         || cancelled.replacement_ids != [cancelled.pending_id]
     {

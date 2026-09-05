@@ -1,11 +1,3 @@
-//! 集成测试：Redis 基建能力（真实 redis 后端）。
-//!
-//! 容器经 `testkit::env_or_redis()` self-provision（testcontainers）——无需手工预置；
-//! 设 `REDIS_TEST_URL` 则对接长存外部 redis（快速本地迭代，不起容器）。需 docker（容器路径）。
-//! 连不上即失败（fail-loud，不 silent skip）。
-//!
-//! nextest test-group 串行（名称前缀 `integration_`）。
-
 #![allow(clippy::expect_used)]
 // reason: canonical live-provider fixtures must fail loudly when typed identities drift.
 
@@ -18,34 +10,12 @@ use diport::{
     CasStore, CasStoreOutcome, CasStoreRequest, GlobalCasStoreKey, LockAcquireOutcome,
     LockRenewOutcome, LockStore, LockStoreKey,
 };
-use redis::{RedisPrivateCa, RedisRuntimeDeps};
+use redis::RedisRuntimeDeps;
 use sha2::{Digest, Sha256};
 use testkit::{FixtureError, await_try};
 use tokio::sync::Barrier;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[tokio::test]
-async fn integration_explicit_private_ca_accepts_matching_redis_and_rejects_wrong_ca()
--> Result<(), FixtureError> {
-    let network = testkit::bridge_network("rss-redis-tls").await?;
-    let dns_name = format!("{}-node", network.name());
-    let fixture = testkit::redis_tls(testkit::NetworkAttachment {
-        network: network.name(),
-        dns_name: &dns_name,
-    })
-    .await?;
-    let endpoint =
-        secure::RedisEndpoint::parse(fixture.url(), secure::PlaintextEndpointPolicy::Deny)?;
-    let good_ca = RedisPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
-    let deps = RedisRuntimeDeps::connect_with_private_ca(&endpoint, good_ca)?;
-    deps.ping().await?;
-
-    let wrong_ca = RedisPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?;
-    let wrong = RedisRuntimeDeps::connect_with_private_ca(&endpoint, wrong_ca)?;
-    assert!(wrong.ping().await.is_err());
-    Ok(())
-}
 
 fn unique_lock_key(label: &str) -> LockStoreKey {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -64,10 +34,8 @@ fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
     Ok(RedisRuntimeDeps::setup_for_test(pool))
 }
 
-#[tokio::test]
-async fn integration_distlock_mutex_ttl_and_fencing() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = make_deps(redis.url())?;
+pub(super) async fn distlock_mutex_ttl_and_fencing(url: &str) -> Result<(), FixtureError> {
+    let deps = make_deps(url)?;
     let lock = deps.infra().lock_store();
     let key = unique_lock_key("integration_distlock");
     let ttl = Duration::from_millis(500);
@@ -121,10 +89,8 @@ async fn integration_distlock_mutex_ttl_and_fencing() -> Result<(), FixtureError
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_distlock_cross_key_isolation() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = make_deps(redis.url())?;
+pub(super) async fn distlock_cross_key_isolation(url: &str) -> Result<(), FixtureError> {
+    let deps = make_deps(url)?;
     let lock = deps.infra().lock_store();
     let ttl = Duration::from_secs(30);
 
@@ -135,10 +101,10 @@ async fn integration_distlock_cross_key_isolation() -> Result<(), FixtureError> 
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_distlock_concurrent_same_key_single_winner() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = Arc::new(make_deps(redis.url())?);
+pub(super) async fn distlock_concurrent_same_key_single_winner(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let deps = Arc::new(make_deps(url)?);
     let key = unique_lock_key("integration_distlock_race");
     let barrier = Arc::new(Barrier::new(8));
     let mut tasks = Vec::new();
@@ -175,10 +141,8 @@ async fn integration_distlock_concurrent_same_key_single_winner() -> Result<(), 
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_redis_cas_three_states_and_fencing() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = make_deps(redis.url())?;
+pub(super) async fn redis_cas_three_states_and_fencing(url: &str) -> Result<(), FixtureError> {
+    let deps = make_deps(url)?;
     let cas = deps.infra().cas_store();
     let key = unique_cas_key("integration_redis_cas");
 
@@ -245,10 +209,10 @@ async fn integration_redis_cas_three_states_and_fencing() -> Result<(), FixtureE
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_redis_cas_concurrent_create_has_single_winner() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = Arc::new(make_deps(redis.url())?);
+pub(super) async fn redis_cas_concurrent_create_has_single_winner(
+    url: &str,
+) -> Result<(), FixtureError> {
+    let deps = Arc::new(make_deps(url)?);
     let key = unique_cas_key("integration_redis_cas_race");
     let barrier = Arc::new(Barrier::new(8));
     let mut tasks = Vec::new();
@@ -292,13 +256,11 @@ async fn integration_redis_cas_concurrent_create_has_single_winner() -> Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn integration_redis_cas_token_overflow_fails_fast() -> Result<(), FixtureError> {
-    let redis = testkit::env_or_redis().await?;
-    let deps = make_deps(redis.url())?;
+pub(super) async fn redis_cas_token_overflow_fails_fast(url: &str) -> Result<(), FixtureError> {
+    let deps = make_deps(url)?;
     let key = unique_cas_key("integration_redis_cas_overflow");
     let redis_key = format!("_runtime:cas:{}:{}", key.as_str().len(), key.as_str());
-    let pool = Config::from_url(redis.url()).create_pool(Some(Runtime::Tokio1))?;
+    let pool = Config::from_url(url).create_pool(Some(Runtime::Tokio1))?;
     let mut conn = pool.get().await?;
     let _: () = deadpool_redis::redis::cmd("HSET")
         .arg(&redis_key)

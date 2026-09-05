@@ -17,7 +17,7 @@ rss-transactional-messaging-runtime.workspace = true
 rss-transactional-messaging-testkit = { path = "../../crates/transactional-messaging-testkit", version = "0.1.0", default-features = false, features = ["consumer", "producer"] }
 rss-request-context = { workspace = true }
 testkit = { path = "../../crates/testkit", features = ["containers"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

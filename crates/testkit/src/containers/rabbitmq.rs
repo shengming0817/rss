@@ -1,16 +1,16 @@
-use std::collections::HashSet;
-use std::net::IpAddr;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use url::{Host, Url};
+use tokio::sync::OnceCell;
 
 use super::runtime::run_container_command;
 use super::{
-    NetworkAttachment, RABBITMQCTL_BACKOFF_MS, RABBITMQCTL_MAX_ATTEMPTS, Result, attach_network,
-    copied_tls_image, process_external_value, runtime, tls_material,
+    NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS, PUBLISHED_PORT_RETRY_BACKOFF_MS,
+    RABBITMQCTL_BACKOFF_MS, RABBITMQCTL_MAX_ATTEMPTS, Result, attach_network, copied_tls_image,
+    runtime, tls_material, wait_published_port,
 };
 
 const AMQP_PORT: u16 = 5672;
@@ -18,122 +18,93 @@ const AMQPS_PORT: u16 = 5671;
 
 // ── rabbitmq ─────────────────────────────────────────────────────────────---
 
-/// rabbitmq fixture guard：持容器句柄（自起路径）到 `Drop`。**须绑定到测试结束**。
-/// per-domain vhost 经 [`RabbitFixture::vhost_url`] 按需创建（同容器可建多 vhost，供跨 vhost 隔离测试）。
+/// Owns one temporary broker. Suites isolate scenarios with fixture-created vhosts.
 pub struct RabbitFixture {
-    pub(super) inner: RabbitInner,
+    container: Box<ContainerAsync<GenericImage>>,
+    host: String,
+    port: u16,
+    created: Vhosts,
 }
 
-pub(super) enum RabbitInner {
-    /// 自起容器：持句柄；`vhost_url` 经 rabbitmqctl 在该 broker 建 vhost。
-    Container {
-        container: Box<ContainerAsync<GenericImage>>,
-        host: String,
-        port: u16,
-        /// 已建 vhost 缓存（幂等：同一 vhost 多次 `vhost_url` 不重复调 rabbitmqctl）。
-        created: Mutex<HashSet<String>>,
-    },
-    /// env 长存 broker：base url（不含 vhost）；`vhost_url` 直接拼（caller 须已建该 vhost）。
-    Env { base: String },
-}
+// The map lock only protects cell lookup; each vhost has its own fallible initialization.
+// ref: tokio 1.52.3 sync/once_cell.rs get_or_try_init (error/cancellation releases the permit).
+#[derive(Default)]
+struct Vhosts(Mutex<HashMap<String, Arc<OnceCell<()>>>>);
 
-impl RabbitFixture {
-    /// 取 `vhost` 的连接 URL `amqp://guest:guest@host:port/<vhost>`。自起路径会先在 broker 建该 vhost
-    /// （+ 给 guest 授权）；env 路径假定长存 broker 已建该 vhost。`vhost` 须 URL-safe（字母数字 / `_` / `-`）。
-    /// 同一 guard 多次调用不同 `vhost` → 同容器多 vhost（per-domain 隔离测试用）。
-    /// 同一 `vhost` 多次调用幂等——不重复调 rabbitmqctl（已建则直接返回 URL）。
-    pub async fn vhost_url(&self, vhost: &str) -> Result<String> {
-        validate_rabbit_vhost(vhost)?;
-        match &self.inner {
-            RabbitInner::Container {
-                container,
-                host,
-                port,
-                created,
-            } => {
-                // 幂等：已建则跳过（reason: rabbitmqctl add_vhost 重入会报 already exists；
-                // HashSet 缓存避免重复调用，同时省重试开销）。
-                let already = {
-                    let guard = created
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("vhost cache mutex poisoned: {e}"))?;
-                    guard.contains(vhost)
-                };
-                if !already {
-                    create_vhost(container, vhost).await?;
-                    created
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("vhost cache mutex poisoned: {e}"))?
-                        .insert(vhost.to_string());
-                }
-                Ok(format!("amqp://guest:guest@{host}:{port}/{vhost}"))
-            }
-            RabbitInner::Env { base } => Ok(amqp_url_with_vhost(base, vhost)),
-        }
-    }
-
-    /// Ask a managed RabbitMQ broker to close one connection in `vhost` from the broker side.
-    ///
-    /// This is intentionally unavailable for externally supplied brokers: possessing an AMQP URL
-    /// does not imply management authority. Tests requiring a real broker-originated close therefore
-    /// fail closed instead of silently substituting a client graceful close.
-    pub async fn broker_force_close_one_connection(&self, vhost: &str, reason: &str) -> Result<()> {
-        validate_rabbit_vhost(vhost)?;
-        if reason.is_empty() || reason.contains('\0') {
-            return Err(anyhow::anyhow!(
-                "RabbitMQ forced-close reason must be non-empty and contain no NUL"
-            ));
-        }
-        match &self.inner {
-            RabbitInner::Container {
-                container, created, ..
-            } => {
-                let exists = created
-                    .lock()
-                    .map_err(|error| anyhow::anyhow!("vhost cache mutex poisoned: {error}"))?
-                    .contains(vhost);
-                if !exists {
-                    return Err(anyhow::anyhow!(
-                        "managed RabbitMQ vhost '{vhost}' must be created before forced close"
-                    ));
-                }
-                run_rabbitmqctl(
-                    container,
-                    &["close_all_connections", "-p", vhost, "--limit", "1", reason],
-                )
-                .await
-            }
-            RabbitInner::Env { .. } => Err(anyhow::anyhow!(
-                "broker-originated connection close requires a managed RabbitMQ container"
-            )),
-        }
-    }
-
-    /// Count the broker's actual consumer registrations for a fixture queue.
-    /// Unlike quorum queue-declare counts, this excludes cancelled consumers holding unacked messages.
-    /// ref: rabbitmq-server v3.13.6 deps/rabbit/src/rabbit_fifo.erl query_consumers/1.
-    pub async fn broker_consumer_count(&self, vhost: &str, queue: &str) -> Result<usize> {
-        validate_rabbit_vhost(vhost)?;
-        validate_exact_queue_name(queue)?;
-        let RabbitInner::Container {
-            container, created, ..
-        } = &self.inner
-        else {
-            return Err(anyhow::anyhow!(
-                "consumer observation requires a managed RabbitMQ fixture"
-            ));
-        };
-        if !created
+impl Vhosts {
+    async fn ensure_created<F, Fut>(&self, vhost: &str, create: F) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let cell = self
+            .0
             .lock()
             .map_err(|_| anyhow::anyhow!("vhost cache poisoned"))?
-            .contains(vhost)
-        {
-            return Err(anyhow::anyhow!(
-                "consumer observation requires a fixture-created vhost"
-            ));
-        }
+            .entry(vhost.to_owned())
+            .or_default()
+            .clone();
+        cell.get_or_try_init(create).await?;
+        Ok(())
+    }
+
+    fn is_ready(&self, vhost: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vhost cache poisoned"))?
+            .get(vhost)
+            .is_some_and(|cell| cell.initialized()))
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+impl RabbitFixture {
+    /// Creates a vhost once on this owned broker and returns its loopback test endpoint.
+    /// Concurrent callers share initialization of the same vhost, including permissions.
+    /// Failed or cancelled initialization can be retried; other vhosts initialize independently.
+    pub async fn vhost_url(&self, vhost: &str) -> Result<String> {
+        validate_rabbit_vhost(vhost)?;
+        self.created
+            .ensure_created(vhost, || create_vhost(&self.container, vhost))
+            .await?;
+        Ok(format!(
+            "amqp://guest:guest@{}:{}/{vhost}",
+            self.host, self.port
+        ))
+    }
+
+    fn require_vhost(&self, vhost: &str) -> Result<()> {
+        validate_rabbit_vhost(vhost)?;
+        anyhow::ensure!(
+            self.created.is_ready(vhost)?,
+            "broker observation requires a fixture-created vhost"
+        );
+        Ok(())
+    }
+
+    /// Closes a connection from the broker side, scoped to a fixture-created vhost.
+    pub async fn broker_force_close_one_connection(&self, vhost: &str, reason: &str) -> Result<()> {
+        self.require_vhost(vhost)?;
+        anyhow::ensure!(
+            !reason.is_empty() && !reason.contains('\0'),
+            "RabbitMQ forced-close reason must be non-empty and contain no NUL"
+        );
+        run_rabbitmqctl(
+            &self.container,
+            &["close_all_connections", "-p", vhost, "--limit", "1", reason],
+        )
+        .await
+    }
+
+    /// Observes actual broker registrations, excluding cancelled consumers holding unacked messages.
+    pub async fn broker_consumer_count(&self, vhost: &str, queue: &str) -> Result<usize> {
+        self.require_vhost(vhost)?;
+        validate_exact_queue_name(queue)?;
         let output = run_rabbitmqctl_output(
-            container,
+            &self.container,
             &[
                 "list_consumers",
                 "-p",
@@ -154,62 +125,32 @@ impl RabbitFixture {
             .count())
     }
 
-    /// Managed-broker receipt for total queue depth, including at-least-once dead letters retained
-    /// inside a source quorum queue while its target is unavailable. AMQP's passive queue-declare
-    /// count exposes only ready messages, so this deliberately narrow fault-observation seam uses
-    /// `rabbitmqctl list_queues` without exposing a raw management or broker handle.
+    /// Includes dead letters retained by a source quorum queue while its target is unavailable.
     pub async fn broker_queue_total_depth(&self, vhost: &str, queue: &str) -> Result<u32> {
-        validate_rabbit_vhost(vhost)?;
-        if queue.is_empty()
-            || queue.len() > 255
-            || !queue.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
-            })
-        {
-            return Err(anyhow::anyhow!(
-                "RabbitMQ queue observation name is invalid"
-            ));
-        }
-        match &self.inner {
-            RabbitInner::Container {
-                container, created, ..
-            } => {
-                let exists = created
-                    .lock()
-                    .map_err(|error| anyhow::anyhow!("vhost cache mutex poisoned: {error}"))?
-                    .contains(vhost);
-                if !exists {
-                    return Err(anyhow::anyhow!(
-                        "managed RabbitMQ vhost '{vhost}' must be created before queue observation"
-                    ));
-                }
-                let output = run_rabbitmqctl_output(
-                    container,
-                    &[
-                        "list_queues",
-                        "-p",
-                        vhost,
-                        "name",
-                        "messages",
-                        "--formatter",
-                        "json",
-                    ],
-                )
-                .await?;
-                let rows: serde_json::Value = serde_json::from_str(&output)?;
-                rows.as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(queue))
-                    .and_then(|row| row.get("messages"))
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|depth| u32::try_from(depth).ok())
-                    .ok_or_else(|| anyhow::anyhow!("RabbitMQ queue observation was absent"))
-            }
-            RabbitInner::Env { .. } => Err(anyhow::anyhow!(
-                "total quorum queue depth observation requires a managed RabbitMQ container"
-            )),
-        }
+        self.require_vhost(vhost)?;
+        validate_exact_queue_name(queue)?;
+        let output = run_rabbitmqctl_output(
+            &self.container,
+            &[
+                "list_queues",
+                "-p",
+                vhost,
+                "name",
+                "messages",
+                "--formatter",
+                "json",
+            ],
+        )
+        .await?;
+        let rows: serde_json::Value = serde_json::from_str(&output)?;
+        rows.as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(queue))
+            .and_then(|row| row.get("messages"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|depth| u32::try_from(depth).ok())
+            .ok_or_else(|| anyhow::anyhow!("RabbitMQ queue observation was absent"))
     }
 }
 
@@ -226,81 +167,7 @@ pub(super) fn validate_rabbit_vhost(vhost: &str) -> Result<()> {
     Ok(())
 }
 
-/// 校验 AMQP base broker URL（无非空 vhost 段）。
-///
-/// 合法：`amqps://user:pass@host:port`、`amqp://user:pass@127.0.0.1:port`。
-/// 拒绝：`amqp://host:5672`（non-loopback 明文）、`amqp://host:5672/existing_vhost`（含非空 path/vhost 段）。
-///
-/// `RSS_AMQP_TEST_URL` 须为 base broker URL，vhost 由 testkit 拼接/预建。
-pub(super) fn validate_amqp_base_url(url: &str) -> Result<()> {
-    let parsed = Url::parse(url)
-        .map_err(|_| anyhow::anyhow!("RSS_AMQP_TEST_URL 不是合法 URL，实际: {url}"))?;
-    match parsed.scheme() {
-        "amqps" => {}
-        "amqp" if is_loopback_url_host(&parsed) => {}
-        "amqp" => {
-            return Err(anyhow::anyhow!(
-                "RSS_AMQP_TEST_URL 明文 amqp:// 仅允许 loopback host；外部长存 broker 须使用 amqps://"
-            ));
-        }
-        _ => {
-            return Err(anyhow::anyhow!(
-                "RSS_AMQP_TEST_URL 须为 amqps:// 或 loopback amqp://，实际: {url}"
-            ));
-        }
-    }
-    if parsed.host().is_none() {
-        return Err(anyhow::anyhow!("RSS_AMQP_TEST_URL 须包含 host"));
-    }
-    let path_has_vhost = !parsed.path().trim_matches('/').is_empty();
-    if path_has_vhost {
-        return Err(anyhow::anyhow!(
-            "RSS_AMQP_TEST_URL='{}' 含非空 path/vhost 段 '{}'——须为 base broker URL（无 vhost），\
-             vhost 由 testkit 在测试用 fixture 中拼接/预建",
-            url,
-            parsed.path().trim_start_matches('/')
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn is_loopback_url_host(parsed: &Url) -> bool {
-    match parsed.host() {
-        Some(Host::Domain(host)) => {
-            host.eq_ignore_ascii_case("localhost")
-                || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
-        }
-        Some(Host::Ipv4(addr)) => addr.is_loopback(),
-        Some(Host::Ipv6(addr)) => addr.is_loopback(),
-        None => false,
-    }
-}
-
-/// **默认起容器（fail-closed 安全语义）**。仅当 `RSS_AMQP_TEST_URL` 非空时走外部 broker 路径。
-///
-/// 外部路径：`RSS_AMQP_TEST_URL` 须为 **base broker URL（无 path/vhost 段）**，如
-/// `amqps://user:pass@host:port` 或 loopback `amqp://user:pass@127.0.0.1:port`；含非空 vhost 段则报错。
-/// vhost 由 testkit 在 `vhost_url()` 中拼接；env 路径假定 broker 已预建该 vhost（caller 负责）。
-///
-/// # Example
-///
-/// ```ignore
-/// let rabbit = testkit::env_or_rabbitmq().await?;
-/// let url = rabbit.vhost_url("rss_identity").await?;
-/// // url = "amqp://guest:guest@host:port/rss_identity"
-/// ```
-pub async fn env_or_rabbitmq() -> Result<RabbitFixture> {
-    if let Some(base) = process_external_value("RSS_AMQP_TEST_URL")? {
-        validate_amqp_base_url(&base)?;
-        return Ok(RabbitFixture {
-            inner: RabbitInner::Env { base },
-        });
-    }
-    managed_rabbitmq().await
-}
-
 /// Start an owned broker for fault injection and management observations.
-/// Ignores `RSS_AMQP_TEST_URL`; never administers an external broker.
 pub async fn managed_rabbitmq() -> Result<RabbitFixture> {
     // Quorum queue TTL and at-least-once dead-lettering require RabbitMQ >= 3.10. Keep the plain
     // fixture on the exact same broker version as the private-CA fixture instead of inheriting the
@@ -310,14 +177,18 @@ pub async fn managed_rabbitmq() -> Result<RabbitFixture> {
         .with_wait_for(WaitFor::message_on_stdout("Server startup complete"));
     let container = runtime::start(image).await?;
     let host = container.get_host().await?.to_string();
-    let port = container.get_host_port_ipv4(AMQP_PORT).await?;
+    let port = wait_published_port(
+        &container,
+        AMQP_PORT,
+        PUBLISHED_PORT_MAX_ATTEMPTS,
+        PUBLISHED_PORT_RETRY_BACKOFF_MS,
+    )
+    .await?;
     Ok(RabbitFixture {
-        inner: RabbitInner::Container {
-            container: Box::new(container),
-            host,
-            port,
-            created: Mutex::new(HashSet::new()),
-        },
+        container: Box::new(container),
+        host,
+        port,
+        created: Vhosts::default(),
     })
 }
 
@@ -741,7 +612,13 @@ pub async fn rabbitmq_tls(
     )
     .await?;
     let host = container.get_host().await?.to_string();
-    let port = container.get_host_port_ipv4(AMQPS_PORT).await?;
+    let port = wait_published_port(
+        &container,
+        AMQPS_PORT,
+        PUBLISHED_PORT_MAX_ATTEMPTS,
+        PUBLISHED_PORT_RETRY_BACKOFF_MS,
+    )
+    .await?;
     Ok(RabbitTlsFixture {
         container: Box::new(container),
         publisher_url: format!(
@@ -790,11 +667,6 @@ pub(super) async fn create_vhost(
     )
     .await?;
     Ok(())
-}
-
-/// 给定 base broker URL（`amqps://user:pass@host:port` 或 loopback `amqp://...`）+ vhost 拼出完整 URL（env 路径用）。
-pub(super) fn amqp_url_with_vhost(base: &str, vhost: &str) -> String {
-    format!("{}/{vhost}", base.trim_end_matches('/'))
 }
 
 /// Fixture management has one execution budget, including CLI startup, Docker I/O and backoff.
@@ -847,32 +719,4 @@ async fn rabbitmqctl_attempts<I: testcontainers::Image>(
     Err(anyhow::anyhow!(
         "RabbitMQ fixture management failed after bounded attempts (exit={last_exit:?})"
     ))
-}
-
-#[cfg(test)]
-mod command_deadline_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn stalled_management_command_has_a_bounded_failure() -> Result<()> {
-        let fixture = managed_rabbitmq().await?;
-        let RabbitInner::Container { container, .. } = &fixture.inner else {
-            unreachable!("owned fixture")
-        };
-        let result = tokio::time::timeout(
-            Duration::from_secs(45),
-            run_rabbitmqctl_output(container.as_ref(), &["eval", "timer:sleep(60000)."]),
-        )
-        .await;
-        assert!(
-            result.is_ok(),
-            "fixture command must enforce its own execution deadline"
-        );
-        assert!(
-            result?.is_err(),
-            "stalled command must fail, never silently succeed"
-        );
-        run_rabbitmqctl(container.as_ref(), &["await_startup"]).await?;
-        Ok(())
-    }
 }

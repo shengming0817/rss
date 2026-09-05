@@ -103,10 +103,19 @@ The separate `amqp-integration` package owns RabbitMQ fixtures and implements th
 and delivery transport suites from `rss-transactional-messaging-testkit`. It proves real confirms,
 refusals, ambiguity, settlement, cancellation, redelivery and private-CA authorization. Its fixtures
 provision test queues independently, including an identity with only queue read authority.
-`RSS_AMQP_TEST_URL` selects a dedicated test broker whose credentials allow fixture provisioning;
-this is separate from the production subscriber credential. Management-only fault observations
-use owned temporary brokers. It makes
-no PostgreSQL or durable application-transaction guarantee.
+Three suites each share a 110-second deadline, including fixture startup; nextest retains its
+120-second termination limit. They own four temporary brokers: publisher/security (plain + TLS),
+settlement/runtime, and subscriber lifecycle. Scenario helpers borrow the suite fixture and
+use separate vhosts; none starts a nested broker. Fixture management only acts on owned containers.
+Production endpoints are always explicit; integration fixtures do not read endpoint environment overrides.
+
+Pure successful-consumer and commit-unknown outcome decisions belong to the runtime T1 tests
+(`long_handler_is_periodically_renewed_then_commits_before_ack` and
+`consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes`). Broker ACK and abandon
+remain in delivery conformance. Real publish cancellation/confirmation timeout, settlement Drop,
+registration/shutdown, recovery installation and forced runtime cancellation remain T2 because
+in-memory generation or decision tests cannot prove their connection and channel cleanup.
+These suites make no PostgreSQL or durable application-transaction guarantee.
 
 Historical implementation: `baseline/pre-community-core-20260902`.
 Upstream reference: lapin v4.10.0 `src/generated/channel.rs`, `src/publisher_confirm.rs`,
