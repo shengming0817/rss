@@ -4,11 +4,8 @@ use std::future::Future;
 
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::message::MessageId;
-use rss_transactional_messaging::outbox::{
-    AppendOutcome, OutboxDisposition, OutboxLeaseStatus, OutboxSettlement,
-};
+use rss_transactional_messaging::outbox::{AppendOutcome, OutboxDisposition, OutboxLeaseStatus};
 use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionTimer};
-use rss_transactional_messaging::transport::PublishOutcome;
 
 use crate::{ConformanceError, suite_deadline, within_budget};
 
@@ -26,17 +23,6 @@ pub trait OutboxDriver: Send + Sync {
     fn partition_head_claims(&self) -> impl Future<Output = Result<usize, MessagingError>>;
     /// Observe that an unresolved dead-letter head blocks its partition successor.
     fn blocked_partition_claims(&self) -> impl Future<Output = Result<usize, MessagingError>>;
-    /// Publish and settle one confirmed claim.
-    fn confirmed_publish(
-        &self,
-    ) -> impl Future<Output = Result<(PublishOutcome<()>, OutboxSettlement<()>), ConformanceError>>;
-    /// Map a definite transient publication failure to retry.
-    fn transient_publish(&self)
-    -> impl Future<Output = Result<PublishOutcome<()>, MessagingError>>;
-    /// Retry one ambiguous publication with the original identity.
-    fn ambiguous_publish(
-        &self,
-    ) -> impl Future<Output = Result<Vec<PublishOutcome<()>>, ConformanceError>>;
     /// Observe a stale contender before settlement.
     fn stale_lease(&self) -> impl Future<Output = Result<OutboxLeaseStatus, MessagingError>>;
     /// Observe an expired settlement deadline.
@@ -46,19 +32,22 @@ pub trait OutboxDriver: Send + Sync {
     fn delivery_window(
         &self,
     ) -> impl Future<Output = Result<Option<[OutboxLeaseStatus; 3]>, MessagingError>>;
-    /// Map a definite permanent publication failure to dead letter.
-    fn permanent_publish(&self)
-    -> impl Future<Output = Result<PublishOutcome<()>, MessagingError>>;
-    /// Publish, crash before settlement, reclaim, and finish the same durable row.
-    fn publish_before_settle_recovery(
+    /// Claim again after Retry settlement and observe the same durable identity.
+    fn retry_settlement_reclaims_same_message(
         &self,
-    ) -> impl Future<Output = Result<Vec<PublishOutcome<()>>, ConformanceError>>;
-    /// Stable message identities observed by the current publication scenario.
-    fn published_message_ids(&self) -> Vec<MessageId>;
-    /// Durable settlement dispositions observed by the current publication scenario.
-    fn settlement_dispositions(&self) -> Vec<OutboxDisposition>;
-    /// Final consumer effects observed across all at-least-once deliveries.
-    fn consumer_effects(&self) -> usize;
+    ) -> impl Future<Output = Result<ReclaimEvidence, ConformanceError>>;
+    /// Expire a claim after publication but before settlement, then reclaim and mark Published.
+    fn reclaim_after_publish_before_settle(
+        &self,
+    ) -> impl Future<Output = Result<ReclaimEvidence, ConformanceError>>;
+}
+
+/// Store-owned claim identities and final durable settlement observed by one scenario.
+pub struct ReclaimEvidence {
+    /// Identity of each successful claim, in order.
+    pub claimed_message_ids: Vec<MessageId>,
+    /// Actual durable disposition recorded by the store.
+    pub settlement: OutboxDisposition,
 }
 
 /// Run the provider-neutral outbox conformance suite.
@@ -138,122 +127,38 @@ pub async fn run_outbox_conformance<D: OutboxDriver>(
     )?;
 
     driver.reset();
-    let (published, settlement) = within_budget(
+    let recovered = within_budget(
         timer,
         deadline,
-        "outbox.publish.confirmed.budget",
-        driver.confirmed_publish(),
+        "outbox.reclaim.budget",
+        driver.reclaim_after_publish_before_settle(),
     )
-    .await?
-    .map_err(|error| error.at_stage("outbox.publish.confirmed"))?;
-    expect_publish("outbox.publish.confirmed", &published, "confirmed")?;
-    expect_settlement(
-        "outbox.publish.confirmed.settlement",
-        &settlement,
-        OutboxDisposition::Published,
-    )?;
-
-    driver.reset();
-    let outcomes = within_budget(
-        timer,
-        deadline,
-        "outbox.publish-before-settle.budget",
-        driver.publish_before_settle_recovery(),
-    )
-    .await?
-    .map_err(|error| error.at_stage("outbox.publish-before-settle"))?;
+    .await??;
     expect_count(
-        "outbox.publish-before-settle.publish-calls",
+        "outbox.reclaim.claims",
         2,
-        outcomes.len(),
+        recovered.claimed_message_ids.len(),
     )?;
-    expect_same_ids(
-        "outbox.publish-before-settle.identity",
-        &driver.published_message_ids(),
-    )?;
-    expect_publish_sequence(
-        "outbox.publish-before-settle.outcomes",
-        &outcomes,
-        &["ambiguous", "confirmed"],
-    )?;
-    expect_count(
-        "outbox.publish-before-settle.settlement-calls",
-        1,
-        driver.settlement_dispositions().len(),
-    )?;
+    expect_same_ids("outbox.reclaim.identity", &recovered.claimed_message_ids)?;
     expect_disposition_value(
-        "outbox.publish-before-settle.settlement",
-        driver.settlement_dispositions()[0],
+        "outbox.reclaim.settlement",
+        recovered.settlement,
         OutboxDisposition::Published,
     )?;
-    expect_count(
-        "outbox.publish-before-settle.consumer-effects",
-        1,
-        driver.consumer_effects(),
-    )?;
-
     driver.reset();
-    let transient = within_budget(
+    let retried = within_budget(
         timer,
         deadline,
-        "outbox.publish.transient.budget",
-        driver.transient_publish(),
+        "outbox.retry.budget",
+        driver.retry_settlement_reclaims_same_message(),
     )
-    .await?
-    .map_err(|error| ConformanceError::provider("outbox.publish.transient", error.kind()))?;
-    expect_publish(
-        "outbox.publish.transient",
-        &transient,
-        "definitely-not-published-transient",
-    )?;
-    expect_settlement(
-        "outbox.publish.transient.settlement",
-        &transient.into_settlement(),
+    .await??;
+    expect_count("outbox.retry.claims", 2, retried.claimed_message_ids.len())?;
+    expect_same_ids("outbox.retry.identity", &retried.claimed_message_ids)?;
+    expect_disposition_value(
+        "outbox.retry.settlement",
+        retried.settlement,
         OutboxDisposition::Retry,
-    )?;
-
-    driver.reset();
-    let outcomes = within_budget(
-        timer,
-        deadline,
-        "outbox.publish.ambiguous.budget",
-        driver.ambiguous_publish(),
-    )
-    .await?
-    .map_err(|error| error.at_stage("outbox.publish.ambiguous"))?;
-    expect_publish_sequence(
-        "outbox.publish.ambiguous.outcomes",
-        &outcomes,
-        &["ambiguous", "confirmed"],
-    )?;
-    expect_same_ids(
-        "outbox.publish.ambiguous.identity",
-        &driver.published_message_ids(),
-    )?;
-    expect_count(
-        "outbox.publish.ambiguous.consumer-effects",
-        1,
-        driver.consumer_effects(),
-    )?;
-
-    driver.reset();
-    let permanent = within_budget(
-        timer,
-        deadline,
-        "outbox.publish.permanent.budget",
-        driver.permanent_publish(),
-    )
-    .await?
-    .map_err(|error| ConformanceError::provider("outbox.publish.permanent", error.kind()))?;
-    expect_publish(
-        "outbox.publish.permanent",
-        &permanent,
-        "definitely-not-published-permanent",
-    )?;
-    expect_settlement(
-        "outbox.publish.permanent.settlement",
-        &permanent.into_settlement(),
-        OutboxDisposition::DeadLetter,
     )?;
 
     expect_lease(
@@ -319,38 +224,6 @@ fn expect_window(window: Option<[OutboxLeaseStatus; 3]>) -> Result<(), Conforman
     Ok(())
 }
 
-fn expect_publish(
-    stage: &'static str,
-    outcome: &PublishOutcome<()>,
-    expected: &'static str,
-) -> Result<(), ConformanceError> {
-    let actual = match outcome {
-        PublishOutcome::Confirmed(()) => "confirmed",
-        PublishOutcome::DefinitelyNotPublished(failure) if failure.kind().is_retryable() => {
-            "definitely-not-published-transient"
-        }
-        PublishOutcome::DefinitelyNotPublished(_) => "definitely-not-published-permanent",
-        PublishOutcome::Ambiguous(_) => "ambiguous",
-    };
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(ConformanceError::mismatch(stage, expected, actual))
-    }
-}
-
-fn expect_publish_sequence(
-    stage: &'static str,
-    outcomes: &[PublishOutcome<()>],
-    expected: &[&'static str],
-) -> Result<(), ConformanceError> {
-    expect_count(stage, expected.len(), outcomes.len())?;
-    for (outcome, expected) in outcomes.iter().zip(expected) {
-        expect_publish(stage, outcome, expected)?;
-    }
-    Ok(())
-}
-
 fn expect_same_ids(stage: &'static str, ids: &[MessageId]) -> Result<(), ConformanceError> {
     if ids.len() >= 2 && ids.windows(2).all(|pair| pair[0] == pair[1]) {
         Ok(())
@@ -359,23 +232,6 @@ fn expect_same_ids(stage: &'static str, ids: &[MessageId]) -> Result<(), Conform
             stage,
             "same-message-id",
             "changed-or-missing-message-id",
-        ))
-    }
-}
-
-fn expect_settlement(
-    stage: &'static str,
-    settlement: &OutboxSettlement<()>,
-    expected: OutboxDisposition,
-) -> Result<(), ConformanceError> {
-    let actual = settlement.disposition();
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(ConformanceError::mismatch(
-            stage,
-            disposition_label(expected),
-            disposition_label(actual),
         ))
     }
 }

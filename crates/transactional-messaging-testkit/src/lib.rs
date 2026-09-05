@@ -16,6 +16,9 @@ pub mod consumer;
 
 pub mod memory;
 
+#[cfg(any(feature = "producer", feature = "consumer"))]
+pub mod transport;
+
 use std::future::Future;
 use std::task::Poll;
 

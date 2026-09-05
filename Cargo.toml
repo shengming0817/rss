@@ -55,7 +55,7 @@ members = [
   # adapters（实现基础 / 引擎 / 服务 trait；不被域依赖）
   "crates/transactional-messaging-postgres",
   "adapters/redis",
-  "adapters/amqp",
+  "crates/transactional-messaging-amqp",
   "adapters/s3",
   "adapters/grpc",
   "adapters/httpd",
@@ -88,6 +88,7 @@ packages = [
   { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-testkit", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging-amqp", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
 ]
@@ -104,8 +105,8 @@ issue = 2264
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging-testkit"
-baseline-rev = "a227ea93227431206fde0e5f81d1a1c1fb45a048"
-issue = 2264
+baseline-rev = "aaacc65d672c593c483cba9e6ceea6aef67332f0"
+issue = 2265
 
 [workspace.package]
 version = "0.0.0"
@@ -123,6 +124,7 @@ rss-platform = { path = "crates/platform", version = "0.3.0" }
 rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
 rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
 rss-transactional-messaging-testkit = { path = "crates/transactional-messaging-testkit", version = "0.1.0" }
+rss-transactional-messaging-amqp = { path = "crates/transactional-messaging-amqp", version = "0.1.0" }
 rss-transactional-messaging-postgres = { path = "crates/transactional-messaging-postgres", version = "0.1.0" }
 rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
@@ -201,8 +203,8 @@ sqlx = { version = "=0.8.6", features = ["runtime-tokio", "tls-rustls", "postgre
 # re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
 # testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
 deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tls-rustls-webpki-roots", "tokio-rustls-comp", "script"] }
-# AMQP broker I/O（adapters/amqp）：rustls + ring provider + webpki roots；default-features=false 禁默认漂移。
-# 生产 URL 经 secure::AmqpEndpoint 默认要求 amqps://；testcontainer 明文 amqp:// 仅 loopback + 显式 opt-in。
+# AMQP broker I/O（crates/transactional-messaging-amqp）：rustls + ring provider + webpki roots；default-features=false 禁默认漂移。
+# 生产 URL 经 adapter-owned AMQP endpoint 默认要求 amqps://；testcontainer 明文 amqp:// 仅 loopback + 显式 opt-in。
 # 不启 native-tls / openssl / rustls--aws_lc_rs；deny.toml 兜住 provider 漂移。
 # ref: amqp-rs/lapin Cargo.toml@71d01e2cc3e3221496d11ffcf1f4aaf41532fb9d
 lapin = { version = "4", default-features = false, features = ["default-runtime", "rustls--ring", "rustls-webpki-roots-certs"] }

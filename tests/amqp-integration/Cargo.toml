@@ -6,17 +6,18 @@ rust-version.workspace = true
 publish = false
 
 [dev-dependencies]
+lapin.workspace = true
 rss-contract.workspace = true
-amqp = { path = "../../adapters/amqp", features = ["integration"] }
+rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
+rss-transactional-messaging-amqp = { workspace = true, features = ["test-support"] }
 anyhow = { workspace = true }
 rss-runtime.workspace = true
 rss-transactional-messaging = { workspace = true }
 rss-transactional-messaging-runtime.workspace = true
 rss-transactional-messaging-testkit = { path = "../../crates/transactional-messaging-testkit", version = "0.1.0", default-features = false, features = ["consumer", "producer"] }
 rss-request-context = { workspace = true }
-secure = { path = "../../crates/secure" }
 testkit = { path = "../../crates/testkit", features = ["containers"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
 
 [lints]
 workspace = true

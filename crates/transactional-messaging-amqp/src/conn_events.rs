@@ -1,17 +1,17 @@
 //! AMQP connect 成功 / 失败 tracing emit（feature-agnostic，无 lapin）。
 //!
 //! **Hard funnel**：[`emit_connected`] / [`emit_connect_failed`] 的 `endpoint` 入参类型为
-//! [`secure::AmqpEndpoint`]——明文 URL / `expose()` 结果无法经本 API 进入日志字段；字段值经
-//! `AmqpEndpoint: Display`（内部 `render_redacted_url` → `redact_url_credentials`）输出。
+//! [`crate::endpoint::Endpoint`]——明文 URL / `expose()` 结果无法经本 API 进入日志字段；字段值经
+//! `Endpoint: Display`（内部 `render_redacted_url` → `redact_url_credentials`）输出。
 //!
 //! **Medium 门**：下方 synthetic CaptureLayer 负向测试闭合 EVENTTRANSPORT-CRED-REDACT-01
 //! （research.md：字段值无 userinfo；类型系统管不到字符串内容，故保留 Medium 执行体）。
 //!
-//! `cfg(any(test, feature = "backend"))`：默认 `cargo test` 可跑（进 verify）；backend 供
-//! [`crate::conn`] 调用；纯 lib build 无消费方不编译（同 [`crate::settle`]）。
+//! Connection events are part of every build. Unit tests capture the same events emitted by the
+//! real transport; only explicit fixture seams require `test-support`.
 
-/// 记录 AMQP 连接成功事件。`endpoint` 只接受 typed [`secure::AmqpEndpoint`]（Display 已脱敏）。
-pub(crate) fn emit_connected(resource: &str, endpoint: &secure::AmqpEndpoint) {
+/// 记录 AMQP 连接成功事件。`endpoint` 只接受 typed [`crate::endpoint::Endpoint`]（Display 已脱敏）。
+pub(crate) fn emit_connected(resource: &str, endpoint: &crate::endpoint::Endpoint) {
     tracing::info!(
         target: "amqp",
         resource,
@@ -23,7 +23,7 @@ pub(crate) fn emit_connected(resource: &str, endpoint: &secure::AmqpEndpoint) {
 /// 记录 AMQP 连接失败事件。`endpoint` 经 typed Display；`error` 经 [`rss_redact::redact_error`]。
 pub(crate) fn emit_connect_failed(
     resource: &str,
-    endpoint: &secure::AmqpEndpoint,
+    endpoint: &crate::endpoint::Endpoint,
     err: &dyn std::error::Error,
 ) {
     tracing::warn!(
@@ -130,9 +130,8 @@ pub(crate) fn emit_recovery_connect_result(
 mod cred_redact_tests {
     //! INVARIANT: EVENTTRANSPORT-CRED-REDACT-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "cred_redact_tests::n1_ok_and_fail_redact_userinfo", anti_vacuity = "cred_redact_tests::b1_no_userinfo_preserves_endpoint" } ——
     //! mock tracing subscriber 断言 amqp URI userinfo 不出现在任何 event 字段；有 userinfo 时
-    //! `endpoint` 必须含 `<redacted>`（防空绿）。非 integration feature。默认 `cargo test -p amqp --lib`
-    //! 进 verify nextest；ArchRules `source_file_gate` 精确绑定 verify（#543 F1 最小修；系统性
-    //! plan→registry 见 #1818）。
+    //! `endpoint` 必须含 `<redacted>`（防空绿）。由默认 `cargo test -p rss-transactional-messaging-amqp --lib`
+    //! 和 workspace nextest 执行，不需要测试专用 feature。
     //!
     //! Hard 入参 funnel 见模块 rustdoc；本测试是字段值 Medium 执行体。
     //!
@@ -142,7 +141,7 @@ mod cred_redact_tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use secure::{AmqpEndpoint, PlaintextEndpointPolicy};
+    use crate::endpoint::Endpoint;
     use tracing::field::{Field, Visit};
     use tracing::{Event, Subscriber};
     use tracing_subscriber::Layer;
@@ -207,15 +206,14 @@ mod cred_redact_tests {
 
     #[allow(clippy::expect_used)]
     // reason: 测试辅助；parse Err 即失败。
-    fn parse_loopback(url: &str) -> AmqpEndpoint {
-        AmqpEndpoint::parse(url, PlaintextEndpointPolicy::AllowLoopback)
-            .expect("loopback amqp endpoint must parse")
+    fn parse_loopback(url: &str) -> Endpoint {
+        Endpoint::parse(url, true).expect("loopback amqp endpoint must parse")
     }
 
     #[allow(clippy::expect_used)]
     // reason: 测试辅助；parse Err 即失败。
-    fn parse_amqps(url: &str) -> AmqpEndpoint {
-        AmqpEndpoint::parse(url, PlaintextEndpointPolicy::Deny).expect("amqps endpoint must parse")
+    fn parse_amqps(url: &str) -> Endpoint {
+        Endpoint::parse(url, false).expect("amqps endpoint must parse")
     }
 
     fn assert_no_cred_leak(fields: &HashMap<String, String>, raw_url: &str) {

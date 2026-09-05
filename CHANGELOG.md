@@ -6,8 +6,24 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-transactional-messaging-amqp 0.1.0
+
+- Publish the historical lapin transport as an independent adapter with generation-scoped confirms,
+  cancellation-safe retirement, manual settlement and separate port handles/resource owners.
+- Remove the internal amqp package, bundle/readiness/fallback and secure endpoint owner; the adapter
+  owns role-specific endpoints/private CA trust and exposes only test-support fixture seams.
+- Redact recursive connection error chains, classify invalid recovery timeouts, and reject subscription
+  registration once resource shutdown has sealed admission.
+
+- Consume externally provisioned queues without declaring topology or owning broker retention,
+  capacity, overflow or dead-letter policy; remove the route preparation and queue-management API.
+- Require explicit production credentials, reject SASL URL overrides, recover subscriber connections
+  within an explicit budget, and preserve permanent/conflict error classifications.
+
 ### rss-transactional-messaging-testkit 0.1.0
 
+- Separate publisher/delivery transport conformance from OutboxDriver storage proof. PostgreSQL retains
+  real Retry/DeadLetter/Published and lease/reclaim evidence without a simulated publisher.
 - Establish the sole provider-neutral owner for transactional messaging conformance drivers and
   deterministic in-memory outbox, inbox, publisher, settlement, and clock test doubles.
 - Preserve the historical local transaction, outbox, inbox, consumer transaction, and nine-case

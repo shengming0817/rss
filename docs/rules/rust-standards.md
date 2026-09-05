@@ -34,7 +34,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - 错误使用 `vocab`(error) + `thiserror`。
 - mock 放 `#[cfg(test)]` 模块或 `mockall`；crate 的 dependency/dev-dependency 边界由 Cargo manifest 显式声明。
 - 真实 provider 集成测试放在 `tests/*-integration` 的 `publish=false` workspace package；该 package
-  直接依赖被测 adapter、testkit，并显式启用 adapter 的现有 integration feature。Cargo 反向依赖图
+  直接依赖被测 adapter、testkit，并显式启用 adapter 所需的测试 feature。Cargo 反向依赖图
   自然负责选择，不维护 provider catalog、lane 或 shard 表。
 
 ## 覆盖率

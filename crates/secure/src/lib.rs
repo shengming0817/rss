@@ -25,6 +25,5 @@ pub use saga_receipt_integrity::{
     SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
 };
 pub use transport_endpoint::{
-    AmqpEndpoint, DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint,
-    TransportEndpointError,
+    DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint, TransportEndpointError,
 };

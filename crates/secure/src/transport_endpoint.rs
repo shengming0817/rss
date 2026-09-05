@@ -35,10 +35,6 @@ pub enum TransportEndpointError {
     UnsupportedScheme { kind: &'static str },
     #[error("redis TLS endpoint must not use URL fragments such as #insecure")]
     RedisFragmentUnsupported,
-    #[error("amqp endpoint must include an explicit host")]
-    AmqpHostRequired,
-    #[error("amqp endpoint must include an explicit vhost path")]
-    AmqpVhostRequired,
     #[error("{kind} endpoint must include an explicit host")]
     HostRequired { kind: &'static str },
     #[error("{kind} endpoint must not include URL userinfo")]
@@ -153,44 +149,6 @@ impl DomainHttpEndpoint {
 impl std::fmt::Debug for DomainHttpEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DomainHttpEndpoint([REDACTED])")
-    }
-}
-
-/// 已校验 AMQP endpoint。默认生产路径只接受 `amqps://`。
-#[derive(Clone, PartialEq, Eq)]
-pub struct AmqpEndpoint(String);
-
-impl AmqpEndpoint {
-    pub fn parse(
-        endpoint: impl Into<String>,
-        policy: PlaintextEndpointPolicy,
-    ) -> Result<Self, TransportEndpointError> {
-        let endpoint = endpoint.into();
-        let parsed = Url::parse(&endpoint).map_err(|_| TransportEndpointError::InvalidUrl)?;
-        validate_endpoint_url(&parsed, "amqp", "amqp", "amqps", policy)?;
-        validate_amqp_endpoint_url(&parsed)?;
-        Ok(Self(endpoint))
-    }
-
-    /// 暴露原始 URL 给 AMQP driver。不要记录该值。
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-
-    fn render_redacted(&self) -> String {
-        render_redacted_url(&self.0)
-    }
-}
-
-impl std::fmt::Debug for AmqpEndpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AmqpEndpoint({})", self.render_redacted())
-    }
-}
-
-impl std::fmt::Display for AmqpEndpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.render_redacted())
     }
 }
 
@@ -312,16 +270,6 @@ fn validate_endpoint_url(
     }
 }
 
-fn validate_amqp_endpoint_url(parsed: &Url) -> Result<(), TransportEndpointError> {
-    if parsed.host().is_none() {
-        return Err(TransportEndpointError::AmqpHostRequired);
-    }
-    if parsed.path().is_empty() || parsed.path() == "/" {
-        return Err(TransportEndpointError::AmqpVhostRequired);
-    }
-    Ok(())
-}
-
 fn validate_s3_endpoint_url(parsed: &Url) -> Result<(), TransportEndpointError> {
     if parsed.host().is_none() {
         return Err(TransportEndpointError::HostRequired { kind: "s3" });
@@ -355,7 +303,6 @@ fn is_dev_container_host(parsed: &Url, plaintext_scheme: &str) -> bool {
         return true;
     }
     match (plaintext_scheme, parsed.host()) {
-        ("amqp", Some(Host::Domain(host))) => host.eq_ignore_ascii_case("rabbitmq"),
         ("redis", Some(Host::Domain(host))) => host.eq_ignore_ascii_case("redis"),
         ("http", Some(Host::Domain(host))) => host.eq_ignore_ascii_case("minio"),
         _ => false,
@@ -372,7 +319,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{
-        AmqpEndpoint, DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint,
+        DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint,
         TransportEndpointError,
     };
 
@@ -510,87 +457,6 @@ mod tests {
         .to_string();
         assert!(!error.contains("private.internal"));
         assert!(!error.contains("top-secret"));
-    }
-
-    #[test]
-    fn amqp_endpoint_requires_amqps_by_default() {
-        assert!(
-            AmqpEndpoint::parse(
-                "amqps://user:pass@broker/vhost",
-                PlaintextEndpointPolicy::Deny
-            )
-            .is_ok()
-        );
-        let result = AmqpEndpoint::parse(
-            "amqp://user:pass@broker/vhost",
-            PlaintextEndpointPolicy::Deny,
-        );
-        let err = result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        assert!(err.contains("amqps://"), "{result:?}");
-    }
-
-    #[test]
-    fn amqp_plaintext_opt_in_is_loopback_only() {
-        assert!(
-            AmqpEndpoint::parse(
-                "amqp://user:pass@127.0.0.1:5672/vhost",
-                PlaintextEndpointPolicy::AllowLoopback,
-            )
-            .is_ok()
-        );
-        assert!(
-            AmqpEndpoint::parse(
-                "amqp://user:pass@broker.internal:5672/vhost",
-                PlaintextEndpointPolicy::AllowLoopback,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn amqp_plaintext_dev_container_policy_is_explicit() {
-        assert!(
-            AmqpEndpoint::parse(
-                "amqp://user:pass@rabbitmq:5672/vhost",
-                PlaintextEndpointPolicy::AllowDevContainer,
-            )
-            .is_ok()
-        );
-        assert!(
-            AmqpEndpoint::parse(
-                "amqp://user:pass@rabbitmq:5672/vhost",
-                PlaintextEndpointPolicy::AllowLoopback,
-            )
-            .is_err()
-        );
-        assert!(
-            AmqpEndpoint::parse(
-                "amqp://user:pass@broker.internal:5672/vhost",
-                PlaintextEndpointPolicy::AllowDevContainer,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn amqp_endpoint_requires_host_and_explicit_vhost() {
-        assert!(AmqpEndpoint::parse("amqps://broker/%2f", PlaintextEndpointPolicy::Deny).is_ok());
-        assert!(
-            AmqpEndpoint::parse("amqps://broker", PlaintextEndpointPolicy::Deny).is_err(),
-            "missing vhost path must not silently fall back to /"
-        );
-        assert!(
-            AmqpEndpoint::parse("amqps://broker/", PlaintextEndpointPolicy::Deny).is_err(),
-            "empty vhost path must not silently fall back to /"
-        );
-        assert!(
-            AmqpEndpoint::parse("amqps:///vhost", PlaintextEndpointPolicy::Deny).is_err(),
-            "missing host must not silently fall back to localhost"
-        );
     }
 
     #[test]
@@ -741,24 +607,6 @@ mod tests {
                 S3Endpoint::parse(endpoint, PlaintextEndpointPolicy::Deny).is_err(),
                 "{endpoint} must fail closed"
             );
-        }
-    }
-
-    #[test]
-    fn endpoint_debug_and_display_drop_credentials_query_and_fragment() {
-        let result = AmqpEndpoint::parse(
-            "amqps://user:pass@broker/vhost?token=supersecret#frag",
-            PlaintextEndpointPolicy::Deny,
-        );
-        assert!(result.is_ok(), "{result:?}");
-        if let Ok(endpoint) = result {
-            for rendered in [format!("{endpoint:?}"), format!("{endpoint}")] {
-                assert!(!rendered.contains("user"), "{rendered}");
-                assert!(!rendered.contains("pass"), "{rendered}");
-                assert!(!rendered.contains("supersecret"), "{rendered}");
-                assert!(!rendered.contains('?'), "{rendered}");
-                assert!(!rendered.contains('#'), "{rendered}");
-            }
         }
     }
 }

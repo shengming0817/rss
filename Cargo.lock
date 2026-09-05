@@ -92,40 +92,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "amqp"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "futures",
- "lapin",
- "rss-contract",
- "rss-diag-context",
- "rss-redact",
- "rss-request-context",
- "rss-runtime",
- "rss-transactional-messaging",
- "rustls-pki-types",
- "secure",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "amqp-integration"
 version = "0.0.0"
 dependencies = [
- "amqp",
  "anyhow",
+ "lapin",
  "rss-contract",
+ "rss-diag-context",
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
+ "rss-transactional-messaging-amqp",
  "rss-transactional-messaging-runtime",
  "rss-transactional-messaging-testkit",
- "secure",
  "testkit",
  "tokio",
 ]
@@ -4491,6 +4470,29 @@ dependencies = [
  "thiserror",
  "tokio",
  "trybuild",
+]
+
+[[package]]
+name = "rss-transactional-messaging-amqp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "lapin",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-redact",
+ "rss-request-context",
+ "rss-runtime",
+ "rss-transactional-messaging",
+ "rustls-pki-types",
+ "static_assertions",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -109,6 +109,51 @@ impl RabbitFixture {
         }
     }
 
+    /// Count the broker's actual consumer registrations for a fixture queue.
+    /// Unlike quorum queue-declare counts, this excludes cancelled consumers holding unacked messages.
+    /// ref: rabbitmq-server v3.13.6 deps/rabbit/src/rabbit_fifo.erl query_consumers/1.
+    pub async fn broker_consumer_count(&self, vhost: &str, queue: &str) -> Result<usize> {
+        validate_rabbit_vhost(vhost)?;
+        validate_exact_queue_name(queue)?;
+        let RabbitInner::Container {
+            container, created, ..
+        } = &self.inner
+        else {
+            return Err(anyhow::anyhow!(
+                "consumer observation requires a managed RabbitMQ fixture"
+            ));
+        };
+        if !created
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vhost cache poisoned"))?
+            .contains(vhost)
+        {
+            return Err(anyhow::anyhow!(
+                "consumer observation requires a fixture-created vhost"
+            ));
+        }
+        let output = run_rabbitmqctl_output(
+            container,
+            &[
+                "list_consumers",
+                "-p",
+                vhost,
+                "queue_name",
+                "--formatter",
+                "json",
+            ],
+        )
+        .await?;
+        let rows: serde_json::Value = serde_json::from_str(&output)?;
+        let rows = rows
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("invalid broker consumer list"))?;
+        Ok(rows
+            .iter()
+            .filter(|row| row.get("queue_name").and_then(serde_json::Value::as_str) == Some(queue))
+            .count())
+    }
+
     /// Managed-broker receipt for total queue depth, including at-least-once dead letters retained
     /// inside a source quorum queue while its target is unavailable. AMQP's passive queue-declare
     /// count exposes only ready messages, so this deliberately narrow fault-observation seam uses
@@ -251,6 +296,12 @@ pub async fn env_or_rabbitmq() -> Result<RabbitFixture> {
             inner: RabbitInner::Env { base },
         });
     }
+    managed_rabbitmq().await
+}
+
+/// Start an owned broker for fault injection and management observations.
+/// Ignores `RSS_AMQP_TEST_URL`; never administers an external broker.
+pub async fn managed_rabbitmq() -> Result<RabbitFixture> {
     // Quorum queue TTL and at-least-once dead-lettering require RabbitMQ >= 3.10. Keep the plain
     // fixture on the exact same broker version as the private-CA fixture instead of inheriting the
     // testcontainers module's obsolete 3.8 default.
@@ -464,6 +515,80 @@ pub(super) async fn provision_adjacent_rabbit_queue<I: testcontainers::Image>(
     run_rabbitmqctl(container, &["clear_permissions", "-p", TLS_VHOST, "guest"]).await
 }
 
+// Management credentials belong to this temporary fixture, never to the adapter subscriber.
+async fn provision_delivery_fixture<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    queue: &str,
+) -> Result<()> {
+    run_rabbitmqctl(
+        container,
+        &[
+            "set_permissions",
+            "-p",
+            TLS_VHOST,
+            "guest",
+            ".*",
+            ".*",
+            ".*",
+        ],
+    )
+    .await?;
+    let dlq = format!("{queue}.dlq");
+    for (name, source) in [(dlq.as_str(), false), (queue, true)] {
+        let mut arguments = serde_json::json!({"x-queue-type": "quorum"});
+        if source {
+            arguments["x-dead-letter-exchange"] = "amq.topic".into();
+            arguments["x-dead-letter-routing-key"] = dlq.clone().into();
+            arguments["x-dead-letter-strategy"] = "at-least-once".into();
+            arguments["x-overflow"] = "reject-publish".into();
+        }
+        let name_arg = format!("name={name}");
+        let arguments_arg = format!("arguments={arguments}");
+        run_container_command(
+            container,
+            "provision TLS delivery fixture queue",
+            &[
+                "rabbitmqadmin",
+                "-V",
+                TLS_VHOST,
+                "-u",
+                "guest",
+                "-p",
+                "guest",
+                "declare",
+                "queue",
+                &name_arg,
+                "durable=true",
+                &arguments_arg,
+            ],
+        )
+        .await?;
+        let destination = format!("destination={name}");
+        let routing_key = format!("routing_key={name}");
+        run_container_command(
+            container,
+            "bind TLS delivery fixture queue",
+            &[
+                "rabbitmqadmin",
+                "-V",
+                TLS_VHOST,
+                "-u",
+                "guest",
+                "-p",
+                "guest",
+                "declare",
+                "binding",
+                "source=amq.topic",
+                "destination_type=queue",
+                &destination,
+                &routing_key,
+            ],
+        )
+        .await?;
+    }
+    run_rabbitmqctl(container, &["clear_permissions", "-p", TLS_VHOST, "guest"]).await
+}
+
 pub(super) async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
     container: &ContainerAsync<I>,
     queue_pattern: &str,
@@ -582,14 +707,11 @@ pub async fn rabbitmq_tls(
     validate_exact_queue_name(queue_name)?;
     let escaped_queue = queue_name.replace('.', "\\.");
     let queue_pattern = format!("^{escaped_queue}$");
-    let subscriber_configure_pattern = format!("^({escaped_queue}|{escaped_queue}\\.dlq)$");
-    // queue.bind needs write on both queues; x-dead-letter-exchange=amq.topic validation needs
-    // exchange write. Exact topic permission below restricts that exchange write to only the DLQ
-    // routing key, while DLQ consume/read remains absent.
-    let subscriber_write_pattern = format!("^(amq\\.topic|{escaped_queue}|{escaped_queue}\\.dlq)$");
-    let subscriber_read_pattern = format!("^(amq\\.topic|{escaped_queue})$");
-    let subscriber_topic_write_pattern = format!("^{escaped_queue}\\.dlq$");
-    let subscriber_topic_read_pattern = format!("^({escaped_queue}|{escaped_queue}\\.dlq)$");
+    let subscriber_configure_pattern = "^$".to_owned();
+    let subscriber_write_pattern = "^$".to_owned();
+    let subscriber_read_pattern = queue_pattern.clone();
+    let subscriber_topic_write_pattern = "^$".to_owned();
+    let subscriber_topic_read_pattern = "^$".to_owned();
     let adjacent_queue = format!("{queue_name}.adjacent");
     let material = tls_material(attachment.dns_name)?;
     let config = format!(
@@ -607,6 +729,7 @@ pub async fn rabbitmq_tls(
     run_rabbitmqctl(&container, &["await_startup"]).await?;
     run_rabbitmqctl(&container, &["add_vhost", TLS_VHOST]).await?;
     provision_adjacent_rabbit_queue(&container, &adjacent_queue).await?;
+    provision_delivery_fixture(&container, queue_name).await?;
     provision_rabbit_tls_permissions(
         &container,
         &queue_pattern,
@@ -674,31 +797,46 @@ pub(super) fn amqp_url_with_vhost(base: &str, vhost: &str) -> String {
     format!("{}/{vhost}", base.trim_end_matches('/'))
 }
 
-/// 容器内执行 `rabbitmqctl <args>`，有界重试（broker 起后 rabbitmqctl 短暂不可用）。
-/// attempts + 线性 backoff：exec I/O **不计入**等待预算；末次失败不再 sleep（省末次空等）。
+/// Fixture management has one execution budget, including CLI startup, Docker I/O and backoff.
+/// BusyBox timeout also terminates a stuck CLI process inside the owned container.
+/// ref: BusyBox 1.36.1 timeout; tokio time::timeout cancellation semantics.
 pub(super) async fn run_rabbitmqctl<I: testcontainers::Image>(
     container: &ContainerAsync<I>,
     args: &[&str],
 ) -> Result<()> {
-    let cmd: Vec<String> = std::iter::once("rabbitmqctl")
+    run_rabbitmqctl_output(container, args).await.map(|_| ())
+}
+
+pub(super) async fn run_rabbitmqctl_output<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    args: &[&str],
+) -> Result<String> {
+    tokio::time::timeout(
+        Duration::from_secs(40),
+        rabbitmqctl_attempts(container, args),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("RabbitMQ fixture management deadline elapsed"))?
+}
+
+async fn rabbitmqctl_attempts<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    args: &[&str],
+) -> Result<String> {
+    let command = ["timeout", "-s", "KILL", "10", "rabbitmqctl"]
+        .into_iter()
         .chain(args.iter().copied())
-        .map(str::to_string)
-        .collect();
-    let mut last: Option<i64> = None;
-    let mut last_exec_err: Option<String> = None;
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut last_exit = None;
     for attempt in 0..RABBITMQCTL_MAX_ATTEMPTS {
-        match container
-            .exec(ExecCommand::new(cmd.clone()).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
-            .await
-        {
-            Ok(res) => match res.exit_code().await {
-                Ok(Some(0)) => return Ok(()),
-                Ok(code) => last = code,
-                Err(error) => last_exec_err = Some(error.to_string()),
-            },
-            Err(error) => last_exec_err = Some(error.to_string()),
+        let mut result = container
+            .exec(ExecCommand::new(command.clone()).with_cmd_ready_condition(CmdWaitFor::exit()))
+            .await?;
+        last_exit = result.exit_code().await?;
+        if last_exit == Some(0) {
+            return String::from_utf8(result.stdout_to_vec().await?).map_err(Into::into);
         }
-        // 末次失败不再 sleep，直接报错（省末次空等约 6s）。
         if attempt + 1 < RABBITMQCTL_MAX_ATTEMPTS {
             crate::await_delay(Duration::from_millis(
                 RABBITMQCTL_BACKOFF_MS * u64::from(attempt + 1),
@@ -706,26 +844,35 @@ pub(super) async fn run_rabbitmqctl<I: testcontainers::Image>(
             .await;
         }
     }
-    let total_wait_secs: u64 = (0..RABBITMQCTL_MAX_ATTEMPTS - 1)
-        .map(|i| RABBITMQCTL_BACKOFF_MS * u64::from(i + 1))
-        .sum::<u64>()
-        / 1000;
     Err(anyhow::anyhow!(
-        "rabbitmqctl {args:?} 未在 {RABBITMQCTL_MAX_ATTEMPTS} 次（累计约 {total_wait_secs}s backoff）内成功（末次 exit={last:?}, last_err={last_exec_err:?}）"
+        "RabbitMQ fixture management failed after bounded attempts (exit={last_exit:?})"
     ))
 }
 
-pub(super) async fn run_rabbitmqctl_output<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
-    args: &[&str],
-) -> Result<String> {
-    let cmd = std::iter::once("rabbitmqctl")
-        .chain(args.iter().copied())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let mut result = container
-        .exec(ExecCommand::new(cmd).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
-        .await?;
-    let stdout = result.stdout_to_vec().await?;
-    String::from_utf8(stdout).map_err(Into::into)
+#[cfg(test)]
+mod command_deadline_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_management_command_has_a_bounded_failure() -> Result<()> {
+        let fixture = managed_rabbitmq().await?;
+        let RabbitInner::Container { container, .. } = &fixture.inner else {
+            unreachable!("owned fixture")
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(45),
+            run_rabbitmqctl_output(container.as_ref(), &["eval", "timer:sleep(60000)."]),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "fixture command must enforce its own execution deadline"
+        );
+        assert!(
+            result?.is_err(),
+            "stalled command must fail, never silently succeed"
+        );
+        run_rabbitmqctl(container.as_ref(), &["await_startup"]).await?;
+        Ok(())
+    }
 }

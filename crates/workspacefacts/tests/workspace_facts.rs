@@ -1733,7 +1733,7 @@ fn shipped_workspace_graph_projects_integration_reverse_dependencies() -> Result
     }
     assert!(!catalog.iter().any(|pkg| pkg.key().as_str() == "xtask"));
 
-    let amqp = facts.package_key("amqp")?;
+    let amqp = facts.package_key("rss-transactional-messaging-amqp")?;
     let closure = facts.reverse_workspace_closure(&BTreeSet::from([amqp]))?;
     assert!(
         closure

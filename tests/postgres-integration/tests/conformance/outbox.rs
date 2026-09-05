@@ -1,23 +1,17 @@
 use super::*;
-use rss_transactional_messaging::{outbox::*, transport::*};
-use rss_transactional_messaging_testkit::{memory::MemoryPublisher, outbox::OutboxDriver};
+use rss_transactional_messaging::outbox::*;
+use rss_transactional_messaging_testkit::outbox::{OutboxDriver, ReclaimEvidence};
 use std::num::NonZeroUsize;
 
 pub(super) struct Driver {
     h: Harness,
     head: tokio::sync::Mutex<Option<PgOutboxClaim>>,
-    ids: Mutex<Vec<MessageId>>,
-    settlements: Mutex<Vec<OutboxDisposition>>,
-    effects: AtomicUsize,
 }
 impl Driver {
     pub(super) fn new(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> Self {
         Self {
             h: Harness::new(runtime, owner, "outbox-conformance"),
             head: tokio::sync::Mutex::new(None),
-            ids: Mutex::new(Vec::new()),
-            settlements: Mutex::new(Vec::new()),
-            effects: AtomicUsize::new(0),
         }
     }
     fn store(&self) -> Arc<PgOutboxStore<()>> {
@@ -184,44 +178,11 @@ impl Driver {
         assert_eq!(count, 1);
         Ok(())
     }
-    async fn publish(
-        &self,
-        claim: &PgOutboxClaim,
-        scripted: PublishOutcome<()>,
-    ) -> Result<PublishOutcome<()>, MessagingError> {
-        let message = PgOutboxStore::<()>::message(claim).envelope();
-        let publisher = MemoryPublisher::new([scripted]);
-        let result = publisher.publish(message, deadline()).await;
-        self.ids
-            .lock()
-            .expect("ids")
-            .extend(publisher.message_ids());
-        if matches!(
-            result,
-            PublishOutcome::Confirmed(_) | PublishOutcome::Ambiguous(_)
-        ) {
-            let binding = binding(message);
-            if let IdempotencyDisposition::Acquired(claim) =
-                self.h.inbox().claim(binding.identity(), deadline()).await?
-            {
-                let outcome = PgConsumerTx::new(
-                    self.h.runtime.clone(),
-                    Effect(TerminalDisposition::Succeeded),
-                )
-                .execute(&claim, message, binding.receipt_intent(), deadline())
-                .await;
-                assert_eq!(outcome.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
-            }
-            self.effects.store(self.h.count().await, Ordering::SeqCst);
-        }
-        Ok(result)
-    }
     async fn settle(
         &self,
         claim: PgOutboxClaim,
-        outcome: &PublishOutcome<()>,
+        settlement: OutboxSettlement<()>,
     ) -> Result<(), MessagingError> {
-        let settlement = duplicate(outcome).into_settlement();
         let disposition = settlement.disposition();
         self.store().settle(claim, settlement, deadline()).await?;
         let status: String = sqlx::query_scalar(
@@ -239,52 +200,52 @@ impl Driver {
                 OutboxDisposition::DeadLetter => "dead_letter",
             }
         );
-        self.settlements
-            .lock()
-            .expect("settlements")
-            .push(disposition);
         Ok(())
-    }
-    async fn uncertain(&self, crash: bool) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        self.append_first().await.map_err(conformance)?;
-        let claim = self.claim().await.map_err(conformance)?;
-        let first = self
-            .publish(
-                &claim,
-                PublishOutcome::Ambiguous(failure(PublishFailureKind::Transient)),
-            )
-            .await
-            .map_err(conformance)?;
-        if crash {
-            self.expire().await.map_err(conformance)?;
-        } else {
-            self.settle(claim, &first).await.map_err(conformance)?;
-            self.retry_ready().await.map_err(conformance)?;
-        }
-        let claim = self.claim().await.map_err(conformance)?;
-        let second = self
-            .publish(&claim, PublishOutcome::Confirmed(()))
-            .await
-            .map_err(conformance)?;
-        self.settle(claim, &second).await.map_err(conformance)?;
-        Ok(vec![first, second])
-    }
-}
-fn failure(kind: PublishFailureKind) -> PublishFailure {
-    PublishFailure::new(
-        kind,
-        PublishFailureStage::Confirm,
-        PublishFailureReason::DeadlineElapsed,
-    )
-}
-fn duplicate(value: &PublishOutcome<()>) -> PublishOutcome<()> {
-    match value {
-        PublishOutcome::Confirmed(()) => PublishOutcome::Confirmed(()),
-        PublishOutcome::Ambiguous(f) => PublishOutcome::Ambiguous(*f),
-        PublishOutcome::DefinitelyNotPublished(f) => PublishOutcome::DefinitelyNotPublished(*f),
     }
 }
 impl OutboxDriver for Driver {
+    async fn retry_settlement_reclaims_same_message(
+        &self,
+    ) -> Result<ReclaimEvidence, ConformanceError> {
+        self.append_first().await.map_err(conformance)?;
+        let first = self.claim().await.map_err(conformance)?;
+        let first_id = PgOutboxStore::<()>::message(&first).envelope().id().clone();
+        self.settle(first, OutboxSettlement::Retry)
+            .await
+            .map_err(conformance)?;
+        self.retry_ready().await.map_err(conformance)?;
+        let second = self.claim().await.map_err(conformance)?;
+        let second_id = PgOutboxStore::<()>::message(&second)
+            .envelope()
+            .id()
+            .clone();
+        Ok(ReclaimEvidence {
+            claimed_message_ids: vec![first_id, second_id],
+            settlement: OutboxDisposition::Retry,
+        })
+    }
+    async fn reclaim_after_publish_before_settle(
+        &self,
+    ) -> Result<ReclaimEvidence, ConformanceError> {
+        self.append_first().await.map_err(conformance)?;
+        let first = self.claim().await.map_err(conformance)?;
+        let first_id = PgOutboxStore::<()>::message(&first).envelope().id().clone();
+        drop(first); // Crash window: no durable settlement has happened.
+        self.expire().await.map_err(conformance)?;
+        let second = self.claim().await.map_err(conformance)?;
+        let second_id = PgOutboxStore::<()>::message(&second)
+            .envelope()
+            .id()
+            .clone();
+        self.settle(second, OutboxSettlement::Published(()))
+            .await
+            .map_err(conformance)?;
+        Ok(ReclaimEvidence {
+            claimed_message_ids: vec![first_id, second_id],
+            settlement: OutboxDisposition::Published,
+        })
+    }
+
     async fn delivery_window(&self) -> Result<Option<[OutboxLeaseStatus; 3]>, MessagingError> {
         self.append_first().await?;
         let claim = self.claim().await?;
@@ -297,9 +258,6 @@ impl OutboxDriver for Driver {
     }
     fn reset(&self) {
         self.h.reset_case();
-        self.ids.lock().expect("ids").clear();
-        self.settlements.lock().expect("settlements").clear();
-        self.effects.store(0, Ordering::SeqCst);
     }
     async fn append_first(&self) -> Result<AppendOutcome, MessagingError> {
         self.append("", vec![1, 2, 3]).await
@@ -326,9 +284,7 @@ impl OutboxDriver for Driver {
     }
     async fn blocked_partition_claims(&self) -> Result<usize, MessagingError> {
         let claim = self.head.lock().await.take().expect("head");
-        self.store()
-            .settle(claim, OutboxSettlement::DeadLetter, deadline())
-            .await?;
+        self.settle(claim, OutboxSettlement::DeadLetter).await?;
         Ok(self
             .store()
             .claim_partition_heads(NonZeroUsize::new(8).expect("limit"), deadline())
@@ -336,45 +292,7 @@ impl OutboxDriver for Driver {
             .into_iter()
             .count())
     }
-    async fn confirmed_publish(
-        &self,
-    ) -> Result<(PublishOutcome<()>, OutboxSettlement<()>), ConformanceError> {
-        self.append_first().await.map_err(conformance)?;
-        let claim = self.claim().await.map_err(conformance)?;
-        let result = self
-            .publish(&claim, PublishOutcome::Confirmed(()))
-            .await
-            .map_err(conformance)?;
-        self.settle(claim, &result).await.map_err(conformance)?;
-        Ok((result, OutboxSettlement::Published(())))
-    }
-    async fn transient_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
-        self.append_first().await?;
-        let claim = self.claim().await?;
-        let result = self
-            .publish(
-                &claim,
-                PublishOutcome::DefinitelyNotPublished(failure(PublishFailureKind::Transient)),
-            )
-            .await?;
-        self.settle(claim, &result).await?;
-        Ok(result)
-    }
-    async fn ambiguous_publish(&self) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        self.uncertain(false).await
-    }
-    async fn permanent_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
-        self.append_first().await?;
-        let claim = self.claim().await?;
-        let result = self
-            .publish(
-                &claim,
-                PublishOutcome::DefinitelyNotPublished(failure(PublishFailureKind::Permanent)),
-            )
-            .await?;
-        self.settle(claim, &result).await?;
-        Ok(result)
-    }
+
     async fn stale_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
         self.h.reset_case();
         self.append_first().await?;
@@ -415,19 +333,5 @@ impl OutboxDriver for Driver {
         unlocked?;
         result?;
         Ok(OutboxLeaseStatus::Lost)
-    }
-    async fn publish_before_settle_recovery(
-        &self,
-    ) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        self.uncertain(true).await
-    }
-    fn published_message_ids(&self) -> Vec<MessageId> {
-        self.ids.lock().expect("ids").clone()
-    }
-    fn settlement_dispositions(&self) -> Vec<OutboxDisposition> {
-        self.settlements.lock().expect("settlements").clone()
-    }
-    fn consumer_effects(&self) -> usize {
-        self.effects.load(Ordering::SeqCst)
     }
 }

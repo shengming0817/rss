@@ -1,10 +1,10 @@
-//! lapin AMQP 发布 adapter——impl `rss_transactional_messaging::transport::Publisher` + `rss_runtime::ManagedResource`。
+//! Private publisher transport shared by the public port handle and unique resource owner.
 //!
 //! ref: amqp-rs/lapin src/generated/channel.rs@v4.10.0（采纳 basic_publish → PublisherConfirm 生命周期；
 //! 偏离其可选 auto-recovery，由 RSS absolute deadline 独占整套 connection+confirm transport replacement）。
 
 use std::future::Future;
-#[cfg(feature = "integration-test-support")]
+#[cfg(feature = "test-support")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -14,7 +14,7 @@ use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable, ShortString, ShortStringError};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
-use rss_runtime::{ManagedResource, ShutdownError};
+use rss_runtime::ShutdownError;
 use rss_transactional_messaging::message::MessageEnvelope;
 use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging::transport::{
@@ -26,13 +26,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::conn::{self, REPLY_SUCCESS};
 
-/// 与 `rss_transactional_messaging::policy::DELIVERY_BUDGET_MAX` 和 PostgreSQL 0062 对齐的 adapter 二次防线。
-const MAX_PUBLISH_TIMEOUT_MILLIS: u64 = 86_400_000;
+use crate::conn::validate_recovery_timeout;
+#[cfg(test)]
+use crate::conn::{MAX_RECOVERY_TIMEOUT_MILLIS, RecoveryTimeoutConfigError};
 
 /// envelope metadata → [`BasicProperties`]：`MessageId` 盖 `message_id`（去重锚点）；`occurred_at`
 /// 独占 AMQP typed `timestamp`（unix 秒 u64），不再重复进 headers；其余 pair 进 `FieldTable` LongString。
 ///
-/// 纯函数——无 broker 依赖；integration-gated（lapin 类型只在 integration feature 链接）。
+/// Pure metadata projection using normally compiled lapin types; no broker I/O.
 fn build_properties(
     message_id: &str,
     envelope: &MessageEnvelope<Vec<u8>>,
@@ -209,31 +210,6 @@ where
             phase: PublishPhase::from_u8(phase.load(Ordering::Relaxed)),
         })),
     }
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-enum PublishTimeoutConfigError {
-    #[error("publish timeout must be non-zero")]
-    Zero,
-    #[error("publish timeout must be an integral number of milliseconds")]
-    NonIntegralMilliseconds,
-    #[error("publish timeout exceeds operational maximum {max_millis}ms")]
-    OperationalRangeExceeded { max_millis: u64 },
-}
-
-fn validate_publish_timeout(timeout: Duration) -> Result<(), PublishTimeoutConfigError> {
-    if timeout.is_zero() {
-        return Err(PublishTimeoutConfigError::Zero);
-    }
-    if !timeout.subsec_nanos().is_multiple_of(1_000_000) {
-        return Err(PublishTimeoutConfigError::NonIntegralMilliseconds);
-    }
-    if timeout.as_millis() > u128::from(MAX_PUBLISH_TIMEOUT_MILLIS) {
-        return Err(PublishTimeoutConfigError::OperationalRangeExceeded {
-            max_millis: MAX_PUBLISH_TIMEOUT_MILLIS,
-        });
-    }
-    Ok(())
 }
 
 /// 一个 publisher generation 的完整 AMQP transport。connection 与 confirm channel 必须同生共死，
@@ -528,15 +504,6 @@ impl PublisherTransportLifecycle {
             recovery: None,
         }
     }
-
-    fn is_ready(&self) -> bool {
-        matches!(
-            &self.slot,
-            TransportSlot::Ready { transport, .. }
-                if transport.connection.status().connected()
-                    && transport.confirm_channel.status().connected()
-        )
-    }
 }
 
 /// 固定安全摘要；不携 endpoint、event、payload 或 lapin 原始错误链。
@@ -556,8 +523,6 @@ enum PublisherTransportError {
     StatePoisoned,
     #[error("amqp publisher transport close failed")]
     Close(#[source] lapin::Error),
-    #[error("amqp publisher admission drain deadline elapsed")]
-    AdmissionDrainDeadline,
     #[error("amqp publisher recovery task panicked")]
     RecoveryTaskPanicked,
     #[error("amqp publisher recovery task was cancelled")]
@@ -570,6 +535,8 @@ enum PublisherTransportError {
 /// payload 与 lapin source 都不会越过 `MessagingError` 的 redacted source 边界。
 #[derive(Debug, thiserror::Error)]
 enum PublishAttemptFailure {
+    #[error("amqp publish deadline elapsed before admission")]
+    ExpiredAdmission,
     #[error("amqp publish message id validation failed")]
     MessageId(#[source] ShortStringError),
     #[error("amqp publish admission failed")]
@@ -611,7 +578,7 @@ impl PublishAttemptFailure {
             Self::MessageId(_) => {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
             }
-            Self::Admission(_) | Self::Rejected(_) => {
+            Self::ExpiredAdmission | Self::Admission(_) | Self::Rejected(_) => {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient)
             }
             Self::Client {
@@ -633,7 +600,9 @@ impl PublishAttemptFailure {
 
     fn phase(&self) -> PublishPhase {
         match self {
-            Self::MessageId(_) | Self::Admission(_) => PublishPhase::PreSend,
+            Self::ExpiredAdmission | Self::MessageId(_) | Self::Admission(_) => {
+                PublishPhase::PreSend
+            }
             Self::Client { phase, .. } => *phase,
             Self::Deadline { elapsed, .. } => elapsed.phase,
             Self::Rejected(_) => PublishPhase::Confirm,
@@ -643,7 +612,7 @@ impl PublishAttemptFailure {
     fn diagnostic(&self, kind: PublishFailureKind) -> PublishFailure {
         let stage = match self {
             Self::MessageId(_) => PublishFailureStage::Encode,
-            Self::Admission(_) => PublishFailureStage::Admission,
+            Self::ExpiredAdmission | Self::Admission(_) => PublishFailureStage::Admission,
             Self::Client {
                 phase: PublishPhase::PreSend,
                 ..
@@ -654,7 +623,7 @@ impl PublishAttemptFailure {
         };
         let reason = match self {
             Self::MessageId(_) => PublishFailureReason::InvalidMessage,
-            Self::Deadline { .. } => PublishFailureReason::DeadlineElapsed,
+            Self::ExpiredAdmission | Self::Deadline { .. } => PublishFailureReason::DeadlineElapsed,
             Self::Rejected(_) => PublishFailureReason::ProviderRejected,
             Self::Admission(_) | Self::Client { .. } => PublishFailureReason::TransportUnavailable,
         };
@@ -860,69 +829,70 @@ fn is_permanent_soft_error(soft: &AMQPSoftError) -> bool {
     )
 }
 
-/// AMQP 事件发布 adapter（lapin）。raw client（`Arc<Connection>` + `Channel`）**私有**——仅本 adapter
-/// 内部（publish / shutdown）使用，不向 crate 内其它模块暴露 raw 连接。
-/// 同时 impl `Publisher` 与 `ManagedResource`（各有 `shutdown`）；消费经 `native Publisher capability` /
-/// `Box<DynManagedResource>` 无歧义，直接操作 raw struct 时用 UFCS 消歧。
-pub struct AmqpPublisher {
+/// Private connection/confirm generation state. Public ownership is defined in handles.
+pub(crate) struct PublisherInner {
     connection_config: PublisherConnectionConfig,
     transports: Arc<Mutex<PublisherTransportLifecycle>>,
     name: String,
-    publish_timeout: Duration,
-    #[cfg(feature = "integration-test-support")]
+    recovery_timeout: Duration,
+    #[cfg(feature = "test-support")]
     post_send_connection_close_once: AtomicBool,
+    #[cfg(feature = "test-support")]
+    confirmation_pause: Mutex<Option<ConfirmationPause>>,
+}
+
+#[cfg(feature = "test-support")]
+struct ConfirmationPause {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[derive(Clone)]
 struct PublisherConnectionConfig {
-    endpoint: secure::AmqpEndpoint,
+    endpoint: crate::endpoint::Endpoint,
     trust: conn::AmqpTlsTrust,
 }
 
-impl AmqpPublisher {
-    pub(crate) fn readiness_snapshot(&self) -> bool {
-        self.lock_transports()
-            .is_ok_and(|lifecycle| lifecycle.is_ready())
-    }
-
+impl PublisherInner {
     /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 `ManagedResource`
-    /// 可读名（kebab/snake 稳定标识）。`publish_timeout` 在任何网络连接前再次校验非零、整毫秒且可由
+    /// 可读名（kebab/snake 稳定标识）。`recovery_timeout` 在任何网络连接前再次校验非零、整毫秒且可由
     /// 数据库/审计 `i64` 表示；连接失败日志只经 redaction funnel，URL 原文绝不进日志。
-    #[cfg(any(test, feature = "integration-test-support"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn connect_with_webpki_for_test(
-        endpoint: &secure::AmqpEndpoint,
+        endpoint: &crate::endpoint::Endpoint,
         name: impl Into<String>,
-        publish_timeout: Duration,
+        recovery_timeout: Duration,
     ) -> Result<Self, conn::AmqpConnectError> {
-        Self::connect_with_trust(endpoint, name, publish_timeout, conn::AmqpTlsTrust::WebPki).await
+        Self::connect_with_trust(endpoint, name, recovery_timeout, conn::AmqpTlsTrust::WebPki).await
     }
 
     pub(crate) async fn connect_with_private_ca(
-        endpoint: &secure::AmqpEndpoint,
+        endpoint: &crate::endpoint::Endpoint,
         name: impl Into<String>,
-        publish_timeout: Duration,
+        recovery_timeout: Duration,
         ca: &conn::AmqpPrivateCa,
     ) -> Result<Self, conn::AmqpConnectError> {
         Self::connect_with_trust(
             endpoint,
             name,
-            publish_timeout,
+            recovery_timeout,
             conn::AmqpTlsTrust::PrivateCa(ca.clone()),
         )
         .await
     }
 
     async fn connect_with_trust(
-        endpoint: &secure::AmqpEndpoint,
+        endpoint: &crate::endpoint::Endpoint,
         name: impl Into<String>,
-        publish_timeout: Duration,
+        recovery_timeout: Duration,
         trust: conn::AmqpTlsTrust,
     ) -> Result<Self, conn::AmqpConnectError> {
-        validate_publish_timeout(publish_timeout).map_err(|_| conn::invalid_publisher_timeout())?;
+        validate_recovery_timeout(recovery_timeout)
+            .map_err(|_| conn::invalid_recovery_timeout())?;
         let name = name.into();
         // confirm=true：启用 publisher confirms，使 publish 能检测 broker ack/nack（durable publish-ok）。
         let (conn, channel) = match &trust {
-            #[cfg(any(test, feature = "integration-test-support"))]
+            #[cfg(any(test, feature = "test-support"))]
             conn::AmqpTlsTrust::WebPki => {
                 conn::connect_with_webpki_for_test(endpoint, &name, true).await?
             }
@@ -939,10 +909,27 @@ impl AmqpPublisher {
                 PublisherTransport::new(conn, channel),
             ))),
             name,
-            publish_timeout,
-            #[cfg(feature = "integration-test-support")]
+            recovery_timeout,
+            #[cfg(feature = "test-support")]
             post_send_connection_close_once: AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
+            confirmation_pause: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn request_shutdown(&self) {
+        let (recovery, retiring) = {
+            let mut lifecycle = self
+                .transports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retiring = lifecycle.slot.take_for_resource_shutdown();
+            (lifecycle.recovery.take(), retiring)
+        };
+        drop(recovery);
+        if let Some(retiring) = retiring {
+            conn::close_connection_now(&retiring.transport.connection);
+        }
     }
 
     fn lock_transports(
@@ -999,7 +986,7 @@ impl AmqpPublisher {
             drop(previous);
         }
         let started = tokio::time::Instant::now();
-        let deadline = started + self.publish_timeout;
+        let deadline = started + self.recovery_timeout;
         let cancellation = CancellationToken::new();
         let connection_config = self.connection_config.clone();
         let transports = Arc::clone(&self.transports);
@@ -1034,7 +1021,7 @@ impl AmqpPublisher {
     ///   `OUTBOX-RELAY-BUDGET-01` 的 AMQP ambiguous audit 按唯一 production tracing marker
     ///   （ambiguous publish outcome 文案）+ required/forbidden fields 定位，不锁本 helper ident。
     /// - **Medium residual**（`AMQP-PUBLISH-BYPASS-01`）：仅禁止 production
-    ///   `impl Publisher for AmqpPublisher::publish`（含 reachable nested local 与 live async/closure
+    ///   `impl Publisher for PublisherInner::publish`（含 reachable nested local 与 live async/closure
     ///   敏感面）直接构造 `MessagingError::{transient,permanent,ambiguous}`、直接 `retire_transport`、
     ///   外层 `?` 或 macro 隐藏上述敏感调用。
     fn handle_publish_failure(&self, failure: PublishAttemptFailure) -> PublishOutcome<()> {
@@ -1051,7 +1038,7 @@ impl AmqpPublisher {
                 resource = %self.name,
                 transport_generation = generation,
                 phase = phase.as_str(),
-                publish_timeout_ms = self.publish_timeout.as_millis() as i64,
+                recovery_timeout_ms = self.recovery_timeout.as_millis() as i64,
                 delivery_outcome = "unknown",
                 broker_may_have_received = true,
                 "amqp publish outcome is ambiguous",
@@ -1060,24 +1047,26 @@ impl AmqpPublisher {
         applied.outcome
     }
 
-    #[allow(clippy::disallowed_methods)]
-    // reason: one adapter-private monotonic deadline bounds recovery join plus admission drain during shutdown.
+    // The runtime owns the shutdown watchdog; cancellation guards retire the exact session.
     async fn shutdown_resource_transport(&self) -> Result<(), PublisherTransportError> {
-        let shutdown_deadline = tokio::time::Instant::now() + self.publish_timeout;
         let (recovery, retiring) = {
             let mut lifecycle = self.lock_transports()?;
             let retiring = lifecycle.slot.take_for_resource_shutdown();
             (lifecycle.recovery.take(), retiring)
         };
+        let close_on_cancel = conn::OnDrop::new(|| {
+            if let Some(retiring) = &retiring {
+                conn::close_connection_now(&retiring.transport.connection);
+            }
+        });
         let recovery_result = if let Some(recovery) = recovery {
             join_cancelled_recovery(recovery).await
         } else {
             Ok(())
         };
-        let transport_result = if let Some(retiring) = retiring {
-            let admission_drained =
-                wait_for_shutdown_admission(&retiring.admission, shutdown_deadline).await;
-            let close_result = if retiring.transport.connection.status().connected() {
+        let transport_result = if let Some(retiring) = &retiring {
+            retiring.admission.wait_until_idle().await;
+            if retiring.transport.connection.status().connected() {
                 retiring
                     .transport
                     .connection
@@ -1086,43 +1075,70 @@ impl AmqpPublisher {
                     .map_err(PublisherTransportError::Close)
             } else {
                 Ok(())
-            };
-            close_result.and(admission_drained)
+            }
         } else {
             Ok(())
         };
+        close_on_cancel.disarm();
         recovery_result.and(transport_result)
     }
 
     /// Integration-only deterministic fault barrier. The next publish closes the exact snapshot connection after
     /// lapin has written `basic.publish` and before its confirm is polled, then routes the synthetic lifecycle loss
     /// through the normal PostSend [`PublishFailureDecision`] path.
-    #[cfg(feature = "integration-test-support")]
+    #[cfg(feature = "test-support")]
     pub fn inject_post_send_connection_close_once(&self) {
         self.post_send_connection_close_once
             .store(true, Ordering::Release);
     }
 
-    #[cfg(feature = "integration-test-support")]
+    #[cfg(feature = "test-support")]
     fn take_post_send_connection_close_fault(&self) -> bool {
         self.post_send_connection_close_once
             .swap(false, Ordering::AcqRel)
     }
 
-    #[cfg(not(feature = "integration-test-support"))]
+    #[cfg(not(feature = "test-support"))]
     fn take_post_send_connection_close_fault(&self) -> bool {
         false
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn pause_confirmation(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        *self
+            .confirmation_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(ConfirmationPause { entered, resume });
+        (observed, release)
+    }
+    #[cfg(feature = "test-support")]
+    pub(crate) fn generation(&self) -> Option<u64> {
+        let lifecycle = self.lock_transports().ok()?;
+        match &lifecycle.slot {
+            TransportSlot::Ready { generation, .. }
+            | TransportSlot::Recovering { generation, .. }
+            | TransportSlot::Unavailable { generation } => Some(*generation),
+            TransportSlot::ShuttingDown { .. } => None,
+        }
     }
 
     /// Integration-only high-level recovery barrier. It proves only that a publish can take a
     /// fresh ready snapshot before the publisher's bounded recovery budget expires; generation,
     /// connection, channel, and any constructible recovery evidence remain adapter-private.
     ///
-    /// Poll backoff uses `interval`（非裸 `sleep`）——本方法在 lib + `integration-test-support`
+    /// Poll backoff uses `interval`（非裸 `sleep`）——本方法在 lib + `test-support`
     /// 路径编译，不能依赖 testkit（LAYER-DEPS-08：testkit 仅限 dev-dep）。
-    #[cfg(feature = "integration-test-support")]
+    #[cfg(feature = "test-support")]
     pub async fn wait_until_publish_ready_for_test(&self) -> bool {
-        tokio::time::timeout(self.publish_timeout, async {
+        tokio::time::timeout(self.recovery_timeout, async {
             let mut ticker = tokio::time::interval(Duration::from_millis(10));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Consume the immediate first tick so subsequent Recovering waits are spaced.
@@ -1145,15 +1161,6 @@ impl AmqpPublisher {
         .await
         .unwrap_or(false)
     }
-}
-
-async fn wait_for_shutdown_admission(
-    admission: &TransportAdmission,
-    deadline: tokio::time::Instant,
-) -> Result<(), PublisherTransportError> {
-    tokio::time::timeout_at(deadline, admission.wait_until_idle())
-        .await
-        .map_err(|_| PublisherTransportError::AdmissionDrainDeadline)
 }
 
 async fn join_cancelled_recovery(
@@ -1568,7 +1575,7 @@ async fn close_transport_bounded_at(
     }
 }
 
-impl Publisher<Vec<u8>> for AmqpPublisher {
+impl Publisher<Vec<u8>> for PublisherInner {
     type Receipt = ();
 
     async fn publish(
@@ -1576,6 +1583,9 @@ impl Publisher<Vec<u8>> for AmqpPublisher {
         message: &MessageEnvelope<Vec<u8>>,
         deadline: OperationDeadline,
     ) -> PublishOutcome<Self::Receipt> {
+        if deadline.timeout().is_zero() {
+            return self.handle_publish_failure(PublishAttemptFailure::ExpiredAdmission);
+        }
         let message_id = message.id().as_str().to_string();
         let properties = match build_properties(&message_id, message) {
             Ok(properties) => properties,
@@ -1609,7 +1619,14 @@ impl Publisher<Vec<u8>> for AmqpPublisher {
         let topic = message.metadata().route().as_str().to_string();
         let payload = message.payload().clone();
         let inject_post_send_close = self.take_post_send_connection_close_fault();
+        #[cfg(feature = "test-support")]
+        let pause = self
+            .confirmation_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         let transport = snapshot.transport.clone();
+        let cancelled_attempt = conn::OnDrop::new(|| self.retire_transport(snapshot.generation));
         let confirmation = run_publish_pipeline(
             deadline.timeout(),
             async {
@@ -1640,9 +1657,17 @@ impl Publisher<Vec<u8>> for AmqpPublisher {
                 Ok(pending)
             },
             // confirm_select 已启用 ⇒ await PublisherConfirm 拿到真实 Ack/Nack/返回消息。
-            |pending| pending,
+            |pending| async move {
+                #[cfg(feature = "test-support")]
+                if let Some(pause) = pause {
+                    let _ = pause.entered.send(());
+                    let _ = pause.resume.await;
+                }
+                pending.await
+            },
         )
         .await;
+        cancelled_attempt.disarm();
         let confirmation = match confirmation {
             Ok(confirmation) => confirmation,
             Err(error) => {
@@ -1667,12 +1692,12 @@ impl Publisher<Vec<u8>> for AmqpPublisher {
     }
 }
 
-impl ManagedResource for AmqpPublisher {
-    fn name(&self) -> &str {
+impl PublisherInner {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
+    pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
         match self.shutdown_resource_transport().await {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -1688,7 +1713,6 @@ fn publisher_transport_shutdown_error(error: PublisherTransportError) -> Shutdow
         PublisherTransportError::RecoveryTaskPanicked => ShutdownError::task_panicked(error),
         PublisherTransportError::RecoveryTaskCancelled => ShutdownError::task_cancelled(error),
         PublisherTransportError::RecoveryTaskUnknown => ShutdownError::task_unknown(error),
-        PublisherTransportError::AdmissionDrainDeadline => ShutdownError::deadline_exceeded(error),
         _ => ShutdownError::new(error),
     }
 }
@@ -1819,7 +1843,7 @@ mod classify_tests {
     }
 }
 
-/// `build_properties` 纯函数单测（integration-gated：lapin 类型只在 integration feature 链接）。
+/// Unit coverage of the normally compiled `build_properties` metadata projection.
 /// 验证 occurred_at → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
 #[cfg(test)]
 mod publish_deadline_tests {
@@ -1828,8 +1852,8 @@ mod publish_deadline_tests {
     use std::time::Duration;
 
     use super::{
-        AmqpPublisher, MAX_PUBLISH_TIMEOUT_MILLIS, PublishDeadlineElapsed, PublishPhase,
-        PublishTimeoutConfigError, run_publish_pipeline, validate_publish_timeout,
+        MAX_RECOVERY_TIMEOUT_MILLIS, PublishDeadlineElapsed, PublishPhase, PublisherInner,
+        RecoveryTimeoutConfigError, run_publish_pipeline, validate_recovery_timeout,
     };
 
     #[test]
@@ -1851,57 +1875,49 @@ mod publish_deadline_tests {
     #[test]
     fn publish_timeout_validation_is_fail_closed() {
         assert_eq!(
-            validate_publish_timeout(Duration::ZERO),
-            Err(PublishTimeoutConfigError::Zero)
+            validate_recovery_timeout(Duration::ZERO),
+            Err(RecoveryTimeoutConfigError::Zero)
         );
         assert_eq!(
-            validate_publish_timeout(Duration::from_micros(1)),
-            Err(PublishTimeoutConfigError::NonIntegralMilliseconds)
+            validate_recovery_timeout(Duration::from_micros(1)),
+            Err(RecoveryTimeoutConfigError::NonIntegralMilliseconds)
         );
         assert_eq!(
-            validate_publish_timeout(Duration::from_millis((i64::MAX as u64 / 1_000) + 1)),
-            Err(PublishTimeoutConfigError::OperationalRangeExceeded {
-                max_millis: MAX_PUBLISH_TIMEOUT_MILLIS,
+            validate_recovery_timeout(Duration::from_millis((i64::MAX as u64 / 1_000) + 1)),
+            Err(RecoveryTimeoutConfigError::OperationalRangeExceeded {
+                max_millis: MAX_RECOVERY_TIMEOUT_MILLIS,
             })
         );
-        assert_eq!(validate_publish_timeout(Duration::from_secs(40)), Ok(()));
+        assert_eq!(validate_recovery_timeout(Duration::from_secs(40)), Ok(()));
         assert_eq!(
-            validate_publish_timeout(Duration::from_millis(MAX_PUBLISH_TIMEOUT_MILLIS)),
+            validate_recovery_timeout(Duration::from_millis(MAX_RECOVERY_TIMEOUT_MILLIS)),
             Ok(())
         );
         assert_eq!(
-            validate_publish_timeout(Duration::from_millis(MAX_PUBLISH_TIMEOUT_MILLIS + 1)),
-            Err(PublishTimeoutConfigError::OperationalRangeExceeded {
-                max_millis: MAX_PUBLISH_TIMEOUT_MILLIS,
+            validate_recovery_timeout(Duration::from_millis(MAX_RECOVERY_TIMEOUT_MILLIS + 1)),
+            Err(RecoveryTimeoutConfigError::OperationalRangeExceeded {
+                max_millis: MAX_RECOVERY_TIMEOUT_MILLIS,
             })
         );
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // fixed literal fixture and required error path
-    async fn invalid_publish_timeout_is_rejected_before_connect() {
-        let endpoint = secure::AmqpEndpoint::parse(
-            "amqp://user:secretpass@127.0.0.1:1/%2f",
-            secure::PlaintextEndpointPolicy::AllowLoopback,
-        )
-        .expect("loopback AMQP fixture must parse");
-        let error = AmqpPublisher::connect_with_webpki_for_test(
+    async fn invalid_recovery_timeout_is_rejected_before_connect() {
+        let endpoint =
+            crate::endpoint::Endpoint::parse("amqp://user:secretpass@127.0.0.1:1/%2f", true)
+                .expect("loopback AMQP fixture must parse");
+        let error = PublisherInner::connect_with_webpki_for_test(
             &endpoint,
             "amqp-invalid-timeout",
             Duration::ZERO,
         )
         .await
         .err();
-        let source = error
-            .as_ref()
-            .and_then(|error| std::error::Error::source(error))
-            .map(ToString::to_string);
-
-        assert_eq!(
-            error.as_ref().map(ToString::to_string).as_deref(),
-            Some("amqp connect failed")
-        );
-        assert_eq!(source.as_deref(), Some("invalid amqp publisher timeout"));
+        assert!(matches!(
+            error,
+            Some(crate::AmqpConnectError::InvalidRecoveryTimeout)
+        ));
         assert!(!format!("{error:?}").contains("secretpass"));
     }
 
@@ -2145,6 +2161,10 @@ mod publish_pipeline_red_tests {
     #[test]
     fn publish_attempt_failure_decision_covers_every_closed_variant() {
         let cases = [
+            (
+                super::PublishAttemptFailure::ExpiredAdmission,
+                PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient),
+            ),
             (
                 super::PublishAttemptFailure::MessageId(
                     lapin::types::ShortString::try_new("x".repeat(256))
@@ -2612,27 +2632,9 @@ mod publisher_channel_recovery_deadline_tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        PublisherTransportError, RecoveryStageError, TransportAdmission, TransportSlot,
-        run_publisher_transport_recovery_pipeline, wait_for_shutdown_admission,
+        PublisherTransportError, RecoveryStageError, TransportSlot,
+        run_publisher_transport_recovery_pipeline,
     };
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_admission_wait_is_bounded_by_publish_timeout() {
-        let started = tokio::time::Instant::now();
-        let admission = TransportAdmission::open();
-        let permit = admission.acquire().expect("synthetic caller admission");
-        admission.close();
-
-        let result =
-            wait_for_shutdown_admission(&admission, started + Duration::from_secs(9)).await;
-
-        assert!(matches!(
-            result,
-            Err(PublisherTransportError::AdmissionDrainDeadline)
-        ));
-        assert_eq!(started.elapsed(), Duration::from_secs(9));
-        drop(permit);
-    }
 
     #[tokio::test(start_paused = true)]
     async fn replacement_create_hang_exits_within_total_recovery_budget() {

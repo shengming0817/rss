@@ -15,8 +15,8 @@ deadline covers the complete suite, so a provider cannot reset the budget betwee
 | Feature | Modules and doubles |
 | --- | --- |
 | no default features | `localtx`, `ConformanceError`, `FakeClock`, `MemoryInboxStore`, `RecordingSettlement` |
-| `consumer` | `inbox`, `consumer` |
-| `producer` | `outbox`, `MemoryOutboxStore`, `MemoryPublisher` |
+| `consumer` | `inbox`, `consumer`, delivery transport conformance |
+| `producer` | `outbox`, `MemoryOutboxStore`, `MemoryPublisher`, publisher transport conformance |
 
 Both features are enabled by default. Memory stores are non-durable test doubles and make no
 production guarantee.
@@ -52,3 +52,21 @@ requiring `Debug`, `Display`, or `source()`.
 There are no aliases, re-exports, shims, or fallback paths for the removed APIs.
 
 Licensed under the Apache License, Version 2.0.
+
+## Transport and store proof ownership
+
+`transport::run_publisher_transport_conformance` checks confirmation, definitive failure and
+same-message retry after ambiguity. `run_delivery_transport_conformance` checks ACK, Requeue,
+Reject, abandonment, settlement failure and cancellation while draining an in-flight delivery.
+Every scenario returns its own core-owned outcomes and message identities. There are no
+cross-scenario observation getters, provider handles, container dependencies or mirrored outcomes.
+
+AMQP implements these transport drivers against RabbitMQ. PostgreSQL instead implements the
+outbox/inbox/transaction suites against PostgreSQL. The outbox runner verifies append identity,
+partition and lease rules, Retry/reclaim, and reclaim after publication without settlement;
+it does not require a provider to implement or simulate publication. Its `ReclaimEvidence`
+contains the observed claim identities and durable disposition. Retry, DeadLetter and Published
+transitions retain independent real-database proofs.
+
+The old OutboxDriver publication scenarios and observation getters have been removed. Callers
+implement the appropriate capability driver directly; no old-API adapter is supplied.

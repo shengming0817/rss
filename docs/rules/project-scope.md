@@ -32,6 +32,7 @@ External 能力不得以 archive、legacy、plugin、compatibility façade 或�
 | 公共运行算法 | provider-neutral 处理顺序、ACK-after-commit、取消、bounded drain 与 settlement callback | 进程启动、配置、listener、health/readiness、assembly 与部署生命周期 |
 | Conformance | 黑盒公共不变量 assertion、已接纳 adapter 的真实后端 T2 与有界临时 fixture/driver | 生产数据库或 broker 管理、产品 journey、T3 与 evidence 平台 |
 | PostgreSQL adapter | 独立 PostgreSQL transactional messaging package、消息专属 schema 与 fresh-install SQL artifact | 迁移执行、角色预建/授权、业务表、operator、部署与数据库运营 |
+| AMQP adapter | 独立 AMQP transactional messaging package、publisher confirms、ambiguity、manual settlement、private CA 与真实 broker T2 | broker 运维、凭据发放、生产装配、health/readiness |
 | 发布 | 独立 package、SemVer、文档、Release Surface、registry candidate 与人工发布 | 应用 binary/image、生产 profile、部署、迁移、运营与 release control plane |
 
 ## 仓库边界

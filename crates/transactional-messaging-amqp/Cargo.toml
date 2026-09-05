@@ -1,0 +1,41 @@
+[package]
+name = "rss-transactional-messaging-amqp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "AMQP publisher confirms and manual settlement for RSS transactional messaging"
+categories = ["asynchronous"]
+keywords = ["amqp", "messaging", "transactions", "rabbitmq"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rss-transactional-messaging.workspace = true
+rss-contract.workspace = true
+rss-request-context.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+rss-redact.workspace = true
+rss-runtime.workspace = true
+tokio-util.workspace = true
+lapin.workspace = true
+rustls-pki-types.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+thiserror.workspace = true
+url.workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dev-dependencies]
+static_assertions.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
+tracing-subscriber.workspace = true
+anyhow.workspace = true

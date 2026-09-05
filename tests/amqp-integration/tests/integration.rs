@@ -4,15 +4,10 @@
 // reason: canonical live-provider fixtures must fail loudly when typed identities drift.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use amqp::{
-    AmqpPrivateCa, AmqpPublisher, AmqpPublisherEndpoint, AmqpRuntimeDeps, AmqpSubscriber,
-    AmqpSubscriberEndpoint,
-};
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
 use rss_runtime::{ManagedResource, ShutdownFailureKind, ShutdownStack, TotalDrainBudget};
@@ -28,10 +23,7 @@ use rss_transactional_messaging::message::{
 use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
-use rss_transactional_messaging::outbox::{
-    AppendOutcome, OutboxDisposition, OutboxLeaseStatus, OutboxSettlement, OutboxStore,
-    PendingMessage,
-};
+use rss_transactional_messaging::outbox::OutboxSettlement;
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, ExecutionTimer,
     MonotonicInstant, OperationDeadline, RetryPolicy, ShutdownBudget,
@@ -42,19 +34,18 @@ use rss_transactional_messaging::transaction::{
 };
 use rss_transactional_messaging::transport::{
     Delivery, DeliverySettlement, DeliverySource, IncomingDelivery, ManagedDeliveryStream,
-    PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
-    Publisher,
+    PublishFailureKind, PublishOutcome, Publisher,
+};
+use rss_transactional_messaging_amqp::{
+    AmqpPrivateCa, AmqpPublisher, AmqpPublisherEndpoint, AmqpPublisherResource, AmqpSubscriber,
+    AmqpSubscriberEndpoint, AmqpSubscriberResource,
 };
 use rss_transactional_messaging_runtime::consumer::{
     ConsumerExecution, ConsumerWorker, ProcessingDisposition, SubscriptionBackoffPolicy,
     consume_once,
 };
 use rss_transactional_messaging_testkit::ConformanceError;
-use rss_transactional_messaging_testkit::consumer::{ConsumerTxDriver, run_consumer_conformance};
-use rss_transactional_messaging_testkit::memory::{
-    FakeClock, MemoryInboxStore, MemoryOutboxStore, MemoryPublisher, RecordingSettlement,
-};
-use rss_transactional_messaging_testkit::outbox::{OutboxDriver, run_outbox_conformance};
+use rss_transactional_messaging_testkit::memory::{FakeClock, MemoryInboxStore};
 
 const TIMEOUT: Duration = Duration::from_secs(40);
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -205,49 +196,6 @@ impl InboxStore for LiveInbox {
     }
 }
 
-struct LostInbox;
-
-impl InboxStore for LostInbox {
-    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
-        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
-            .expect("test lease")
-    }
-    type Claim = ();
-
-    async fn claim(
-        &self,
-        _identity: &ConsumerIdentity,
-        _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-        Ok(IdempotencyDisposition::Acquired(()))
-    }
-
-    async fn read_terminal(
-        &self,
-        _identity: &ConsumerIdentity,
-        _deadline: OperationDeadline,
-    ) -> Result<Option<rss_transactional_messaging::transaction::TerminalReceipt>, MessagingError>
-    {
-        Ok(None)
-    }
-
-    async fn extend(
-        &self,
-        _claim: &Self::Claim,
-        _deadline: OperationDeadline,
-    ) -> Result<LeaseStatus, MessagingError> {
-        Ok(LeaseStatus::Lost)
-    }
-
-    async fn release(
-        &self,
-        _claim: Self::Claim,
-        _deadline: OperationDeadline,
-    ) -> Result<(), MessagingError> {
-        Ok(())
-    }
-}
-
 type LiveTxFactory =
     fn(rss_transactional_messaging::transaction::ReceiptIntent) -> TransactionOutcome<()>;
 
@@ -288,23 +236,6 @@ impl ConsumerTx<Vec<u8>> for LiveTx {
         _deadline: OperationDeadline,
     ) -> TransactionOutcome<Self::CommitProof> {
         (self.0)(receipt)
-    }
-}
-
-struct MemoryInboxTx;
-
-impl ConsumerTx<Vec<u8>> for MemoryInboxTx {
-    type Claim = (ConsumerIdentity, u64);
-    type CommitProof = ();
-
-    async fn execute(
-        &self,
-        _claim: &Self::Claim,
-        _message: &MessageEnvelope<Vec<u8>>,
-        receipt: rss_transactional_messaging::transaction::ReceiptIntent,
-        _deadline: OperationDeadline,
-    ) -> TransactionOutcome<Self::CommitProof> {
-        receipt.committed((), TerminalDisposition::Succeeded)
     }
 }
 
@@ -392,13 +323,6 @@ impl<S: DeliverySettlement> DeliverySettlement for ObservingSettlement<S> {
     }
 }
 
-fn endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
-    Ok(secure::AmqpEndpoint::parse(
-        url,
-        secure::PlaintextEndpointPolicy::AllowLoopback,
-    )?)
-}
-
 async fn shutdown_bounded(resource: &impl ManagedResource) -> Result<(), LiveConformanceFailure> {
     match tokio::time::timeout(Duration::from_secs(5), ManagedResource::shutdown(resource)).await {
         Ok(Ok(())) => Ok(()),
@@ -455,32 +379,25 @@ async fn prepared_subscriber(
     route: &MessageRoute,
     name: &'static str,
     purge: bool,
-) -> Result<AmqpSubscriber, LiveConformanceFailure> {
-    let endpoint = endpoint(url)
+) -> Result<(AmqpSubscriber, AmqpSubscriberResource), LiveConformanceFailure> {
+    let endpoint = AmqpSubscriberEndpoint::for_test(url)
         .map_err(|_| live_failure(LivePhase::Connect, MessagingErrorKind::Permanent))?;
-    let subscriber = AmqpSubscriber::connect_with_webpki_for_test(&endpoint, name)
+    let (subscriber, resource) = AmqpSubscriber::connect_for_test(&endpoint, name, TIMEOUT)
         .await
         .map_err(|_| live_failure(LivePhase::Connect, MessagingErrorKind::Transient))?;
-    subscriber
-        .prepare_delivery_route(route)
+    topology::provision(url, route, purge)
         .await
-        .map_err(|error| live_failure(LivePhase::Fixture, error.kind()))?;
-    if purge {
-        subscriber
-            .purge_durable_queue_for_test(route)
-            .await
-            .map_err(|_| live_failure(LivePhase::Fixture, MessagingErrorKind::Transient))?;
-    }
-    Ok(subscriber)
+        .map_err(|_| live_failure(LivePhase::Fixture, MessagingErrorKind::Transient))?;
+    Ok((subscriber, resource))
 }
 
 async fn connected_publisher(
     url: &str,
     name: &'static str,
-) -> Result<AmqpPublisher, LiveConformanceFailure> {
-    let endpoint = endpoint(url)
+) -> Result<(AmqpPublisher, AmqpPublisherResource), LiveConformanceFailure> {
+    let endpoint = AmqpPublisherEndpoint::for_test(url)
         .map_err(|_| live_failure(LivePhase::Connect, MessagingErrorKind::Permanent))?;
-    AmqpPublisher::connect_with_webpki_for_test(&endpoint, name, TIMEOUT)
+    AmqpPublisher::connect_for_test(&endpoint, name, TIMEOUT)
         .await
         .map_err(|_| live_failure(LivePhase::Connect, MessagingErrorKind::Transient))
 }
@@ -517,91 +434,6 @@ async fn consume_live_delivery<S: DeliverySettlement>(
         .map_err(|error| live_failure(LivePhase::Settlement, error.kind()))
 }
 
-async fn duplicate_delivery_evidence()
--> Result<(TerminalDisposition, Vec<TransactionalMessagingObservation>), MessagingError> {
-    let route = MessageRoute::parse("rss.integration.duplicate")
-        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
-    let message = envelope(&route, "duplicate-delivery");
-    let group = ConsumerGroup::parse("duplicate-consumer")
-        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
-    let subscription = subscription_for(&message, &route);
-    let store = MemoryInboxStore::new();
-    store.store_terminal(
-        ConsumerIdentity::new(
-            message.metadata().tenant_id(),
-            group.clone(),
-            message.id().clone(),
-            message.metadata().contract().clone(),
-        ),
-        MessageFingerprint::of(&message),
-        TerminalDisposition::Succeeded,
-    );
-    let observations = Arc::new(Mutex::new(Vec::new()));
-    let outcome = consume_once(
-        &store,
-        &MemoryInboxTx,
-        &ConsumerExecution::new(
-            group,
-            &LiveIngress,
-            &subscription,
-            &FakeClock::new(),
-            consumer_policy(),
-            &RecordingEmitter(Arc::clone(&observations)),
-        ),
-        Delivery::new(message, RecordingSettlement::new()),
-    )
-    .await?;
-    let ProcessingDisposition::Duplicate(disposition) = outcome else {
-        return Err(
-            live_failure(LivePhase::Settlement, MessagingErrorKind::Invariant).into_messaging(),
-        );
-    };
-    let observations = observations
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    Ok((disposition, observations))
-}
-
-async fn lease_lost_evidence()
--> Result<(Vec<TransactionalMessagingObservation>, usize), MessagingError> {
-    let route = MessageRoute::parse("rss.integration.lease-lost")
-        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
-    let message = envelope(&route, "lease-lost-delivery");
-    let subscription = subscription_for(&message, &route);
-    let observations = Arc::new(Mutex::new(Vec::new()));
-    let settlements = Arc::new(Mutex::new(Vec::new()));
-    let abandons = Arc::new(AtomicUsize::new(0));
-    let outcome = consume_once(
-        &LostInbox,
-        &LiveTx(committed),
-        &ConsumerExecution::new(
-            ConsumerGroup::parse("lease-lost-consumer")
-                .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?,
-            &LiveIngress,
-            &subscription,
-            &FakeClock::new(),
-            consumer_policy(),
-            &RecordingEmitter(Arc::clone(&observations)),
-        ),
-        Delivery::new(
-            message,
-            RecordingSettlement::observing(settlements, Arc::clone(&abandons)),
-        ),
-    )
-    .await?;
-    if !matches!(outcome, ProcessingDisposition::Fenced) {
-        return Err(
-            live_failure(LivePhase::Settlement, MessagingErrorKind::Invariant).into_messaging(),
-        );
-    }
-    let observations = observations
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    Ok((observations, abandons.load(Ordering::SeqCst)))
-}
-
 async fn assert_committed_redelivery(
     url: &str,
     route: &MessageRoute,
@@ -610,7 +442,8 @@ async fn assert_committed_redelivery(
     missing: &'static str,
     invalid: &'static str,
 ) -> Result<(), LiveConformanceFailure> {
-    let subscriber = prepared_subscriber(url, route, subscriber_name, false).await?;
+    let (subscriber, subscriber_resource) =
+        prepared_subscriber(url, route, subscriber_name, false).await?;
     let mut deliveries = DeliverySource::deliveries(&subscriber, subscription)
         .await
         .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
@@ -629,7 +462,7 @@ async fn assert_committed_redelivery(
             MessagingErrorKind::Invariant,
         ));
     }
-    shutdown_bounded(&subscriber).await
+    shutdown_bounded(&subscriber_resource).await
 }
 
 async fn assert_same_id_redelivery(
@@ -638,7 +471,8 @@ async fn assert_same_id_redelivery(
     subscription: &SubscriptionIdentity,
     expected_id: &MessageId,
 ) -> Result<(), LiveConformanceFailure> {
-    let subscriber = prepared_subscriber(url, route, "managed-cancel-sub-2", false).await?;
+    let (subscriber, subscriber_resource) =
+        prepared_subscriber(url, route, "managed-cancel-sub-2", false).await?;
     let mut deliveries = DeliverySource::deliveries(&subscriber, subscription)
         .await
         .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
@@ -669,7 +503,7 @@ async fn assert_same_id_redelivery(
             MessagingErrorKind::Invariant,
         ));
     }
-    shutdown_bounded(&subscriber).await
+    shutdown_bounded(&subscriber_resource).await
 }
 
 async fn run_publish_delivery_and_settle_once() -> Result<
@@ -682,13 +516,14 @@ async fn run_publish_delivery_and_settle_once() -> Result<
 > {
     let (_rabbit, url) = isolated_rabbit("rss_transactional_core").await?;
     let route = MessageRoute::parse("rss.integration.message").expect("route");
-    let subscriber = prepared_subscriber(&url, &route, "core-sub", true).await?;
+    let (subscriber, subscriber_resource) =
+        prepared_subscriber(&url, &route, "core-sub", true).await?;
     let message = envelope(&route, "integration-message-1");
     let subscription = subscription_for(&message, &route);
     let mut deliveries = DeliverySource::deliveries(&subscriber, &subscription)
         .await
         .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
-    let publisher = connected_publisher(&url, "core-pub").await?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "core-pub").await?;
 
     let outcome = Publisher::publish(&publisher, &message, provider_deadline()).await;
     if !matches!(outcome, PublishOutcome::Confirmed(())) {
@@ -720,8 +555,8 @@ async fn run_publish_delivery_and_settle_once() -> Result<
         ));
     }
 
-    shutdown_bounded(&publisher).await?;
-    shutdown_bounded(&subscriber).await?;
+    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(&subscriber_resource).await?;
     let observations = observations
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -792,8 +627,9 @@ async fn run_ambiguous_publish_retries_the_same_message_identity()
 -> Result<(Vec<MessageId>, Vec<PublishOutcome<()>>, usize), LiveConformanceFailure> {
     let (_rabbit, url) = isolated_rabbit("rss_transactional_ambiguity").await?;
     let route = MessageRoute::parse("rss.integration.ambiguity").expect("route");
-    let subscriber = prepared_subscriber(&url, &route, "ambiguous-sub", false).await?;
-    let publisher = connected_publisher(&url, "ambiguous-pub").await?;
+    let (subscriber, subscriber_resource) =
+        prepared_subscriber(&url, &route, "ambiguous-sub", false).await?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "ambiguous-pub").await?;
     let message = envelope(&route, "stable-message-id");
     let subscription = subscription_for(&message, &route);
     let mut deliveries = DeliverySource::deliveries(&subscriber, &subscription)
@@ -827,8 +663,8 @@ async fn run_ambiguous_publish_retries_the_same_message_identity()
 
     let effects = consume_ambiguous_retries(&mut deliveries, &subscription).await?;
 
-    shutdown_bounded(&publisher).await?;
-    shutdown_bounded(&subscriber).await?;
+    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(&subscriber_resource).await?;
     Ok((
         vec![message.id().clone(), message.id().clone()],
         vec![first, second],
@@ -847,13 +683,19 @@ async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow
     let rabbit = testkit::env_or_rabbitmq().await?;
     let url = rabbit.vhost_url("rss_transactional_reject").await?;
     let route = MessageRoute::parse("rss.integration.reject").expect("route");
-    let subscriber =
-        AmqpSubscriber::connect_with_webpki_for_test(&endpoint(&url)?, "reject-sub").await?;
-    subscriber.prepare_delivery_route(&route).await?;
-    subscriber.purge_durable_queue_for_test(&route).await?;
-    let publisher =
-        AmqpPublisher::connect_with_webpki_for_test(&endpoint(&url)?, "reject-pub", TIMEOUT)
-            .await?;
+    let (subscriber, subscriber_resource) = AmqpSubscriber::connect_for_test(
+        &AmqpSubscriberEndpoint::for_test(&url)?,
+        "reject-sub",
+        TIMEOUT,
+    )
+    .await?;
+    topology::provision(&url, &route, true).await?;
+    let (publisher, publisher_resource) = AmqpPublisher::connect_for_test(
+        &AmqpPublisherEndpoint::for_test(&url)?,
+        "reject-pub",
+        TIMEOUT,
+    )
+    .await?;
     let message = envelope(&route, "integration-reject-1");
     let subscription = SubscriptionIdentity::new(
         message.metadata().domain().clone(),
@@ -885,12 +727,12 @@ async fn integration_rejected_commit_enters_broker_dead_letter_queue() -> anyhow
         ))
     );
     testkit::await_try(TIMEOUT, async || {
-        let depth = subscriber.dead_letter_depth_for_test(&route).await?;
+        let depth = topology::dead_letter_depth(&url, &route).await?;
         Ok::<_, anyhow::Error>((depth == 1).then_some(()))
     })
     .await?;
-    shutdown_bounded(&publisher).await?;
-    shutdown_bounded(&subscriber).await?;
+    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(&subscriber_resource).await?;
     Ok(())
 }
 
@@ -898,8 +740,8 @@ async fn run_commit_unknown_abandons_and_redelivers_same_message()
 -> Result<(Vec<TransactionalMessagingObservation>, usize), LiveConformanceFailure> {
     let (_rabbit, url) = isolated_rabbit("rss_transactional_unknown").await?;
     let route = MessageRoute::parse("rss.integration.unknown").expect("route");
-    let first = prepared_subscriber(&url, &route, "unknown-sub-1", true).await?;
-    let publisher = connected_publisher(&url, "unknown-pub").await?;
+    let (first, first_resource) = prepared_subscriber(&url, &route, "unknown-sub-1", true).await?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "unknown-pub").await?;
     let message = envelope(&route, "integration-unknown-1");
     let subscription = subscription_for(&message, &route);
     let mut deliveries = DeliverySource::deliveries(&first, &subscription)
@@ -947,8 +789,8 @@ async fn run_commit_unknown_abandons_and_redelivers_same_message()
         "redelivered envelope was invalid",
     )
     .await?;
-    shutdown_bounded(&publisher).await?;
-    shutdown_bounded(&first).await?;
+    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(&first_resource).await?;
     let observations = observations
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -966,8 +808,10 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id()
 -> Result<(), LiveConformanceFailure> {
     let (_rabbit, url) = isolated_rabbit("rss_transactional_managed_cancel").await?;
     let route = MessageRoute::parse("rss.integration.managed-cancel").expect("route");
-    let first = Arc::new(prepared_subscriber(&url, &route, "managed-cancel-sub-1", true).await?);
-    let publisher = connected_publisher(&url, "managed-cancel-pub").await?;
+    let (first, first_resource) =
+        prepared_subscriber(&url, &route, "managed-cancel-sub-1", true).await?;
+    let first = Arc::new(first);
+    let (publisher, publisher_resource) = connected_publisher(&url, "managed-cancel-pub").await?;
     let message = envelope(&route, "integration-managed-cancel-1");
     let subscription = subscription_for(&message, &route);
     let publish = Publisher::publish(&publisher, &message, provider_deadline()).await;
@@ -1002,6 +846,7 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id()
     let mut startup = stack
         .startup()
         .map_err(|_| live_failure(LivePhase::Shutdown, MessagingErrorKind::Invariant))?;
+    startup.stage_resource(rss_runtime::DynManagedResource::new_box(first_resource));
     startup.stage_task_with_token(registration);
     startup.commit().finish();
     tokio::time::timeout(TIMEOUT, async {
@@ -1025,11 +870,10 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id()
             MessagingErrorKind::Invariant,
         ));
     }
-    shutdown_bounded(first.as_ref()).await?;
 
     assert_same_id_redelivery(&url, &route, &subscription, message.id()).await?;
 
-    shutdown_bounded(&publisher).await?;
+    shutdown_bounded(&publisher_resource).await?;
     Ok(())
 }
 
@@ -1073,10 +917,6 @@ impl LiveConformanceFailure {
         Self { phase, kind }
     }
 
-    fn into_messaging(self) -> MessagingError {
-        MessagingError::new(self.kind, self)
-    }
-
     const fn into_conformance(self) -> ConformanceError {
         match self.phase {
             LivePhase::Fixture => ConformanceError::fixture(self.kind),
@@ -1105,330 +945,6 @@ fn live_failure(phase: LivePhase, kind: MessagingErrorKind) -> LiveConformanceFa
     LiveConformanceFailure::new(phase, kind)
 }
 
-struct AmqpOutboxDriver {
-    append_store: Mutex<MemoryOutboxStore<Vec<u8>>>,
-    recovery_store: Mutex<MemoryOutboxStore<Vec<u8>>>,
-    published_ids: Mutex<Vec<MessageId>>,
-    consumer_effects: AtomicUsize,
-}
-
-impl Default for AmqpOutboxDriver {
-    fn default() -> Self {
-        Self {
-            append_store: Mutex::new(MemoryOutboxStore::new()),
-            recovery_store: Mutex::new(MemoryOutboxStore::new()),
-            published_ids: Mutex::new(Vec::new()),
-            consumer_effects: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl OutboxDriver for AmqpOutboxDriver {
-    async fn delivery_window(&self) -> Result<Option<[OutboxLeaseStatus; 3]>, MessagingError> {
-        Ok(None)
-    }
-    fn reset(&self) {
-        *self
-            .append_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = MemoryOutboxStore::new();
-        *self
-            .recovery_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = MemoryOutboxStore::new();
-        self.published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.consumer_effects.store(0, Ordering::SeqCst);
-    }
-
-    async fn append_first(&self) -> Result<AppendOutcome, MessagingError> {
-        let store = self
-            .append_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        store
-            .append(
-                &mut (),
-                PendingMessage::new(envelope(
-                    &MessageRoute::parse("rss.integration.outbox").expect("route"),
-                    "shared-outbox-append",
-                )),
-            )
-            .await
-    }
-
-    async fn append_same(&self) -> Result<AppendOutcome, MessagingError> {
-        self.append_first().await
-    }
-
-    async fn append_conflict(&self) -> Result<AppendOutcome, MessagingError> {
-        let store = self
-            .append_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let route = MessageRoute::parse("rss.integration.outbox").expect("route");
-        let changed = envelope_with_payload(
-            &route,
-            "shared-outbox-append",
-            b"conflicting-payload".to_vec(),
-        );
-        store.append(&mut (), PendingMessage::new(changed)).await
-    }
-
-    async fn partition_head_claims(&self) -> Result<usize, MessagingError> {
-        let store = memory_partition_store().await?;
-        Ok(store
-            .claim_partition_heads(NonZeroUsize::new(8).expect("positive"), provider_deadline())
-            .await?
-            .len())
-    }
-
-    async fn blocked_partition_claims(&self) -> Result<usize, MessagingError> {
-        let store = memory_partition_store().await?;
-        let claims = store
-            .claim_partition_heads(NonZeroUsize::new(8).expect("positive"), provider_deadline())
-            .await?;
-        let claim = claims.into_iter().next().expect("partition head");
-        store
-            .settle(claim, OutboxSettlement::DeadLetter, provider_deadline())
-            .await?;
-        Ok(store
-            .claim_partition_heads(NonZeroUsize::new(8).expect("positive"), provider_deadline())
-            .await?
-            .len())
-    }
-
-    async fn confirmed_publish(
-        &self,
-    ) -> Result<(PublishOutcome<()>, OutboxSettlement<()>), ConformanceError> {
-        let (outcome, settlement, _) = run_publish_delivery_and_settle_once()
-            .await
-            .map_err(LiveConformanceFailure::into_conformance)?;
-        Ok((outcome, settlement))
-    }
-
-    async fn transient_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
-        let outcome = PublishOutcome::DefinitelyNotPublished(PublishFailure::new(
-            PublishFailureKind::Transient,
-            PublishFailureStage::Admission,
-            PublishFailureReason::TransportUnavailable,
-        ));
-        let publisher = MemoryPublisher::new([outcome]);
-        Ok(publisher
-            .publish(
-                &envelope(
-                    &MessageRoute::parse("rss.integration.transient").expect("route"),
-                    "transient-publish",
-                ),
-                provider_deadline(),
-            )
-            .await)
-    }
-
-    async fn ambiguous_publish(&self) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        let (ids, outcomes, effects) = run_ambiguous_publish_retries_the_same_message_identity()
-            .await
-            .map_err(LiveConformanceFailure::into_conformance)?;
-        *self
-            .published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ids;
-        self.consumer_effects.store(effects, Ordering::SeqCst);
-        Ok(outcomes)
-    }
-
-    async fn stale_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
-        let store = memory_partition_store().await?;
-        let claim = store
-            .claim_partition_heads(NonZeroUsize::new(1).expect("positive"), provider_deadline())
-            .await?
-            .into_iter()
-            .next()
-            .expect("partition head");
-        store.fence_claims();
-        store.lease_status(&claim, provider_deadline()).await
-    }
-
-    async fn expired_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
-        let store = memory_partition_store().await?;
-        let claim = store
-            .claim_partition_heads(NonZeroUsize::new(1).expect("positive"), provider_deadline())
-            .await?
-            .into_iter()
-            .next()
-            .expect("partition head");
-        let clock = FakeClock::new();
-        let expired = AbsoluteDeadline::from_timeout(&clock, Duration::ZERO)
-            .expect("representable")
-            .operation(&clock);
-        store.lease_status(&claim, expired).await
-    }
-
-    async fn permanent_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
-        let outcome = PublishOutcome::DefinitelyNotPublished(PublishFailure::new(
-            PublishFailureKind::Permanent,
-            PublishFailureStage::Admission,
-            PublishFailureReason::ProviderRejected,
-        ));
-        let publisher = MemoryPublisher::new([outcome]);
-        Ok(publisher
-            .publish(
-                &envelope(
-                    &MessageRoute::parse("rss.integration.permanent").expect("route"),
-                    "permanent-publish",
-                ),
-                provider_deadline(),
-            )
-            .await)
-    }
-
-    async fn publish_before_settle_recovery(
-        &self,
-    ) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        let (ids, outcomes, effects) = run_ambiguous_publish_retries_the_same_message_identity()
-            .await
-            .map_err(LiveConformanceFailure::into_conformance)?;
-        *self
-            .published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ids;
-        self.consumer_effects.store(effects, Ordering::SeqCst);
-        let store = self
-            .recovery_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let route = MessageRoute::parse("rss.integration.recovery")
-            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
-        store
-            .append(
-                &mut (),
-                PendingMessage::new(envelope(&route, "recovery-message")),
-            )
-            .await
-            .map_err(|error| ConformanceError::settlement(error.kind()))?;
-        let claim = store
-            .claim_partition_heads(NonZeroUsize::new(1).expect("positive"), provider_deadline())
-            .await
-            .map_err(|error| ConformanceError::settlement(error.kind()))?
-            .into_iter()
-            .next()
-            .expect("recovery claim");
-        store
-            .settle(claim, OutboxSettlement::Published(()), provider_deadline())
-            .await
-            .map_err(|error| ConformanceError::settlement(error.kind()))?;
-        Ok(outcomes)
-    }
-
-    fn published_message_ids(&self) -> Vec<MessageId> {
-        self.published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    fn settlement_dispositions(&self) -> Vec<OutboxDisposition> {
-        self.recovery_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .settlements()
-    }
-
-    fn consumer_effects(&self) -> usize {
-        self.consumer_effects.load(Ordering::SeqCst)
-    }
-}
-
-async fn memory_partition_store() -> Result<MemoryOutboxStore<Vec<u8>>, MessagingError> {
-    let store = MemoryOutboxStore::new();
-    let route = MessageRoute::parse("rss.integration.partition")
-        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
-    store
-        .append(
-            &mut (),
-            PendingMessage::new(envelope(&route, "partition-head")),
-        )
-        .await?;
-    store
-        .append(
-            &mut (),
-            PendingMessage::new(envelope(&route, "partition-successor")),
-        )
-        .await?;
-    Ok(store)
-}
-
-#[derive(Default)]
-struct AmqpConsumerDriver;
-
-impl ConsumerTxDriver for AmqpConsumerDriver {
-    fn reset(&self) {}
-
-    async fn committed_delivery(
-        &self,
-    ) -> Result<Vec<TransactionalMessagingObservation>, ConformanceError> {
-        let (_, _, observations) = run_publish_delivery_and_settle_once()
-            .await
-            .map_err(LiveConformanceFailure::into_conformance)?;
-        Ok(observations)
-    }
-
-    async fn duplicate_delivery(
-        &self,
-    ) -> Result<(TerminalDisposition, Vec<TransactionalMessagingObservation>), ConformanceError>
-    {
-        duplicate_delivery_evidence()
-            .await
-            .map_err(|error| ConformanceError::settlement(error.kind()))
-    }
-
-    async fn commit_unknown_delivery(
-        &self,
-    ) -> Result<(Vec<TransactionalMessagingObservation>, usize), ConformanceError> {
-        run_commit_unknown_abandons_and_redelivers_same_message()
-            .await
-            .map_err(LiveConformanceFailure::into_conformance)
-    }
-
-    async fn lease_lost_delivery(
-        &self,
-    ) -> Result<(Vec<TransactionalMessagingObservation>, usize), ConformanceError> {
-        run_managed_forced_cancel_redelivers_the_same_message_id()
-            .await
-            .map_err(LiveConformanceFailure::into_conformance)?;
-        lease_lost_evidence()
-            .await
-            .map_err(|error| ConformanceError::settlement(error.kind()))
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_shared_outbox_conformance_runner() -> anyhow::Result<()> {
-    run_outbox_conformance(
-        &AmqpOutboxDriver::default(),
-        &TokioClock::new(),
-        ExecutionBudget::new(Duration::from_secs(90), Duration::from_secs(5))?,
-    )
-    .await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_shared_consumer_conformance_runner() -> anyhow::Result<()> {
-    run_consumer_conformance(
-        &AmqpConsumerDriver,
-        &TokioClock::new(),
-        ExecutionBudget::new(Duration::from_secs(90), Duration::from_secs(5))?,
-    )
-    .await?;
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_private_ca_and_split_roles_fail_closed() -> anyhow::Result<()> {
     let network = testkit::bridge_network("rss-transactional-amqp-tls").await?;
@@ -1442,37 +958,70 @@ async fn integration_private_ca_and_split_roles_fail_closed() -> anyhow::Result<
         },
     )
     .await?;
-    let publisher_endpoint = AmqpPublisherEndpoint::new(secure::AmqpEndpoint::parse(
-        fixture.publisher_url(),
-        secure::PlaintextEndpointPolicy::Deny,
-    )?);
-    let subscriber_endpoint = AmqpSubscriberEndpoint::new(secure::AmqpEndpoint::parse(
-        fixture.subscriber_url(),
-        secure::PlaintextEndpointPolicy::Deny,
-    )?);
-    let deps = AmqpRuntimeDeps::connect_with_private_ca(
-        &publisher_endpoint,
-        &subscriber_endpoint,
-        AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
-        "private-ca",
-        TIMEOUT,
-    )
-    .await?;
-    assert_eq!(deps.runtime_resources().len(), 2);
+    let publisher_endpoint = AmqpPublisherEndpoint::parse(fixture.publisher_url())?;
+    let subscriber_endpoint = AmqpSubscriberEndpoint::parse(fixture.subscriber_url())?;
+    let ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
+    let wrong_ca = AmqpPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?;
+    let (publisher, publisher_resource) =
+        AmqpPublisher::connect(&publisher_endpoint, "private-ca-publisher", &ca, TIMEOUT).await?;
+    let (subscriber, subscriber_resource) =
+        AmqpSubscriber::connect(&subscriber_endpoint, "private-ca-subscriber", &ca, TIMEOUT)
+            .await?;
     assert!(fixture.publisher_permissions_are_exact().await?);
     assert!(fixture.subscriber_permissions_are_exact().await?);
     assert!(
-        AmqpRuntimeDeps::connect_with_private_ca(
-            &publisher_endpoint,
+        AmqpPublisher::connect(&publisher_endpoint, "wrong-private-ca", &wrong_ca, TIMEOUT)
+            .await
+            .is_err()
+    );
+    assert!(
+        AmqpSubscriber::connect(&subscriber_endpoint, "wrong-private-ca", &wrong_ca, TIMEOUT)
+            .await
+            .is_err()
+    );
+    let mut rollback_stack =
+        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?)?;
+    let mut startup = rollback_stack.startup()?;
+    let (rollback_handle, rollback_resource) =
+        AmqpPublisher::connect(&publisher_endpoint, "rollback-publisher", &ca, TIMEOUT).await?;
+    startup.stage_resource(rss_runtime::DynManagedResource::new_box(rollback_resource));
+    assert!(
+        AmqpSubscriber::connect(
             &subscriber_endpoint,
-            AmqpPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?,
-            "wrong-private-ca",
-            TIMEOUT,
+            "rollback-subscriber",
+            &wrong_ca,
+            TIMEOUT
         )
         .await
         .is_err()
     );
-    ManagedResource::shutdown(deps.publisher_for_integration_test()).await?;
-    ManagedResource::shutdown(deps.subscriber_for_integration_test()).await?;
+    drop(startup);
+    let rollback = rollback_stack.shutdown().await?;
+    assert!(rollback.failures().is_empty());
+    assert!(rollback_handle.transport_generation_for_test().is_none());
+
+    let route = MessageRoute::parse(route)?;
+
+    assert!(matches!(
+        publisher
+            .publish(&envelope(&route, "private-ca-valid"), provider_deadline())
+            .await,
+        PublishOutcome::Confirmed(())
+    ));
+    let message = envelope(&route, "private-ca-valid");
+    let subscription = subscription_for(&message, &route);
+    let mut stream = subscriber.deliveries(&subscription).await?;
+    let delivery = next_valid_delivery(&mut stream, "private CA delivery", "invalid").await?;
+    let (received, settlement) = (*delivery).into_parts();
+    transport::acknowledge(settlement, &received, &subscription).await?;
+    let forbidden = MessageRoute::parse("rss.integration.forbidden")?;
+    assert!(
+        matches!(publisher.publish(&envelope(&forbidden, "private-ca-forbidden"), provider_deadline()).await, PublishOutcome::DefinitelyNotPublished(failure) if failure.kind() == PublishFailureKind::Permanent)
+    );
+    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(&subscriber_resource).await?;
     Ok(())
 }
+
+mod topology;
+mod transport;

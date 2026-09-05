@@ -17,7 +17,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingIoOutcome,
     TransactionalMessagingObservation, TransactionalMessagingTransactionStatus,
 };
-use rss_transactional_messaging::outbox::{AppendOutcome, OutboxLeaseStatus, OutboxSettlement};
+use rss_transactional_messaging::outbox::{AppendOutcome, OutboxDisposition, OutboxLeaseStatus};
 use rss_transactional_messaging::policy::ExecutionBudget;
 use rss_transactional_messaging::transaction::{
     SettlementKind, TerminalDisposition, TerminalReceipt,
@@ -29,11 +29,17 @@ use rss_transactional_messaging_testkit::ConformanceError;
 use rss_transactional_messaging_testkit::consumer::{ConsumerTxDriver, run_consumer_conformance};
 use rss_transactional_messaging_testkit::inbox::{InboxDriver, run_inbox_conformance};
 use rss_transactional_messaging_testkit::memory::FakeClock;
-use rss_transactional_messaging_testkit::outbox::{OutboxDriver, run_outbox_conformance};
+use rss_transactional_messaging_testkit::outbox::{
+    OutboxDriver, ReclaimEvidence, run_outbox_conformance,
+};
+
+use rss_transactional_messaging_testkit::transport::{
+    PublishAttempt, PublisherTransportDriver, run_publisher_transport_conformance,
+};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Defect {
     OutboxAfterPublishBeforeSettle,
     OutboxTransientPublishFailure,
@@ -75,7 +81,7 @@ const CASES: &[FaultCase] = &[
         id: "outbox-after-publish-before-settle",
         crash_point: "after-publish-before-settle",
         expected_invariant: "outbox-publish-settled-once",
-        expected_stage: "outbox.publish-before-settle.settlement-calls",
+        expected_stage: "outbox.reclaim.claims",
         expected_error: ExpectedError::Count,
         defect: Defect::OutboxAfterPublishBeforeSettle,
     },
@@ -83,23 +89,23 @@ const CASES: &[FaultCase] = &[
         id: "outbox-transient-publish-failure",
         crash_point: "during-transient-publish",
         expected_invariant: "outbox-transient-remains-retryable",
-        expected_stage: "outbox.publish.transient",
+        expected_stage: "publisher.transient",
         expected_error: ExpectedError::Mismatch,
         defect: Defect::OutboxTransientPublishFailure,
     },
     FaultCase {
         id: "outbox-confirm-lost-channel-close",
         crash_point: "post-send-close-before-confirm",
-        expected_invariant: "outbox-ambiguous-retry-consumer-effect-once",
-        expected_stage: "outbox.publish.ambiguous.identity",
+        expected_invariant: "publisher-ambiguous-retry-preserves-message-identity",
+        expected_stage: "publisher.ambiguous.identity",
         expected_error: ExpectedError::Mismatch,
         defect: Defect::OutboxConfirmLostChannelClose,
     },
     FaultCase {
         id: "outbox-permanent-publish-failure",
         crash_point: "during-permanent-publish",
-        expected_invariant: "outbox-dlx-summary-redacted",
-        expected_stage: "outbox.publish.permanent",
+        expected_invariant: "publisher-permanent-refusal-stays-permanent",
+        expected_stage: "publisher.permanent",
         expected_error: ExpectedError::Mismatch,
         defect: Defect::OutboxPermanentPublishFailure,
     },
@@ -149,54 +155,41 @@ const CASES: &[FaultCase] = &[
 #[error("synthetic provider conflict")]
 struct Conflict;
 
-#[derive(Debug, thiserror::Error)]
-#[error("amqp://operator:super-secret@provider.invalid")]
-struct SecretDiagnostic;
-
 struct OutboxFixture {
     defect: Option<Defect>,
-    settlement_calls: AtomicUsize,
-    consumer_effects: AtomicUsize,
-    published_ids: Mutex<Vec<MessageId>>,
 }
-
 impl OutboxFixture {
     fn new(defect: Option<Defect>) -> Self {
-        Self {
-            defect,
-            settlement_calls: AtomicUsize::new(0),
-            consumer_effects: AtomicUsize::new(0),
-            published_ids: Mutex::new(Vec::new()),
-        }
+        Self { defect }
     }
-
     fn is(&self, defect: Defect) -> bool {
-        matches!(
-            (self.defect, defect),
-            (
-                Some(Defect::OutboxAfterPublishBeforeSettle),
-                Defect::OutboxAfterPublishBeforeSettle
-            ) | (
-                Some(Defect::OutboxTransientPublishFailure),
-                Defect::OutboxTransientPublishFailure
-            ) | (
-                Some(Defect::OutboxConfirmLostChannelClose),
-                Defect::OutboxConfirmLostChannelClose
-            ) | (
-                Some(Defect::OutboxPermanentPublishFailure),
-                Defect::OutboxPermanentPublishFailure
-            ) | (
-                Some(Defect::OutboxStaleLeaseContender),
-                Defect::OutboxStaleLeaseContender
-            ) | (
-                Some(Defect::OutboxLeaseDeadlineExpired),
-                Defect::OutboxLeaseDeadlineExpired
-            )
-        )
+        self.defect == Some(defect)
     }
 }
 
 impl OutboxDriver for OutboxFixture {
+    async fn retry_settlement_reclaims_same_message(
+        &self,
+    ) -> Result<ReclaimEvidence, ConformanceError> {
+        Ok(ReclaimEvidence {
+            claimed_message_ids: vec![fixture_id("retry")?, fixture_id("retry")?],
+            settlement: OutboxDisposition::Retry,
+        })
+    }
+    async fn reclaim_after_publish_before_settle(
+        &self,
+    ) -> Result<ReclaimEvidence, ConformanceError> {
+        Ok(ReclaimEvidence {
+            claimed_message_ids: if self.is(Defect::OutboxAfterPublishBeforeSettle) {
+                vec![]
+            } else {
+                vec![fixture_id("reclaim")?, fixture_id("reclaim")?]
+            },
+            settlement: OutboxDisposition::Published,
+        })
+    }
+
+    fn reset(&self) {}
     async fn delivery_window(&self) -> Result<Option<[OutboxLeaseStatus; 3]>, MessagingError> {
         let renewed = if matches!(self.defect, Some(Defect::OutboxWindowReset)) {
             20
@@ -209,14 +202,6 @@ impl OutboxDriver for OutboxFixture {
                 delivery_remaining: Some(Duration::from_secs(seconds)),
             }
         })))
-    }
-    fn reset(&self) {
-        self.settlement_calls.store(0, Ordering::SeqCst);
-        self.consumer_effects.store(0, Ordering::SeqCst);
-        self.published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
     }
 
     async fn append_first(&self) -> Result<AppendOutcome, MessagingError> {
@@ -239,43 +224,6 @@ impl OutboxDriver for OutboxFixture {
         Ok(0)
     }
 
-    async fn confirmed_publish(
-        &self,
-    ) -> Result<(PublishOutcome<()>, OutboxSettlement<()>), ConformanceError> {
-        Ok((
-            PublishOutcome::Confirmed(()),
-            OutboxSettlement::Published(()),
-        ))
-    }
-
-    async fn transient_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
-        Ok(if self.is(Defect::OutboxTransientPublishFailure) {
-            PublishOutcome::Confirmed(())
-        } else {
-            PublishOutcome::DefinitelyNotPublished(transient_failure())
-        })
-    }
-
-    async fn ambiguous_publish(&self) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        let first = MessageId::parse("fault-message")
-            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
-        let second = MessageId::parse(if self.is(Defect::OutboxConfirmLostChannelClose) {
-            "changed-message"
-        } else {
-            "fault-message"
-        })
-        .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
-        *self
-            .published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = vec![first, second];
-        self.consumer_effects.store(1, Ordering::SeqCst);
-        Ok(vec![
-            PublishOutcome::Ambiguous(transient_failure()),
-            PublishOutcome::Confirmed(()),
-        ])
-    }
-
     async fn stale_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
         Ok(if self.is(Defect::OutboxStaleLeaseContender) {
             OutboxLeaseStatus::Held {
@@ -296,56 +244,6 @@ impl OutboxDriver for OutboxFixture {
         } else {
             OutboxLeaseStatus::Lost
         })
-    }
-
-    async fn permanent_publish(&self) -> Result<PublishOutcome<()>, MessagingError> {
-        if self.is(Defect::OutboxPermanentPublishFailure) {
-            return Err(MessagingError::new(
-                MessagingErrorKind::Permanent,
-                SecretDiagnostic,
-            ));
-        }
-        Ok(PublishOutcome::DefinitelyNotPublished(permanent_failure()))
-    }
-
-    async fn publish_before_settle_recovery(
-        &self,
-    ) -> Result<Vec<PublishOutcome<()>>, ConformanceError> {
-        let id = MessageId::parse("fault-message")
-            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
-        *self
-            .published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = vec![id.clone(), id];
-        self.settlement_calls.store(
-            usize::from(!self.is(Defect::OutboxAfterPublishBeforeSettle)),
-            Ordering::SeqCst,
-        );
-        self.consumer_effects.store(1, Ordering::SeqCst);
-        Ok(vec![
-            PublishOutcome::Ambiguous(transient_failure()),
-            PublishOutcome::Confirmed(()),
-        ])
-    }
-
-    fn published_message_ids(&self) -> Vec<MessageId> {
-        self.published_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    fn settlement_dispositions(
-        &self,
-    ) -> Vec<rss_transactional_messaging::outbox::OutboxDisposition> {
-        vec![
-            rss_transactional_messaging::outbox::OutboxDisposition::Published;
-            self.settlement_calls.load(Ordering::SeqCst)
-        ]
-    }
-
-    fn consumer_effects(&self) -> usize {
-        self.consumer_effects.load(Ordering::SeqCst)
     }
 }
 
@@ -601,6 +499,12 @@ fn message() -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error + Sen
 
 #[tokio::test]
 async fn conforming_drivers_pass_all_suites() -> TestResult {
+    run_publisher_transport_conformance(
+        &PublisherFixture(None),
+        &FakeClock::new(),
+        ExecutionBudget::STANDARD,
+    )
+    .await?;
     run_outbox_conformance(
         &OutboxFixture::new(None),
         &FakeClock::new(),
@@ -716,6 +620,16 @@ async fn every_historical_fault_has_a_synthetic_red() {
                 )
                 .await
             }
+            Defect::OutboxTransientPublishFailure
+            | Defect::OutboxConfirmLostChannelClose
+            | Defect::OutboxPermanentPublishFailure => {
+                run_publisher_transport_conformance(
+                    &PublisherFixture(Some(case.defect)),
+                    &FakeClock::new(),
+                    ExecutionBudget::STANDARD,
+                )
+                .await
+            }
             _ => {
                 run_outbox_conformance(
                     &OutboxFixture::new(Some(case.defect)),
@@ -759,5 +673,54 @@ async fn every_historical_fault_has_a_synthetic_red() {
             case.id,
             case.expected_invariant
         );
+    }
+}
+
+fn fixture_id(value: &str) -> Result<MessageId, ConformanceError> {
+    MessageId::parse(value).map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))
+}
+struct PublisherFixture(Option<Defect>);
+impl PublisherTransportDriver for PublisherFixture {
+    async fn confirmed(&self) -> Result<PublishAttempt, ConformanceError> {
+        Ok(PublishAttempt {
+            message_id: fixture_id("confirmed")?,
+            outcome: PublishOutcome::Confirmed(()),
+        })
+    }
+    async fn transient(&self) -> Result<PublishAttempt, ConformanceError> {
+        Ok(PublishAttempt {
+            message_id: fixture_id("transient")?,
+            outcome: if self.0 == Some(Defect::OutboxTransientPublishFailure) {
+                PublishOutcome::Confirmed(())
+            } else {
+                PublishOutcome::DefinitelyNotPublished(transient_failure())
+            },
+        })
+    }
+    async fn permanent(&self) -> Result<PublishAttempt, ConformanceError> {
+        Ok(PublishAttempt {
+            message_id: fixture_id("permanent")?,
+            outcome: if self.0 == Some(Defect::OutboxPermanentPublishFailure) {
+                PublishOutcome::DefinitelyNotPublished(transient_failure())
+            } else {
+                PublishOutcome::DefinitelyNotPublished(permanent_failure())
+            },
+        })
+    }
+    async fn ambiguous_retry(&self) -> Result<Vec<PublishAttempt>, ConformanceError> {
+        Ok(vec![
+            PublishAttempt {
+                message_id: fixture_id("original")?,
+                outcome: PublishOutcome::Ambiguous(transient_failure()),
+            },
+            PublishAttempt {
+                message_id: fixture_id(if self.0 == Some(Defect::OutboxConfirmLostChannelClose) {
+                    "different"
+                } else {
+                    "original"
+                })?,
+                outcome: PublishOutcome::Confirmed(()),
+            },
+        ])
     }
 }

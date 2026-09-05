@@ -265,7 +265,9 @@ pub use postgres::{
     PgConnParams, PgFixture, PgTlsFixture, PgTlsServerIdentity, env_or_postgres, owned_postgres,
     postgres_tls,
 };
-pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, env_or_rabbitmq, rabbitmq_tls};
+pub use rabbitmq::{
+    RabbitFixture, RabbitTlsFixture, env_or_rabbitmq, managed_rabbitmq, rabbitmq_tls,
+};
 pub use redis::{RedisFixture, RedisTlsFixture, env_or_redis, redis_tls};
 pub use vault::{VaultTlsFixture, vault_tls};
 
