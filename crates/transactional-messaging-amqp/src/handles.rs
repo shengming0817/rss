@@ -73,6 +73,16 @@ impl AmqpPublisher {
     ) {
         self.0.pause_confirmation()
     }
+    /// Pause the ready generation's close operation so recovery/shutdown ownership can be tested.
+    #[cfg(feature = "test-support")]
+    pub fn pause_transport_close_for_test(
+        &self,
+    ) -> Option<(
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    )> {
+        self.0.pause_transport_close()
+    }
     /// Read the current transport generation without admitting another publication.
     #[cfg(feature = "test-support")]
     pub fn transport_generation_for_test(&self) -> Option<u64> {

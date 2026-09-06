@@ -1059,3 +1059,45 @@ async fn standalone_subscriber_close_case(
     drop(stream);
     Ok(())
 }
+
+pub(super) async fn publisher_recovery_and_shutdown_share_broker_close(
+    rabbit: &testkit::RabbitFixture,
+) -> anyhow::Result<()> {
+    let url = isolated_url(rabbit, "rss_shared_publisher_close").await?;
+    let vhost = url.rsplit('/').next().expect("fixture vhost");
+    let (publisher, resource) = connected_publisher(&url, "shared-close").await?;
+    assert_eq!(rabbit.broker_connection_count(vhost).await?, 1);
+    let (closing, release_close) = publisher
+        .pause_transport_close_for_test()
+        .expect("ready transport");
+    let message = envelope(&MessageRoute::parse("rss.shared-close")?, "cancelled");
+    cancel_confirming_publication(&publisher, &message).await?;
+    tokio::time::timeout(TIMEOUT, closing).await??;
+    let shutdown = resource.shutdown(Duration::from_secs(5));
+    tokio::pin!(shutdown);
+    let state = std::future::poll_fn(|cx| std::task::Poll::Ready(shutdown.as_mut().poll(cx))).await;
+    assert!(state.is_pending());
+    assert!(publisher.transport_generation_for_test().is_none());
+    assert!(release_close.send(()).is_ok());
+    close(shutdown).await?;
+    testkit::await_try(TIMEOUT, async || {
+        let count = rabbit.broker_connection_count(vhost).await?;
+        Ok::<_, anyhow::Error>((count == 0).then_some(()))
+    })
+    .await?;
+    Ok(())
+}
+
+async fn cancel_confirming_publication(
+    publisher: &AmqpPublisher,
+    message: &MessageEnvelope<Vec<u8>>,
+) -> anyhow::Result<()> {
+    let (sent, _release_confirm) = publisher.pause_next_confirmation_for_test();
+    let publishing = publisher.publish(message, provider_deadline());
+    tokio::pin!(publishing);
+    tokio::select! {
+        _ = &mut publishing => anyhow::bail!("publication must pause before confirmation"),
+        ready = tokio::time::timeout(TIMEOUT, sent) => { ready??; },
+    }
+    Ok(())
+}

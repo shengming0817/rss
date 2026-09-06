@@ -96,6 +96,11 @@ stage/reason labels and generation, never endpoint coordinates or provider error
   settlement operation. Constructor `recovery_timeout` must be an integral number of milliseconds in `1ms..=24h` and bounds publisher background replacement:
   confirm drain, connection close and new confirmed transport share one recovery deadline.
   Resource shutdown has its own total budget, independently of that recovery operation.
+  Every publisher generation shares one connection-close future across recovery, cancellation
+  and resource shutdown; concurrent owners observe the same completion or error without
+  issuing duplicate close RPCs. Each waiter retains its own cancellation and deadline.
+  Cancellation also interrupts cleanup of a replacement rejected during shutdown; the orphan
+  close is requested on cancellation without waiting out the original recovery deadline.
 - Subscriber retries lazily replace a disconnected connection under a single recovery lock. The
   constructor budget covers lock acquisition, connection setup and installation; shutdown seals
   installation. Existing streams terminate on connection loss and the runtime resubscribes.

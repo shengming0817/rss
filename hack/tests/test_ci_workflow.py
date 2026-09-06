@@ -1,0 +1,41 @@
+"""Execute the workflow finalizer under GitHub's shell behavior, including empty targets."""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import textwrap
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class FinalizerTests(unittest.TestCase):
+    def test_empty_selection_and_failed_diagnostics_still_stop_server(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        step = workflow.split('      - name: Record cache statistics and stop job server\n', 1)[1]
+        body = step.split('        run: |\n', 1)[1].split('      - name:', 1)[0]
+        script = textwrap.dedent(body)
+        with tempfile.TemporaryDirectory(prefix='rss-finalize-') as temporary:
+            root = Path(temporary).resolve()
+            (root / 'rss-sccache').mkdir()
+            binary = root / 'sccache'
+            binary.write_text('#!/bin/sh\nif [ "$1" = --show-stats ]; then exit 1; fi\necho stopped > "$STOP_PROOF"\n')
+            binary.chmod(0o755)
+            env = os.environ | {'PATH': f'{root}:{os.environ["PATH"]}', 'RUNNER_TEMP': str(root),
+                                'SCCACHE_DIR': str(root / 'rss-sccache'), 'CARGO_HOME': str(root / 'missing-home'),
+                                'CARGO_TARGET_DIR': str(root / 'missing-target'), 'CI_PART': 'tests',
+                                'GITHUB_STEP_SUMMARY': str(root / 'summary'), 'GITHUB_OUTPUT': str(root / 'outputs'),
+                                'STOP_PROOF': str(root / 'stopped')}
+            result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / 'stopped').exists())
+            summary = (root / 'summary').read_text()
+            self.assertIn('Filesystem', summary)
+            self.assertIn('missing-target', summary)
+            self.assertIn('stopped=true', (root / 'outputs').read_text())
+            self.assertIn('has_objects=false', (root / 'outputs').read_text())
+
+
+if __name__ == '__main__':
+    unittest.main()

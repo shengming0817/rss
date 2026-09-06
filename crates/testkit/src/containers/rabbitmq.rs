@@ -99,6 +99,24 @@ impl RabbitFixture {
         .await
     }
 
+    /// Counts live broker connections for a fixture-created vhost, without exposing peer details.
+    pub async fn broker_connection_count(&self, vhost: &str) -> Result<usize> {
+        self.require_vhost(vhost)?;
+        let output = run_rabbitmqctl_output(
+            &self.container,
+            &["list_connections", "vhost", "--formatter", "json"],
+        )
+        .await?;
+        let rows: serde_json::Value = serde_json::from_str(&output)?;
+        let rows = rows
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("invalid broker connection list"))?;
+        Ok(rows
+            .iter()
+            .filter(|row| row.get("vhost").and_then(serde_json::Value::as_str) == Some(vhost))
+            .count())
+    }
+
     /// Observes actual broker registrations, excluding cancelled consumers holding unacked messages.
     pub async fn broker_consumer_count(&self, vhost: &str, queue: &str) -> Result<usize> {
         self.require_vhost(vhost)?;

@@ -20,36 +20,165 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  cargo:
+  checks:
+    name: ${{ matrix.part }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [checks, tests]
+    env:
+      SCCACHE_CACHE_SIZE: 2G
+      RSS_COMPILER_CACHE: 'on'
+      CI_PART: ${{ matrix.part }}
     steps:
+      - name: Configure job-owned directories
+        run: |
+          {
+            echo "CARGO_HOME=$RUNNER_TEMP/rss-cargo"
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/rss-target"
+            echo "SCCACHE_DIR=$RUNNER_TEMP/rss-sccache"
+            echo "SCCACHE_SERVER_UDS=$RUNNER_TEMP/rss-sccache.sock"
+          } >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Install pinned Rust toolchains
+      - name: Install pinned Rust toolchain
         run: |
-          set -euo pipefail
           rustup toolchain install 1.96.0 --profile minimal --component clippy --component llvm-tools-preview
           rustup default 1.96.0
       - name: Install pinned Cargo tools
         uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
-          tool: cargo-nextest@0.9.137,cargo-semver-checks@0.49.0,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9
+          tool: ${{ matrix.part == 'checks' && 'cargo-deny@0.19.9,sccache@0.15.0' || 'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,sccache@0.15.0' }}
           fallback: none
-      - name: Run package-selected checks
-        if: ${{ github.event_name == 'pull_request' }}
-        run: make ci CI_BASE=${{ github.event.pull_request.base.sha }}
-      - name: Run full workspace checks after develop push
-        if: ${{ github.event_name == 'push' }}
-        run: make ci-full CI_BASE=${{ github.event.before }}
-      - name: Run manually requested full workspace checks
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          REQUESTED_BASELINE: ${{ inputs.baseline }}
+      - name: Install pinned SemVer checker from upstream release
+        if: matrix.part == 'checks'
         run: |
-          set -euo pipefail
+          archive="$RUNNER_TEMP/semver.tar.gz"
+          curl --fail --location --retry 3 -o "$archive" https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.49.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
+          echo "72f6834d75d28a66e02c9fd6a230ce901bb30eee6067b85867a97445df040e4a  $archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/semver-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/semver-bin"
+          echo "$RUNNER_TEMP/semver-bin" >> "$GITHUB_PATH"
+      - name: Derive immutable cache keys
+        id: keys
+        run: |
+          toolchain="$(rustc -Vv | sha256sum | cut -d' ' -f1)"
+          inputs="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
+          download="rss-download-v1-$RUNNER_OS-$RUNNER_ARCH-$toolchain-"
+          compiler="rss-sccache-v1-$RUNNER_OS-$RUNNER_ARCH-$toolchain-0.15.0-$CI_PART-"
+          {
+            echo "download=$download"
+            echo "compiler=$compiler"
+            echo "inputs=$inputs"
+            echo "suffix=$inputs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo downloads
+        id: download
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+          restore-keys: |
+            ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.inputs }}-
+            ${{ steps.keys.outputs.download }}
+      - name: Restore compiler objects
+        id: compiler
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+          restore-keys: |
+            ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.inputs }}-
+            ${{ steps.keys.outputs.compiler }}
+      - name: Discard partial restores on cache failure
+        env:
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          COMPILER_OUTCOME: ${{ steps.compiler.outcome }}
+        run: |
+          if [ "$DOWNLOAD_OUTCOME" = failure ]; then
+            rm -rf -- "$RUNNER_TEMP/rss-cargo/registry/index" "$RUNNER_TEMP/rss-cargo/registry/cache" "$RUNNER_TEMP/rss-cargo/git/db"
+          fi
+          if [ "$COMPILER_OUTCOME" = failure ]; then rm -rf -- "$RUNNER_TEMP/rss-sccache"; fi
+      - name: Run canonical Make checks
+        id: execution
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED_BASELINE: ${{ inputs.baseline || github.event.pull_request.base.sha || github.event.before }}
+        run: |
           baseline="$(/usr/bin/git rev-parse --verify "$REQUESTED_BASELINE^{commit}")"
           [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
-          make ci-full CI_BASE="$baseline"
+          if [ "$EVENT" = pull_request ]; then target=ci; else target=ci-full; fi
+          /usr/bin/time -v make "$target" CI_BASE="$baseline" CI_PART="$CI_PART"
+      - name: Record cache statistics and stop job server
+        id: finish
+        if: always() && !cancelled() && steps.execution.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          DOWNLOAD_KEY: ${{ steps.download.outputs.cache-matched-key }}
+          COMPILER_KEY: ${{ steps.compiler.outputs.cache-matched-key }}
+        run: |
+          {
+            echo "### $CI_PART cache"
+            echo "Cargo restore: ${DOWNLOAD_KEY:-miss}"
+            echo "Compiler restore: ${COMPILER_KEY:-miss}"
+            sccache --show-stats || echo 'Compiler statistics unavailable'
+            for path in "$CARGO_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR"; do
+              if [ -d "$path" ]; then du -sh "$path" || true; else echo "Not created: $path"; fi
+            done
+            df -h . || true
+          } | tee -a "$GITHUB_STEP_SUMMARY" || true
+          sccache --stop-server
+          # Save only the exact job-owned, non-symlink object directory.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['SCCACHE_DIR'])
+          assert not root.is_symlink() and root.resolve() == Path(os.environ['RUNNER_TEMP']).resolve() / 'rss-sccache'
+          assert root.is_dir()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"has_objects={str(any(root.iterdir())).lower()}\n")
+          PY
+          echo 'stopped=true' >> "$GITHUB_OUTPUT"
+      - name: Save Cargo downloads from the checks writer
+        if: >-
+          always() && !cancelled() && matrix.part == 'checks' &&
+          steps.execution.outcome != 'skipped' && steps.keys.outcome == 'success' &&
+          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+      - name: Save stopped compiler snapshot
+        if: >-
+          always() && !cancelled() && steps.finish.outputs.stopped == 'true' && steps.finish.outputs.has_objects == 'true' &&
+          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+
+  cargo:
+    name: cargo
+    runs-on: ubuntu-latest
+    needs: checks
+    if: always()
+    timeout-minutes: 1
+    steps:
+      - name: Require both groups to succeed
+        env:
+          RESULT: ${{ needs.checks.result }}
+        run: test "$RESULT" = success

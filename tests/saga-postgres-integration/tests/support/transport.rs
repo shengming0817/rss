@@ -254,8 +254,8 @@ async fn completion(
         faulty,
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
-    )
-    .with_lease_policy(LeasePolicy::new(Duration::from_millis(300))?);
+    );
+    // This proves lost COMMIT acknowledgement, not sub-second lease scheduling under load.
     executor.register(s, d, control).await?;
     assert_kind(executor.run(s, 30, control).await, ErrorKind::CommitUnknown);
     assert_eq!(proxy.lost.load(Ordering::SeqCst), 3);
@@ -263,7 +263,7 @@ async fn completion(
         direct.claim(s, Duration::from_secs(5), control).await,
         ErrorKind::Fenced,
     );
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    expire(owner, s).await?;
     let recovered = Executor::new(
         direct.clone(),
         protection()?,

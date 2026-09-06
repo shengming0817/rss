@@ -6,15 +6,17 @@ fail-fast = true
 slow-timeout = { period = "60s", terminate-after = 3 }
 leak-timeout = "200ms"
 
-[test-groups.trybuild]
+[test-groups.compiler-proof]
 max-threads = 1
 
 [test-groups.integration]
 max-threads = 1
 
 [[profile.default.overrides]]
-filter = 'binary(/(^trybuild$|_trybuild$)/)'
-test-group = "trybuild"
+# These tests spawn Cargo; sharing this group prevents independent compilers from
+# starving each other on a standard four-core runner. Test deadlines stay unchanged.
+filter = 'binary(/(^trybuild$|_trybuild$|^optional_features$|^feature_matrix$)/)'
+test-group = "compiler-proof"
 
 [[profile.default.overrides]]
 filter = 'package(/-integration$/)'

@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use crate::shutdown::{ShutdownFailures, ShutdownStage};
 use crate::{AmqpShutdownError, AmqpShutdownErrorKind};
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable, ShortString, ShortStringError};
@@ -217,16 +219,74 @@ where
 /// 一个 publisher generation 的完整 AMQP transport。connection 与 confirm channel 必须同生共死，
 /// 不能在旧 connection 上只换 channel，否则 connection reset 后会持续复用已失效的 transport。
 #[derive(Clone)]
-struct PublisherTransport<C, H> {
-    connection: C,
-    confirm_channel: H,
+struct PublisherTransport {
+    connection: Arc<Connection>,
+    confirm_channel: Channel,
+    close: PublisherClose,
 }
 
-impl<C, H> PublisherTransport<C, H> {
-    fn new(connection: C, confirm_channel: H) -> Self {
+/// Every owner of one generation polls the same close RPC and observes the same result.
+/// Cancellation and deadlines belong to each waiter, outside this shared operation.
+/// ref: amqp-rs/lapin src/internal_rpc.rs@v4.10.0 (Closing is queued asynchronously).
+#[derive(Clone)]
+struct PublisherClose {
+    future: Shared<BoxFuture<'static, lapin::Result<()>>>,
+    #[cfg(feature = "test-support")]
+    pause: Arc<Mutex<Option<ConfirmationPause>>>,
+}
+
+impl PublisherClose {
+    fn new(close: impl Future<Output = lapin::Result<()>> + Send + 'static) -> Self {
+        #[cfg(feature = "test-support")]
+        let pause: Arc<Mutex<Option<ConfirmationPause>>> = Arc::default();
+        #[cfg(feature = "test-support")]
+        let close = {
+            let pause = Arc::clone(&pause);
+            async move {
+                let barrier = pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(barrier) = barrier {
+                    let _ = barrier.entered.send(());
+                    let _ = barrier.resume.await;
+                }
+                close.await
+            }
+        };
+        Self {
+            future: close.boxed().shared(),
+            #[cfg(feature = "test-support")]
+            pause,
+        }
+    }
+
+    async fn wait(&self) -> lapin::Result<()> {
+        self.future.clone().await
+    }
+
+    fn request_now(&self) {
+        let _ = self.future.clone().now_or_never();
+    }
+}
+
+impl PublisherTransport {
+    fn new(connection: Arc<Connection>, confirm_channel: Channel) -> Self {
+        let closing = Arc::clone(&connection);
+        let close = PublisherClose::new(async move {
+            if closing.status().connected() {
+                closing
+                    .close(REPLY_SUCCESS, "publisher transport retirement".into())
+                    .await
+            } else {
+                // Broker failure can retire a connection before local cleanup starts.
+                Ok(())
+            }
+        });
         Self {
             connection,
             confirm_channel,
+            close,
         }
     }
 }
@@ -488,10 +548,8 @@ where
     }
 }
 
-type LapinPublisherTransport = PublisherTransport<Arc<Connection>, Channel>;
-
 struct PublisherTransportLifecycle {
-    slot: TransportSlot<LapinPublisherTransport>,
+    slot: TransportSlot<PublisherTransport>,
     recovery: Option<OwnedTransportRecovery>,
 }
 
@@ -508,7 +566,7 @@ impl Drop for OwnedTransportRecovery {
 }
 
 impl PublisherTransportLifecycle {
-    fn new(transport: LapinPublisherTransport) -> Self {
+    fn new(transport: PublisherTransport) -> Self {
         Self {
             slot: TransportSlot::ready(transport),
             recovery: None,
@@ -930,7 +988,7 @@ impl PublisherInner {
         };
         drop(recovery);
         if let Some(retiring) = retiring {
-            conn::close_connection_now(&retiring.transport.connection);
+            retiring.transport.close.request_now();
         }
     }
 
@@ -947,7 +1005,7 @@ impl PublisherInner {
     /// 自身仍 fail-fast。
     fn transport_snapshot(
         &self,
-    ) -> Result<TransportSnapshot<LapinPublisherTransport>, PublisherTransportError> {
+    ) -> Result<TransportSnapshot<PublisherTransport>, PublisherTransportError> {
         let mut lifecycle = self.lock_transports()?;
         match lifecycle.slot.snapshot() {
             Ok(snapshot) => Ok(snapshot),
@@ -978,7 +1036,7 @@ impl PublisherInner {
     fn spawn_transport_recovery(
         &self,
         lifecycle: &mut PublisherTransportLifecycle,
-        recovery: TransportRecovery<LapinPublisherTransport>,
+        recovery: TransportRecovery<PublisherTransport>,
     ) {
         if let Some(mut previous) = lifecycle.recovery.take() {
             crate::shutdown::observe_finished_task(&mut previous.task, "publisher_recovery");
@@ -993,13 +1051,13 @@ impl PublisherInner {
         let name = self.name.clone();
         let task_cancellation = cancellation.clone();
         // Create the guard before spawn: abort before the first poll must retire this session too.
-        let retiring_connection = recovery
+        let retiring_close = recovery
             .retiring
             .as_ref()
-            .map(|retiring| Arc::clone(&retiring.transport.connection));
+            .map(|retiring| retiring.transport.close.clone());
         let cleanup = conn::OnDrop::new(move || {
-            if let Some(connection) = retiring_connection {
-                conn::close_connection_now(&connection);
+            if let Some(close) = retiring_close {
+                close.request_now();
             }
         });
         let task = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -1070,7 +1128,7 @@ impl PublisherInner {
         };
         let close_on_cancel = conn::OnDrop::new(|| {
             if let Some(retiring) = &retiring {
-                conn::close_connection_now(&retiring.transport.connection);
+                retiring.transport.close.request_now();
             }
         });
         let mut failures = ShutdownFailures::default();
@@ -1086,16 +1144,12 @@ impl PublisherInner {
         );
         let transport_result = if let Some(retiring) = &retiring {
             retiring.admission.wait_until_idle().await;
-            if retiring.transport.connection.status().connected() {
-                retiring
-                    .transport
-                    .connection
-                    .close(REPLY_SUCCESS, "publisher resource shutdown".into())
-                    .await
-                    .map_err(AmqpShutdownError::operation)
-            } else {
-                Ok(())
-            }
+            retiring
+                .transport
+                .close
+                .wait()
+                .await
+                .map_err(AmqpShutdownError::operation)
         } else {
             Ok(())
         };
@@ -1140,6 +1194,25 @@ impl PublisherInner {
             Some(ConfirmationPause { entered, resume });
         (observed, release)
     }
+    #[cfg(feature = "test-support")]
+    pub(crate) fn pause_transport_close(
+        &self,
+    ) -> Option<(
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    )> {
+        let transport = self.lock_transports().ok()?.slot.snapshot().ok()?.transport;
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        *transport
+            .close
+            .pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(ConfirmationPause { entered, resume });
+        Some((observed, release))
+    }
+
     #[cfg(feature = "test-support")]
     pub(crate) fn generation(&self) -> Option<u64> {
         let lifecycle = self.lock_transports().ok()?;
@@ -1203,7 +1276,7 @@ async fn run_transport_recovery(
     started: tokio::time::Instant,
     recovery_deadline: tokio::time::Instant,
     cancellation: CancellationToken,
-    recovery: TransportRecovery<LapinPublisherTransport>,
+    recovery: TransportRecovery<PublisherTransport>,
 ) {
     let generation = recovery.generation;
     let Some(replacement) = recover_publisher_transport(
@@ -1213,7 +1286,7 @@ async fn run_transport_recovery(
         generation,
         started,
         recovery_deadline,
-        cancellation,
+        cancellation.clone(),
     )
     .await
     else {
@@ -1233,7 +1306,7 @@ async fn run_transport_recovery(
         return;
     };
 
-    let cleanup = conn::OnDrop::new(|| conn::close_connection_now(&replacement.connection));
+    let cleanup = conn::OnDrop::new(|| replacement.close.request_now());
     let installed = match transports.lock() {
         Ok(mut lifecycle) => lifecycle
             .slot
@@ -1263,8 +1336,9 @@ async fn run_transport_recovery(
     } else {
         // shutdown 或另一代 recovery 已先完成：replacement 不能成为无主可发布 transport。
         close_transport_bounded_at(
-            &replacement,
+            replacement.close.wait(),
             recovery_deadline,
+            &cancellation,
             &name,
             generation.saturating_add(1),
             "orphan_replacement",
@@ -1413,13 +1487,13 @@ where
 // reason: drain/close/create 三阶段各自需安全审计；复杂度主要来自 tracing 宏展开。
 async fn recover_publisher_transport(
     connection_config: &PublisherConnectionConfig,
-    retiring: Option<RetiringTransport<LapinPublisherTransport>>,
+    retiring: Option<RetiringTransport<PublisherTransport>>,
     name: &str,
     generation: u64,
     started: tokio::time::Instant,
     recovery_deadline: tokio::time::Instant,
     cancellation: CancellationToken,
-) -> Option<LapinPublisherTransport> {
+) -> Option<PublisherTransport> {
     let has_retiring = retiring.is_some();
     let result = run_publisher_transport_recovery_pipeline(
         started,
@@ -1442,12 +1516,14 @@ async fn recover_publisher_transport(
             }
         },
         async {
-            match retiring.as_ref().map(|value| &value.transport.connection) {
-                Some(connection) if connection.status().connected() => connection
-                    .close(REPLY_SUCCESS, "publisher transport retirement".into())
+            match retiring.as_ref() {
+                Some(retiring) => retiring
+                    .transport
+                    .close
+                    .wait()
                     .await
                     .map_err(TransportRecoveryClientError::Lapin),
-                Some(_) | None => Ok(()),
+                None => Ok(()),
             }
         },
         async {
@@ -1550,29 +1626,22 @@ async fn recover_publisher_transport(
 }
 
 #[allow(clippy::cognitive_complexity)]
-// reason: close 成功/client error/deadline 三态需独立安全审计；复杂度主要来自 tracing 宏展开。
+// reason: close 成功/client error/deadline/cancellation 四态需独立安全审计；复杂度主要来自 tracing 宏展开。
 #[allow(clippy::disallowed_methods)]
 // reason: orphan transport close 的 Tokio I/O absolute deadline；不表达业务时间。
-async fn close_transport_bounded_at(
-    transport: &LapinPublisherTransport,
+async fn close_transport_bounded_at<F, E>(
+    close: F,
     deadline: tokio::time::Instant,
+    cancellation: &CancellationToken,
     name: &str,
     generation: u64,
     phase: &'static str,
-) {
-    if !transport.connection.status().connected() {
-        return;
-    }
-    match tokio::time::timeout_at(
-        deadline,
-        transport
-            .connection
-            .close(REPLY_SUCCESS, "publisher transport retirement".into()),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => tracing::warn!(
+) where
+    F: Future<Output = Result<(), E>>,
+{
+    match run_recovery_cleanup_stage_at(deadline, cancellation, close).await {
+        Ok(()) => {}
+        Err(RecoveryStageError::Client(_)) => tracing::warn!(
             target: "amqp",
             resource = %name,
             transport_generation = generation,
@@ -1580,13 +1649,21 @@ async fn close_transport_bounded_at(
             result = "client_error",
             "amqp publisher transport close failed",
         ),
-        Err(_) => tracing::warn!(
+        Err(RecoveryStageError::Deadline) => tracing::warn!(
             target: "amqp",
             resource = %name,
             transport_generation = generation,
             phase,
             result = "deadline",
             "amqp publisher transport close deadline elapsed",
+        ),
+        Err(RecoveryStageError::Cancelled) => tracing::info!(
+            target: "amqp",
+            resource = %name,
+            transport_generation = generation,
+            phase,
+            result = "cancelled",
+            "amqp orphan close cancelled by resource shutdown",
         ),
     }
 }
@@ -1660,12 +1737,7 @@ impl Publisher<Vec<u8>> for PublisherInner {
                     )
                     .await?;
                 if inject_post_send_close {
-                    if transport.connection.status().connected() {
-                        transport
-                            .connection
-                            .close(REPLY_SUCCESS, "integration post-send fault".into())
-                            .await?;
-                    }
+                    transport.close.wait().await?;
                     return Err(lapin::Error::from(ErrorKind::InvalidConnectionState(
                         lapin::ConnectionState::Closed,
                     )));
@@ -2639,6 +2711,44 @@ mod publisher_channel_recovery_deadline_tests {
     };
 
     #[tokio::test(start_paused = true)]
+    async fn orphan_close_obeys_owner_cancellation_before_recovery_deadline() {
+        let cancellation = CancellationToken::new();
+        let child_cancel = cancellation.clone();
+        let forced = Arc::new(AtomicBool::new(false));
+        let closed = Arc::clone(&forced);
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _cleanup = crate::conn::OnDrop::new(|| closed.store(true, Ordering::SeqCst));
+            super::close_transport_bounded_at(
+                async {
+                    entered.send(()).expect("owner is waiting for orphan close");
+                    future::pending::<Result<(), Infallible>>().await
+                },
+                tokio::time::Instant::now() + Duration::from_secs(40),
+                &child_cancel,
+                "orphan-test",
+                1,
+                "orphan_replacement",
+            )
+            .await;
+        });
+        ready.await.expect("replacement has entered orphan cleanup");
+        let recovery = super::OwnedTransportRecovery {
+            task: tokio_util::task::AbortOnDropHandle::new(task),
+            cancellation,
+        };
+        let started = tokio::time::Instant::now();
+        crate::shutdown::within_budget(
+            Duration::from_secs(5),
+            super::join_cancelled_recovery(recovery),
+        )
+        .await
+        .expect("owner cancellation must finish orphan cleanup without its 40s deadline");
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(forced.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn replacement_create_hang_exits_within_total_recovery_budget() {
         let mut slot = TransportSlot::ready("channel-0");
         let generation = slot
@@ -2841,5 +2951,55 @@ mod task_ownership_tests {
         assert!(observer.is_cancelled());
         drop(closing);
         assert!(released.await.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod shared_close_tests {
+    use super::PublisherClose;
+    use futures::FutureExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn cancelled_waiter_and_drop_guard_share_one_close_result() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let (release, ready) = tokio::sync::oneshot::channel();
+        let close = PublisherClose::new(async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let _ = ready.await;
+            Ok(())
+        });
+        close.request_now();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let mut cancelled = close.wait().boxed();
+        assert!(futures::poll!(&mut cancelled).is_pending());
+        drop(cancelled);
+        close.request_now();
+        assert!(release.send(()).is_ok());
+        let (first, second) = tokio::join!(close.wait(), close.wait());
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn close_failure_is_preserved_for_every_owner() {
+        let close = PublisherClose::new(async {
+            Err(lapin::ErrorKind::InvalidConnectionState(lapin::ConnectionState::Error).into())
+        });
+        close.request_now();
+        for _ in 0..2 {
+            let result = close.wait().await;
+            assert!(matches!(
+                result.as_ref().map_err(lapin::Error::kind),
+                Err(lapin::ErrorKind::InvalidConnectionState(
+                    lapin::ConnectionState::Error
+                ))
+            ));
+        }
     }
 }

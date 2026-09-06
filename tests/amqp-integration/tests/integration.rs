@@ -741,8 +741,14 @@ async fn private_ca_and_split_roles_fail_closed(
     let route = MessageRoute::parse(route)?;
 
     assert_tls_roundtrip(&publisher, &subscriber, &route).await?;
-    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
-    shutdown_bounded(subscriber_resource.shutdown(Duration::from_secs(5))).await?;
+    publisher_resource
+        .shutdown(Duration::from_secs(5))
+        .await
+        .map_err(|error| anyhow::anyhow!("publisher shutdown failed: {:?}", error.kind()))?;
+    subscriber_resource
+        .shutdown(Duration::from_secs(5))
+        .await
+        .map_err(|error| anyhow::anyhow!("subscriber shutdown failed: {:?}", error.kind()))?;
     Ok(())
 }
 
@@ -807,6 +813,12 @@ async fn publisher_and_security_suite() -> anyhow::Result<()> {
         deadline,
         "cancelled publish",
         transport::cancelled_publish_retires_generation_and_owner_cannot_revive(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "publisher close ownership",
+        transport::publisher_recovery_and_shutdown_share_broker_close(&rabbit),
     )
     .await?;
     suite_phase(

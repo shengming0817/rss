@@ -322,14 +322,30 @@ fn cargo<const N: usize>(
     args: [&str; N],
 ) -> Result<Output, Box<dyn Error>> {
     let cargo = option_env!("CARGO").unwrap_or("cargo");
-    Ok(Command::new(cargo)
-        .args(args)
+    let mut command = Command::new(cargo);
+    command.args(args);
+    if args.first() == Some(&"metadata") {
+        // This proves native consumer closure, not dependency availability on every platform.
+        let rustc = Command::new("rustc")
+            .arg("-vV")
+            .current_dir(root)
+            .output()?;
+        ensure_success("native target", "rustc -vV", &rustc)?;
+        let version = String::from_utf8(rustc.stdout)?;
+        let host = version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .ok_or("rustc omitted host target")?;
+        command.args(["--filter-platform", host]);
+    }
+    Ok(command
         .current_dir(root)
         .env("CARGO_TARGET_DIR", temp_root.join("target"))
         .env_remove("CARGO")
         .env_remove("RUSTC")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTDOCFLAGS")
         .output()?)
 }

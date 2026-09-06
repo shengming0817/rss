@@ -88,7 +88,6 @@ async fn recover(
             store: store.clone(),
             key: t.scope().reconciler().to_owned(),
         };
-        let local = c.child(Duration::from_millis(100));
         let policy = Policy::try_from(rss_reconcile::PolicyConfig {
             concurrency: 1,
             lease_ttl: Duration::from_secs(1),
@@ -98,9 +97,30 @@ async fn recover(
             max_backoff: Duration::from_millis(10),
             max_attempts: 3,
         })?;
-        let report =
-            rss_reconcile::run(store.as_ref(), &runner, t.scope(), policy, &local, |_| {}).await?;
-        assert_eq!(report.converged, 1);
+        // Recovery is a durable-state assertion, not a 100ms performance assertion.
+        // Keep the caller's existing budget, and stop the worker once finish has committed.
+        let converged = async {
+            loop {
+                let finished = sqlx::query_scalar::<_, bool>(
+                    "SELECT result='converged' FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3",
+                )
+                .bind(t.scope().tenant().to_string())
+                .bind(t.scope().reconciler())
+                .bind(t.entity())
+                .fetch_one(owner)
+                .await?;
+                if finished {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                c.sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            result = rss_reconcile::run(store.as_ref(), &runner, t.scope(), policy, c, |_| {}) => {
+                anyhow::bail!("{mode}: recovery stopped before durable convergence: {:?}", result?);
+            }
+            result = tokio::time::timeout(c.remaining(), converged) => { result??; }
+        }
         assert_eq!(count(owner, t.scope().reconciler()).await?, 1);
     }
     Ok(())
