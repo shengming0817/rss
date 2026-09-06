@@ -1,0 +1,21 @@
+[package]
+name = "kafka-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+[lints]
+workspace = true
+[dev-dependencies]
+rss-transactional-messaging-kafka = { workspace = true, features = ["test-support"] }
+rdkafka.workspace = true
+rss-transactional-messaging.workspace = true
+rss-transactional-messaging-runtime.workspace = true
+rss-transactional-messaging-postgres.workspace = true
+rss-transactional-messaging-testkit.workspace = true
+rss-contract.workspace = true
+rss-request-context.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+anyhow.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

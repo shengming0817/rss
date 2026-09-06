@@ -6,6 +6,16 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-transactional-messaging-kafka 0.1.0 (#2306)
+
+- Add an experimental publisher-only Kafka adapter with verified TLS, bounded native ownership,
+  typed delivery receipts and conservative ambiguous outcomes. Existing PostgreSQL Outbox/relay
+  provide same-ID at-least-once publication without changing their public APIs or database schema.
+- Require caller-owned Kafka client identity, retire fatal native owners, distinguish native/core
+  timeouts, and verify mTLS/SCRAM authentication and receipt coordinates against the real broker.
+- Confine the vendored OpenSSL dependency exception to librdkafka's adapter/test dependency chain.
+  Kafka consumers, transactions, projection sources and product deployment remain outside this change.
+
 ### Transactional message recovery (#2301)
 
 - Add experimental `rss-transactional-messaging-recovery 0.1.0` and explicit PostgreSQL recovery:
@@ -19,7 +29,6 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
   exposed. Exact operation retries reuse receipts; replay identities are unique across operations.
 - Identity authority, approvals, production migration execution, retention, S3 archival and DR
   orchestration remain outside this increment; no retired aggregate package is restored.
-
 
 ### Internal package retirement (#2299)
 

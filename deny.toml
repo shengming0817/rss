@@ -59,7 +59,11 @@ deny = [
   { crate = "tokio-native-tls", use-instead = "tokio-rustls" },
   { crate = "async-native-tls", use-instead = "rustls" },
   { crate = "openssl", use-instead = "rustls" },
-  { crate = "openssl-sys", use-instead = "rustls" },
+  # #2306: librdkafka owns this native TLS exception; all other TLS bans remain.
+  { crate = "openssl-sys", wrappers = ["rdkafka-sys"] },
+  { crate = "openssl-src", wrappers = ["openssl-sys"] },
+  { crate = "rdkafka-sys", wrappers = ["rdkafka"] },
+  { crate = "rdkafka", wrappers = ["rss-transactional-messaging-kafka", "kafka-integration"] },
   { crate = "async-openssl", use-instead = "rustls" },
   { crate = "aws-lc-rs", use-instead = "rustls ring provider" },
   { crate = "aws-lc-sys", use-instead = "rustls ring provider" },

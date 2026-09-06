@@ -172,10 +172,12 @@ mod runtime;
 mod tls;
 use tls::*;
 
+mod kafka;
 mod postgres;
 mod rabbitmq;
 mod redis;
 
+pub use kafka::{KafkaTlsFixture, KafkaTlsServerIdentity, kafka_tls};
 pub use postgres::{PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls};
 pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, managed_rabbitmq, rabbitmq_tls};
 pub use redis::{RedisFixture, managed_redis};

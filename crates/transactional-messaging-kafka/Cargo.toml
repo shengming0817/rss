@@ -1,0 +1,38 @@
+[package]
+name = "rss-transactional-messaging-kafka"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Bounded Kafka publishing for RSS transactional messaging"
+categories = ["asynchronous"]
+keywords = ["kafka", "messaging", "outbox"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+rdkafka.workspace = true
+rss-redact.workspace = true
+rss-transactional-messaging.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+tempfile.workspace = true
+anyhow.workspace = true
+rss-contract.workspace = true
+rss-request-context.workspace = true
+static_assertions.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
