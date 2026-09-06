@@ -2,20 +2,8 @@
 
 > 本文件只拥有 Rust 语言层规范，不拥有架构、contract 或一致性分类。
 
-## 分层依赖（crate 图 + deny.toml 编译期强制）
-
-依赖矩阵由 typed layer catalog 持有，本文件不复制。Rust 语言层要点：cargo 拒绝循环依赖；禁依赖用
-`cargo-deny`，已发布外部 API 面用 `cargo-semver-checks` 守。
-
-## DDD 分层（crate 内 module）
-
-- `handler`（http）：参数绑定、鉴权结果消费、响应返回。
-- `application`：业务编排。
-- `domain`：实体、值对象、领域服务，不依赖框架。
-- `repository` / `ports`：持久化 trait 与实现，不放业务判断。
-
-domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过 EventBus 或 contract 解耦。
-**domain 类型不 derive `Serialize`**——只有 contract / DTO 类型可序列化到 wire，从类型层杜绝 "把 entity 直接序列化"。
+crate 划分、依赖方向及模块边界只按[架构与依赖规则](dependency-policy.md)判断，
+本文件不规定业务分层或目录布局。
 
 ## 工程护栏
 
@@ -32,6 +20,7 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - DB 字段 snake_case。
 - JSON、query、path、event header 字段 camelCase（`#[serde(rename_all = "camelCase")]`）。
 - 错误使用 `vocab`(error) + `thiserror`。
+- 日志和追踪使用结构化字段与关联上下文，输出遵循[错误处理](error-handling.md)的脱敏边界。
 - mock 放 `#[cfg(test)]` 模块或 `mockall`；crate 的 dependency/dev-dependency 边界由 Cargo manifest 显式声明。
 - 真实 provider 集成测试放在 `tests/*-integration` 的 `publish=false` workspace package；该 package
   直接依赖被测 adapter、testkit，并显式启用 adapter 所需的测试 feature。Cargo 反向依赖图
@@ -40,7 +29,6 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 ## 覆盖率
 
 - 完整 workspace 行覆盖率 ≥ 80%（`cargo-llvm-cov`）。
-- handler 用 `axum::http` / `tower::ServiceExt::oneshot` 覆盖参数校验、鉴权、错误码。
 
 ## 数据库迁移
 
@@ -49,18 +37,3 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 - 索引形态按阶段：pre-GA / 有序 migration 集 / 新建或空表用普通 `CREATE INDEX`（留在事务型 migration）；
   `CONCURRENTLY` 仅用于 post-GA 给已填充、有在线流量的生产表加索引。消息专属 SQL artifact 与外部执行边界见 `crates/transactional-messaging-postgres/README.md`。
 - 文件命名：`{序号}_{动词}_{对象}.sql`。
-
-## 安全检查点
-
-- 新端点默认鉴权；public 降级仅 `Primary` listener，且只能由 generated
-  `HttpRouteEvidence::auth() == HttpRouteAuth::Public` 经 `GeneratedPrimaryEndpoint` 推导；禁止手写 opt-out。
-- `/internal/v1/` 必须声明 caller、鉴权和网络隔离。
-- 列表接口强制分页，`limit` 上限 500。
-- 生产配置禁止 localhost fallback 和 noop publisher。
-
-## API
-
-- 资源用复数名词，动作由 HTTP method 表达。
-- 状态码：200 GET/PUT/PATCH，201 POST，202 async，204 DELETE。
-- 列表响应：`data`、`nextCursor`、`hasMore`。
-- 错误响应使用 shared error schema。

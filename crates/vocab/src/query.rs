@@ -1,4 +1,4 @@
-//! 基础查询上限词汇。分页 token 由 `rss_contract::PageCursor` 拥有。limit 上限语义见 rust-standards（≤500）。
+//! 基础查询上限词汇。分页 token 由 `rss_contract::PageCursor` 拥有；查询数量边界由 [`Limit`] 定义。
 
 /// 分页上限校验错误。
 #[derive(Debug, thiserror::Error)]
@@ -8,13 +8,15 @@ pub enum LimitError {
     TooLarge,
 }
 
-/// 分页上限 newtype（私有字段，构造时校验 ≤500）。
+/// 查询数量上限，合法范围为 0 到 500（含两端）。
+///
+/// 最大值限制单次查询的请求规模；0 保留给仅计数查询。默认页大小及业务下限由调用方决定。
+/// 私有字段保证取值经过 [`Self::new`] 校验。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limit(u16);
 
 impl Limit {
-    /// 构造，上限 500（超出拒绝）。
-    // reason: limit=0 合法（count-only 查询）；默认页大小与下限由调用方/handler 决定。
+    /// 按 [`Limit`] 的范围构造查询上限，超出范围返回 [`LimitError::TooLarge`]。
     pub fn new(value: u16) -> Result<Self, LimitError> {
         if value > 500 {
             Err(LimitError::TooLarge)

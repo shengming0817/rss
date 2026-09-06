@@ -1,110 +1,52 @@
-# RSS 依赖使用与能力实现规则
+# RSS 架构与依赖规则
 
-本文件只拥有依赖与自研准入；能力范围由独立 policy owner 决定。依赖版本和 feature 由 workspace
-`Cargo.toml` 与 `Cargo.lock` 声明。
+本文拥有 crate 划分、依赖方向、依赖与自研选择。能力是否属于 RSS 由
+[项目范围](project-scope.md)决定；兼容与退出遵循[版本规则](api-versioning.md)，
+验证遵循[验证范围](verification-scope.md)，约束强度遵循[AI-robust 规则](ai-robust.md)。
 
-## 实现顺序
+## 职责与依赖方向
 
-```text
-直接使用成熟上游
-→ 内部薄适配
-→ RSS 语义 wrapper / composition
-→ 核心不变量需要时自研
-```
+- 按共同变化原因、唯一职责和真实消费需求划分能力；不以文件大小、类型数量或多个调用方共用作为拆包依据。
+- 核心拥有其所需的窄 port，adapter 实现 port，消费方负责组合。核心不依赖具体 provider 或消费方；
+  conformance 不拥有 provider 实现或测试基础设施。
+- 保留必要协议和值类型依赖；通用能力不吸收业务特化，共享类型只由一个能力拥有。
+- 公开接口表达能力所需语义，不为测试便利或潜在替换新增通用注册、动态发现或全局接口中心。
+- 区分资源所有权与进程控制权；库可拥有必要的资源清理和有界执行，不强制消费方采用整套应用组织方式。
+- 实现接缝可以开放，但不能因此转移受控资源的唯一所有权。
 
-## 机制归属
+## 边界选择
 
-| 机制 | 上游机制 | RSS 语义 |
-|------|----------|----------|
-| 异步与任务 | async runtime / task utility | startup transaction、任务 owner、readiness、drain/shutdown |
-| HTTP / RPC | server、router、middleware、client | contract binding、tenant/auth context、统一错误与 lifecycle |
-| 序列化与 schema | serializer、schema 标准与库 | contract metadata、compatibility、deterministic codegen |
-| 数据库与缓存 | driver、pool、数据库能力 | tenant-safe transaction、RLS、LocalTx、outbox/inbox、fencing |
-| 消息与设备协议 | broker/MQTT client | settlement、idempotency、DLQ、command/reconcile 与 recovery |
-| 对象存储 | 标准 SDK | archive/WORM receipt、tenant/security policy 与 recovery |
-| TLS、身份与密码学 | 安全库与外部身份系统 | verified identity、key-use policy、rotation/revocation、redaction |
-| 可观测与弹性 | telemetry、限流与 resilience 库 | RSS label、trace、health、failure posture 与业务幂等边界 |
-| 测试与治理 | Cargo/rustc、lint/gate 与测试工具 | conformance、journey、fault/recovery oracle 与结构化诊断 |
+| 选择 | 适用条件 |
+|---|---|
+| 保留强依赖 | 能力必需的协议、稳定值类型或所选技术实现 |
+| 包内模块 | 仅内部组织不同，没有独立消费或发布需求 |
+| 可选 feature | 存在真实独立选择需求，共享主要职责，关闭后基础能力仍完整可用 |
+| 独立 crate | 职责与消费边界独立，独立发布的收益足以承担维护成本 |
+| 外置 | 能力不属于项目范围，交由外部 owner 持有 |
 
-具体选择以 workspace 依赖、能力 owner 和真实 consumer 为依据。
+## 复杂度与准入
 
-## 实施前判定
+- 优先直接使用成熟上游；需要适配时只承载实际语义差异，只有核心不变量必需时才自研。
+- 新增抽象、feature 或 crate 前，明确职责、真实消费者、公开边界、资源 owner、预期收益和替换退出路径；
+  比较新增分支、组合验证、文档与版本维护成本，选择满足需求的最小机制。
+- feature 保持加法式和可组合，不用互斥开关选择整套架构；安全与一致性保证不得随 feature 改变。
+- 不以包数量、依赖条数、零依赖或所有实现均可替换为目标；以性能为理由时提供测量证据。
+- 薄适配必须承载必要的身份传播、错误边界、资源约束或一致性语义，不复制上游通用机制。
 
-新增依赖、wrapper、port、adapter 或自研机制前确定：
+## 依赖管理
 
-1. capability owner 与真实 consumer。
-2. workspace/upstream 可复用机制。
-3. RSS-specific semantic 与 thin adapter 边界。
-4. public API、support matrix 与 dependency feature closure 影响。
-5. 重复机制的 `yes/no` 结论与明细。
-6. upgrade、replacement 与 removal path。
-
-## 机器约束
-
-| 条件 | 权威 carrier |
-|------|--------------|
-| 使用方直接声明依赖并形成合法无环图 | Cargo manifest/rustc |
-| workspace 外部 version pin 与 lock 对齐 | `[workspace.dependencies]`、`Cargo.lock`、`--locked` |
-| license、advisory 与 source policy | `deny.toml`、`cargo deny` |
+- 使用方显式声明实际依赖与所需能力，保持依赖图无环；版本、来源和 feature 选择由 Cargo 声明持有。
+- 依赖声明与锁定结果保持一致，依赖必须满足项目的许可证、安全公告和来源政策。
+- 依赖升级与替换同时考虑公开行为、消费组合及维护成本；兼容与删除条件只按版本规则判断。
 
 ### 临时 advisory 风险接受
 
-图内 RustSec advisory 默认不得 ignore。若修复被上游发布阻塞且产品决定临时接受风险，必须同时满足：
+图内 advisory 默认不得忽略。上游尚无修复而临时接受风险时，必须同时满足：
 
-- `deny.toml [advisories].ignore` 使用含 issue 与风险原因的结构化条目，并以完整 `DEFER`
-  元数据声明 owner、阻塞条件和撤销条件；
-- canonical cargo-audit 步骤同步每个 `--ignore`，保持双扫描器对账；
-- 机器守卫必须通过 `WorkspaceFacts` owned resolved-package/edge DTO，对每项 advisory 的完整
-  受影响 PackageId 集合与唯一允许集合做精确比较，并锁定唯一依赖根；出现第二脆弱版本、第二
-  source、额外父依赖或上游已移除该依赖时 fail-closed，暴露扩大或过期的豁免；
-- 风险接受必须有独立 owner 与撤销条件；上游修复可用后升级依赖并在同一变更中删除两侧豁免。
+- 豁免绑定具体问题、风险原因、责任人、阻塞条件和撤销条件。
+- 各安全扫描入口对同一豁免保持一致。
+- 确定性检查精确限定受影响依赖的完整身份集合及唯一允许依赖根；出现额外版本、来源、父依赖，
+  或上游已移除相关依赖时拒绝过期或扩大的豁免。
+- 修复可用后升级依赖，并在同一变更中删除所有对应豁免。
 
-该机制仅表示显式风险接受，不得宣称漏洞已修复，也不得扩大到没有独立跟踪项的其它依赖。
-
-## Wrapper 与 adapter
-
-薄适配至少承载一项 RSS 语义：
-
-- `TenantContext`、Principal 或 Device Identity 传播；
-- fail-closed、timeout、cancellation 或 bounded-drain posture；
-- LocalTx、outbox、idempotency、settlement、checkpoint 或 fencing；
-- redaction、audit 或 trace continuity；
-- 上游错误到稳定 RSS 错误模型的映射。
-
-Core 公开 contract 只暴露 provider-neutral 语义，不依赖 SQLx。经 Release Surface 接纳的 PostgreSQL
-adapter 可以向可信 companion 基础设施暴露 provider-specific SQLx 借用接口；应用 handler 仅接收 typed
-repositories。事务生命周期和连接归还由 adapter 唯一拥有，不增加通用 effect 框架或兼容桥。
-
-Tooling 的 Cargo facts 遵循同一边界：复用 `workspacefacts` 时，catalog / feature selection 经 guppy
-`PackageGraph` / `CargoSet`，declaration-granularity provenance 经同一 `cargo metadata` JSON 的私有 raw
-投影；轻量 CI selector 直接消费标准 `cargo metadata` schema，只输出 package reverse closure。
-
-## Port / trait
-
-RSS port 用于：
-
-- domain 业务或一致性语义；
-- raw client 与 domain 之间的安全边界；
-- external side effect 的 failure injection、conformance 或 transaction seam；
-- 多个实际交付实现的共同 consumer contract；
-- 已确认的实现替换需求。
-
-单一 provider 由 composition root 构造，通过窄语义 wrapper 使用。测试复用上游 mock、受控 factory 或测试工具。
-
-## 自研范围
-
-- contract/codegen 与运行 binding；
-- L0–L4 typed semantic、receipt、idempotency、fencing/checkpoint 与 recovery；
-- tenant-safe transaction/RLS funnel；
-- Verified Principal/Tenant/Device/credential 与 authorization obligation；
-- provider-neutral execution ordering、cancellation 与 bounded drain lifecycle primitive；
-- conformance、fault/recovery 与 upgrade evidence。
-
-自研 ADR 记录 invariant、上游组合评估、owner、consumer、正确性/安全/性能/互操作证据，以及替换触发条件。
-
-## 升级与替换
-
-- 升级验证 feature/target、公开行为、schema/wire compatibility 与 production posture。
-- workspace 保持统一 dependency declaration 与 feature closure。
-- candidate 通过后切换唯一调用路径并移除旧路径。
-- production acceptance replacement 必须 first-green 后原子切换并删除旧 carrier。
+风险接受不表示漏洞已修复，不得扩展到未独立跟踪的其它风险。

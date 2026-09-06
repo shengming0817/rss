@@ -50,7 +50,7 @@ tools:
 - 如果单条实际影响超过 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API / 需改 deny.toml 分层） → 立即停止，回报调用方升级处理
 - 批量模式下：先全部判一遍复杂度，Cx3/Cx4 条目剔除并回报，只处理剩余 Cx1/Cx2
 
-### 2. 检查对标约束（基础/基建/域/adapters crate 下修改时）
+### 2. 检查对标约束
 
 按对标规则（`ref:` commit 工作流见 CLAUDE.md §参考框架）：
 - 直接读取当前模块对应的 primary upstream 源码
@@ -67,27 +67,16 @@ tools:
 
 ### 4. 补/改测试
 
-- 新增代码必须有对应测试（底座 crate `consistency`/`primitives`/`vocab` ≥ 90%，其他 ≥ 80%）
-- 表驱动测试（`#[test]` / `rstest` 参数化）覆盖边界用例
+- 按验证与语言规则选择与改动相匹配的测试，覆盖受影响的边界与错误路径。
 
 ### 5. 验证与收尾
 
 - **单任务报告**：改了什么文件、测试结果、遗留项（如有）
 - **批量任务报告**：逐条列状态表（✅ FIXED / ⚠ ESCALATE / ⏭ SKIPPED-Cx3+），末尾给改动文件汇总与统一测试结果
 
-## 编码规范（必须遵守）
+## 规则入口
 
-- 错误用 `vocab` 错误模型 + `thiserror`（库错误枚举），应用边界可 `anyhow`；不裸 `panic!` 对外
-- 日志 / 追踪用 `tracing`（结构化字段 + span），不 `println!`
-- DB `snake_case`，JSON/Query/Path `camelCase`（`#[serde(rename_all = "camelCase")]`）
-- clippy 认知复杂度 ≤ 15（`clippy::cognitive_complexity`）
-- 同义字符串 ≥ 3 次使用需抽 `const`
-- HTTP 错误响应格式 `{"error": {"code","message","details"}}`
-- EventBus consumer 订阅声明来自 `Cargo.toml [dependencies]` + `contract.toml`、派生到 `generated`，不得靠注释合规
-
-> RSS workspace 成员与依赖图以 Cargo metadata 为事实源；`deny.toml` 补充敏感 wrapper 约束。
-
-升级判据：单条任务若实际影响超出 Cx2 范围（跨 3+ crate / 需改 trait 或公共 API / 需改 `deny.toml` 分层） → 立即停止，回报调用方升级处理。
+能力范围遵循 [project-scope](../../docs/rules/project-scope.md)，架构与依赖遵循 [dependency-policy](../../docs/rules/dependency-policy.md)，兼容性遵循 [api-versioning](../../docs/rules/api-versioning.md)，验证遵循 [verification-scope](../../docs/rules/verification-scope.md)，约束强度遵循 [ai-robust](../../docs/rules/ai-robust.md)，语言与错误边界遵循 [rust-standards](../../docs/rules/rust-standards.md)和 [error-handling](../../docs/rules/error-handling.md)。本 agent 不复制规则阈值、响应格式或实现约束。
 
 ## Git 约束
 

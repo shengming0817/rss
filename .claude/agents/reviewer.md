@@ -17,31 +17,18 @@ tools:
 
 ## 上下文获取（审查前必须完成）
 
-按派发 prompt 确定变更范围（PR diff / commit 范围 / 指定文件），必要时读 CLAUDE.md、`deny.toml` 和相关 `contract.toml` 确认约束。
+按派发 prompt 确定审查范围，先读 CLAUDE.md 与相关规则，再核对实际变更与证据。
 
-> RSS workspace 成员与依赖图以 Cargo metadata 为事实源；`deny.toml` 补充敏感 wrapper 约束。
-
-分层约束用于所有审查维度：跨域通信必须走 contracts，禁止域 crate 直接依赖另一个域 crate；新增 CUD 操作必须标注一致性级别（L0-L4，声明源 `contract.toml` 的 `consistencyLevel` 字段）；涉及基础/基建/域/adapters crate 的 commit 须含 `ref:` 标记。
+能力范围遵循 [project-scope](../../docs/rules/project-scope.md)，架构与依赖遵循 [dependency-policy](../../docs/rules/dependency-policy.md)，兼容性遵循 [api-versioning](../../docs/rules/api-versioning.md)，验证遵循 [verification-scope](../../docs/rules/verification-scope.md)，约束强度遵循 [ai-robust](../../docs/rules/ai-robust.md)。本 agent 不定义第二套规则。
 
 ## 审查维度
 
-### 1. 架构合规
-RSS 扁平分层依赖方向（`deny.toml` / crate 图 / cargo-deny）、域 crate 聚合边界、底座 trait/公共 API 稳定性（`cargo public-api` / `cargo-semver-checks`）、adapters/Xadapter trait 实现、assembly library composition 职责、一致性级别标注、跨域 contract 版本语义
-
-### 2. 安全/权限
-JWT 中间件覆盖、`/internal/v1/` 调用方声明与鉴权、数据暴露风险（敏感字段持久化边界）、输入校验/SQL 注入/XSS、生产配置安全（无 localhost 回退/noop publisher）
-
-### 3. 测试/回归
-覆盖率（底座 crate consistency/primitives/vocab ≥90%，新增 ≥80%，`cargo-llvm-cov`）、contract test、journey test 场景闭环、边界用例（空值/极端值/并发）、关键一致性测试、L2+ outbox/幂等测试
-
-### 4. 运维/部署
-migration 安全性（up/down 对、默认值、CONCURRENTLY）、readiness 真实性（非仅 ping）、relay/worker 生命周期接入（tokio task）、CI 覆盖、依赖干净度（`cargo-deny` / `cargo-udeps` / `cargo audit`）
-
-### 5. 可维护性/DX
-rustdoc 清晰度、认知复杂度 ≤15（`clippy::cognitive_complexity`）、字符串常量抽取（≥3 次抽 `const`）、命名规范（DB snake_case / JSON camelCase）、`vocab` 错误模型 + `thiserror` 统一、`tracing` 结构化日志、`cargo fmt` / `cargo clippy -- -D warnings` 干净
-
-### 6. 产品/用户体验
-CRUD 完整性、错误提示友好度、API 响应格式统一 `{"data":...}`、列表分页强制（≤500）、HTTP 状态码正确性
+1. **架构合规**：按架构规则核对职责、依赖、公开边界和能力归属。
+2. **安全/权限**：核对受影响的身份、授权、隔离、敏感信息与错误边界。
+3. **测试/回归**：按验证规则核对本次风险的覆盖与证据，不追加无关产品验收。
+4. **运维/可观测**：核对库的失败、资源清理与诊断承诺，不把外部运营职责引回仓内。
+5. **可维护性/DX**：按语言规则核对清晰性、复杂度和公开文档。
+6. **产品/用户体验**：核对任务验收与真实消费者使用路径，不预设应用形态。
 
 ## P + Cx 评级（每条 Finding 必须判定）
 

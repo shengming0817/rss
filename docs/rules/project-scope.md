@@ -52,18 +52,14 @@ External 能力不得以 archive、legacy、plugin、compatibility façade 或�
 - internal `pub`、workspace package、路径依赖或 generated artifact 不自动成为 Release API。
 - Release Surface 明确接纳与 package artifact 闭合共同选择公共 package；Release API 兼容性归
   `api-versioning.md`。
-- Core 不依赖 provider 或消费方；conformance 不拥有 provider 实现或测试基础设施。
-- 候选 crate 可以拥有其公共算法签名和 conformance 所必需的最小 semantic trait/callback；不得借此引入通用 Provider SPI、
-  registry、动态发现、client、配置、生命周期、选择逻辑或具体实现。
+- crate 划分、依赖方向与公共 port 设计遵循[架构与依赖规则](dependency-policy.md)。
 - package 数量、名称和依赖 DAG 由职责边界、最终 Cargo metadata 与维护者接纳确认，不能从既有目录、临时抽取路径
   或本文反推。
 
 ## 验证边界
 
-- T1 证明类型、状态机、API 与 package 不变量；T2 覆盖公共语义无法由 T1 观察的 seam 与已接纳 adapter 的真实后端行为。
-- T3、production profile、binary/image、deployment 与产品级 recovery 不属于 RSS。
-- 结构边界最终由 Cargo metadata、target kind、依赖图、package proof 和 tracked-path audit 验证。
-- Markdown 只记录范围与决策，不充当 package inventory、删除完成证明或运行 receipt。
+验证深度、消费组合与发布收尾由[验证范围](verification-scope.md)持有；
+约束强度与证据要求由[AI-robust 规则](ai-robust.md)持有。
 
 ## 能力准入
 

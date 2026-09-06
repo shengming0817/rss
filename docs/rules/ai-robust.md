@@ -1,24 +1,25 @@
 # AI-robust 治理章程
 
-RSS 的 AI-robust 治理保护安全、正确性、兼容性和生产运行不变量。关键约束优先由 Cargo/crate 图、visibility、
-类型系统、schema 与 codegen 表达；跨文件、真实后端和 production 组合使用确定性的 Medium carrier。
+本文只拥有约束强度与证据要求。能力准入见[项目范围](project-scope.md)，架构与依赖方向见
+[架构与依赖规则](dependency-policy.md)，兼容承诺见[版本规则](api-versioning.md)，
+验证深度与消费组合见[验证范围](verification-scope.md)。
 
 ## 风险类型
 
 | 风险 | 保护对象 | 首选证明 |
 |------|----------|----------|
-| 架构依赖与可见性 | crate/domain 方向、public/internal seam、构造与 lifecycle owner | Cargo graph、visibility、sealed trait、外部 consumer 编译 |
+| 架构依赖与可见性 | crate 方向、public/internal seam、构造与 lifecycle owner | Cargo graph、visibility、sealed trait、外部 consumer 编译 |
 | 契约与兼容性 | contract identity、wire schema、codegen/binding、公开 API | schema、typed binding、deterministic codegen、breaking/deprecation |
 | 安全、租户与可信 evidence | verified identity、tenant authority、credential、RLS、receipt | 私有构造、newtype、sealed receipt、真实 verifier/provider conformance |
 | 一致性状态转换 | commit/rollback/unknown、idempotency、settlement、checkpoint、fencing | typed state、transaction conformance、fault/recovery proof |
-| Library runtime lifecycle | task/resource ownership、startup transaction、cancellation、bounded drain | typestate、private construction、single cancellation root、lifecycle tests |
+| Library runtime lifecycle | 资源所有权、取消与有界清理 | 所有权约束、状态边界与行为验证 |
 
 ## 强度
 
 | 级别 | 定义 | 典型载体 |
 |------|------|----------|
 | **Hard** | 违规不可表达，或修改必然导致 production consumer 编译、构建或构造失败 | Cargo 图、visibility、private field、newtype、sealed trait、typestate、必填构造器、被 production target 编译的 generated Rust |
-| **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy、cargo-deny、type-aware test、bootstrap guard、provider conformance |
+| **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy、cargo-deny、type-aware test、provider conformance |
 | **Soft** | 面向设计与 review 的说明 | 文档、注释、命名与 review guidance |
 
 关键约束采用 Hard 或 Medium；可由类型和依赖图表达的约束采用 Hard。
@@ -40,20 +41,14 @@ Hard admission 是 fail-closed 的语义判定：必须能从 Cargo production t
 - README 文案和手工 expected count；
 - 无 consumer 的未来 API；
 - 通用 CI、构建编排和研发控制平台；
-- domain × provider × assembly × fault 测试笛卡尔积；
 - 已删除私有 API 的 compile-fail 墓碑；重新引入会恢复真实安全或一致性绕过时，按对应 invariant 保留。
 
 迁移期 carrier 记录 owner、目标 hazard、替代载体和删除条件；目标 invariant 被稳定载体覆盖后移除。
 
 ## 证据层
 
-Hard/Medium/Soft 表示 enforcement 强度；T1/T2 表示仓内验证深度，两轴不得互相推导。
-
-- **T1**：Cargo、类型、schema/codegen、compile-fail、组件属性和状态机。
-- **T2**：consumer/provider conformance、真实 DB/Broker/identity seam、事务与接缝故障。
-- **External**：产品进程、应用镜像、部署、production join、启动/重启/排空和 operator recovery 由外部消费者证明，不是仓内 T3 carrier。
-
-每个仓内 invariant 选择覆盖目标失效模式的最低充分 T1/T2；外部产品风险不由仓内证据代证。
+Hard/Medium/Soft 表示 enforcement 强度，验证深度由[验证范围](verification-scope.md)定义，两轴不得互相推导。
+设计指导不自动构成机器约束，也不能凭规则文字宣称行为已被验证。
 
 ## 实施前判定
 
@@ -96,51 +91,21 @@ Funnel 类约束分别说明上游和下游强度；callsite 约束同时说明�
 
 ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并在同一改动中重写冲突段落。
 
-## 风险实施规则
+## 风险证明边界
 
-### 架构依赖与可见性
-
-- Cargo manifest 和分层规则表达依赖方向。
-- `pub(crate)`、private field、sealed trait 表达 public/internal seam。
-- composition root 持有构造与 lifecycle owner。
-- 外部 consumer 编译证明稳定 façade 与 contract 可消费性。
-
-### 契约与兼容性
-
-- contract/schema 是 identity、wire 与 lifecycle 的权威声明源。
-- typed marker/binding 和 deterministic codegen 派生运行与发布 artifact。
-- breaking、deprecation、SemVer 与真实 consumer 共同证明升级和退役语义。
-- 可变集合从稳定 ID 与 manifest 派生。
-
-### 安全、租户与可信 evidence
-
-- Verified Principal、TenantContext、DeviceCredential 与 receipt 使用私有构造或 sealed 类型。
-- auth、tenant 和 credential 作为必填 typed input 进入执行路径。
-- RLS/ACL、tenant transaction、revocation/replay 与 negative authorization 使用 T1/T2 证明。
-- consumer-owned assembly identity、provider selection/attestation 与 production join 均属于 External。
-- PostgreSQL 借用接口只约束引用生命周期，不阻止可信 companion 执行 `COMMIT` 或切换 tenant。
-  不得把 SQL 能力声明为类型系统的事务/租户隔离保证；应用 handler 分层由消费者负责，RLS、CAS、
-  receipt 与连接 quarantine 通过真实最小权限 PostgreSQL T2 验证。
-
-### 一致性、事务与 fencing
-
-- commit outcome、settlement、checkpoint、generation、lease 与 fencing 使用闭值类型。
-- LocalTx、outbox/inbox、idempotency 和真实 backend failure mode 使用 conformance 证明。
-- stale writer、lease loss、commit unknown、DLQ/recovery 使用独立 fault oracle。
-- active L3/L4 value stream 使用 restart 与 operator recovery 证明。
-
-### Library runtime 与 consumer posture
-
-- managed task/resource 经 phase-typed startup/launch transaction 转移所有权。
-- single cancellation root 与 positive total budget 约束 reverse-order drain。
-- process signal、配置、listener/readiness composition、provider selection、inventory 与 production join
-  由 External consumer 负责。
-- 仓内 T2 证明 public seam 与已接纳 adapter 的真实 provider capability/durability；不代证生产配置。
+- 架构依赖与可见性证明须对应实际依赖和访问边界，不能用目录名称代替。
+- 兼容性证据须覆盖受保护的公共承诺，不能用内部重构理由免除外部责任。
+- 身份、事务和消息一致性的证据须区分合法状态转换与可信实现提供的外部事实；
+  类型和借用限制不能证明任意外部操作真实执行或未越过信任边界。
+- 安全证据覆盖受控身份、必需租户与凭据输入、默认拒绝的授权、隔离、防重放及不安全降级拒绝；
+  事务证据覆盖最小权限下的原子性、过期所有权拒绝、不确定结果及未确认资源隔离。
+- 资源生命周期证据须覆盖所有权、取消及有界清理的失效模式，不预设具体托管实现。
+- 库与 provider 的证明不能代替消费方的生产配置或产品验收。
 
 ## Proof 收敛
 
 - 一个事实对应一个权威声明源，其它 artifact 由该声明源派生。
-- 一个 invariant 对应一个 canonical owner；T1/T2 分别覆盖独立仓内风险。
+- 一个 invariant 对应一个 canonical owner；验证范围由其独立风险决定。
 - 回归测试绑定可复发行为；类型封闭后移除对应 source-shape regression。
 - integration evidence 进入显式 canonical target，并携带环境与 provider/library assertion 结果。
 - fault matrix 按独立 failure mode 组织。

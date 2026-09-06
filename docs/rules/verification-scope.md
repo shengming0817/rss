@@ -9,10 +9,17 @@
 | T1 | 类型、状态机、schema、组件不变量 | Cargo/rustc、类型、codegen、组件测试 |
 | T2 | 真实 provider/transaction/transport seam | conformance、真实 DB/broker/identity integration |
 
-- Hard/Medium/Soft 是 enforcement 强度，T1–T2 是验证深度，两轴不得互相推导。
-- 每个 invariant 只有一个 canonical owner；高层只证明低层无法观察的 seam hazard。
-- 禁止 domain × provider × assembly × fault 的笛卡尔积和“多一道保险”重复证明。
+- 约束强度与证据归属遵循[AI-robust 规则](ai-robust.md)，不由验证深度推导。
+- 高层只证明低层无法观察的接缝风险。
+- 按独立风险选择最低充分验证，不做全组合穷举或重复证明。
 - 产品进程、应用镜像、部署配置、production profile 与产品级 recovery 不属于本仓验证面。
+
+## 独立消费与组合
+
+- 独立消费、必要 feature 组合与真实 provider 行为分别提供证据，不用其中一种代替其它证明。
+- 覆盖基础能力、真实独立选择及有交互风险的支持组合；隔离依赖解析，避免其它消费者补齐缺失能力。
+- 构建成功、artifact 可消费和实际发布是不同事实；发布证明绑定被验证的版本与 artifact 身份。
+- package 与依赖闭包以构建事实验证；文档不充当包清单、删除完成证明或运行记录。
 
 ## 默认选择
 
