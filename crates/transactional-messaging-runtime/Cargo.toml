@@ -16,9 +16,9 @@ workspace = true
 
 [features]
 default = ["consumer", "producer"]
+managed-runtime = ["dep:rss-runtime"]
 consumer = [
   "dep:futures",
-  "dep:rss-runtime",
   "dep:rss-transactional-messaging",
   "dep:tokio",
   "dep:tokio-util",
@@ -27,7 +27,6 @@ consumer = [
 ]
 producer = [
   "dep:futures",
-  "dep:rss-runtime",
   "dep:rss-transactional-messaging",
   "dep:thiserror",
   "dep:tokio",
@@ -49,7 +48,7 @@ tracing = { workspace = true, optional = true }
 rss-contract.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 rss-request-context.workspace = true
-rss-transactional-messaging-testkit = { path = "../transactional-messaging-testkit", version = "0.1.0", default-features = false, features = ["producer"] }
+rss-transactional-messaging-testkit = { path = "../transactional-messaging-testkit", version = "0.1.0", default-features = false, features = ["consumer", "producer"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 trybuild.workspace = true
 

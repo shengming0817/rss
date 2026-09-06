@@ -1,4 +1,4 @@
-//! Bounded outbox relay execution and managed worker ownership.
+//! Bounded outbox relay execution and caller-driven worker ownership.
 
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt as _};
-use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError, TaskStatus};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingEmitter,
@@ -17,7 +16,7 @@ use rss_transactional_messaging::outbox::{
     OutboxDisposition, OutboxLeaseStatus, OutboxSettlement, OutboxStore,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, DeliveryBudget, ExecutionTimer, ShutdownBudget, within,
+    AbsoluteDeadline, DeliveryBudget, ExecutionTimer, within,
 };
 use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
@@ -381,7 +380,7 @@ fn emit_runtime_failure(
     });
 }
 
-/// Owned dependencies for one managed outbox relay worker.
+/// Dependencies owned by one caller-driven outbox relay worker.
 pub struct RelayWorker<P, S, U, C, E> {
     store: Arc<S>,
     publisher: Arc<U>,
@@ -393,14 +392,14 @@ pub struct RelayWorker<P, S, U, C, E> {
 
 impl<P, S, U, C, E> RelayWorker<P, S, U, C, E>
 where
-    P: Send + Sync + 'static,
-    S: OutboxStore<P> + 'static,
+    P: Send + Sync,
+    S: OutboxStore<P>,
     S::Claim: Sync,
-    U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
-    C: ExecutionTimer + 'static,
-    E: TransactionalMessagingEmitter + 'static,
+    U: Publisher<P, Receipt = S::PublishReceipt>,
+    C: ExecutionTimer,
+    E: TransactionalMessagingEmitter,
 {
-    /// Bind all mandatory relay dependencies without defaults or optional runtime paths.
+    /// Bind all mandatory relay dependencies without defaults.
     #[must_use]
     pub const fn new(
         store: Arc<S>,
@@ -419,59 +418,45 @@ where
         }
     }
 
-    /// Transfer the worker into the `rss-runtime` startup token funnel.
-    pub fn into_registration(
+    /// Drive this worker on the caller's Tokio host until cancellation or failure.
+    ///
+    /// Cancellation stops admission and lets in-flight work finish, including lease
+    /// renewal and settlement. Keep polling this future after cancelling the token.
+    /// The host owns the final drain timeout: dropping this future (or aborting and
+    /// joining its task) forcibly ends work without inventing a durable outcome.
+    /// This method does not spawn a task or catch provider panics.
+    pub async fn run(
         self,
-        name: impl Into<String>,
-        shutdown_budget: ShutdownBudget,
-    ) -> (ManagedTaskRegistration, TaskStatus) {
-        let (start, status) = ManagedTask::prepare(name, shutdown_budget.timeout());
-        let registration = start.into_registration(move |token| async move {
-            relay_loop(self, token).await.map_err(ShutdownError::new)
-        });
-        (registration, status)
-    }
-}
-
-async fn relay_loop<P, S, U, C, E>(
-    worker: RelayWorker<P, S, U, C, E>,
-    token: tokio_util::sync::CancellationToken,
-) -> Result<(), MessagingError>
-where
-    P: Send + Sync + 'static,
-    S: OutboxStore<P> + 'static,
-    S::Claim: Sync,
-    U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
-    C: ExecutionTimer + 'static,
-    E: TransactionalMessagingEmitter + 'static,
-{
-    let mut ticker = tokio::time::interval(worker.config.poll_interval());
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            biased;
-            () = token.cancelled() => return Ok(()),
-            _ = ticker.tick() => {}
-        }
-        let result = relay_once(
-            worker.store.as_ref(),
-            worker.publisher.as_ref(),
-            worker.clock.as_ref(),
-            worker.emitter.as_ref(),
-            worker.config.max_in_flight(),
-        )
-        .await;
-        if let Err(error) = result {
-            if !matches!(
-                error.kind(),
-                MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed
-            ) {
-                return Err(error);
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<(), MessagingError> {
+        let mut ticker = tokio::time::interval(self.config.poll_interval());
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => return Ok(()),
+                _ = ticker.tick() => {}
             }
-            tracing::warn!(
-                error_kind = error.kind().as_label(),
-                "relay batch will retry"
-            );
+            let result = relay_once(
+                self.store.as_ref(),
+                self.publisher.as_ref(),
+                self.clock.as_ref(),
+                self.emitter.as_ref(),
+                self.config.max_in_flight(),
+            )
+            .await;
+            if let Err(error) = result {
+                if !matches!(
+                    error.kind(),
+                    MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed
+                ) {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    error_kind = error.kind().as_label(),
+                    "relay batch will retry"
+                );
+            }
         }
     }
 }

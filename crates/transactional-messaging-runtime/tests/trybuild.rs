@@ -1,5 +1,6 @@
+#[cfg(feature = "managed-runtime")]
 #[test]
-fn raw_loops_and_cancellation_tokens_remain_private() {
+fn registration_cancellation_token_remains_private() {
     let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/ui/*.rs");
+    tests.compile_fail("tests/ui/registration_token_private_fail.rs");
 }

@@ -2419,18 +2419,8 @@ async fn transient_delivery_failure_replaces_stream_and_resubscribes() {
         SubscriptionBackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(1))
             .expect("backoff"),
     );
-    let (registration, status) = worker.into_registration(
-        "transient-redelivery",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while calls.load(Ordering::SeqCst) == 0 {
@@ -2446,11 +2436,8 @@ async fn transient_delivery_failure_replaces_stream_and_resubscribes() {
         actions.lock().expect("actions").as_slice(),
         &[SettlementKind::Acknowledge]
     );
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
 }
 
 #[tokio::test]
@@ -2491,18 +2478,8 @@ async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
         SubscriptionBackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(1))
             .expect("backoff"),
     );
-    let (registration, status) = worker.into_registration(
-        "deadline-redelivery",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while calls.load(Ordering::SeqCst) == 0 {
@@ -2518,11 +2495,8 @@ async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
         actions.lock().expect("actions").as_slice(),
         &[SettlementKind::Acknowledge]
     );
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
 }
 
 impl InboxStore for BlockingClaimInbox {
@@ -2569,6 +2543,7 @@ impl InboxStore for BlockingClaimInbox {
     }
 }
 
+#[cfg(feature = "managed-runtime")]
 #[tokio::test]
 async fn forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
     let message = envelope(|_| {});
@@ -2657,18 +2632,8 @@ async fn provider_decoding_failure_uses_core_minted_reject() {
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
-    let (registration, status) = worker.into_registration(
-        "invalid-provider-delivery",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while actions.lock().expect("actions").is_empty() {
             tokio::task::yield_now().await;
@@ -2677,11 +2642,8 @@ async fn provider_decoding_failure_uses_core_minted_reject() {
     .await
     .expect("invalid delivery rejected");
 
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         actions.lock().expect("actions").as_slice(),
@@ -2690,6 +2652,7 @@ async fn provider_decoding_failure_uses_core_minted_reject() {
     assert_eq!(abandoned.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(feature = "managed-runtime")]
 #[tokio::test]
 async fn forced_worker_shutdown_drops_handler_without_settlement() {
     let message = envelope(|_| {});
@@ -2783,18 +2746,8 @@ async fn terminal_outcome_completing_during_cancellation_is_settled() {
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
-    let (registration, status) = worker.into_registration(
-        "terminal-cancel",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while started.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -2807,12 +2760,9 @@ async fn terminal_outcome_completing_during_cancellation_is_settled() {
         tokio::task::yield_now().await;
         complete.notify_one();
     };
-    let (receipt, ()) = tokio::join!(stack.shutdown(), finish);
-    assert!(receipt.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    let (result, ()) = tokio::join!(support::join_worker(task), finish);
+    result.expect("in-flight work drains");
     assert_eq!(
         *actions.lock().expect("actions"),
         [SettlementKind::Acknowledge]
@@ -2891,8 +2841,10 @@ impl DeliverySource<Vec<u8>> for FailingSubscribeSource {
     }
 }
 
+#[cfg(feature = "managed-runtime")]
 struct PanickingSubscribeSource;
 
+#[cfg(feature = "managed-runtime")]
 impl DeliverySource<Vec<u8>> for PanickingSubscribeSource {
     type Settlement = RecordingSettlement;
     type Deliveries = BoxDeliveries;
@@ -2938,18 +2890,8 @@ async fn cancellation_during_subscribe_stops_without_admitting_work() {
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
-    let (registration, status) = worker.into_registration(
-        "cancel-subscribe",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while started.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -2958,11 +2900,8 @@ async fn cancellation_during_subscribe_stops_without_admitting_work() {
     .await
     .expect("subscribe starts");
 
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -2997,18 +2936,8 @@ async fn cancellation_wins_over_a_simultaneously_ready_new_delivery() {
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
-    let (registration, status) = worker.into_registration(
-        "cancel-admission",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while subscribed.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -3021,12 +2950,9 @@ async fn cancellation_wins_over_a_simultaneously_ready_new_delivery() {
         tokio::task::yield_now().await;
         gate.notify_one();
     };
-    let (receipt, ()) = tokio::join!(stack.shutdown(), release);
-    assert!(receipt.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    let (result, ()) = tokio::join!(support::join_worker(task), release);
+    result.expect("in-flight work drains");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(actions.lock().expect("actions").is_empty());
     assert_eq!(abandoned.load(Ordering::SeqCst), 0);
@@ -3054,18 +2980,8 @@ async fn cancellation_interrupts_subscription_backoff() {
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
-    let (registration, status) = worker.into_registration(
-        "cancel-backoff",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while subscribe_calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -3074,14 +2990,12 @@ async fn cancellation_interrupts_subscription_backoff() {
     .await
     .expect("subscribe fails");
 
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
     assert_eq!(subscribe_calls.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(feature = "managed-runtime")]
 #[tokio::test]
 async fn non_transient_subscribe_failure_is_fail_loud() {
     let message = envelope(|_| {});
@@ -3128,6 +3042,7 @@ async fn non_transient_subscribe_failure_is_fail_loud() {
     ));
 }
 
+#[cfg(feature = "managed-runtime")]
 #[tokio::test]
 async fn provider_panic_maps_to_typed_worker_failure() {
     let message = envelope(|_| {});
@@ -3297,18 +3212,8 @@ async fn consumer_does_not_process_the_next_delivery_before_settlement() {
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
-    let (registration, status) = worker.into_registration(
-        "backpressure",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -3331,11 +3236,8 @@ async fn consumer_does_not_process_the_next_delivery_before_settlement() {
     .await
     .expect("both settlements");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
 }
 
 struct RecordingTimer {
@@ -3422,18 +3324,8 @@ async fn subscription_backoff_saturates_and_success_resets_the_cursor() {
         SubscriptionBackoffPolicy::new(Duration::from_millis(100), Duration::from_millis(150))
             .expect("backoff"),
     );
-    let (registration, status) = worker.into_registration(
-        "subscription-recovery",
-        rss_transactional_messaging::policy::ShutdownBudget::new(Duration::from_secs(1))
-            .expect("budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
 
     for expected in 1..=3 {
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -3455,9 +3347,184 @@ async fn subscription_backoff_saturates_and_success_resets_the_cursor() {
             Duration::from_millis(100),
         ]
     );
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
+}
+
+#[tokio::test]
+async fn directly_awaited_consumer_accepts_borrowed_timer_and_stops_before_claim() {
+    let message = envelope(|_| {});
+    let expected = subscription(&message);
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let timer = ManualTimer::new();
+    let source = Arc::new(OneDeliverySource {
+        delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
+            message,
+            RecordingSettlement::observing(Arc::clone(&actions), abandoned),
+        ))))),
+    });
+    let worker = ConsumerWorker::new(
+        Arc::clone(&source),
+        idle_inbox(),
+        Arc::new(FakeTx {
+            calls: Arc::clone(&calls),
+            disposition: TerminalDisposition::Succeeded,
+        }),
+        ConsumerGroup::parse("borrowed-host").expect("group"),
+        Arc::new(TrustedIngress),
+        expected,
+        Arc::new(support::BorrowedTimer(&timer)),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
     );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    worker.run(cancellation).await.expect("cancelled consumer");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(actions.lock().expect("actions").is_empty());
+    assert!(source.delivery.lock().expect("source").is_some());
+}
+
+#[tokio::test]
+async fn host_non_transient_subscribe_failure_is_fail_loud() {
+    let message = envelope(|_| {});
+    let worker = ConsumerWorker::new(
+        Arc::new(FailingSubscribeSource {
+            calls: Arc::new(AtomicUsize::new(0)),
+            kind: MessagingErrorKind::Invariant,
+        }),
+        idle_inbox(),
+        Arc::new(FakeTx {
+            calls: Arc::new(AtomicUsize::new(0)),
+            disposition: TerminalDisposition::Succeeded,
+        }),
+        ConsumerGroup::parse("failed-subscribe").expect("group"),
+        Arc::new(TrustedIngress),
+        subscription(&message),
+        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
+
+    let error = support::join_worker(task)
+        .await
+        .expect_err("permanent subscription error");
+    assert_eq!(error.kind(), MessagingErrorKind::Invariant);
+}
+
+#[tokio::test]
+async fn host_forced_worker_shutdown_drops_handler_without_settlement() {
+    let message = envelope(|_| {});
+    let expected = subscription(&message);
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let source = Arc::new(OneDeliverySource {
+        delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
+            message,
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
+        ))))),
+    });
+    let inbox = Arc::new(RenewingInbox {
+        claim: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
+        extends: AtomicUsize::new(0),
+        lose_at: None,
+    });
+    let timer = Arc::new(ManualTimer::new());
+    let started = Arc::new(AtomicUsize::new(0));
+    let worker = ConsumerWorker::new(
+        source,
+        inbox,
+        Arc::new(BlockingCommitTx {
+            started: Arc::clone(&started),
+            complete: Arc::new(tokio::sync::Notify::new()),
+        }),
+        ConsumerGroup::parse("shutdown-consumer").expect("group"),
+        Arc::new(TrustedIngress),
+        expected,
+        timer,
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let mut task = tokio::spawn(worker.run(cancellation.clone()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("handler starts");
+
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut task)
+            .await
+            .is_err()
+    );
+    task.abort();
+    assert!(task.await.expect_err("host aborted task").is_cancelled());
+    assert!(actions.lock().expect("actions").is_empty());
+    assert_eq!(abandoned.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn host_forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
+    let message = envelope(|_| {});
+    let expected = subscription(&message);
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let abandoned = Arc::new(AtomicUsize::new(0));
+    let source = Arc::new(OneDeliverySource {
+        delivery: Mutex::new(Some(IncomingDelivery::Valid(Box::new(Delivery::new(
+            message,
+            RecordingSettlement::observing(Arc::clone(&actions), Arc::clone(&abandoned)),
+        ))))),
+    });
+    let claim_started = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = ConsumerWorker::new(
+        source,
+        Arc::new(BlockingClaimInbox {
+            started: Arc::clone(&claim_started),
+            gate: Arc::new(tokio::sync::Notify::new()),
+        }),
+        Arc::new(FakeTx {
+            calls: Arc::clone(&calls),
+            disposition: TerminalDisposition::Succeeded,
+        }),
+        ConsumerGroup::parse("claim-cancel").expect("group"),
+        Arc::new(TrustedIngress),
+        expected,
+        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let mut task = tokio::spawn(worker.run(cancellation.clone()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while claim_started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("claim starts");
+
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut task)
+            .await
+            .is_err()
+    );
+    task.abort();
+    assert!(task.await.expect_err("host aborted task").is_cancelled());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(actions.lock().expect("actions").is_empty());
+    assert_eq!(abandoned.load(Ordering::SeqCst), 0);
 }

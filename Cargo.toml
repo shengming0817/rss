@@ -100,8 +100,8 @@ issue = 2264
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging-runtime"
-baseline-rev = "a227ea93227431206fde0e5f81d1a1c1fb45a048"
-issue = 2264
+baseline-rev = "0b32db6619794f5fcac08288d26797942a3c897a"
+issue = 2282
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging-testkit"

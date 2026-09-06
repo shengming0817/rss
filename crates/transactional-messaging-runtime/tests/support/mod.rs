@@ -95,3 +95,34 @@ pub async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
         tokio::task::yield_now().await;
     }
 }
+
+/// A host-owned timer borrowed by a directly awaited worker.
+pub struct BorrowedTimer<'a, T>(pub &'a T);
+
+impl<T: Clock> Clock for BorrowedTimer<'_, T> {
+    fn now(&self) -> MonotonicInstant {
+        self.0.now()
+    }
+}
+
+impl<T: ExecutionTimer> ExecutionTimer for BorrowedTimer<'_, T> {
+    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+        self.0.sleep_until(deadline).await;
+    }
+}
+
+/// Await a task with a test deadline; never detach timed-out work.
+pub async fn join_worker(
+    mut task: tokio::task::JoinHandle<
+        Result<(), rss_transactional_messaging::error::MessagingError>,
+    >,
+) -> Result<(), rss_transactional_messaging::error::MessagingError> {
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
+    if result.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    result
+        .expect("worker completes within host budget")
+        .expect("worker does not panic")
+}

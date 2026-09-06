@@ -1,11 +1,10 @@
-//! Transactional consumer execution, lease supervision, and managed worker ownership.
+//! Transactional consumer execution, lease supervision, and caller-driven worker ownership.
 
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError, TaskStatus};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::inbox::{
     ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
@@ -17,8 +16,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRuntimePhase, TransactionalMessagingSubscribeOutcome,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, ConsumerExecutionPolicy, ExecutionDeadlines, ExecutionTimer, ShutdownBudget,
-    within,
+    AbsoluteDeadline, ConsumerExecutionPolicy, ExecutionDeadlines, ExecutionTimer, within,
 };
 use rss_transactional_messaging::transaction::{
     CommittedTransaction, ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressValidator,
@@ -766,7 +764,7 @@ impl SubscriptionBackoffPolicy {
     }
 }
 
-/// Owned dependencies for one managed transactional consumer worker.
+/// Dependencies owned by one caller-driven transactional consumer worker.
 pub struct ConsumerWorker<P, S, I, T, V, R, E> {
     source: Arc<S>,
     inbox: Arc<I>,
@@ -783,13 +781,13 @@ pub struct ConsumerWorker<P, S, I, T, V, R, E> {
 
 impl<P, S, I, T, V, R, E> ConsumerWorker<P, S, I, T, V, R, E>
 where
-    P: AsRef<[u8]> + Send + Sync + 'static,
-    S: DeliverySource<P> + 'static,
-    I: InboxStore + 'static,
-    T: ConsumerTx<P, Claim = I::Claim> + 'static,
-    V: IngressValidator<P> + 'static,
-    R: ExecutionTimer + 'static,
-    E: TransactionalMessagingEmitter + 'static,
+    P: AsRef<[u8]> + Send + Sync,
+    S: DeliverySource<P>,
+    I: InboxStore,
+    T: ConsumerTx<P, Claim = I::Claim>,
+    V: IngressValidator<P>,
+    R: ExecutionTimer,
+    E: TransactionalMessagingEmitter,
 {
     /// Bind every mandatory consumer dependency and policy.
     #[allow(clippy::too_many_arguments)]
@@ -822,147 +820,130 @@ where
         }
     }
 
-    /// Transfer the worker into the `rss-runtime` startup token funnel.
-    pub fn into_registration(
+    /// Drive this worker on the caller's Tokio host until cancellation or failure.
+    ///
+    /// Cancellation stops admission and lets in-flight work finish, including lease
+    /// renewal and settlement. Keep polling this future after cancelling the token.
+    /// The host owns the final drain timeout: dropping this future (or aborting and
+    /// joining its task) forcibly ends work without inventing a durable outcome.
+    /// This method does not spawn a task or catch provider panics.
+    pub async fn run(
         self,
-        name: impl Into<String>,
-        shutdown_budget: ShutdownBudget,
-    ) -> (ManagedTaskRegistration, TaskStatus) {
-        let (start, status) = ManagedTask::prepare(name, shutdown_budget.timeout());
-        let registration = start.into_registration(move |token| async move {
-            consumer_loop(self, token).await.map_err(ShutdownError::new)
-        });
-        (registration, status)
-    }
-}
-
-async fn consumer_loop<P, S, I, T, V, R, E>(
-    worker: ConsumerWorker<P, S, I, T, V, R, E>,
-    token: tokio_util::sync::CancellationToken,
-) -> Result<(), MessagingError>
-where
-    P: AsRef<[u8]> + Send + Sync + 'static,
-    S: DeliverySource<P> + 'static,
-    I: InboxStore + 'static,
-    T: ConsumerTx<P, Claim = I::Claim> + 'static,
-    V: IngressValidator<P> + 'static,
-    R: ExecutionTimer + 'static,
-    E: TransactionalMessagingEmitter + 'static,
-{
-    let mut recovery_attempt = NonZeroU32::MIN;
-    loop {
-        let subscribe = worker.source.deliveries(&worker.subscription);
-        tokio::pin!(subscribe);
-        let deliveries = tokio::select! {
-            biased;
-            () = token.cancelled() => return Ok(()),
-            result = &mut subscribe => result,
-        };
-        let mut deliveries = match deliveries {
-            Ok(deliveries) => {
-                recovery_attempt = NonZeroU32::MIN;
-                deliveries
-            }
-            Err(error) if is_recoverable(error.kind()) => {
-                emit_runtime_failure(
-                    worker.emitter.as_ref(),
-                    TransactionalMessagingRuntimePhase::ConsumerSubscribe,
-                    &error,
-                );
-                worker
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerSubscribeRetry {
-                        outcome: TransactionalMessagingSubscribeOutcome::SubscribeError,
-                    });
-                if wait_for_recovery(&worker, &token, recovery_attempt).await? {
-                    return Ok(());
-                }
-                recovery_attempt = recovery_attempt.saturating_add(1);
-                continue;
-            }
-            Err(error) => {
-                emit_runtime_failure(
-                    worker.emitter.as_ref(),
-                    TransactionalMessagingRuntimePhase::ConsumerSubscribe,
-                    &error,
-                );
-                return Err(error);
-            }
-        };
-
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<(), MessagingError> {
+        let mut recovery_attempt = NonZeroU32::MIN;
         loop {
-            let delivery = tokio::select! {
+            let subscribe = self.source.deliveries(&self.subscription);
+            tokio::pin!(subscribe);
+            let deliveries = tokio::select! {
                 biased;
                 () = token.cancelled() => return Ok(()),
-                item = deliveries.next() => item,
+                result = &mut subscribe => result,
             };
-            let Some(delivery) = delivery else {
-                worker
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerSubscribeRetry {
-                        outcome: TransactionalMessagingSubscribeOutcome::StreamEnd,
-                    });
-                break;
-            };
-            let execution = ConsumerExecution::new(
-                worker.group.clone(),
-                worker.validator.as_ref(),
-                &worker.subscription,
-                worker.timer.as_ref(),
-                worker.policy,
-                worker.emitter.as_ref(),
-            );
-            let processing = async {
-                match delivery {
-                    IncomingDelivery::Valid(delivery) => {
-                        consume_once(
-                            worker.inbox.as_ref(),
-                            worker.transaction.as_ref(),
-                            &execution,
-                            *delivery,
-                        )
-                        .await?;
-                    }
-                    IncomingDelivery::Invalid(invalid) => {
-                        let (rejection, settlement) = invalid.into_parts();
-                        reject_invalid(
-                            rejection,
-                            settlement,
-                            execution.deadlines()?.settlement(),
-                            execution.timer,
-                            execution.emitter(),
-                        )
-                        .await?;
-                    }
+            let mut deliveries = match deliveries {
+                Ok(deliveries) => {
+                    recovery_attempt = NonZeroU32::MIN;
+                    deliveries
                 }
-                Ok::<(), MessagingError>(())
-            };
-            tokio::pin!(processing);
-            let result = tokio::select! {
-                biased;
-                result = &mut processing => result,
-                () = token.cancelled() => {
-                    processing.await?;
-                    return Ok(());
-                }
-            };
-            match result {
-                Ok(()) => {}
                 Err(error) if is_recoverable(error.kind()) => {
-                    worker.emitter.emit(
-                        TransactionalMessagingObservation::ConsumerSubscribeRetry {
-                            outcome: TransactionalMessagingSubscribeOutcome::DeliveryError,
-                        },
+                    emit_runtime_failure(
+                        self.emitter.as_ref(),
+                        TransactionalMessagingRuntimePhase::ConsumerSubscribe,
+                        &error,
                     );
-                    break;
+                    self.emitter
+                        .emit(TransactionalMessagingObservation::ConsumerSubscribeRetry {
+                            outcome: TransactionalMessagingSubscribeOutcome::SubscribeError,
+                        });
+                    if wait_for_recovery(&self, &token, recovery_attempt).await? {
+                        return Ok(());
+                    }
+                    recovery_attempt = recovery_attempt.saturating_add(1);
+                    continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    emit_runtime_failure(
+                        self.emitter.as_ref(),
+                        TransactionalMessagingRuntimePhase::ConsumerSubscribe,
+                        &error,
+                    );
+                    return Err(error);
+                }
+            };
+
+            loop {
+                let delivery = tokio::select! {
+                    biased;
+                    () = token.cancelled() => return Ok(()),
+                    item = deliveries.next() => item,
+                };
+                let Some(delivery) = delivery else {
+                    self.emitter
+                        .emit(TransactionalMessagingObservation::ConsumerSubscribeRetry {
+                            outcome: TransactionalMessagingSubscribeOutcome::StreamEnd,
+                        });
+                    break;
+                };
+                let execution = ConsumerExecution::new(
+                    self.group.clone(),
+                    self.validator.as_ref(),
+                    &self.subscription,
+                    self.timer.as_ref(),
+                    self.policy,
+                    self.emitter.as_ref(),
+                );
+                let processing = async {
+                    match delivery {
+                        IncomingDelivery::Valid(delivery) => {
+                            consume_once(
+                                self.inbox.as_ref(),
+                                self.transaction.as_ref(),
+                                &execution,
+                                *delivery,
+                            )
+                            .await?;
+                        }
+                        IncomingDelivery::Invalid(invalid) => {
+                            let (rejection, settlement) = invalid.into_parts();
+                            reject_invalid(
+                                rejection,
+                                settlement,
+                                execution.deadlines()?.settlement(),
+                                execution.timer,
+                                execution.emitter(),
+                            )
+                            .await?;
+                        }
+                    }
+                    Ok::<(), MessagingError>(())
+                };
+                tokio::pin!(processing);
+                let result = tokio::select! {
+                    biased;
+                    result = &mut processing => result,
+                    () = token.cancelled() => {
+                        processing.await?;
+                        return Ok(());
+                    }
+                };
+                match result {
+                    Ok(()) => {}
+                    Err(error) if is_recoverable(error.kind()) => {
+                        self.emitter.emit(
+                            TransactionalMessagingObservation::ConsumerSubscribeRetry {
+                                outcome: TransactionalMessagingSubscribeOutcome::DeliveryError,
+                            },
+                        );
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
+            if wait_for_recovery(&self, &token, recovery_attempt).await? {
+                return Ok(());
+            }
+            recovery_attempt = recovery_attempt.saturating_add(1);
         }
-        if wait_for_recovery(&worker, &token, recovery_attempt).await? {
-            return Ok(());
-        }
-        recovery_attempt = recovery_attempt.saturating_add(1);
     }
 }
 

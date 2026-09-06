@@ -24,9 +24,10 @@ use rss_transactional_messaging::outbox::{
     AppendOutcome, OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxSettlement,
     OutboxStore, PendingMessage,
 };
+#[cfg(feature = "managed-runtime")]
+use rss_transactional_messaging::policy::ShutdownBudget;
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, DeliveryBudget, ExecutionTimer, MonotonicInstant, OperationDeadline,
-    ShutdownBudget,
 };
 use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
@@ -534,17 +535,8 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
     );
-    let (registration, status) = worker.into_registration(
-        "relay-drain",
-        ShutdownBudget::new(Duration::from_secs(1)).expect("shutdown budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total budget"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while publisher.started.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -557,14 +549,12 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
         tokio::task::yield_now().await;
         publisher.permits.add_permits(1);
     };
-    let (receipt, ()) = tokio::join!(stack.shutdown(), release);
-    assert!(receipt.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    cancellation.cancel();
+    let (result, ()) = tokio::join!(support::join_worker(task), release);
+    result.expect("in-flight work drains");
 }
 
+#[cfg(feature = "managed-runtime")]
 #[tokio::test]
 async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
     let worker = RelayWorker::<Vec<u8>, _, _, _, _>::new(
@@ -619,17 +609,8 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
         Arc::new(NoopEmitter),
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
     );
-    let (registration, status) = worker.into_registration(
-        "relay-deadline-recovery",
-        ShutdownBudget::new(Duration::from_secs(1)).expect("shutdown budget"),
-    );
-    let mut stack = rss_runtime::ShutdownStack::try_new(
-        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total budget"),
-    )
-    .expect("stack");
-    let mut startup = stack.startup().expect("startup");
-    startup.stage_task_with_token(registration);
-    startup.commit().finish();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancellation.clone()));
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while store.claim_calls.load(Ordering::SeqCst) == 0 {
@@ -639,12 +620,9 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
     .await
     .expect("a later tick polls the provider after the first deadline");
 
-    assert!(status.is_running());
-    assert!(stack.shutdown().await.expect("shutdown").is_clean());
-    assert_eq!(
-        status.wait_stopped().await,
-        rss_runtime::TaskExit::Cancelled
-    );
+    assert!(!task.is_finished());
+    cancellation.cancel();
+    support::join_worker(task).await.expect("graceful stop");
 }
 
 #[tokio::test]
@@ -1086,4 +1064,27 @@ async fn publish_timeout_is_ambiguous_retry_and_reuses_the_same_message_id() {
         message_ids.lock().expect("message ids").as_slice(),
         ["message-1", "message-1"]
     );
+}
+
+#[tokio::test]
+async fn directly_awaited_relay_accepts_borrowed_timer_and_stops_before_claim() {
+    let timer = FakeClock::new();
+    let store = Arc::new(Store::with_count(
+        OutboxLeaseStatus::Held {
+            delivery_remaining: None,
+            remaining: Duration::from_secs(10),
+        },
+        1,
+    ));
+    let worker = RelayWorker::<Vec<u8>, _, _, _, _>::new(
+        Arc::clone(&store),
+        Arc::new(ScriptedPublisher::new([])),
+        Arc::new(support::BorrowedTimer(&timer)),
+        Arc::new(NoopEmitter),
+        RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
+    );
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    worker.run(cancellation).await.expect("cancelled relay");
+    assert_eq!(store.claim_calls.load(Ordering::SeqCst), 0);
 }
