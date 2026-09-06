@@ -17,7 +17,6 @@ workspace = true
 rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
-# 非消息 DLQ / saga 能力仍由 diport 提供；消息 runtime 直接消费 transactional messaging native ports。
 diport = { path = "../diport" }
 vocab = { path = "../vocab" }
 futures = { workspace = true, features = ["std", "async-await", "executor"] }
@@ -25,7 +24,6 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，`crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
 tracing = { workspace = true }
-# 非消息 saga 引擎接缝。
 consistency = { path = "../consistency" }
 # Keyed command idempotency aliases are derived inside the runtime boundary; raw business keys
 # never cross into persistence providers.

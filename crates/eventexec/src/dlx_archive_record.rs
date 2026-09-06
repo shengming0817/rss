@@ -118,9 +118,7 @@ impl DlxArchiveSafeMetadata {
             DeadLetterSource::Consumer | DeadLetterSource::Projection => {
                 self.consumer_domain.is_some()
             }
-            DeadLetterSource::OutboxRelay | DeadLetterSource::Saga => {
-                self.consumer_domain.is_none()
-            }
+            DeadLetterSource::OutboxRelay => self.consumer_domain.is_none(),
         };
         let safe_text_bytes = [
             Some(self.message_id.as_str()),

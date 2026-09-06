@@ -137,23 +137,3 @@ note: required by a bound in `assert_send`
 18 | fn assert_send<T: Send>() {}
    |                   ^^^^ required by this bound in `assert_send`
    = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `(dyn saga_durable_store::__dynosaur_macro_dynsagatenantsource::ErasedSagaTenantSource + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn saga_durable_store::__dynosaur_macro_dynsagatenantsource::ErasedSagaTenantSource + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynSagaTenantSource<'static>`, the trait `Sync` is not implemented for `(dyn saga_durable_store::__dynosaur_macro_dynsagatenantsource::ErasedSagaTenantSource + 'static)`
-note: required because it appears within the type `DynSagaTenantSource<'static>`
-  --> src/saga_durable_store.rs
-   |
-   | #[dynosaur(pub DynSagaTenantSource = dyn(box) SagaTenantSource, bridge(dyn))]
-   |                ^^^^^^^^^^^^^^^^^^^
-   = note: required for `Arc<DynSagaTenantSource<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)

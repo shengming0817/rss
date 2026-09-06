@@ -1,7 +1,6 @@
 //! 引擎层错误词汇（ADR-004 C10）。
 //!
-//! 剩余内部状态机以及
-//! `eventexec::SagaStep<GeneratedStepMarker>` authoring seam 共用的失败通道。
+//! 内部状态机共用的失败通道。
 //! `kind` 的 message 是 `&'static str` const literal（禁 `format!` 拼 runtime 数据，遵 ADR-004 C10）。
 //! runtime 因由经 `vocab::CoreError` typed 通道（with_internal）落日志，引擎错误本身只携 kind。
 
@@ -11,7 +10,7 @@
 pub enum EngineErrorKind {
     /// 后端暂时不可用 / 冲突，可重试（内部重试策略）。
     Transient,
-    /// 永久失败，重试无意义（→ DLX / saga 补偿）。
+    /// 永久失败，重试无意义。
     Permanent,
     /// 引擎前置不变量被破坏（编程错误，非外部输入）。
     Invariant,

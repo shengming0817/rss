@@ -6,8 +6,6 @@ use testkit::FixtureError;
 mod claimer;
 #[path = "scenarios/rate_limit.rs"]
 mod rate_limit;
-#[path = "scenarios/saga.rs"]
-mod saga;
 
 #[tokio::test]
 async fn redis_command_suite() -> Result<(), FixtureError> {
@@ -43,9 +41,6 @@ async fn redis_command_suite() -> Result<(), FixtureError> {
     rate_limit::saturated_pool_fails_within_limiter_budget(url)
         .await
         .map_err(|error| error.context("saturated_pool_fails_within_limiter_budget"))?;
-    saga::saga_effect_apply_duplicate_conflict_and_probe(url)
-        .await
-        .map_err(|error| error.context("saga_effect_apply_duplicate_conflict_and_probe"))?;
     rate_limit::acl_without_time_rejects_startup_capability(url)
         .await
         .map_err(|error| error.context("acl_without_time_rejects_startup_capability"))?;

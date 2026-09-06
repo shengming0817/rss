@@ -6,6 +6,17 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-saga / rss-saga-postgres 0.1.0
+
+- Add experimental `rss-saga 0.1.0` and `rss-saga-postgres 0.1.0`: exact definitions,
+  typed actions, protected receipts, bounded execution, PostgreSQL fencing and unified recovery.
+- Compensation failure pauses durably; explicit revision-checked resume preserves attempts and keys.
+- Move Saga receipt protection and integrity to the Saga owner. Remove the former consistency,
+  diport, vocab, memory, secure and authorization-mint paths without aliases or compatibility flags.
+- Remove Saga-specific APIs from pre-publication `rss-data-protection`; ordinary field AAD is unchanged.
+  Receipt AAD, canonical JSON, effect-key and HMAC golden vectors preserve their existing bytes.
+- PostgreSQL is a fresh component schema. No historical data adoption is required or provided.
+
 ### rss-reconcile / rss-reconcile-postgres 0.1.0
 
 - Extract tenant-scoped reconciliation into independent core and PostgreSQL packages (#2290).

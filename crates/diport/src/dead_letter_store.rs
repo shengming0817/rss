@@ -52,8 +52,6 @@ pub enum DeadLetterSource {
     Consumer,
     /// outbox relay 发布失败进入 DLX，同时登记统一 DLQ 审计行。
     OutboxRelay,
-    /// saga 补偿失败进入 DLQ。
-    Saga,
     /// projection poison event 进入 DLQ。
     Projection,
 }
@@ -64,7 +62,6 @@ impl DeadLetterSource {
         match self {
             Self::Consumer => "consumer",
             Self::OutboxRelay => "outbox_relay",
-            Self::Saga => "saga",
             Self::Projection => "projection",
         }
     }
@@ -74,7 +71,6 @@ impl DeadLetterSource {
         match raw {
             "consumer" => Some(Self::Consumer),
             "outbox_relay" => Some(Self::OutboxRelay),
-            "saga" => Some(Self::Saga),
             "projection" => Some(Self::Projection),
             _ => None,
         }
@@ -92,9 +88,6 @@ pub enum DeadLetterProvenance {
         consumer_domain: String,
     },
     OutboxRelay {
-        producer_domain: String,
-    },
-    Saga {
         producer_domain: String,
     },
     Projection {
@@ -120,12 +113,6 @@ impl DeadLetterProvenance {
         }
     }
 
-    pub fn saga(producer_domain: impl Into<String>) -> Self {
-        Self::Saga {
-            producer_domain: producer_domain.into(),
-        }
-    }
-
     pub fn projection(
         producer_domain: impl Into<String>,
         consumer_domain: impl Into<String>,
@@ -140,7 +127,6 @@ impl DeadLetterProvenance {
         match self {
             Self::Consumer { .. } => DeadLetterSource::Consumer,
             Self::OutboxRelay { .. } => DeadLetterSource::OutboxRelay,
-            Self::Saga { .. } => DeadLetterSource::Saga,
             Self::Projection { .. } => DeadLetterSource::Projection,
         }
     }
@@ -151,7 +137,6 @@ impl DeadLetterProvenance {
                 producer_domain, ..
             }
             | Self::OutboxRelay { producer_domain }
-            | Self::Saga { producer_domain }
             | Self::Projection {
                 producer_domain, ..
             } => producer_domain,
@@ -166,7 +151,7 @@ impl DeadLetterProvenance {
             | Self::Projection {
                 consumer_domain, ..
             } => Some(consumer_domain),
-            Self::OutboxRelay { .. } | Self::Saga { .. } => None,
+            Self::OutboxRelay { .. } => None,
         }
     }
 }

@@ -1590,7 +1590,6 @@ dependencies = [
 name = "diport"
 version = "0.0.0"
 dependencies = [
- "consistency",
  "diport",
  "dlqauthmint",
  "dynosaur",
@@ -1603,14 +1602,12 @@ dependencies = [
  "rss-redact",
  "rss-request-context",
  "rss-transactional-messaging",
- "sagaauthmint",
  "sha2 0.10.9",
  "thiserror",
  "tokio",
  "trait-variant",
  "trybuild",
  "url",
- "uuid",
  "vocab",
  "zeroize",
 ]
@@ -3029,16 +3026,13 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 name = "memory"
 version = "0.0.0"
 dependencies = [
- "consistency",
  "diport",
- "eventexec",
  "futures",
  "primitives",
  "rss-contract",
  "rss-data-protection",
  "rss-request-context",
  "tokio",
- "uuid",
  "vocab",
  "zeroize",
 ]
@@ -4087,7 +4081,6 @@ dependencies = [
 name = "redis-adapter"
 version = "0.0.0"
 dependencies = [
- "consistency",
  "deadpool-redis",
  "diport",
  "rss-redact",
@@ -4461,6 +4454,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-saga"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "hmac 0.12.1",
+ "ring",
+ "rss-contract",
+ "rss-data-protection",
+ "rss-redact",
+ "rss-request-context",
+ "rss-runtime",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-saga-postgres"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "rss-request-context",
+ "rss-runtime",
+ "rss-saga",
+ "serde_json",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "rss-trace-context"
 version = "0.1.0"
 dependencies = [
@@ -4763,8 +4794,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "sagaauthmint"
+name = "saga-postgres-integration"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "deadpool-redis",
+ "ring",
+ "rss-contract",
+ "rss-data-protection",
+ "rss-request-context",
+ "rss-saga",
+ "rss-saga-postgres",
+ "rustls",
+ "serde_json",
+ "sqlx",
+ "testkit",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "salsa20"
@@ -4860,7 +4910,6 @@ dependencies = [
  "rss-request-context",
  "rstest",
  "sha2 0.10.9",
- "subtle",
  "thiserror",
  "trybuild",
  "unicode-normalization",
@@ -5240,6 +5289,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots",
 ]
 
@@ -5306,6 +5356,7 @@ dependencies = [
  "sqlx-core",
  "thiserror",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5340,6 +5391,7 @@ dependencies = [
  "stringprep",
  "thiserror",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -5365,6 +5417,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6159,6 +6212,7 @@ checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

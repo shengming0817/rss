@@ -30,13 +30,4 @@ fn ui() {
     t.compile_fail("tests/ui/unsafe_forbid_fail.rs");
     t.compile_fail("tests/ui/arc_dyn_ports_not_send.rs");
     t.compile_fail("tests/ui/dead_letter_record_tenant_fail.rs");
-    t.compile_fail("tests/ui/saga_operator_authorization_forge_fail.rs");
-    t.compile_fail("tests/ui/saga_operator_authorization_clone_fail.rs");
-    t.compile_fail("tests/ui/saga_operator_claim_second_consume_fail.rs");
-    t.compile_fail("tests/ui/saga_operator_claim_cross_provider_fail.rs");
-    t.compile_fail("tests/ui/saga_operator_cross_action_fail.rs");
-    t.compile_fail("tests/ui/saga_start_authorization_forge_fail.rs");
-    t.compile_fail("tests/ui/saga_start_authorization_clone_fail.rs");
-    t.compile_fail("tests/ui/saga_register_missing_authorization_fail.rs");
-    t.compile_fail("tests/ui/saga_completion_forge_fail.rs");
 }

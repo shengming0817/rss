@@ -180,13 +180,6 @@ impl RedisInfraDeps {
         limiter.verify_capability().await
     }
 
-    /// Real Redis effect handle for provider integration tests.
-    #[cfg(feature = "integration")]
-    #[must_use]
-    pub fn saga_effect_fixture(&self) -> crate::RedisSagaEffectFixture {
-        crate::RedisSagaEffectFixture::new(Arc::clone(&self.store))
-    }
-
     /// Redis distlock provider 句柄（DI-ready dyn port）。
     #[must_use]
     pub fn lock_store(&self) -> Box<DynLockStore<'static>> {

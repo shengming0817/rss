@@ -17,7 +17,6 @@ vocab = { path = "../vocab" }
 # 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + constant-time digest 比较 + 有界 KDF 验签 + 随机盐（OsRng）。
 argon2 = { workspace = true }
 unicode-normalization = { workspace = true }
-# SHA-256：refresh token 摘要、pseudonym 与 Saga receipt integrity。
 # default-features=false（无 std oid 等额外面）；与 password(argon2) / authn(hmac) 同源。
 sha2 = { workspace = true }
 # 生产 transport endpoint typed funnel：用 canonical URL parser 校验 scheme/host，防手写 authority split
@@ -25,12 +24,9 @@ sha2 = { workspace = true }
 url = { workspace = true }
 # secure::refresh（#1325）：base64url 编码不透明 secret。
 base64 = { workspace = true }
-# HMAC-SHA256 pseudonym 与 Saga receipt integrity。
 # ref: RustCrypto/MACs hmac/README.md@master（Hmac<Sha256> new_from_slice→update→finalize）
 hmac = { workspace = true }
-# Saga receipt key-id 与 digest 常数时间比较。
 # ref: dalek-cryptography/subtle src/lib.rs@main
-subtle = { workspace = true }
 # drop 时自动清零 password 与 capability-specific HMAC key material。
 # workspace base 已开 alloc。同 crates/diport/Cargo.toml:42 范式。
 zeroize = { workspace = true, features = ["zeroize_derive"] }

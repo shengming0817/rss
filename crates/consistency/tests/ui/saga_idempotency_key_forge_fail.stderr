@@ -1,9 +1,0 @@
-error[E0451]: fields `bytes` and `phase` of struct `SagaIdempotencyKey` are private
- --> tests/ui/saga_idempotency_key_forge_fail.rs:3:9
-  |
-2 |     let _ = consistency::SagaIdempotencyKey {
-  |             ------------------------------- in this type
-3 |         bytes: [7; 32],
-  |         ^^^^^ private field
-4 |         phase: consistency::SagaEffectPhase::Forward,
-  |         ^^^^^ private field

@@ -2,7 +2,7 @@
 
 `rss-data-protection` is the public owner of provider-neutral encrypted-data protection primitives
 for RSS. It contains AEAD and plaintext capsules, ciphertext envelopes, derived AAD and protection
-contexts, Saga receipt protection coordinates, and blind indexes.
+contexts and blind indexes.
 
 The package defines data formats and invariants but does not select key providers, cryptographic
 backends, storage adapters, workflows, or authorization policy. Diagnostic-output redaction is owned

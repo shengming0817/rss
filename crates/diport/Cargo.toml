@@ -23,7 +23,6 @@ workspace = true
 rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
-sagaauthmint = { path = "../sagaauthmint" }
 dlqauthmint = { path = "../dlqauthmint" }
 # DI port 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 dynosaur = { workspace = true }
@@ -36,13 +35,9 @@ rss-data-protection.workspace = true
 # AuditEvent.tenant_id: Option<vocab::TenantId>（基础层强类型租户标识；跨租户主体可为空）。DiPort 依赖基础合规。
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
-# Saga durable ports consume consistency engine types. DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
-consistency = { path = "../consistency" }
 # KeyProvider 的 KeyName/KeyVersion/KeyRef 常数时间 key-id 匹配复用 primitives::crypto::constant_time_eq
 # （防 timing oracle，ADR-011 §D3）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
 primitives = { path = "../primitives" }
-# SagaDurableStore port 的 SagaId(uuid::Uuid)：saga 实例标识下沉 diport（eventexec::SagaId re-export 本类型）。
-uuid = { workspace = true }
 # PKI URI SANs require a standards-aware absolute-URI parser rather than delimiter-only checks.
 url = { workspace = true }
 # Non-messaging streaming ports use futures::Stream.

@@ -15,7 +15,4 @@ pub use blind_index::{
 pub use envelope::{
     CipherAlg, CiphertextEnvelope, ENVELOPE_VERSION, EncryptionMode, EnvelopeError,
 };
-pub use protection::{
-    AadError, DerivedAad, ProtectionAad, ProtectionContext, SagaReceiptProtectionContext,
-    SagaReceiptProtectionCoordinates,
-};
+pub use protection::{AadError, DerivedAad, ProtectionAad, ProtectionContext};

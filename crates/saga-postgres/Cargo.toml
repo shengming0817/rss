@@ -1,0 +1,23 @@
+[package]
+name = "rss-saga-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "PostgreSQL atomic Saga journals, leases and protected receipts"
+publish = ["crates-io"]
+[features]
+default = []
+rss-runtime = ["dep:rss-runtime"]
+[dependencies]
+rss-saga.workspace = true
+rss-request-context.workspace = true
+rss-runtime = { workspace = true, optional = true }
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "uuid"] }
+uuid = { workspace = true, features = ["v4"] }
+futures = { workspace = true, features = ["std"] }
+[lints]
+workspace = true

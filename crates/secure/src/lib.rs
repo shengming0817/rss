@@ -7,7 +7,6 @@ pub mod password;
 pub mod pathsafe;
 pub mod pseudonym;
 pub mod refresh;
-pub mod saga_receipt_integrity;
 pub mod transport_endpoint;
 
 pub use cookie::{CookieCodec, CookieError, CookieValue, CookieValueError};
@@ -20,10 +19,6 @@ pub use pseudonym::{
     PseudonymError, PseudonymKeyId, PseudonymKeyRing, PseudonymRef, VersionedPseudonymKey,
 };
 pub use refresh::{OpaqueToken, digest};
-pub use saga_receipt_integrity::{
-    SagaReceiptFingerprint, SagaReceiptIntegrityError, SagaReceiptIntegrityKeyId,
-    SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
-};
 pub use transport_endpoint::{
     DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint, TransportEndpointError,
 };

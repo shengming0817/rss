@@ -86,8 +86,6 @@ deny = [
   # 分层（target-centric wrappers）：只列 all-features 最终图中的真实 direct parents。
   # `cargo deny check -D unused-wrapper` rejects stale wrapper entries.
   # adapter→domain wrapper 仍必须有 shipped source edge。
-  # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 可持有。
-  { crate = "sagaauthmint", wrappers = ["diport"] },
   # DLQ-OPERATOR-MINT-01：DLQ operator mint 仅 DI proof owner 可持有。
   { crate = "dlqauthmint", wrappers = ["diport"] },
   # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint opaque carrier。

@@ -111,7 +111,6 @@ pub mod rate_limiter;
 // DTO 字节 payload 脱敏 newtype（`Debug`/`Display` 恒 `<redacted>`，经 `as_bytes`/`into_bytes` 受控访问）。
 // `pub`（经下方 re-export 进跨 crate 导出面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
 mod dlq_operator;
-pub mod saga_durable_store;
 pub mod secret_resolver;
 pub mod signer;
 pub use cas_store::{
@@ -158,29 +157,6 @@ pub use rate_limiter::{
     DynRateLimiter, MAX_RATE_LIMIT_QUOTA, RateLimitDecision, RateLimitError, RateLimitKey,
     RateLimitQuota, RateLimitQuotaError, RateLimiter,
 };
-pub use saga_durable_store::{
-    DynSagaDurableStore, DynSagaTenantSource, SagaClaimOutcome, SagaClaimRequest,
-    SagaCompensationCompletion, SagaCompensationFailure, SagaCompensationIntent,
-    SagaCompensationNotApplied, SagaCompensationProgress, SagaContractId, SagaContractIdError,
-    SagaDurableMutation, SagaDurableMutationError, SagaDurableMutationOutcome, SagaDurableStore,
-    SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardCompletion, SagaForwardIntent,
-    SagaForwardNotApplied, SagaForwardProgress, SagaInstanceRegistration,
-    SagaInstanceRegistrationError, SagaLeaseHolder, SagaLeaseHolderError, SagaLeaseTtl,
-    SagaLeaseTtlError, SagaOperatorAction, SagaOperatorAuthorization, SagaOperatorCasOutcome,
-    SagaOperatorChangeTicket, SagaOperatorChangeTicketError, SagaOperatorClaimOutcome,
-    SagaOperatorJournalExpectation, SagaOperatorJournalExpectationError, SagaOperatorReasonText,
-    SagaOperatorReasonTextError, SagaOperatorRepair, SagaOperatorRepairClaim,
-    SagaOperatorRepairExpectation, SagaOperatorRepairReason, SagaOperatorRepairReasonError,
-    SagaOperatorStartAuditId, SagaOperatorStartAuditIdError, SagaOperatorStatusOutcome,
-    SagaOperatorStatusSnapshot, SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest,
-    SagaRecoveryRequestError, SagaRecoverySnapshot, SagaRetryCompensationExpectation,
-    SagaRetryCompensationExpectationError, SagaRunnableInstance, SagaRunnableInstanceError,
-    SagaStartAuditId, SagaStartAuditIdError, SagaStartAuthorization, SagaStepCompletion,
-    SagaTenantCursor, SagaTenantPage, SagaTenantSource, SagaTerminalReceiptOutcome,
-    SagaTerminalReceiptRequest, SagaTerminateExpectation, SagaUnresolvedObservation,
-    SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SagaWorkerIdentityError, StoredSagaReceipt,
-    saga_operator_action,
-};
 pub use secret_resolver::{
     DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
 };
@@ -189,10 +165,6 @@ pub use signer::{DynSigner, KeyId, SignRequest, Signature, Signer, SignerError, 
 /// Test-only constructors for production-sealed DI values.
 #[cfg(any(feature = "test-support", feature = "dlq-test-support"))]
 pub mod test_support {
-    use super::{
-        SagaOperatorAction, SagaOperatorAuthorization, SagaOperatorStartAuditId, SagaStartAuditId,
-        SagaStartAuthorization, SagaWorkerIdentity,
-    };
 
     #[cfg(feature = "dlq-test-support")]
     use super::{DlqOperatorAction, DlqOperatorAuthorization, DlqOperatorStartAuditId};
@@ -211,31 +183,5 @@ pub mod test_support {
             tenant,
             start_audit_id,
         )
-    }
-
-    pub fn saga_operator_authorization<A: SagaOperatorAction>(
-        caller: vocab::ServiceCallerDomain,
-        identity: SagaWorkerIdentity,
-        instance: consistency::SagaInstanceRef,
-        evidence: A::Evidence,
-        start_audit_id: SagaOperatorStartAuditId,
-    ) -> SagaOperatorAuthorization<A> {
-        SagaOperatorAuthorization::issue(
-            sagaauthmint::SagaOperatorMint::capability(),
-            caller,
-            identity,
-            instance,
-            evidence,
-            start_audit_id,
-        )
-    }
-
-    pub fn saga_start_authorization(
-        caller: vocab::ServiceCallerDomain,
-        identity: SagaWorkerIdentity,
-        instance: consistency::SagaInstanceRef,
-        start_audit_id: SagaStartAuditId,
-    ) -> SagaStartAuthorization {
-        SagaStartAuthorization::issue(caller, identity, instance, start_audit_id)
     }
 }

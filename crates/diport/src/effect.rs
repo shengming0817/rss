@@ -212,7 +212,6 @@ macro_rules! classify_ports {
 classify_ports! {
     async_sync DynKeyProvider => AuthEffect;
     async_sync DynSecretResolver => AuthEffect;
-    async_sync DynSagaDurableStore => WorkflowEffect;
 
     async_send DynRateLimiter => AuthEffect;
     async_send DynSigner => AuthEffect;
@@ -223,7 +222,6 @@ classify_ports! {
     async_send DynObjectStore => BusinessWriteEffect;
 
     async_send DynLockStore => WorkflowEffect;
-    async_send DynSagaTenantSource => WorkflowEffect;
 
     sync_obj MetricsExporter => ReadEffect;
 }

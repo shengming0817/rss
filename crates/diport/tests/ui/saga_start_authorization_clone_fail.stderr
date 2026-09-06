@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `SagaStartAuthorization` in the current scope
- --> tests/ui/saga_start_authorization_clone_fail.rs:2:31
-  |
-2 |     let _copy = authorization.clone();
-  |                               ^^^^^ method not found in `SagaStartAuthorization`

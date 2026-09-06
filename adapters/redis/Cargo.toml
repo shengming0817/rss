@@ -19,7 +19,6 @@ workspace = true
 [dependencies]
 diport = { path = "../../crates/diport" }
 rss-runtime.workspace = true
-consistency = { path = "../../crates/consistency", optional = true }
 vocab = { path = "../../crates/vocab", optional = true }
 deadpool-redis = { workspace = true, optional = true }
 # redacted 结构化日志（仅 backend）：`rss_redact::redact_error` funnel + `tracing`（`crates/observ` 与 typed metric enums：错误经 redact）。
@@ -35,7 +34,7 @@ tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"], op
 default = []
 backend = ["dep:deadpool-redis", "dep:secure", "dep:rss-redact", "dep:tracing", "dep:thiserror", "dep:vocab", "dep:sha2", "dep:tokio"]
 # Live tests are owned by tests/redis-integration, which enables this existing feature directly.
-integration = ["backend", "dep:consistency"]
+integration = ["backend"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"] }
