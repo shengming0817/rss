@@ -44,6 +44,36 @@ database errors are permanent configuration failures; permission denial during t
 is a storage-contract failure, while runtime permission denial remains a non-retryable operation
 error. Transaction stages log only the phase, classification and redacted source.
 
+## Resource ownership and shutdown
+
+The default adapter has no `rss-runtime` dependency. A Tokio-based host can connect, use
+`local_tx`, and call `runtime.close().await` directly. `PgRuntime` builds and owns its pool;
+`PgTransaction` remains the only transaction lifecycle owner. A shared pool cannot substitute
+for sharing the same transaction with repositories and Outbox.
+
+Stop admitting work before closing. The first poll of `close()` stops pool admission and wakes
+waiting acquisitions with a closed-pool error classified as `Permanent`: the same runtime cannot
+reopen, so retrying acquisition is not useful. Already acquired transactions retain their own
+operation deadlines and settlement authority. The future waits for pooled connections to be
+released and closed; `is_closed()` only reports that admission has stopped. Repeated and
+concurrent closes are safe. Cancelling the wait leaves admission closed, and another call can
+continue waiting. Dropping handles does not guarantee graceful cleanup.
+
+SQLx 0.9.0 supplies the corrected pool drain implementation; companion repositories must use
+that same SQLx version for borrowed connection types.
+
+The host owns the shutdown budget and wraps `close()` in its own timeout. No additional adapter
+shutdown timeout is created. For optional RSS lifecycle integration, explicitly enable:
+
+```toml
+rss-transactional-messaging-postgres = { version = "=0.1.0", features = ["rss-runtime"] }
+```
+
+This implements `rss_runtime::ManagedResource` for `PgRuntime`; its `shutdown()` delegates to
+`close()`, with the budget supplied by `ShutdownStack`. The previous default trait implementation
+is removed: existing managed consumers must opt in. The `integration` test feature does not
+activate this bridge, and neither feature changes transaction or tenant guarantees.
+
 ## Typed companion composition
 
 This compile-checked example keeps SQL in trusted companion repositories. The application handler
@@ -57,7 +87,7 @@ The example's Rust 2024 consumer declares all three direct dependencies:
 [dependencies]
 rss-transactional-messaging-postgres = "=0.1.0"
 rss-transactional-messaging = "=0.2.0"
-sqlx = { version = "0.8.6", default-features = false, features = ["postgres", "runtime-tokio"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 ```
 
 `compose` borrows the caller's timer and clones its shared time domain into the adapter;
@@ -109,6 +139,10 @@ async fn compose<C: ExecutionTimer + Clone + 'static>(config: PgConfig, timer: &
     let outbox = Arc::new(PgOutboxStore::new(runtime.clone(), domain, budget)?);
     let consumer = PgConsumerTx::new(runtime.clone(), Effect);
     Ok((runtime, outbox, consumer))
+}
+async fn close(runtime: &PgRuntime) {
+    // The caller applies its remaining shutdown budget around this future.
+    runtime.close().await;
 }
 async fn append(runtime: &PgRuntime, store: Arc<PgOutboxStore<()>>,
     message: MessageEnvelope<Vec<u8>>, deadline: OperationDeadline) -> LocalTxAttempt<AppendOutcome, PgError> {

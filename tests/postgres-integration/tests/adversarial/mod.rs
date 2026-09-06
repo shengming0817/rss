@@ -272,7 +272,8 @@ pub(super) async fn run(
     let accepted = PgRuntime::connect(config.clone(), Timer::new())
         .await
         .is_ok();
-    sqlx::raw_sql(&format!("ALTER TABLE rss_transactional_messaging.inbox DROP CONSTRAINT inbox_receipt_shape, ADD CONSTRAINT inbox_receipt_shape {original}")).execute(owner).await?;
+    // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.inbox DROP CONSTRAINT inbox_receipt_shape, ADD CONSTRAINT inbox_receipt_shape {original}"))).execute(owner).await?;
     assert!(!accepted, "same-name weakened constraint must fail connect");
     storage_mutations(owner, &config).await?;
     consumer_failures::run(runtime.clone(), owner).await?;
@@ -340,13 +341,15 @@ async fn storage_defaults(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Re
         ("outbox", "retry_count", "0"),
         ("outbox", "retry_after", "clock_timestamp()"),
     ] {
-        sqlx::raw_sql(&format!(
+        // SQL safety: SQL fragments are literals from the fixture table below/above.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE rss_transactional_messaging.{relation} ALTER COLUMN {column} DROP DEFAULT"
-        ))
+        )))
         .execute(owner)
         .await?;
         let error = PgRuntime::connect(config.clone(), Timer::new()).await.err();
-        sqlx::raw_sql(&format!("ALTER TABLE rss_transactional_messaging.{relation} ALTER COLUMN {column} SET DEFAULT {restore}")).execute(owner).await?;
+        // SQL safety: SQL fragments are literals from the fixture table below/above.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.{relation} ALTER COLUMN {column} SET DEFAULT {restore}"))).execute(owner).await?;
         assert!(matches!(
             error,
             Some(PgError::IncompatibleStorageContract(
@@ -366,7 +369,8 @@ async fn storage_mutations(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::R
     .execute(owner)
     .await?;
     let error = PgRuntime::connect(config.clone(), Timer::new()).await.err();
-    sqlx::raw_sql(&format!("ALTER TABLE rss_transactional_messaging.outbox ADD CONSTRAINT outbox_lease_shape {definition}")).execute(owner).await?;
+    // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.outbox ADD CONSTRAINT outbox_lease_shape {definition}"))).execute(owner).await?;
     assert!(matches!(
         error,
         Some(PgError::IncompatibleStorageContract(
@@ -409,7 +413,8 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
         ("domain='projection-other'", "projection-other"),
         ("partition_key='projection-other'", "integration"),
     ] {
-        sqlx::query(&format!("UPDATE rss_transactional_messaging.outbox SET status='pending', {mutation} WHERE seq=$1")).bind(seq).execute(owner).await?;
+        // SQL safety: SQL fragments are literals from the fixture table below/above.
+        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE rss_transactional_messaging.outbox SET status='pending', {mutation} WHERE seq=$1"))).bind(seq).execute(owner).await?;
         let store = PgOutboxStore::<()>::new(
             runtime.clone(),
             MessagingDomain::parse(domain)?,

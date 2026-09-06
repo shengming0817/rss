@@ -2,6 +2,7 @@
 // reason: integration fixtures fail loudly on invalid static identities and test setup.
 mod adversarial;
 mod conformance;
+mod lifecycle;
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant,
 };
@@ -68,10 +69,14 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         outbox_roundtrip(runtime.clone()).await?;
         consumer_receipt(runtime.clone(), &owner).await?;
         localtx_faults(runtime.clone(), &owner).await?;
-        conformance::run(runtime.clone(), &owner).await?;
-        adversarial::run(runtime.clone(), &owner, &raw_runtime, config).await?;
-        use rss_runtime::ManagedResource as _;
-        runtime.shutdown().await?;
+        Box::pin(conformance::run(runtime.clone(), &owner)).await?;
+        Box::pin(adversarial::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
+        lifecycle::business_outbox_atomicity(runtime.clone(), &owner).await?;
+        lifecycle::close_during_transaction(config.clone(), &owner).await?;
+        #[cfg(feature = "rss-runtime")]
+        lifecycle::managed_close(config).await?;
+        runtime.close().await;
+        assert!(runtime.is_closed());
         owner.close().await;
         raw_runtime.close().await;
         drop(fixture);

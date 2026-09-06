@@ -80,7 +80,8 @@ impl Harness {
         };
         let actions = Arc::new(Mutex::new(Vec::new()));
         let abandons = Arc::new(AtomicUsize::new(0));
-        let result = consume_once(
+        // Keep the concrete provider future off the conformance runner stack.
+        let result = Box::pin(consume_once(
             &self.inbox(),
             &transaction,
             &execution,
@@ -88,7 +89,7 @@ impl Harness {
                 message,
                 RecordingSettlement::observing(actions, abandons.clone()),
             ),
-        )
+        ))
         .await
         .map_err(conformance)?;
         let observations = std::mem::take(&mut *emitter.0.lock().expect("observations"));

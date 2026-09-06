@@ -181,11 +181,13 @@ impl From<sqlx::Error> for PgError {
             {
                 MessagingErrorKind::Permanent
             }
-            sqlx::Error::Io(_)
-            | sqlx::Error::PoolTimedOut
-            | sqlx::Error::PoolClosed
-            | sqlx::Error::WorkerCrashed => MessagingErrorKind::Transient,
-            sqlx::Error::Configuration(_) | sqlx::Error::Tls(_) => MessagingErrorKind::Permanent,
+            sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => {
+                MessagingErrorKind::Transient
+            }
+            // A closed pool never reopens; retrying against the same runtime cannot succeed.
+            sqlx::Error::PoolClosed | sqlx::Error::Configuration(_) | sqlx::Error::Tls(_) => {
+                MessagingErrorKind::Permanent
+            }
             sqlx::Error::Database(error) => sqlstate_kind(error.code().as_deref()),
             _ => MessagingErrorKind::Invariant,
         };
@@ -427,7 +429,18 @@ impl PgRuntime {
         }
     }
 
-    /// Whether the pool has been closed by its resource owner.
+    /// Stop pool admission and wait for all pooled connections to be released and closed.
+    ///
+    /// Closing starts when this future is first polled. Existing transactions retain their
+    /// settlement authority and deadlines; closing does not abort them. The host must stop
+    /// admitting work and apply its shutdown budget around this future. Cancelling the wait
+    /// leaves the pool closed, and another call can resume waiting. Repeated and concurrent
+    /// calls are safe. Dropping the runtime is not a substitute for awaiting graceful close.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
+    /// Whether pool admission has stopped, not whether graceful close has completed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.pool.is_closed()
@@ -508,12 +521,13 @@ impl PgRuntime {
 pub(crate) fn settled<T>(attempt: LocalTxAttempt<T, PgError>) -> Result<T, PgError> {
     attempt.fold(Ok, Err, Err, Err, Err, Err)
 }
+#[cfg(feature = "rss-runtime")]
 impl rss_runtime::ManagedResource for PgRuntime {
     fn name(&self) -> &str {
         "postgres-transactional-messaging"
     }
     async fn shutdown(&self) -> Result<(), rss_runtime::ShutdownError> {
-        self.pool.close().await;
+        PgRuntime::close(self).await;
         Ok(())
     }
 }
@@ -656,7 +670,6 @@ mod tests {
     fn probe_preserves_transient_failures() {
         for source in [
             sqlx::Error::PoolTimedOut,
-            sqlx::Error::PoolClosed,
             sqlx::Error::Io(std::io::Error::other("secret endpoint")),
         ] {
             let error = PgError::probe(source);
@@ -667,6 +680,17 @@ mod tests {
             PgError::probe(sqlx::Error::ColumnNotFound("missing".into())),
             PgError::StorageContractProbe(_)
         ));
+    }
+    #[test]
+    fn closed_pool_is_not_retryable() {
+        assert_eq!(
+            PgError::from(sqlx::Error::PoolClosed).kind(),
+            MessagingErrorKind::Permanent
+        );
+        assert_eq!(
+            PgError::probe(sqlx::Error::PoolClosed).kind(),
+            MessagingErrorKind::Permanent
+        );
     }
     #[test]
     fn sql_errors_have_closed_safe_classifications() {

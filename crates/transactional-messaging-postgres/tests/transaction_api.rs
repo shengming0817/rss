@@ -29,3 +29,13 @@ fn lease_policy_retains_authoritative_ttl() -> Result<(), Box<dyn std::error::Er
     assert_eq!(policy.ttl(), ttl);
     Ok(())
 }
+
+#[test]
+fn independent_host_can_close_without_a_lifecycle_trait() {
+    fn close(
+        runtime: &rss_transactional_messaging_postgres::PgRuntime,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        runtime.close()
+    }
+    let _ = close;
+}

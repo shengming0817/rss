@@ -259,28 +259,37 @@ impl InboxDriver for Harness {
 
 pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let timer = Timer::new();
-    rss_transactional_messaging_testkit::localtx::run_localtx_conformance(
-        &Harness::new(runtime.clone(), owner, "local-conformance"),
-        &timer,
-        ExecutionBudget::STANDARD,
+    Box::pin(
+        rss_transactional_messaging_testkit::localtx::run_localtx_conformance(
+            &Harness::new(runtime.clone(), owner, "local-conformance"),
+            &timer,
+            ExecutionBudget::STANDARD,
+        ),
     )
     .await?;
-    rss_transactional_messaging_testkit::inbox::run_inbox_conformance(
-        &Harness::new(runtime.clone(), owner, "inbox-conformance"),
-        &timer,
-        ExecutionBudget::STANDARD,
+    Box::pin(
+        rss_transactional_messaging_testkit::inbox::run_inbox_conformance(
+            &Harness::new(runtime.clone(), owner, "inbox-conformance"),
+            &timer,
+            ExecutionBudget::STANDARD,
+        ),
     )
     .await?;
-    rss_transactional_messaging_testkit::consumer::run_consumer_conformance(
-        &Harness::new(runtime.clone(), owner, "consumer-conformance"),
-        &timer,
-        ExecutionBudget::STANDARD,
+    // Bound the stack of the nested, concrete PostgreSQL consumer futures in debug builds.
+    Box::pin(
+        rss_transactional_messaging_testkit::consumer::run_consumer_conformance(
+            &Harness::new(runtime.clone(), owner, "consumer-conformance"),
+            &timer,
+            ExecutionBudget::STANDARD,
+        ),
     )
     .await?;
-    rss_transactional_messaging_testkit::outbox::run_outbox_conformance(
-        &outbox::Driver::new(runtime, owner),
-        &timer,
-        ExecutionBudget::STANDARD,
+    Box::pin(
+        rss_transactional_messaging_testkit::outbox::run_outbox_conformance(
+            &outbox::Driver::new(runtime, owner),
+            &timer,
+            ExecutionBudget::STANDARD,
+        ),
     )
     .await?;
     Ok(())

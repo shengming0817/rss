@@ -8,6 +8,10 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime"]
+
 [dev-dependencies]
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
 rss-transactional-messaging.workspace = true
