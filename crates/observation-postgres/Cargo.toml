@@ -14,10 +14,27 @@ rss-request-context.workspace = true
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
 futures = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["time"] }
+rss-projection = { workspace = true, optional = true }
+rss-projection-postgres = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
 [features]
 default = []
 integration = []
+projection = ["dep:rss-projection", "dep:serde", "dep:serde_json"]
+projection-postgres = ["projection", "dep:rss-projection-postgres"]
 [dev-dependencies]
+rss-contract.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util.workspace = true
 anyhow.workspace = true
 [lints]
 workspace = true
+
+[[example]]
+name = "handoff"
+required-features = ["projection-postgres"]
+
+[[example]]
+name = "handoff-install"
+required-features = ["projection-postgres"]

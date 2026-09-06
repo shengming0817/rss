@@ -28,7 +28,7 @@ fn deadline() -> Deadline {
 }
 struct Trusted;
 impl Authority for Trusted {
-    fn authorize(&self, _: &Scope, _: Option<&Coverage>, _: Access) -> Result<(), Error> {
+    fn authorize(&self, _: Access<'_>) -> Result<(), Error> {
         Ok(())
     } // reason: fixture authority, never production authentication.
 }
@@ -121,6 +121,7 @@ async fn suite() -> anyhow::Result<()> {
     let store = Arc::new(PgStore::new(pool.clone(), Timer, deadline()).await?);
     let base = scope(TENANT, "registration-1", "agent", "epoch-1")?;
     receipt_identity(&store, &base).await?;
+    journal_position(&admin).await?;
     delta_gap(&store, &base).await?;
     review_regressions(&admin, &pool, &store).await?;
     contract_checks(&store, &base, &admin, &pool).await?;
@@ -378,7 +379,7 @@ async fn schema_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_err());
-    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:1'")
+    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:2'")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_ok());
@@ -999,5 +1000,14 @@ async fn server_lock_wait(
         .await;
     blocker.rollback().await?;
     assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Deadline));
+    Ok(())
+}
+
+async fn journal_position(admin: &PgPool) -> anyhow::Result<()> {
+    let position: i64 =
+        sqlx::query_scalar("SELECT log_position FROM rss_observation.batches WHERE batch_id='s1'")
+            .fetch_one(admin)
+            .await?;
+    assert_eq!(position, 1);
     Ok(())
 }

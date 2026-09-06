@@ -2,7 +2,7 @@ use rss_observation::{Error, ErrorKind};
 use sqlx::PgConnection;
 // PostgreSQL 16 canonical columns/constraints/indexes/policies/functions. A change requires a
 // new component storage revision and a matching fresh-install/upgrade proof, never a bypass.
-const CATALOG: &str = "3c2fc37018a977a271d9892fc30d19d7";
+const CATALOG: &str = "c333b69da7b748f33867aa9cbad60ec5";
 pub(crate) async fn validate(connection: &mut PgConnection) -> Result<(), Error> {
     let valid: Option<bool> = sqlx::query_scalar(include_str!("probe.sql"))
         .fetch_one(&mut *connection)

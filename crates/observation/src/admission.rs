@@ -1,25 +1,52 @@
 use crate::{Batch, Coverage, Error, Scope};
-/// Product-owned authority checks are trusted code, not a credential or device verifier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Access {
-    /// Read durable receipts or historical stream state.
-    Read,
-    /// Submit a report within the exact authorized coverage.
-    Submit,
-    /// Activate the requested registration and producer epoch using lifecycle CAS.
-    Activate,
+use rss_request_context::TenantId;
+/// Exact product-owned authorization request; every variant carries its required context.
+#[derive(Clone, Copy, Debug)]
+pub enum Access<'a> {
+    /// Read durable receipts or historical state in one stream.
+    Read {
+        /// Exact stream.
+        scope: &'a Scope,
+    },
+    /// Submit a report within the exact coverage.
+    Submit {
+        /// Exact stream.
+        scope: &'a Scope,
+        /// Authorized collection boundary.
+        coverage: &'a Coverage,
+    },
+    /// Activate the requested registration and producer epoch.
+    Activate {
+        /// Exact stream.
+        scope: &'a Scope,
+    },
+    /// Read all historically applicable records in this tenant's journal.
+    ReadJournal {
+        /// Trusted tenant selected by the host, never inferred from a report.
+        tenant: TenantId,
+    },
 }
-/// Trusted product authorization boundary, normally backed by already authenticated context.
-/// Implementations must validate the requested access and coverage; this synchronous method
-/// must not perform blocking provider I/O. Returning success grants the exact requested scope.
+/// Product authorization using authenticated context. No blocking I/O or implicit grants.
 pub trait Authority: Send + Sync {
-    /// Verify this exact scope and (for submission) coverage against trusted context.
-    fn authorize(
-        &self,
-        scope: &Scope,
-        coverage: Option<&Coverage>,
-        access: Access,
-    ) -> Result<(), Error>;
+    /// Authorize the exact operation. Submission authority does not grant journal access.
+    fn authorize(&self, request: Access<'_>) -> Result<(), Error>;
+}
+/// Product-authorized tenant journal read. Reauthorize at each host operation boundary;
+/// cancel/join a long-lived worker before revoking its in-process grant.
+#[derive(Debug)]
+pub struct JournalReadGrant {
+    tenant: TenantId,
+}
+impl JournalReadGrant {
+    /// Obtain explicit tenant-wide historical journal authority.
+    pub fn verify(authority: &impl Authority, tenant: TenantId) -> Result<Self, Error> {
+        authority.authorize(Access::ReadJournal { tenant })?;
+        Ok(Self { tenant })
+    }
+    /// Exact authorized tenant.
+    pub const fn tenant(&self) -> TenantId {
+        self.tenant
+    }
 }
 /// Input bound to an exact successful product authority decision and core-computed fingerprint.
 pub struct VerifiedBatch {
@@ -37,7 +64,10 @@ impl VerifiedBatch {
     /// The authority is trusted product code; this does not authenticate credentials itself.
     /// Reauthorize each external request instead of retaining this capability across revocation.
     pub fn verify(authority: &impl Authority, scope: Scope, batch: Batch) -> Result<Self, Error> {
-        authority.authorize(&scope, Some(batch.coverage()), Access::Submit)?;
+        authority.authorize(Access::Submit {
+            scope: &scope,
+            coverage: batch.coverage(),
+        })?;
         let fingerprint = batch.fingerprint(&scope)?;
         Ok(Self {
             scope,
@@ -69,7 +99,7 @@ macro_rules! grant {
             /// Check this exact scope through the corresponding product authority operation.
             /// This records a successful decision; it neither authenticates a device nor activates storage.
             pub fn verify(authority: &impl Authority, scope: Scope) -> Result<Self, Error> {
-                authority.authorize(&scope, None, Access::$access)?;
+                authority.authorize(Access::$access { scope: &scope })?;
                 Ok(Self { scope })
             }
             /// Exact scope approved by the product authority.

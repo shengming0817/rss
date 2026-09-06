@@ -13,11 +13,14 @@ default = []
 rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime"]
 
 [dev-dependencies]
+rss-projection.workspace = true
+rss-projection-postgres = { workspace = true, features = ["integration"] }
+tokio-util.workspace = true
 rss-transactional-messaging-recovery.workspace = true
 rss-data-protection.workspace = true
 ring.workspace = true
 rss-observation.workspace = true
-rss-observation-postgres = { workspace = true, features = ["integration"] }
+rss-observation-postgres = { workspace = true, features = ["integration", "projection-postgres"] }
 serde_json.workspace = true
 tempfile.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration", "recovery"] }

@@ -120,6 +120,12 @@ repository = "https://github.com/shengming0817/rss"
 
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
+# #2297 intentionally replaces the pre-publication Observation authorization signature.
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-observation"
+baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
+issue = 2297
+
 [workspace.dependencies]
 rss-platform = { path = "crates/platform", version = "0.3.0" }
 axum = { version = "0.8", default-features = false, features = ["json"] }

@@ -131,7 +131,7 @@ fn bounds_and_unknown_versions_are_rejected() -> anyhow::Result<()> {
 }
 struct Denied;
 impl Authority for Denied {
-    fn authorize(&self, _: &Scope, _: Option<&Coverage>, _: Access) -> Result<(), Error> {
+    fn authorize(&self, _: Access<'_>) -> Result<(), Error> {
         Err(ErrorKind::Unauthorized.into())
     }
 }

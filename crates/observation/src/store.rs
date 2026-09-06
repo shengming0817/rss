@@ -39,6 +39,13 @@ impl Record {
             decision,
         })
     }
+    /// Admit only a historically complete snapshot or contiguous delta for downstream use.
+    pub fn into_applicable(self) -> Result<ApplicableRecord, Error> {
+        if !self.decision.outcome().is_applicable() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        Ok(ApplicableRecord(self))
+    }
     /// Exact stream to which this immutable receipt belongs.
     pub const fn scope(&self) -> &Scope {
         &self.scope
@@ -58,6 +65,15 @@ impl Record {
     /// Immutable historical sync result; it does not claim Inventory or projection completion.
     pub const fn decision(&self) -> &Decision {
         &self.decision
+    }
+}
+/// Validated historically applicable durable record. No independent constructor or state copy.
+#[derive(Clone, Debug)]
+pub struct ApplicableRecord(Record);
+impl ApplicableRecord {
+    /// Complete immutable receipt, including scope, coverage and explicit snapshot/delta operations.
+    pub const fn record(&self) -> &Record {
+        &self.0
     }
 }
 #[derive(Debug)]

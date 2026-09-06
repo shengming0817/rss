@@ -6,7 +6,7 @@ use rss_observation::{
     Batch, Clock, Decision, Error, ErrorKind, Id, LifecycleGrant, ObservationStore, Policy,
     ReadGrant, ReceiveOutcome, Record, Scope, State, VerifiedBatch,
 };
-use rss_request_context::Deadline;
+use rss_request_context::{Deadline, TenantId};
 use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgRow};
 #[cfg(feature = "integration")]
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// Dropping an operation quarantines its unconfirmed transaction. Close stops pool admission.
 pub struct PgStore<C> {
     pool: PgPool,
-    clock: C,
+    pub(crate) clock: C,
     #[cfg(feature = "integration")]
     fault: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -110,7 +110,7 @@ impl<C: Clock> PgStore<C> {
     async fn setup(
         &self,
         connection: &mut PgConnection,
-        scope: &Scope,
+        tenant: TenantId,
         deadline: Deadline,
     ) -> Result<(), Error> {
         let remaining = watchdog(
@@ -119,12 +119,12 @@ impl<C: Clock> PgStore<C> {
                 .ok_or(ErrorKind::Deadline)?,
         );
         sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
-            .bind(scope.tenant().to_string()).bind(remaining).execute(connection).await.map_err(sql_error)?;
+            .bind(tenant.to_string()).bind(remaining).execute(connection).await.map_err(sql_error)?;
         Ok(())
     }
-    async fn transact<T, F>(
+    pub(crate) async fn transact<T, F>(
         &self,
-        scope: &Scope,
+        tenant: TenantId,
         deadline: Deadline,
         fault: u8,
         operation: F,
@@ -145,7 +145,7 @@ impl<C: Clock> PgStore<C> {
             };
             let mut tx = lease.connection.begin().await.map_err(sql_error)?;
             let result = async {
-                self.setup(&mut tx, scope, deadline).await?;
+                self.setup(&mut tx, tenant, deadline).await?;
                 #[cfg(feature = "integration")]
                 crate::transaction::watchdog_fault(&mut tx, fault).await?;
                 let result = operation(&mut tx, &progress).await;
@@ -201,7 +201,7 @@ impl<C: Clock> PgStore<C> {
         let input_scope = input.scope().clone();
         let batch = input.batch().clone();
         let fingerprint = input.fingerprint();
-        self.transact(input.scope(),deadline,fault,move |connection,progress|Box::pin(async move{
+        self.transact(input.scope().tenant(),deadline,fault,move |connection,progress|Box::pin(async move{
             if let Some(record)=read(connection,&input_scope,batch.id()).await?{return replay(record,&batch);}
             let row=sqlx::query("SELECT state,policy FROM rss_observation.lock_stream($1)").bind(input_scope.encode()?).fetch_one(&mut *connection).await.map_err(sql_error)?;
             // A concurrent exact retry may have committed while we waited for the stream lock.
@@ -235,7 +235,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         let encoded_policy = policy.clone();
         let result = self
             .transact(
-                grant.scope(),
+                grant.scope().tenant(),
                 deadline,
                 fault,
                 move |connection, progress| {
@@ -258,7 +258,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
             .await;
         match result {
             Err(error) if error.kind() == ErrorKind::CommitUnknown && fault != 3 => {
-                let found=self.transact(grant.scope(),deadline,0,move |connection,_|Box::pin(async move {
+                let found=self.transact(grant.scope().tenant(),deadline,0,move |connection,_|Box::pin(async move {
                     let revision:Option<String>=sqlx::query_scalar("SELECT activation_revision::text FROM rss_observation.streams WHERE tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid AND scope=$1 AND activation_previous IS NOT DISTINCT FROM $2::numeric AND policy::jsonb=$3::jsonb")
                         .bind(scope).bind(expected.map(|n|n.to_string())).bind(policy).fetch_optional(connection).await.map_err(sql_error)?;
                     revision.map(|r|r.parse::<u64>().map_err(|_|Error::new(ErrorKind::Invariant))).transpose()
@@ -286,7 +286,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
                 let scope = input.scope().clone();
                 let id = input.batch().id().clone();
                 let found = self
-                    .transact(input.scope(), deadline, 0, move |connection, _| {
+                    .transact(input.scope().tenant(), deadline, 0, move |connection, _| {
                         Box::pin(async move { read(connection, &scope, &id).await })
                     })
                     .await;
@@ -310,7 +310,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         let scope = grant.scope().clone();
         let id = id.clone();
         self.transact(
-            grant.scope(),
+            grant.scope().tenant(),
             deadline,
             self.take_fault(),
             move |connection, _| Box::pin(async move { read(connection, &scope, &id).await }),
@@ -319,7 +319,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
     }
     async fn state(&self, grant: &ReadGrant, deadline: Deadline) -> Result<State, Error> {
         let scope = grant.scope().encode()?;
-        self.transact(grant.scope(),deadline,0,move |connection,_|Box::pin(async move{
+        self.transact(grant.scope().tenant(),deadline,0,move |connection,_|Box::pin(async move{
             let raw:Option<String>=sqlx::query_scalar("SELECT state FROM rss_observation.streams WHERE scope=$1 AND tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid").bind(scope).fetch_optional(connection).await.map_err(sql_error)?;
             durable(State::decode(&raw.ok_or(ErrorKind::UnknownStream)?))
         })).await
@@ -336,11 +336,11 @@ async fn read(
     scope: &Scope,
     id: &Id,
 ) -> Result<Option<Record>, Error> {
-    let row=sqlx::query("SELECT raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable FROM rss_observation.batches WHERE tenant_id=$1::uuid AND scope=$2 AND batch_id=$3")
+    let row=sqlx::query("SELECT raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND scope=$2 AND batch_id=$3")
         .bind(scope.tenant().to_string()).bind(scope.encode()?).bind(id.as_str()).fetch_optional(connection).await.map_err(sql_error)?;
     row.map(|row| restore(row, scope, id)).transpose()
 }
-fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {
+pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {
     let restore = || -> Result<Record, Error> {
         let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
         let batch = Batch::decode(&raw)?;
@@ -364,6 +364,12 @@ fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {
         )?;
         if decision.outcome().is_applicable()
             != row.try_get::<bool, _>("applicable").map_err(sql_error)?
+        {
+            return Err(ErrorKind::Invariant.into());
+        }
+        let position: Option<i64> = row.try_get("log_position").map_err(sql_error)?;
+        if decision.outcome().is_applicable() != position.is_some()
+            || position.is_some_and(|p| p <= 0)
         {
             return Err(ErrorKind::Invariant.into());
         }

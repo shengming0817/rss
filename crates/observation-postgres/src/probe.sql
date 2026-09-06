@@ -5,12 +5,15 @@ WITH reachable AS (
  SELECT * FROM pg_roles WHERE rolname=current_user OR pg_has_role(current_user,oid,'SET')
 ), relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
- WHERE n.nspname='rss_observation' AND c.relname IN ('objects','streams','batches')
+ WHERE n.nspname='rss_observation' AND c.relname IN ('objects','streams','batches','journals')
 ), functions AS (
  SELECT p.* FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='rss_observation'
 )
 SELECT session_user=current_user
- AND (SELECT count(*)=3 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)
+ AND has_schema_privilege(current_user,'rss_observation','USAGE')
+ AND (SELECT bool_and(has_table_privilege(current_user,oid,'SELECT')) FROM relations)
+ AND (SELECT bool_and(has_function_privilege(current_user,oid,'EXECUTE')) FROM functions)
+ AND (SELECT count(*)=4 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)
  AND NOT EXISTS (SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole)
  AND NOT EXISTS (SELECT FROM reachable r CROSS JOIN relations c WHERE c.relowner=r.oid
   OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
@@ -22,8 +25,8 @@ SELECT session_user=current_user
  AND NOT EXISTS (SELECT FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a WHERE n.nspname='rss_observation' AND a.grantee=0)
  AND NOT EXISTS (SELECT FROM relations c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a WHERE a.grantee=0)
  AND NOT EXISTS (SELECT FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a WHERE att.attrelid IN (SELECT oid FROM relations) AND a.grantee=0)
- AND (SELECT count(*)=3 AND bool_and(polcmd='*' AND polqual IS NOT NULL AND polwithcheck IS NOT NULL) FROM pg_policy WHERE polrelid IN (SELECT oid FROM relations))
- AND (SELECT count(*)=3 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='p')
+ AND (SELECT count(*)=4 AND bool_and(polcmd='*' AND polqual IS NOT NULL AND polwithcheck IS NOT NULL) FROM pg_policy WHERE polrelid IN (SELECT oid FROM relations))
+ AND (SELECT count(*)=4 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='p')
  AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='f')
  AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='u')
- AND (SELECT obj_description(oid,'pg_namespace')='rss-observation-postgres:1' FROM pg_namespace WHERE nspname='rss_observation')
+ AND (SELECT obj_description(oid,'pg_namespace')='rss-observation-postgres:2' FROM pg_namespace WHERE nspname='rss_observation')

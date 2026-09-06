@@ -7,7 +7,12 @@ collector, Inventory or projection dependency.
 
 ## Admission and ownership
 
-The product implements `Authority` using authenticated context. `VerifiedBatch::verify` requires
+The product implements `Authority::authorize(Access)` using authenticated context. The closed
+request variants carry their required fields: Submit has Scope/Coverage, Read and Activate have
+Scope, and ReadJournal has TenantId. The former multi-argument authorization signature is removed.
+`JournalReadGrant::verify` requires explicit tenant-wide historical journal authority; submission
+or exact-stream read permission never grants a tenant scan. Reauthorize at host operation
+boundaries; cancel/join long-lived workers before revoking an in-process grant. `VerifiedBatch::verify` requires
 submission authority for the exact `Scope` and `Coverage`; `ReadGrant` and `LifecycleGrant` require
 separate read and lifecycle decisions. These private-field capabilities do not authenticate a
 network peer themselves. Reauthorize for each external request; do not cache grants across product
@@ -76,8 +81,10 @@ cursor nor extends the baseline deadline.
 two are minimum retention guarantees, not a TTL that invalidates an existing receipt. V1 retains
 all records and retirement evidence; there is no automatic deletion. Baseline validity uses the
 provider's received time. Expired baselines require a new snapshot, even if an old snapshot is
-replayed. Pending applicable records remain discoverable for the separate Observation/Projection
-handoff work; producer sequence is not a server projection log position.
+replayed. Historically applicable records are the durable projection handoff. `Record::into_applicable`
+returns a private-field `ApplicableRecord` only for a validated Snapshot/Delta decision; failure,
+partial, stale and NeedSnapshot receipts cannot enter this seam. Producer sequence is not a server
+projection log position. Receipt retention also retains the complete data referenced by projections.
 
 Policy、State 和 Decision 的持久表示均带必填 `version: 1`；未知版本和不可达状态拒绝恢复。
 公开反序列化复用同一校验入口，Decision 必须结合原始批次、接收时间与 Policy 验证。
@@ -105,3 +112,14 @@ retain only an opaque redacted source and a closed recovery classification.
 Historical extraction: `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891` receipt/replay mechanisms only.
 No historical generation, fencing, command store, wire or schema compatibility is retained.
 ref: kube-rs/kube kube-runtime/src/watcher.rs@2.0.1
+
+## Projection composition
+
+`rss-observation-postgres` exposes its optional `projection` integration: one committed-order
+journal per tenant, immutable small event references, and authorized restoration of full reports.
+The core does not depend on Projection. Complete empty snapshots and coverage-limited absence,
+explicit delta deletes, all stream identity fields, and collection-definition references remain
+available through `ApplicableRecord::record`; consumers own their interpretation and mapping.
+
+自主报告可直接进入 Observation；按需采集由 MDM 组合 Device Command，后者不是接收或投影的前置依赖。
+接收完成、完整性结果和投影 checkpoint 分别表达；任何一种都不自动表示 Inventory 更新或设备合规。
