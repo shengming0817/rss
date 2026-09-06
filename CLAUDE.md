@@ -1,6 +1,6 @@
 # RSS 协作说明
 
-RSS 是面向 Rust 社区的消息一致性 library workspace。本文件是协作入口，只拥有工作方式；
+RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。本文件是协作入口，只拥有工作方式；
 架构与工程规则按各自 owner 读取，不在此重复定义：
 
 - [项目范围](docs/rules/project-scope.md)：能力准入、仓内外边界与处置状态。
@@ -18,6 +18,12 @@ RSS 是面向 Rust 社区的消息一致性 library workspace。本文件是协�
 - 涉及功能或行为变更时，同步更新对应文档
 - 被 `.gitignore` 忽略的文件禁止 `git add -f`
 - 需求判断 / 方案设计 / review 默认考虑 MDM / 零信任治理与安全边界，不按隐含单租户 / 无设备场景推进
+
+## 临时项目规则：历史能力提取来源
+
+历史能力提取统一以历史 tag `baseline/pre-community-core-20260902`、固定 commit
+`5b63e10a1b396b0ff70b7d1e6e55db296cd7a891` 中的记录为来源。
+全部相关历史能力提取完成后删除本规则。
 
 ## 修改代码前
 

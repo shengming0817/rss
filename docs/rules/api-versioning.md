@@ -7,6 +7,7 @@ release catalog、schema 与 Cargo facts 派生，文档不复制。
 
 - 轴 A：Rust Release API/SemVer。
 - 轴 B：wire/contract compatibility。只要 persisted、networked 或跨版本消费，schema/manifest identity 受保护。
+- 组件持久化格式及必要升级定义由组件 owner 维护，适用本文件的兼容与退出规则；生产迁移执行由产品负责。
 - 两轴正交：internal Rust breaking 不必升 wire version；wire breaking 不能靠 Rust SemVer 掩盖。
 - internal `pub`、Markdown、同名 carrier 或历史发布不自动建立当前承诺。
 
