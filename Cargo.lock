@@ -1539,6 +1539,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "device-command-postgres-integration"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "rss-contract",
+ "rss-device-command",
+ "rss-device-command-postgres",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "serde_json",
+ "sqlx",
+ "testkit",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4266,6 +4285,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-device-command"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "rss-device-command-postgres"
+version = "0.1.0"
+dependencies = [
+ "rss-device-command",
+ "rss-redact",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "tracing",
+]
+
+[[package]]
 name = "rss-diag-context"
 version = "0.1.0"
 dependencies = [
@@ -5955,6 +5998,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5964,12 +6017,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

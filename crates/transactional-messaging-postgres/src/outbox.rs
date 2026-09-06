@@ -44,6 +44,55 @@ impl<R> PgOutboxStore<R> {
             receipt: PhantomData,
         })
     }
+    /// Reject a transaction from a different runtime before any companion operation.
+    /// Transaction provenance is private and minted by the enclosing runtime, never caller data.
+    pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
+        if !tx.belongs_to(&self.runtime) {
+            tracing::warn!(
+                phase = "transaction",
+                reason = "runtime_mismatch",
+                "outbox transaction owner rejected"
+            );
+            return Err(PgError::classified(
+                MessagingErrorKind::Invariant,
+                std::io::Error::other("transaction runtime mismatch"),
+            ));
+        }
+        Ok(())
+    }
+    /// Read durable confirmation using the persisted exact domain and message identity.
+    /// Readback may cross this store's relay domain, but cannot cross its runtime owner.
+    /// Missing rows and malformed state are invariant failures; changed identity is a conflict.
+    /// This is storage readback, not proof of device receipt or external execution.
+    pub async fn is_published(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        domain: &MessagingDomain,
+        message_id: &rss_transactional_messaging::message::MessageId,
+        expected: rss_transactional_messaging::message::MessageFingerprint,
+    ) -> Result<bool, PgError> {
+        self.validate_transaction(tx)?;
+        let tenant = tx.tenant_id().to_string();
+        let id = message_id.as_str().to_owned();
+        let row = tx.with_connection(move |connection| Box::pin(async move {
+            sqlx::query("SELECT domain,fingerprint,status FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2")
+                .bind(tenant).bind(id).fetch_optional(connection).await
+        })).await?.ok_or_else(PgError::invariant)?;
+        let digest: Vec<u8> = row.try_get("fingerprint")?;
+        if row.try_get::<String, _>("domain")? != domain.as_str()
+            || fingerprint(digest)? != expected
+        {
+            return Err(PgError::classified(
+                MessagingErrorKind::Conflict,
+                std::io::Error::other("dispatch identity conflict"),
+            ));
+        }
+        match row.try_get::<String, _>("status")?.as_str() {
+            "published" => Ok(true),
+            "pending" | "publishing" | "dead_letter" => Ok(false),
+            _ => Err(PgError::invariant()),
+        }
+    }
     async fn lease(
         &self,
         claim: &PgOutboxClaim,
@@ -106,6 +155,7 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         tx: &mut Self::Transaction<'_>,
         message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
+        self.validate_transaction(tx).map_err(PgError::port)?;
         let envelope = message.envelope();
         if tx.tenant_id() != envelope.metadata().tenant_id()
             || envelope.metadata().domain() != &self.domain

@@ -1,0 +1,25 @@
+[package]
+name = "rss-device-command-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Atomic PostgreSQL device commands and transactional dispatch"
+publish = ["crates-io"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+tracing.workspace = true
+rss-device-command.workspace = true
+rss-request-context.workspace = true
+rss-transactional-messaging.workspace = true
+rss-transactional-messaging-postgres.workspace = true
+rss-redact.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }

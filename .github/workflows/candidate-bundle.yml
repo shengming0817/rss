@@ -81,6 +81,12 @@ jobs:
           python3 -m unittest discover -s hack/tests -p test_projection_package_proof.py
           python3 hack/projection-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
+      - name: Verify independent Device Command artifact consumption
+        env:
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
+        run: |
+          python3 -m unittest discover -s hack/tests -p test_device_command_package_proof.py
+          python3 hack/device-command-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
       - name: Verify independent Reconcile artifact consumption
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof

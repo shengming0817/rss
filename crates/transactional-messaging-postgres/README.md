@@ -153,6 +153,18 @@ async fn append(runtime: &PgRuntime, store: Arc<PgOutboxStore<()>>,
 }
 ```
 
+## Durable publication readback
+
+Companion repositories may call `PgOutboxStore::is_published(tx, domain, message_id, fingerprint)` on
+an already appended message. It uses the transaction tenant, explicit persisted domain and exact
+authored fingerprint. Readback may cross the store's relay domain; append/claim remain bound to
+the configured domain. Both append and readback require a transaction minted by this same
+PgRuntime. Companion stores can use `validate_transaction` to enforce that binding at every
+entry point. Private provenance is minted by local/consumer transactions, never supplied by a
+caller; the comparison is a runtime enforcement, not proof against malicious trusted SQL. Only durable published settlement returns true; pending, publishing and dead-letter
+return false. Missing rows, corrupt state and changed identity fail closed. This is not device
+receipt or execution evidence, and the method neither settles an outbox nor changes its schema.
+
 ## Historical source ledger
 
 Source: `baseline/pre-community-core-20260902`.

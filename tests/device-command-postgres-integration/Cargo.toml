@@ -1,0 +1,22 @@
+[package]
+name = "device-command-postgres-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+[lints]
+workspace = true
+[dev-dependencies]
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+rss-device-command.workspace = true
+rss-device-command-postgres.workspace = true
+rss-request-context.workspace = true
+rss-contract.workspace = true
+rss-transactional-messaging.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+anyhow.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }

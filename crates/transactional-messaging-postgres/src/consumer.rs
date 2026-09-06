@@ -114,7 +114,7 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>> ConsumerTx<P> for PgConsumer
             transaction.connection(),
             claim.identity.tenant_id(),
             cutoff,
-            timer,
+            &self.runtime,
         );
         let body = within(timer, cutoff, |_| {
             effect_body(&self.effect, &mut tx, claim, message, &intent)

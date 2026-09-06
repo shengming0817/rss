@@ -390,12 +390,7 @@ impl PgRuntime {
             Ok(value) => value,
             Err(error) => return LocalTxAttempt::not_started(error),
         };
-        let mut view = PgTransaction {
-            connection: transaction.connection(),
-            tenant,
-            cutoff,
-            timer: &self.timer,
-        };
+        let mut view = PgTransaction::new(transaction.connection(), tenant, cutoff, self);
         let result = within(&self.timer, cutoff, |_| async {
             view.setup().await?;
             operation(&mut context, &mut view).await
@@ -568,20 +563,25 @@ pub struct PgTransaction<'tx> {
     tenant: TenantId,
     cutoff: AbsoluteDeadline,
     timer: &'tx PgTimer,
+    owner: &'tx PgRuntime,
 }
 impl PgTransaction<'_> {
     pub(crate) fn new<'a>(
         connection: &'a mut PgConnection,
         tenant: TenantId,
         cutoff: AbsoluteDeadline,
-        timer: &'a PgTimer,
+        owner: &'a PgRuntime,
     ) -> PgTransaction<'a> {
         PgTransaction {
             connection,
             tenant,
             cutoff,
-            timer,
+            timer: &owner.timer,
+            owner,
         }
+    }
+    pub(crate) fn belongs_to(&self, owner: &PgRuntime) -> bool {
+        std::ptr::eq(self.owner, owner)
     }
     pub(crate) async fn setup(&mut self) -> Result<(), PgError> {
         let millis = self.cutoff.remaining(self.timer).as_millis().max(1);

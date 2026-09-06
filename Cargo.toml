@@ -3,6 +3,9 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/device-command",
+  "crates/device-command-postgres",
+  "tests/device-command-postgres-integration",
   "crates/reconcile",
   "crates/reconcile-postgres",
   "tests/reconcile-postgres-integration",
@@ -85,6 +88,8 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-device-command", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-device-command-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-reconcile", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-reconcile-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-observation", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -144,6 +149,8 @@ repository = "https://github.com/shengming0817/rss"
 # 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-device-command = { path = "crates/device-command", version = "0.1.0" }
+rss-device-command-postgres = { path = "crates/device-command-postgres", version = "0.1.0" }
 rss-reconcile-postgres = { path = "crates/reconcile-postgres", version = "0.1.0" }
 rss-reconcile = { path = "crates/reconcile", version = "0.1.0" }
 tempfile = "3"

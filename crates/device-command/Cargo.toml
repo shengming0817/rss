@@ -1,0 +1,25 @@
+[package]
+name = "rss-device-command"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Fenced device command lifecycle and recovery contracts"
+publish = ["crates-io"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+rss-request-context.workspace = true
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["producer"] }
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
