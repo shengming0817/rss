@@ -31,7 +31,7 @@ thiserror.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time", "rt-multi-thread"] }
 
 [[test]]
 name = "fault_matrix"

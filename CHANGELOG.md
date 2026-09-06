@@ -6,6 +6,21 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-projection / rss-projection-postgres 0.1.0
+
+- Extract ordered projection execution and recovery from baseline `5b63e10` into independent
+  core and PostgreSQL packages (#2292). Events no longer require RSS envelopes or MessageRoute.
+- Commit read-model effects, fact receipts, epoch validation and checkpoints in one PostgreSQL
+  transaction. Append positions follow commit order; replay uses immutable new generations.
+- Expose bounded cancellation/deadline execution and an explicitly at-least-once external target path.
+  External mutations receive the same Control; caller-owned Report observations run after execution.
+- Require complete fact receipts for positioned generation baselines and initialize them atomically;
+  only adapter receipts may classify PostgreSQL effects as duplicate.
+- Remove legacy Projection models, metrics, conformance and generated input binding exports without
+  aliases or compatibility schemas. Generic diport checkpoints now own `CheckpointOffset`.
+- Provide a fresh-install schema only; external migrators own installation/grants, and products own
+  read-model schema, authentication and generation cutover. No legacy data adoption is supported.
+
 ### rss-transactional-messaging-amqp 0.1.0
 
 - Publish the historical lapin transport as an independent adapter with generation-scoped confirms,

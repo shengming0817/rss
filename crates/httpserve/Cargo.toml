@@ -27,7 +27,7 @@ axum = { workspace = true }
 http-body-util = { workspace = true }  # Limited：stream-level 字节硬顶（#1106 FIX-1，body-limit 中间件）
 tower = { workspace = true }                             # EnforceLayer/EnforceService impl tower::Layer/Service（axum from_fn 不可用于 MethodRouter::layer）
 tower-http = { workspace = true, features = ["set-header"] } # security-headers（SetResponseHeaderLayer，#1106 批次2）
-futures = { workspace = true }         # panic_recovery 中间件 catch_unwind（AssertUnwindSafe + FutureExt）
+futures = { workspace = true, features = ["std", "async-await", "executor"] }         # panic_recovery 中间件 catch_unwind（AssertUnwindSafe + FutureExt）
 # wire DTO 序列化（error envelope / readyz 响应）
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,11 +38,11 @@ tracing = { workspace = true }
 metrics = { workspace = true }
 thiserror = { workspace = true }
 ipnet = { workspace = true }
-tokio = { workspace = true, features = ["time"] } # 全请求 server budget；timeout 通过 drop 取消整条 request future
+tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"] } # 全请求 server budget；timeout 通过 drop 取消整条 request future
 tokio-util.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 tower = { workspace = true, features = ["util"] } # ServiceExt::oneshot 驱动 mock 请求
 # typed route funnel 负向证据（#1113/#1103，ADR-009）：编译期 Hard 不变式的 compile-fail 回归锁
 # （未认证 router 不可 bind、AuthenticatedRoutes 外部不可 mint、non-Primary 不可 mount Primary endpoint）。

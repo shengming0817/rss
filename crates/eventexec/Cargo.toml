@@ -21,12 +21,12 @@ rss-request-context.workspace = true
 diport = { path = "../diport" }
 # reconcile harness 经 vocab::Epoch 传递 lease epoch（Context::epoch / LeaseToken.epoch 同源，#1123）。
 vocab = { path = "../vocab" }
-futures = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，`crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
 tracing = { workspace = true }
-# 非消息 saga / projection / reconcile 引擎接缝。
+# 非消息 saga / reconcile 引擎接缝。
 consistency = { path = "../consistency" }
 # Keyed command idempotency aliases are derived inside the runtime boundary; raw business keys
 # never cross into persistence providers.
@@ -45,10 +45,10 @@ primitives = { path = "../primitives" }
 # 只依赖此 helper、不直接 import otel（otel 收口在 tracewire/adapters-otel）。
 tracewire = { package = "rss-trace-context", path = "../tracewire", version = "0.1.0" }
 # 非消息 eventexec algorithms 的 Tokio execution support。
-tokio = { workspace = true, features = ["rt", "time", "sync"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "rt-multi-thread", "macros"] }
 # CancellationToken（非消息 runtime 取消信号）。
 tokio-util = { workspace = true }
-# retention/projection/reconcile 等非 TransactionalMessaging canonical family 仍经 metrics facade 发射。硬依赖、非 optional——idiomatic
+# retention/reconcile 等非 TransactionalMessaging canonical family 仍经 metrics facade 发射。硬依赖、非 optional——idiomatic
 # metrics facade 范式：库无条件发射，executable（组合根）选 recorder（装 PromExporter 才导出，否则 facade
 # 自身 no-op）；不留 public no-op metrics 让生产静默降级（#1209 review F3 fail-closed）。同 tracing 层级。
 metrics = { workspace = true }
@@ -61,7 +61,7 @@ zeroize = { workspace = true }
 diport = { path = "../diport", features = ["test-support", "dlq-test-support"] }
 testkit = { path = "../testkit" }
 # test-util feature 提供 tokio::time::advance/pause（start_paused=true 控 interval tick）。
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 # #2054：OTel 测试脚手架移入 publish=false、dev-only carrier，不进入候选 feature/API 图。
 tracewiretest = { path = "../tracewiretest" }
 # TC5 T007.5 tracing 字段断言：捕获 error 级事件字段名/值（CapLayer subscriber）。

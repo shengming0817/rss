@@ -11,6 +11,6 @@ workspace = true
 [dependencies]
 diport = { path = "../diport" }
 rss-runtime.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
 

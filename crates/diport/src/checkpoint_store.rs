@@ -1,8 +1,8 @@
 //! `OwnerCheckpointStore` —— owner 断点续投 DI port（可替换：prod postgres / test in-mem）。
 //!
-//! saga journal resume 与 projection 断点续投共享：`(owner, checkpoint_id)` 主键 + `offset`（已处理
-//! 位点 [`Lsn`]）+ `version`（CAS 版本）。`save_checkpoint` 经**版本 CAS** 推进——`expected` 与存储版本
-//! 不符即 [`SaveOutcome::StaleVersion`]（旧写被拒，并发执行器/投影实例 fence），不静默覆盖。
+//! 通用机制的断点续投：`(owner, checkpoint_id)` 主键 + `offset`（已处理
+//! 位点 [`CheckpointOffset`]）+ `version`（CAS 版本）。`save_checkpoint` 经**版本 CAS** 推进——`expected` 与存储版本
+//! 不符即 [`SaveOutcome::StaleVersion`]（旧写被拒，并发 checkpoint 写入竞争），不静默覆盖。
 //!
 //! 数据无 PII（仅 owner 标识 + 偏移 + 版本，均为路由 / 版本元数据），故无 payload Debug 脱敏；
 //! 错误 source 仍经 [`RedactedSource`] 脱敏（adapter 原始错误可能携连接串）。
@@ -11,13 +11,25 @@
 
 use dynosaur::dynosaur;
 
-use consistency::Lsn;
-
 use rss_redact::RedactedSource;
+
+/// Offset owned by the unpublished generic checkpoint port, independent of Projection positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CheckpointOffset(u64);
+impl CheckpointOffset {
+    /// Hydrate the neutral mechanism's offset.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+    /// Numeric offset interpreted by the owning mechanism.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 // ── owner / checkpoint id newtype funnel ──────────────────────────────────────
 
-/// checkpoint owner（saga：saga 域 owner；projection：projector owner）。newtype funnel（私有字段，
+/// 通用 checkpoint owner。newtype funnel（私有字段，
 /// 单一构造入口）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CheckpointOwner(String);
@@ -33,12 +45,12 @@ impl CheckpointOwner {
     }
 }
 
-/// checkpoint 标识（saga：saga 实例 id；projection：事件流 / 投影标识）。newtype funnel。
+/// 通用机制的 checkpoint 标识。newtype funnel。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CheckpointId(String);
 
 impl CheckpointId {
-    /// 由标识构造（如 saga uuid 串、投影名）。
+    /// 由标识构造（如机制实例 id）。
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
@@ -74,8 +86,8 @@ impl CheckpointVersion {
 /// 读到的 checkpoint：已处理位点 + 当前 CAS 版本（save 时回传作 `expected`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Checkpoint {
-    /// 已处理位点（saga：已完成 step 数；projection：已处理事件 Lsn）。
-    pub offset: Lsn,
+    /// 已处理位点（由对应通用机制解释）。
+    pub offset: CheckpointOffset,
     /// 当前 CAS 版本（下次 `save_checkpoint` 的 `expected`）。
     pub version: CheckpointVersion,
 }
@@ -130,7 +142,7 @@ impl CheckpointStoreError {
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `OwnerCheckpointStore` 变体 +
 // dynosaur `DynOwnerCheckpointStore` 承载（DI 注入走 Send wrapper）。这是 ADR-003 既定 dyn-port 范式。
 pub trait OwnerCheckpointStoreLocal {
-    /// 读 `(owner, id)` 当前 checkpoint。`None` ⇒ 从未保存（调用方从 version 0 / Lsn 0 起）。
+    /// 读 `(owner, id)` 当前 checkpoint。`None` ⇒ 从未保存（调用方从 version 0 / CheckpointOffset 0 起）。
     async fn get_checkpoint(
         &self,
         owner: &CheckpointOwner,
@@ -147,7 +159,7 @@ pub trait OwnerCheckpointStoreLocal {
         &self,
         owner: &CheckpointOwner,
         id: &CheckpointId,
-        offset: Lsn,
+        offset: CheckpointOffset,
         expected: CheckpointVersion,
     ) -> Result<SaveOutcome, CheckpointStoreError>;
 
@@ -160,10 +172,9 @@ pub trait OwnerCheckpointStoreLocal {
 mod smoke {
     //! build smoke：async DI port 可 native AFIT impl + 经 `Box<DynOwnerCheckpointStore>` 跨 spawn 注入。
     use super::{
-        Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-        DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,
+        Checkpoint, CheckpointId, CheckpointOffset, CheckpointOwner, CheckpointStoreError,
+        CheckpointVersion, DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,
     };
-    use consistency::Lsn;
 
     #[test]
     fn checkpoint_version_next_is_monotone() {
@@ -180,7 +191,7 @@ mod smoke {
             _id: &CheckpointId,
         ) -> Result<Option<Checkpoint>, CheckpointStoreError> {
             Ok(Some(Checkpoint {
-                offset: Lsn::new(2),
+                offset: CheckpointOffset::new(2),
                 version: CheckpointVersion::new(1),
             }))
         }
@@ -188,7 +199,7 @@ mod smoke {
             &self,
             _owner: &CheckpointOwner,
             _id: &CheckpointId,
-            _offset: Lsn,
+            _offset: CheckpointOffset,
             _expected: CheckpointVersion,
         ) -> Result<SaveOutcome, CheckpointStoreError> {
             Ok(SaveOutcome::Saved)
@@ -206,7 +217,12 @@ mod smoke {
             let id = CheckpointId::new("saga-1");
             let read = store.get_checkpoint(&owner, &id).await;
             let saved = store
-                .save_checkpoint(&owner, &id, Lsn::new(3), CheckpointVersion::new(1))
+                .save_checkpoint(
+                    &owner,
+                    &id,
+                    CheckpointOffset::new(3),
+                    CheckpointVersion::new(1),
+                )
                 .await;
             matches!(read, Ok(Some(_)))
                 && matches!(saved, Ok(SaveOutcome::Saved))

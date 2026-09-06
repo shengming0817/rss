@@ -18,14 +18,14 @@ rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 rss-redact.workspace = true
-tokio = { workspace = true, features = ["time", "sync"] }
+tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-futures = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
 rss-request-context.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
-sqlx = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "any", "migrate", "json"] }
 thiserror = { workspace = true }
 tracing.workspace = true
 zeroize.workspace = true

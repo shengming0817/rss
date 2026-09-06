@@ -29,5 +29,5 @@ zeroize = { workspace = true }
 [dev-dependencies]
 diport = { path = "../../crates/diport", features = ["test-support"] }
 # 异步单测 runtime + StreamExt::next。
-tokio = { workspace = true }
-futures = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+futures = { workspace = true, features = ["std", "async-await", "executor"] }

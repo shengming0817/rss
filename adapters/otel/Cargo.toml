@@ -34,7 +34,7 @@ url = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 # ManagedResource::shutdown：SdkTracerProvider::shutdown 是同步阻塞（batch worker flush）；spawn_blocking
 # 移出 async executor，使 rss-runtime 的 per-resource timeout 可在 .await 让出点生效（见 lib.rs shutdown）。
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []

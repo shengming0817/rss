@@ -46,10 +46,6 @@ pub use containers::{
     minio_tls_archive, postgres_tls, rabbitmq_tls, redis_tls, vault_tls,
 };
 
-// Provider-neutral transactional messaging assertions are dependency-free and intentionally available
-// without the container feature. Real provider runners remain integration-gated in each adapter.
-pub mod projection_conformance;
-
 /// Closed diagnostic classification owned only by the legacy, unpublished generic testkit.
 ///
 /// Transactional messaging conformance uses the production core classifications instead.

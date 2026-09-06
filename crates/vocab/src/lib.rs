@@ -24,8 +24,8 @@ pub(crate) fn is_crate_name(s: &str) -> bool {
 
 pub use authz::{PermissionParseError, RoutePermissionId};
 pub use contract::binding::{
-    ContractBinding, EventFactBinding, ProjectionInputBinding, SagaBackoff, SagaContractBinding,
-    SagaJitter, SagaRetryClass, SagaRuntimePolicySpec, SagaStepBinding,
+    ContractBinding, EventFactBinding, SagaBackoff, SagaContractBinding, SagaJitter,
+    SagaRetryClass, SagaRuntimePolicySpec, SagaStepBinding,
 };
 pub use contract::owner::{DomainName, DomainNameError};
 pub use contract::step::{StepName, StepNameError};

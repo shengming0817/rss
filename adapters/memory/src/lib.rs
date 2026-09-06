@@ -12,16 +12,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    Lsn, SagaCompensationCause, SagaIdempotencyKey, SagaInstanceRecord, SagaInstanceRef,
+    SagaCompensationCause, SagaIdempotencyKey, SagaInstanceRecord, SagaInstanceRef,
     SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseOutcome,
     SagaOperatorReason, SagaReceiptScope,
 };
 use diport::{
     CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, Checkpoint, CheckpointId,
-    CheckpointOwner, CheckpointStoreError, CheckpointVersion, FencedWriteKey, FencedWriteRequest,
-    FencedWriter, FencedWriterError, GlobalCasStoreKey, LeaderElector, LeaderElectorError,
-    LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError,
-    LockStoreKey, OwnerCheckpointStore, SagaClaimOutcome, SagaClaimRequest,
+    CheckpointOffset, CheckpointOwner, CheckpointStoreError, CheckpointVersion, FencedWriteKey,
+    FencedWriteRequest, FencedWriter, FencedWriterError, GlobalCasStoreKey, LeaderElector,
+    LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore,
+    LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaClaimOutcome, SagaClaimRequest,
     SagaCompensationProgress, SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore,
     SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardProgress,
     SagaInstanceRegistration, SagaLeaseHolder, SagaLeaseTtl, SagaOperatorAuthorization,
@@ -1803,7 +1803,7 @@ where
 // ── MemCheckpointStore：owner 断点续投 in-mem 替身 ─────────────────────────────
 
 /// checkpoint store 内部 HashMap 类型别名（规避 clippy::type_complexity）。
-type CheckpointMap = HashMap<(String, String), (Lsn, CheckpointVersion)>;
+type CheckpointMap = HashMap<(String, String), (CheckpointOffset, CheckpointVersion)>;
 
 /// in-mem owner checkpoint store（impl [`diport::OwnerCheckpointStore`]）：
 /// `(owner, id)` 主键 + `(offset, version)` CAS——`expected` 版本不符即 [`SaveOutcome::StaleVersion`]。
@@ -1839,7 +1839,7 @@ impl OwnerCheckpointStore for MemCheckpointStore {
         &self,
         owner: &CheckpointOwner,
         id: &CheckpointId,
-        offset: Lsn,
+        offset: CheckpointOffset,
         expected: CheckpointVersion,
     ) -> Result<SaveOutcome, CheckpointStoreError> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1978,14 +1978,14 @@ mod tests {
         let v0 = CheckpointVersion::new(0);
         assert_eq!(
             store
-                .save_checkpoint(&owner, &id, Lsn::new(10), v0)
+                .save_checkpoint(&owner, &id, CheckpointOffset::new(10), v0)
                 .await
                 .expect("save"),
             SaveOutcome::Saved
         );
         assert_eq!(
             store
-                .save_checkpoint(&owner, &id, Lsn::new(20), v0)
+                .save_checkpoint(&owner, &id, CheckpointOffset::new(20), v0)
                 .await
                 .expect("save"),
             SaveOutcome::StaleVersion
@@ -1995,7 +1995,7 @@ mod tests {
             .await
             .expect("read")
             .expect("present");
-        assert_eq!(current.offset, Lsn::new(10));
+        assert_eq!(current.offset, CheckpointOffset::new(10));
         assert_eq!(current.version, CheckpointVersion::new(1));
     }
 

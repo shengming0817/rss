@@ -151,79 +151,6 @@ impl EventFactBinding {
     }
 }
 
-/// Projection workflow input binding static from `[capabilities.workflow].inputs`.
-///
-/// The projection id and input event contract are derived from the
-/// contract manifests. Runtime projection writers consume only this static binding surface; they
-/// do not accept handwritten `(contract_id, topic)` registry rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectionInputBinding {
-    projection_id: &'static str,
-    contract: ContractBinding,
-    topic: &'static str,
-}
-
-impl ProjectionInputBinding {
-    /// Construct a static projection input binding from static manifest literals.
-    #[must_use]
-    pub const fn from_static(
-        projection_id: &'static str,
-        domain: &'static str,
-        contract_id: &'static str,
-        version: &'static str,
-        schema_hash: &'static str,
-        topic: &'static str,
-    ) -> Self {
-        Self {
-            projection_id,
-            contract: ContractBinding::from_static(domain, contract_id, version, schema_hash),
-            topic,
-        }
-    }
-
-    /// Projection workflow contract id.
-    #[must_use]
-    pub const fn projection_id(&self) -> &'static str {
-        self.projection_id
-    }
-
-    /// Input event contract binding.
-    #[must_use]
-    pub const fn contract(&self) -> ContractBinding {
-        self.contract
-    }
-
-    /// Input event topic.
-    #[must_use]
-    pub const fn topic(&self) -> &'static str {
-        self.topic
-    }
-
-    /// Input event contract id.
-    #[must_use]
-    pub const fn contract_id(&self) -> &'static str {
-        self.contract.contract_id()
-    }
-
-    /// Input event domain.
-    #[must_use]
-    pub const fn domain(&self) -> &'static str {
-        self.contract.domain()
-    }
-
-    /// Input event schema version.
-    #[must_use]
-    pub const fn version(&self) -> &'static str {
-        self.contract.version()
-    }
-
-    /// Input event schema hash.
-    #[must_use]
-    pub const fn schema_hash(&self) -> &'static str {
-        self.contract.schema_hash()
-    }
-}
-
 /// Contract-declared retry backoff algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SagaBackoff {
@@ -599,23 +526,5 @@ mod tests {
         assert_eq!(BINDING.steps()[0].name(), "reserve_funds");
         assert_eq!(BINDING.steps()[0].receipt_schema(), "reserve.schema.json");
         assert_eq!(BINDING.action_registry_generation(), HASH);
-    }
-
-    #[test]
-    fn projection_input_binding_exposes_static_contract_and_topic() {
-        const B: super::ProjectionInputBinding = super::ProjectionInputBinding::from_static(
-            "runtime.projection",
-            "runtime",
-            "runtime.fact-recorded",
-            "v1",
-            HASH,
-            "runtime.fact.recorded",
-        );
-        assert_eq!(B.projection_id(), "runtime.projection");
-        assert_eq!(B.contract_id(), "runtime.fact-recorded");
-        assert_eq!(B.domain(), "runtime");
-        assert_eq!(B.version(), "v1");
-        assert_eq!(B.schema_hash(), HASH);
-        assert_eq!(B.topic(), "runtime.fact.recorded");
     }
 }

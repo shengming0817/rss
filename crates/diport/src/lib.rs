@@ -121,8 +121,8 @@ pub use cas_store::{
     GlobalCasStoreKey,
 };
 pub use checkpoint_store::{
-    Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,
+    Checkpoint, CheckpointId, CheckpointOffset, CheckpointOwner, CheckpointStoreError,
+    CheckpointVersion, DynOwnerCheckpointStore, OwnerCheckpointStore, SaveOutcome,
 };
 pub use dead_letter_store::{
     DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterStore,

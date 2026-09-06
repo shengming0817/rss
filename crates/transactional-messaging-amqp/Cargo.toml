@@ -24,9 +24,9 @@ rss-runtime = { workspace = true, optional = true }
 tokio-util.workspace = true
 lapin.workspace = true
 rustls-pki-types.workspace = true
-futures.workspace = true
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
 tracing.workspace = true
-tokio = { workspace = true, features = ["time", "sync"] }
+tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 thiserror.workspace = true
 url.workspace = true
 

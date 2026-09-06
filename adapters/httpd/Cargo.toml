@@ -24,7 +24,7 @@ listenerlifecycle = { path = "../../crates/listenerlifecycle" }
 httpserve = { path = "../../crates/httpserve" }
 tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0" }
 axum = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
+tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -39,5 +39,5 @@ httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 primitives = { path = "../../crates/primitives" }
 tracewiretest = { path = "../../crates/tracewiretest" }
 metrics-exporter-prometheus = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
 http-body-util = { workspace = true }

@@ -3,6 +3,9 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/projection",
+  "crates/projection-postgres",
+  "tests/projection-postgres-integration",
   # Foundation Public：公开值与只读请求上下文；零 internal workspace 生产依赖。
   "crates/contract",
   "crates/request-context",
@@ -77,6 +80,8 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-projection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-projection-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
   { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
   { package = "rss-redact-derive", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -130,6 +135,8 @@ repository = "https://github.com/shengming0817/rss"
 # 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-projection-postgres = { path = "crates/projection-postgres", version = "0.1.0" }
+rss-projection = { path = "crates/projection", version = "0.1.0" }
 rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }
@@ -143,7 +150,7 @@ rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }
 rss-runtime = { path = "crates/runtime", version = "0.1.0" }
 # 运行时 / 序列化 / 错误 / 日志
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken / TaskTracker（cargo feature = "rt"）
 tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（adapters/grpc serve_with_incoming_shutdown：自绑 listener 读回 ephemeral 端口供测试）
 serde = { version = "1", features = ["derive"] }
@@ -157,7 +164,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
 uuid = { version = "1" }
-futures = "0.3"
+futures = { version = "0.3", default-features = false }
 # 编码 / 加密原语（基础层 + 引擎原语 opt-in）
 base64 = "0.22"   # consumer-owned opaque token / wire payload 的 base64url（URL_SAFE_NO_PAD）编解码
 subtle = "2"      # primitives constant_time_eq 常数时间比较（RustCrypto 工业标准，免自维护 black_box 屏障）。ref: dalek-cryptography/subtle src/lib.rs@main
@@ -210,7 +217,7 @@ tonic = "0.14"
 tonic-health = "0.14"
 prost = "0.14"
 # 持久化（postgres adapter，#1116）
-sqlx = { version = "=0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "macros"] }
+sqlx = { version = "=0.9.0", default-features = false }
 # redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
 # re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
 # testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。

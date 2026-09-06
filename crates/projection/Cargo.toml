@@ -1,0 +1,30 @@
+[package]
+name = "rss-projection"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Ordered, bounded projection execution and recovery"
+categories = ["asynchronous", "database"]
+keywords = ["projection", "checkpoint", "cqrs"]
+publish = ["crates-io"]
+
+[dependencies]
+rss-request-context.workspace = true
+rss-redact.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tokio-util.workspace = true
+
+[features]
+default = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+anyhow.workspace = true
+
+[lints]
+workspace = true

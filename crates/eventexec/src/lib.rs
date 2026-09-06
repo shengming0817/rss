@@ -11,12 +11,6 @@ pub use tenant_authority::{
 mod worker_health;
 pub use worker_health::WorkerHealth;
 
-pub mod projection_metrics;
-pub use projection_metrics::{
-    MetricsProjectionMetrics, ProjectionMetric, ProjectionMetricActivation, ProjectionMetricScope,
-    ProjectionMetrics, ProjectionProcessedOutcome,
-};
-
 pub mod dlq;
 pub use dlq::{
     DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget,

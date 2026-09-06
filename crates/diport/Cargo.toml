@@ -46,11 +46,11 @@ uuid = { workspace = true }
 # PKI URI SANs require a standards-aware absolute-URI parser rather than delimiter-only checks.
 url = { workspace = true }
 # Non-messaging streaming ports use futures::Stream.
-futures = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
 # Service-token replay deadlines are typed, absolute Tokio deadlines so every adapter operation
 # shares one cancellation boundary instead of minting per-stage relative timeouts. `rt` exposes
 # JoinError for the payload-free ShutdownError task-failure classifier.
-tokio = { workspace = true, features = ["rt", "time", "sync"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "rt-multi-thread", "macros"] }
 # DLX archive provider observations carry a fixed SHA-256 integrity checksum.
 sha2 = { workspace = true }
 

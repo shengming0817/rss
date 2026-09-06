@@ -1,8 +1,8 @@
-//! consistency — RSS saga / reconcile / projection / command journal 纯态机与策略 trait。
+//! consistency — RSS saga / reconcile / command journal 纯态机与策略 trait。
 //!
 //! # 派发范式（ADR-003 §2 / ADR-004 C1）
 //!
-//! 本 crate 冻结的是非消息引擎策略 trait：`Reconciler`/`Projector` 一律 **native AFIT**
+//! 本 crate 冻结的是非消息引擎策略 trait：`Reconciler` 一律 **native AFIT**
 //! （trait 内直接 `async fn`）+ **泛型静态分发**
 //! （消费方 `fn run<S: Trait>(s: &S)`，零开销、零 box）——**不引 dynosaur、不引 async-trait**。
 //! native AFIT trait 不 object-safe，故全 crate 禁 `Box<dyn Trait>`：消费方一律泛型 `<S: Trait>`。
@@ -25,11 +25,9 @@
 //! | outbox | L1/L2 |
 //! | saga | L3 |
 //! | reconcile | L4 |
-//! | projection | L3 |
 
 pub mod command_journal;
 pub mod error;
-pub mod projection;
 pub mod reconcile;
 pub mod saga;
 
@@ -39,13 +37,6 @@ pub use command_journal::{
     CommandJournalValueError, CommandRequestFingerprint, CommandResultSummary,
 };
 pub use error::{EngineError, EngineErrorKind};
-pub use projection::{
-    Lsn, PartitionSerialDelivery, ProjectionApplyError, ProjectionApplyErrorKind,
-    ProjectionApplyErrorReason, ProjectionApplyOutcome, ProjectionBatchLimit,
-    ProjectionBatchLimitError, ProjectionCheckpoint, ProjectionCheckpointError,
-    ProjectionDeadLetter, ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata,
-    ProjectionEventRecord, ProjectionEventSource, Projector, SerialInOrder, SerialInOrderGuarantor,
-};
 pub use reconcile::{
     ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,
     Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,

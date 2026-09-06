@@ -15,7 +15,7 @@ rss-contract.workspace = true
 rss-request-context.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 trybuild.workspace = true
 
 [features]

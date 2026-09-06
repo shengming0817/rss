@@ -74,6 +74,13 @@ jobs:
             test -f "$RSS_PACKAGE_PROOF/$package-$version.crate"
           done < "$RSS_PACKAGE_PROOF/packages.tsv"
 
+      - name: Verify independent Projection artifact consumption
+        env:
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
+        run: |
+          python3 -m unittest discover -s hack/tests -p test_projection_package_proof.py
+          python3 hack/projection-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
+
       - name: Upload immutable package proof
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

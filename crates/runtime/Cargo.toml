@@ -16,16 +16,16 @@ default = []
 
 [dependencies]
 dynosaur = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
 rss-redact.workspace = true
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 trait-variant = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "rt-multi-thread"] }
 trybuild = { workspace = true }
 
 [lints]

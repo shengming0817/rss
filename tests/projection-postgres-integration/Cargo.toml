@@ -1,0 +1,21 @@
+[package]
+name = "projection-postgres-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rss-projection.workspace = true
+rss-projection-postgres = { workspace = true, features = ["integration"] }
+rss-request-context.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "any", "migrate", "json"] }
+uuid.workspace = true
+anyhow.workspace = true
+futures = { workspace = true, features = ["std", "async-await", "executor"] }

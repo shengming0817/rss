@@ -19,4 +19,4 @@ governor = { workspace = true }
 
 [dev-dependencies]
 # 异步单测 runtime（dyn-injection multi_thread spawn）。
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
