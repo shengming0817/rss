@@ -26,7 +26,7 @@ syn = { workspace = true }
 [dev-dependencies]
 syn = { workspace = true }
 trybuild = { workspace = true }
-privacy = { package = "rss-redact", path = "../redact" }
+privacy = { package = "rss-redact", path = "../redact", features = ["derive"] }
 
 [lints]
 workspace = true

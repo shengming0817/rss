@@ -5,8 +5,20 @@
 /// [`SecretText::into_string`].
 ///
 /// INVARIANT: SECRET-TEXT-OPAQUE-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the private field, restricted API, `Redact`, and absence of `Clone`/`Display`/serialization prevent implicit disclosure; `ZeroizeOnDrop` clears the allocation while this owner retains it.
-#[derive(zeroize::ZeroizeOnDrop, rss_redact::Redact)]
-pub struct SecretText(#[redact(sensitivity = secret)] String);
+#[derive(zeroize::ZeroizeOnDrop)]
+pub struct SecretText(String);
+
+impl std::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretText(<redacted>)")
+    }
+}
+
+impl crate::Redact for SecretText {
+    fn redact_scoped(&self, _scope: crate::RedactScope) -> String {
+        format!("{self:?}")
+    }
+}
 
 impl SecretText {
     /// Take ownership of an existing UTF-8 secret allocation without normalization.

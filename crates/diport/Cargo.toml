@@ -31,7 +31,7 @@ dynosaur = { workspace = true }
 # Send 的 Dyn wrapper（ShutdownStack 经 tokio::spawn 做 panic 隔离需要 Send future）。
 trait-variant = { workspace = true }
 thiserror = { workspace = true }
-rss-redact.workspace = true
+rss-redact = { workspace = true, features = ["derive"] }
 rss-data-protection.workspace = true
 # AuditEvent.tenant_id: Option<vocab::TenantId>（基础层强类型租户标识；跨租户主体可为空）。DiPort 依赖基础合规。
 vocab = { path = "../vocab" }

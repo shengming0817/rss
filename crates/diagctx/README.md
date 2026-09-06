@@ -1,10 +1,28 @@
 # rss-diag-context
 
-`rss-diag-context` propagates a validated correlation ID through an asynchronous task scope. Its
-API is intentionally small: parse at a trust boundary, bind one `DiagnosticCtx`, and read the
-ambient value where diagnostic metadata is emitted.
+`rss-diag-context` provides validated `CorrelationId` and owned `DiagnosticCtx` values. The default
+API has no Tokio dependency: parse at a trust boundary and pass the context explicitly.
 
 ```rust
+use rss_diag_context::{CorrelationId, DiagnosticCtx};
+let ctx = DiagnosticCtx::new(CorrelationId::parse("request-42")?);
+assert_eq!(ctx.correlation().as_str(), "request-42");
+# Ok::<(), rss_diag_context::CorrelationIdError>(())
+```
+
+Opt into ambient asynchronous propagation with the `task-local` feature:
+
+```toml
+[dependencies]
+rss-diag-context = { version = "0.1", features = ["task-local"] }
+```
+
+`scope`, `current`, and `correlation` are available only with this feature. Task scoping uses Tokio's
+existing task-local mechanism; it does not create a runtime or spawn tasks on the caller's behalf.
+
+```rust
+# #[cfg(feature = "task-local")]
+# {
 use rss_diag_context::{CorrelationId, DiagnosticCtx, correlation, current, scope};
 
 # async fn example() -> Result<(), rss_diag_context::CorrelationIdError> {
@@ -20,6 +38,7 @@ let seen = scope(DiagnosticCtx::new(id), async {
 assert_eq!(seen.as_str(), "request-42");
 # Ok(())
 # }
+# }
 ```
 
 Ambient context does not cross `tokio::spawn` automatically. Capture it before spawning and bind
@@ -27,6 +46,8 @@ the snapshot inside the child task when the diagnostic chain must continue. A `S
 produces a spawnable scoped future; local executors may also scope a non-`Send` future:
 
 ```no_run
+# #[cfg(feature = "task-local")]
+# {
 use rss_diag_context::{current, scope};
 
 # async fn emit_metadata() {}
@@ -37,6 +58,7 @@ if let Some(snapshot) = current() {
     tokio::spawn(async { emit_metadata().await }).await?;
 }
 # Ok(())
+# }
 # }
 ```
 

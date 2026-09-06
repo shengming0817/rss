@@ -15,13 +15,15 @@ fn secret_text_debug_and_redact_hide_all_material() {
     let secret = SecretText::from_string(bait.to_owned());
 
     let debug = format!("{secret:?}");
-    let redacted = secret.redact_scoped(RedactScope::ServerLog);
+    for scope in [RedactScope::ServerLog, RedactScope::Wire] {
+        let redacted = secret.redact_scoped(scope);
 
-    assert_eq!(debug, "SecretText(<redacted>)");
-    assert_eq!(redacted, "SecretText(<redacted>)");
-    for fragment in ["dsn-password", "vault-token", "jwt-hmac", "PEM"] {
-        assert!(!debug.contains(fragment));
-        assert!(!redacted.contains(fragment));
+        assert_eq!(debug, "SecretText(<redacted>)");
+        assert_eq!(redacted, "SecretText(<redacted>)");
+        for fragment in ["dsn-password", "vault-token", "jwt-hmac", "PEM"] {
+            assert!(!debug.contains(fragment));
+            assert!(!redacted.contains(fragment));
+        }
     }
 }
 

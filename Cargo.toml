@@ -108,6 +108,12 @@ package = "rss-transactional-messaging-testkit"
 baseline-rev = "aaacc65d672c593c483cba9e6ceea6aef67332f0"
 issue = 2265
 
+# Explicitly approved pre-publication default API cutover (#2279).
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-diag-context"
+baseline-rev = "73dec6f205de7b3c41e8f17412db89f759af0ae5"
+issue = 2279
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"

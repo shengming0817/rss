@@ -19,7 +19,7 @@ rss-request-context.workspace = true
 diport = { path = "../../crates/diport" }
 rss-runtime.workspace = true
 # KeyProvider 明文/AAD 类型（Plaintext / DerivedAad）。Vault provider 只读受控出口，不把明文/AAD 写入日志。
-rss-redact = { workspace = true, optional = true }
+rss-redact = { workspace = true, optional = true, features = ["derive"] }
 rss-data-protection = { workspace = true, optional = true }
 # SecretResolver::resolve 签名中的 TenantId（tenant 隔离位置参，Hard）。
 vocab = { path = "../../crates/vocab" }

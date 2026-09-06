@@ -7,7 +7,7 @@ publish = ["crates-io"]
 license-file = "../../LICENSE"
 repository.workspace = true
 readme = "README.md"
-description = "Task-scoped diagnostic correlation context for Rust applications"
+description = "Validated diagnostic correlation values with optional Tokio task-local propagation"
 categories = ["asynchronous", "development-tools::debugging"]
 keywords = ["diagnostics", "correlation", "context", "observability"]
 
@@ -18,7 +18,7 @@ workspace = true
 # task_local! / LocalKey / TaskLocalFuture 均只需 Tokio `rt` feature。
 # diagctx 刻意不依赖 vocab / tracing / serde：它只承载**诊断**信号（correlation），与 runctx（授权控制流值）
 # 在 crate 图上物理隔离（ADR-002 §D1-bis）——「诊断信道被误读为授权源」即一处可被 review 一眼抓的跨 import。
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 thiserror = "2"
 
 [dev-dependencies]
@@ -26,3 +26,4 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 
 [features]
 default = []
+task-local = ["dep:tokio"]

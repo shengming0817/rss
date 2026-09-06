@@ -1770,7 +1770,6 @@ dependencies = [
  "primitives",
  "rss-contract",
  "rss-data-protection",
- "rss-diag-context",
  "rss-redact",
  "rss-request-context",
  "rss-trace-context",

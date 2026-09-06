@@ -25,7 +25,7 @@ thiserror = { workspace = true }
 # base 层 DAG：vocab ◁ ids ◁ secure ◁ support ◁ runctx。
 vocab = { path = "../vocab" }
 # RequestCtx 的字段级 Debug 脱敏 derive。
-rss-redact.workspace = true
+rss-redact = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 # 仅测试 fixture（tid helper）用：把 label 确定性映射成 canonical UUID 串再经 TenantId::parse 构造。

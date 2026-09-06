@@ -31,6 +31,7 @@ impl CorrelationId {
         &self.0
     }
 
+    #[cfg(feature = "task-local")]
     pub(crate) fn snapshot(&self) -> Self {
         Self(self.0.clone())
     }
@@ -75,6 +76,7 @@ impl DiagnosticCtx {
         &self.correlation
     }
 
+    #[cfg(feature = "task-local")]
     pub(crate) fn snapshot(&self) -> Self {
         Self::new(self.correlation.snapshot())
     }

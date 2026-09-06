@@ -54,6 +54,7 @@ backend = [
 test-support = ["backend"]
 
 [dev-dependencies]
+rss-redact = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 rstest = { workspace = true }
 # round-trip 测试：SimpleSpanProcessor + InMemorySpanExporter 确定性捕获导出 span（无 live collector、

@@ -106,8 +106,20 @@ pub enum RedactionHashError {
 ///
 /// `rss-redact` 是 L0 纯计算 crate：真实 key 来源由上层组合根 / KeyProvider 决定，本类型只接收已加载的
 /// key 字节，并通过 [`redact_hash`] 显式传入。没有全局 key、环境变量读取或部署常量。
-#[derive(zeroize::ZeroizeOnDrop, rss_redact::Redact)]
-pub struct RedactionHashKey(#[redact(sensitivity = secret)] Vec<u8>);
+#[derive(zeroize::ZeroizeOnDrop)]
+pub struct RedactionHashKey(Vec<u8>);
+
+impl std::fmt::Debug for RedactionHashKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedactionHashKey(<redacted>)")
+    }
+}
+
+impl crate::Redact for RedactionHashKey {
+    fn redact_scoped(&self, _scope: crate::RedactScope) -> String {
+        format!("{self:?}")
+    }
+}
 
 impl RedactionHashKey {
     /// 由字节构造 redaction HMAC key（< 32 字节 → [`RedactionHashError::KeyTooShort`]）。
@@ -563,7 +575,7 @@ pub enum RedactScope {
 }
 
 /// 字段级脱敏上游模型：类型声明自身字段策略，按输出 [`RedactScope`] 产出已脱敏的 `Debug` 渲染 `String`。
-/// 由 `#[derive(Redact)]` 实现（生成的 `Debug` 委托 `self.redact_scoped(RedactScope::ServerLog)`）。
+/// 可手写实现，或启用 `derive` feature 后由 `#[derive(Redact)]` 实现（生成的 `Debug` 委托 `self.redact_scoped(RedactScope::ServerLog)`）。
 ///
 /// 返回 `String` 而非 [`Redacted`]（#1360 F1）：`redact_scoped` 是 `Debug` 渲染 helper，非「安全值」产出口——
 /// 字段 mode 由类型作者声明（含 `Show`），若返回 `Redacted` 则任意类型经 `Show` 字段即可 mint 可 Display
@@ -818,6 +830,7 @@ impl std::fmt::Debug for LastError {
 
 #[cfg(test)]
 mod tests {
+    use super::Redact;
     use super::{
         FieldRedaction, LastError, RedactField, RedactScope, RedactValue, Redacted, RedactionCtx,
         RedactionHashError, RedactionHashKey, RedactionMode, data_class_from_key, redact_error,
@@ -1000,6 +1013,18 @@ mod tests {
     #[case("@no-local.com", "<redacted>")] // 空 local → fixed
     fn mask_email_masks_local(#[case] input: &str, #[case] want: &str) {
         assert_eq!(RedactionMode::EmailMask.mask(RedactValue::Str(input)), want);
+    }
+
+    #[test]
+    fn redaction_hash_key_is_opaque_and_zeroizing() -> Result<(), RedactionHashError> {
+        fn assert_secret_traits<T: Send + Sync + zeroize::ZeroizeOnDrop>() {}
+        assert_secret_traits::<RedactionHashKey>();
+        let key = hash_key(42)?;
+        assert_eq!(format!("{key:?}"), "RedactionHashKey(<redacted>)");
+        for scope in [RedactScope::ServerLog, RedactScope::Wire] {
+            assert_eq!(key.redact_scoped(scope), "RedactionHashKey(<redacted>)");
+        }
+        Ok(())
     }
 
     #[test]
@@ -1252,83 +1277,43 @@ mod tests {
         assert_eq!(r.as_str(), "T");
     }
 
-    // --- #[derive(Redact)] 端到端（rss-redact 内自用，验证派生 Debug + 多 mode 渲染）---
-
-    #[allow(dead_code)]
-    #[derive(rss_redact::Redact)]
-    struct DerivedNewtype(#[redact(sensitivity = secret)] Vec<u8>);
-
-    #[derive(rss_redact::Redact)]
-    // `gone`（mode = "drop"）经 F2 后取 RedactValue::Absent、不被 redact 读取 ⇒ field never read。
-    #[allow(dead_code)]
-    struct DerivedMixed {
-        #[redact(sensitivity = public, mode = "show")]
-        visible: String,
-        #[redact(sensitivity = secret)]
-        secret: String,
-        #[redact(sensitivity = pii_phone, mode = "last4")]
-        card: String,
-        #[redact(sensitivity = pii_email, mode = "email_mask")]
-        email: String,
-        #[redact(sensitivity = secret, mode = "drop")]
-        gone: String,
+    // Explicit policy fixture keeps the runtime funnel tests independent of the optional macro.
+    struct PolicyFixture;
+    impl super::Redact for PolicyFixture {
+        fn redact_scoped(&self, scope: RedactScope) -> String {
+            redact_struct(
+                "PolicyFixture",
+                false,
+                scope,
+                &[
+                    FieldRedaction {
+                        name: Some("visible"),
+                        mode: RedactionMode::Show,
+                        value: RedactValue::Str("ok"),
+                    },
+                    FieldRedaction {
+                        name: Some("secret"),
+                        mode: RedactionMode::Fixed,
+                        value: RedactValue::Str("topsecret"),
+                    },
+                    FieldRedaction {
+                        name: Some("card"),
+                        mode: RedactionMode::Last4,
+                        value: RedactValue::Str("4242424242424242"),
+                    },
+                    FieldRedaction {
+                        name: Some("email"),
+                        mode: RedactionMode::EmailMask,
+                        value: RedactValue::Str("alice@example.com"),
+                    },
+                ],
+            )
+        }
     }
-
-    // F2 回归（#1360）：自定义类型字段标显式 `mode = "fixed"`/`drop` **不要求** impl `RedactField`
-    //（compile-pass 即证）——对标 serde `skip` 字段不走默认 Serialize bound。
-    struct NotRedactField; // 故意不 impl RedactField
-
-    #[derive(rss_redact::Redact)]
-    #[allow(dead_code)] // fixed/drop 字段取 Absent、不被读取
-    struct CustomFixedDrop {
-        #[redact(sensitivity = secret, mode = "fixed")]
-        a: NotRedactField,
-        #[redact(sensitivity = secret, mode = "drop")]
-        b: NotRedactField,
-    }
-
-    #[test]
-    fn derive_fixed_drop_needs_no_redact_field_bound() {
-        let v = CustomFixedDrop {
-            a: NotRedactField,
-            b: NotRedactField,
-        };
-        // a: Fixed → <redacted>；b: Drop → 剔除；NotRedactField 无 RedactField impl。
-        assert_eq!(format!("{v:?}"), "CustomFixedDrop { a: <redacted> }");
-    }
-
-    #[test]
-    fn derive_newtype_debug_is_opaque() {
-        let v = DerivedNewtype(vec![0xDE, 0xAD]);
-        assert_eq!(format!("{v:?}"), "DerivedNewtype(<redacted>)");
-    }
-
-    #[test]
-    fn derive_mixed_debug_applies_per_field_policy() {
-        let v = DerivedMixed {
-            visible: "ok".to_string(),
-            secret: "topsecret".to_string(),
-            card: "4242424242424242".to_string(),
-            email: "alice@example.com".to_string(),
-            gone: "vanish".to_string(),
-        };
-        let dbg = format!("{v:?}");
-        // Show 字段 `visible` 经 Debug-转义（#1360 F3）：`ok` → `"ok"`；其余 mode 产物不转义。
-        assert_eq!(
-            dbg,
-            "DerivedMixed { visible: \"ok\", secret: <redacted>, card: ****4242, email: a***@example.com }"
-        );
-        assert!(!dbg.contains("topsecret"));
-        assert!(!dbg.contains("vanish"));
-        assert!(!dbg.contains("gone"));
-    }
-
-    #[test]
-    fn derive_impls_redact_trait() {
-        // 派生实现 trait `Redact::redact_scoped`（Debug 委托它）；返回脱敏 String（非 Redacted，#1360 F1）。
-        let v = DerivedNewtype(vec![1]);
-        let r: String = rss_redact::Redact::redact_scoped(&v, RedactScope::ServerLog);
-        assert_eq!(r, "DerivedNewtype(<redacted>)");
+    impl std::fmt::Debug for PolicyFixture {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.redact_scoped(RedactScope::ServerLog))
+        }
     }
 
     // --- rss_redact::safe + RedactScope（#1361 字段级输出 funnel + 输出通道）---
@@ -1336,13 +1321,7 @@ mod tests {
     #[test]
     fn safe_serverlog_eq_debug() {
         // ServerLog scope = 派生 Debug 默认（同源，零第二份脱敏逻辑）。
-        let v = DerivedMixed {
-            visible: "ok".to_string(),
-            secret: "topsecret".to_string(),
-            card: "4242424242424242".to_string(),
-            email: "alice@example.com".to_string(),
-            gone: "vanish".to_string(),
-        };
+        let v = PolicyFixture;
         assert_eq!(safe(&v, RedactScope::ServerLog), format!("{v:?}"));
     }
 
@@ -1350,13 +1329,7 @@ mod tests {
     fn safe_wire_collapses_partial_reveal_to_fixed() {
         // Wire scope：pii 部分泄露 mode（email_mask / last4）塌缩 Fixed，不向外部 sink 部分泄露；
         // ServerLog 保留掩码诊断。secret 两 scope 均 Fixed；public(show) 两 scope 均原样。
-        let v = DerivedMixed {
-            visible: "ok".to_string(),
-            secret: "topsecret".to_string(),
-            card: "4242424242424242".to_string(),
-            email: "alice@example.com".to_string(),
-            gone: "vanish".to_string(),
-        };
+        let v = PolicyFixture;
         let server = safe(&v, RedactScope::ServerLog);
         let wire = safe(&v, RedactScope::Wire);
         // ServerLog：掩码可见（诊断）。
@@ -1383,9 +1356,9 @@ mod tests {
 
     #[test]
     fn safe_works_on_unsized_dyn_redact() {
-        let v = DerivedNewtype(vec![0xAB]);
+        let v = crate::SecretText::from_string("secret".to_owned());
         let r: &dyn super::Redact = &v;
-        assert_eq!(safe(r, RedactScope::Wire), "DerivedNewtype(<redacted>)");
+        assert_eq!(safe(r, RedactScope::Wire), "SecretText(<redacted>)");
     }
 
     #[test]
@@ -1434,13 +1407,7 @@ mod tests {
     #[test]
     fn last_error_from_redactable_applies_field_policy() {
         // 带字段策略的值经 from_redactable + scope 渲染——Wire 塌缩 pii，原始邮箱不入 last_error。
-        let v = DerivedMixed {
-            visible: "ctx".to_string(),
-            secret: "topsecret".to_string(),
-            card: "4242424242424242".to_string(),
-            email: "alice@example.com".to_string(),
-            gone: "vanish".to_string(),
-        };
+        let v = PolicyFixture;
         let le = LastError::from_redactable(&v, RedactScope::Wire);
         assert!(!le.as_str().contains("alice@example.com"));
         assert!(!le.as_str().contains("topsecret"));

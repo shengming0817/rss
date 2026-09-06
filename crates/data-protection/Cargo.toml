@@ -16,7 +16,7 @@ default = []
 
 [dependencies]
 rss-request-context.workspace = true
-rss-redact.workspace = true
+rss-redact = { workspace = true, features = ["derive"] }
 hmac = { workspace = true }
 secrecy = { workspace = true }
 sha2 = { workspace = true }

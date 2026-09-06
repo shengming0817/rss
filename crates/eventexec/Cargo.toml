@@ -17,7 +17,6 @@ workspace = true
 rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
-rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 # 非消息 DLQ / saga 能力仍由 diport 提供；消息 runtime 直接消费 transactional messaging native ports。
 diport = { path = "../diport" }
 # reconcile harness 经 vocab::Epoch 传递 lease epoch（Context::epoch / LeaseToken.epoch 同源，#1123）。

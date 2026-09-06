@@ -83,7 +83,8 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 ### rss-redact 0.1.0
 
 - Establish the sole public owner for diagnostic-output redaction, `SecretText`, `RedactedSource`,
-  and `RedactedBytes`, with the `Redact` derive re-exported from the same user-facing package.
+  and `RedactedBytes`. The `Redact` trait and built-in zeroizing secret types work by default;
+  the derive re-export now requires explicit `features = ["derive"]`, with no compatibility default.
 - Remove the former `secure` and `diport` owner paths without aliases, shims, deprecated re-exports,
   or compatibility features.
 
@@ -138,11 +139,13 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 ### rss-diag-context 0.1.0
 
 - Establish the initial root-only diagnostic-context API: validated `CorrelationId`, owned
-  `DiagnosticCtx`, and task-local `scope`, `current`, and `correlation` accessors.
+  `DiagnosticCtx`, and optional task-local `scope`, `current`, and `correlation` accessors.
+- Require explicit `features = ["task-local"]` for ambient propagation. Default value consumers,
+  including transactional messaging core, no longer acquire Tokio through diagnostics.
 - Keep missing ambient context fail-open while preventing diagnostic correlation from becoming an
   identity, tenant, authentication, or authorization source.
 - Set MSRV to Rust 1.96 with no default features. The normal direct dependencies are limited to
-  Tokio task-local runtime support and `thiserror`.
+  `thiserror`, plus Tokio task-local runtime support only when explicitly selected.
 - This is the initial public API; there is no earlier published version, compatibility
   shim, or migration path.
 

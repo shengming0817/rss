@@ -1,8 +1,4 @@
-//! Provider-neutral redaction primitives for diagnostics and observable output.
-
-// Keep a stable self name for documentation and explicit paths inside this package. The derive
-// resolves `rss-redact` to `crate` here and to the declared dependency name for external consumers.
-extern crate self as rss_redact;
+#![doc = include_str!("../README.md")]
 
 mod redacted_bytes;
 mod redacted_source;
@@ -18,5 +14,6 @@ pub use redaction::{
     RedactionHashError, RedactionHashKey, RedactionMode, Redactor, redact_error, redact_field,
     redact_hash, redact_observation_field, redact_struct, redact_url_credentials, safe,
 };
+#[cfg(feature = "derive")]
 pub use rss_redact_derive::Redact;
 pub use secret_text::SecretText;

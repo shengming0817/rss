@@ -13,7 +13,7 @@ rss-transactional-messaging.workspace = true
 rss-request-context.workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
-rss-redact.workspace = true
+rss-redact = { workspace = true, features = ["derive"] }
 support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }

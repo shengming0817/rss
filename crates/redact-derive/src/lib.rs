@@ -13,7 +13,7 @@
 //! （compile-fail golden 见 `tests/`）。
 //!
 //! 不依赖 `rss-redact` crate：展开时解析消费方声明的实际依赖名并生成对应绝对路径（无编译环；
-//! `rss-redact` 包内展开时使用 `crate`）。属性中的 sensitivity 只作为宏 grammar AST；生成代码不会
+//! 同包文档示例使用 `::rss_redact`；runtime 内建类型不使用此宏）。属性中的 sensitivity 只作为宏 grammar AST；生成代码不会
 //! 引用或复制 canonical `rss_contract::DataClass`，默认 mode 经 `rss-redact` owner 的 helper 单源解析。
 //!
 //! ref: iqlusioninc/crates secrecy/src/lib.rs@main（`SecretBox` Debug `[REDACTED]` 脱敏 + `ExposeSecret`
@@ -52,7 +52,9 @@ pub fn derive_redact(input: TokenStream) -> TokenStream {
 
 fn redact_crate_path() -> syn::Result<TokenStream2> {
     match crate_name("rss-redact") {
-        Ok(FoundCrate::Itself) => Ok(quote!(crate)),
+        // The runtime has no internal derives. Same-package expansion is an external
+        // rustdoc consumer, whose `crate` root is the example rather than rss-redact.
+        Ok(FoundCrate::Itself) => Ok(quote!(::rss_redact)),
         Ok(FoundCrate::Name(name)) => {
             let ident = Ident::new(&name, Span::call_site());
             Ok(quote!(::#ident))
