@@ -6,6 +6,15 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-mqtt: canonical Outbox and transactional consumer (#2310)
+
+- Replace the experimental Outbox mapper with immutable domain/route configuration and canonical
+  MQTT metadata. Persisted payload bytes are sent unchanged; no legacy wire fallback is provided.
+- Add the optional consumer adapter to the existing verified Inbox/ConsumerTx pipeline. Only core
+  decisions authorize ACK/Reject; uncertain transactions retire the session for conservative replay.
+- Producers/consumers and old MQTT checkpoints require a coordinated wire cutover. Generic MQTT
+  APIs remain independent; the upstream logging restriction tracked by #2308 remains required.
+
 ### rss-mqtt 0.1.0 (#2305)
 
 - Add a standalone MQTT v5 / QoS 1 adapter using rumqttc-v5-next 0.34.0 tracked publication,

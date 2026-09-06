@@ -2082,6 +2082,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "futures",
  "log",
  "rcgen",
  "rss-contract",
@@ -2098,6 +2099,7 @@ dependencies = [
  "testkit",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing-subscriber",
 ]
 
@@ -2985,6 +2987,10 @@ dependencies = [
  "anyhow",
  "backon",
  "bytes",
+ "futures",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-request-context",
  "rss-transactional-messaging",
  "rumqttc-v5-next",
  "rustls",

@@ -57,12 +57,6 @@ pub enum MqttError {
     ReceiveCapacity,
 }
 
-/// Permanent failure to encode an authored Outbox message, before protocol admission.
-/// Transport, storage and other retryable work must not run inside the mapper.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("invalid authored MQTT message")]
-pub struct EncodeError;
-
 /// Queue, in-flight and wire limits. All queues are bounded independently.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {

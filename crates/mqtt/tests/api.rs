@@ -70,5 +70,23 @@ fn reconnect_policy_rejects_unbounded_or_inverted_budgets() {
     assert!(ReconnectPolicy::new(Duration::from_millis(100), Duration::from_secs(30)).is_ok());
 }
 
-// Encoding cannot represent transport failures or silently convert one to DeadLetter.
-static_assertions::assert_not_impl_any!(rss_mqtt::EncodeError: From<MqttError>);
+#[test]
+fn outbox_plan_rejects_duplicate_routes_and_invalid_topics() -> anyhow::Result<()> {
+    use rss_mqtt::{MqttOutboxPlan, MqttOutboxTopic};
+    use rss_transactional_messaging::message::{MessageRoute, MessagingDomain};
+    assert!(MqttOutboxTopic::new("bad/+").is_err());
+    let domain = MessagingDomain::parse("test")?;
+    let route = MessageRoute::parse("created")?;
+    assert!(MqttOutboxPlan::new(domain.clone(), []).is_err());
+    assert!(
+        MqttOutboxPlan::new(
+            domain,
+            [
+                (route.clone(), MqttOutboxTopic::new("events/a")?),
+                (route, MqttOutboxTopic::new("events/b")?),
+            ]
+        )
+        .is_err()
+    );
+    Ok(())
+}

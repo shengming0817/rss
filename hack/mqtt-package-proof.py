@@ -91,7 +91,7 @@ def main():
         consumer = root / "consumer"
         (consumer / "src").mkdir(parents=True)
         source = (extracted / f'rss-mqtt-{versions["rss-mqtt"]}/examples/consume.rs').read_text()
-        manifest = '[package]\nname="mqtt-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\n'
+        manifest = '[package]\nname="mqtt-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[features]\nconsumer=["rss-mqtt/consumer"]\n[dependencies]\n'
         manifest += f'rss-mqtt={{version="={versions["rss-mqtt"]}",default-features=false}}\n'
         manifest += f'rss-transactional-messaging={{version="={versions["rss-transactional-messaging"]}",default-features=false,features=["producer"]}}\n'
         manifest += 'rumqttc-v5-next={version="=0.34.0",default-features=false,features=["use-rustls-ring"]}\n'
@@ -100,7 +100,7 @@ def main():
         (consumer / "src/support").mkdir()
         (consumer / "src/support/logging.rs").write_text((extracted / f'rss-mqtt-{versions["rss-mqtt"]}/examples/support/logging.rs').read_text())
         (consumer / "src/main.rs").write_text(source)
-        for features in ([], ["--no-default-features"], ["--all-features"]):
+        for features in ([], ["--no-default-features"], ["--features", "consumer"], ["--all-features"]):
             run(["cargo", "check", "--offline", *features], consumer, env)
         facts = json.loads(subprocess.check_output(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=consumer, env=env))
         for package in facts["packages"]:

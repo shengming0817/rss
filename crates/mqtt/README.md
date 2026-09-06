@@ -81,10 +81,54 @@ sent or replayed. Preserve the original message identity, content and properties
 retry, and design consumers for duplicate delivery. Only the canonical relay maps these outcomes to
 Outbox Published/Retry/DeadLetter. Protocol checkpoints do not replace the application Outbox.
 
-`MqttOutboxPublisher::new(publisher, mapper)` implements `Publisher<P>`. The mapper is a trusted infrastructure, caller-owned
-`Fn(&MessageEnvelope<P>) -> Result<PublishRequest, MqttError>`; it must deterministically preserve the
-message ID and authored content in the caller's chosen encoding. The adapter imposes no topic or
-wire envelope format. Mapper failure is an Encode/InvalidMessage permanent non-publication.
+`MqttOutboxPublisher::new(publisher, plan)` implements `Publisher<Vec<u8>>`. Encode business
+payloads before appending to the Outbox. `MqttOutboxPlan` binds one domain and a nonempty immutable
+map of typed routes to `MqttOutboxTopic` destinations/options. The adapter sends persisted payload
+bytes unchanged and exclusively writes canonical user properties; there is no encoding callback.
+Wrong domain, unbound route and oversized/invalid metadata fail before protocol admission.
+
+The RSS MQTT envelope uses `messageId`, `tenantId`, `domain`, `route`, `contractId`, `schemaVersion`,
+`schemaHash`, `occurredAt`, optional `partitionKey`, `correlation`, `causationId`, `trace` and
+`tenantAuthority`. Application attributes use `attribute.` prefixes, including attributes whose
+names equal reserved fields. The reader rejects duplicate, missing required and unknown fields.
+These metadata names align with the Kafka adapter; they are not a business authentication claim.
+
+This replaces the experimental mapper API and its caller-defined wire format, including the former
+example's `message-id`. There is no legacy fallback. Switch producers and consumers together;
+existing protocol checkpoints/queued publications encoded in the old format need an explicit drain
+and session/consumer cutover. A route/topic option change between deployments is also an explicit
+routing migration; immutable per-instance configuration does not prove cross-deployment equality.
+The generic `MqttPublisher` still accepts application-owned raw MQTT packets independently.
+
+## Transactional receive (`consumer` feature)
+
+`MqttDeliverySource::new(receiver, subscription)` consumes the exclusive receiver. Its connection
+must have exactly one configured MQTT filter; each broker topic must match it and each decoded
+RSS envelope must match the exact logical domain/route/contract subscription. A filter may contain
+MQTT wildcards; topic membership does not authenticate tenant authority.
+
+The source implements core `DeliverySource<Vec<u8>>`. Feed it to the existing `ConsumerWorker`
+with a trusted ingress validator, Inbox and `ConsumerTx`. Only one managed stream can be active;
+there is no raw receiver or settlement extraction from the transactional source. Business handlers
+receive only their normal typed context/repositories. The `MqttTransactionSettlement` wrapper can
+consume core-issued decisions, but cannot mint ACK/Reject or expose its raw protocol authority.
+
+Successful transaction/duplicate receipt verification grants ACK. Decode/ingress or durable terminal
+rejection grants a terminal negative PUBACK. Requeue/abandon sends no PUBACK and requests retirement
+of the connection: all other unacknowledged deliveries on that session may also replay. Returning
+from that synchronous request does not prove broker redelivery. Commit unknown and rollback failure
+never grant success ACK. Old-generation settlement remains invalid after reconnect.
+
+Temporary reconnects run inside the same stream. Cancelling a pending `next()` does not discard
+unyielded deliveries. Graceful worker cancellation lets its current transaction finish; forcibly
+dropping the stream retires the current connection without implicit ACK and returns the receiver
+to its source. A replacement stream waits for a newer Ready generation; concurrent stream creation
+is rejected. This supports the worker's resubscription after transient settlement failures. Dropping
+the last source/stream owner closes the receiver/driver. Terminal failures remain observable through
+`connection_state()` and fail subsequent subscription attempts; construct a new resource/source
+for terminal recovery. Requeue/abandon rejects elapsed budgets and stale/closed ownership, while
+Drop still requests conservative retirement on failure.
+The `consumer` feature adds no runtime, SQLx or product authentication implementation to this crate.
 
 ## Receive settlement
 
@@ -116,8 +160,3 @@ Historical extraction source: `baseline/pre-community-core-20260902`, commit
 `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891:adapters/mqtt`.
 Primary implementation reference: `thehouseisonfire/rumqtt`, commit
 `aa7a694f9b76b17d4c31200cf73d79616acae9b3`, `rumqttc-v5/src/{client,eventloop,state,notice,session}.rs`.
-
-The Outbox mapper performs pure encoding and returns only `EncodeError` for permanent invalid content.
-Transport, storage, authentication and other fallible I/O belong outside that function. The caller
-composition owns canonical metadata encoding and durable-handoff proof; the generic MQTT crate does
-not grant business handlers access to its publisher or settlement capabilities.

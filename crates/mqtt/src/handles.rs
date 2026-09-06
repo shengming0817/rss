@@ -1,10 +1,9 @@
-use crate::{ConnectionState, EncodeError, MqttError, PublishRequest, RejectReason, outcome};
+use crate::{ConnectionState, MqttError, PublishRequest, RejectReason, outcome};
 use rss_transactional_messaging::{
-    message::MessageEnvelope,
     policy::{AbsoluteDeadline, Clock, MonotonicInstant, OperationDeadline},
     transport::{
         PublishFailureKind as Kind, PublishFailureReason as Reason, PublishFailureStage as Stage,
-        PublishOutcome, Publisher,
+        PublishOutcome,
     },
 };
 use std::{
@@ -44,6 +43,8 @@ pub(crate) enum Command {
     },
 }
 pub(crate) struct Shared {
+    #[cfg(feature = "consumer")]
+    pub subscriptions: Vec<String>,
     pub commands: mpsc::Sender<Command>,
     pub clock: ClockRef,
     pub state: watch::Sender<ConnectionState>,
@@ -177,48 +178,6 @@ impl MqttPublisher {
         })
         .await
         .map_err(|_| MqttError::DeadlineElapsed)?
-    }
-}
-
-/// Caller-owned route/encoding function at the existing Outbox publisher seam.
-pub struct MqttOutboxPublisher<M> {
-    publisher: MqttPublisher,
-    mapper: M,
-}
-impl<M> MqttOutboxPublisher<M> {
-    /// The trusted infrastructure mapper must preserve authored identity/content/properties on every retry.
-    /// It performs pure encoding and can return only permanent [`EncodeError`] failures.
-    ///
-    /// Transport errors cannot be silently converted into permanent encoding failures:
-    /// ```compile_fail
-    /// use rss_mqtt::{MqttError, MqttOutboxPublisher, MqttPublisher, PublishRequest};
-    /// use rss_transactional_messaging::{message::MessageEnvelope, transport::Publisher};
-    /// fn requires_publisher(_: impl Publisher<Vec<u8>, Receipt = ()>) {}
-    /// fn invalid(publisher: MqttPublisher) {
-    ///     let mapper = |_: &MessageEnvelope<Vec<u8>>| -> Result<PublishRequest, MqttError> {
-    ///         Err(MqttError::Unavailable)
-    ///     };
-    ///     requires_publisher(MqttOutboxPublisher::new(publisher, mapper));
-    /// }
-    /// ```
-    pub const fn new(publisher: MqttPublisher, mapper: M) -> Self {
-        Self { publisher, mapper }
-    }
-}
-impl<P: Sync, M> Publisher<P> for MqttOutboxPublisher<M>
-where
-    M: Fn(&MessageEnvelope<P>) -> Result<PublishRequest, EncodeError> + Send + Sync,
-{
-    type Receipt = ();
-    async fn publish(
-        &self,
-        message: &MessageEnvelope<P>,
-        deadline: OperationDeadline,
-    ) -> PublishOutcome<()> {
-        match (self.mapper)(message) {
-            Ok(request) => self.publisher.publish(request, deadline).await,
-            Err(_) => outcome::definite(Kind::Permanent, Stage::Encode, Reason::InvalidMessage),
-        }
     }
 }
 

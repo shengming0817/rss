@@ -45,6 +45,8 @@ pub fn connect(
     let (commands, rx) = mpsc::channel(config.limits.commands);
     let (state, _) = watch::channel(ConnectionState::Connecting);
     let shared = Arc::new(Shared {
+        #[cfg(feature = "consumer")]
+        subscriptions: config.subscriptions.clone(),
         commands,
         clock: ClockRef(clock),
         state,

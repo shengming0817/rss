@@ -118,6 +118,12 @@ package = "rss-transactional-messaging-postgres"
 baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
 issue = 2301
 
+# #2310: explicit pre-publication replacement of the arbitrary MQTT Outbox mapper.
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-mqtt"
+baseline-rev = "177000e70b34dd1cf8a0c989d1557dd2f5434cca"
+issue = 2310
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"

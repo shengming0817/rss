@@ -38,14 +38,14 @@ fn message(id: &str) -> anyhow::Result<MessageEnvelope<Vec<u8>>> {
         b"durable-payload".to_vec(),
     ))
 }
-fn map(
-    message: &MessageEnvelope<Vec<u8>>,
-) -> Result<rss_mqtt::PublishRequest, rss_mqtt::EncodeError> {
-    Ok(
-        rss_mqtt::PublishRequest::new("outbox/events", message.payload().clone())
-            .map_err(|_| rss_mqtt::EncodeError)?
-            .user_properties(vec![("message-id".into(), message.id().as_str().into())]),
-    )
+fn plan() -> anyhow::Result<rss_mqtt::MqttOutboxPlan> {
+    Ok(rss_mqtt::MqttOutboxPlan::new(
+        MessagingDomain::parse("mqtt-integration")?,
+        [(
+            MessageRoute::parse("created")?,
+            rss_mqtt::MqttOutboxTopic::new("outbox/events")?,
+        )],
+    )?)
 }
 struct Database {
     _fixture: testkit::PgTlsFixture,
@@ -188,7 +188,7 @@ async fn confirmed(
     )?;
     publisher.wait_ready(Duration::from_secs(5)).await?;
     database
-        .relay(&rss_mqtt::MqttOutboxPublisher::new(publisher, map))
+        .relay(&rss_mqtt::MqttOutboxPublisher::new(publisher, plan()?))
         .await?;
     assert_eq!(database.status("mqtt-outbox-original").await?, "published");
     let delivery = receiver
@@ -199,7 +199,7 @@ async fn confirmed(
     assert_eq!(delivery.topic(), b"outbox/events");
     assert!(delivery.properties().is_some_and(|p| {
         p.user_properties
-            .contains(&("message-id".into(), "mqtt-outbox-original".into()))
+            .contains(&("messageId".into(), "mqtt-outbox-original".into()))
     }));
     // The application's handoff transaction commits before ACK authority is used.
     sqlx::query("INSERT INTO public.mqtt_handoff VALUES($1,$2)")
@@ -242,7 +242,7 @@ async fn ambiguous(
     assert_eq!(first.payload.as_ref(), b"durable-payload");
     assert!(first.properties.as_ref().is_some_and(|p| {
         p.user_properties
-            .contains(&("message-id".into(), "mqtt-outbox-ambiguous".into()))
+            .contains(&("messageId".into(), "mqtt-outbox-ambiguous".into()))
     }));
     retry(database, mqtt, clock, checkpoint, &mut receiver, &first).await?;
     resource.shutdown(Duration::from_secs(3)).await?;
@@ -271,7 +271,10 @@ async fn lost_ack(
         rss_mqtt::connect(config, clock.clone(), checkpoint.clone())?;
     publisher.wait_ready(Duration::from_secs(5)).await?;
     database
-        .relay(&rss_mqtt::MqttOutboxPublisher::new(publisher.clone(), map))
+        .relay(&rss_mqtt::MqttOutboxPublisher::new(
+            publisher.clone(),
+            plan()?,
+        ))
         .await?;
     assert!(
         proxy.dropped.load(std::sync::atomic::Ordering::Acquire) > 0,
@@ -303,7 +306,7 @@ async fn retry(
     drain_protocol_replay(&publisher, observer, &clock, first).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp() WHERE message_id='mqtt-outbox-ambiguous'").execute(&database.owner).await?;
     database
-        .relay(&rss_mqtt::MqttOutboxPublisher::new(publisher, map))
+        .relay(&rss_mqtt::MqttOutboxPublisher::new(publisher, plan()?))
         .await?;
     assert_eq!(database.status("mqtt-outbox-ambiguous").await?, "published");
     // This delivery is after the replay barrier: it must come from the canonical Outbox retry.
@@ -359,7 +362,7 @@ fn assert_same(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn permanent_mapper_error_never_enters_the_protocol() -> anyhow::Result<()> {
+async fn unbound_domain_never_enters_the_protocol() -> anyhow::Result<()> {
     use rss_transactional_messaging::transport::{
         PublishFailureKind, PublishFailureStage, PublishOutcome,
     };
@@ -378,9 +381,16 @@ async fn permanent_mapper_error_never_enters_the_protocol() -> anyhow::Result<()
     let (publisher, _receiver, resource) =
         rss_mqtt::connect(config, clock.clone(), Arc::new(FileStore::new()?))?;
     publisher.wait_ready(Duration::from_secs(3)).await?;
-    let adapter = rss_mqtt::MqttOutboxPublisher::new(publisher, |_: &MessageEnvelope<Vec<u8>>| {
-        Err(rss_mqtt::EncodeError)
-    });
+    let adapter = rss_mqtt::MqttOutboxPublisher::new(
+        publisher,
+        rss_mqtt::MqttOutboxPlan::new(
+            MessagingDomain::parse("unbound")?,
+            [(
+                MessageRoute::parse("created")?,
+                rss_mqtt::MqttOutboxTopic::new("events")?,
+            )],
+        )?,
+    );
     let result = adapter
         .publish(&message("encode-failure")?, support::deadline(&*clock))
         .await;
@@ -391,3 +401,6 @@ async fn permanent_mapper_error_never_enters_the_protocol() -> anyhow::Result<()
     server.await??;
     Ok(())
 }
+
+#[path = "transactional.rs"]
+mod transactional;

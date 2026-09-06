@@ -1,8 +1,13 @@
 //! Compileable external composition: callers supply session storage, TLS, clock and routing.
 use rss_mqtt::{
-    MqttConfig, MqttError, MqttOutboxPublisher, MqttReceiver, MqttResource, PublishRequest,
+    MqttConfig, MqttError, MqttOutboxPlan, MqttOutboxPublisher, MqttOutboxTopic, MqttReceiver,
+    MqttResource,
 };
-use rss_transactional_messaging::{message::MessageEnvelope, policy::Clock, transport::Publisher};
+use rss_transactional_messaging::{
+    message::{MessageRoute, MessagingDomain},
+    policy::Clock,
+    transport::Publisher,
+};
 use std::sync::Arc;
 
 pub fn compose(
@@ -18,13 +23,14 @@ pub fn compose(
     MqttError,
 > {
     let (publisher, receiver, resource) = rss_mqtt::connect(config, clock, store)?;
-    let outbox = MqttOutboxPublisher::new(publisher, |envelope: &MessageEnvelope<Vec<u8>>| {
-        Ok(
-            PublishRequest::new("application/events", envelope.payload().clone())
-                .map_err(|_| rss_mqtt::EncodeError)?
-                .user_properties(vec![("message-id".into(), envelope.id().as_str().into())]),
-        )
-    });
+    let plan = MqttOutboxPlan::new(
+        MessagingDomain::parse("application").map_err(|_| MqttError::InvalidConfig)?,
+        [(
+            MessageRoute::parse("events").map_err(|_| MqttError::InvalidConfig)?,
+            MqttOutboxTopic::new("application/events")?,
+        )],
+    )?;
+    let outbox = MqttOutboxPublisher::new(publisher, plan);
     Ok((outbox, receiver, resource))
 }
 #[path = "support/logging.rs"]
@@ -35,4 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(logging::filter())
         .try_init()?;
     Ok(())
+}
+
+/// Hand this source to the canonical ConsumerWorker with an Inbox, transaction and verifier.
+#[cfg(feature = "consumer")]
+pub fn compose_consumer(
+    receiver: MqttReceiver,
+    subscription: rss_transactional_messaging::message::SubscriptionIdentity,
+) -> Result<rss_mqtt::MqttDeliverySource, MqttError> {
+    rss_mqtt::MqttDeliverySource::new(receiver, subscription)
 }
