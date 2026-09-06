@@ -1,24 +1,26 @@
-//! Closed, provider-neutral TransactionalMessaging telemetry vocabulary and emission contract.
+//! Provider-neutral observations with fixed event identities and categorical labels.
 //!
-//! Metric/event identities and all categorical values are statically owned here. Observations can
-//! carry only bounded enums, counts, and durations; tenant or event identity, payload, free-form
-//! error text, and provider addresses are not representable.
-//!
-//! ref: tokio-rs/tracing tracing/src/macros.rs@main
-//! ref: metrics-rs/metrics metrics/src/macros.rs@main
+//! Keep counts and durations as measurements, not label values.
+//! [`TransactionalMessagingObservation`]
+//! has no fields for tenant/message IDs, payloads, credentials, or provider error text. Emitters
+//! must
+//! preserve that boundary when exporting diagnostics. Observations report outcomes; they do not
+//! establish durable state or authorize settlement.
 
 use std::time::Duration;
 
 use crate::error::MessagingErrorKind;
 
-/// Broker disposition used by publication and settlement telemetry.
+/// Shared labels for outbox publication disposition or consumer settlement action.
+/// Read the surrounding observation to distinguish these stages; consumer settlement success
+/// is reported separately by [`TransactionalMessagingIoOutcome`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingDisposition {
-    /// Delivery completed successfully.
+    /// Outbox publication was confirmed, or a consumer ACK was requested.
     Ack,
-    /// Delivery is eligible for another attempt.
+    /// Outbox retry was selected, or a consumer Requeue was requested.
     Requeue,
-    /// Delivery was rejected terminally.
+    /// Outbox dead-letter was selected, or a consumer Reject was requested.
     Reject,
 }
 
@@ -63,7 +65,7 @@ pub enum TransactionalMessagingTransactionStatus {
     HandlerTransient,
     /// Infrastructure failure requires broker redelivery.
     InfrastructureTransient,
-    /// A permanently invalid delivery was rejected.
+    /// A transaction failed permanently before starting or after rollback; no broker Reject is implied.
     RejectedPermanent,
     /// Commit acknowledgement was ambiguous.
     CommitUnknown,
@@ -457,7 +459,7 @@ pub enum TransactionalMessagingObservation {
     },
     /// One outbox settlement.
     OutboxPublish {
-        /// `status` state in the closed protocol.
+        /// Requested publication disposition; this observation itself proves no durable mutation.
         status: TransactionalMessagingDisposition,
     },
     /// Safe failure detail retained by the publisher mapping boundary.
@@ -472,27 +474,27 @@ pub enum TransactionalMessagingObservation {
     },
     /// One complete outbox backlog sample.
     OutboxBacklog {
-        /// `pending_depth` state in the closed protocol.
+        /// Number of pending outbox records in the sample.
         pending_depth: u64,
-        /// `oldest_pending_age` state in the closed protocol.
+        /// Age of the oldest pending record.
         oldest_pending_age: Duration,
-        /// `partition_blocked_depth` state in the closed protocol.
+        /// Number of records waiting behind unresolved partition heads.
         partition_blocked_depth: u64,
     },
     /// Outbox backlog is not authoritative.
     OutboxBacklogUnavailable,
     /// One relay phase duration.
     RelayTick {
-        /// `phase` state in the closed protocol.
+        /// Relay work whose elapsed time was measured.
         phase: TransactionalMessagingRelayPhase,
-        /// `duration` state in the closed protocol.
+        /// Elapsed time for that phase.
         duration: Duration,
     },
     /// One complete inbox backlog sample.
     InboxBacklog {
-        /// `stale_claim_depth` state in the closed protocol.
+        /// Number of stale inbox claims observed.
         stale_claim_depth: u64,
-        /// `oldest_stale_claim_age` state in the closed protocol.
+        /// Age of the oldest stale claim.
         oldest_stale_claim_age: Duration,
     },
     /// Inbox backlog is not authoritative.
@@ -507,29 +509,29 @@ pub enum TransactionalMessagingObservation {
     },
     /// One consumer transaction result.
     ConsumerTransaction {
-        /// `status` state in the closed protocol.
+        /// Transaction outcome classification, independent of broker settlement success.
         status: TransactionalMessagingTransactionStatus,
     },
     /// One broker settlement result.
     ConsumerSettlement {
-        /// `action` state in the closed protocol.
+        /// Broker action attempted for this delivery.
         action: TransactionalMessagingDisposition,
-        /// `outcome` state in the closed protocol.
+        /// Whether the settlement call returned success or error.
         outcome: TransactionalMessagingIoOutcome,
     },
     /// Application dead-letter storage was skipped.
     ConsumerDeadLetterSkip {
-        /// `reason` state in the closed protocol.
+        /// Why the external dead-letter write was omitted.
         reason: TransactionalMessagingDeadLetterSkipReason,
     },
     /// One application dead-letter write result.
     ConsumerDeadLetterWrite {
-        /// `outcome` state in the closed protocol.
+        /// Whether the external dead-letter write returned success or error.
         outcome: TransactionalMessagingIoOutcome,
     },
     /// One supervised subscription recovery trigger.
     ConsumerSubscribeRetry {
-        /// `outcome` state in the closed protocol.
+        /// Trigger for retrying subscription establishment.
         outcome: TransactionalMessagingSubscribeOutcome,
     },
     /// Consumer ownership was fenced.
@@ -540,17 +542,17 @@ pub enum TransactionalMessagingObservation {
     ConsumerReleaseFailed,
     /// One application dead-letter replay result.
     DeadLetterReplay {
-        /// `result` state in the closed protocol.
+        /// Replay outcome without message identity or error text.
         result: TransactionalMessagingDeadLetterReplayResult,
     },
     /// One outbox DLX redrive result.
     OutboxDlxRedrive {
-        /// `result` state in the closed protocol.
+        /// Redrive outcome without durable row identity.
         result: TransactionalMessagingOutboxDlxRedriveResult,
     },
     /// One expired outbox DLX resolution result.
     OutboxDlxResolveExpired {
-        /// `result` state in the closed protocol.
+        /// Resolution outcome without submitted evidence or provider text.
         result: TransactionalMessagingOutboxDlxResolveResult,
     },
 }
@@ -597,7 +599,8 @@ impl TransactionalMessagingObservation {
 
 /// Provider-neutral sink for closed TransactionalMessaging observations.
 pub trait TransactionalMessagingEmitter: Send + Sync {
-    /// Emit one complete observation.
+    /// Export the observation using its fixed identity and typed fields.
+    /// Keep this synchronous callback bounded; do not add identity or free-form provider data.
     fn emit(&self, observation: TransactionalMessagingObservation);
 }
 

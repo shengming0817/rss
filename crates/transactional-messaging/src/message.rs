@@ -1,4 +1,11 @@
-//! Canonical authored message identity, envelope, metadata, and fingerprint.
+//! Authored messages and per-delivery transport input.
+//!
+//! Persist authored facts unchanged for same-ID retries. [`MessageFingerprint`] detects changes
+//! to those facts, including payload bytes, but excludes [`TransportContext`]. Neither a digest
+//! nor an envelope authenticates a tenant or validates a payload schema.
+//!
+//! Metadata, partition keys, transport context, fingerprints, and payloads are hidden by envelope
+//! `Debug`; message IDs remain visible. Raw accessors do not redact their results.
 
 use std::collections::BTreeMap;
 
@@ -12,32 +19,33 @@ const PARTITION_KEY_MAX_LEN: usize = 255;
 const FINGERPRINT_DOMAIN: &str = "rss-transactional-message-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-/// Closed `MessageIdentityError` protocol type.
+/// Invalid input to a message identifier or partition key.
 pub enum MessageIdentityError {
     #[error("message identity must not be empty")]
-    /// `Empty` state in the closed protocol.
+    /// The identifier is empty.
     Empty,
     #[error("message identity is too long")]
-    /// `TooLong` state in the closed protocol.
+    /// The identifier exceeds its byte limit.
     TooLong,
     #[error("message identity contains an invalid character")]
-    /// `InvalidChar` state in the closed protocol.
+    /// The identifier contains a character forbidden by its type.
     InvalidChar,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-/// Closed `MessageId` protocol type.
+/// Stable authored identity; retries and ambiguous publication must reuse this value.
 pub struct MessageId(Box<str>);
 
 impl MessageId {
-    /// `parse` operation defined by this protocol type.
+    /// Parse 1–255 bytes of ASCII letters, digits, `.`, `-`, `_`, or `:`; otherwise return
+    /// [`MessageIdentityError`].
     pub fn parse(raw: &str) -> Result<Self, MessageIdentityError> {
         validate_transport_identity(raw, MESSAGE_ID_MAX_LEN)?;
         Ok(Self(raw.into()))
     }
 
     #[must_use]
-    /// `as_str` operation defined by this protocol type.
+    /// The validated identifier, without normalization.
     pub const fn as_str(&self) -> &str {
         &self.0
     }
@@ -53,18 +61,18 @@ impl std::fmt::Debug for MessageId {
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-/// Closed `MessagingDomain` protocol type.
+/// Namespace separating independently routed message families.
 pub struct MessagingDomain(Box<str>);
 
 impl MessagingDomain {
-    /// `parse` operation defined by this protocol type.
+    /// Parse using the same syntax and errors as [`MessageId::parse`].
     pub fn parse(raw: &str) -> Result<Self, MessageIdentityError> {
         validate_transport_identity(raw, MESSAGE_ID_MAX_LEN)?;
         Ok(Self(raw.into()))
     }
 
     #[must_use]
-    /// `as_str` operation defined by this protocol type.
+    /// The routing namespace as supplied.
     pub const fn as_str(&self) -> &str {
         &self.0
     }
@@ -80,18 +88,18 @@ impl std::fmt::Debug for MessagingDomain {
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-/// Closed `MessageRoute` protocol type.
+/// Logical destination within a [`MessagingDomain`].
 pub struct MessageRoute(Box<str>);
 
 impl MessageRoute {
-    /// `parse` operation defined by this protocol type.
+    /// Parse using the same syntax and errors as [`MessageId::parse`].
     pub fn parse(raw: &str) -> Result<Self, MessageIdentityError> {
         validate_transport_identity(raw, MESSAGE_ID_MAX_LEN)?;
         Ok(Self(raw.into()))
     }
 
     #[must_use]
-    /// `as_str` operation defined by this protocol type.
+    /// The logical destination as supplied.
     pub const fn as_str(&self) -> &str {
         &self.0
     }
@@ -116,7 +124,7 @@ pub struct SubscriptionIdentity {
 
 impl SubscriptionIdentity {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Bind the exact domain, route, and contract accepted by a subscription.
     pub const fn new(
         domain: MessagingDomain,
         route: MessageRoute,
@@ -130,25 +138,25 @@ impl SubscriptionIdentity {
     }
 
     #[must_use]
-    /// `domain` operation defined by this protocol type.
+    /// Required routing namespace.
     pub const fn domain(&self) -> &MessagingDomain {
         &self.domain
     }
 
     #[must_use]
-    /// `route` operation defined by this protocol type.
+    /// Required logical destination.
     pub const fn route(&self) -> &MessageRoute {
         &self.route
     }
 
     #[must_use]
-    /// `contract` operation defined by this protocol type.
+    /// Required contract ID, version, and schema digest.
     pub const fn contract(&self) -> &ContractIdentity {
         &self.contract
     }
 
     #[must_use]
-    /// `accepts` operation defined by this protocol type.
+    /// Check exact routing and contract equality; this does not authenticate tenant authority.
     pub fn accepts<P>(&self, message: &MessageEnvelope<P>) -> bool {
         message.metadata().domain() == self.domain()
             && message.metadata().route() == self.route()
@@ -157,11 +165,12 @@ impl SubscriptionIdentity {
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-/// Closed `PartitionKey` protocol type.
+/// Ordering key scoped by tenant and domain through [`PartitionIdentity`].
 pub struct PartitionKey(Box<str>);
 
 impl PartitionKey {
-    /// `parse` operation defined by this protocol type.
+    /// Parse 1–255 UTF-8 bytes without ASCII control characters; otherwise return
+    /// [`MessageIdentityError`].
     pub fn parse(raw: &str) -> Result<Self, MessageIdentityError> {
         if raw.is_empty() {
             return Err(MessageIdentityError::Empty);
@@ -176,7 +185,7 @@ impl PartitionKey {
     }
 
     #[must_use]
-    /// `as_str` operation defined by this protocol type.
+    /// The unredacted ordering key; avoid exposing it in diagnostics.
     pub const fn as_str(&self) -> &str {
         &self.0
     }
@@ -189,7 +198,7 @@ impl std::fmt::Debug for PartitionKey {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-/// Closed `PartitionIdentity` protocol type.
+/// Tenant and domain scope for messages sharing one ordered sequence.
 pub struct PartitionIdentity {
     tenant_id: TenantId,
     domain: MessagingDomain,
@@ -198,7 +207,7 @@ pub struct PartitionIdentity {
 
 impl PartitionIdentity {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Scope an ordering key to its tenant and messaging domain.
     pub const fn new(tenant_id: TenantId, domain: MessagingDomain, key: PartitionKey) -> Self {
         Self {
             tenant_id,
@@ -208,19 +217,19 @@ impl PartitionIdentity {
     }
 
     #[must_use]
-    /// `tenant_id` operation defined by this protocol type.
+    /// Tenant whose sequence is addressed.
     pub const fn tenant_id(&self) -> TenantId {
         self.tenant_id
     }
 
     #[must_use]
-    /// `domain` operation defined by this protocol type.
+    /// Namespace containing the sequence.
     pub const fn domain(&self) -> &MessagingDomain {
         &self.domain
     }
 
     #[must_use]
-    /// `key` operation defined by this protocol type.
+    /// Ordering key within this tenant and domain.
     pub const fn key(&self) -> &PartitionKey {
         &self.key
     }
@@ -233,7 +242,7 @@ impl std::fmt::Debug for PartitionIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Closed `ContractIdentity` protocol type.
+/// Exact contract ID, version, and schema digest required for message compatibility.
 pub struct ContractIdentity {
     id: ContractId,
     version: ContractVersion,
@@ -242,7 +251,7 @@ pub struct ContractIdentity {
 
 impl ContractIdentity {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Combine contract facts; this does not check the payload against the schema.
     pub const fn new(
         id: ContractId,
         version: ContractVersion,
@@ -256,17 +265,17 @@ impl ContractIdentity {
     }
 
     #[must_use]
-    /// `id` operation defined by this protocol type.
+    /// Contract name used at ingress.
     pub const fn id(&self) -> &ContractId {
         &self.id
     }
     #[must_use]
-    /// `version` operation defined by this protocol type.
+    /// Authored contract version.
     pub const fn version(&self) -> ContractVersion {
         self.version
     }
     #[must_use]
-    /// `schema_digest` operation defined by this protocol type.
+    /// Digest identifying the expected schema.
     pub const fn schema_digest(&self) -> &SchemaDigest {
         &self.schema_digest
     }
@@ -311,7 +320,7 @@ pub struct MessageMetadataExtensions {
 }
 
 impl MessageMetadataExtensions {
-    /// Construct the complete optional extension set without positional ambiguity.
+    /// Set authored extensions; attribute keys and values are stored without validation.
     #[must_use]
     pub fn new(
         correlation: Option<CorrelationId>,
@@ -329,7 +338,7 @@ impl MessageMetadataExtensions {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-/// Validated metadata stored in the canonical message envelope.
+/// Authored metadata; construction scopes the partition but does not authenticate the tenant.
 pub struct MessageMetadata {
     tenant_id: TenantId,
     occurred_at: Timepoint,
@@ -375,46 +384,46 @@ impl MessageMetadata {
     }
 
     #[must_use]
-    /// `tenant_id` operation defined by this protocol type.
+    /// Authored tenant identity; transport authority must be verified separately.
     pub const fn tenant_id(&self) -> TenantId {
         self.tenant_id
     }
     #[must_use]
-    /// `occurred_at` operation defined by this protocol type.
+    /// Authored occurrence time, preserved on replay.
     pub const fn occurred_at(&self) -> Timepoint {
         self.occurred_at
     }
     #[must_use]
-    /// `correlation` operation defined by this protocol type.
+    /// Optional authored correlation value, included in the fingerprint.
     pub fn correlation(&self) -> Option<&str> {
         self.correlation.as_deref()
     }
     #[must_use]
-    /// `domain` operation defined by this protocol type.
+    /// Authored routing namespace.
     pub const fn domain(&self) -> &MessagingDomain {
         &self.domain
     }
     #[must_use]
-    /// `route` operation defined by this protocol type.
+    /// Authored logical destination.
     pub const fn route(&self) -> &MessageRoute {
         &self.route
     }
     #[must_use]
-    /// `contract` operation defined by this protocol type.
+    /// Contract the payload claims to implement.
     pub const fn contract(&self) -> &ContractIdentity {
         &self.contract
     }
     #[must_use]
-    /// `partition` operation defined by this protocol type.
+    /// Optional ordering scope derived from this message's tenant, domain, and partition key.
     pub fn partition(&self) -> Option<&PartitionIdentity> {
         self.partition.as_ref()
     }
     #[must_use]
-    /// `causation` operation defined by this protocol type.
+    /// Optional ID of the message that caused this one.
     pub fn causation(&self) -> Option<&MessageId> {
         self.causation.as_ref()
     }
-    /// `attributes` operation defined by this protocol type.
+    /// Authored attributes in key order; values are not redacted by this accessor.
     pub fn attributes(&self) -> impl Iterator<Item = (&str, &str)> {
         self.attributes
             .iter()
@@ -429,7 +438,7 @@ impl std::fmt::Debug for MessageMetadata {
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
-/// Closed `TransportContext` protocol type.
+/// Per-delivery trace and tenant-authority input, excluded from [`MessageFingerprint`].
 pub struct TransportContext {
     trace: Option<String>,
     tenant_authority: Option<String>,
@@ -437,7 +446,7 @@ pub struct TransportContext {
 
 impl TransportContext {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Store transport input without authenticating it; ingress validation owns verification.
     pub const fn new(trace: Option<String>, tenant_authority: Option<String>) -> Self {
         Self {
             trace,
@@ -446,12 +455,12 @@ impl TransportContext {
     }
 
     #[must_use]
-    /// `trace` operation defined by this protocol type.
+    /// Unverified transport trace input.
     pub fn trace(&self) -> Option<&str> {
         self.trace.as_deref()
     }
     #[must_use]
-    /// `tenant_authority` operation defined by this protocol type.
+    /// Unverified tenant-authority input, which may contain credentials.
     pub fn tenant_authority(&self) -> Option<&str> {
         self.tenant_authority.as_deref()
     }
@@ -464,7 +473,7 @@ impl std::fmt::Debug for TransportContext {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-/// Closed `MessageEnvelope` protocol type.
+/// Authored identity, metadata, and payload with replaceable per-delivery context.
 pub struct MessageEnvelope<P> {
     id: MessageId,
     metadata: MessageMetadata,
@@ -474,7 +483,7 @@ pub struct MessageEnvelope<P> {
 
 impl<P> MessageEnvelope<P> {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Create an envelope with empty transport context; payload validation remains external.
     pub fn new(id: MessageId, metadata: MessageMetadata, payload: P) -> Self {
         Self {
             id,
@@ -485,29 +494,29 @@ impl<P> MessageEnvelope<P> {
     }
 
     #[must_use]
-    /// `with_transport_context` operation defined by this protocol type.
+    /// Replace delivery context without changing authored facts or their fingerprint.
     pub fn with_transport_context(mut self, transport: TransportContext) -> Self {
         self.transport = transport;
         self
     }
 
     #[must_use]
-    /// `id` operation defined by this protocol type.
+    /// Stable identity to preserve across publication retries.
     pub const fn id(&self) -> &MessageId {
         &self.id
     }
     #[must_use]
-    /// `metadata` operation defined by this protocol type.
+    /// Authored metadata used for fingerprinting and ingress checks.
     pub const fn metadata(&self) -> &MessageMetadata {
         &self.metadata
     }
     #[must_use]
-    /// `transport_context` operation defined by this protocol type.
+    /// Per-delivery input to tracing and authority verification.
     pub const fn transport_context(&self) -> &TransportContext {
         &self.transport
     }
     #[must_use]
-    /// `payload` operation defined by this protocol type.
+    /// Authored payload; this accessor does not redact it.
     pub const fn payload(&self) -> &P {
         &self.payload
     }
@@ -526,7 +535,8 @@ impl<P> std::fmt::Debug for MessageEnvelope<P> {
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
-/// Closed `MessageFingerprint` protocol type.
+/// SHA-256 digest for detecting authored drift under the same message ID; not an authenticity
+/// proof.
 pub struct MessageFingerprint([u8; 32]);
 
 impl MessageFingerprint {
@@ -537,7 +547,7 @@ impl MessageFingerprint {
     }
 
     #[must_use]
-    /// `of` operation defined by this protocol type.
+    /// Hash the ID, all authored metadata, and payload bytes; exclude [`TransportContext`].
     pub fn of<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Self {
         let mut digest = Sha256::new();
         frame(&mut digest, 0, FINGERPRINT_DOMAIN.as_bytes());
@@ -626,12 +636,14 @@ impl MessageFingerprint {
     }
 
     #[must_use]
-    /// `as_bytes` operation defined by this protocol type.
+    /// Digest bytes for durable storage or equality checks.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// Detect same-ID authored drift without inspecting transport context.
+    /// Compare digests, returning [`MessageConflict`] on mismatch.
+    ///
+    /// `message_id` labels the error; this method does not check that either digest belongs to it.
     pub fn verify(self, message_id: &MessageId, actual: Self) -> Result<(), MessageConflict> {
         if self == actual {
             Ok(())
@@ -651,7 +663,7 @@ impl std::fmt::Debug for MessageFingerprint {
     }
 }
 
-/// Closed `MessageConflict` protocol type.
+/// Expected and observed authored digests differ for a reported message ID.
 pub struct MessageConflict {
     message_id: MessageId,
     expected: MessageFingerprint,
@@ -660,17 +672,17 @@ pub struct MessageConflict {
 
 impl MessageConflict {
     #[must_use]
-    /// `message_id` operation defined by this protocol type.
+    /// Identity supplied by the caller for conflict reporting.
     pub const fn message_id(&self) -> &MessageId {
         &self.message_id
     }
     #[must_use]
-    /// `expected` operation defined by this protocol type.
+    /// Previously recorded digest.
     pub const fn expected(&self) -> MessageFingerprint {
         self.expected
     }
     #[must_use]
-    /// `actual` operation defined by this protocol type.
+    /// Digest observed on this attempt.
     pub const fn actual(&self) -> MessageFingerprint {
         self.actual
     }

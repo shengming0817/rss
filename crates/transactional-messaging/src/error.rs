@@ -1,4 +1,8 @@
-//! Opaque, safely classified failures crossing transactional messaging ports.
+//! Classified provider failures with a contained source error.
+//!
+//! [`MessagingErrorKind`] guides recovery but does not prove whether an external effect occurred.
+//! Combine it with the transaction/publication outcome, current ownership, and remaining budget;
+//! a transient classification alone never authorizes retry or ACK.
 
 use rss_redact::RedactedSource;
 
@@ -36,7 +40,9 @@ impl MessagingErrorKind {
 
 #[derive(Debug, thiserror::Error)]
 #[error("transactional messaging operation failed: {}", .kind.as_label())]
-/// Opaque port failure carrying only a public classification and a redacted source chain.
+/// Port failure exposing a classification while containing the original provider error.
+/// `Display`, `Debug`, and standard error-source traversal do not reveal the wrapped error text;
+/// the source chain terminates at [`RedactedSource`]. The original error remains owned in memory.
 pub struct MessagingError {
     kind: MessagingErrorKind,
     #[source]

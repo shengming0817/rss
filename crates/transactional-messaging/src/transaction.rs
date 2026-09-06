@@ -1,37 +1,42 @@
-//! Closed local transaction outcomes and consumer settlement projection.
+//! Transaction outcomes and, with `consumer`, settlement authority.
+//!
+//! [`LocalTxAttempt`] preserves commit, rollback, and uncertainty as distinct outcomes; its
+//! constructors report provider facts rather than executing or proving a transaction.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `FailureClass` protocol type.
+/// Failure category used with the transaction outcome to choose recovery.
 pub enum FailureClass {
-    /// `Transient` state in the closed protocol.
+    /// A handler failure eligible for local retry only when no effect started or rollback was
+    /// confirmed.
     Transient,
-    /// `Permanent` state in the closed protocol.
+    /// The unchanged request cannot succeed; this classification alone grants no Reject authority.
     Permanent,
-    /// `Infrastructure` state in the closed protocol.
+    /// Provider infrastructure failed; defer recovery to redelivery rather than local handler
+    /// retry.
     Infrastructure,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `LocalTxDeadlineStage` protocol type.
+/// Transaction phase whose deadline elapsed, for bounded diagnostics.
 pub enum LocalTxDeadlineStage {
-    /// `Acquire` state in the closed protocol.
+    /// Waiting for a provider resource or connection.
     Acquire,
-    /// `Begin` state in the closed protocol.
+    /// Starting the local transaction.
     Begin,
-    /// `Setup` state in the closed protocol.
+    /// Establishing transaction-local context before the operation.
     Setup,
-    /// `Operation` state in the closed protocol.
+    /// Executing the handler or transactional operation.
     Operation,
-    /// `Backoff` state in the closed protocol.
+    /// Waiting before another attempt under the original deadline.
     Backoff,
-    /// `Commit` state in the closed protocol.
+    /// Awaiting commit acknowledgement; expiry may leave the outcome unknown.
     Commit,
-    /// `Rollback` state in the closed protocol.
+    /// Awaiting rollback acknowledgement; expiry leaves cleanup unconfirmed.
     Rollback,
 }
 
 impl LocalTxDeadlineStage {
-    /// Canonical operation owned by the transactional messaging core.
+    /// All supported deadline phases for exhaustive diagnostic registration.
     pub const ALL: &'static [Self] = &[
         Self::Acquire,
         Self::Begin,
@@ -43,7 +48,7 @@ impl LocalTxDeadlineStage {
     ];
 
     #[must_use]
-    /// `as_label` operation defined by this protocol type.
+    /// Stable phase label without transaction or provider data.
     pub const fn as_label(self) -> &'static str {
         match self {
             Self::Acquire => "acquire",
@@ -58,20 +63,20 @@ impl LocalTxDeadlineStage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `LocalTxFinalStatus` protocol type.
+/// Provider-reported terminal transaction status for diagnostics.
 pub enum LocalTxFinalStatus {
-    /// `Committed` state in the closed protocol.
+    /// Commit acknowledgement was received.
     Committed,
-    /// `RolledBack` state in the closed protocol.
+    /// Rollback acknowledgement was received.
     RolledBack,
-    /// `RollbackFailed` state in the closed protocol.
+    /// Rollback could not be confirmed; the attempt must be isolated.
     RollbackFailed,
-    /// `CommitUnknown` state in the closed protocol.
+    /// Commit may have happened; do not treat it as a confirmed rollback.
     CommitUnknown,
 }
 
 impl LocalTxFinalStatus {
-    /// Canonical operation owned by the transactional messaging core.
+    /// All terminal statuses for exhaustive diagnostic registration.
     pub const ALL: &'static [Self] = &[
         Self::Committed,
         Self::RolledBack,
@@ -79,7 +84,7 @@ impl LocalTxFinalStatus {
         Self::CommitUnknown,
     ];
     #[must_use]
-    /// `as_label` operation defined by this protocol type.
+    /// Stable outcome label without provider error text.
     pub const fn as_label(self) -> &'static str {
         match self {
             Self::Committed => "committed",
@@ -91,20 +96,20 @@ impl LocalTxFinalStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `TxRetryClass` protocol type.
+/// Reason a transaction attempt failed, distinct from whether its effects are known.
 pub enum TxRetryClass {
-    /// `Transient` state in the closed protocol.
+    /// A later attempt may succeed if the transaction outcome permits retry.
     Transient,
-    /// `Conflict` state in the closed protocol.
+    /// Submitted state conflicts with authoritative state.
     Conflict,
-    /// `Permanent` state in the closed protocol.
+    /// The unchanged request cannot succeed.
     Permanent,
-    /// `OwnershipLost` state in the closed protocol.
+    /// This attempt no longer has lease or fencing authority.
     OwnershipLost,
 }
 
 impl TxRetryClass {
-    /// Canonical operation owned by the transactional messaging core.
+    /// All supported retry categories for exhaustive diagnostic registration.
     pub const ALL: &'static [Self] = &[
         Self::Transient,
         Self::Conflict,
@@ -112,7 +117,7 @@ impl TxRetryClass {
         Self::OwnershipLost,
     ];
     #[must_use]
-    /// `as_label` operation defined by this protocol type.
+    /// Stable recovery-category label.
     pub const fn as_label(self) -> &'static str {
         match self {
             Self::Transient => "transient",
@@ -124,19 +129,19 @@ impl TxRetryClass {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `TxRetryFinalStatus` protocol type.
+/// Why a bounded transaction retry sequence ended.
 pub enum TxRetryFinalStatus {
-    /// `Success` state in the closed protocol.
+    /// An attempt completed successfully.
     Success,
-    /// `Exhausted` state in the closed protocol.
+    /// The retry allowance was consumed without success.
     Exhausted,
-    /// `NotRetryable` state in the closed protocol.
+    /// Retry stopped with the supplied classification.
     NotRetryable(TxRetryClass),
 }
 
 impl TxRetryFinalStatus {
     #[must_use]
-    /// `as_label` operation defined by this protocol type.
+    /// Stable final label, distinguishing a transient failure that was not retried.
     pub const fn as_label(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -149,7 +154,7 @@ impl TxRetryFinalStatus {
     }
 }
 
-/// Opaque provider attempt preserving the historical exhaustive settlement fold.
+/// Provider-reported attempt consumed through [`LocalTxAttempt::fold`] without losing uncertainty.
 pub struct LocalTxAttempt<T, E> {
     state: LocalTxAttemptState<T, E>,
 }
@@ -165,49 +170,50 @@ enum LocalTxAttemptState<T, E> {
 
 impl<T, E> LocalTxAttempt<T, E> {
     #[must_use]
-    /// `committed` operation defined by this protocol type.
+    /// Record acknowledged commit and retain its provider result; this performs no commit itself.
     pub fn committed(value: T) -> Self {
         Self {
             state: LocalTxAttemptState::Committed(value),
         }
     }
     #[must_use]
-    /// `not_started` operation defined by this protocol type.
+    /// Record failure before the transactional operation began.
     pub fn not_started(error: E) -> Self {
         Self {
             state: LocalTxAttemptState::NotStarted(error),
         }
     }
     #[must_use]
-    /// `rolled_back` operation defined by this protocol type.
+    /// Record failure with acknowledged rollback of the transaction.
     pub fn rolled_back(error: E) -> Self {
         Self {
             state: LocalTxAttemptState::RolledBack(error),
         }
     }
     #[must_use]
-    /// `rollback_failed` operation defined by this protocol type.
+    /// Record unconfirmed rollback; the provider must isolate the unresolved attempt.
     pub fn rollback_failed(error: E) -> Self {
         Self {
             state: LocalTxAttemptState::RollbackFailed(error),
         }
     }
     #[must_use]
-    /// `commit_unknown` operation defined by this protocol type.
+    /// Record uncertain commit; the provider must not report rollback or retry as if no effect
+    /// occurred.
     pub fn commit_unknown(error: E) -> Self {
         Self {
             state: LocalTxAttemptState::CommitUnknown(error),
         }
     }
     #[must_use]
-    /// `fenced` operation defined by this protocol type.
+    /// Record loss of fencing authority, preventing further effects by this attempt.
     pub fn fenced(error: E) -> Self {
         Self {
             state: LocalTxAttemptState::Fenced(error),
         }
     }
 
-    /// `fold` operation defined by this protocol type.
+    /// Consume the attempt and invoke exactly one callback, preserving distinct uncertain outcomes.
     pub fn fold<R>(
         self,
         committed: impl FnOnce(T) -> R,
@@ -240,26 +246,26 @@ mod consumer {
     use super::FailureClass;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    /// Closed `RejectKind` protocol type.
+    /// Reason for a durable terminal rejection.
     pub enum RejectKind {
-        /// `Permanent` state in the closed protocol.
+        /// The message cannot be processed successfully without changing the request.
         Permanent,
-        /// `Invariant` state in the closed protocol.
+        /// Processing violated a required invariant.
         Invariant,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    /// Closed `TerminalDisposition` protocol type.
+    /// Durable terminal result whose validated projection determines broker settlement.
     pub enum TerminalDisposition {
-        /// `Succeeded` state in the closed protocol.
+        /// Handler effects and the terminal receipt committed together; projects to ACK.
         Succeeded,
-        /// `Rejected` state in the closed protocol.
+        /// A terminal rejection was durably recorded; projects to Reject.
         Rejected(RejectKind),
     }
 
     impl TerminalDisposition {
         #[must_use]
-        /// `as_label` operation defined by this protocol type.
+        /// Stable terminal label, including the rejection category.
         pub const fn as_label(self) -> &'static str {
             match self {
                 Self::Succeeded => "succeeded",
@@ -299,27 +305,28 @@ mod consumer {
         }
 
         #[must_use]
-        /// `consumer` operation defined by this protocol type.
+        /// Durable tenant, group, message, and contract identity reported by the provider.
         pub const fn consumer(&self) -> &ConsumerIdentity {
             &self.consumer
         }
         #[must_use]
-        /// `message_id` operation defined by this protocol type.
+        /// Message ID contained in the durable consumer identity.
         pub const fn message_id(&self) -> &MessageId {
             self.consumer.message_id()
         }
         #[must_use]
-        /// `fingerprint` operation defined by this protocol type.
+        /// Authored digest recorded with the terminal result.
         pub const fn fingerprint(&self) -> MessageFingerprint {
             self.fingerprint
         }
         #[must_use]
-        /// `disposition` operation defined by this protocol type.
+        /// Durable result reported by the provider, before ingress matching.
         pub const fn disposition(&self) -> TerminalDisposition {
             self.disposition
         }
         #[must_use]
-        /// `matches` operation defined by this protocol type.
+        /// Compare the complete consumer identity and fingerprint; this does not authenticate
+        /// storage evidence.
         pub fn matches(
             &self,
             consumer: &ConsumerIdentity,
@@ -335,8 +342,10 @@ mod consumer {
         }
     }
 
-    /// Core-minted, move-only binding that a transaction provider must consume when committing a
-    /// terminal receipt. External callers cannot construct or relabel it.
+    /// Move-only identity and fingerprint obtained from
+    /// [`VerifiedConsumerBinding::receipt_intent`].
+    /// The trusted transaction provider consumes it after atomically persisting the terminal
+    /// result.
     pub struct ReceiptIntent {
         consumer: ConsumerIdentity,
         fingerprint: MessageFingerprint,
@@ -362,7 +371,9 @@ mod consumer {
             }
         }
 
-        /// Complete a provider commit with its private proof and terminal disposition.
+        /// Report acknowledged atomic commit and produce terminal settlement authority.
+        /// Persist this intent's identity, fingerprint, and disposition with the handler effects
+        /// before calling. This method performs no I/O and cannot validate the supplied proof.
         #[must_use]
         pub fn committed<P>(
             self,
@@ -390,7 +401,7 @@ mod consumer {
         }
     }
 
-    /// Closed `TransactionOutcome` protocol type.
+    /// Consumer attempt result; only a consumed [`ReceiptIntent`] can form its committed branch.
     pub struct TransactionOutcome<P> {
         state: TransactionOutcomeState<P>,
     }
@@ -406,35 +417,35 @@ mod consumer {
 
     impl<P> TransactionOutcome<P> {
         #[must_use]
-        /// `not_started` operation defined by this protocol type.
+        /// Record failure before handler effects began; no settlement authority is granted.
         pub const fn not_started(class: FailureClass) -> Self {
             Self {
                 state: TransactionOutcomeState::NotStarted(class),
             }
         }
         #[must_use]
-        /// `rolled_back` operation defined by this protocol type.
+        /// Record a confirmed rollback; no settlement authority is granted.
         pub const fn rolled_back(class: FailureClass) -> Self {
             Self {
                 state: TransactionOutcomeState::RolledBack(class),
             }
         }
         #[must_use]
-        /// `rollback_failed` operation defined by this protocol type.
+        /// Record uncertain rollback; abandon the attempt without ACK or local retry.
         pub const fn rollback_failed() -> Self {
             Self {
                 state: TransactionOutcomeState::RollbackFailed,
             }
         }
         #[must_use]
-        /// `commit_unknown` operation defined by this protocol type.
+        /// Record uncertain commit; abandon the attempt without ACK or local retry.
         pub const fn commit_unknown() -> Self {
             Self {
                 state: TransactionOutcomeState::CommitUnknown,
             }
         }
         #[must_use]
-        /// `fenced` operation defined by this protocol type.
+        /// Record loss of ownership; stop effects and abandon this attempt without ACK.
         pub const fn fenced() -> Self {
             Self {
                 state: TransactionOutcomeState::Fenced,
@@ -442,7 +453,8 @@ mod consumer {
         }
 
         #[must_use]
-        /// `may_retry` operation defined by this protocol type.
+        /// Whether a transient not-started or rolled-back attempt permits local retry; budget and
+        /// lease checks still apply.
         pub const fn may_retry(&self) -> bool {
             matches!(
                 &self.state,
@@ -451,7 +463,8 @@ mod consumer {
             )
         }
 
-        /// Return the closed, low-cardinality transaction status without exposing the private state.
+        /// Return the closed, low-cardinality transaction status without exposing the private
+        /// state.
         #[must_use]
         pub const fn status(&self) -> TransactionalMessagingTransactionStatus {
             match &self.state {
@@ -515,7 +528,7 @@ mod consumer {
         }
     }
 
-    /// A verified terminal result that can be projected into broker settlement exactly once.
+    /// A verified terminal result that can be projected into broker settlement at most once.
     pub struct TerminalSettlement {
         receipt: TerminalReceipt,
     }
@@ -535,17 +548,19 @@ mod consumer {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    /// Closed `SettlementKind` protocol type.
+    /// Broker action label; possession of this enum alone grants no settlement authority.
     pub enum SettlementKind {
-        /// `Acknowledge` state in the closed protocol.
+        /// Acknowledge a delivery backed by validated successful terminal evidence.
         Acknowledge,
-        /// `Requeue` state in the closed protocol.
+        /// Return the delivery for a later attempt without claiming success.
         Requeue,
-        /// `Reject` state in the closed protocol.
+        /// Reject a delivery using terminal or ingress/decode rejection authority.
         Reject,
     }
 
-    /// Move-only settlement authority. Its constructor is deliberately private.
+    /// Move-only broker decision. Callers can directly request only [`Self::requeue`].
+    /// ACK requires [`TerminalSettlement`]; Reject requires terminal, ingress, or decode authority.
+    /// These capabilities depend on truthful trusted validators and providers.
     pub struct SettlementDecision(SettlementKind);
 
     impl SettlementDecision {
@@ -556,22 +571,22 @@ mod consumer {
         }
 
         #[must_use]
-        /// `kind` operation defined by this protocol type.
+        /// Inspect the authorized action without consuming or duplicating its authority.
         pub const fn kind(&self) -> SettlementKind {
             self.0
         }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    /// Closed `EnvelopeValidationFailure` protocol type.
+    /// Safe reason for rejecting decoded input or mismatched ingress evidence.
     pub enum EnvelopeValidationFailure {
-        /// `MalformedIdentity` state in the closed protocol.
+        /// Message identity or tenant authority could not be accepted.
         MalformedIdentity,
-        /// `MalformedMetadata` state in the closed protocol.
+        /// Required authored metadata is invalid.
         MalformedMetadata,
-        /// `UnsupportedContract` state in the closed protocol.
+        /// The envelope does not match the accepted routing or contract requirements.
         UnsupportedContract,
-        /// `FingerprintConflict` state in the closed protocol.
+        /// Identity or authored digest differs from the evidence being checked.
         FingerprintConflict,
     }
 
@@ -595,18 +610,32 @@ mod consumer {
         }
     }
 
-    /// Trusted transaction provider that atomically binds handler effects and terminal receipt state.
+    /// Trusted transaction provider that atomically binds handler effects and terminal receipt
+    /// state.
     ///
-    /// A timeout may occur after commit begins, so implementations must quarantine or close an attempt
-    /// without an explicit commit/rollback acknowledgement; callers conservatively treat it as commit
-    /// outcome unknown.
+    /// A timeout may occur after commit begins, so implementations must quarantine or close an
+    /// attempt
+    /// without an explicit commit/rollback acknowledgement; callers conservatively treat it as
+    /// commit
+    /// outcome unknown. The claim, message, and receipt must agree on tenant, identity, and digest;
+    /// enforce fencing in the same transaction as the handler effects and terminal receipt.
+    /// Call [`ReceiptIntent::committed`] only after acknowledged atomic commit. Success authorizes
+    /// ACK; merely invoking a constructor cannot prove durability.
+    ///
+    /// # Failures and cancellation
+    ///
+    /// Preserve failure classes and commit/rollback uncertainty in [`TransactionOutcome`]. Enforce
+    /// [`OperationDeadline`] as the provider I/O watchdog. The caller also uses
+    /// [`within`](crate::policy::within); an execute timeout is conservatively `CommitUnknown`,
+    /// followed by abandon rather than ACK. No uncertain or fenced outcome permits local retry.
     pub trait ConsumerTx<P>: Send + Sync {
-        /// Provider-owned `Claim` capability used by this port.
+        /// Inbox claim whose identity and fencing generation protect this transaction.
         type Claim: Send + Sync;
-        /// Provider-owned `CommitProof` capability used by this port.
+        /// Provider evidence retained alongside terminal settlement after acknowledged commit.
         type CommitProof: Send;
 
-        /// Canonical operation owned by the transactional messaging core.
+        /// Execute under the current claim and atomically commit handler effects with the supplied
+        /// receipt identity.
         fn execute(
             &self,
             claim: &Self::Claim,
@@ -617,8 +646,7 @@ mod consumer {
     }
 
     /// Core-issued, move-only ingress candidate. Only the delivery pipeline can construct it; a
-    /// validator can inspect its exact subscription/message pair and convert that same pair into a
-    /// verified capability after authority checks succeed.
+    /// validator checks this exact subscription/message pair before returning bound evidence.
     pub struct IngressChallenge<'a, P> {
         subscription: &'a SubscriptionIdentity,
         message: &'a MessageEnvelope<P>,
@@ -644,7 +672,10 @@ mod consumer {
             self.message
         }
 
-        /// Bind successful validation to this exact subscription, tenant, message and fingerprint.
+        /// Bind the current facts after the validator has authenticated tenant authority and
+        /// checked
+        /// subscription compatibility. This method records the facts; it does not perform those
+        /// checks.
         #[must_use]
         pub fn verified(self) -> VerifiedIngress
         where
@@ -675,9 +706,16 @@ mod consumer {
         }
     }
 
-    /// Required ingress authority check performed before inbox identity or business effects are used.
+    /// Trusted authority check before durable inbox access or business effects.
+    ///
+    /// Authenticate transport tenant authority against the authored tenant and verify the exact
+    /// subscription's routing and contract requirements. Do not equate well-formed IDs or a
+    /// matching
+    /// fingerprint with authentication. Return [`IngressChallenge::verified`] only after these
+    /// checks.
     pub trait IngressValidator<P>: Send + Sync {
-        /// Validate and return the capability bound to the supplied core-issued challenge.
+        /// Return evidence for this challenge, or [`EnvelopeValidationFailure`] on rejected input.
+        /// This synchronous boundary must not perform blocking provider I/O.
         fn validate(
             &self,
             challenge: IngressChallenge<'_, P>,
@@ -695,11 +733,10 @@ mod consumer {
         reason: EnvelopeValidationFailure,
     }
 
-    /// Core-minted authority to reject a delivery that a trusted provider adapter could not decode.
-    ///
-    /// The private constructor prevents application code from manufacturing arbitrary Reject
-    /// decisions; only the transport boundary can mint this capability while constructing an invalid
-    /// incoming delivery.
+    /// Rejection authority supplied by a trusted provider decoder through
+    /// [`IncomingDelivery::invalid_from_provider`](crate::transport::IncomingDelivery::invalid_from_provider).
+    /// That public provider boundary reports a decode failure; it cannot prove the report is
+    /// truthful.
     pub struct DecodeRejection {
         reason: EnvelopeValidationFailure,
     }
@@ -749,7 +786,9 @@ mod consumer {
             ReceiptIntent::new(self.identity.clone(), self.fingerprint)
         }
 
-        /// Validate a provider-rehydrated terminal receipt before projecting settlement.
+        /// Match a durable receipt to verified ingress before granting ACK or Reject authority.
+        /// Return an [`IngressRejection`] with `FingerprintConflict` on any identity or digest
+        /// mismatch. Matching trusts the provider's durable fact; it does not re-read storage.
         pub fn validate_terminal(
             &self,
             receipt: TerminalReceipt,
@@ -766,8 +805,16 @@ mod consumer {
 
     /// Validate one exact ingress envelope and bind it to a durable consumer identity.
     ///
-    /// The challenge constructor and verified fields remain private; callers receive an opaque binding
-    /// only when the validator's evidence matches the supplied subscription and message exactly.
+    /// The trusted [`IngressValidator`] establishes authority; this function checks that its
+    /// evidence
+    /// matches this exact subscription and envelope before creating the inbox binding. The binding
+    /// supplies a [`ReceiptIntent`] for new work or validates a [`TerminalReceipt`] for a
+    /// duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Return the validator's rejection, or `FingerprintConflict` if returned evidence differs from
+    /// the supplied facts. Neither path executes a handler or performs durable I/O.
     pub fn verify_ingress<P, V>(
         validator: &V,
         group: ConsumerGroup,

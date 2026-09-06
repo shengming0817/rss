@@ -20,6 +20,7 @@ ci:
 		cargo check --locked --no-default-features $$selection; \
 		cargo check --locked --all-features $$selection; \
 		cargo nextest run --locked --all-features $$selection; \
+		cargo test --doc --locked --all-features $$selection; \
 		cargo clippy --locked --all-targets --all-features $$selection -- -D warnings; \
 	fi
 
@@ -32,6 +33,7 @@ ci-full:
 	cargo deny check -D unused-wrapper
 	@bash hack/semver-checks.sh "$(CI_BASE)" "$(CI_HEAD)"
 	cargo llvm-cov nextest --locked --workspace --all-features --no-report
+	cargo test --doc --locked --workspace --all-features
 	cargo llvm-cov report --fail-under-lines 80 --lcov --output-path lcov.info
 
 audit:

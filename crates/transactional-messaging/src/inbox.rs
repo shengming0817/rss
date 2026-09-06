@@ -7,11 +7,12 @@ use crate::transaction::TerminalReceipt;
 use std::time::Duration;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-/// Closed `ConsumerGroup` protocol type.
+/// Independent handler group sharing inbox deduplication state.
 pub struct ConsumerGroup(Box<str>);
 
 impl ConsumerGroup {
-    /// `parse` operation defined by this protocol type.
+    /// Parse 1–255 UTF-8 bytes without ASCII control characters; otherwise return
+    /// [`ConsumerGroupError`].
     pub fn parse(raw: &str) -> Result<Self, ConsumerGroupError> {
         if raw.is_empty() {
             return Err(ConsumerGroupError::Empty);
@@ -25,7 +26,7 @@ impl ConsumerGroup {
         Ok(Self(raw.into()))
     }
     #[must_use]
-    /// `as_str` operation defined by this protocol type.
+    /// The group name as supplied, without redaction.
     pub const fn as_str(&self) -> &str {
         &self.0
     }
@@ -41,21 +42,22 @@ impl std::fmt::Debug for ConsumerGroup {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-/// Closed `ConsumerGroupError` protocol type.
+/// Invalid consumer-group name.
 pub enum ConsumerGroupError {
     #[error("consumer group must not be empty")]
-    /// `Empty` state in the closed protocol.
+    /// No group name was supplied.
     Empty,
     #[error("consumer group is too long")]
-    /// `TooLong` state in the closed protocol.
+    /// The group name exceeds 255 UTF-8 bytes.
     TooLong,
     #[error("consumer group contains an invalid character")]
-    /// `InvalidChar` state in the closed protocol.
+    /// The group name contains an ASCII control character.
     InvalidChar,
 }
 
 #[derive(Clone, Eq, PartialEq)]
-/// Closed `ConsumerIdentity` protocol type.
+/// Ingress and receipt identity: tenant, handler group, message ID, and contract.
+/// This carries contract evidence; it does not define a provider's database uniqueness key.
 pub struct ConsumerIdentity {
     tenant_id: rss_request_context::TenantId,
     group: ConsumerGroup,
@@ -65,7 +67,7 @@ pub struct ConsumerIdentity {
 
 impl ConsumerIdentity {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Assemble receipt identity; authenticated ingress is required before using it for processing.
     pub const fn new(
         tenant_id: rss_request_context::TenantId,
         group: ConsumerGroup,
@@ -80,22 +82,22 @@ impl ConsumerIdentity {
         }
     }
     #[must_use]
-    /// `tenant_id` operation defined by this protocol type.
+    /// Tenant whose durable inbox is addressed.
     pub const fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
     }
     #[must_use]
-    /// `group` operation defined by this protocol type.
+    /// Handler group sharing this deduplication record.
     pub const fn group(&self) -> &ConsumerGroup {
         &self.group
     }
     #[must_use]
-    /// `message_id` operation defined by this protocol type.
+    /// Authored message identity being deduplicated.
     pub const fn message_id(&self) -> &MessageId {
         &self.message_id
     }
     #[must_use]
-    /// `contract` operation defined by this protocol type.
+    /// Exact contract associated with this inbox record.
     pub const fn contract(&self) -> &ContractIdentity {
         &self.contract
     }
@@ -107,25 +109,25 @@ impl std::fmt::Debug for ConsumerIdentity {
     }
 }
 
-/// Closed `IdempotencyDisposition` protocol type.
+/// Durable inbox state observed while attempting to acquire ownership.
 pub enum IdempotencyDisposition<C> {
-    /// `Acquired` state in the closed protocol.
+    /// This attempt acquired a fenced claim and may enter the transaction path.
     Acquired(C),
-    /// `InProgress` state in the closed protocol.
+    /// Another live attempt owns the record; do not execute the handler.
     InProgress,
-    /// `Terminal` state in the closed protocol.
+    /// A durable terminal result exists; validate it against verified ingress before settlement.
     Terminal(TerminalReceipt),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `LeaseStatus` protocol type.
+/// Provider-authoritative lease evidence for the current claim.
 pub enum LeaseStatus {
     /// Provider-authoritative remaining lease time for a held claim.
     Held {
         /// Remaining duration observed after the provider renewed or checked the lease.
         remaining: Duration,
     },
-    /// `Lost` state in the closed protocol.
+    /// The attempt no longer owns the record; stop executing effects.
     Lost,
 }
 
@@ -134,36 +136,48 @@ pub enum LeaseStatus {
 /// Implementations are a semantic trust boundary: a terminal succeeded receipt must be rehydrated
 /// only from provider-authoritative state committed atomically with the handler effect. The core
 /// validates identity and fingerprint before granting settlement authority, but cannot prove that a
-/// provider reported durable state truthfully.
+/// provider reported durable state truthfully. Providers must document their deduplication key and
+/// contract-conflict policy, check requested identity and contract against durable state, and
+/// enforce tenant isolation, authoritative lease time, and fencing atomically.
+///
+/// # Errors and cancellation
+///
+/// Classify I/O failures with [`MessagingError`]; expired ownership on release is
+/// [`OwnershipLost`](crate::error::MessagingErrorKind::OwnershipLost). An expired claim must
+/// never mutate a successor's record. Follow [`within`](crate::policy::within) for deadline and
+/// cancellation obligations.
 pub trait InboxStore: Send + Sync {
-    /// Provider-owned `Claim` capability used by this port.
+    /// Handle binding this attempt to its durable identity and fencing generation.
     type Claim: Send + Sync;
 
     /// Single provider-owned lease policy used for durable TTL and runtime renewal scheduling.
     fn lease_policy(&self) -> crate::policy::LeaseRenewalPolicy;
 
-    /// Canonical operation owned by the transactional messaging core.
+    /// Acquire exclusive ownership, or return the existing live or terminal state for the full
+    /// identity.
     fn claim(
         &self,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<IdempotencyDisposition<Self::Claim>, MessagingError>> + Send;
 
-    /// Read a provider-authoritative durable terminal receipt without acquiring a claim.
+    /// Read committed terminal state without acquiring ownership or modifying the record.
+    /// `None` means no terminal result was observed, not permission to execute a handler.
     fn read_terminal(
         &self,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<Option<TerminalReceipt>, MessagingError>> + Send;
 
-    /// Canonical operation owned by the transactional messaging core.
+    /// Renew only the current fenced claim and report remaining time after renewal; return `Lost`
+    /// if ownership ended.
     fn extend(
         &self,
         claim: &Self::Claim,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<LeaseStatus, MessagingError>> + Send;
 
-    /// Canonical operation owned by the transactional messaging core.
+    /// Release this claim without removing or downgrading a durable terminal result.
     fn release(
         &self,
         claim: Self::Claim,

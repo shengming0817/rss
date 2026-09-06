@@ -1,54 +1,47 @@
 # rss-transactional-messaging
 
-Provider-neutral transactional messaging semantics for RSS. The crate owns one authored message
-model, one transaction outcome model, and narrow inbox, outbox, publisher, ingress, settlement,
-policy, and observability ports. It contains no relay or consumer execution algorithm, worker loop,
-runtime task, broker topology, SQL implementation, provider handle, health registry, or assembly.
+Provider-neutral message identities, transaction outcomes, inbox/outbox ports, and settlement
+contracts. Start with [message] for authored facts, [transaction] for effect outcomes, and
+[policy] for deadlines. [error] and [observability] define safe diagnostics.
 
-The default feature set enables both `consumer` and `producer`; disabling either removes that
-side's ports and state machines from the public API. Provider-neutral LocalTx attempt, deadline,
-retry, and final-status types remain available without either feature.
+`consumer` enables inbox, ingress, and consumer settlement APIs; `producer` enables outbox and
+publication APIs. Both are enabled by default. Message types, local transaction outcomes, and
+budget primitives remain available with `default-features = false`.
 
-Consumer authority is represented by opaque, move-only phases. `verify_ingress` is the only
-constructor for `VerifiedConsumerBinding`; exact subscription, tenant, message, contract, and
-fingerprint evidence is checked before an inbox identity or `ReceiptIntent` can be produced.
-`ReceiptIntent::committed` creates an opaque `CommittedTransaction`, while a provider-rehydrated
-terminal receipt must be checked through the verified binding. Only those paths can produce a
-`TerminalSettlement`. Core ingress verification can additionally return a move-only
-`IngressRejection`; trusted transport decode boundaries receive the separate move-only
-`DecodeRejection`. Only these opaque authorities can produce ACK or Reject. Callers may construct
-only the conservative Requeue decision directly. Inbox renewal returns provider-authoritative
-remaining lease evidence for the runtime to check before continuing execution.
+Providers own durable truth, fencing, and transport evidence. Opaque capabilities bind that
+reported evidence to a message; they cannot prove a provider or validator is truthful. Consumer
+ACK requires verified successful terminal evidence committed atomically with handler effects.
+Uncertain commit must not be treated as rollback; ambiguous publication preserves the original
+message ID and authored content for retry.
 
-`InboxStore` and `ConsumerTx` implementations are trusted durable semantic boundaries. In
-particular, a provider may rehydrate `TerminalReceipt`, and must return `Succeeded` only for state
-committed atomically with the handler effect. Private receipt fields and settlement projection keep
-that authority out of business callers; they cannot prove that a provider told the truth.
+The companion [runtime crate](https://docs.rs/rss-transactional-messaging-runtime) owns consumer
+and relay execution, renewal, retry, and settlement ordering. Its loops use the core's
+[policy::within] deadline and cancellation contract. Provider-specific storage and transport
+implementations live in adapters.
 
-`TransactionOutcome::fold` exposes every closed outcome without exposing or making its private
-state forgeable. Commit-unknown, rollback-failed, and fenced outcomes remain distinct. Every
-delivery or relay execution provider future is raced by the core-owned `within` funnel against one
-monotonic absolute deadline. Subscription establishment and `stream.next()` are intentionally
-long-lived admission waits controlled by cancellation and shutdown, not by a per-delivery budget.
-The same execution cutoff is projected as `OperationDeadline` for the adapter's second-layer I/O
-watchdog. Timeout drops the future as a cancellation request; it does not prove that an external
-effect did not occur. `ExecutionDeadlines` mints the operation cutoff and settlement reserve from
-one clock observation, so retry stages cannot reset the budget.
-
-The companion `rss-transactional-messaging-runtime` package is the sole owner of `relay_once`,
-`consume_once`, periodic claim renewal, retry, settlement ordering, long-lived loops, and
-`rss-runtime` task registration.
+[message]: https://docs.rs/rss-transactional-messaging/latest/rss_transactional_messaging/message/index.html
+[transaction]: https://docs.rs/rss-transactional-messaging/latest/rss_transactional_messaging/transaction/index.html
+[policy]: https://docs.rs/rss-transactional-messaging/latest/rss_transactional_messaging/policy/index.html
+[error]: https://docs.rs/rss-transactional-messaging/latest/rss_transactional_messaging/error/index.html
+[observability]: https://docs.rs/rss-transactional-messaging/latest/rss_transactional_messaging/observability/index.html
+[policy::within]: https://docs.rs/rss-transactional-messaging/latest/rss_transactional_messaging/policy/fn.within.html
 
 ```rust
 use rss_transactional_messaging::message::MessageId;
-use rss_transactional_messaging::transaction::{FailureClass, TransactionOutcome};
+use rss_transactional_messaging::transaction::LocalTxAttempt;
 
 let id = MessageId::parse("message-42")?;
 assert_eq!(id.as_str(), "message-42");
 
-let outcome = TransactionOutcome::<()>::commit_unknown();
-assert!(!outcome.may_retry());
-assert!(TransactionOutcome::<()>::rolled_back(FailureClass::Transient).may_retry());
-
+let attempt = LocalTxAttempt::<(), &str>::commit_unknown("confirmation lost");
+let status = attempt.fold(
+    |_| "committed",
+    |_| "not started",
+    |_| "rolled back",
+    |_| "rollback failed",
+    |_| "commit unknown",
+    |_| "fenced",
+);
+assert_eq!(status, "commit unknown");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```

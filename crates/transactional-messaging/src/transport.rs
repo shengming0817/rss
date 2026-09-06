@@ -20,11 +20,13 @@ use crate::transaction::{DecodeRejection, EnvelopeValidationFailure, SettlementD
 
 #[cfg(feature = "producer")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed `PublishFailureKind` protocol type.
+/// Whether the failure can be repaired by another attempt, independent of acceptance evidence.
+/// Only [`PublishOutcome::DefinitelyNotPublished`] uses this classification to choose Retry or
+/// DeadLetter; an ambiguous outcome always maps to Retry.
 pub enum PublishFailureKind {
-    /// `Transient` state in the closed protocol.
+    /// A later attempt may succeed within the remaining delivery budget.
     Transient,
-    /// `Permanent` state in the closed protocol.
+    /// Repeating the unchanged request cannot repair the failure.
     Permanent,
 }
 
@@ -36,7 +38,7 @@ pub enum PublishFailureStage {
     Encode,
     /// Transport admission failed before any send was attempted.
     Admission,
-    /// Provider send failed before acceptance was possible.
+    /// Sending failed; acceptance certainty is expressed by [`PublishOutcome`].
     Send,
     /// Provider acknowledgement or confirmation did not complete.
     Confirm,
@@ -129,25 +131,25 @@ impl PublishFailure {
 #[cfg(feature = "producer")]
 impl PublishFailureKind {
     #[must_use]
-    /// `is_retryable` operation defined by this protocol type.
+    /// Whether the failure is transient; acceptance evidence and budget still govern retry.
     pub const fn is_retryable(self) -> bool {
         matches!(self, Self::Transient)
     }
     #[must_use]
-    /// `is_permanent` operation defined by this protocol type.
+    /// Whether repeating the unchanged request cannot repair this failure.
     pub const fn is_permanent(self) -> bool {
         matches!(self, Self::Permanent)
     }
 }
 
 #[cfg(feature = "producer")]
-/// Closed `PublishOutcome` protocol type.
+/// Provider evidence about whether the message was accepted; uncertainty must remain explicit.
 pub enum PublishOutcome<R> {
-    /// `Confirmed` state in the closed protocol.
+    /// Acceptance was confirmed by the provider and is backed by the returned receipt.
     Confirmed(R),
-    /// `DefinitelyNotPublished` state in the closed protocol.
+    /// The provider can prove the message was not accepted.
     DefinitelyNotPublished(PublishFailure),
-    /// `Ambiguous` state in the closed protocol.
+    /// Acceptance may have occurred; any retry must preserve the original message ID and content.
     Ambiguous(PublishFailure),
 }
 
@@ -168,7 +170,9 @@ impl<R> PublishOutcome<R> {
         matches!(self, Self::Ambiguous(_))
     }
 
-    /// Exhaustively classify provider publication evidence for the store settlement CAS.
+    /// Convert evidence to a store transition without performing I/O.
+    /// Ambiguity always becomes `Retry`, even with a permanent diagnostic; only a definite
+    /// non-publication with a permanent failure becomes `DeadLetter`.
     #[must_use]
     pub fn into_settlement(self) -> OutboxSettlement<R> {
         match self {
@@ -185,12 +189,19 @@ impl<R> PublishOutcome<R> {
 #[cfg(feature = "producer")]
 /// Provider publisher with a mandatory second-layer I/O watchdog.
 ///
-/// Runtime orchestration independently races this future against the same absolute deadline. A
-/// dropped future requests cancellation but does not prove that publication did not occur.
+/// Follow [`crate::policy::within`] for deadline and cancellation obligations. Preserve the message
+/// ID and authored facts on every attempt; a transport trace may change independently.
+///
+/// # Failures
+///
+/// Return [`PublishOutcome::DefinitelyNotPublished`] only with evidence of non-acceptance.
+/// Missing confirmation, including timeout after sending, is [`PublishOutcome::Ambiguous`].
+/// Confirmation establishes provider acceptance, not consumer processing or exactly-once delivery.
 pub trait Publisher<P>: Send + Sync {
-    /// Provider-owned `Receipt` capability used by this port.
+    /// Acceptance evidence understood by the paired outbox store.
     type Receipt: Send;
-    /// Canonical operation owned by the transactional messaging core.
+    /// Publish the authored envelope unchanged and return acceptance evidence or a classified
+    /// failure.
     fn publish(
         &self,
         message: &MessageEnvelope<P>,
@@ -202,9 +213,16 @@ pub trait Publisher<P>: Send + Sync {
 /// One-shot provider settlement with a mandatory second-layer I/O watchdog.
 ///
 /// A timed-out settlement has unknown transport outcome. Callers must not issue a second or
-/// contradictory decision through another path.
+/// contradictory decision through another path. Enforce [`OperationDeadline`] for both methods;
+/// cancellation must not trigger an implicit ACK. ACK authority comes from durable transaction
+/// evidence checked by [`crate::transaction::VerifiedConsumerBinding`].
+///
+/// # Errors
+///
+/// Return [`MessagingError`] for provider I/O or ownership failures. An error alone does not
+/// establish that the broker rejected the decision; retire uncertain session state safely.
 pub trait DeliverySettlement: Send {
-    /// Canonical operation owned by the transactional messaging core.
+    /// Consume this delivery handle and apply exactly the supplied broker decision.
     fn settle(
         self,
         decision: SettlementDecision,
@@ -219,7 +237,7 @@ pub trait DeliverySettlement: Send {
 }
 
 #[cfg(feature = "consumer")]
-/// Closed `Delivery` protocol type.
+/// Decoded envelope paired with its one-shot provider settlement handle.
 pub struct Delivery<P, S> {
     message: MessageEnvelope<P>,
     settlement: S,
@@ -228,25 +246,25 @@ pub struct Delivery<P, S> {
 #[cfg(feature = "consumer")]
 impl<P, S> Delivery<P, S> {
     #[must_use]
-    /// `new` operation defined by this protocol type.
+    /// Pair an envelope with the handle for that same broker delivery; ingress remains unverified.
     pub const fn new(message: MessageEnvelope<P>, settlement: S) -> Self {
         Self {
             message,
             settlement,
         }
     }
-    /// `into_parts` operation defined by this protocol type.
+    /// Consume the delivery to verify its envelope and later settle through its original handle.
     pub fn into_parts(self) -> (MessageEnvelope<P>, S) {
         (self.message, self.settlement)
     }
 }
 
 #[cfg(feature = "consumer")]
-/// Closed `IncomingDelivery` protocol type.
+/// Provider decode result, prior to consumer ingress verification.
 pub enum IncomingDelivery<P, S> {
-    /// `Valid` state in the closed protocol.
+    /// Decoding succeeded; tenant authority and subscription checks are still required.
     Valid(Box<Delivery<P, S>>),
-    /// `Invalid` state in the closed protocol.
+    /// The trusted decoder rejected the envelope and supplied rejection authority.
     Invalid(InvalidDelivery<S>),
 }
 
@@ -263,7 +281,7 @@ impl<P, S> IncomingDelivery<P, S> {
     }
 }
 
-/// Move-only invalid delivery carrying core-minted Reject authority.
+/// Move-only decode failure carrying rejection authority issued at the trusted provider boundary.
 #[cfg(feature = "consumer")]
 pub struct InvalidDelivery<S> {
     rejection: DecodeRejection,
@@ -300,21 +318,32 @@ impl<S> ManagedDeliveryStream<S> {
 
 #[cfg(feature = "consumer")]
 impl<S: Stream + Unpin> ManagedDeliveryStream<S> {
-    /// Await the next delivery owned by this managed stream receipt.
+    /// Await one delivery, or `None` when the source ends.
+    /// This admission wait has no per-delivery deadline; the caller controls cancellation and
+    /// shutdown. The underlying provider stream must preserve unyielded deliveries on cancellation.
     pub async fn next(&mut self) -> Option<S::Item> {
         self.stream.next().await
     }
 }
 
 #[cfg(feature = "consumer")]
-/// Closed `DeliverySource` protocol type.
+/// Provider admission of deliveries for an exact subscription.
+///
+/// Establishment and stream polling are long-lived admission waits, outside the per-delivery
+/// execution budget. Providers must support caller cancellation/shutdown without acknowledging
+/// unprocessed deliveries, and bind each settlement handle to its original delivery/session.
+///
+/// # Errors
+///
+/// Establishment reports [`MessagingError`]; decode failures are [`IncomingDelivery::Invalid`].
+/// A decoded envelope still requires ingress verification before any handler effect.
 pub trait DeliverySource<P>: Send + Sync {
-    /// Provider-owned `Settlement` capability used by this port.
+    /// One-shot handle for deciding the outcome of one broker delivery.
     type Settlement: DeliverySettlement;
-    /// Provider-owned `Deliveries` capability used by this port.
+    /// Stream of decoded envelopes or explicit decode rejections.
     type Deliveries: Stream<Item = IncomingDelivery<P, Self::Settlement>> + Send + Unpin;
 
-    /// Canonical operation owned by the transactional messaging core.
+    /// Establish a stream for this subscription, or return a classified admission error.
     fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
