@@ -4018,6 +4018,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "reconcile-postgres-integration"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-contract",
+ "rss-reconcile",
+ "rss-reconcile-postgres",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "testkit",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "redis"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4311,6 +4330,37 @@ dependencies = [
  "futures",
  "rss-projection",
  "rss-request-context",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "rss-reconcile"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-redact",
+ "rss-request-context",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "rss-reconcile-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-reconcile",
+ "rss-redact",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
  "sqlx",
  "thiserror",
  "tokio",

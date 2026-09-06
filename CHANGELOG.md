@@ -6,6 +6,27 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-reconcile / rss-reconcile-postgres 0.1.0
+
+- Extract tenant-scoped reconciliation into independent core and PostgreSQL packages (#2290).
+  Durable scans, per-target epochs, bounded retries/concurrency and cancellation recover unfinished work.
+- Observe desired/actual before every attempt. Action success schedules another observation and never
+  certifies convergence. Remote effects require application idempotency and independent remote fencing.
+- Protect database effects and scheduling with one locked transaction. The optional
+  `transactional-messaging` feature composes canonical Outbox appends without duplicating the engine.
+- Ship a fresh `rss_reconcile` schema only. Remove legacy consistency models, global leader/fenced-write
+  ports and memory substitutes atomically; no aliases, compatibility features or historical data import.
+- Replace positional execution limits with validated named `PolicyConfig`; base `run` needs no
+  Notify and exposes typed target/stage/redacted failure observations. Preserve original panic payloads.
+- Revalidate each actual PostgreSQL connection before callbacks; prove real commit/rollback
+  transport interruption and cancelled/deadline pool close using PostgreSQL integration tests.
+- Products retain authentication, business state/policy, role provisioning and migration execution.
+
+### rss-transactional-messaging-postgres 0.1.0
+
+- Add `PgRuntime::local_tx_with_context` for borrowed application context. It shares the existing
+  transaction cutoff, settlement and connection quarantine owner; message behavior is unchanged.
+
 ### rss-projection / rss-projection-postgres 0.1.0
 
 - Extract ordered projection execution and recovery from baseline `5b63e10` into independent

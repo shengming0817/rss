@@ -132,7 +132,7 @@ impl std::fmt::Debug for GlobalCasStoreKey {
 /// typed CAS 请求：`key` 目标状态 + `expected` 期望当前值（`None` = 期望键不存在）+ `new_value` 待写值
 /// + 可选 `expected_token`（fencing 防 stale）。
 ///
-/// PII 边界（类型层 Hard，同 [`crate::SignRequest`] / [`crate::FencedWriteRequest`]）：`expected` / `new_value`
+/// PII 边界（类型层 Hard，同 [`crate::SignRequest`]）：`expected` / `new_value`
 /// （状态 payload，可能含敏感设备状态 / 凭据）经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`）；
 /// [`GlobalCasStoreKey`] 自身也恒脱敏，仅 `expected_token` 作为版本元数据可观测。
 ///
@@ -169,7 +169,7 @@ pub enum CasStoreOutcome {
 
 /// CAS 写失败（infra 故障，**非** conflict/fence——后两者是 [`CasStoreOutcome`] 的 `Ok`）。
 ///
-/// PII 边界（与 [`crate::SignerError`] / [`crate::FencedWriterError`] 同范式）：source 经 [`RedactedSource`] 脱敏。
+/// PII 边界（与 [`crate::SignerError`] 同范式）：source 经 [`RedactedSource`] 脱敏。
 /// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("cas store operation failed")]

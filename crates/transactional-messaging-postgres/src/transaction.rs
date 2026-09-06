@@ -344,6 +344,26 @@ impl PgRuntime {
     where
         F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
     {
+        self.local_tx_with_context(tenant, deadline, (), move |_, tx| operation(tx))
+            .await
+    }
+
+    /// Execute with application context reborrowed for the transaction. Context can contain
+    /// non-static references; this retains the same single cutoff and settlement owner.
+    pub async fn local_tx_with_context<T: Send, C: Send, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
+        mut context: C,
+        operation: F,
+    ) -> LocalTxAttempt<T, PgError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut C,
+                &'a mut PgTransaction<'_>,
+            ) -> BoxFuture<'a, Result<T, PgError>>
+            + Send,
+    {
         let cutoff = match AbsoluteDeadline::from_timeout(&self.timer, deadline.timeout()) {
             Ok(value) => value,
             Err(_) => return LocalTxAttempt::not_started(PgError::invariant()),
@@ -378,7 +398,7 @@ impl PgRuntime {
         };
         let result = within(&self.timer, cutoff, |_| async {
             view.setup().await?;
-            operation(&mut view).await
+            operation(&mut context, &mut view).await
         })
         .await;
         let result = match result {

@@ -1,34 +1,7 @@
-//! consistency — RSS saga / reconcile / command journal 纯态机与策略 trait。
-//!
-//! # 派发范式（ADR-003 §2 / ADR-004 C1）
-//!
-//! 本 crate 冻结的是非消息引擎策略 trait：`Reconciler` 一律 **native AFIT**
-//! （trait 内直接 `async fn`）+ **泛型静态分发**
-//! （消费方 `fn run<S: Trait>(s: &S)`，零开销、零 box）——**不引 dynosaur、不引 async-trait**。
-//! native AFIT trait 不 object-safe，故全 crate 禁 `Box<dyn Trait>`：消费方一律泛型 `<S: Trait>`。
-//! Saga authoring 已收口到 `eventexec::SagaStep<GeneratedStepMarker>`；本 crate 只拥有其 durable
-//! identity、journal/replay 纯模型，避免平行 factory/runtime contract。
-//!
-//! 这些是引擎侧策略接缝，**非** messaging core 或 DI 注入 infra port。错误用本地 [`EngineError`]（thiserror，message `&'static str`
-//! const，ADR-004 C10）。engine 类型**不** derive serde（ADR-004 C6）。
-//!
-//! ref: kube-rs kube-runtime/src/{controller,watcher}.rs@main（Reconciler 函数式接缝 + 内部 native AFIT）；
-//! oxidecomputer/steno src/saga_action_generic.rs@main（saga do/undo + 逆序补偿）。
-//!
-//! # 模块一致性等级
-//!
-//! | 模块 | 等级 |
-//! |------|------|
-//! | idempotency | L0 |
-//! | command_journal | L1/L2 |
-//! | inbox | L0/L2 |
-//! | outbox | L1/L2 |
-//! | saga | L3 |
-//! | reconcile | L4 |
+//! Internal Saga and command journal models. Reconciliation is owned by rss-reconcile.
 
 pub mod command_journal;
 pub mod error;
-pub mod reconcile;
 pub mod saga;
 
 pub use command_journal::{
@@ -37,10 +10,6 @@ pub use command_journal::{
     CommandJournalValueError, CommandRequestFingerprint, CommandResultSummary,
 };
 pub use error::{EngineError, EngineErrorKind};
-pub use reconcile::{
-    ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,
-    Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
-};
 pub use saga::{
     CompensationOutcome, SagaAttempt, SagaAttemptError, SagaCompensationCause, SagaContractId,
     SagaContractIdError, SagaDefinition, SagaDefinitionIdentity, SagaDefinitionIdentityError,

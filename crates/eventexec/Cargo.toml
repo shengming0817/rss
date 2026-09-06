@@ -19,14 +19,13 @@ rss-contract.workspace = true
 rss-request-context.workspace = true
 # 非消息 DLQ / saga 能力仍由 diport 提供；消息 runtime 直接消费 transactional messaging native ports。
 diport = { path = "../diport" }
-# reconcile harness 经 vocab::Epoch 传递 lease epoch（Context::epoch / LeaseToken.epoch 同源，#1123）。
 vocab = { path = "../vocab" }
 futures = { workspace = true, features = ["std", "async-await", "executor"] }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # run_dispatch 对 Nack 丢弃 / Requeue 耗尽做结构化日志（防静默消息丢失，`crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
 tracing = { workspace = true }
-# 非消息 saga / reconcile 引擎接缝。
+# 非消息 saga 引擎接缝。
 consistency = { path = "../consistency" }
 # Keyed command idempotency aliases are derived inside the runtime boundary; raw business keys
 # never cross into persistence providers.
@@ -48,7 +47,7 @@ tracewire = { package = "rss-trace-context", path = "../tracewire", version = "0
 tokio = { workspace = true, features = ["rt", "time", "sync", "rt-multi-thread", "macros"] }
 # CancellationToken（非消息 runtime 取消信号）。
 tokio-util = { workspace = true }
-# retention/reconcile 等非 TransactionalMessaging canonical family 仍经 metrics facade 发射。硬依赖、非 optional——idiomatic
+# retention 等非 TransactionalMessaging canonical family 仍经 metrics facade 发射。硬依赖、非 optional——idiomatic
 # metrics facade 范式：库无条件发射，executable（组合根）选 recorder（装 PromExporter 才导出，否则 facade
 # 自身 no-op）；不留 public no-op metrics 让生产静默降级（#1209 review F3 fail-closed）。同 tracing 层级。
 metrics = { workspace = true }

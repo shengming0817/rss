@@ -220,10 +220,8 @@ classify_ports! {
     async_send DynCasStore => BusinessWriteEffect;
     async_send DynOwnerCheckpointStore => BusinessWriteEffect;
     async_send DynDeadLetterStore => BusinessWriteEffect;
-    async_send DynFencedWriter => BusinessWriteEffect;
     async_send DynObjectStore => BusinessWriteEffect;
 
-    async_send DynLeaderElector => WorkflowEffect;
     async_send DynLockStore => WorkflowEffect;
     async_send DynSagaTenantSource => WorkflowEffect;
 

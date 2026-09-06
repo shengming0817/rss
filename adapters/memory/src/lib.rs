@@ -18,151 +18,22 @@ use consistency::{
 };
 use diport::{
     CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, Checkpoint, CheckpointId,
-    CheckpointOffset, CheckpointOwner, CheckpointStoreError, CheckpointVersion, FencedWriteKey,
-    FencedWriteRequest, FencedWriter, FencedWriterError, GlobalCasStoreKey, LeaderElector,
-    LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore,
-    LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaClaimOutcome, SagaClaimRequest,
-    SagaCompensationProgress, SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore,
-    SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardProgress,
-    SagaInstanceRegistration, SagaLeaseHolder, SagaLeaseTtl, SagaOperatorAuthorization,
-    SagaOperatorCasOutcome, SagaOperatorClaimOutcome, SagaOperatorJournalExpectation,
-    SagaOperatorRepair, SagaOperatorRepairClaim, SagaOperatorRepairReason,
-    SagaOperatorStatusOutcome, SagaOperatorStatusSnapshot, SagaOperatorStore, SagaRecoveryOutcome,
-    SagaRecoveryRequest, SagaRecoverySnapshot, SagaRunnableInstance, SagaTenantCursor,
-    SagaTenantPage, SagaTenantSource, SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest,
-    SagaUnresolvedObservation, SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SaveOutcome,
-    SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, StoredSagaReceipt,
-    WriteOutcome, saga_operator_action,
+    CheckpointOffset, CheckpointOwner, CheckpointStoreError, CheckpointVersion, GlobalCasStoreKey,
+    LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey,
+    OwnerCheckpointStore, SagaClaimOutcome, SagaClaimRequest, SagaCompensationProgress,
+    SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore, SagaDurableStoreError,
+    SagaDurableStoreErrorKind, SagaForwardProgress, SagaInstanceRegistration, SagaLeaseHolder,
+    SagaLeaseTtl, SagaOperatorAuthorization, SagaOperatorCasOutcome, SagaOperatorClaimOutcome,
+    SagaOperatorJournalExpectation, SagaOperatorRepair, SagaOperatorRepairClaim,
+    SagaOperatorRepairReason, SagaOperatorStatusOutcome, SagaOperatorStatusSnapshot,
+    SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest, SagaRecoverySnapshot,
+    SagaRunnableInstance, SagaTenantCursor, SagaTenantPage, SagaTenantSource,
+    SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedObservation,
+    SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SaveOutcome, SecretCoordinate, SecretMaterial,
+    SecretResolver, SecretResolverError, StoredSagaReceipt, saga_operator_action,
 };
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
 // 且 lib 代码禁 unwrap/expect（clippy deny）。`unwrap_or_else(into_inner)` 取回 guard，clippy-clean。
-
-// ── MemLeaseStore / MemLeaderElector：进程内 leader 选举替身（reconcile harness 测试 / demo）──────────
-
-/// 共享 lease 底座：多个 [`MemLeaderElector`]（模拟多副本）克隆共享同一底座竞争 leadership。
-///
-/// 确定性、无时钟（不触 clippy disallowed-methods）：lease TTL 过期 / holder crash 由测试显式
-/// [`MemLeaseStore::evict`] 模拟；生产替身走真实 redis/pg leader-elect adapter。
-#[derive(Default)]
-struct LeaseInner {
-    /// 当前持有者 + 其任期 epoch；`None` = 无人持有（可被首个 acquire 接管）。
-    holder: Option<(LeaderId, vocab::Epoch)>,
-    /// 下一个**全新**任期 epoch（每次易手 / 首次获得单调 `+1`；同一持有者续租不动）。
-    next_epoch: u64,
-}
-
-/// in-mem leader 选举底座（克隆共享同一底座）。经 [`MemLeaseStore::elector`] 取每个副本的端口。
-#[derive(Clone, Default)]
-pub struct MemLeaseStore {
-    inner: Arc<Mutex<LeaseInner>>,
-}
-
-impl MemLeaseStore {
-    /// 新建空底座（无人持有 leadership，next_epoch 从 0 起）。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 取一个副本的 [`MemLeaderElector`]（`id` = 该副本 holder identity，须经 `LeaderId::parse` canonical 校验）。
-    pub fn elector(&self, id: LeaderId) -> MemLeaderElector {
-        MemLeaderElector {
-            store: self.clone(),
-            id,
-        }
-    }
-
-    /// 测试钩子：模拟 lease TTL 过期 / holder crash——清当前持有者，使他副本下次 `acquire` 可接管
-    /// （接管获**新**任期 epoch，单调递增）。不重置 `next_epoch`（保跨任期单调）。
-    pub fn evict(&self) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).holder = None;
-    }
-}
-
-/// 单副本 in-mem leader 选举端口（impl [`diport::LeaderElector`]）。
-pub struct MemLeaderElector {
-    store: MemLeaseStore,
-    id: LeaderId,
-}
-
-impl LeaderElector for MemLeaderElector {
-    async fn acquire(&self, _lease: Duration) -> Result<Option<LeaseToken>, LeaderElectorError> {
-        // reason: in-mem 无 TTL，`lease` 时长被忽略（过期由测试 evict 模拟）；锁内同步无 await。
-        let mut g = self.store.inner.lock().unwrap_or_else(|e| e.into_inner());
-        match &g.holder {
-            // 无人持有 → 接管全新任期（epoch 单调 +1）。
-            None => {
-                let epoch = vocab::Epoch::new(g.next_epoch);
-                g.next_epoch = g.next_epoch.saturating_add(1);
-                g.holder = Some((self.id.clone(), epoch));
-                Ok(Some(LeaseToken {
-                    holder: self.id.clone(),
-                    epoch,
-                }))
-            }
-            // 本副本续租 → 同任期 epoch 不变。
-            Some((holder, epoch)) if *holder == self.id => Ok(Some(LeaseToken {
-                holder: holder.clone(),
-                epoch: *epoch,
-            })),
-            // 他副本持有 → 本副本非 leader。
-            Some(_) => Ok(None),
-        }
-    }
-
-    async fn release(&self, token: LeaseToken) -> Result<(), LeaderElectorError> {
-        let mut g = self.store.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // 仅当 token 是**当前任期**持有者时让出：holder + epoch **双校验**（已易手或旧任期 stale token
-        // 则幂等 no-op）。仅校验 holder 不够——同 holder 重启后持旧 epoch token 会误让出自己续租后的新任期。
-        if matches!(&g.holder, Some((holder, epoch)) if *holder == token.holder && *epoch == token.epoch)
-        {
-            g.holder = None;
-        }
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<(), LeaderElectorError> {
-        // reason: in-mem 无 infra 资源，关闭无需释放。
-        Ok(())
-    }
-}
-
-// ── MemFencedWriter：进程内防护写替身（单调 epoch CAS）─────────────────────────────────────────────
-
-/// in-mem 防护写端口（impl [`diport::FencedWriter`]）：**按 `key` 各自**记已接受 epoch 高水位，
-/// `epoch < 该 key 高水位` 的写被 [`WriteOutcome::Fenced`]（旧 leader 跨任期 stale 写被挡）；`epoch ≥` 提交并
-/// 推进该 key 高水位（**同任期多写 / 不同 key 互不 fence**，幂等由消费方负责）。
-///
-/// 仅校验 fencing CAS 语义，不持久化 `data`。INVARIANT: RECONCILE-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（per-key 单调，回归见本 crate 单测）。
-#[derive(Clone, Default)]
-pub struct MemFencedWriter {
-    high_water: Arc<Mutex<HashMap<FencedWriteKey, vocab::Epoch>>>,
-}
-
-impl MemFencedWriter {
-    /// 新建空 writer（各 key 高水位未设，每个 key 首写恒提交）。
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl FencedWriter for MemFencedWriter {
-    async fn write(&self, request: FencedWriteRequest) -> Result<WriteOutcome, FencedWriterError> {
-        let mut hw = self.high_water.lock().unwrap_or_else(|e| e.into_inner());
-        // per-key 单调：该 key 首写（absent）或 epoch ≥ 该 key 高水位 → 提交并推进；否则 fence（跨任期 stale）。
-        match hw.get(&request.key) {
-            Some(&seen) if request.epoch < seen => Ok(WriteOutcome::Fenced),
-            _ => {
-                hw.insert(request.key, request.epoch);
-                Ok(WriteOutcome::Committed)
-            }
-        }
-    }
-
-    async fn shutdown(&self) -> Result<(), FencedWriterError> {
-        // reason: in-mem 无 infra 资源，关闭无需释放。
-        Ok(())
-    }
-}
 
 // ── MemCasStore：in-mem state-CAS 替身（etcd-revision 条件写）──────────────────────────────────────
 
@@ -240,7 +111,7 @@ struct LockEntry {
 
 /// in-mem 分布式互斥锁替身（impl [`diport::LockStore`]）：per-key fencing token、token-as-capability 互斥。
 /// **无时钟**——`ttl` 入参被忽略（TTL 过期 / holder crash 由 [`MemLockStore::evict`] 显式模拟，照
-/// [`MemLeaseStore::evict`] 先例，不触 clippy disallowed-methods 系统时钟）。生产替身走 etcd/redis/consul
+/// explicit test eviction 先例，不触 clippy disallowed-methods 系统时钟）。生产替身走 etcd/redis/consul
 /// adapter；本 crate 仅测试/demo 用。INVARIANT: DISTLOCK-FENCE-MONO-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（per-key token 单调 + 互斥；回归见本 crate 单测）。
 #[derive(Clone, Default)]
 pub struct MemLockStore {
@@ -254,7 +125,7 @@ impl MemLockStore {
     }
 
     /// 测试钩子：模拟 lock TTL 过期 / holder crash——清该 key 持有者，使下次 `acquire` 可接管
-    /// （接管获**新**单调 token，不回退 `minted`）。照 [`MemLeaseStore::evict`]；生产走真实 TTL 过期。
+    /// （接管获**新**单调 token，不回退 `minted`）。照 explicit test eviction；生产走真实 TTL 过期。
     pub fn evict(&self, key: &LockStoreKey) {
         if let Some(entry) = self
             .state
@@ -1965,7 +1836,6 @@ mod tests {
 
     #[test]
     fn neutral_consistency_doubles_construct_without_domain_state() {
-        let _ = MemFencedWriter::new();
         let _ = MemCasStore::new();
     }
 

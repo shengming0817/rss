@@ -1,7 +1,7 @@
 use diport::{
     AuthEffect, BusinessWriteEffect, DiPortEffect,
-    DynCasStore, DynDeadLetterStore, DynFencedWriter, DynKeyProvider,
-    DynLeaderElector, DynLockStore, DynObjectStore,
+    DynCasStore, DynDeadLetterStore, DynKeyProvider,
+    DynLockStore, DynObjectStore,
     DynOwnerCheckpointStore, DynRateLimiter, DynSagaDurableStore,
     DynSagaTenantSource, DynSecretResolver, DynSigner, LocalPrivilege,
     MetricsExporter, PortEffectClass, PortPrivilegeClass, ReadEffect, WorkflowEffect,
@@ -32,10 +32,8 @@ fn main() {
     assert_local_effect!(DynCasStore<'static>, BusinessWriteEffect);
     assert_local_effect!(DynOwnerCheckpointStore<'static>, BusinessWriteEffect);
     assert_local_effect!(DynDeadLetterStore<'static>, BusinessWriteEffect);
-    assert_local_effect!(DynFencedWriter<'static>, BusinessWriteEffect);
     assert_local_effect!(DynObjectStore<'static>, BusinessWriteEffect);
 
-    assert_local_effect!(DynLeaderElector<'static>, WorkflowEffect);
     assert_local_effect!(DynLockStore<'static>, WorkflowEffect);
     assert_local_effect!(DynSagaDurableStore<'static>, WorkflowEffect);
     assert_local_effect!(DynSagaTenantSource<'static>, WorkflowEffect);

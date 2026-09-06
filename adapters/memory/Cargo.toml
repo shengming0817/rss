@@ -19,7 +19,6 @@ diport = { path = "../../crates/diport" }
 rss-contract.workspace = true
 rss-data-protection.workspace = true
 primitives = { path = "../../crates/primitives" }
-# MemLeaderElector/MemFencedWriter 的 LeaseToken.epoch / FencedWriteRequest.epoch（单调 fencing token）。
 # 单测亦构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
 vocab = { path = "../../crates/vocab" }
 # MemSagaDurableStore 内部按 saga_id.as_uuid()（uuid::Uuid）存储/过滤，须直接使用 uuid 类型。

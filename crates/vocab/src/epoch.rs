@@ -1,17 +1,8 @@
-//! `Epoch` —— 单调 fencing token（lease epoch）。
-//!
-//! 分布式 leader-elect + fencing 的跨副本正确性原语：leader 每次续租 / 接管时 epoch **单调递增**，
-//! 写路径据此做 CAS——`FencedWriter` 拒绝 epoch 小于已见最大值的写（stale-update protection），
-//! 旧 leader 即便误判自己仍持 lease，其 stale 写也被新 epoch 挡下。对标 etcd lease revision / fencing token
-//! （Martin Kleppmann《DDIA》§8.3 fencing token）。
-//!
-//! 落 `vocab`（基础层）的理由：被 `consistency::reconcile::Context`（reconciler 读当前 epoch）与
-//! `diport::{LeaseToken, FencedWriter}`（leader 产出 + 写路径 CAS）**共用同一类型**，避免每次跨层转换；
-//! `vocab` 是 consistency(引擎) 与 diport(DI-infra) 唯一共同已依赖的最低层，置此无新增跨层边。
+//! CAS 与资源锁使用的单调 token 值；实际条件写由各 provider 校验。
 
 /// 单调 fencing token（lease epoch）。
 ///
-/// `u64` 内核 + `Ord`：leader 续租 / 接管单调递增，`FencedWriter` 据 `<` 比较拒旧写。newtype funnel
+/// `u64` 内核 + `Ord`：资源版本 / 接管任期单调递增，由条件写 provider 校验。newtype funnel
 /// （私有字段，单一构造入口 [`Epoch::new`]）——独立语义不复用裸 `u64`，杜绝把任意计数误当 fence token。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(u64);

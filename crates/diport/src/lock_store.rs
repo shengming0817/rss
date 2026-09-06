@@ -2,7 +2,7 @@
 //!
 //! **按 key 互斥**接缝：consumer 携 `key` + `ttl` 争夺锁，provider 维护**每个 key 各自**的 per-key 单调
 //! fencing token；锁的持有凭据**就是 token**（无独立 holder 身份——对齐 `distributed::LockGrant{key,token,ttl}`
-//! 无 holder 字段，区别于 [`crate::LeaderElector`] 的全局单 leader + `LeaderId`）：
+//! 无 holder 字段，以 token 标识持锁权限）：
 //! - **空闲 / 已过期** → [`LockAcquireOutcome::Acquired`]（授予**新任期** token，per-key 单调 `+1`）；
 //! - **已被他者持有**（未过期）→ [`LockAcquireOutcome::Held`]（本次未获取）；
 //! - **续租**（`token` 匹配当前持有者）→ [`LockRenewOutcome::Renewed`]（延 TTL，**同任期** token 不变）；

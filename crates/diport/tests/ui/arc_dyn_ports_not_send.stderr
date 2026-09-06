@@ -98,26 +98,6 @@ note: required by a bound in `assert_send`
    |                   ^^^^ required by this bound in `assert_send`
    = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: `(dyn fenced_writer::__dynosaur_macro_dynfencedwriter::ErasedFencedWriter + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn fenced_writer::__dynosaur_macro_dynfencedwriter::ErasedFencedWriter + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynFencedWriter<'static>`, the trait `Sync` is not implemented for `(dyn fenced_writer::__dynosaur_macro_dynfencedwriter::ErasedFencedWriter + 'static)`
-note: required because it appears within the type `DynFencedWriter<'static>`
-  --> src/fenced_writer.rs
-   |
-   | #[dynosaur(pub DynFencedWriter = dyn(box) FencedWriter, bridge(dyn))]
-   |                ^^^^^^^^^^^^^^^
-   = note: required for `Arc<DynFencedWriter<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
 error[E0277]: `(dyn object_store::__dynosaur_macro_dynobjectstore::ErasedObjectStore + 'static)` cannot be shared between threads safely
   --> tests/ui/arc_dyn_ports_not_send.rs:22:5
    |
@@ -131,26 +111,6 @@ note: required because it appears within the type `DynObjectStore<'static>`
    | #[dynosaur(pub DynObjectStore = dyn(box) ObjectStore, bridge(dyn))]
    |                ^^^^^^^^^^^^^^
    = note: required for `Arc<DynObjectStore<'static>>` to implement `Send`
-note: required by a bound in `assert_send`
-  --> tests/ui/arc_dyn_ports_not_send.rs:18:19
-   |
-18 | fn assert_send<T: Send>() {}
-   |                   ^^^^ required by this bound in `assert_send`
-   = note: this error originates in the macro `diport::ui_assert_async_send_arc_not_send` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `(dyn leader_elector::__dynosaur_macro_dynleaderelector::ErasedLeaderElector + 'static)` cannot be shared between threads safely
-  --> tests/ui/arc_dyn_ports_not_send.rs:22:5
-   |
-22 |     diport::ui_assert_async_send_arc_not_send!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn leader_elector::__dynosaur_macro_dynleaderelector::ErasedLeaderElector + 'static)` cannot be shared between threads safely
-   |
-   = help: within `DynLeaderElector<'static>`, the trait `Sync` is not implemented for `(dyn leader_elector::__dynosaur_macro_dynleaderelector::ErasedLeaderElector + 'static)`
-note: required because it appears within the type `DynLeaderElector<'static>`
-  --> src/leader_elector.rs
-   |
-   | #[dynosaur(pub DynLeaderElector = dyn(box) LeaderElector, bridge(dyn))]
-   |                ^^^^^^^^^^^^^^^^
-   = note: required for `Arc<DynLeaderElector<'static>>` to implement `Send`
 note: required by a bound in `assert_send`
   --> tests/ui/arc_dyn_ports_not_send.rs:18:19
    |

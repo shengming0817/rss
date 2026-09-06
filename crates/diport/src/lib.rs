@@ -100,9 +100,7 @@ pub mod checkpoint_store;
 pub mod dead_letter_store;
 pub mod dlx_lifecycle;
 mod effect;
-pub mod fenced_writer;
 pub mod key_provider;
-pub mod leader_elector;
 pub mod lock_store;
 pub mod metrics_exporter;
 pub mod object_store;
@@ -145,16 +143,9 @@ pub use effect::{
     DiPortConcurrency, DiPortEffect, LocalPrivilege, PortEffectClass, PortPrivilegeClass,
     ReadEffect, SyncObj, WorkflowEffect,
 };
-pub use fenced_writer::{
-    DynFencedWriter, FencedWriteKey, FencedWriteRequest, FencedWriter, FencedWriterError,
-    WriteOutcome,
-};
 pub use key_provider::{
     DynKeyProvider, EncryptOutput, KeyName, KeyParseError, KeyProvider, KeyProviderError, KeyRef,
     KeyVersion,
-};
-pub use leader_elector::{
-    DynLeaderElector, LeaderElector, LeaderElectorError, LeaderId, LeaderIdError, LeaseToken,
 };
 pub use lock_store::{
     DynLockStore, LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey,
