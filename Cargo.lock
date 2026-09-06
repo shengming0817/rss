@@ -2407,13 +2407,16 @@ name = "postgres-integration"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "ring",
  "rss-contract",
+ "rss-data-protection",
  "rss-observation",
  "rss-observation-postgres",
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
  "rss-transactional-messaging-postgres",
+ "rss-transactional-messaging-recovery",
  "rss-transactional-messaging-runtime",
  "rss-transactional-messaging-testkit",
  "serde_json",
@@ -3059,11 +3062,13 @@ dependencies = [
  "futures",
  "rcgen",
  "rss-contract",
+ "rss-data-protection",
  "rss-diag-context",
  "rss-redact",
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
+ "rss-transactional-messaging-recovery",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -3073,6 +3078,25 @@ dependencies = [
  "tokio",
  "tracing",
  "trybuild",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-transactional-messaging-recovery"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "rss-contract",
+ "rss-data-protection",
+ "rss-diag-context",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "uuid",
  "zeroize",
 ]
 

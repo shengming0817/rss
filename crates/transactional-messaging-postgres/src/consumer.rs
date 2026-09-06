@@ -51,14 +51,19 @@ pub trait PgConsumerEffect<P>: Send + Sync {
     ) -> impl Future<Output = Result<TerminalDisposition, PgConsumerEffectFailure>> + Send;
 }
 /// Consumer transaction composition. Application code does not receive this proof's constructor.
-pub struct PgConsumerTx<H> {
+pub struct PgConsumerTx<H, M = ReceiptOnly> {
     runtime: Arc<PgRuntime>,
     effect: H,
+    mode: M,
 }
 impl<H> PgConsumerTx<H> {
     /// Bind the pool owner and trusted, statically dispatched effect.
-    pub const fn new(runtime: Arc<PgRuntime>, effect: H) -> Self {
-        Self { runtime, effect }
+    pub const fn receipt_only(runtime: Arc<PgRuntime>, effect: H) -> Self {
+        Self {
+            runtime,
+            effect,
+            mode: ReceiptOnly,
+        }
     }
 }
 /// Evidence minted only after SQLx acknowledged the encompassing database commit.
@@ -71,7 +76,9 @@ pub struct PgConsumerTxCommitProof {
     _private: (),
 }
 
-impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>> ConsumerTx<P> for PgConsumerTx<H> {
+impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> ConsumerTx<P>
+    for PgConsumerTx<H, M>
+{
     type Claim = PgInboxClaim;
     type CommitProof = PgConsumerTxCommitProof;
     async fn execute(
@@ -117,7 +124,7 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>> ConsumerTx<P> for PgConsumer
             &self.runtime,
         );
         let body = within(timer, cutoff, |_| {
-            effect_body(&self.effect, &mut tx, claim, message, &intent)
+            effect_body(&self.effect, &self.mode, &mut tx, claim, message, &intent)
         })
         .await;
         let body = match body {
@@ -176,8 +183,9 @@ async fn finish(
     }
 }
 
-async fn effect_body<P: Sync, H: PgConsumerEffect<P>>(
+async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>>(
     effect: &H,
+    mode: &M,
     tx: &mut PgTransaction<'_>,
     claim: &PgInboxClaim,
     message: &MessageEnvelope<P>,
@@ -209,6 +217,9 @@ async fn effect_body<P: Sync, H: PgConsumerEffect<P>>(
         .execute(&mut *tx.connection)
         .await
         .map_err(PgConsumerEffectFailure::infrastructure)?;
+    if matches!(disposition, TerminalDisposition::Rejected(_)) {
+        mode.record(tx, claim, message, intent, disposition).await?;
+    }
     // Acquire the row lock only after effect completion; sample expiry in the next statement
     // so time spent waiting for another writer cannot authorize an expired commit.
     sqlx::query("SELECT 1 FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
@@ -219,4 +230,50 @@ async fn effect_body<P: Sync, H: PgConsumerEffect<P>>(
                 .bind(intent.fingerprint().as_bytes().as_slice()).bind(disposition.as_label())
                 .execute(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?.rows_affected();
     Ok::<_, PgConsumerEffectFailure>((count == 1).then_some(disposition))
+}
+
+/// Explicit receipt-only composition; application DLQ persistence is not selected.
+pub struct ReceiptOnly;
+pub(crate) mod sealed {
+    pub trait Mode {}
+}
+impl sealed::Mode for ReceiptOnly {}
+/// Closed static consumer composition. Applications cannot insert transaction hooks.
+pub trait ConsumerRecoveryMode<P>: sealed::Mode + Send + Sync {
+    /// Persist a rejected message after rollback of its business effect, inside the outer transaction.
+    fn record(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        claim: &PgInboxClaim,
+        message: &MessageEnvelope<P>,
+        intent: &ReceiptIntent,
+        disposition: TerminalDisposition,
+    ) -> impl Future<Output = Result<(), PgConsumerEffectFailure>> + Send;
+}
+impl<P: Sync> ConsumerRecoveryMode<P> for ReceiptOnly {
+    async fn record(
+        &self,
+        _: &mut PgTransaction<'_>,
+        _: &PgInboxClaim,
+        _: &MessageEnvelope<P>,
+        _: &ReceiptIntent,
+        _: TerminalDisposition,
+    ) -> Result<(), PgConsumerEffectFailure> {
+        // reason: receipt-only is an explicitly selected capability, not a failed recovery fallback.
+        Ok(())
+    }
+}
+#[cfg(feature = "recovery")]
+impl<H> PgConsumerTx<H> {
+    /// Select atomic protected dead letters using the capture capability's verified runtime.
+    pub fn with_recovery<K>(
+        effect: H,
+        capture: crate::PgRecoveryCapture<K>,
+    ) -> PgConsumerTx<H, crate::PgRecoveryCapture<K>> {
+        PgConsumerTx {
+            runtime: capture.runtime.clone(),
+            effect,
+            mode: capture,
+        }
+    }
 }

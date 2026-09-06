@@ -89,7 +89,7 @@ impl<R> PgOutboxStore<R> {
         }
         match row.try_get::<String, _>("status")?.as_str() {
             "published" => Ok(true),
-            "pending" | "publishing" | "dead_letter" => Ok(false),
+            "pending" | "publishing" | "dead_letter" | "resolved" => Ok(false),
             _ => Err(PgError::invariant()),
         }
     }
@@ -156,42 +156,9 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
         self.validate_transaction(tx).map_err(PgError::port)?;
-        let envelope = message.envelope();
-        if tx.tenant_id() != envelope.metadata().tenant_id()
-            || envelope.metadata().domain() != &self.domain
-        {
-            return Err(PgError::invariant().port());
-        }
-        let tenant = tx.tenant_id().to_string();
-        let id = envelope.id().as_str().to_owned();
-        let domain = self.domain.as_str().to_owned();
-        let partition = message.partition().map(|p| p.key().as_str().to_owned());
-        let encoded = Envelope::encode(envelope).map_err(PgError::port)?;
-        let digest = *message.fingerprint().as_bytes();
-        let count = tx.with_connection(move |connection| Box::pin(async move {
-            sqlx::query("INSERT INTO rss_transactional_messaging.outbox (tenant_id,message_id,domain,partition_key,envelope,fingerprint) VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (tenant_id,message_id) DO NOTHING")
-                .bind(tenant).bind(id).bind(domain).bind(partition).bind(encoded).bind(digest.as_slice()).execute(connection).await.map(|r| r.rows_affected())
-        })).await.map_err(PgError::port)?;
-        if count == 1 {
-            return Ok(AppendOutcome::Inserted);
-        }
-        // Separate statement is required after a concurrent ON CONFLICT wait (fresh MVCC snapshot).
-        let tenant = tx.tenant_id().to_string();
-        let id = envelope.id().as_str().to_owned();
-        let persisted = tx.with_connection(move |connection| Box::pin(async move {
-            sqlx::query_scalar::<_, Vec<u8>>("SELECT fingerprint FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2")
-                .bind(tenant).bind(id).fetch_one(connection).await
-        })).await.map_err(PgError::port)?;
-        if fingerprint(persisted).map_err(PgError::port)? == message.fingerprint() {
-            Ok(AppendOutcome::AlreadyPresent)
-        } else {
-            Err(PgError::classified(
-                MessagingErrorKind::Conflict,
-                std::io::Error::other("same-ID fingerprint conflict"),
-            )
-            .port())
-        }
+        append_message(tx, &self.domain, message).await
     }
+
     async fn claim_partition_heads(
         &self,
         limit: NonZeroUsize,
@@ -277,5 +244,46 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
             })
             .await
             .map_err(PgError::port)
+    }
+}
+
+/// Single canonical append funnel shared with recovery under the same PG transaction.
+pub(crate) async fn append_message<P: AsRef<[u8]>>(
+    tx: &mut PgTransaction<'_>,
+    domain: &MessagingDomain,
+    message: PendingMessage<P>,
+) -> Result<AppendOutcome, MessagingError> {
+    let envelope = message.envelope();
+    if tx.tenant_id() != envelope.metadata().tenant_id() || envelope.metadata().domain() != domain {
+        return Err(PgError::invariant().port());
+    }
+    let tenant = tx.tenant_id().to_string();
+    let id = envelope.id().as_str().to_owned();
+    let domain = domain.as_str().to_owned();
+    let partition = message.partition().map(|p| p.key().as_str().to_owned());
+    let encoded = Envelope::encode(envelope).map_err(PgError::port)?;
+    let digest = *message.fingerprint().as_bytes();
+    let count = tx.with_connection(move |connection| Box::pin(async move {
+            sqlx::query("INSERT INTO rss_transactional_messaging.outbox (tenant_id,message_id,domain,partition_key,envelope,fingerprint) VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (tenant_id,message_id) DO NOTHING")
+                .bind(tenant).bind(id).bind(domain).bind(partition).bind(encoded).bind(digest.as_slice()).execute(connection).await.map(|r| r.rows_affected())
+        })).await.map_err(PgError::port)?;
+    if count == 1 {
+        return Ok(AppendOutcome::Inserted);
+    }
+    // Separate statement is required after a concurrent ON CONFLICT wait (fresh MVCC snapshot).
+    let tenant = tx.tenant_id().to_string();
+    let id = envelope.id().as_str().to_owned();
+    let persisted = tx.with_connection(move |connection| Box::pin(async move {
+            sqlx::query_scalar::<_, Vec<u8>>("SELECT fingerprint FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2")
+                .bind(tenant).bind(id).fetch_one(connection).await
+        })).await.map_err(PgError::port)?;
+    if fingerprint(persisted).map_err(PgError::port)? == message.fingerprint() {
+        Ok(AppendOutcome::AlreadyPresent)
+    } else {
+        Err(PgError::classified(
+            MessagingErrorKind::Conflict,
+            std::io::Error::other("same-ID fingerprint conflict"),
+        )
+        .port())
     }
 }

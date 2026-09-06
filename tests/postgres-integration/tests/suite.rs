@@ -333,7 +333,7 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
         else {
             panic!("new claim")
         };
-        let consumer = PgConsumerTx::new(runtime.clone(), Effect(disposition));
+        let consumer = PgConsumerTx::receipt_only(runtime.clone(), Effect(disposition));
         let outcome = consumer
             .execute(&claim, &message, binding.receipt_intent(), deadline())
             .await;

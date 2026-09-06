@@ -21,7 +21,7 @@ async fn deliver(
     else {
         anyhow::bail!("expected fresh ingress claim")
     };
-    let consumer = PgConsumerTx::new(
+    let consumer = PgConsumerTx::receipt_only(
         f.runtime.clone(),
         compose::ReportEffect {
             store: f.store.clone(),

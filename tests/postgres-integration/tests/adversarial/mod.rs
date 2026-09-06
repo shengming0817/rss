@@ -89,14 +89,15 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         IdempotencyDisposition::Acquired(_)
     ));
     assert_eq!(inbox.extend(&old, deadline()).await?, LeaseStatus::Lost);
-    let outcome = PgConsumerTx::new(runtime.clone(), Effect(TerminalDisposition::Succeeded))
-        .execute(
-            &old,
-            &message("concurrent-claim"),
-            binding.receipt_intent(),
-            deadline(),
-        )
-        .await;
+    let outcome =
+        PgConsumerTx::receipt_only(runtime.clone(), Effect(TerminalDisposition::Succeeded))
+            .execute(
+                &old,
+                &message("concurrent-claim"),
+                binding.receipt_intent(),
+                deadline(),
+            )
+            .await;
     assert_eq!(
         outcome.status(),
         rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Fenced
@@ -132,7 +133,7 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         };
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let consumer = PgConsumerTx::new(
+        let consumer = PgConsumerTx::receipt_only(
             runtime.clone(),
             GateEffect {
                 entered: entered.clone(),
@@ -478,14 +479,15 @@ async fn tenant_isolation(
         else {
             panic!("tenant claim")
         };
-        let outcome = PgConsumerTx::new(runtime.clone(), Effect(TerminalDisposition::Succeeded))
-            .execute(
-                &claim,
-                &envelope,
-                receipt_binding.receipt_intent(),
-                deadline(),
-            )
-            .await;
+        let outcome =
+            PgConsumerTx::receipt_only(runtime.clone(), Effect(TerminalDisposition::Succeeded))
+                .execute(
+                    &claim,
+                    &envelope,
+                    receipt_binding.receipt_intent(),
+                    deadline(),
+                )
+                .await;
         assert_eq!(outcome.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
         runtime
             .local_tx(tenant, deadline(), move |tx| {

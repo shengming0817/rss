@@ -1,0 +1,27 @@
+[package]
+name = "rss-transactional-messaging-recovery"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Authorized transactional message recovery with protected dead letters"
+publish = ["crates-io"]
+[dependencies]
+rss-transactional-messaging.workspace = true
+rss-request-context.workspace = true
+rss-contract.workspace = true
+rss-data-protection.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid = { workspace = true, features = ["v4", "serde"] }
+thiserror.workspace = true
+zeroize.workspace = true
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+ring.workspace = true
+[lints]
+workspace = true

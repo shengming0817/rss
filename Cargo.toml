@@ -4,6 +4,7 @@
 resolver = "2"
 members = [
   "crates/axum",
+  "crates/transactional-messaging-recovery",
   "crates/saga",
   "crates/saga-postgres",
   "tests/saga-postgres-integration",
@@ -41,6 +42,7 @@ members = [
 [workspace.metadata.release-surface]
 packages = [
   { package = "rss-axum", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging-recovery", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-saga-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-saga", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-device-command", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -69,8 +71,8 @@ packages = [
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging"
-baseline-rev = "a227ea93227431206fde0e5f81d1a1c1fb45a048"
-issue = 2264
+baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
+issue = 2301
 
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging-runtime"
@@ -105,6 +107,10 @@ issue = 2293
 package = "rss-platform"
 baseline-rev = "9a2ab29a06b4bfb8baef4a1970412d03a9f0c1ef"
 issue = 2300
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-postgres"
+baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
+issue = 2301
 
 [workspace.package]
 version = "0.0.0"
@@ -122,6 +128,7 @@ http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", default-features = false, features = ["server", "http2"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
+rss-transactional-messaging-recovery = { path = "crates/transactional-messaging-recovery", version = "0.1.0" }
 # Versions and sources are declared here; consumers select only their required features.
 # dynosaur and trait-variant remain exact-pinned for rss-runtime's async dispatch macros.
 # sqlx and lapin use Rustls with the ring provider; cargo-deny rejects alternative TLS providers.

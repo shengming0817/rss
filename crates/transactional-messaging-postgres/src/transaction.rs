@@ -75,6 +75,10 @@ impl PgStorageContractFailure {
 /// Safely redacted PostgreSQL failures. Transaction outcome is carried separately.
 #[derive(Debug, thiserror::Error)]
 pub enum PgError {
+    /// Recovery domain rejection; transaction outcome independently reports rollback certainty.
+    #[cfg(feature = "recovery")]
+    #[error(transparent)]
+    Recovery(#[from] rss_transactional_messaging_recovery::Error),
     /// Authentication failed; credentials must be corrected before retrying.
     #[error("PostgreSQL authentication failed")]
     Authentication(#[source] RedactedSource),
@@ -114,7 +118,7 @@ pub enum PgError {
 }
 
 impl PgError {
-    fn probe(source: sqlx::Error) -> Self {
+    pub(crate) fn probe(source: sqlx::Error) -> Self {
         match Self::from(source) {
             Self::PermissionDenied(source) => Self::StorageContractProbe(source),
             Self::Operation {
@@ -283,6 +287,8 @@ pub enum PgTransactionFault {
     RollbackFailedAfterAck = 2,
     /// Hold COMMIT pending until the shared deadline or cancellation drops it.
     CommitPending = 3,
+    /// Commit is durable but the acknowledgement future never completes.
+    CommitAcknowledgedPending = 4,
 }
 
 impl PgRuntime {
@@ -290,6 +296,13 @@ impl PgRuntime {
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
+    ) -> Result<Self, PgError> {
+        Self::connect_profile(config, timer, false).await
+    }
+    pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
+        config: PgConfig,
+        timer: C,
+        recovery_operator: bool,
     ) -> Result<Self, PgError> {
         config.validate()?;
         let timer = PgTimer(Arc::new(timer));
@@ -313,6 +326,7 @@ impl PgRuntime {
         };
         let failure = within(&runtime.timer, cutoff, |_| async {
             sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
+                .bind(recovery_operator)
                 .fetch_optional(&runtime.pool)
                 .await
         })
@@ -327,6 +341,10 @@ impl PgRuntime {
                 "PostgreSQL storage contract rejected"
             );
             return Err(PgError::IncompatibleStorageContract(reason));
+        }
+        #[cfg(feature = "recovery")]
+        if recovery_operator {
+            crate::recovery::check(&runtime, true, cutoff.operation(&runtime.timer)).await?;
         }
         Ok(runtime)
     }
@@ -665,6 +683,10 @@ impl BorrowedTransaction<'_> {
             std::future::pending::<()>().await;
         }
         self.transaction.commit().await?;
+        #[cfg(feature = "integration")]
+        if self.fault == PgTransactionFault::CommitAcknowledgedPending as u8 {
+            std::future::pending::<()>().await;
+        }
         #[cfg(feature = "integration")]
         if self.fault == PgTransactionFault::CommitUnknownAfterAck as u8 {
             return Err(sqlx::Error::PoolTimedOut);

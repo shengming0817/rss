@@ -392,7 +392,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     else {
         anyhow::bail!("new claim missing")
     };
-    let consumer = PgConsumerTx::new(
+    let consumer = PgConsumerTx::receipt_only(
         f.runtime.clone(),
         compose::ReportEffect {
             store: f.store.clone(),

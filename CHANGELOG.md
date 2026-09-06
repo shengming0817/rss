@@ -6,6 +6,21 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Transactional message recovery (#2301)
+
+- Add experimental `rss-transactional-messaging-recovery 0.1.0` and explicit PostgreSQL recovery:
+  protected consumer dead letters, tenant-bound queries, new-ID replay, same-ID redrive and expired
+  resolution with atomic operation receipts. Commit uncertainty remains distinct from rollback.
+- Replace `PgConsumerTx::new` with explicit `receipt_only` / `with_recovery` static composition;
+  migrate workspace consumers without aliases. Recovery-specific observations leave messaging core.
+- Add one-way component migrations 0002/0003; runtime requires the current schema. Expired resolution
+  uses `resolved`, never claims publication, and preserves the ordered partition invariant.
+- Operator pools are private to `PgRecoveryStore::connect`; no privileged generic SQL runtime is
+  exposed. Exact operation retries reuse receipts; replay identities are unique across operations.
+- Identity authority, approvals, production migration execution, retention, S3 archival and DR
+  orchestration remain outside this increment; no retired aggregate package is restored.
+
+
 ### Internal package retirement (#2299)
 
 - Retire 29 unpublished legacy DI, service, aggregate and provider packages. The 24 public

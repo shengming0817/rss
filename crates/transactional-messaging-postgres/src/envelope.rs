@@ -27,7 +27,7 @@ pub(crate) struct Envelope {
     payload: Vec<u8>,
 }
 impl Envelope {
-    pub(crate) fn encode(message: &MessageEnvelope<Vec<u8>>) -> Result<String, PgError> {
+    pub(crate) fn encode<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Result<String, PgError> {
         let m = message.metadata();
         serde_json::to_string(&Self {
             id: message.id().as_str().into(),
@@ -47,7 +47,7 @@ impl Envelope {
                 .transport_context()
                 .tenant_authority()
                 .map(Into::into),
-            payload: message.payload().clone(),
+            payload: message.payload().as_ref().to_vec(),
         })
         .map_err(|_| PgError::invariant())
     }

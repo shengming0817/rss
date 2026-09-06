@@ -35,7 +35,7 @@
 - success ACK 只能发生在 durable commit 明确成功之后。
 - 只有 handler transient 进入本地 retry budget；infrastructure transient、commit unknown、rollback failed 与
   fenced 立即重投，不得写 application DLQ 或提交 Inbox done。Rejected 先回滚 effect savepoint，
-  再在同一事务提交完整 terminal receipt；v0.1 不提供 application DLQ。
+  再在同一事务提交完整 terminal receipt；显式选择 recovery 的 PostgreSQL consumer 同时提交受保护死信，写入失败不得只提交终态。
 - 本地 retry loop 必须接收一个 `rss_transactional_messaging::policy::RetryPolicy`；尝试上限与指数 backoff 不得拆开传递或
   单独默认。标准值为三次总尝试、1 秒 base、60 秒 cap。
 - TransactionalMessaging worker 构造必须显式接收 `rss_transactional_messaging::policy::ShutdownBudget`；标准值 45 秒，仅在 internal
@@ -57,8 +57,10 @@
 
 ## Dead letter
 
-- v0.1 仅记录闭值 terminal disposition；application DLQ、replay/redrive/resolve、operator authorization
-  与 audit 属于消费者，不提供仓内实现或隐式恢复入口。
+- recovery 库拥有消息专属 application DLQ、replay/redrive/resolve、请求绑定与持久化操作回执；身份认证、审批与业务补偿决策归产品。
+- 仅经可信 ingress 校验的业务终态拒绝可形成死信；临时/基础设施失败与未验证输入不得补造 application DLQ。
+- Replay 使用新 MessageId 与原路由/分区，清空 transport context；来源在操作回执中绑定。同 ID redrive 不改变原事实或投递期限。
+- 过期处置使用独立 resolved 状态，不伪造 Published；提交确认未知时先查同操作身份回执，不盲目重做修改。
 
 ## Carrier
 

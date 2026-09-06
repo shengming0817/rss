@@ -73,7 +73,10 @@ impl Harness {
             &emitter,
         );
         let transaction = FaultTransaction {
-            inner: PgConsumerTx::new(self.runtime.clone(), Effect(TerminalDisposition::Succeeded)),
+            inner: PgConsumerTx::receipt_only(
+                self.runtime.clone(),
+                Effect(TerminalDisposition::Succeeded),
+            ),
             runtime: &self.runtime,
             owner: &self.owner,
             fault,

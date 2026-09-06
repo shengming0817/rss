@@ -42,7 +42,7 @@ retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 r
 - 首次 claim 冻结 24 小时 automatic deadline；续租只延长 lease，不重置投递窗口。
 - 只有数据库确认窗口过期才 DeadLetter；尚未过期但预算不足时 Retry，均不得 publish。
 - provider 调用耗时从 lease/window 预算中扣除；无 publish 的结算只消费有效 lease 预算。
-- v0.1 无 redrive、resolve、retention worker；Medium carrier 为统一 conformance 与真实 PostgreSQL T2，
+- 基础组合不启用恢复；recovery 提供显式 redrive/resolve，但不提供 retention worker；Medium carrier 为统一 conformance 与真实 PostgreSQL T2，
   不使用源码 contains、文件数量或 SQL hash 正确性守卫。
 
 ## Partition order
@@ -62,3 +62,9 @@ retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 r
 - broker-ahead 依赖 Inbox 幂等收敛；DB-ahead 只允许授权 same-ID republish，不绕过 deadline/policy。
 - apply 必须消费新 epoch 的 drained fence并原子写 tenant-scoped durable receipt；缺失或不一致即 fail-closed。
 - 本能力默认 T1/T2；不得自动注册普通 PR T3、dashboard 或 alert。
+
+## Explicit recovery
+
+消息 recovery 拥有显式恢复请求；PostgreSQL adapter 在原消息 schema 和事务 owner 内落实。
+未过期 dead_letter 可按原身份 redrive；过期头仅可通过带持久化回执的 resolved 处置解除分区阻塞。
+resolved 不表示 published，发布事实查询必须区分两者。所有操作按租户、目标版本和稳定操作身份校验。

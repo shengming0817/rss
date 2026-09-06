@@ -80,7 +80,7 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
             panic!("new claim")
         };
         let pid = Arc::new(AtomicI32::new(0));
-        let consumer = PgConsumerTx::new(
+        let consumer = PgConsumerTx::receipt_only(
             runtime.clone(),
             FailingEffect {
                 mode,
@@ -125,7 +125,7 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         };
         let pid = Arc::new(AtomicI32::new(0));
         let entered = Arc::new(Notify::new());
-        let consumer = PgConsumerTx::new(
+        let consumer = PgConsumerTx::receipt_only(
             runtime.clone(),
             FailingEffect {
                 mode: Mode::Pending,

@@ -13,6 +13,8 @@ description = "PostgreSQL transactions, inbox and outbox for RSS transactional m
 workspace = true
 
 [dependencies]
+rss-transactional-messaging-recovery = { workspace = true, optional = true }
+rss-data-protection = { workspace = true, optional = true }
 rss-runtime = { workspace = true, optional = true }
 rss-transactional-messaging.workspace = true
 rss-contract.workspace = true
@@ -32,6 +34,7 @@ zeroize.workspace = true
 
 [features]
 default = []
+recovery = ["dep:rss-transactional-messaging-recovery", "dep:rss-data-protection"]
 rss-runtime = ["dep:rss-runtime"]
 test-support = []
 integration = ["test-support"]

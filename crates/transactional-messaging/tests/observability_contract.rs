@@ -8,8 +8,8 @@ fn descriptor_closes_metric_and_event_exact_sets() {
     let descriptor = transactional_messaging_observability_descriptor();
     assert_eq!(descriptor.metrics(), &TransactionalMessagingMetric::ALL);
     assert_eq!(descriptor.events(), &TransactionalMessagingEvent::ALL);
-    assert_eq!(TransactionalMessagingMetric::ALL.len(), 20);
-    assert_eq!(TransactionalMessagingEvent::ALL.len(), 19);
+    assert_eq!(TransactionalMessagingMetric::ALL.len(), 17);
+    assert_eq!(TransactionalMessagingEvent::ALL.len(), 16);
 
     assert_eq!(
         TransactionalMessagingMetric::ALL.map(TransactionalMessagingMetric::name),
@@ -27,13 +27,10 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "transactional_messaging_ingress_rejected_total",
             "consumer_tx_outcome_total",
             "consumer_settle_total",
-            "consumer_dlx_skip_total",
-            "consumer_dlx_write_total",
             "consumer_subscribe_retry_total",
             "consumer_lease_lost_total",
             "outbox_relay_lease_lost_total",
             "consumer_release_failed_total",
-            "dlq_redrive_total",
         ]
     );
     assert_eq!(
@@ -47,10 +44,6 @@ fn descriptor_closes_metric_and_event_exact_sets() {
     assert_eq!(
         TransactionalMessagingMetric::ConsumerSettlementTotal.label_keys(),
         &["action", "outcome"]
-    );
-    assert_eq!(
-        TransactionalMessagingMetric::DlqRedriveTotal.label_keys(),
-        &["kind", "outcome"]
     );
     for metric in TransactionalMessagingMetric::ALL {
         assert!(!metric.label_keys().iter().any(|key| matches!(
@@ -74,13 +67,10 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "transactional_messaging.consumer.ingress_rejected",
             "transactional_messaging.consumer.transaction",
             "transactional_messaging.consumer.settlement",
-            "transactional_messaging.consumer.dead_letter_skip",
-            "transactional_messaging.consumer.dead_letter_write",
             "transactional_messaging.consumer.subscribe_retry",
             "transactional_messaging.consumer.lease_lost",
             "transactional_messaging.outbox.relay_lease_lost",
             "transactional_messaging.consumer.release_failed",
-            "transactional_messaging.dlq.mutation",
         ]
     );
     assert_eq!(

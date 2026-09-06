@@ -2,7 +2,7 @@
 
 `rss-transactional-messaging-postgres` 0.1 is an experimental, independently packaged adapter.
 The core remains provider-neutral. Installation, role provisioning, business tables, deployment,
-database operations and operator recovery belong to the consumer.
+database operations and operator authorization belong to the consumer. Explicit library recovery is described below.
 
 Trusted companion infrastructure borrows `PgTransaction` through `with_connection`; application
 handlers receive typed repositories. The borrow bounds reference lifetimes, not arbitrary SQL:
@@ -137,7 +137,7 @@ async fn compose<C: ExecutionTimer + Clone + 'static>(config: PgConfig, timer: &
     domain: MessagingDomain, budget: DeliveryBudget) -> Result<(Arc<PgRuntime>, Arc<PgOutboxStore<()>>, PgConsumerTx<Effect>), PgError> {
     let runtime = Arc::new(PgRuntime::connect(config, timer.clone()).await?);
     let outbox = Arc::new(PgOutboxStore::new(runtime.clone(), domain, budget)?);
-    let consumer = PgConsumerTx::new(runtime.clone(), Effect);
+    let consumer = PgConsumerTx::receipt_only(runtime.clone(), Effect);
     Ok((runtime, outbox, consumer))
 }
 async fn close(runtime: &PgRuntime) {
@@ -176,8 +176,54 @@ Source: `baseline/pre-community-core-20260902`.
 | `inbox.rs`, `cotx/eventing.rs` | Adapt claim/reclaim, lease CAS and receipt to core identities and fingerprint. |
 | `outbox.rs`, `outbox/settlement.rs`, migrations 0057/0060/0064/0066 | Retain atomic claim, frozen retry window, partition head gate and closed settlement; dedicated schema and core digest replace product metadata. |
 | `consumer_tx.rs` | Retain private commit proof and atomic effect/receipt; remove Audit/Settings handlers in favor of trusted static effect. |
-| Product migration chain, CDC, redrive, reconcile, fault-matrix product combinations | Exclude: not v0.1 messaging ownership. Fresh installation only, no compatibility bridge. |
+| Product migration execution, CDC, reconcile, fault-matrix product combinations | Exclude: products own deployment and production workflows; component upgrade SQL remains library-owned. |
 
 Receipt retention must strictly exceed the 24-hour automatic window plus safety margin. No
-automatic cleanup, redrive, resolve, CDC or application DLQ is supplied. A dead-letter partition
+automatic cleanup or CDC is supplied. Explicit recovery supplies application DLQ, redrive and resolve. A dead-letter partition
 head continues blocking its successors.
+
+## Explicit message recovery
+
+Enable `recovery` to consume `rss-transactional-messaging-recovery`. `PgConsumerTx::receipt_only`
+selects ordinary terminal receipts. `PgConsumerTx::with_recovery(effect, capture)` selects atomic
+protected dead letters; obtain `PgRecoveryCapture::new(runtime, protector, deadline)` first.
+Both use the same transaction implementation. The former `new` constructor is removed.
+
+Capture occurs only after verified ingress and rollback of a rejected business effect, in the same
+transaction as the terminal Inbox receipt. Protection/storage failure prevents terminal commit.
+Configure an `rss-data-protection::Aead` implementation with external key ownership; no default key
+or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
+An existing terminal Inbox receipt with no saved payload is not retroactively replayable.
+
+Create the opaque operator store with `PgRecoveryStore::connect(config, timer, protector)` after
+provisioning its privileges. The store privately owns the same PG pool/transaction implementation;
+it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
+continues to reject operator UPDATE rights. The operator role requires UPDATE on `consumer_dead_letter`
+and `outbox`, plus SELECT/INSERT on `recovery_operations`, in addition to the declared base privileges.
+These are explicit maintenance privileges;
+ordinary consumer roles do not receive them automatically. Every operation consumes library-bound
+product authorization. RLS remains forced; runtime/maintenance logins must not own tables, bypass
+RLS or inherit the relay role. Products provision roles and decide authorization.
+
+New installs execute `MIGRATION_SQL`. Existing component installations execute `RECOVERY_UPGRADE_SQL`
+once after the original schema. Runtime only accepts the latest schema; no old-schema fallback or
+legacy data importer exists. Migration execution and deployment sequencing remain external.
+
+New-ID replay preserves authored facts and appends at the partition tail, using the same canonical
+Outbox append logic. Transport authority/trace are omitted; the product's publisher/ingress adapters
+supply fresh transport context. Replay follows the original route, not a single consumer group.
+Same-ID redrive never resets the original deadline. Expired resolution writes `resolved`, which
+unblocks successors but never passes `is_published`. Compensated resolution requires a same-tenant
+published message whose authored causation identifies the target; products judge business adequacy.
+
+Successful operation receipts and state changes commit together. Only the same OperationId may
+revisit its existing receipt. A new operation that reuses any existing replay MessageId is a conflict;
+a unique database constraint also prevents multiple operation receipts claiming that identity.
+`Error::Store(StoreFailureKind)` retains transient/permanent/ownership-lost/invariant classification
+without provider text; classification never substitutes for transaction certainty.
+Call `PgRecoveryStore::close` to stop admission and drain its private pool under the host's shutdown budget. `LocalTxAttempt` distinguishes
+confirmed rollback, failed rollback and commit uncertainty. Read the exact operation receipt after
+an uncertain commit; absence is not proof of rollback. The library never blindly repeats a mutation.
+`rss_transactional_messaging_recovery::execute` accepts core `ExecutionDeadlines`: mutation uses the
+operation cutoff, and receipt readback uses the reserved settlement cutoff from the same clock
+observation. It performs one mutation and never resets the total budget.

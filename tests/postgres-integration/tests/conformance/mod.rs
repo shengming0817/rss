@@ -88,8 +88,10 @@ impl Harness {
         if let IdempotencyDisposition::Acquired(claim) =
             self.inbox().claim(binding.identity(), deadline()).await?
         {
-            let consumer =
-                PgConsumerTx::new(self.runtime.clone(), Effect(TerminalDisposition::Succeeded));
+            let consumer = PgConsumerTx::receipt_only(
+                self.runtime.clone(),
+                Effect(TerminalDisposition::Succeeded),
+            );
             let result = consumer
                 .execute(&claim, &message, binding.receipt_intent(), deadline())
                 .await;

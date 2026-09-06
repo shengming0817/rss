@@ -184,269 +184,6 @@ impl TransactionalMessagingSubscribeOutcome {
     }
 }
 
-/// Closed reason why a fail-closed consumer path skipped application dead-letter storage.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingDeadLetterSkipReason {
-    /// Message identifier was not a valid idempotency key.
-    MalformedId,
-    /// Tenant authority evidence was absent.
-    TenantAuthorityMissing,
-    /// Tenant authority evidence was malformed or unauthentic.
-    TenantAuthorityInvalid,
-    /// Tenant authority evidence was outside its validity window.
-    TenantAuthorityExpired,
-    /// Tenant authority evidence did not bind the envelope.
-    TenantAuthorityBindingMismatch,
-    /// Required tenant metadata was absent.
-    EnvelopeMissingTenantId,
-    /// Tenant metadata was invalid.
-    EnvelopeInvalidTenantId,
-    /// Required occurrence time was absent.
-    EnvelopeMissingOccurredAt,
-    /// Occurrence time was invalid.
-    EnvelopeInvalidOccurredAt,
-    /// Required schema version was absent.
-    EnvelopeMissingSchemaVersion,
-    /// Schema version was invalid.
-    EnvelopeInvalidSchemaVersion,
-    /// Required schema digest was absent.
-    EnvelopeMissingSchemaHash,
-    /// Schema digest was invalid.
-    EnvelopeInvalidSchemaHash,
-    /// Schema version contradicted the binding.
-    EnvelopeSchemaVersionMismatch,
-    /// Schema digest contradicted the binding.
-    EnvelopeSchemaHashMismatch,
-    /// The generated consumer group was invalid.
-    InboxReceiptInvalidConsumerGroup,
-    /// Receipt domain was empty.
-    InboxReceiptEmptyDomain,
-    /// Receipt topic was empty.
-    InboxReceiptEmptyTopic,
-    /// Receipt contract identity was empty.
-    InboxReceiptEmptyContractId,
-    /// Receipt contract version was invalid.
-    InboxReceiptInvalidContractVersion,
-    /// Receipt schema digest was invalid.
-    InboxReceiptInvalidSchemaHash,
-    /// Receipt trace context was invalid.
-    InboxReceiptInvalidTrace,
-    /// Receipt correlation context was invalid.
-    InboxReceiptInvalidCorrelationId,
-    /// Receipt context failed another closed validation.
-    InboxReceiptInvalidContext,
-}
-
-impl TransactionalMessagingDeadLetterSkipReason {
-    /// Stable metric/event field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::MalformedId => "malformed_id",
-            Self::TenantAuthorityMissing => "tenant_authority_missing",
-            Self::TenantAuthorityInvalid => "tenant_authority_invalid",
-            Self::TenantAuthorityExpired => "tenant_authority_expired",
-            Self::TenantAuthorityBindingMismatch => "tenant_authority_binding_mismatch",
-            Self::EnvelopeMissingTenantId => "envelope_missing_tenant_id",
-            Self::EnvelopeInvalidTenantId => "envelope_invalid_tenant_id",
-            Self::EnvelopeMissingOccurredAt => "envelope_missing_occurred_at",
-            Self::EnvelopeInvalidOccurredAt => "envelope_invalid_occurred_at",
-            Self::EnvelopeMissingSchemaVersion => "envelope_missing_schema_version",
-            Self::EnvelopeInvalidSchemaVersion => "envelope_invalid_schema_version",
-            Self::EnvelopeMissingSchemaHash => "envelope_missing_schema_hash",
-            Self::EnvelopeInvalidSchemaHash => "envelope_invalid_schema_hash",
-            Self::EnvelopeSchemaVersionMismatch => "envelope_schema_version_mismatch",
-            Self::EnvelopeSchemaHashMismatch => "envelope_schema_hash_mismatch",
-            Self::InboxReceiptInvalidConsumerGroup => "inbox_receipt_invalid_consumer_group",
-            Self::InboxReceiptEmptyDomain => "inbox_receipt_empty_domain",
-            Self::InboxReceiptEmptyTopic => "inbox_receipt_empty_topic",
-            Self::InboxReceiptEmptyContractId => "inbox_receipt_empty_contract_id",
-            Self::InboxReceiptInvalidContractVersion => "inbox_receipt_invalid_contract_version",
-            Self::InboxReceiptInvalidSchemaHash => "inbox_receipt_invalid_schema_hash",
-            Self::InboxReceiptInvalidTrace => "inbox_receipt_invalid_trace",
-            Self::InboxReceiptInvalidCorrelationId => "inbox_receipt_invalid_correlation_id",
-            Self::InboxReceiptInvalidContext => "inbox_receipt_invalid_context",
-        }
-    }
-}
-
-/// Closed failure classification for application dead-letter replay.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingDeadLetterReplayFailure {
-    /// The requested entry was absent.
-    NotFound,
-    /// The entry cannot be replayed.
-    NotReplayable,
-    /// Payload validation failed.
-    InvalidPayload,
-    /// Schema header validation failed.
-    InvalidSchemaHeaders,
-    /// Payload key service was unavailable.
-    PayloadKeyUnavailable,
-    /// Payload key authorization or configuration was rejected.
-    PayloadKeyForbidden,
-    /// Durable outbox fact identity conflicted.
-    FactConflict,
-    /// Dead-letter fetch failed.
-    FetchDeadLetter,
-    /// Metadata encoding failed.
-    EncodeMetadata,
-    /// Outbox append failed.
-    AppendOutbox,
-    /// Projection mirror failed.
-    ProjectionMirror,
-    /// Transaction completion failed.
-    Transaction,
-    /// Generic store operation failed.
-    Store,
-    /// A caller reached replay through an impossible operation/error pairing.
-    Invariant,
-}
-
-impl TransactionalMessagingDeadLetterReplayFailure {
-    /// Stable metric/event field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::NotFound => "not_found",
-            Self::NotReplayable => "not_replayable",
-            Self::InvalidPayload => "invalid_payload",
-            Self::InvalidSchemaHeaders => "invalid_schema_headers",
-            Self::PayloadKeyUnavailable => "payload_key_unavailable",
-            Self::PayloadKeyForbidden => "payload_key_forbidden",
-            Self::FactConflict => "fact_conflict",
-            Self::FetchDeadLetter => "fetch_dead_letter",
-            Self::EncodeMetadata => "encode_metadata",
-            Self::AppendOutbox => "append_outbox",
-            Self::ProjectionMirror => "projection_mirror",
-            Self::Transaction => "transaction",
-            Self::Store => "store",
-            Self::Invariant => "invariant",
-        }
-    }
-}
-
-/// Closed failure classification for restoring an outbox DLX row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingOutboxDlxRedriveFailure {
-    /// The provider store operation failed.
-    Store,
-    /// A caller reached redrive through an impossible operation/error pairing.
-    Invariant,
-}
-
-impl TransactionalMessagingOutboxDlxRedriveFailure {
-    /// Stable outcome field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::Store => "store",
-            Self::Invariant => "invariant",
-        }
-    }
-}
-
-/// Closed failure classification for resolving an expired outbox DLX row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingOutboxDlxResolveFailure {
-    /// Expired-resolution input was invalid.
-    InvalidResolutionInput,
-    /// The provider store operation failed.
-    Store,
-    /// A caller reached resolution through an impossible operation/error pairing.
-    Invariant,
-}
-
-impl TransactionalMessagingOutboxDlxResolveFailure {
-    /// Stable outcome field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::InvalidResolutionInput => "invalid_resolution_input",
-            Self::Store => "store",
-            Self::Invariant => "invariant",
-        }
-    }
-}
-
-/// Typed result of replaying an application dead-letter record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingDeadLetterReplayResult {
-    /// A new outbox fact was inserted.
-    Inserted,
-    /// The same outbox fact already existed.
-    AlreadyExists,
-    /// Replay failed at a closed stage.
-    Failed(TransactionalMessagingDeadLetterReplayFailure),
-}
-
-impl TransactionalMessagingDeadLetterReplayResult {
-    /// Stable outcome field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::Inserted => "inserted",
-            Self::AlreadyExists => "already_exists",
-            Self::Failed(failure) => failure.as_label(),
-        }
-    }
-}
-
-/// Typed result of restoring an outbox DLX row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingOutboxDlxRedriveResult {
-    /// The row returned to pending delivery.
-    Redriven,
-    /// The row was absent.
-    NotFound,
-    /// The redrive deadline elapsed.
-    Expired,
-    /// Redrive failed at a closed stage.
-    Failed(TransactionalMessagingOutboxDlxRedriveFailure),
-}
-
-impl TransactionalMessagingOutboxDlxRedriveResult {
-    /// Stable outcome field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::Redriven => "redriven",
-            Self::NotFound => "not_found",
-            Self::Expired => "expired",
-            Self::Failed(failure) => failure.as_label(),
-        }
-    }
-}
-
-/// Typed result of resolving an expired outbox DLX row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionalMessagingOutboxDlxResolveResult {
-    /// The row was resolved terminally.
-    Resolved,
-    /// The row was absent.
-    NotFound,
-    /// The row was not yet expired.
-    NotExpired,
-    /// Submitted evidence was rejected.
-    EvidenceRejected,
-    /// Resolution failed at a closed stage.
-    Failed(TransactionalMessagingOutboxDlxResolveFailure),
-}
-
-impl TransactionalMessagingOutboxDlxResolveResult {
-    /// Stable outcome field value.
-    #[must_use]
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::Resolved => "resolved",
-            Self::NotFound => "not_found",
-            Self::NotExpired => "not_expired",
-            Self::EvidenceRejected => "evidence_rejected",
-            Self::Failed(failure) => failure.as_label(),
-        }
-    }
-}
-
 /// Closed TransactionalMessaging observation. No variant can carry identity or free-form data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionalMessagingObservation {
@@ -519,16 +256,6 @@ pub enum TransactionalMessagingObservation {
         /// Whether the settlement call returned success or error.
         outcome: TransactionalMessagingIoOutcome,
     },
-    /// Application dead-letter storage was skipped.
-    ConsumerDeadLetterSkip {
-        /// Why the external dead-letter write was omitted.
-        reason: TransactionalMessagingDeadLetterSkipReason,
-    },
-    /// One application dead-letter write result.
-    ConsumerDeadLetterWrite {
-        /// Whether the external dead-letter write returned success or error.
-        outcome: TransactionalMessagingIoOutcome,
-    },
     /// One supervised subscription recovery trigger.
     ConsumerSubscribeRetry {
         /// Trigger for retrying subscription establishment.
@@ -540,21 +267,6 @@ pub enum TransactionalMessagingObservation {
     RelayLeaseLost,
     /// Inbox claim release failed after another failure.
     ConsumerReleaseFailed,
-    /// One application dead-letter replay result.
-    DeadLetterReplay {
-        /// Replay outcome without message identity or error text.
-        result: TransactionalMessagingDeadLetterReplayResult,
-    },
-    /// One outbox DLX redrive result.
-    OutboxDlxRedrive {
-        /// Redrive outcome without durable row identity.
-        result: TransactionalMessagingOutboxDlxRedriveResult,
-    },
-    /// One expired outbox DLX resolution result.
-    OutboxDlxResolveExpired {
-        /// Resolution outcome without submitted evidence or provider text.
-        result: TransactionalMessagingOutboxDlxResolveResult,
-    },
 }
 
 impl TransactionalMessagingObservation {
@@ -578,21 +290,12 @@ impl TransactionalMessagingObservation {
             }
             Self::ConsumerTransaction { .. } => TransactionalMessagingEvent::ConsumerTransaction,
             Self::ConsumerSettlement { .. } => TransactionalMessagingEvent::ConsumerSettlement,
-            Self::ConsumerDeadLetterSkip { .. } => {
-                TransactionalMessagingEvent::ConsumerDeadLetterSkip
-            }
-            Self::ConsumerDeadLetterWrite { .. } => {
-                TransactionalMessagingEvent::ConsumerDeadLetterWrite
-            }
             Self::ConsumerSubscribeRetry { .. } => {
                 TransactionalMessagingEvent::ConsumerSubscribeRetry
             }
             Self::ConsumerLeaseLost => TransactionalMessagingEvent::ConsumerLeaseLost,
             Self::RelayLeaseLost => TransactionalMessagingEvent::RelayLeaseLost,
             Self::ConsumerReleaseFailed => TransactionalMessagingEvent::ConsumerReleaseFailed,
-            Self::DeadLetterReplay { .. }
-            | Self::OutboxDlxRedrive { .. }
-            | Self::OutboxDlxResolveExpired { .. } => TransactionalMessagingEvent::DlqMutation,
         }
     }
 }
@@ -633,10 +336,6 @@ pub enum TransactionalMessagingMetric {
     ConsumerTransactionOutcomeTotal,
     /// Count of consumer settlement outcomes by action.
     ConsumerSettlementTotal,
-    /// Count of consumer dead-letter skips by reason.
-    ConsumerDeadLetterSkipTotal,
-    /// Count of consumer dead-letter write outcomes.
-    ConsumerDeadLetterWriteTotal,
     /// Count of consumer subscription retry outcomes.
     ConsumerSubscribeRetryTotal,
     /// Count of consumer lease-loss detections.
@@ -645,13 +344,11 @@ pub enum TransactionalMessagingMetric {
     RelayLeaseLostTotal,
     /// Count of failed consumer releases.
     ConsumerReleaseFailedTotal,
-    /// Count of dead-letter queue redrive outcomes by mutation kind.
-    DlqRedriveTotal,
 }
 
 impl TransactionalMessagingMetric {
     /// Complete metric inventory in stable order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 17] = [
         Self::RuntimeFailureTotal,
         Self::OutboxPublishTotal,
         Self::OutboxPublishFailureTotal,
@@ -665,13 +362,10 @@ impl TransactionalMessagingMetric {
         Self::ConsumerIngressRejectedTotal,
         Self::ConsumerTransactionOutcomeTotal,
         Self::ConsumerSettlementTotal,
-        Self::ConsumerDeadLetterSkipTotal,
-        Self::ConsumerDeadLetterWriteTotal,
         Self::ConsumerSubscribeRetryTotal,
         Self::ConsumerLeaseLostTotal,
         Self::RelayLeaseLostTotal,
         Self::ConsumerReleaseFailedTotal,
-        Self::DlqRedriveTotal,
     ];
 
     /// Stable metric family name.
@@ -691,13 +385,10 @@ impl TransactionalMessagingMetric {
             Self::ConsumerIngressRejectedTotal => "transactional_messaging_ingress_rejected_total",
             Self::ConsumerTransactionOutcomeTotal => "consumer_tx_outcome_total",
             Self::ConsumerSettlementTotal => "consumer_settle_total",
-            Self::ConsumerDeadLetterSkipTotal => "consumer_dlx_skip_total",
-            Self::ConsumerDeadLetterWriteTotal => "consumer_dlx_write_total",
             Self::ConsumerSubscribeRetryTotal => "consumer_subscribe_retry_total",
             Self::ConsumerLeaseLostTotal => "consumer_lease_lost_total",
             Self::RelayLeaseLostTotal => "outbox_relay_lease_lost_total",
             Self::ConsumerReleaseFailedTotal => "consumer_release_failed_total",
-            Self::DlqRedriveTotal => "dlq_redrive_total",
         }
     }
 
@@ -711,10 +402,8 @@ impl TransactionalMessagingMetric {
             Self::OutboxRelayTickDurationSeconds => &["phase"],
             Self::ConsumerTransactionOutcomeTotal => &["outcome"],
             Self::ConsumerSettlementTotal => &["action", "outcome"],
-            Self::ConsumerDeadLetterSkipTotal => &["reason"],
             Self::ConsumerIngressRejectedTotal => &["reason"],
-            Self::ConsumerDeadLetterWriteTotal | Self::ConsumerSubscribeRetryTotal => &["outcome"],
-            Self::DlqRedriveTotal => &["kind", "outcome"],
+            Self::ConsumerSubscribeRetryTotal => &["outcome"],
             Self::OutboxPendingDepth
             | Self::OutboxOldestPendingAgeSeconds
             | Self::OutboxPartitionBlockedDepth
@@ -755,10 +444,6 @@ pub enum TransactionalMessagingEvent {
     ConsumerTransaction,
     /// One consumer settlement outcome.
     ConsumerSettlement,
-    /// A skipped consumer dead-letter mutation.
-    ConsumerDeadLetterSkip,
-    /// One consumer dead-letter write outcome.
-    ConsumerDeadLetterWrite,
     /// One consumer subscription retry outcome.
     ConsumerSubscribeRetry,
     /// A consumer lease-loss detection.
@@ -767,13 +452,11 @@ pub enum TransactionalMessagingEvent {
     RelayLeaseLost,
     /// A failed consumer release.
     ConsumerReleaseFailed,
-    /// One dead-letter queue mutation outcome.
-    DlqMutation,
 }
 
 impl TransactionalMessagingEvent {
     /// Complete event inventory in stable order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 16] = [
         Self::RuntimeFailure,
         Self::OutboxPublish,
         Self::OutboxPublishFailure,
@@ -786,13 +469,10 @@ impl TransactionalMessagingEvent {
         Self::ConsumerIngressRejected,
         Self::ConsumerTransaction,
         Self::ConsumerSettlement,
-        Self::ConsumerDeadLetterSkip,
-        Self::ConsumerDeadLetterWrite,
         Self::ConsumerSubscribeRetry,
         Self::ConsumerLeaseLost,
         Self::RelayLeaseLost,
         Self::ConsumerReleaseFailed,
-        Self::DlqMutation,
     ];
 
     /// Stable tracing event name.
@@ -811,13 +491,10 @@ impl TransactionalMessagingEvent {
             Self::ConsumerIngressRejected => "transactional_messaging.consumer.ingress_rejected",
             Self::ConsumerTransaction => "transactional_messaging.consumer.transaction",
             Self::ConsumerSettlement => "transactional_messaging.consumer.settlement",
-            Self::ConsumerDeadLetterSkip => "transactional_messaging.consumer.dead_letter_skip",
-            Self::ConsumerDeadLetterWrite => "transactional_messaging.consumer.dead_letter_write",
             Self::ConsumerSubscribeRetry => "transactional_messaging.consumer.subscribe_retry",
             Self::ConsumerLeaseLost => "transactional_messaging.consumer.lease_lost",
             Self::RelayLeaseLost => "transactional_messaging.outbox.relay_lease_lost",
             Self::ConsumerReleaseFailed => "transactional_messaging.consumer.release_failed",
-            Self::DlqMutation => "transactional_messaging.dlq.mutation",
         }
     }
 
@@ -838,9 +515,7 @@ impl TransactionalMessagingEvent {
             Self::ConsumerTransaction => &["outcome"],
             Self::ConsumerSettlement => &["action", "outcome"],
             Self::ConsumerIngressRejected => &["reason"],
-            Self::ConsumerDeadLetterSkip => &["reason"],
-            Self::ConsumerDeadLetterWrite | Self::ConsumerSubscribeRetry => &["outcome"],
-            Self::DlqMutation => &["kind", "outcome"],
+            Self::ConsumerSubscribeRetry => &["outcome"],
             Self::OutboxBacklogUnavailable
             | Self::InboxBacklogUnavailable
             | Self::ConsumerClaimInProgress
