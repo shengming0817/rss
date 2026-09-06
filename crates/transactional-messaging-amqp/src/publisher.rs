@@ -10,11 +10,12 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use crate::shutdown::{ShutdownFailures, ShutdownStage};
+use crate::{AmqpShutdownError, AmqpShutdownErrorKind};
 use lapin::options::BasicPublishOptions;
 use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable, ShortString, ShortStringError};
 use lapin::{BasicProperties, Channel, Connection, ErrorKind};
-use rss_runtime::ShutdownError;
 use rss_transactional_messaging::message::MessageEnvelope;
 use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging::transport::{
@@ -23,6 +24,7 @@ use rss_transactional_messaging::transport::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::conn::{self, REPLY_SUCCESS};
 
@@ -355,7 +357,7 @@ enum TransportSlot<T> {
     Unavailable {
         generation: u64,
     },
-    /// port-local shutdown 先关 confirm channel，但保留最新 connection，供 runtime ManagedResource
+    /// port-local shutdown 先关 confirm channel，但保留最新 connection，供 resource owner
     /// 随后从 lifecycle 单源取得并关闭，不能保存初始 connection 的陈旧 Arc。
     ShuttingDown {
         retiring: Option<RetiringTransport<T>>,
@@ -494,7 +496,15 @@ struct PublisherTransportLifecycle {
 }
 
 struct OwnedTransportRecovery {
-    task: rss_runtime::ManagedTask,
+    task: AbortOnDropHandle<()>,
+    cancellation: CancellationToken,
+}
+
+impl Drop for OwnedTransportRecovery {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        // AbortOnDropHandle retains abort-on-drop even while shutdown is awaiting it.
+    }
 }
 
 impl PublisherTransportLifecycle {
@@ -521,14 +531,6 @@ enum PublisherTransportError {
     ShuttingDown,
     #[error("amqp publisher transport state is poisoned")]
     StatePoisoned,
-    #[error("amqp publisher transport close failed")]
-    Close(#[source] lapin::Error),
-    #[error("amqp publisher recovery task panicked")]
-    RecoveryTaskPanicked,
-    #[error("amqp publisher recovery task was cancelled")]
-    RecoveryTaskCancelled,
-    #[error("amqp publisher recovery task terminated unexpectedly")]
-    RecoveryTaskUnknown,
 }
 
 /// `Publisher::publish` 的唯一内部失败载体。Display 只含固定安全摘要；endpoint、routing key、message id、
@@ -854,7 +856,7 @@ struct PublisherConnectionConfig {
 }
 
 impl PublisherInner {
-    /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 `ManagedResource`
+    /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 resource
     /// 可读名（kebab/snake 稳定标识）。`recovery_timeout` 在任何网络连接前再次校验非零、整毫秒且可由
     /// 数据库/审计 `i64` 表示；连接失败日志只经 redaction funnel，URL 原文绝不进日志。
     #[cfg(any(test, feature = "test-support"))]
@@ -978,12 +980,10 @@ impl PublisherInner {
         lifecycle: &mut PublisherTransportLifecycle,
         recovery: TransportRecovery<LapinPublisherTransport>,
     ) {
-        if let Some(previous) = lifecycle.recovery.take()
-            && previous.task.status().is_running()
-        {
-            // 只能命中「上一 task 已把状态落为 Unavailable、尚未 return」的窄窗口。合作取消避免
-            // detached task 在新 generation 已开始恢复后继续发起 authenticated reconnect。
-            drop(previous);
+        if let Some(mut previous) = lifecycle.recovery.take() {
+            crate::shutdown::observe_finished_task(&mut previous.task, "publisher_recovery");
+            // A still-running previous task has already published Unavailable; retire that
+            // narrow tail before starting the new generation. Drop cancels and aborts it.
         }
         let started = tokio::time::Instant::now();
         let deadline = started + self.recovery_timeout;
@@ -991,24 +991,31 @@ impl PublisherInner {
         let connection_config = self.connection_config.clone();
         let transports = Arc::clone(&self.transports);
         let name = self.name.clone();
-        let (start, _) = rss_runtime::ManagedTask::prepare(
-            "amqp-publisher-transport-recovery",
-            rss_runtime::DEFAULT_SHUTDOWN_TIMEOUT,
-        );
-        let task = start.spawn_detached(cancellation, |cancellation| async move {
+        let task_cancellation = cancellation.clone();
+        // Create the guard before spawn: abort before the first poll must retire this session too.
+        let retiring_connection = recovery
+            .retiring
+            .as_ref()
+            .map(|retiring| Arc::clone(&retiring.transport.connection));
+        let cleanup = conn::OnDrop::new(move || {
+            if let Some(connection) = retiring_connection {
+                conn::close_connection_now(&connection);
+            }
+        });
+        let task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _cleanup = cleanup;
             run_transport_recovery(
                 connection_config,
                 transports,
                 name,
                 started,
                 deadline,
-                cancellation,
+                task_cancellation,
                 recovery,
             )
             .await;
-            Ok(())
-        });
-        lifecycle.recovery = Some(OwnedTransportRecovery { task });
+        }));
+        lifecycle.recovery = Some(OwnedTransportRecovery { task, cancellation });
     }
 
     /// 将 [`PublishFailureDecision`] 落到 generation retirement 与三态 [`MessagingError`]。
@@ -1047,10 +1054,17 @@ impl PublisherInner {
         applied.outcome
     }
 
-    // The runtime owns the shutdown watchdog; cancellation guards retire the exact session.
-    async fn shutdown_resource_transport(&self) -> Result<(), PublisherTransportError> {
+    // The entry point owns the budget; cancellation guards retire the exact session.
+    async fn shutdown_resource_transport(&self) -> Result<(), AmqpShutdownError> {
         let (recovery, retiring) = {
-            let mut lifecycle = self.lock_transports()?;
+            let mut lifecycle = self
+                .lock_transports()
+                .map_err(AmqpShutdownError::operation)?;
+            if matches!(lifecycle.slot, TransportSlot::ShuttingDown { .. }) {
+                return Err(AmqpShutdownError::classified(
+                    AmqpShutdownErrorKind::AlreadyStarted,
+                ));
+            }
             let retiring = lifecycle.slot.take_for_resource_shutdown();
             (lifecycle.recovery.take(), retiring)
         };
@@ -1059,11 +1073,17 @@ impl PublisherInner {
                 conn::close_connection_now(&retiring.transport.connection);
             }
         });
+        let mut failures = ShutdownFailures::default();
         let recovery_result = if let Some(recovery) = recovery {
             join_cancelled_recovery(recovery).await
         } else {
             Ok(())
         };
+        failures.record(
+            &self.name,
+            ShutdownStage::PublisherRecovery,
+            recovery_result,
+        );
         let transport_result = if let Some(retiring) = &retiring {
             retiring.admission.wait_until_idle().await;
             if retiring.transport.connection.status().connected() {
@@ -1072,15 +1092,16 @@ impl PublisherInner {
                     .connection
                     .close(REPLY_SUCCESS, "publisher resource shutdown".into())
                     .await
-                    .map_err(PublisherTransportError::Close)
+                    .map_err(AmqpShutdownError::operation)
             } else {
                 Ok(())
             }
         } else {
             Ok(())
         };
-        close_on_cancel.disarm();
-        recovery_result.and(transport_result)
+        close_on_cancel.disarm_on_success(&transport_result);
+        failures.record(&self.name, ShutdownStage::TransportClose, transport_result);
+        failures.finish()
     }
 
     /// Integration-only deterministic fault barrier. The next publish closes the exact snapshot connection after
@@ -1164,17 +1185,10 @@ impl PublisherInner {
 }
 
 async fn join_cancelled_recovery(
-    recovery: OwnedTransportRecovery,
-) -> Result<(), PublisherTransportError> {
-    recovery.task.shutdown().await.map_err(|error| {
-        if error.kind() == rss_runtime::ShutdownErrorKind::TaskPanicked {
-            PublisherTransportError::RecoveryTaskPanicked
-        } else if error.kind() == rss_runtime::ShutdownErrorKind::TaskCancelled {
-            PublisherTransportError::RecoveryTaskCancelled
-        } else {
-            PublisherTransportError::RecoveryTaskUnknown
-        }
-    })
+    mut recovery: OwnedTransportRecovery,
+) -> Result<(), AmqpShutdownError> {
+    recovery.cancellation.cancel();
+    (&mut recovery.task).await.map_err(AmqpShutdownError::task)
 }
 
 /// ambiguous/client failure 后的资源恢复在 owned task 中执行，避免 Postgres 外层 publisher watchdog drop
@@ -1219,6 +1233,7 @@ async fn run_transport_recovery(
         return;
     };
 
+    let cleanup = conn::OnDrop::new(|| conn::close_connection_now(&replacement.connection));
     let installed = match transports.lock() {
         Ok(mut lifecycle) => lifecycle
             .slot
@@ -1236,6 +1251,7 @@ async fn run_transport_recovery(
         }
     };
     if installed {
+        cleanup.disarm();
         tracing::info!(
             target: "amqp",
             resource = %name,
@@ -1693,27 +1709,13 @@ impl Publisher<Vec<u8>> for PublisherInner {
 }
 
 impl PublisherInner {
+    #[cfg(feature = "managed-runtime")]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
-        match self.shutdown_resource_transport().await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(&error), "amqp publisher transport close error");
-                Err(publisher_transport_shutdown_error(error))
-            }
-        }
-    }
-}
-
-fn publisher_transport_shutdown_error(error: PublisherTransportError) -> ShutdownError {
-    match error {
-        PublisherTransportError::RecoveryTaskPanicked => ShutdownError::task_panicked(error),
-        PublisherTransportError::RecoveryTaskCancelled => ShutdownError::task_cancelled(error),
-        PublisherTransportError::RecoveryTaskUnknown => ShutdownError::task_unknown(error),
-        _ => ShutdownError::new(error),
+    pub(crate) async fn shutdown(&self) -> Result<(), AmqpShutdownError> {
+        self.shutdown_resource_transport().await
     }
 }
 
@@ -2790,5 +2792,54 @@ mod publisher_channel_recovery_deadline_tests {
         assert!(matches!(result.replacement, Ok("orphan-replacement")));
         assert!(cancellation.is_cancelled());
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod task_ownership_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[tokio::test]
+    async fn recovery_drop_before_first_poll_releases_captured_cleanup() {
+        let released = Arc::new(AtomicBool::new(false));
+        let cleanup = conn::OnDrop::new({
+            let released = Arc::clone(&released);
+            move || {
+                released.store(true, Ordering::SeqCst);
+            }
+        });
+        let cancellation = CancellationToken::new();
+        let observer = cancellation.clone();
+        let task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _cleanup = cleanup;
+            std::future::pending::<()>().await;
+        }));
+        drop(OwnedTransportRecovery { task, cancellation });
+        assert!(observer.is_cancelled());
+        tokio::task::yield_now().await;
+        assert!(released.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelling_recovery_join_aborts_and_releases_task() {
+        let (dropped, released) = tokio::sync::oneshot::channel();
+        let cleanup = conn::OnDrop::new(move || {
+            let _ = dropped.send(());
+        });
+        let task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _cleanup = cleanup;
+            std::future::pending::<()>().await;
+        }));
+        let cancellation = CancellationToken::new();
+        let observer = cancellation.clone();
+        let mut closing = Box::pin(join_cancelled_recovery(OwnedTransportRecovery {
+            task,
+            cancellation,
+        }));
+        assert!(futures::poll!(&mut closing).is_pending());
+        assert!(observer.is_cancelled());
+        drop(closing);
+        assert!(released.await.is_ok());
     }
 }

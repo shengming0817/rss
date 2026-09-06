@@ -5,15 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+managed-runtime = ["dep:rss-runtime", "rss-transactional-messaging-amqp/managed-runtime", "rss-transactional-messaging-runtime/managed-runtime"]
+
+[dependencies]
+rss-runtime = { workspace = true, optional = true }
+
 [dev-dependencies]
 lapin.workspace = true
 rss-contract.workspace = true
 rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
 rss-transactional-messaging-amqp = { workspace = true, features = ["test-support"] }
 anyhow = { workspace = true }
-rss-runtime.workspace = true
 rss-transactional-messaging = { workspace = true }
-rss-transactional-messaging-runtime = { workspace = true, features = ["managed-runtime"] }
+rss-transactional-messaging-runtime.workspace = true
 rss-transactional-messaging-testkit = { path = "../../crates/transactional-messaging-testkit", version = "0.1.0", default-features = false, features = ["consumer", "producer"] }
 rss-request-context = { workspace = true }
 testkit = { path = "../../crates/testkit", features = ["containers"] }

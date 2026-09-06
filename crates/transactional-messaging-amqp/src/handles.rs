@@ -1,10 +1,10 @@
 //! One port handle and one move-only lifecycle owner per connection.
+use crate::shutdown::{AmqpShutdownError, within_budget};
 use crate::{
     AmqpConnectError, AmqpDeliveries, AmqpPrivateCa, AmqpPublisherEndpoint, AmqpSettlement,
     AmqpSubscriberEndpoint,
 };
 use crate::{publisher::PublisherInner, subscriber::SubscriberInner};
-use rss_runtime::{ManagedResource, ShutdownError};
 use rss_transactional_messaging::{
     error::MessagingError,
     message::{MessageEnvelope, SubscriptionIdentity},
@@ -18,13 +18,13 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct AmqpPublisher(Arc<PublisherInner>);
 /// Unique owner of one publisher connection and its recovery task.
-#[must_use = "immediately register this owner with StartupTransaction"]
+#[must_use = "retain this owner until shutdown; dropping it stops the transport"]
 pub struct AmqpPublisherResource(Arc<PublisherInner>);
 /// Cloneable delivery capability. Every delivery retains its original settlement channel.
 #[derive(Clone)]
 pub struct AmqpSubscriber(Arc<SubscriberInner>);
 /// Unique owner of one subscriber connection and all its subscription tasks.
-#[must_use = "immediately register this owner with StartupTransaction"]
+#[must_use = "retain this owner until shutdown; dropping it stops the transport"]
 pub struct AmqpSubscriberResource(Arc<SubscriberInner>);
 
 impl AmqpPublisher {
@@ -94,11 +94,19 @@ impl Publisher<Vec<u8>> for AmqpPublisher {
         self.0.publish(message, deadline).await
     }
 }
-impl ManagedResource for AmqpPublisherResource {
-    fn name(&self) -> &str {
+impl AmqpPublisherResource {
+    /// Consume the unique owner and await cleanup within one total budget.
+    /// Zero budget forces retirement and returns a deadline error. Dropping this future
+    /// also retires the transport, even if it has never been polled.
+    pub async fn shutdown(self, timeout: Duration) -> Result<(), AmqpShutdownError> {
+        within_budget(timeout, self.0.shutdown()).await
+    }
+    #[cfg(feature = "managed-runtime")]
+    pub(crate) fn name(&self) -> &str {
         self.0.name()
     }
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
+    #[cfg(feature = "managed-runtime")]
+    pub(crate) async fn shutdown_managed(&self) -> Result<(), AmqpShutdownError> {
         self.0.shutdown().await
     }
 }
@@ -168,11 +176,19 @@ impl DeliverySource<Vec<u8>> for AmqpSubscriber {
         self.0.deliveries(subscription).await
     }
 }
-impl ManagedResource for AmqpSubscriberResource {
-    fn name(&self) -> &str {
+impl AmqpSubscriberResource {
+    /// Consume the unique owner and await cleanup within one total budget.
+    /// Zero budget forces retirement and returns a deadline error. Dropping this future
+    /// also retires the transport, even if it has never been polled.
+    pub async fn shutdown(self, timeout: Duration) -> Result<(), AmqpShutdownError> {
+        within_budget(timeout, self.0.shutdown()).await
+    }
+    #[cfg(feature = "managed-runtime")]
+    pub(crate) fn name(&self) -> &str {
         self.0.name()
     }
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
+    #[cfg(feature = "managed-runtime")]
+    pub(crate) async fn shutdown_managed(&self) -> Result<(), AmqpShutdownError> {
         self.0.shutdown().await
     }
 }

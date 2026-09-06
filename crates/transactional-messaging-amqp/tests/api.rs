@@ -1,4 +1,5 @@
 //! Public capability separation must hold without constructing a broker connection.
+#[cfg(feature = "managed-runtime")]
 use rss_runtime::ManagedResource;
 use rss_transactional_messaging::transport::{DeliverySource, Publisher};
 use rss_transactional_messaging_amqp::{
@@ -9,10 +10,16 @@ use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 assert_impl_all!(AmqpPublisher: Clone, Publisher<Vec<u8>>, Send, Sync);
 assert_impl_all!(AmqpSubscriber: Clone, DeliverySource<Vec<u8>>, Send, Sync);
+#[cfg(feature = "managed-runtime")]
 assert_impl_all!(AmqpPublisherResource: ManagedResource, Send, Sync);
+#[cfg(feature = "managed-runtime")]
 assert_impl_all!(AmqpSubscriberResource: ManagedResource, Send, Sync);
+#[cfg(feature = "managed-runtime")]
 assert_not_impl_any!(AmqpPublisher: ManagedResource);
+#[cfg(feature = "managed-runtime")]
 assert_not_impl_any!(AmqpSubscriber: ManagedResource);
+assert_impl_all!(AmqpPublisherResource: Send, Sync);
+assert_impl_all!(AmqpSubscriberResource: Send, Sync);
 assert_not_impl_any!(AmqpPublisherResource: Clone, Publisher<Vec<u8>>);
 assert_not_impl_any!(AmqpSubscriberResource: Clone, DeliverySource<Vec<u8>>);
 
@@ -78,4 +85,21 @@ fn production_endpoints_reject_implicit_identity_and_sasl_overrides() {
         );
     }
     assert!(AmqpPublisherEndpoint::parse("amqps://publisher:secret@broker/%2f").is_ok());
+}
+
+// External hosts own one resource and pass one total cleanup budget.
+async fn close_publisher(
+    resource: AmqpPublisherResource,
+) -> Result<(), rss_transactional_messaging_amqp::AmqpShutdownError> {
+    resource.shutdown(std::time::Duration::from_secs(1)).await
+}
+async fn close_subscriber(
+    resource: AmqpSubscriberResource,
+) -> Result<(), rss_transactional_messaging_amqp::AmqpShutdownError> {
+    resource.shutdown(std::time::Duration::from_secs(1)).await
+}
+#[test]
+fn independent_shutdown_is_public() {
+    let _ = close_publisher;
+    let _ = close_subscriber;
 }

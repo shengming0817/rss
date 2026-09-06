@@ -7,39 +7,70 @@ bundle, readiness registry, provider selection, or PostgreSQL dependency.
 ## Connect and own the resource
 
 Publisher and subscriber each have one production `connect` constructor. The returned handle is
-cloneable and implements only its messaging port; the returned resource is move-only and implements
-`rss_runtime::ManagedResource`. Register each resource immediately, before the next await. Register
-relay/consumer workers afterwards, so LIFO shutdown drains workers before closing their transport.
+cloneable and implements only its messaging port; the resource is the unique, move-only owner.
+A Tokio host retains the owner and drains its relay/consumer workers before closing the transport.
 
 ```rust,no_run
 use std::time::Duration;
-use rss_runtime::{DynManagedResource, StartupTransaction};
-use rss_transactional_messaging_amqp::{
-    AmqpConnectError, AmqpPrivateCa, AmqpPublisher, AmqpPublisherEndpoint,
-};
+use rss_transactional_messaging_amqp::{AmqpPrivateCa, AmqpPublisher, AmqpPublisherEndpoint};
 
-async fn attach_publisher(
-    startup: &mut StartupTransaction<'_>,
+async fn use_publisher(
     endpoint: &AmqpPublisherEndpoint,
     ca: &AmqpPrivateCa,
-) -> Result<AmqpPublisher, AmqpConnectError> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let (publisher, resource) = AmqpPublisher::connect(
         endpoint, "outbox-publisher", ca, Duration::from_secs(10),
     ).await?;
-    startup.stage_resource(DynManagedResource::new_box(resource));
-    Ok(publisher)
+    // Pass publisher clones to workers; stop and drain those workers before this await.
+    resource.shutdown(Duration::from_secs(5)).await?;
+    Ok(())
 }
 ```
 
-`AmqpSubscriber::connect(endpoint, name, ca, recovery_timeout)` returns the corresponding subscriber/resource pair.
-Its handle implements `DeliverySource<Vec<u8>>`. The application supplies subscriptions and
-transaction handlers through the core/runtime APIs. Partial single-role connection failures clean
-up their local connection; multi-resource startup rollback is owned by `rss-runtime`.
+`AmqpSubscriber::connect(endpoint, name, ca, recovery_timeout)` returns the corresponding pair.
+Its handle implements `DeliverySource<Vec<u8>>`. Both resources expose consuming
+`shutdown(self, timeout)`: one total budget covers cancellation, connection close, and task joins.
+Success means the registered tasks have finished. Zero budget requests forced retirement and
+returns `DeadlineExceeded`; an unrepresentable deadline returns `InvalidBudget` and retires the owner.
+Completed task failures are harvested with a closed diagnostic kind before pruning; retained tasks
+are joined and classified by shutdown. Every failed close/join stage emits its actual phase, task
+kind and safe error kind. When multiple stages fail, shutdown returns `TaskPanicked` before
+`TaskCancelled` before `Operation`; equal kinds retain the first failure. The total-budget timeout
+still returns `DeadlineExceeded`, and failures observed before that timeout remain in diagnostics. Timeout or dropping the close future aborts remaining tasks and requests protocol close; it does
+not claim their asynchronous destruction or broker CloseOk has already completed. Cleanup requires
+the host's Tokio runtime to continue running. Error kinds are public; provider/panic payloads stay redacted.
 
-Resource shutdown atomically seals subscription/task registration and retires the exact active transport. Surviving handles fail
-closed and cannot resurrect the resource. Dropping an unregistered owner also requests retirement;
-use the runtime shutdown stack to await and bound cleanup. The library does not install signal
-handlers or own an application process.
+Shutdown atomically seals subscription/task registration and retires the exact active transport.
+Surviving handles fail closed and cannot resurrect the resource. Resource Drop requests retirement,
+including when its consuming close future is dropped before its first poll. Recovery and cancel
+workers use Tokio cancellation and abort-on-drop handles inside the adapter. The library does not
+install signal handlers or own an application process.
+
+### Optional RSS lifecycle integration
+
+Enable `managed-runtime` explicitly to implement `rss_runtime::ManagedResource` on the same owners.
+Register resources immediately, then workers, so the stack's LIFO shutdown drains workers first.
+The bridge calls the same private cleanup and leaves its single timeout to the RSS shutdown stack
+(default 30 seconds). A repeated trait shutdown is classified as RSS `Operation` (internal AMQP `AlreadyStarted`);
+it does not start another cleanup.
+
+```rust,no_run
+# #[cfg(feature = "managed-runtime")]
+# async fn attach(startup: &mut rss_runtime::StartupTransaction<'_>, endpoint: &rss_transactional_messaging_amqp::AmqpPublisherEndpoint, ca: &rss_transactional_messaging_amqp::AmqpPrivateCa) -> Result<(), rss_transactional_messaging_amqp::AmqpConnectError> {
+use rss_runtime::DynManagedResource;
+use rss_transactional_messaging_amqp::AmqpPublisher;
+let (publisher, resource) = AmqpPublisher::connect(
+    endpoint, "outbox-publisher", ca, std::time::Duration::from_secs(10),
+).await?;
+startup.stage_resource(DynManagedResource::new_box(resource));
+# Ok(())
+# }
+```
+
+This is an intentional pre-publication API replacement: previous default trait consumers must
+select this feature or migrate to consuming shutdown. There is no legacy task implementation.
+Partial connection failures clean their local connection; multi-resource startup rollback belongs
+to the host (or its explicitly selected RSS startup transaction).
 
 ## TLS and credentials
 
@@ -64,7 +95,7 @@ stage/reason labels and generation, never endpoint coordinates or provider error
 - Per-call `OperationDeadline` from the messaging core covers the complete send/confirm or
   settlement operation. Constructor `recovery_timeout` must be an integral number of milliseconds in `1ms..=24h` and bounds publisher background replacement:
   confirm drain, connection close and new confirmed transport share one recovery deadline.
-  Resource shutdown is bounded by `rss-runtime`, independently of that recovery operation.
+  Resource shutdown has its own total budget, independently of that recovery operation.
 - Subscriber retries lazily replace a disconnected connection under a single recovery lock. The
   constructor budget covers lock acquisition, connection setup and installation; shutdown seals
   installation. Existing streams terminate on connection loss and the runtime resubscribes.
@@ -93,7 +124,8 @@ Production retention management and application replay remain external. See
 
 ## Verification and features
 
-Only `test-support` is optional. It enables explicit loopback plaintext/default-root fixture
+Default and no-default dependency closures do not contain `rss-runtime`. The additive
+`managed-runtime` feature supplies the explicit RSS bridge. `test-support` enables explicit loopback plaintext/default-root fixture
 constructors and deterministic fault barriers; it never supplies queue provisioning or broker management.
 Do not enable it for production credentials. Default and no-default builds expose the same real
 production transport.
@@ -113,13 +145,18 @@ Pure successful-consumer and commit-unknown outcome decisions belong to the runt
 (`long_handler_is_periodically_renewed_then_commits_before_ack` and
 `consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes`). Broker ACK and abandon
 remain in delivery conformance. Real publish cancellation/confirmation timeout, settlement Drop,
-registration/shutdown, recovery installation and forced runtime cancellation remain T2 because
+registration/shutdown, recovery installation, standalone close cancellation and forced runtime cancellation remain T2 because
 in-memory generation or decision tests cannot prove their connection and channel cleanup.
+The integration package defaults to the standalone host and all three real-broker suites. Its
+`managed-runtime` feature additionally exercises RSS startup rollback, repeated trait close and
+forced cancellation. Both combinations are verified independently; fixtures are shared within each suite.
 These suites make no PostgreSQL or durable application-transaction guarantee.
 
 Historical implementation: `baseline/pre-community-core-20260902`.
 Upstream reference: lapin v4.10.0 `src/generated/channel.rs`, `src/publisher_confirm.rs`,
 `src/consumer.rs`, and `src/connection_properties.rs`. RSS retains ownership of replacement
 and deliberately leaves lapin automatic recovery disabled.
+Task ownership reference: tokio-util 0.7.18 `src/task/abort_on_drop.rs` at
+`9cc02cc88d083113cd9889a74b382e39e430e180`; drop requests abort, while normal await observes completion.
 
 Licensed under the Apache License, Version 2.0.

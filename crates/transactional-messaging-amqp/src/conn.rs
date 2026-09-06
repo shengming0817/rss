@@ -491,6 +491,12 @@ impl<F: FnOnce()> OnDrop<F> {
     pub(crate) fn disarm(mut self) {
         self.0.take();
     }
+    /// Failed graceful cleanup must still run the forced-retirement fallback.
+    pub(crate) fn disarm_on_success<T, E>(self, result: &Result<T, E>) {
+        if result.is_ok() {
+            self.disarm();
+        }
+    }
 }
 impl<F: FnOnce()> Drop for OnDrop<F> {
     fn drop(&mut self) {
@@ -540,5 +546,21 @@ impl TestPause {
     pub(crate) async fn wait(self) {
         let _ = self.entered.send(());
         let _ = self.resume.await;
+    }
+}
+
+#[cfg(test)]
+mod cleanup_guard_tests {
+    use super::OnDrop;
+    use std::cell::Cell;
+
+    #[test]
+    fn close_error_keeps_forced_retirement_armed() {
+        for close_result in [Ok(()), Err("injected close failure")] {
+            let forced = Cell::new(false);
+            let cleanup = OnDrop::new(|| forced.set(true));
+            cleanup.disarm_on_success(&close_result);
+            assert_eq!(forced.get(), close_result.is_err());
+        }
     }
 }

@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
-use rss_runtime::{ManagedResource, ShutdownFailureKind, ShutdownStack, TotalDrainBudget};
+#[cfg(feature = "managed-runtime")]
+use rss_runtime::{ShutdownFailureKind, ShutdownStack, TotalDrainBudget};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::inbox::{
     ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
@@ -25,7 +26,7 @@ use rss_transactional_messaging::observability::{
 };
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, ExecutionTimer,
-    MonotonicInstant, OperationDeadline, RetryPolicy, ShutdownBudget,
+    MonotonicInstant, OperationDeadline, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, SettlementDecision,
@@ -40,11 +41,16 @@ use rss_transactional_messaging_amqp::{
     AmqpSubscriberEndpoint, AmqpSubscriberResource,
 };
 use rss_transactional_messaging_runtime::consumer::{
-    ConsumerExecution, ConsumerWorker, ProcessingDisposition, SubscriptionBackoffPolicy,
-    consume_once,
+    ConsumerExecution, ProcessingDisposition, consume_once,
 };
 use rss_transactional_messaging_testkit::ConformanceError;
 use rss_transactional_messaging_testkit::memory::{FakeClock, MemoryInboxStore};
+
+#[cfg(feature = "managed-runtime")]
+use rss_transactional_messaging::policy::ShutdownBudget;
+use rss_transactional_messaging_amqp::{AmqpShutdownError, AmqpShutdownErrorKind};
+#[cfg(feature = "managed-runtime")]
+use rss_transactional_messaging_runtime::consumer::{ConsumerWorker, SubscriptionBackoffPolicy};
 
 const TIMEOUT: Duration = Duration::from_secs(40);
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -132,8 +138,10 @@ impl ExecutionTimer for TokioClock {
     }
 }
 
+#[cfg(feature = "managed-runtime")]
 struct BlockingLiveTx(Arc<AtomicUsize>);
 
+#[cfg(feature = "managed-runtime")]
 impl ConsumerTx<Vec<u8>> for BlockingLiveTx {
     type Claim = ();
     type CommitProof = ();
@@ -279,18 +287,19 @@ impl TransactionalMessagingEmitter for NoopEmitter {
     fn emit(&self, _observation: TransactionalMessagingObservation) {}
 }
 
-async fn shutdown_bounded(resource: &impl ManagedResource) -> Result<(), LiveConformanceFailure> {
-    match tokio::time::timeout(Duration::from_secs(5), ManagedResource::shutdown(resource)).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) => Err(live_failure(
+async fn shutdown_bounded(
+    shutdown: impl std::future::Future<Output = Result<(), AmqpShutdownError>>,
+) -> Result<(), LiveConformanceFailure> {
+    shutdown.await.map_err(|error| {
+        live_failure(
             LivePhase::Shutdown,
-            MessagingErrorKind::Transient,
-        )),
-        Err(_) => Err(live_failure(
-            LivePhase::Shutdown,
-            MessagingErrorKind::DeadlineElapsed,
-        )),
-    }
+            if error.kind() == AmqpShutdownErrorKind::DeadlineExceeded {
+                MessagingErrorKind::DeadlineElapsed
+            } else {
+                MessagingErrorKind::Transient
+            },
+        )
+    })
 }
 
 type AmqpDeliveries = <AmqpSubscriber as DeliverySource<Vec<u8>>>::Deliveries;
@@ -415,7 +424,7 @@ async fn assert_same_id_redelivery(
             MessagingErrorKind::Invariant,
         ));
     }
-    shutdown_bounded(&subscriber_resource).await
+    shutdown_bounded(subscriber_resource.shutdown(Duration::from_secs(5))).await
 }
 
 async fn consume_ambiguous_retries(
@@ -502,8 +511,8 @@ async fn run_ambiguous_publish_retries_the_same_message_identity(
 
     let effects = consume_ambiguous_retries(&mut deliveries, &subscription).await?;
 
-    shutdown_bounded(&publisher_resource).await?;
-    shutdown_bounded(&subscriber_resource).await?;
+    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    shutdown_bounded(subscriber_resource.shutdown(Duration::from_secs(5))).await?;
     Ok((
         vec![message.id().clone(), message.id().clone()],
         vec![first, second],
@@ -559,11 +568,12 @@ async fn rejected_commit_enters_broker_dead_letter_queue(
         Ok::<_, anyhow::Error>((depth == 1).then_some(()))
     })
     .await?;
-    shutdown_bounded(&publisher_resource).await?;
-    shutdown_bounded(&subscriber_resource).await?;
+    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    shutdown_bounded(subscriber_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
+#[cfg(feature = "managed-runtime")]
 async fn run_managed_forced_cancel_redelivers_the_same_message_id(
     rabbit: &testkit::RabbitFixture,
 ) -> Result<(), LiveConformanceFailure> {
@@ -634,7 +644,7 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id(
 
     assert_same_id_redelivery(&url, &route, &subscription, message.id()).await?;
 
-    shutdown_bounded(&publisher_resource).await?;
+    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -725,13 +735,14 @@ async fn private_ca_and_split_roles_fail_closed(
             .await
             .is_err()
     );
+    #[cfg(feature = "managed-runtime")]
     assert_tls_startup_rollback(&publisher_endpoint, &subscriber_endpoint, &ca, &wrong_ca).await?;
 
     let route = MessageRoute::parse(route)?;
 
     assert_tls_roundtrip(&publisher, &subscriber, &route).await?;
-    shutdown_bounded(&publisher_resource).await?;
-    shutdown_bounded(&subscriber_resource).await?;
+    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    shutdown_bounded(subscriber_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -840,6 +851,7 @@ async fn settlement_and_runtime_suite() -> anyhow::Result<()> {
         rejected_commit_enters_broker_dead_letter_queue(&rabbit),
     )
     .await?;
+    #[cfg(feature = "managed-runtime")]
     suite_phase(
         deadline,
         "forced runtime cancellation",
@@ -884,6 +896,19 @@ async fn subscriber_lifecycle_suite() -> anyhow::Result<()> {
     .await?;
     suite_phase(
         deadline,
+        "standalone close cancellation",
+        transport::standalone_close_cancellation_is_owned(&rabbit),
+    )
+    .await?;
+    #[cfg(feature = "managed-runtime")]
+    suite_phase(
+        deadline,
+        "managed close single claim",
+        transport::managed_close_is_single_claim(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
         "missing queue",
         transport::subscriber_never_provisions_a_missing_queue(&rabbit),
     )
@@ -894,6 +919,7 @@ async fn subscriber_lifecycle_suite() -> anyhow::Result<()> {
 mod topology;
 mod transport;
 
+#[cfg(feature = "managed-runtime")]
 async fn assert_tls_startup_rollback(
     publisher_endpoint: &AmqpPublisherEndpoint,
     subscriber_endpoint: &AmqpSubscriberEndpoint,

@@ -10,6 +10,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::shutdown::{ShutdownFailures, ShutdownStage};
+use crate::{AmqpShutdownError, AmqpShutdownErrorKind};
 use futures::StreamExt;
 use lapin::message::Delivery;
 use lapin::options::{
@@ -18,7 +20,6 @@ use lapin::options::{
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
 use rss_redact::RedactedSource;
-use rss_runtime::{ManagedTask, ShutdownError};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::message::{
     AuthoredMessageMetadata, ContractIdentity, MessageEnvelope, MessageId, MessageMetadata,
@@ -32,6 +33,7 @@ use rss_transactional_messaging::transport::{
     ManagedDeliveryStream,
 };
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::conn::{self, REPLY_SUCCESS};
 use crate::settle::{SettleMode, settle_mode};
@@ -106,7 +108,7 @@ struct SubscriberLifecycle {
     connection: Arc<Connection>,
     generation: u64,
     closed: bool,
-    cancellation_tasks: Vec<ManagedTask>,
+    cancellation_tasks: Vec<AbortOnDropHandle<()>>,
 }
 
 impl SubscriberInner {
@@ -262,6 +264,7 @@ async fn close_failed_subscription(channel: &Channel, reason: &'static str) {
 }
 
 impl SubscriberInner {
+    #[cfg(feature = "managed-runtime")]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -273,29 +276,44 @@ impl SubscriberInner {
         drop(tasks);
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
-        let (connection, tasks) = self.close_admission();
+    pub(crate) async fn shutdown(&self) -> Result<(), AmqpShutdownError> {
+        let (connection, tasks) = {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if lifecycle.closed {
+                return Err(AmqpShutdownError::classified(
+                    AmqpShutdownErrorKind::AlreadyStarted,
+                ));
+            }
+            lifecycle.closed = true;
+            (
+                Arc::clone(&lifecycle.connection),
+                std::mem::take(&mut lifecycle.cancellation_tasks),
+            )
+        };
         self.shutdown.cancel();
         let close_on_cancel = conn::OnDrop::new(|| conn::close_connection_now(&connection));
         let result = if connection.status().connected() {
             connection
-            .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
-            .await
-            .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %rss_redact::redact_error(e), "amqp connection close error");
-            })
-            .map_err(ShutdownError::new)
+                .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
+                .await
+                .map_err(AmqpShutdownError::operation)
         } else {
             Ok(())
         };
-        let mut task_result = Ok(());
+        close_on_cancel.disarm_on_success(&result);
+        let mut failures = ShutdownFailures::default();
+        failures.record(&self.name, ShutdownStage::TransportClose, result);
         for task in tasks {
-            if let Err(error) = task.shutdown().await {
-                task_result = Err(error);
-            }
+            failures.record(
+                &self.name,
+                ShutdownStage::SubscriberCancellation,
+                task.await.map_err(AmqpShutdownError::task),
+            );
         }
-        close_on_cancel.disarm();
-        result.and(task_result)
+        failures.finish()
     }
 }
 
@@ -686,11 +704,10 @@ impl SubscriberInner {
             if lifecycle.closed {
                 return Err(closed_subscriber());
             }
-            let (start, _) = ManagedTask::prepare(
-                "amqp-subscription-cancel",
-                rss_runtime::DEFAULT_SHUTDOWN_TIMEOUT,
-            );
-            let task = start.spawn_detached(token, |token| async move {
+            let abort_channel = cancel_channel.clone();
+            let abort_cleanup = conn::OnDrop::new(move || conn::close_channel_now(&abort_channel));
+            let task = AbortOnDropHandle::new(tokio::spawn(async move {
+                let abort_cleanup = abort_cleanup;
                 token.cancelled().await;
                 #[cfg(feature = "test-support")]
                 {
@@ -706,11 +723,11 @@ impl SubscriberInner {
                 let _rpc = cancel_rpc.gate.lock().await;
                 cancel_delivery_source(cancel_channel, consumer_tag).await;
                 cancel_rpc.admission_stopped.cancel();
-                Ok(())
+                abort_cleanup.disarm();
+            }));
+            lifecycle.cancellation_tasks.retain_mut(|task| {
+                !crate::shutdown::observe_finished_task(task, "subscription_cancel")
             });
-            lifecycle
-                .cancellation_tasks
-                .retain(|task| task.status().is_running());
             lifecycle.cancellation_tasks.push(task);
         }
         cleanup.disarm();
@@ -786,7 +803,7 @@ impl SubscriberInner {
         (entered, resume)
     }
 
-    fn close_admission(&self) -> (Arc<Connection>, Vec<ManagedTask>) {
+    fn close_admission(&self) -> (Arc<Connection>, Vec<AbortOnDropHandle<()>>) {
         let mut lifecycle = self
             .lifecycle
             .lock()

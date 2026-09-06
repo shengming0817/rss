@@ -114,6 +114,12 @@ package = "rss-diag-context"
 baseline-rev = "73dec6f205de7b3c41e8f17412db89f759af0ae5"
 issue = 2279
 
+# Explicit pre-publication lifecycle API replacement (#2284).
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-amqp"
+baseline-rev = "97f26b68d5b822285df826e1ed4ce671aff04ae4"
+issue = 2284
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"

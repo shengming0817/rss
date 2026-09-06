@@ -278,8 +278,9 @@ impl<T> Drop for OwnedTask<T> {
 /// - **不要在 `shutdown` 内部自设超时**：per-resource 超时由驱动器外层 `tokio::time::timeout`
 ///   包裹（[`shutdown_timeout`](ManagedResource::shutdown_timeout)）；内部再设超时是双重计时。
 /// - **幂等性免费**：驱动器消费 stack 单次驱动，`shutdown` 不会被重复调用，无需自保幂等。
-/// - **后台 Tokio task 必须由 [`ManagedTask`] 持有**：调用方只能保留只读 [`TaskStatus`]，长期
-///   task 的 token、terminal publisher 与 cancellation-safe join 由 canonical owner 独占。
+/// - **注册到 RSS 的后台任务由 [`ManagedTask`] 持有**：调用方只保留只读 [`TaskStatus`]。
+///   adapter 自有的私有 recovery/cleanup 任务可直接使用 Tokio 所有权工具；adapter 必须保证
+///   admission 封闭、取消安全的 join/abort 和资源清理，不能向调用方泄漏任务控制权。
 /// - **其它需要 `&mut` 的内部状态**：因 `shutdown(&self)`，用 `Mutex<Option<Inner>>` 或
 ///   `tokio::sync::Mutex` 包装，在 `shutdown` 中 `take()`。
 #[trait_variant::make(ManagedResource: Send)]

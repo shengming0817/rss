@@ -59,8 +59,10 @@ fn terminal_decision(
         || Err(evidence_error(())),
     )
 }
-async fn close(resource: &impl ManagedResource) -> Result<(), ConformanceError> {
-    shutdown_bounded(resource)
+async fn close(
+    shutdown: impl std::future::Future<Output = Result<(), AmqpShutdownError>>,
+) -> Result<(), ConformanceError> {
+    shutdown_bounded(shutdown)
         .await
         .map_err(LiveConformanceFailure::into_conformance)
 }
@@ -91,8 +93,8 @@ impl BrokerDriver<'_> {
         cancel_and_drain(self, settlement, &drained, &subscription).await?;
         let received_id = observe_cancel_successor(&self.url, &subscription).await?;
         drop(stream);
-        close(&resource).await?;
-        close(&publisher_resource).await?;
+        close(resource.shutdown(Duration::from_secs(5))).await?;
+        close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
         Ok(CancellationEvidence {
             drained_id: drained.id().clone(),
             pending_id: pending.id().clone(),
@@ -121,9 +123,9 @@ impl BrokerDriver<'_> {
             .map_err(LiveConformanceFailure::into_conformance)?;
         let message = envelope(&route, "transport-publish");
         let outcome = publisher.publish(&message, provider_deadline()).await;
-        close(&resource).await?;
+        close(resource.shutdown(Duration::from_secs(5))).await?;
         if let Some((_, resource)) = subscriber {
-            close(&resource).await?;
+            close(resource.shutdown(Duration::from_secs(5))).await?;
         }
         Ok(PublishAttempt {
             message_id: message.id().clone(),
@@ -159,10 +161,9 @@ impl BrokerDriver<'_> {
         }
         apply_settlement(kind, settlement, &received, &subscription).await?;
         let redelivered_ids = self
-            .observe_settled(kind, stream, &subscriber, &resource, &subscription)
+            .observe_settled(kind, stream, &subscriber, resource, &subscription)
             .await?;
-        close(&resource).await?;
-        close(&publisher_resource).await?;
+        close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
         Ok(DeliveryEvidence {
             message_id: received.id().clone(),
             redelivered_ids,
@@ -173,18 +174,19 @@ impl BrokerDriver<'_> {
         kind: Case,
         mut stream: ManagedDeliveryStream<AmqpDeliveries>,
         subscriber: &AmqpSubscriber,
-        resource: &AmqpSubscriberResource,
+        resource: AmqpSubscriberResource,
         subscription: &SubscriptionIdentity,
     ) -> Result<Vec<MessageId>, ConformanceError> {
         let redelivered_ids = if matches!(kind, Case::Requeue) {
             // Only the actual NACK may reopen the original prefetch window.
             let ids = observe_redelivery(&mut stream, subscription, kind).await?;
             drop(stream);
+            close(resource.shutdown(Duration::from_secs(5))).await?;
             ids
         } else if matches!(kind, Case::Ack | Case::Reject) {
             // Closing makes an omitted ACK observable as a redelivery, including unacked messages.
             drop(stream);
-            close(resource).await?;
+            close(resource.shutdown(Duration::from_secs(5))).await?;
             let (replacement, replacement_resource) = prepared_subscriber(
                 &self.url,
                 subscription.route(),
@@ -198,7 +200,7 @@ impl BrokerDriver<'_> {
                 .await
                 .map_err(|e| ConformanceError::delivery(e.kind()))?;
             let ids = observe_redelivery(&mut stream, subscription, kind).await?;
-            close(&replacement_resource).await?;
+            close(replacement_resource.shutdown(Duration::from_secs(5))).await?;
             ids
         } else {
             // Abandon/timeout must retire the old channel themselves. Keep both the old stream
@@ -209,6 +211,7 @@ impl BrokerDriver<'_> {
                 .map_err(|e| ConformanceError::delivery(e.kind()))?;
             let ids = observe_redelivery(&mut replacement, subscription, kind).await?;
             drop(stream);
+            close(resource.shutdown(Duration::from_secs(5))).await?;
             ids
         };
         Ok(redelivered_ids)
@@ -262,7 +265,7 @@ impl PublisherTransportDriver for PublisherDriver<'_> {
             "permission-refusal",
         );
         let outcome = publisher.publish(&message, provider_deadline()).await;
-        close(&resource).await?;
+        close(resource.shutdown(Duration::from_secs(5))).await?;
         Ok(PublishAttempt {
             message_id: message.id().clone(),
             outcome,
@@ -374,7 +377,7 @@ pub(super) async fn cancelled_publish_retires_generation_and_owner_cannot_revive
         PublishOutcome::DefinitelyNotPublished(_)
     ));
     assert!(publisher.transport_generation_for_test().is_none());
-    close(&subscriber_resource).await?;
+    close(subscriber_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -403,8 +406,8 @@ pub(super) async fn expired_settlement_never_acks_and_redelivers(
     );
     assert_same_id_redelivery(&url, &route, &subscription, message.id()).await?;
     drop(stream);
-    close(&resource).await?;
-    close(&publisher_resource).await?;
+    close(resource.shutdown(Duration::from_secs(5))).await?;
+    close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -434,7 +437,7 @@ pub(super) async fn headers_roundtrip_and_subscription_cancel_is_isolated(
         subscriber.deliveries(&subscription).await.is_err(),
         "dropping the unique owner must fence surviving handles"
     );
-    close(&publisher_resource).await?;
+    close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -535,7 +538,7 @@ pub(super) async fn subscription_cannot_register_after_resource_shutdown(
         _ = &mut registration => anyhow::bail!("subscription must pause before registration"),
         ready = tokio::time::timeout(TIMEOUT, entered) => { ready??; },
     }
-    close(&resource).await?;
+    close(resource.shutdown(Duration::from_secs(5))).await?;
     let _ = resume.send(());
     assert!(
         registration.await.is_err(),
@@ -582,8 +585,8 @@ pub(super) async fn confirmation_deadline_retires_generation_and_preserves_retry
     );
     assert_recovered_generation(&publisher, generation).await;
     publish_confirmed(&publisher, &message).await?;
-    close(&resource).await?;
-    close(&subscriber_resource).await?;
+    close(resource.shutdown(Duration::from_secs(5))).await?;
+    close(subscriber_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -661,7 +664,7 @@ async fn observe_cancel_successor(
         .map_err(LiveConformanceFailure::into_conformance)?;
     let (received, settlement) = (*delivery).into_parts();
     acknowledge(settlement, &received, subscription).await?;
-    close(&replacement_resource).await?;
+    close(replacement_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(received.id().clone())
 }
 
@@ -730,8 +733,8 @@ pub(super) async fn subscriber_recovers_after_broker_connection_loss(
     let (received, settlement) = (*delivery).into_parts();
     assert_eq!(received.id(), message.id());
     acknowledge(settlement, &received, &subscription).await?;
-    close(&publisher_resource).await?;
-    close(&resource).await?;
+    close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    close(resource.shutdown(Duration::from_secs(5))).await?;
     assert!(subscriber.deliveries(&subscription).await.is_err());
     Ok(())
 }
@@ -753,7 +756,7 @@ pub(super) async fn subscriber_recovery_cancellation_and_shutdown_fence_installa
         "recovery fence proof",
     )
     .await?;
-    assert_recovery_installation_fenced(&subscriber, &resource, &subscription).await?;
+    assert_recovery_installation_fenced(&subscriber, resource, &subscription).await?;
     Ok(())
 }
 
@@ -776,7 +779,7 @@ pub(super) async fn subscriber_never_provisions_a_missing_queue(
         result.is_err(),
         "production delivery must not create an absent broker queue"
     );
-    close(&resource).await?;
+    close(resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
 
@@ -826,7 +829,7 @@ async fn lose_subscriber_connection(
 
 async fn assert_recovery_installation_fenced(
     subscriber: &AmqpSubscriber,
-    resource: &AmqpSubscriberResource,
+    resource: AmqpSubscriberResource,
     subscription: &SubscriptionIdentity,
 ) -> anyhow::Result<()> {
     let (entered, resume) = subscriber.pause_next_recovery_installation_for_test();
@@ -850,7 +853,7 @@ async fn assert_recovery_installation_fenced(
         result = &mut waiter => anyhow::bail!("waiter completed before barrier: {}", result.is_ok()),
         result = tokio::time::timeout(TIMEOUT, entered) => { result??; }
     }
-    close(resource).await?;
+    close(resource.shutdown(Duration::from_secs(5))).await?;
     drop(resume);
     let result = tokio::time::timeout(TIMEOUT, waiter).await?;
     let error = result
@@ -936,5 +939,123 @@ async fn acknowledge_adjacent_delivery(
     let (received, settlement) = (*delivery).into_parts();
     assert_eq!(received.id(), expected.id());
     acknowledge(settlement, &received, subscription).await?;
+    Ok(())
+}
+
+// Real connection and cancel-task cleanup must survive cancellation of the owning close future.
+pub(super) async fn standalone_close_cancellation_is_owned(
+    rabbit: &testkit::RabbitFixture,
+) -> anyhow::Result<()> {
+    let url = isolated_url(rabbit, "rss_standalone_close").await?;
+    let route = MessageRoute::parse("rss.transport.standalone-close")?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "standalone-close-pub").await?;
+    for mode in ["unpolled", "zero", "cancelled", "deadline"] {
+        standalone_subscriber_close_case(rabbit, &url, &route, &publisher, mode).await?;
+    }
+    let error = publisher_resource
+        .shutdown(Duration::ZERO)
+        .await
+        .expect_err("zero budget");
+    assert_eq!(error.kind(), AmqpShutdownErrorKind::DeadlineExceeded);
+    assert!(matches!(
+        publisher
+            .publish(&envelope(&route, "closed"), provider_deadline())
+            .await,
+        PublishOutcome::DefinitelyNotPublished(_)
+    ));
+    assert!(!publisher.wait_until_publish_ready_for_test().await);
+    Ok(())
+}
+
+#[cfg(feature = "managed-runtime")]
+pub(super) async fn managed_close_is_single_claim(
+    rabbit: &testkit::RabbitFixture,
+) -> anyhow::Result<()> {
+    let url = isolated_url(rabbit, "rss_managed_close_once").await?;
+    let (publisher, resource) = connected_publisher(&url, "managed-close").await?;
+    rss_runtime::ManagedResource::shutdown(&resource).await?;
+    let repeated = rss_runtime::ManagedResource::shutdown(&resource)
+        .await
+        .expect_err("already closed");
+    assert_eq!(repeated.kind(), rss_runtime::ShutdownErrorKind::Operation);
+    assert!(matches!(
+        publisher
+            .publish(
+                &envelope(&MessageRoute::parse("rss.closed")?, "closed"),
+                provider_deadline()
+            )
+            .await,
+        PublishOutcome::DefinitelyNotPublished(_)
+    ));
+    Ok(())
+}
+
+async fn interrupt_paused_subscriber_close(
+    resource: AmqpSubscriberResource,
+    settlement: &rss_transactional_messaging_amqp::AmqpSettlement,
+    expire: bool,
+) -> anyhow::Result<()> {
+    let (entered, mut resume) = settlement.pause_subscription_cancel_for_test();
+    let budget = if expire {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_secs(5)
+    };
+    let mut closing = Box::pin(resource.shutdown(budget));
+    tokio::select! {
+        result = &mut closing => anyhow::bail!("close finished before cancel barrier: {result:?}"),
+        ready = tokio::time::timeout(TIMEOUT, entered) => { ready??; }
+    }
+    if expire {
+        assert_eq!(
+            closing
+                .await
+                .expect_err("cancel RPC must exceed budget")
+                .kind(),
+            AmqpShutdownErrorKind::DeadlineExceeded
+        );
+    } else {
+        drop(closing);
+    }
+    // Sender closure proves the owned cancellation future actually dropped its receiver.
+    tokio::time::timeout(TIMEOUT, resume.closed()).await?;
+    Ok(())
+}
+
+async fn standalone_subscriber_close_case(
+    rabbit: &testkit::RabbitFixture,
+    url: &str,
+    route: &MessageRoute,
+    publisher: &AmqpPublisher,
+    mode: &'static str,
+) -> anyhow::Result<()> {
+    let (subscriber, resource) = prepared_subscriber(url, route, mode, true).await?;
+    let message = envelope(route, mode);
+    let subscription = subscription_for(&message, route);
+    let mut stream = subscriber.deliveries(&subscription).await?;
+    publish_confirmed(publisher, &message).await?;
+    let delivery = next_valid_delivery(&mut stream).await?;
+    let (_, settlement) = (*delivery).into_parts();
+    match mode {
+        "unpolled" => drop(resource.shutdown(Duration::from_secs(5))),
+        "zero" => {
+            let error = resource
+                .shutdown(Duration::ZERO)
+                .await
+                .expect_err("zero budget");
+            assert_eq!(error.kind(), AmqpShutdownErrorKind::DeadlineExceeded);
+        }
+        _ => interrupt_paused_subscriber_close(resource, &settlement, mode == "deadline").await?,
+    }
+    assert!(subscriber.deliveries(&subscription).await.is_err());
+    testkit::await_try(TIMEOUT, async || {
+        let count = rabbit
+            .broker_consumer_count(url.rsplit('/').next().expect("vhost"), route.as_str())
+            .await?;
+        Ok::<_, anyhow::Error>((count == 0).then_some(()))
+    })
+    .await?;
+    drop(settlement);
+    drop(stream);
     Ok(())
 }

@@ -20,7 +20,7 @@ rss-contract.workspace = true
 rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 rss-redact.workspace = true
-rss-runtime.workspace = true
+rss-runtime = { workspace = true, optional = true }
 tokio-util.workspace = true
 lapin.workspace = true
 rustls-pki-types.workspace = true
@@ -32,6 +32,7 @@ url.workspace = true
 
 [features]
 default = []
+managed-runtime = ["dep:rss-runtime"]
 test-support = []
 
 [dev-dependencies]
