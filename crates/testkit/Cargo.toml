@@ -8,34 +8,18 @@ publish = false
 [lints]
 workspace = true
 
-# 服务层 test-support 脚手架：HTTP 契约测试 harness（per-contract 测试模板，#1136）。
-# 保持零 adapter 依赖：域 crate 经 [dev-dependencies] 消费本 crate写契约测试，不拉任何 adapter crate；
-# provider-neutral transactional messaging conformance 由独立 public testkit 持有。
 [dependencies]
-axum = { workspace = true }                          # Router / Body / Request / to_bytes（被测 router 类型）
-tower = { workspace = true, features = ["util"] }    # ServiceExt::oneshot 驱动（in-process，无 TCP）
-serde = { workspace = true }                         # ContractRequest.json 的 Serialize 约束 + WireError derive
-serde_json = { workspace = true }                    # body 序列化 / 反序列化（schema 对齐 + error envelope 解析）
-thiserror = { workspace = true }                     # TestkitError 库错误枚举
-# 有界等待（#1495）：`wait` 模块始终可用；time/sync 给 poll + Notify，macros/rt 给单测 runtime。
-tokio = { workspace = true, features = ["time", "sync", "macros", "rt", "rt-multi-thread"] }
-# 容器 fixture（#1137，仅 `containers` feature）：testcontainers 起真 pg/redis/rabbitmq；
-# anyhow = FixtureError（测试体 `?` 组合）。默认构建 / 契约 harness 消费方不拉此树。
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+# Provider fixtures are absent from the default bounded-wait surface.
 testcontainers = { workspace = true, optional = true }
-testcontainers-modules = { workspace = true, optional = true, features = ["redis"] }
 anyhow = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
-# 容器 fixture（#1137）+ tenant-scope conformance 骨架（#1437）：adapter 集成测试 + journeys durable journey
-# 经各自 `integration` feature 传递激活（`testkit/containers`）。契约 harness（#1136，axum oneshot）始终可用。
-# conformance 骨架对 tenant 类型泛型化，仍为零 adapter 依赖。
-containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:rcgen"]
-integration = ["containers"]
+containers = ["dep:testcontainers", "dep:anyhow", "dep:rcgen", "dep:serde_json", "tokio/sync", "tokio/process", "tokio/io-util"]
 
-# Live provider tests 由独立 integration workspace package 直接依赖本 feature；本 crate 不维护 test catalog。
 [dev-dependencies]
-uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度
-trybuild = { workspace = true }                      # provider owner-private receipt compile reds
-tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }  # wait 自测：start_paused 虚拟时钟验证 await_delay
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }

@@ -17,73 +17,23 @@ members = [
   "crates/projection",
   "crates/projection-postgres",
   "tests/projection-postgres-integration",
-  # Foundation Public：公开值与只读请求上下文；零 internal workspace 生产依赖。
   "crates/contract",
   "crates/request-context",
-  # Platform Public：只依赖 Foundation Public 的 provider-free 应用窄腰。
   "crates/platform",
-  # Transactional Messaging Public：provider-neutral message/transaction/receipt/settlement core。
   "crates/transactional-messaging",
-  # Transactional Messaging Runtime Public：provider-neutral relay/consumer algorithms + managed task glue。
   "crates/transactional-messaging-runtime",
-  # Transactional Messaging Testkit Public：provider-neutral conformance + deterministic memory doubles。
   "crates/transactional-messaging-testkit",
-  # 基础（仅 std + 外部 crate）
-  "crates/vocab",
-  "crates/ids",
-  # 字段级脱敏 runtime + derive；proc-macro 仅由 rss-redact 包装。
   "crates/redact-derive",
   "crates/redact",
-  # Provider-neutral storage protection primitives.
   "crates/data-protection",
-  # Provider-neutral lifecycle ownership and bounded shutdown.
   "crates/runtime",
-  "crates/secure",
-  "crates/support",
-  "crates/runctx",
   "crates/diagctx",
-  "crates/dlqauthmint",
-  "crates/requestidmint",
-  # 引擎 / 原语（依赖基础）
-  "crates/consistency",
-  "crates/primitives",
-  # W3C traceparent capture/restore 生产单源（#1224），被 httpd/postgres/eventexec 依赖。
   "crates/tracewire",
-  # publish=false、dev-dependency-only 的 OTel 测试 subscriber / exporter 脚手架。
-  "crates/tracewiretest",
-  # Cargo workspace facts（guppy 薄适配；仅 tooling/verification consumer）。
-  "crates/workspacefacts",
-  # DI-infra（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费——DI port trait 单源 + dynosaur unsafe 收敛）
-  "crates/diport",
-  "crates/listenerlifecycle",
-  # 服务（依赖基础 + 引擎 + DI-infra）
-  "crates/httpserve",
-  "crates/eventexec",
-  "crates/observ",
-  "crates/distributed",
-  # 服务层 test-support：HTTP 契约测试脚手架（oneshot harness；经 [dev-dependencies] 被域/组合根消费，不进生产 shipped 图）
   "crates/testkit",
-  # 域（依赖基础 + 引擎 + 服务 + generated；互不依赖）
-  # adapters（实现基础 / 引擎 / 服务 trait；不被域依赖）
   "crates/transactional-messaging-postgres",
-  "adapters/redis",
   "crates/transactional-messaging-amqp",
-  "adapters/s3",
-  "adapters/grpc",
-  "adapters/httpd",
-  "adapters/otel",
-  "adapters/prometheus",
-  "adapters/vault",
-  "adapters/ratelimit",
-  # MacVerifier 生产 backend（RustCrypto hmac/sha2；audit keyed-HMAC 链 verifier，#1230）
-  "adapters/crypto",
-  # in-mem DI port provider（RW-G1 追踪弹验接缝；测试 / demo 注入用，被 journeys 组合根消费）
-  "adapters/memory",
-  # Live provider tests are ordinary reverse-dependency workspace packages.
   "tests/amqp-integration",
   "tests/postgres-integration",
-  "tests/redis-integration",
-  "tests/s3-integration",
 ]
 
 # Positive Release Surface selection. Unlisted packages remain internal.
@@ -155,9 +105,11 @@ rust-version = "1.96"
 repository = "https://github.com/shengming0817/rss"
 
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
-# 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+# Versions and sources are declared here; consumers select only their required features.
+# dynosaur and trait-variant remain exact-pinned for rss-runtime's async dispatch macros.
+# sqlx and lapin use Rustls with the ring provider; cargo-deny rejects alternative TLS providers.
 rss-saga-postgres = { path = "crates/saga-postgres", version = "0.1.0" }
 rss-saga = { path = "crates/saga", version = "0.1.0" }
 rss-device-command = { path = "crates/device-command", version = "0.1.0" }
@@ -171,7 +123,6 @@ rss-projection-postgres = { path = "crates/projection-postgres", version = "0.1.
 rss-projection = { path = "crates/projection", version = "0.1.0" }
 rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
-rss-platform = { path = "crates/platform", version = "0.3.0" }
 rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
 rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
 rss-transactional-messaging-testkit = { path = "crates/transactional-messaging-testkit", version = "0.1.0" }
@@ -181,167 +132,43 @@ rss-redact-derive = { path = "crates/redact-derive", version = "0.1.0" }
 rss-redact = { path = "crates/redact", version = "0.1.0" }
 rss-data-protection = { path = "crates/data-protection", version = "0.1.0" }
 rss-runtime = { path = "crates/runtime", version = "0.1.0" }
-# 运行时 / 序列化 / 错误 / 日志
 tokio = { version = "1", default-features = false }
-tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken / TaskTracker（cargo feature = "rt"）
-tokio-stream = { version = "0.1", features = ["net"] }   # TcpListenerStream（adapters/grpc serve_with_incoming_shutdown：自绑 listener 读回 ephemeral 端口供测试）
+tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_path_to_error = "0.1"
 serde_json_canonicalizer = "=0.3.2"
-regex = "1"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
 uuid = { version = "1" }
 futures = { version = "0.3", default-features = false }
-# 编码 / 加密原语（基础层 + 引擎原语 opt-in）
-base64 = "0.22"   # consumer-owned opaque token / wire payload 的 base64url（URL_SAFE_NO_PAD）编解码
-subtle = "2"      # primitives constant_time_eq 常数时间比较（RustCrypto 工业标准，免自维护 black_box 屏障）。ref: dalek-cryptography/subtle src/lib.rs@main
-# Unix blocklist loader open(2) flags (`O_NONBLOCK|O_NOFOLLOW`); direct target-only dependency
-# keeps the filesystem capability boundary explicit instead of relying on a transitive crate.
-libc = "=0.2.186"
-# softca dev-CA 签名 provider（adapters/softca，#1010）：ECDSA P-256 sign-bytes 原语
-# （EcdsaKeyPair generate_pkcs8 / from_pkcs8 / sign）。ring 0.17 已因 rustls←sqlx/redis 在树、LICENSE 判
-# ISC 在 deny allow-list 内 ⇒ 零新增 crypto license 面（对标 adapters/oidc 选 ring 同款理由）；仅 softca
-# backend feature 直接消费。ref: briansmith/ring src/signature/ecdsa.rs@0.17.14
+subtle = "2"
 ring = "0.17"
-# 密码哈希（secure::password，#1188）：argon2id PHC 哈希 + constant-time digest 比较 + 有界 KDF 验签 + 随机盐。default `rand`
-# 给 `SaltString::generate`；额外 `std` 经 password-hash/std → rand_core/std 拉起 getrandom，暴露
-# `password_hash::rand_core::OsRng`（CSPRNG 盐源）。ref: RustCrypto/argon2 argon2/src/lib.rs@master
-# （Apache-2.0 OR MIT，deny allow-list 内；传递 blake2/password-hash 同许可）。
-argon2 = { version = "0.5", features = ["std"] }
-unicode-normalization = "0.1"
-# DI port trait 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
-# exact-pin（pre-1.0，new_box/new_arc/bridge API 仍破坏式演进；升级须审 changelog）。仅 diport
-# 可依赖（deny.toml wrapper 守 DI port 集中 + 单一 dyn-dispatch 依赖点；别处 import 不到宏）。
-# 注：实测 dynosaur 0.3 生成的 unsafe 不触发 consumer forbid（def-site hygiene），无 unsafe 例外（见 diport）。
 dynosaur = "=0.3.0"
-# Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur `bridge(dyn)` 据此生成
-# Send 的 Dyn wrapper（ShutdownStack 经 tokio::spawn 做 panic 隔离需要 Send future）。
-# exact-pin：与 dynosaur 耦合的 dyn-infra，codegen 互操作随版本演进，升级须同审。
 trait-variant = "=0.1.2"
-# HTTP / gRPC（服务层前瞻）
-axum = "0.8"
-http-body = "1"
-http-body-util = "0.1"  # stream-level body cap（Limited wrap，#1106 FIX-1）；axum 0.8 生态同版本
-tower = "0.5"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-pki-types = "1"
 rcgen = "0.14.8"
-tower-http = "0.6"   # 服务层中间件前瞻（rate-limit/body-limit/security-headers，见 #1106）；当前无成员引用，inert
-# 限流 provider（adapters/ratelimit，#1011）：keyed GCRA 限流器，x/time/rate（token bucket）的 Rust 工业等价。
-# 自带 monotonic clock（DefaultClock/QuantaClock；FakeRelativeClock 供确定性测试）——不经 diport::Clock
-# （wall-clock SystemTime，错的时间基），故不触 clippy disallowed-methods（ban 仅约束我们直调 now()）。
-# ref: antifuchs/governor src/state/keyed.rs
-governor = "0.8"
-# gRPC 传输（adapters/grpc，#1011）+ otel OTLP/gRPC 导出（adapters/otel）共用一份。tonic 0.14 把 prost 集成
-# 拆出 tonic-prost/tonic-prost-build（core tonic codec-agnostic）。grpc 直接消费 tonic（server+router，当前
-# 不配置 TLS；默认入口拒绝 non-loopback plaintext，只有显式 insecure opt-in 可对外绑定）+
-# tonic-health（标准 gRPC 健康服务，server scaffold 的 baseline service）；prost 当前仅经
-# tonic-prost 传递进 lock@0.14。与 otel 的
-# opentelemetry-otlp 0.32（grpc-tonic → tonic 0.14.6）统一到 0.14，避免 0.13/0.14 双版本（#1185）。
-# ref: hyperium/tonic examples/src/health/server.rs@master
-tonic = "0.14"
-tonic-health = "0.14"
-prost = "0.14"
-# 持久化（postgres adapter，#1116）
 sqlx = { version = "=0.9.0", default-features = false }
-# redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
-# re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
-# testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
 deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tls-rustls-webpki-roots", "tokio-rustls-comp", "script"] }
-# AMQP broker I/O（crates/transactional-messaging-amqp）：rustls + ring provider + webpki roots；default-features=false 禁默认漂移。
-# 生产 URL 经 adapter-owned AMQP endpoint 默认要求 amqps://；testcontainer 明文 amqp:// 仅 loopback + 显式 opt-in。
-# 不启 native-tls / openssl / rustls--aws_lc_rs；deny.toml 兜住 provider 漂移。
-# ref: amqp-rs/lapin Cargo.toml@71d01e2cc3e3221496d11ffcf1f4aaf41532fb9d
 lapin = { version = "4", default-features = false, features = ["default-runtime", "rustls--ring", "rustls-webpki-roots-certs"] }
-# 对象存储 provider（adapters/s3，#1011/#1164）：AWS 官方 SDK，对标 gocell s3.ObjectUploader@aws-sdk-go-v2。
-# default-features=false 关默认 HTTPS client；生产 HTTPS connector 由 runtime 组合根显式注入 rustls+ring
-# `aws-smithy-http-client`，明文 HTTP 仅 loopback MinIO/test opt-in。ref: awslabs/aws-sdk-rust sdk/s3/src/client.rs
-aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio"] }
-# AWS SDK HTTP client：只启 rustls-ring；禁 default aws-lc / native-tls / openssl 漂移。
-aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
-# Vault Transit 签名 HTTP 客户端（adapters/vault，#1011）：TLS-agnostic —— default-features=false 不绑 crypto
-# provider（不进 ring/aws-lc-rs/openssl/rustls，deny 全绿；http 即可达本地 dev Vault）。production HTTPS 的
-# TLS provider（rustls+ring，对齐 sqlx）由组合根 Join 阶段经 reqwest tls feature 选定后注入预配置 Client
-# （对标 s3 注入 aws Client 不配 TLS）。ref: jmgilman/vaultrs vaultrs/src/api/transit/requests.rs
-reqwest = { version = "0.12", default-features = false }
-# Vault token 内存清零（adapters/vault，#1011 F5）：Zeroizing<String> drop 时清零密钥物料。
-# default-features=false + alloc：只取 String Zeroize impl，不拉 std/derive（Apache-2.0 OR MIT，deny allow-list 内）。
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-# 解密产物明文封装（rss_data_protection::Plaintext，#1469）：SecretSlice<u8> Debug=[REDACTED] + Drop-zeroize，
-# 承载 ADR-011 D5 no-decrypt-in-debug（FIELDPROT-NODBG-DECRYPT-01）。0.10 已去掉 alloc/std feature gate，
-# 默认即提供 SecretBox/SecretSlice/ExposeSecret + 传递 zeroize；serde 默认 off（不给 secret 类型上 serde，Apache-2.0 OR MIT）。
 secrecy = { version = "0.10" }
-# aws-sdk-s3 客户端测试 mock（dev-only，adapters/s3）：canned 响应规则注入确定性单测。只复用
-# aws-smithy-mocks 的 HTTP 1.x client/interceptor seam；禁止为便利宏开启 aws-sdk-s3/test-util，后者会经
-# Smithy legacy-test-util 重新拉入 hyper 0.14 / h2 0.3。production lib 仍 crypto-free。
-# smithy-rs 官方非实验 mock crate。
-aws-smithy-mocks = "0.2"
-# reqwest 客户端测试 mock server（dev-only，adapters/vault）：loopback canned 响应 endpoint，让 reqwest 真发
-# 请求、测真实编排（URL percent-encode / X-Vault-Token header / 非 2xx 状态分支 / timeout），不抽 transport
-# trait（vault 永远只用 reqwest 一个 provider，seam 是只为测试的多余抽象）——对标 s3 aws-smithy-mocks「传输边界
-# mock、测真实编排」范式。默认仅明文 HTTP，**不拉 TLS crypto**（ring/aws-lc-rs/openssl/rustls 均不进树，deny
-# 全绿，同 aws-smithy-mocks 收口理由）。ref: LukeMathWalker/wiremock-rs src/server.rs@main
-wiremock = "0.6"
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-ipnet = "2.11"
-# 可观测性导出（adapters/otel，#1011）：tracing span → OTLP/gRPC 导出。opentelemetry-otlp 选
-# grpc-tonic + tls-ring（rustls 走 ring，**禁** tls-aws-lc：aws-lc-sys 的 OpenSSL 派生 license 不在
-# deny.toml allow-list，与 sqlx/redis tls-rustls 同口径）+ tls-webpki-roots（打包 Mozilla 根，webpki-roots
-# CDLA-Permissive-2.0 已在 allow-list）。default-features=false 关默认 http/reqwest exporter，仅留 gRPC 面。
-# 注：opentelemetry-otlp 0.32 传递引入 tonic 0.14；workspace `tonic`/`prost` pin 已统一到 0.14（#1011/#1185），
-# grpc adapter 直接消费同一份，无 0.13/0.14 双版本。ref: open-telemetry/opentelemetry-rust
-opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-webpki-roots"] }
-# tracing span → OTel SDK 桥接 Layer（组合根 registry().with(layer) 注册）。0.33 配对 opentelemetry 0.32。
-# ref: tokio-rs/tracing-opentelemetry
-tracing-opentelemetry = "0.33"
-# OtelEndpoint::insecure_localhost 的 loopback 校验：用 canonical URL parser 解析 scheme/host/userinfo，
-# 不手写 authority split（防 `http://localhost@evil` userinfo 伪装 host 绕过）。已在树（idna 等传递依赖）。
-# ref: servo/rust-url url/src/lib.rs（Url::host/username/password）
 url = "2"
-x509-parser = "0.18"
-# 指标 facade + Prometheus 后端（adapters/prometheus，#1011）。当前可观测组合使用
-# `tracing` + `tracing-opentelemetry` 承载 trace，`metrics` facade + Prometheus adapter 承载指标；
-# 发射点经 `metrics::counter!` 全局 facade，adapter 持 PrometheusHandle 渲染 exposition。
-# default-features=false 关 http-listener/push-gateway——避免拉 hyper/rustls/ring/aws-lc（TLS + HTTP-server
-# 供应链面；/metrics HTTP serving 是组合根/httpserve 关注点，不在 adapter；同 s3/lapin 的 TLS 收口范式，
-# deny license allow-list 是机器门：ring/aws-lc 不在 allow-list ⇒ 入树即红，仅余 recorder + render 子树）。
-# 注：m-e-p default-features=false 子树无 tokio；workspace 内 tokio 经 diport→tokio-util 已在树，与本依赖无关。
-# ref: metrics-rs/metrics metrics-exporter-prometheus/src/exporter/builder.rs@metrics-exporter-prometheus-v0.18.3
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18", default-features = false }
-# SemVer 由 workspacefacts 消费；time parsing 由 secure 的 typed redaction 字段支持消费。
-semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 syn = { version = "2", features = ["full", "parsing"] }
-# rss-redact-derive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
-# 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-# proc-macro 展开时解析消费方对 rss-redact 的真实依赖名，支持 Cargo dependency alias。
 proc-macro-crate = "3"
-toml = "0.8"
-# Cargo workspace 图事实（#1994）：pre-1.0 exact pin；仅 workspacefacts 直接消费。
-guppy = { version = "=0.17.26", default-features = false }
-# 测试
 rstest = "0.24"
 static_assertions = "1.1.0"
-trybuild = "1"   # diport DI port trait 的 dyn-compatible compile-pass/fail 回归锁（Medium）
-mockall = "0.13"
-insta = "1"   # inert 前瞻预留（snapshot 测试，暂未引入任何成员）
-# testcontainers 真集成（#1137，crates/testkit `containers` feature）：起真 postgres/redis/rabbitmq 容器。
-# 仅经 testkit `containers` feature + 各 adapter 的 `integration` feature 传递激活（默认构建不拉此树）。
-# docker 为运行期依赖（编译不需）；独立 integration test package 自持容器。ref: testcontainers/testcontainers-rs-modules-community
+trybuild = "1"
 testcontainers = "0.27"
-testcontainers-modules = "0.15"
 
 # 工程护栏（成员经 `[lints] workspace = true` 继承）。
 [workspace.lints.rust]

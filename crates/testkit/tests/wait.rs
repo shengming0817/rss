@@ -1,13 +1,10 @@
-//! testkit `wait` 模块自测：有界条件轮询、固定延时与 Notify 唤醒。
+//! testkit `wait` 模块自测：有界条件轮询与固定延时。
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
-
-use testkit::{TestkitError, await_delay, await_map, await_notified, await_try, await_try_every};
+use testkit::{TestkitError, await_delay, await_try};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -43,13 +40,13 @@ impl Drop for DropProbe {
 }
 
 #[tokio::test(start_paused = true)]
-async fn await_map_returns_first_non_send_value_and_lends_state() -> TestResult {
+async fn await_try_returns_first_non_send_value_and_lends_state() -> TestResult {
     let value = Rc::new(String::from("ready-value"));
     let mut calls = 0;
 
-    let observed = await_map(Duration::from_secs(1), async || {
+    let observed = await_try(Duration::from_secs(1), async || {
         calls += 1;
-        (calls == 2).then(|| Rc::clone(&value))
+        Ok::<_, TestkitError>((calls == 2).then(|| Rc::clone(&value)))
     })
     .await?;
 
@@ -59,8 +56,11 @@ async fn await_map_returns_first_non_send_value_and_lends_state() -> TestResult 
 }
 
 #[tokio::test(start_paused = true)]
-async fn await_map_pending_times_out_with_exact_budget() -> TestResult {
-    let error = await_map(Duration::from_millis(25), async || None::<()>).await;
+async fn await_try_pending_times_out_with_exact_budget() -> TestResult {
+    let error = await_try(Duration::from_millis(25), async || {
+        Ok::<Option<()>, TestkitError>(None)
+    })
+    .await;
     assert!(matches!(
         error,
         Err(TestkitError::WaitTimeout { waited_ms: 25 })
@@ -82,30 +82,6 @@ async fn await_try_propagates_first_fatal_error() -> TestResult {
 
     assert!(matches!(error, TryWaitError::Probe));
     assert_eq!(calls, 1);
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn await_try_every_uses_custom_interval_and_converts_timeout() -> TestResult {
-    let mut calls = 0;
-    let result = await_try_every(
-        Duration::from_millis(25),
-        Duration::from_millis(10),
-        async || {
-            calls += 1;
-            Ok::<Option<()>, TryWaitError>(None)
-        },
-    )
-    .await;
-    let Err(error) = result else {
-        return Err("pending probe must time out".into());
-    };
-
-    assert!(matches!(
-        error,
-        TryWaitError::Timeout(TestkitError::WaitTimeout { waited_ms: 25 })
-    ));
-    assert_eq!(calls, 3, "probe should run at t=0ms, 10ms, and 20ms");
     Ok(())
 }
 
@@ -144,36 +120,5 @@ async fn await_delay_completes_after_duration() -> TestResult {
         "await_delay must not resolve before the requested duration"
     );
     await_delay(Duration::from_millis(50)).await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn await_notified_wakes_after_spawned_notify() -> TestResult {
-    let notify = Arc::new(Notify::new());
-    let signal = Arc::clone(&notify);
-    tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        signal.notify_one();
-    });
-    await_notified(&notify, Duration::from_secs(1)).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn await_notified_times_out() -> TestResult {
-    let notify = Notify::new();
-    let result = await_notified(&notify, Duration::from_millis(30)).await;
-    let Err(err) = result else {
-        return Err("no notify must time out".into());
-    };
-    match err {
-        TestkitError::WaitTimeout { waited_ms } => {
-            assert!(
-                waited_ms >= 30,
-                "waited_ms={waited_ms} should cover the timeout budget"
-            );
-        }
-        other => return Err(format!("expected WaitTimeout, got {other:?}").into()),
-    }
     Ok(())
 }

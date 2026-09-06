@@ -16,8 +16,7 @@ workspace = true
 
 [dependencies]
 # task_local! / LocalKey / TaskLocalFuture 均只需 Tokio `rt` feature。
-# diagctx 刻意不依赖 vocab / tracing / serde：它只承载**诊断**信号（correlation），与 runctx（授权控制流值）
-# 在 crate 图上物理隔离（ADR-002 §D1-bis）——「诊断信道被误读为授权源」即一处可被 review 一眼抓的跨 import。
+# Diagnostic correlation is independent of request authorization and tracing/serde integrations.
 tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
 thiserror = "2"
 

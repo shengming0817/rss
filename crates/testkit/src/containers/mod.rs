@@ -1,4 +1,4 @@
-//! 真容器 fixtures（testcontainers 0.27 + testcontainers-modules 0.15）。
+//! 真容器 fixtures（testcontainers 0.27）。
 //!
 //! Fixtures own temporary containers; callers share a guard within one bounded test suite.
 //! Provider endpoints and credentials are returned explicitly, never selected from environment.
@@ -16,11 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use testcontainers::ImageExt;
-use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage};
-
-#[cfg(test)]
-use testcontainers_modules::redis::REDIS_PORT;
 
 /// fixture 错误（容器起停 / 坐标解析 / env 解析）——dev/test 用，anyhow 以与任意测试返回类型组合。
 pub type FixtureError = anyhow::Error;
@@ -29,7 +25,6 @@ type Result<T> = std::result::Result<T, FixtureError>;
 /// 容器内固定端口（modules 镜像默认暴露端口）。
 const PUBLISHED_PORT_MAX_ATTEMPTS: u32 = 3;
 const PUBLISHED_PORT_RETRY_BACKOFF_MS: u64 = 100;
-const MINIO_PORT: u16 = 9000;
 static BRIDGE_NETWORK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Fixture-owned Docker network membership for TLS provider containers.
@@ -160,30 +155,6 @@ async fn wait_published_port<I: testcontainers::Image>(
     ))
 }
 
-async fn force_remove_named_container(name: &str) {
-    let _ = tokio::process::Command::new("docker")
-        .args(["rm", "-f", "--", name])
-        .output()
-        .await;
-}
-
-fn vault_dev_tls_san_flags(dns_name: &str) -> Vec<String> {
-    // Keep host-mapped names (localhost / 127.0.0.1) plus the fixture DNS name. Do not pass `::1`
-    // as a bare `-dev-tls-san` token: shell/`vault` flag splitting can truncate the remaining SANs.
-    // Caller must validate `dns_name` (see [`validate_network_attachment`]) before shell join.
-    ["localhost", "127.0.0.1", dns_name]
-        .into_iter()
-        .map(|san| format!("-dev-tls-san={san}"))
-        .collect()
-}
-const MINIO_ROOT_USER: &str = "rss-minio-root";
-const MINIO_ROOT_PASSWORD: &str = "rss-minio-root-test-password";
-const MINIO_WORKLOAD_USER: &str = "rss-test-workload";
-const MINIO_WORKLOAD_PASSWORD: &str = "rss-test-workload-password";
-const MINIO_ARCHIVE_BUCKET: &str = "rss-test-dlx";
-const MINIO_NEIGHBOR_BUCKET: &str = "rss-test-neighbor";
-const MINIO_POLICY_NAME: &str = "rss-test-archive";
-
 /// rabbitmqctl exec 有界重试（broker 起后 rabbitmqctl/epmd 短暂不可用窗口）。
 const RABBITMQCTL_MAX_ATTEMPTS: u32 = 12;
 const RABBITMQCTL_BACKOFF_MS: u64 = 500;
@@ -201,17 +172,13 @@ mod runtime;
 mod tls;
 use tls::*;
 
-mod minio;
 mod postgres;
 mod rabbitmq;
 mod redis;
-mod vault;
 
-pub use minio::{MinioCredentials, MinioTlsFixture, minio_tls_archive};
 pub use postgres::{PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls};
 pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, managed_rabbitmq, rabbitmq_tls};
-pub use redis::{RedisFixture, RedisTlsFixture, managed_redis, redis_tls};
-pub use vault::{VaultTlsFixture, vault_tls};
+pub use redis::{RedisFixture, managed_redis};
 
 #[cfg(test)]
 mod tests;

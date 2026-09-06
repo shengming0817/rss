@@ -1,58 +1,44 @@
-# 本地一致性（L0/L1）规则
+# 本地事务一致性规则
 
-本文统一拥有 LocalOnly（L0）与 LocalTx（L1）的 contract、effect、failure 与证明边界。
+本文拥有组件本地事务 outcome、重试与 provider 证明边界。产品 route 的读写能力、认证、审计与
+HTTP 接线由产品持有；本仓不提供 LocalOnly route/codegen adoption 或通用业务事务 registry。
 
-## L0 LocalOnly
+## 能力与 owner
 
-LocalOnly 不产生业务持久化、outbox、publish、workflow 或外部 side effect；允许 provider-owned read transaction、
-鉴权、校验、投影读取与观测。
-
-- contract/effect 使用闭值 typed metadata；未知 effect 与未分类 port 默认拒绝。
-- route 不得取得 write transaction、publisher、command emitter、workflow/reconcile capability。
-- auth/audit 若要求 durable write，必须拆为独立非 L0 route/contract；不得把写入隐藏在 middleware。
-- runtime conformance 必须证明 success、validation error 与 authorization deny 都没有业务 write/publish。
-- carrier：closed effect model、generated route capability、source semantic guard 与 LocalOnly conformance。
-
-## L1 LocalTx
-
-LocalTx 是单域、tenant-scoped 的本地原子写；不表示跨域事务、outbox fact、saga 或 reconcile 已兑现。
-
-contract 必须声明完整闭值 evidence：single-domain boundary、`tenant-scoped-uow | repo-atomic-cas`、
-bounded-transient retry 与 commit-unknown non-retryable。
-
-- UoW 每次 transient retry 重建完整 transaction；只有确认 rollback 后可重试。
-- CAS conflict 不由 handler 自动重放，调用方基于新版本重新发起。
-- commit unknown、rollback failed 均不可自动重放，第一次 attempt 可能已 durable。
-- tenant scope 来自 verified context/typed command，禁止 HTTP body、ambient string 或 raw pool。
-- 多次 port 调用不得宣称同一 transaction；正确性只由真实 transaction/CAS boundary 提供。
+- `rss-transactional-messaging` 拥有 `LocalTxAttempt`、事务结算分类和消费者事务契约。
+- `rss-transactional-messaging-runtime` 拥有消费执行、重试与有界结算算法。
+- `rss-transactional-messaging-postgres` 拥有实际 PostgreSQL 事务与连接回收语义。
+- `rss-transactional-messaging-testkit` 提供 provider-neutral conformance，真实 provider 测试进入
+  `postgres-integration` 等组件 T2 package。
+- 本地事务不证明跨系统 effect、消息投递、Saga 或 Reconcile 已完成。多个独立 port 调用不自动组成同一事务。
 
 ## Transaction outcome
 
-结算是闭值 committed、rolled-back、rollback-failed、commit-unknown；retry class 与 settlement outcome 正交。
+- `LocalTxAttempt` 覆盖 committed、not-started、rolled-back、rollback-failed、commit-unknown 和
+  fenced 六种状态；它报告 provider 事实，构造值本身不执行或证明数据库事务。retry class 与结算结果正交。
+- 通用本地事务路径由 provider 返回 `LocalTxAttempt`，调用方通过穷尽 fold 消费结果。
+  `ConsumerTx::execute` 则直接返回 `TransactionOutcome<Self::CommitProof>`，不经过该 fold 投影。
+  消费者的 committed 分支需要消费 `ReceiptIntent` 并携带 provider commit proof；官方 PostgreSQL
+  provider 仅在收到 commit ACK 后铸造私有 proof。缺失 commit ACK 为 commit-unknown，缺失 rollback ACK
+  为 rollback-failed。
+- 明确 commit/rollback ACK 才可正常回收 connection lease；取消、timeout、未结算或结算失败必须隔离或关闭。
+- commit-unknown、rollback-failed 不能被当作 no-write，不能自动重放 handler；事务可能已经 durable。
+- transient retry 仅在确认未开始 effect 或 rollback 完成后进行，重建整个 transaction，并沿用原总预算。
+- CAS conflict 不因 handler 重试自动解决，调用方须依据最新版本重新决策。
+- tenant scope 来自能力的受控上下文与类型；不能把 payload 字符串或未绑定租户的 raw pool 当作租户授权。
 
-- ConsumerTx 复用 `rss_transactional_messaging::transaction::LocalTxAttempt`，只通过穷尽 fold 投影到
-  `TransactionOutcome<ProviderCommitProof>`。commit ACK 铸造 provider-private proof；缺失 commit ACK 为
-  commit-unknown，缺失 rollback ACK 为 rollback-failed 并覆盖原错误分类，确认 rollback 后的 lease lost
-  才是 fenced，其余 storage failure 是 infrastructure-transient。
-- 明确 commit/rollback ACK 才可释放 connection lease；取消、timeout、未结算或结算失败必须 quarantine/close。
-- validation/unauthenticated 路径 no-write；授权拒绝只允许契约明确要求的 durable denial audit。
-- conflict/permanent error 恰好一次且零业务写；unknown outcome 只能断言 attempt=1，禁止伪造 no-write。
-- execution budget 从一次 monotonic clock observation 同时 mint operation cutoff 与 settlement cutoff，跨 attempt
-  不得重置；provider future 必须同时受 algorithm-owner race 与 provider I/O watchdog 约束。execute race timeout
-  固定为 commit-unknown，不得解释为 not-started。
+## 有界执行
 
-## Proof closure
+- 一次 monotonic clock observation 确定 operation cutoff 和 settlement cutoff，跨 attempt 不重置预算。
+- provider future 同时受算法 owner 的 deadline race 和 provider I/O 边界约束。
+- execute race timeout 按 commit-unknown 处理；未来被取消不证明外部操作未发生。
+- 结算与投递决定遵循[消息消费规则](event-delivery.md)，不能把数据库事务成功替代 broker settlement。
 
-proof chain：contract metadata → generated spec → production route → component/conformance → provider profile →
-真实 backend → active journey。缺失、重复、孤儿、错 owner/provider 或空 inventory 均 fail-closed。
+## 验证载体
 
-- static gate 只证明声明/route/test closure，不冒充真实 transaction execution。
-- real backend receipt 只在 canonical typed batches 全绿时产生；report/Markdown 不是 evidence。
-- `CONSISTENCY-EFFECT-BREAKING-REVIEW-01`：effect/consistency fingerprint 与 breaking policy 由 closed types
-  和 base/current deterministic review 承载；未知变化默认 breaking。
-
-## Carrier
-
-- Hard：closed consistency/effect enums、generated capabilities、typed transaction/lane/outcome 与 private constructors。
-- Medium：contract validation、LocalOnly/LocalTx closure gates、provider conformance、真实 PostgreSQL fault tests。
-- GA/T3 不由 L0/L1 自动授权，必须独立获得 production acceptance。
+- Hard：生产代码中的闭合 outcome、typed transaction 接口、private commit proof 与连接所有权边界。
+- Medium：组件状态机测试、provider conformance，以及真实 PostgreSQL 原子性、租户隔离、fault/recovery 测试。
+- trait 或公开构造器不能证明第三方 provider 的真实事务语义，必须由其实现和 T2 支持。
+- 验证从实际 Cargo consumer 与 provider 推导，不维护 generated HTTP route、active journey 或手工 backend catalog。
+- 文档和报告不是执行证据；公共 API 与持久化 identity 的变化遵循[版本规则](api-versioning.md)。
+- 产品完整生产验收归产品 T3，组件本地事务不自动授权产品部署、迁移执行或生产运维建设。

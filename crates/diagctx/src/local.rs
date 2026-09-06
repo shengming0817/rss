@@ -1,12 +1,12 @@
 //! [`DiagnosticCtx`] 的 `task_local!` 传播 + **fail-open** 访问器。
 //!
-//! 与 `runctx::local` 刻意相反：诊断信号缺失返回 `None`（best-effort 省略），**绝不 deny / panic**——
-//! 它不是授权闸门，丢失只影响可观测关联，不影响正确性 / 安全（ADR-002 §D1-bis）。`scope` 在信任边界
-//! （httpserve correlation middleware）每请求绑定一次；深层 adapter（outbox emit）经 [`correlation`] 读回。
+//! 诊断信号缺失返回 `None`（best-effort 省略），**绝不 deny / panic**——
+//! 它不是授权闸门，丢失只影响可观测关联。消费方在请求或消息处理入口调用 [`scope`]，
+//! 深层调用经 [`correlation`] 读回诊断关联。
 //!
 //! `tokio::task_local!` 的 `with` / `get` 在未绑定时**会 panic**，故本模块只封装 `try_with`
 //! （workspace `panic`/`unwrap_used`/`expect_used` 均 deny）。`spawn` / `spawn_blocking` 不继承 task_local：
-//! 跨任务诊断关联丢失 ⇒ fail-open 省略（benign），不像 runctx 需「捕获-重绑」（缺失不越权）。
+//! 跨任务诊断关联丢失时 fail-open 省略，不改变授权结果。
 //!
 //! # 跨 `tokio::spawn` 透传（惯用 recipe）
 //!
@@ -14,15 +14,14 @@
 //!
 //! ```ignore
 //! // 后台任务需保关联：spawn 前捕获、子任务内重绑
-//! match diagctx::current() {
-//!     Some(ctx) => tokio::spawn(diagctx::scope(ctx, async { /* outbox emit */ })),
+//! match rss_diag_context::current() {
+//!     Some(ctx) => tokio::spawn(rss_diag_context::scope(ctx, async { /* outbox emit */ })),
 //!     None => tokio::spawn(async { /* 无关联，fail-open */ }),
 //! };
 //! ```
 //!
-//! **不需重绑的场景**：httpserve correlation middleware 的 `diagctx::scope(ctx, next.run(req))` 已覆盖
-//! axum handler + application + adapter emit 的同步调用链（同一 task），子 future 在同一 scope 内自然
-//! 继承。只有 `tokio::spawn` 隔断 task 时才需要显式捕获-重绑。
+//! 同一 [`scope`] 内被轮询的子 future 自然继承关联；跨 `tokio::spawn` 的新 task 才需要
+//! 显式捕获并重绑。具体 HTTP 或消息接线由消费方持有。
 
 use crate::ctx::{CorrelationId, DiagnosticCtx};
 use std::future::Future;
@@ -83,7 +82,7 @@ mod tests {
         );
     }
 
-    // fail-open 核心不变式（与 runctx fail-closed 刻意相反）：无 scope 返回 None，绝不 panic / Err。
+    // fail-open 核心不变式：无 scope 返回 None，绝不 panic / Err。
     #[tokio::test]
     async fn correlation_outside_scope_is_none() {
         assert!(correlation().is_none());

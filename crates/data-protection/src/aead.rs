@@ -3,7 +3,7 @@
 //! 字段级数据保护边界（observe-redaction vs storage-encryption 分层、AAD 必填 envelope、deterministic
 //! opt-in、no-decrypt-in-debug）的设计单源见 **ADR-011**。本 crate 只立 v2 **基础类型 + trait 接缝**
 //! （AAD 必填、envelope 自描述、解密产物 no-decrypt-in-debug），**不引入真实 crypto 后端**——真实
-//! AES-GCM/SIV impl 落 #1466（`adapters/vault`），持久化落 #1467（`settings`）。
+//! 具体密码 backend 与持久化接线由直接消费方选择，本模块只持有 provider-neutral 契约。
 //!
 //! Hard 不变式（类型层成立）：
 //! - `FIELDPROT-AAD-MANDATORY-01`：[`Aead::seal`]/[`Aead::open`] 的 `aad: &DerivedAad` 是必填位置参（非 `Option`）。

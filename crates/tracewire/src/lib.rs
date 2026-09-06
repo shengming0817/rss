@@ -8,7 +8,7 @@
 //! `metadata` 保留键 `trace`），consumer 经 [`restore_remote_parent`] 还原成 remote parent 挂到消费 span，使 handler
 //! 与 producer **同一 `trace_id`**。HTTP server 入口也经同一 API 恢复 `traceparent` + `tracestate`。
 //! emit、consume 与 HTTP server 的传播调用方只依赖本 crate、
-//! **不直接 import otel**，延续 RSS「otel 收口」治理（`adapters/otel` / `diagctx` / `observ` 同思路）。
+//! 无需直接依赖 OTel 的传播类型；产品 host 自行安装 exporter。
 //!
 //! **fail-open**：诊断信道缺失从不阻塞投递——未装 otel 层 / span context 无效 ⇒ [`capture_current`] 返
 //! `None`（不写 trace 键）；有效但未采样的 context 仍以 flags `00` 传播。入站值必须先经
@@ -174,7 +174,7 @@ pub fn capture_current() -> Option<W3cTraceContext> {
 /// 状态不可用，则返回 [`RestoreOutcome::Unavailable`]，不 panic、不泄漏 SDK error，也不改变业务结果。
 ///
 /// caller 必须在 span 首次 enter/instrument 前调用。畸形 `tracestate` 只丢 state，不使合法 parent 失效。
-/// 生产 caller：`adapters/httpd` HTTP 入口与 `crates/eventexec` consumer Fresh 路径。
+/// 产品 HTTP 入口或消息消费方在构造处理 span 时调用。
 pub fn restore_remote_parent(
     span: &tracing::Span,
     traceparent: &TraceParent,
@@ -208,7 +208,7 @@ pub enum RestoreOutcome {
 /// （确定性 `SdkTracerProvider`，默认 `ParentBased(AlwaysOn)` 采样根 span）的 subscriber 内同步跑 `f`，
 /// 使 [`capture_current`] 在活跃 span 内产出有效 W3C carrier。
 ///
-/// 跨 crate 测试复用 publish=false 的 `tracewiretest` carrier；本 helper 不进入 Release API。
+/// 仅本 crate 单测使用；本 helper 不进入 Release API，消费方自行安装测试 subscriber。
 #[cfg(test)]
 fn with_test_subscriber<R>(f: impl FnOnce() -> R) -> R {
     use opentelemetry::trace::TracerProvider as _;

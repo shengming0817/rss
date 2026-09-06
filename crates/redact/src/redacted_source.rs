@@ -1,6 +1,6 @@
-//! `RedactedSource` —— diport provider-error wrapper 的共享 `#[source]` 字段类型。
+//! `RedactedSource` —— 组件错误持有底层 source 时使用的脱敏字段类型。
 //!
-//! 把 adapter 原始错误（`Box<dyn Error>`）的「`Debug` 不展开 source」从 7 份手写 `impl Debug` 上移为
+//! 把底层原始错误（`Box<dyn Error>`）的「`Debug` 不展开 source」收敛为
 //! **单一类型保证**（Hard）：本 newtype 的 `Debug` / `Display` 固定输出 `<redacted>`、**不展开内层**
 //! （redis / 网络 provider 的 source Debug 常携连接串 / 凭据，如 Redis URL）。各 wrapper 经
 //! `#[source] source: RedactedSource` + `#[derive(Debug, thiserror::Error)]` 持有它，derive(Debug) 即安全
@@ -27,11 +27,10 @@
 /// 内层 `Box` 是 **owned 但 write-only**：原始错误值保留在内存（供 panic / core-dump 事后排查），却不经
 /// `Debug` / `Display` / `Error::source()` 任一接口暴露——write-only 是本脱敏边界的**设计本意**（containment），
 /// 故字段标 `#[allow(dead_code)]`（非冗余字段）。
-// pub（非 pub(crate)）：`pub enum` 错误（如 `ObjectStoreError`）的变体字段恒 public，须持 public 类型
-// 否则「more private than item」privacy leak。re-export 于 rss-redact crate root。
+// 组件公开错误可持有本字段类型；canonical 公开入口为 rss-redact crate root。
 pub struct RedactedSource(
     // reason: write-only containment——原始错误 owned 供事后 debugger / core-dump 排查，但不经任何
-    // `Error` 接口（`Debug`/`Display`/`source()`）暴露（fail-closed PII 边界，DIPORT-ERR-SOURCE-REDACT-01）。
+    // `Error` 接口（`Debug`/`Display`/`source()`）暴露（fail-closed PII 边界，REDACT-SOURCE-OPAQUE-01）。
     #[allow(dead_code)] Box<dyn std::error::Error + Send + Sync + 'static>,
 );
 
@@ -49,8 +48,7 @@ impl RedactedSource {
 impl std::fmt::Debug for RedactedSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // PII 边界（Hard）：不展开内层（其 Debug 可能携连接串 / 凭据），只输出固定脱敏占位。
-        // 类型前缀对齐仓库脱敏 Debug 约定（`primitives::crypto::Signature(<redacted>)` /
-        // `rss_redact::Redacted(<redacted>)`）：wrapper derive(Debug) 渲染 `XError { source: RedactedSource(<redacted>) }`。
+        // wrapper derive(Debug) 渲染 `XError { source: RedactedSource(<redacted>) }`。
         f.write_str("RedactedSource(<redacted>)")
     }
 }
@@ -72,7 +70,7 @@ impl std::error::Error for RedactedSource {
 mod tests {
     //! `RedactedSource` `Debug` / `Display` 不展开内层（adapter 原始错误可能携连接串 / 凭据），
     //! 且 `Error::source()` 恒 `None`——原始内层不经任何 `Error` 接口暴露（fail-closed）。
-    //! INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
+    //! INVARIANT: REDACT-SOURCE-OPAQUE-01 { level = "Hard", exec = "native-test", source = "code" }.
     use super::RedactedSource;
 
     fn secret() -> std::io::Error {

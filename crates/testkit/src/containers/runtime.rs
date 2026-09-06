@@ -4,7 +4,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerRequest, Image};
 use tokio::io::AsyncReadExt as _;
 
-use super::{CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES, MINIO_ROOT_PASSWORD, MINIO_WORKLOAD_PASSWORD};
+use super::CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES;
 
 pub(super) async fn start<I, T>(image: T) -> Result<ContainerAsync<I>>
 where
@@ -82,17 +82,15 @@ pub(super) async fn run_container_command_output<I: Image>(
         ))?;
     Ok(ContainerCommandOutput {
         exit_code,
-        stdout: bounded_redacted_command_output(stdout),
-        stderr: bounded_redacted_command_output(stderr),
+        stdout: bounded_command_output(stdout),
+        stderr: bounded_command_output(stderr),
     })
 }
 
-pub(super) fn bounded_redacted_command_output(mut bytes: Vec<u8>) -> String {
+pub(super) fn bounded_command_output(mut bytes: Vec<u8>) -> String {
     let truncated = bytes.len() > CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES;
     bytes.truncate(CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES);
-    let mut output = String::from_utf8_lossy(&bytes)
-        .replace(MINIO_ROOT_PASSWORD, "<redacted>")
-        .replace(MINIO_WORKLOAD_PASSWORD, "<redacted>");
+    let mut output = String::from_utf8_lossy(&bytes).into_owned();
     output.retain(|character| character == '\n' || character == '\t' || !character.is_control());
     if truncated {
         output.push_str("\n[rss-testkit: command output truncated]");

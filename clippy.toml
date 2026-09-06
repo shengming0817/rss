@@ -14,7 +14,6 @@ disallowed-methods = [
   { path = "std::time::Instant::duration_since", reason = "同上：禁绕过 Clock 的时延计算" },
   { path = "std::time::SystemTime::elapsed", reason = "同上：禁直接 elapsed" },
   { path = "tokio::time::Instant::elapsed", reason = "同上（tokio 变体）", allow-invalid = true },
-  { path = "secure::RedisEndpoint::expose", reason = "凭据原文出口仅 Redis pool builder callsite 受控调用；生产路径必须先经 typed endpoint", allow-invalid = true },
 ]
 
 # 预留：跨域 wire 不裸传强类型标识等纪律，随类型落地补充。

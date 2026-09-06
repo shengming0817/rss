@@ -19,7 +19,7 @@ crate 划分、依赖方向及模块边界只按[架构与依赖规则](dependen
 
 - DB 字段 snake_case。
 - JSON、query、path、event header 字段 camelCase（`#[serde(rename_all = "camelCase")]`）。
-- 错误使用 `vocab`(error) + `thiserror`。
+- 各组件持有自己的错误类型，使用 `thiserror`；分类和诊断遵循[错误处理](error-handling.md)。
 - 日志和追踪使用结构化字段与关联上下文，输出遵循[错误处理](error-handling.md)的脱敏边界。
 - mock 放 `#[cfg(test)]` 模块或 `mockall`；crate 的 dependency/dev-dependency 边界由 Cargo manifest 显式声明。
 - 真实 provider 集成测试放在 `tests/*-integration` 的 `publish=false` workspace package；该 package

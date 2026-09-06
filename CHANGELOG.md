@@ -6,6 +6,20 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Internal package retirement (#2299)
+
+- Retire 29 unpublished legacy DI, service, aggregate and provider packages. The 24 public
+  Release Surface packages, six provider integration packages and internal testkit remain.
+- Remove legacy HTTP/conformance harnesses and MinIO, Vault and Redis TLS fixtures. Retain
+  PostgreSQL/RabbitMQ fixtures, Saga's Redis effect fixture, and bounded readiness/delay helpers.
+- Legacy eventexec DLQ operator workflows, DR recovery and DLX archival leave the current source
+  tree; they have not been migrated into the public messaging libraries. Public component schemas
+  and APIs are unchanged. The owner confirmed no supported external consumers or live legacy state.
+- Recovery sources: `baseline/pre-community-core-20260902` at
+  `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891`, and `baseline/pre-retirement-2299` at
+  `3e660e2f56cce38803a377b8ae7742203b36af68`. Future extraction follows capability ownership,
+  not restoration of the old aggregate packages.
+
 ### rss-saga / rss-saga-postgres 0.1.0
 
 - Add experimental `rss-saga 0.1.0` and `rss-saga-postgres 0.1.0`: exact definitions,

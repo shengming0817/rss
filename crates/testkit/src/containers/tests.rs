@@ -1,12 +1,8 @@
-#![allow(clippy::expect_used, unused_imports)]
-// reason: test setup and assertions use expect/expect_err to retain precise failure context.
-
-use super::minio::*;
-use super::postgres::*;
-use super::rabbitmq::*;
-use super::redis::*;
-use super::vault::*;
+use super::postgres::PgConnParams;
+use super::rabbitmq::{validate_exact_queue_name, validate_rabbit_vhost};
+use super::redis::REDIS_PORT;
 use super::*;
+use testcontainers::core::IntoContainerPort as _;
 
 #[test]
 fn published_port_resolution_retries_only_bounded_missing_port_metadata() {
@@ -28,6 +24,7 @@ fn published_port_resolution_retries_only_bounded_missing_port_metadata() {
 }
 
 #[test]
+#[allow(clippy::expect_used)] // Fixture setup assertions retain their failure context.
 fn network_attachment_rejects_shell_metacharacters_in_dns_name() {
     let err = validate_network_attachment(NetworkAttachment {
         network: "rss-bridge",
@@ -38,28 +35,13 @@ fn network_attachment_rejects_shell_metacharacters_in_dns_name() {
 
     validate_network_attachment(NetworkAttachment {
         network: "rss-bridge",
-        dns_name: "rss-so-1-vault",
+        dns_name: "rss-fixture-pg",
     })
     .expect("safe dns_name must pass");
 }
 
 #[test]
-fn vault_dev_tls_san_flags_include_dns_name_and_exclude_host_gateway_aliases() {
-    let flags = vault_dev_tls_san_flags("rss-fixture-dns");
-    assert_eq!(
-        flags,
-        vec![
-            "-dev-tls-san=localhost".to_string(),
-            "-dev-tls-san=127.0.0.1".to_string(),
-            "-dev-tls-san=rss-fixture-dns".to_string(),
-        ]
-    );
-    let joined = flags.join(" ");
-    assert!(!joined.contains("host.docker.internal"));
-    assert!(!joined.contains("host.testcontainers.internal"));
-}
-
-#[test]
+#[allow(clippy::expect_used)] // Fixture setup assertions retain their failure context.
 fn tls_dns_names_include_localhost_and_fixture_dns() {
     assert_eq!(
         tls_dns_names("rss-fixture-dns"),
@@ -69,19 +51,7 @@ fn tls_dns_names_include_localhost_and_fixture_dns() {
 }
 
 #[test]
-fn vault_fixture_pins_image_and_maps_host_https_endpoint() {
-    assert_eq!(
-        (vault::VAULT_IMAGE, vault::VAULT_IMAGE_TAG),
-        ("hashicorp/vault", "1.17.6")
-    );
-    assert_eq!(
-        vault_host_endpoint("127.0.0.1", 49_152),
-        "https://127.0.0.1:49152"
-    );
-}
-
-#[test]
-fn exact_provider_tls_inputs_reject_wildcards_and_policy_drift() {
+fn exact_rabbit_queue_names_reject_wildcards() {
     for queue in ["", "settings.*", "settings/queue", "空"] {
         assert!(
             validate_exact_queue_name(queue).is_err(),
@@ -89,50 +59,18 @@ fn exact_provider_tls_inputs_reject_wildcards_and_policy_drift() {
         );
     }
     assert!(validate_exact_queue_name("runtime.fact-updated").is_ok());
-
-    let policy: serde_json::Value = serde_json::from_str(&minio_archive_policy())
-        .expect("fixed MinIO archive policy must be valid JSON");
-    assert_eq!(
-        policy,
-        serde_json::json!({
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "s3:GetBucketVersioning",
-                        "s3:GetBucketObjectLockConfiguration",
-                        "s3:GetLifecycleConfiguration"
-                    ],
-                    "Resource": format!("arn:aws:s3:::{MINIO_ARCHIVE_BUCKET}")
-                },
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "s3:GetObject",
-                        "s3:GetObjectVersion",
-                        "s3:GetObjectRetention",
-                        "s3:PutObject"
-                    ],
-                    "Resource": format!("arn:aws:s3:::{MINIO_ARCHIVE_BUCKET}/*")
-                }
-            ]
-        }),
-        "MinIO workload policy must remain an exact closed value"
-    );
 }
 
 #[test]
-fn container_command_diagnostics_are_bounded_and_redacted() {
+fn container_command_diagnostics_are_bounded_and_strip_control_characters() {
     let oversized = format!(
-        "prefix {MINIO_ROOT_PASSWORD} {MINIO_WORKLOAD_PASSWORD} {}",
+        "prefix\x1b[31m\x00\n\t{}",
         "x".repeat(CONTAINER_COMMAND_OUTPUT_LIMIT_BYTES + 128)
     );
-    let rendered = runtime::bounded_redacted_command_output(oversized.into_bytes());
-
-    assert!(!rendered.contains(MINIO_ROOT_PASSWORD));
-    assert!(!rendered.contains(MINIO_WORKLOAD_PASSWORD));
-    assert_eq!(rendered.matches("<redacted>").count(), 2);
+    let rendered = runtime::bounded_command_output(oversized.into_bytes());
+    assert!(!rendered.contains('\x1b'));
+    assert!(!rendered.contains('\x00'));
+    assert!(rendered.contains("\n\t"));
     assert!(rendered.ends_with("[rss-testkit: command output truncated]"));
     assert!(
         rendered.len()
@@ -145,11 +83,10 @@ fn container_command_diagnostics_are_bounded_and_redacted() {
         stdout: "safe stdout".to_owned(),
         stderr: "safe stderr".to_owned(),
     }
-    .failure("provision archive");
+    .failure("provision fixture");
     let diagnostic = failure.to_string();
-    assert!(diagnostic.contains("provision archive"));
+    assert!(diagnostic.contains("provision fixture"));
     assert!(diagnostic.contains("exit=Some(7)"));
-    assert!(!diagnostic.contains("mc alias set"));
 }
 
 /// PgConnParams Debug 脱敏：password 输出 `<redacted>`，不泄露凭证。

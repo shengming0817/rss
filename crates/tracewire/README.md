@@ -43,8 +43,8 @@ is observability data: it must never mint identity or tenant authority, change a
 authorization, or block an HTTP request, message, or transaction.
 
 The package has no default features. OpenTelemetry exporter/subscriber helpers are intentionally
-absent from its feature graph and public API; RSS keeps its multi-consumer harness in the
-publish-disabled `tracewiretest` workspace crate.
+absent from its feature graph and public API. The crate uses a private subscriber helper in its
+own unit tests; consumers install test subscribers in their own test scope.
 
 Cargo publication eligibility and a passing same-revision package proof make this package a
 candidate only. RC approval applies to an exact revision and archive digest under the repository's

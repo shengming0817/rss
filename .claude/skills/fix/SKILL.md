@@ -77,7 +77,7 @@ CONFIRMED 后、修复前，先构造一个能**复现问题**的测试用例：
 
 判定依据（按顺序检查）：
 1. 修复涉及多少个文件？（`Grep` 搜索所有受影响的调用点）
-2. 是否需要修改底座 crate（`consistency` / `primitives` / `vocab` 等）的 trait 或类型？
+2. 是否需要修改底座 crate（`rss-transactional-messaging` / `rss-runtime` / `rss-contract` 等）的 trait 或类型？
 3. 是否需要修改数据库 schema（migration）？
 4. 是否影响组合根（assembly / bin crate）的组装逻辑？
 5. 同类问题在其他模块是否重复出现？（1 处=局部，3+=系统性）
@@ -146,7 +146,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | **下迭代做** | 设计级问题 / 改动量 200+ 行 / 需要先完成其他前置工作 |
 | **记录不做** | 理论风险但实际不触发 / 修复代价远大于收益 |
 
-**Q2: 能不能现在做？** 检查：已有 issue 依赖、活跃分支冲突、底座 crate（`consistency` / `primitives` / `vocab`）trait 消费方。
+**Q2: 能不能现在做？** 检查：已有 issue 依赖、活跃分支冲突、底座 crate（`rss-transactional-messaging` / `rss-runtime` / `rss-contract`）trait 消费方。
 
 **Q3: 最小修复的有效期？** 给出彻底方案的建议时间窗口。
 
@@ -199,11 +199,11 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 ### 4.1 Commit 格式
 
 在当前分支直接修改。Commit: `fix(<scope>): <问题简述>` + 根因 + 复杂度 + Refs + Co-Authored-By。
-scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `identity` / `eventexec` / `postgres`）。安全约束：只 add 修复文件（不 add -A）；不 amend。
+scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-transactional-messaging` / `rss-transactional-messaging-postgres`）。安全约束：只 add 修复文件（不 add -A）；不 amend。
 
 ### 4.2 执行代码修改（逐编辑测试循环）
 
-> **批量并行**：4+ 条 finding 时按 crate（扁平 workspace 的 `crates/*` 域/底座 crate、`adapters/*`、`bins/*`）聚类派发 `developer` sub-agent（**同 crate 同 agent** 防写冲突，组内串行执行下面循环）；并发 4-9→2 / ≥10→3；≤3 条由主 agent 直接处理。triage 同理可按聚类并行（`Explore`）。
+> **批量并行**：4+ 条 finding 时按 `cargo metadata --no-deps --format-version 1` 返回的实际 workspace package（含 integration package）聚类；非 Cargo 文件按共同 owner 聚类，再派发 `developer` sub-agent（**同 crate 同 agent** 防写冲突，组内串行执行下面循环）；并发 4-9→2 / ≥10→3；≤3 条由主 agent 直接处理。triage 同理可按聚类并行（`Explore`）。
 
 对每个任务，执行 Edit-Test Loop + 状态更新：
 

@@ -3,7 +3,7 @@
 //! 两层能力：
 //! - **sink/key funnel**：[`redact_error`]（顶层 `Display`-only）/ [`redact_field`]（按 key 判敏感）/
 //!   [`redact_url_credentials`]（剥 URL userinfo）——span error / tracing sink / last_error 一律经此收口
-//!   （由 `crates/observ`、`rss_redact::redact_error` 与 typed metric enums 承载），敏感 key 判定与
+//!   （由本 crate 的错误与字段脱敏入口承载），敏感 key 判定与
 //!   free-form scrub 不散落各 consumer。
 //! - **字段级策略模型**（#1360）：[`rss_contract::DataClass`] / [`PiiKind`] / [`RedactionMode`] / `RedactionCtx` /
 //!   [`Redact`] + 公开 funnel [`redact_struct`]。配 `#[derive(Redact)]`（`rss-redact-derive`）让任意 struct
@@ -622,13 +622,8 @@ fn scope_effective_mode(mode: RedactionMode, scope: RedactScope) -> RedactionMod
 /// 字段级脱敏渲染 funnel（`#[derive(Redact)]` 调用）。对每字段 apply 声明的 mode、按 tuple / named
 /// 形态渲染成已脱敏 `String`。`Drop` 字段从输出剔除。
 ///
-/// **返回 `String` 而非 [`Redacted`]（#1360 F1，封闭面收窄）**：本函数须 `pub`（derive 在 diport 等
-/// 外部 crate 生成的 `impl Redact` 调它），且字段 mode 由调用方传入（含 `Show`+任意 `value`）；若返回
-/// `Redacted` 则成外部 mint「安全值」的旁路。`Redacted` 改由固定语义 sink funnel 经 `pub(crate)`
-/// [`Redacted::new`] 独家产出——类型层封闭，外部不可伪造。
-/// 结构化 Debug 上下文的单字段渲染：先按 mode 脱敏，再对 `Show` 字段 Debug-转义（#1360 F3）——
-/// Show 字段含换行 / 控制字符时不污染 `Type { f: .. }` 渲染结构（与 derive(Debug) 对 `String` 字段一致）。
-/// `Fixed`/`Last4`/`EmailMask`/`Drop` 产物是受控占位 / 掩码片段，不转义（避免给 `<redacted>` 加引号）。
+/// 根据已选定的字段策略渲染原始值；仅在本模块内部调用。
+/// 返回的 `String` 由公开脱敏入口封装为 [`Redacted`]，不新增外部构造路径。
 fn render_field(mode: RedactionMode, value: RedactValue<'_>) -> String {
     let masked = mode.mask(value);
     if mode == RedactionMode::Show {
@@ -691,15 +686,14 @@ pub fn redact_struct(
 // ===== sink / key / url funnel =====
 
 /// 统一脱敏 funnel：把 error 的**顶层** `Display` 作为可记录的安全摘要。
-/// span error / tracing sink / last_error 一律经此（`crates/observ`、`rss_redact::redact_error` 与 typed metric enums），不裸打印 error。
+/// 调用方可用此处理 span error、tracing sink 或 last_error 的顶层诊断。
 ///
 /// # 安全性（fail-closed）
 ///
 /// **只输出顶层 `error.to_string()`，不遍历 `source()` 链**——source 链可能来自第三方 error
 /// （驱动 / 网络层），其 `Display` 可能携连接串 / 凭据 / 用户输入等 PII；默认不展开，从根上杜绝
-/// 经 error 链泄漏（也顺带消除 source 链循环遍历风险）。RSS 自有 `vocab::CoreError` 的 message 是
-/// `&'static str` const（安全），顶层摘要已足够定位；需要链路诊断的调用方走显式 verbose 通道，
-/// 不在本默认安全 funnel。
+/// 经 source 链泄漏（也顺带消除 source 链循环遍历风险）。调用方仍须确保顶层 Display 不包含
+/// payload 或其它敏感字段；这里的 URL 凭据清理不提供任意文本的全面脱敏。
 ///
 /// **belt-and-suspenders（#1361 review F2）**：顶层 `Display` 再经 [`redact_url_credentials`] 剥 URL
 /// 内联凭据——第三方驱动错误常把 DSN（`postgres://u:p@host/db ...`）拼进顶层 message，本 funnel 统一
@@ -791,7 +785,7 @@ pub fn redact_url_credentials(url: &str) -> Redacted {
 /// 输出已脱敏内容（安全可记录）。
 ///
 /// 持久化列 / 域字段 / writer 待落地（本轮仅交付安全载体——落地时列写入取 `LastError`，redaction 由构造口
-/// 强制；见 `crates/observ`、`rss_redact::redact_error` 与 typed metric enums）。
+/// 强制；由本 crate 的类型边界与测试验证）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct LastError(String);
 

@@ -53,14 +53,14 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 
 | Label | 领域 | 主要 crate |
 |-------|------|--------|
-| `area-kernel` | 底座/生命周期 + Bootstrap 启停编排 | `crates/bootstrap` `crates/primitives` `crates/runctx` `crates/ids` |
-| `area-auth` | 认证 + 授权 | `crates/authn` `crates/identity` `adapters/oidcadapter` |
-| `area-http` | Contract 注册/发现 + HTTP 入站 | `crates/httpserve` `crates/contractreg` `adapters/grpcadapter` `adapters/ratelimit` |
-| `area-eventing` | Outbox producer + Subscriber/Claimer + Saga L3 | `crates/consistency` `crates/eventexec` `crates/deviceloop` `adapters/amqpadapter` `adapters/mqttadapter` `adapters/softca` |
-| `area-data` | Config 热更新 + 持久化/加密 + 分布式锁 | `crates/settings` `crates/secure` `crates/support` `crates/distributed` `adapters/pgadapter` `adapters/redisadapter` `adapters/vaultadapter` `adapters/s3adapter` |
-| `area-observability` | Metrics / Tracing / Logging | `crates/observ` `crates/audit` `adapters/oteladapter` `adapters/promadapter` |
+| `area-kernel` | 公共基础与资源生命周期 | `crates/runtime` `crates/request-context` `crates/contract` |
+| `area-auth` | 身份与授权边界 | `crates/request-context` 的身份边界；产品认证与协议归仓外 |
+| `area-http` | 公共契约与产品 HTTP 边界 | `crates/contract` 的公共契约；HTTP host 归产品 |
+| `area-eventing` | 事务消息与持久化执行 | `crates/transactional-messaging*` `crates/saga*` `crates/projection*` `crates/reconcile*` `crates/device-command*` |
+| `area-data` | 组件持久化与存储保护 | `crates/data-protection` `crates/*-postgres` |
+| `area-observability` | Metrics / Tracing / Logging | `crates/diagctx` `crates/tracewire`；telemetry exporter 归产品 |
 | `area-tooling` | Cargo package 选择 + deny.toml + 标准工具链 | `hack/ci-impact.py` `deny.toml` `clippy.toml` |
-| `area-cross` | 跨 ≥4 领域 / 无明确归属 | `crates/vocab` `crates/syshealth` + 跨 ≥4 域 |
+| `area-cross` | 跨 ≥4 领域 / 无明确归属 | 跨 ≥4 个能力领域的变更 |
 
 ### 2.2 type-XX（类型，1 个，8 选）
 
@@ -114,7 +114,7 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 | **P3** | 触发型 / 可延后 / 性能微调 / 文档完善 | |
 
 **架构/去重/抽象命中信号**（任一即命中 → P3 升 P2、P2 升 P1，P1 维持）：type ∈ {arch-opt/refactor/debt} 且描述含
-*统一/合并/拆分/抽象/converge/unify/dedup/single source/funnel/sealed/Hard 升级* ；或触及 `crates/primitives` / `crates/consistency` 等多个核心 crate /
+*统一/合并/拆分/抽象/converge/unify/dedup/single source/funnel/sealed/Hard 升级* ；或触及 `crates/runtime` / `crates/transactional-messaging` 等多个核心 crate /
 crate 依赖图·deny.toml·clippy typed funnel / ≥3 crate；或 AI-robust Soft→Hard 未闭合；或影响 ≥3 领域。
 
 **触发型例外**：`flag-cond` 风格触发型条目，若其守护的 invariant 已被 Medium clippy lint/cargo-deny/governance 守住（CI 绿），

@@ -243,7 +243,7 @@ impl FilterBits {
 /// 截断 HMAC 盲索引值（等值-only；sealed 构造；无 Ord/PartialOrd/PartialEq/Eq）。
 ///
 /// **INVARIANT: FIELDPROT-BLINDIDX-EQUALITYONLY-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }**（Hard，类型系统载体）——
-/// `Ord`/`PartialOrd`/`PartialEq`/`Eq` **故意未 derive**，完全对标 `primitives::Mac`：
+/// `Ord`/`PartialOrd`/`PartialEq`/`Eq` **故意未 derive**：
 /// 等值比较唯一入口是常数时间 `ct_eq`，范围/前缀查询在类型层不可表达（无 `<`/`>` 运算符，
 /// 无 `Eq` 实现 → 不能用作 `HashMap` key / `BTreeMap` key / `==` 比较）。
 /// 消除 "不小心 == 比较导致时序泄漏" 和 "加了 range 查询但 HMAC 不保序" 两类错误。

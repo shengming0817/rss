@@ -16,7 +16,7 @@ workspace = true
 
 [dependencies]
 # 唯一生产 OpenTelemetry 桥：W3C Trace Context capture/remote-parent restore 单源；
-# httpd/eventexec/postgres 只依赖本 crate、不直接 import otel。Engine 档（被 service + adapter 依赖）。
+# Consumers use this propagation boundary; product hosts install their own exporter.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 # Span::current().context() / Span::set_parent(cx)：tracing span ↔ OTel Context 桥（OpenTelemetrySpanExt）。
 tracing-opentelemetry = { version = "0.33", default-features = false }
@@ -28,7 +28,7 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["t
 default = []
 
 [dev-dependencies]
-# 本 crate 自身私有单测装 subscriber；跨 crate 脚手架由 publish=false `tracewiretest` 承载。
+# This crate installs a private subscriber only in its own tests.
 tracing-subscriber = { workspace = true }
 # 精确断言 remote parent / tracestate 的内存 exporter；只进入本 crate 测试图。
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

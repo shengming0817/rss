@@ -341,7 +341,7 @@ fn extract_metadata(props: &lapin::BasicProperties) -> std::collections::BTreeMa
 /// lapin `Delivery` → `rss_transactional_messaging::transport::Delivery`（携 [`AmqpSettlement`] 结算句柄 + envelope metadata）。
 /// 先取出 `acker`（lapin `Acker` 是 Arc handle，cheap clone）再 move `data`/`properties` 构造 Message，
 /// 避免借用冲突。clone 出的句柄随 `Delivery` owned 交给 driver——driver 须保证最终只一方 settle
-/// （settle-once；二次 settle 在 lapin 层返 Err、由 eventexec 的 settle 失败日志承接，不 panic）。
+/// （settle-once；二次 settle 在 lapin 层返 Err，由调用方处理失败，不 panic）。
 fn delivery_to_core(
     delivery: Delivery,
     channel: Channel,
@@ -640,7 +640,7 @@ impl SubscriberInner {
         let topic_name = topic.as_str();
         validate_queue_name(topic_name)?;
         // 稳定 consumer tag（按 name+topic 派生）：重连/重订阅复用同一 tag，不变成新消费者
-        // （由 `contracts/**/contract.toml`、`generated` 与 `crates/consistency` 承载）。
+        // topic 来自 messaging core 的 SubscriptionIdentity，具体订阅由消费方配置。
         let consumer_tag = format!("{}-ack-{}", self.name, topic_name);
         // 每订阅独立 channel（review #274 F4/C4）：token cancel 只停止本 channel 的 consumer，
         // 不连带停掉同 subscriber 其它 topic 的 consumer。
