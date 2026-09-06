@@ -292,6 +292,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-tungstenite"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8447f02eaa65412035e2d3eeaa3fc82bbb8d7137c84c5976b4af685136012ee9"
+dependencies = [
+ "atomic-waker",
+ "futures-core",
+ "futures-io",
+ "futures-task",
+ "futures-util",
+ "log",
+ "pin-project-lite",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1083,6 +1103,12 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "fixedbitset"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "flagset"
@@ -2051,6 +2077,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqtt-integration"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "log",
+ "rcgen",
+ "rss-contract",
+ "rss-mqtt",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "rss-transactional-messaging-runtime",
+ "rumqttc-v5-next",
+ "rustls",
+ "rustls-pki-types",
+ "sqlx",
+ "tempfile",
+ "testkit",
+ "tokio",
+ "tokio-rustls",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mqttbytes-core-next"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366b6ba2b4209ca4bc5ac731ccddf570d09831981eed07e5fbd63564cf0cf1aa"
+dependencies = [
+ "bytes",
+ "thiserror",
+]
+
+[[package]]
 name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2918,6 +2979,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-mqtt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backon",
+ "bytes",
+ "rss-transactional-messaging",
+ "rumqttc-v5-next",
+ "rustls",
+ "static_assertions",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rss-observation"
 version = "0.1.0"
 dependencies = [
@@ -3278,6 +3356,44 @@ dependencies = [
  "rustc_version",
  "syn",
  "unicode-ident",
+]
+
+[[package]]
+name = "rumqttc-core-next"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "249896ab27ed630590971738264baa8f722f18965d2e387c706c40a3c2a572cc"
+dependencies = [
+ "async-tungstenite",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "rumqttc-v5-next"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dfa6ddcc7a7dd5688f9bf78d8f81cb94f367bce56c055d8d94cf81ecb0518bf"
+dependencies = [
+ "async-tungstenite",
+ "bytes",
+ "fixedbitset",
+ "flume",
+ "futures-util",
+ "log",
+ "mqttbytes-core-next",
+ "rumqttc-core-next",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4551,6 +4667,24 @@ dependencies = [
  "target-triple",
  "termcolor",
  "toml",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "rustls",
+ "rustls-pki-types",
+ "sha1 0.10.6",
+ "thiserror",
 ]
 
 [[package]]

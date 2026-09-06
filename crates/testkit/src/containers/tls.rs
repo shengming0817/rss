@@ -5,6 +5,8 @@ pub(super) struct TlsMaterial {
     pub(super) wrong_ca_pem: String,
     pub(super) server_cert_pem: String,
     pub(super) server_key_pem: String,
+    pub(super) client_cert_pem: String,
+    pub(super) client_key_pem: String,
 }
 
 pub(super) fn tls_dns_names(dns_name: &str) -> [&str; 2] {
@@ -50,7 +52,13 @@ pub(super) fn tls_material_for_host(dns_name: &str, matching_host: bool) -> Resu
     }
     server.subject_alt_names = sans;
     let server_cert = server.signed_by(&server_key, &ca)?;
+    let client_key = KeyPair::generate()?;
+    let mut client = CertificateParams::default();
+    client.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = client.signed_by(&client_key, &ca)?;
     Ok(TlsMaterial {
+        client_cert_pem: client_cert.pem(),
+        client_key_pem: client_key.serialize_pem(),
         ca_pem: ca.pem(),
         wrong_ca_pem: wrong_ca.pem(),
         server_cert_pem: server_cert.pem(),

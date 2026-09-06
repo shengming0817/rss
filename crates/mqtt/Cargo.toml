@@ -1,0 +1,32 @@
+[package]
+name = "rss-mqtt"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Bounded MQTT v5 QoS 1 delivery and RSS Outbox publication"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+backon.workspace = true
+rumqttc-v5-next.workspace = true
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["producer"] }
+bytes.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+static_assertions.workspace = true
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }

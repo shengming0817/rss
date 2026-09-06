@@ -3,6 +3,8 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/mqtt",
+  "tests/mqtt-integration",
   "crates/axum",
   "crates/transactional-messaging-recovery",
   "crates/saga",
@@ -43,6 +45,7 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-mqtt", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-kafka", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-axum", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-recovery", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -130,6 +133,11 @@ baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
 issue = 2297
 
 [workspace.dependencies]
+backon = { version = "1.6", default-features = false, features = ["std"] }
+rss-mqtt = { path = "crates/mqtt", version = "0.1.0" }
+rumqttc-v5-next = { version = "=0.34.0", default-features = false, features = ["use-rustls-ring"] }
+bytes = "1"
+log = "0.4"
 rdkafka = { version = "=0.39.0", default-features = false, features = ["ssl-vendored"] }
 rss-transactional-messaging-kafka = { path = "crates/transactional-messaging-kafka", version = "0.1.0" }
 rss-platform = { path = "crates/platform", version = "0.3.0" }

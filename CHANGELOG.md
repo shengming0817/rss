@@ -6,6 +6,16 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-mqtt 0.1.0 (#2305)
+
+- Add a standalone MQTT v5 / QoS 1 adapter using rumqttc-v5-next 0.34.0 tracked publication,
+  manual settlement, strict persistent-session checkpoints and bounded resource ownership.
+- Add the existing Publisher/PublishOutcome Outbox seam, verified with PostgreSQL and real Mosquitto,
+  including withheld PUBACK and same-identity recovery. No device protocol or legacy compatibility API.
+- Use the maintained MQTT v5 package with Rustls/ring; no historical advisory exceptions are restored.
+- Consumer-owned logging must exclude upstream MQTT targets until the explicitly accepted upstream
+  packet-diagnostic risk tracked in #2308 is fixed; other application logs remain enabled.
+
 ### rss-transactional-messaging-kafka 0.1.0 (#2306)
 
 - Add an experimental publisher-only Kafka adapter with verified TLS, bounded native ownership,

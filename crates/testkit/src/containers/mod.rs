@@ -184,3 +184,6 @@ pub use redis::{RedisFixture, managed_redis};
 
 #[cfg(test)]
 mod tests;
+
+mod mqtt;
+pub use mqtt::{MqttTlsFixture, mqtt_tls};
