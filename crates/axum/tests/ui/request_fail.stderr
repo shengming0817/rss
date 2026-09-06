@@ -1,0 +1,24 @@
+error[E0631]: type mismatch in function arguments
+ --> tests/ui/request_fail.rs:9:48
+  |
+8 | async fn wrong(_: ContractMarker<Echo>, _: State<App>, _: String) -> Result<u32, SafeError> { Ok(1) }
+  | ------------------------------------------------------------------------------------------- found signature defined here
+9 | fn main() { let _ = Endpoint::<Echo, App>::new(wrong); }
+  |                     -------------------------- ^^^^^ expected due to this
+  |                     |
+  |                     required by a bound introduced by this call
+  |
+  = note: expected function signature `fn(ContractMarker<Echo>, State<App>, u32) -> _`
+             found function signature `fn(ContractMarker<Echo>, State<App>, String) -> _`
+note: required by a bound in `Endpoint::<C, S>::new`
+ --> src/routes.rs
+  |
+  |     pub fn new<H, F>(handler: H) -> Self
+  |            --- required by a bound in this associated function
+  |     where
+  |         H: Fn(ContractMarker<C>, State<S>, C::Request) -> F + Clone + Send + Sync + 'static,
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Endpoint::<C, S>::new`
+help: consider wrapping the function in a closure
+  |
+9 | fn main() { let _ = Endpoint::<Echo, App>::new(|arg0: ContractMarker<Echo>, arg1: State<App>, arg2: u32| wrong(arg0, arg1, /* String */)); }
+  |                                                +++++++++++++++++++++++++++++++++++++++++++++++++++++++++      ++++++++++++++++++++++++++

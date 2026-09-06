@@ -11,6 +11,10 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。主�
 Observation 核心拥有来自离线、多来源生产者的可靠接收、报告语义、流身份与快照/增量完整性；
 `rss-observation-postgres` 拥有组件 schema 和原子持久化。核心不依赖 provider、命令库或 telemetry。
 
+rss-axum 拥有已接纳公共能力到 Axum 的可选协议适配：类型化契约绑定、请求处理预算与
+只读上下文、安全错误投影和 listener 到 rss-runtime 的资源交接。认证授权、协议编解码、
+最终路由组合、响应流限制与产品 readiness 由消费方拥有，不恢复通用 Web/装配平台。
+
 ## 产品拥有
 
 - 业务流程、读模型、设备认证与协议、MDM 策略和准入判定。

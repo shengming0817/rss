@@ -331,6 +331,8 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
  "sync_wrapper",
  "tower",
  "tower-layer",
@@ -2744,6 +2746,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-axum"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rss-contract",
+ "rss-platform",
+ "rss-request-context",
+ "rss-runtime",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "trybuild",
+]
+
+[[package]]
 name = "rss-contract"
 version = "0.1.0"
 
@@ -3409,6 +3434,17 @@ dependencies = [
  "ryu-js",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

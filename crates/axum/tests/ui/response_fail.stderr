@@ -1,0 +1,16 @@
+error[E0271]: expected `impl Future<Output = Result<String, SafeError>>` to be a future that resolves to `Result<u32, SafeError>`, but it resolves to `Result<String, SafeError>`
+ --> tests/ui/response_fail.rs:9:21
+  |
+9 | fn main() { let _ = Endpoint::<Echo, App>::new(wrong); }
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<u32, SafeError>`, found `Result<String, SafeError>`
+  |
+  = note: expected enum `Result<u32, SafeError>`
+             found enum `Result<String, SafeError>`
+note: required by a bound in `Endpoint::<C, S>::new`
+ --> src/routes.rs
+  |
+  |     pub fn new<H, F>(handler: H) -> Self
+  |            --- required by a bound in this associated function
+...
+  |         F: Future<Output = Result<C::Response, SafeError>> + Send + 'static,
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Endpoint::<C, S>::new`

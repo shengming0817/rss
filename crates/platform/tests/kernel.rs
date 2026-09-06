@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use rss_contract::ContractDescriptor;
+use rss_contract::{Contract, ContractDescriptor};
 use rss_platform::*;
 use rss_request_context::{
     Cancellation, CancellationObserver, Deadline, RequestContextView, RequestId,

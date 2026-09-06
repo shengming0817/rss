@@ -11,10 +11,13 @@
 - 重试、冲突、结果未知与 terminal outcome 按组件的真实语义表达；不能仅凭底层错误字符串推导可安全重试。
 - exported crate-scope 裸 `pub static ERR_*` / `pub const ERR_*` 哨兵错误禁止。
 
-## 产品 wire 边界
+## HTTP 适配与产品 wire 边界
 
-- HTTP 状态码、错误响应 envelope、request ID 注入及业务错误到 wire 的映射由产品消费方持有。
-- 组件不依赖 HTTP host，也不替产品声明统一的 4xx/5xx 映射。
+- 公共能力保留完整错误和恢复结果，先处理 CommitUnknown 等结果，再投影为 `rss-contract::SafeError`。
+- 可选 `rss-axum::HttpError` 只映射 SafeError 的封闭类别，输出 `{"error":{"code":"…","message":"…"}}`，
+  对应 400/401/403/404/409/429/503/500；不透传 source、内部诊断或自动重试授权，不兼容旧 envelope。
+- 产品拥有认证 challenge、业务错误、编解码、最终响应和 request ID 注入；其它组件不依赖 HTTP host。
+- 401 最终响应须由产品认证组件补充适用的 WWW-Authenticate，RSS 不选择认证方案。
 - 已接纳的持久化或跨版本错误 identity 仍受版本规则保护，不能因删除内部库而原地改变。
 
 ## Message 与敏感信息

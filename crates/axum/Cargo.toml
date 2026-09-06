@@ -1,0 +1,47 @@
+[package]
+name = "rss-axum"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Typed Axum bindings, request control and optional managed serving for RSS"
+categories = ["web-programming::http-server", "asynchronous"]
+keywords = ["axum", "contract", "deadline", "shutdown"]
+publish = ["crates-io"]
+
+[features]
+default = []
+managed-server = ["dep:rss-runtime", "dep:futures", "dep:hyper", "dep:hyper-util", "tokio/net"]
+
+[dependencies]
+rss-contract.workspace = true
+rss-request-context.workspace = true
+rss-runtime = { workspace = true, optional = true }
+futures = { workspace = true, optional = true, features = ["std", "async-await"] }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+axum.workspace = true
+tokio = { workspace = true, features = ["time", "macros"] }
+tokio-util.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+hyper = { workspace = true, features = ["client", "http2"] }
+rss-platform.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util", "io-util", "net", "sync"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util.workspace = true
+http-body.workspace = true
+futures = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+trybuild.workspace = true
+
+[lints]
+workspace = true
+
+[[example]]
+name = "managed"
+required-features = ["managed-server"]

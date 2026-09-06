@@ -11,6 +11,16 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, SystemTime};
 
+/// A protocol-neutral typed contract with one authored identity.
+///
+/// The application owns request/response types and the schema-to-type correspondence.
+/// This trait binds Rust types to an identity; it does not authenticate inputs or prove effects.
+pub trait Contract: Send + Sync + 'static {
+    type Request: Send + 'static;
+    type Response: Send + 'static;
+    const DESCRIPTOR: ContractDescriptor;
+}
+
 /// Conversion failure for an absolute Unix timestamp.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimepointError {

@@ -1,0 +1,24 @@
+warning: unused import: `rss_contract::SafeError`
+ --> tests/ui/error_fail.rs:5:5
+  |
+5 | use rss_contract::SafeError;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0271]: expected `impl Future<Output = Result<u32, Error>>` to be a future that resolves to `Result<u32, SafeError>`, but it resolves to `Result<u32, Error>`
+ --> tests/ui/error_fail.rs:9:21
+  |
+9 | fn main() { let _ = Endpoint::<Echo, App>::new(wrong); }
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<u32, SafeError>`, found `Result<u32, Error>`
+  |
+  = note: expected enum `Result<u32, SafeError>`
+             found enum `Result<u32, std::io::Error>`
+note: required by a bound in `Endpoint::<C, S>::new`
+ --> src/routes.rs
+  |
+  |     pub fn new<H, F>(handler: H) -> Self
+  |            --- required by a bound in this associated function
+...
+  |         F: Future<Output = Result<C::Response, SafeError>> + Send + 'static,
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Endpoint::<C, S>::new`

@@ -2,7 +2,11 @@
 
 `rss-contract` provides canonical, authority-free values used by RSS public APIs: contract
 identities, absolute timepoints, opaque pagination cursors, data classification, and redact-safe
-errors.
+errors, and the protocol-neutral `Contract` trait.
+
+`Contract` binds associated Request/Response types to one ContractDescriptor. It is the sole
+owner previously located in rss-platform; consumers import it directly from rss-contract.
+The trait does not prove schema/DTO equivalence or authorize execution. No old export remains.
 
 Values can be parsed at runtime or authored as validated constants. The package deliberately does
 not contain a registry, generated catalog, runtime binding, or admission authority.

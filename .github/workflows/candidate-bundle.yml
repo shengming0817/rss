@@ -74,6 +74,13 @@ jobs:
             test -f "$RSS_PACKAGE_PROOF/$package-$version.crate"
           done < "$RSS_PACKAGE_PROOF/packages.tsv"
 
+      - name: Verify independent Axum and shared Contract artifact consumption
+        env:
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
+        run: |
+          python3 -m unittest discover -s hack/tests -p test_axum_package_proof.py
+          python3 hack/axum-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
+
       - name: Verify independent Projection artifact consumption
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof

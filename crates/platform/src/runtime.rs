@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Instant;
 
-use rss_contract::{ContractDescriptor, ContractId};
+use rss_contract::{Contract, ContractDescriptor, ContractId};
 use rss_request_context::RequestContextView;
 
 use crate::{ApplicationName, ModuleName};
@@ -18,12 +18,6 @@ use crate::{ApplicationName, ModuleName};
 static NEXT_APPLICATION_SEAL: AtomicU64 = AtomicU64::new(1);
 
 pub type HandlerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HandlerError>> + Send + 'a>>;
-
-pub trait Contract: Send + Sync + 'static {
-    type Request: Send + 'static;
-    type Response: Send + 'static;
-    const DESCRIPTOR: ContractDescriptor;
-}
 
 pub trait Handler<C: Contract>: Send + Sync + 'static {
     fn handle<'a>(

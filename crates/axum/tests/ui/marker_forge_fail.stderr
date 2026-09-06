@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/marker_forge_fail.rs:2:21
+  |
+2 | fn main() { let _ = ContractMarker::<()>(std::marker::PhantomData); }
+  |                     ^^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/routes.rs
+  |
+  | pub struct ContractMarker<C>(PhantomData<fn() -> C>);
+  |                              ^^^^^^^^^^^^^^^^^^^^^^ private field

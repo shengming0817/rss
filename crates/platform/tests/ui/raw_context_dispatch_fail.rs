@@ -1,5 +1,6 @@
 use rss_contract::ContractDescriptor;
-use rss_platform::{Contract, Dispatcher};
+use rss_contract::Contract;
+use rss_platform::Dispatcher;
 use rss_request_context::RequestContextView;
 
 struct Inventory;

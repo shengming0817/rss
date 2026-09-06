@@ -3,6 +3,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/axum",
   "crates/saga",
   "crates/saga-postgres",
   "tests/saga-postgres-integration",
@@ -39,6 +40,7 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-axum", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-saga-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-saga", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-device-command", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -98,6 +100,12 @@ package = "rss-data-protection"
 baseline-rev = "d290fffe2378629a2afa5c468e9111e9b9780882"
 issue = 2293
 
+# #2300: approved pre-publication move to the sole rss-contract owner, without alias.
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-platform"
+baseline-rev = "9a2ab29a06b4bfb8baef4a1970412d03a9f0c1ef"
+issue = 2300
+
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
@@ -107,6 +115,13 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-platform = { path = "crates/platform", version = "0.3.0" }
+axum = { version = "0.8", default-features = false, features = ["json"] }
+tower = { version = "0.5", default-features = false }
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["server", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
 # Versions and sources are declared here; consumers select only their required features.
 # dynosaur and trait-variant remain exact-pinned for rss-runtime's async dispatch macros.
 # sqlx and lapin use Rustls with the ring provider; cargo-deny rejects alternative TLS providers.

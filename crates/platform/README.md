@@ -1,7 +1,7 @@
 # rss-platform
 
 `rss-platform` is the provider-free asynchronous application waist for RSS. Applications author
-typed `Contract` markers and async `Handler` implementations; the host supplies a read-only
+typed `rss_contract::Contract` markers and async `Handler` implementations; the host supplies a read-only
 `HostView`, while authenticated request values arrive as `rss-request-context` views.
 
 The crate deliberately contains no JWT/JWKS verification, provider catalog, process lifecycle,
@@ -19,3 +19,6 @@ let module = ApplicationModule::new(ModuleName::parse("inventory")?);
 assert_eq!(module.name().as_str(), "inventory");
 # Ok::<(), rss_platform::NameError>(())
 ```
+
+`Contract` is now owned by `rss-contract`; import `rss_contract::Contract` directly.
+The previous platform export is removed without alias or compatibility re-export.
