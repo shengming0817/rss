@@ -13,6 +13,10 @@ default = []
 rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime"]
 
 [dev-dependencies]
+rss-observation.workspace = true
+rss-observation-postgres = { workspace = true, features = ["integration"] }
+serde_json.workspace = true
+tempfile.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
 rss-transactional-messaging.workspace = true
 rss-transactional-messaging-runtime.workspace = true

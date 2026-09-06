@@ -3,6 +3,8 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/observation",
+  "crates/observation-postgres",
   "crates/projection",
   "crates/projection-postgres",
   "tests/projection-postgres-integration",
@@ -80,6 +82,8 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-observation", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-observation-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-projection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-projection-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
@@ -135,6 +139,9 @@ repository = "https://github.com/shengming0817/rss"
 # 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+tempfile = "3"
+rss-observation = { path = "crates/observation", version = "0.1.0" }
+rss-observation-postgres = { path = "crates/observation-postgres", version = "0.1.0" }
 rss-projection-postgres = { path = "crates/projection-postgres", version = "0.1.0" }
 rss-projection = { path = "crates/projection", version = "0.1.0" }
 rss-contract = { path = "crates/contract", version = "0.1.0" }

@@ -1,0 +1,23 @@
+[package]
+name = "rss-observation-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Atomic PostgreSQL persistence for observation batches"
+publish = ["crates-io"]
+[dependencies]
+rss-observation.workspace = true
+rss-request-context.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+futures = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["time"] }
+[features]
+default = []
+integration = []
+[dev-dependencies]
+anyhow.workspace = true
+[lints]
+workspace = true

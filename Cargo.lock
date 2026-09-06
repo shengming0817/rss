@@ -3637,13 +3637,17 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "rss-contract",
+ "rss-observation",
+ "rss-observation-postgres",
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",
  "rss-transactional-messaging-postgres",
  "rss-transactional-messaging-runtime",
  "rss-transactional-messaging-testkit",
+ "serde_json",
  "sqlx",
+ "tempfile",
  "testkit",
  "tokio",
 ]
@@ -4247,6 +4251,32 @@ name = "rss-diag-context"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rss-observation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rss-contract",
+ "rss-redact",
+ "rss-request-context",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
+name = "rss-observation-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-observation",
+ "rss-request-context",
+ "sqlx",
  "tokio",
 ]
 
@@ -5401,6 +5431,19 @@ dependencies = [
  "futures-io",
  "p12-keystore",
  "rustls-connector",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
