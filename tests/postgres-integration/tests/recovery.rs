@@ -253,7 +253,7 @@ async fn run() -> anyhow::Result<()> {
         ),
         "committed rejection survives missing ACK"
     );
-    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
+    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
     let operator_config = PgConfig::new(
         &params.host,
         params.port,
@@ -314,7 +314,7 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 async fn base_grants(owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_transactional_messaging TO recovery_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO recovery_runtime;").execute(owner).await?;
     Ok(())
 }
 async fn schema_signature(owner: &sqlx::PgPool) -> anyhow::Result<Vec<String>> {
@@ -427,7 +427,7 @@ async fn replay_scenarios(
     let cross = Mutation::new(
         other,
         OperationId::new(),
-        entry.target,
+        entry.target.clone(),
         receipt.version,
         Action::Replay(MessageId::parse("cross")?),
     )?;
@@ -439,6 +439,28 @@ async fn replay_scenarios(
         .fetch_one(owner)
         .await?;
     assert_eq!(count, 1);
+    // Simulate the persisted post-purge snapshot; the archive T2 suite proves the purge itself.
+    sqlx::query("UPDATE rss_transactional_messaging.consumer_dead_letter SET capsule=NULL WHERE tenant_id=$1::uuid AND id=$2::uuid").bind(tenant().to_string()).bind(entry.target.key()).execute(owner).await?;
+    assert_eq!(
+        committed(store.mutate(&req, deadline()).await)?.version,
+        receipt.version
+    );
+    let fresh = request(
+        entry.target.clone(),
+        receipt.version,
+        Action::Replay(MessageId::parse("cold-replay")?),
+    )
+    .await?;
+    assert_eq!(
+        failure(store.mutate(&fresh, deadline()).await),
+        Some(Error::Archived)
+    );
+    let inspected = page(&store, Query::inspect(tenant(), entry.target.clone())).await?;
+    if let Details::Consumer(details) = &inspected.entries[0].details {
+        assert!(!details.hot_available)
+    } else {
+        anyhow::bail!("consumer detail")
+    }
     Ok(())
 }
 #[allow(clippy::cognitive_complexity)] // reason: ordered real-database scenarios keep mutations adjacent to their durable assertions.

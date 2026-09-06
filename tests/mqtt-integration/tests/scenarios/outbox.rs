@@ -158,7 +158,7 @@ async fn provision(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
         .execute(owner)
         .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO mqtt_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO mqtt_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO mqtt_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO mqtt_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO mqtt_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_transactional_messaging TO mqtt_runtime; CREATE TABLE public.mqtt_handoff (message_id text PRIMARY KEY, payload bytea NOT NULL);").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO mqtt_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO mqtt_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO mqtt_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO mqtt_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO mqtt_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO mqtt_runtime; CREATE TABLE public.mqtt_handoff (message_id text PRIMARY KEY, payload bytea NOT NULL);").execute(owner).await?;
     Ok(())
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

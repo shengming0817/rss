@@ -41,3 +41,39 @@ Exact retries reuse the same OperationId and request digest. A new operation can
 MessageId, including a previous replay from the same source. `StoreFailureKind` retains closed backend
 classification alongside `LocalTxAttempt`; transient classification alone never authorizes retry
 after unknown commit or failed rollback.
+
+## Consumer archive lifecycle
+
+`archive` owns canonical archive format v1, exact-request product authorization, independently
+keyed AEAD assembly, and verified/missing proofs. `HotKey` and `ArchiveKey` cannot be interchanged;
+the archive cipher also rejects reuse of the actual HOT key identity. The canonical record includes
+the authenticated authored message, source identity, fingerprint, reason and capture time. Archive
+AAD binds tenant, source and generation under a separate protection domain. Before issuing a HOT
+cleanup proof, the core reads and authenticates the versioned archive format and checks the authored
+fingerprint against the trusted source; the format reader is private and grants no cold replay.
+
+The product explicitly supplies HOT retention, cold retention after purge, and `Hold`. HOT retention
+must cover the database's same-ID window plus safety margin. At purge the actual Compliance lock
+must extend strictly past database time plus the greater of cold retention and receipt retention.
+There is no fixed 30-day policy. `execute` is bounded, preserves `LocalTxAttempt` settlement states,
+and reserves settlement time for exact receipt readback. Products own scheduling and authorization.
+
+The PG repository persists randomized bytes before S3 writes. Unknown writes retry identical bytes;
+verified receipt commit removes temporary bytes. Cleanup removes only HOT capsule content, retaining
+source identity and operation receipts. `ConsumerDetails::hot_available` becomes false and a new
+Replay returns `Archived`; exact existing Replay operation retries still return their original receipt.
+No cold restoration/replay API is supplied in this version.
+
+Expired generations retain coordinates for bounded reconciliation. The PG scan rotates a persisted
+64-object batch so unresolved writes cannot starve later generations. A purged object remains
+`Purged` until expiry; `Retained` means it still exists after expiry.
+
+Missing/Evidence faults are persisted and block the same operation. A prior success cannot settle an
+attempt that observed an integrity failure, even if the fault write itself is interrupted. A new
+explicitly authorized operation is required to resume work; the old fault receipt stays intact.
+Natural retention expiry renews the generation and is not an integrity fault.
+Expired generations retain their evidence. A staged write with no known
+version and no currently visible object remains unresolved: a key-level absence does not prove that
+an unknown immutable version disappeared. Provider failures never mean missing. Closed observations
+carry no tenant, object path, payload or key data. Providers and product authorizers are trusted
+implementations; private proof construction does not establish the truth of a malicious provider.

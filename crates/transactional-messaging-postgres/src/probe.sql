@@ -77,6 +77,7 @@ expected_policies(relation, name, roles, predicate) AS (
       OR EXISTS (SELECT 1 FROM unnest(string_to_array(r.privileges, ',')) privilege
         WHERE NOT has_table_privilege(current_user, c.oid, privilege))
   ))),
+ ('runtime_acl', (NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='rss_transactional_messaging' AND p.proname LIKE 'archive_%' AND has_function_privilege(current_user,p.oid,'EXECUTE')))),
  ('runtime_acl', (has_schema_privilege(current_user, 'rss_transactional_messaging', 'USAGE'))),
  ('runtime_acl', (NOT has_schema_privilege(current_user, 'rss_transactional_messaging', 'CREATE'))),
  ('relay_acl', (NOT has_schema_privilege('rss_tmsg_relay', 'rss_transactional_messaging', 'CREATE'))),

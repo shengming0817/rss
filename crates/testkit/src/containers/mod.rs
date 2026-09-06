@@ -187,3 +187,6 @@ mod tests;
 
 mod mqtt;
 pub use mqtt::{MqttTlsFixture, mqtt_tls};
+
+mod minio;
+pub use minio::{MinioTlsFixture, minio_tls_archive};

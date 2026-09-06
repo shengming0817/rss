@@ -3,6 +3,8 @@
 [workspace]
 resolver = "2"
 members = [
+  "tests/archive-integration",
+  "crates/transactional-messaging-recovery-s3",
   "crates/mqtt",
   "tests/mqtt-integration",
   "crates/axum",
@@ -45,6 +47,7 @@ members = [
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-transactional-messaging-recovery-s3", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-mqtt", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-transactional-messaging-kafka", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
   { package = "rss-axum", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
@@ -115,8 +118,14 @@ baseline-rev = "9a2ab29a06b4bfb8baef4a1970412d03a9f0c1ef"
 issue = 2300
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-transactional-messaging-postgres"
-baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
-issue = 2301
+baseline-rev = "406c2f61cacf10b672e2351ace62c16e18963dae"
+issue = 2302
+
+# #2302: explicit pre-publication recovery inspection/error replacement.
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-recovery"
+baseline-rev = "406c2f61cacf10b672e2351ace62c16e18963dae"
+issue = 2302
 
 # #2310: explicit pre-publication replacement of the arbitrary MQTT Outbox mapper.
 [[workspace.metadata.semver-breaking-authorizations]]
@@ -139,6 +148,10 @@ baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
 issue = 2297
 
 [workspace.dependencies]
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
+rss-transactional-messaging-recovery-s3 = { path = "crates/transactional-messaging-recovery-s3", version = "0.1.0" }
+aws-sdk-s3 = { version = "=1.142.0", default-features = false, features = ["rt-tokio"] }
+base64 = "0.22"
 backon = { version = "1.6", default-features = false, features = ["std"] }
 rss-mqtt = { path = "crates/mqtt", version = "0.1.0" }
 rumqttc-v5-next = { version = "=0.34.0", default-features = false, features = ["use-rustls-ring"] }

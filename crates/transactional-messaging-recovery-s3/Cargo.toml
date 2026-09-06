@@ -1,0 +1,20 @@
+[package]
+name = "rss-transactional-messaging-recovery-s3"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Verified S3 Object Lock archive provider for transactional message recovery"
+publish = ["crates-io"]
+[dependencies]
+rss-transactional-messaging-recovery.workspace = true
+rss-transactional-messaging.workspace = true
+aws-sdk-s3.workspace = true
+base64.workspace = true
+sha2.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["time"] }
+[lints]
+workspace = true

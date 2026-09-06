@@ -53,7 +53,7 @@ pub async fn run(
     sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
         .execute(owner)
         .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO reconcile_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO reconcile_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO reconcile_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_transactional_messaging TO reconcile_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO reconcile_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO reconcile_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO reconcile_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO reconcile_runtime;").execute(owner).await?;
     let p = fixture.params();
     let runtime = Arc::new(
         PgRuntime::connect(

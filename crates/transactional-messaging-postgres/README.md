@@ -198,10 +198,9 @@ An existing terminal Inbox receipt with no saved payload is not retroactively re
 Create the opaque operator store with `PgRecoveryStore::connect(config, timer, protector)` after
 provisioning its privileges. The store privately owns the same PG pool/transaction implementation;
 it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
-continues to reject operator UPDATE rights. The operator role requires UPDATE on `consumer_dead_letter`
-and `outbox`, plus SELECT/INSERT on `recovery_operations`, in addition to the declared base privileges.
-These are explicit maintenance privileges;
-ordinary consumer roles do not receive them automatically. Every operation consumes library-bound
+continues to reject operator UPDATE rights. Provision the operator using the single
+[maintenance grant contract below](#consumer-archive-schema-and-role-cutover-2302); ordinary consumer
+roles do not receive these privileges automatically. Every operation consumes library-bound
 product authorization. RLS remains forced; runtime/maintenance logins must not own tables, bypass
 RLS or inherit the relay role. Products provision roles and decide authorization.
 
@@ -227,3 +226,47 @@ an uncertain commit; absence is not proof of rollback. The library never blindly
 `rss_transactional_messaging_recovery::execute` accepts core `ExecutionDeadlines`: mutation uses the
 operation cutoff, and receipt readback uses the reserved settlement cutoff from the same clock
 observation. It performs one mutation and never resets the total budget.
+
+## Consumer archive schema and role cutover (#2302)
+
+`ARCHIVE_UPGRADE_SQL` applies migrations 0004–0006 to the #2301 schema once; `MIGRATION_SQL`
+includes all three. Sites that already applied 0004 execute the appended 0005 and 0006 definitions, then grant
+EXECUTE on the replacement `archive_fault(uuid,uuid,bytea,text)` function. The three-argument overload
+is removed; no compatibility function remains. Sites already at 0005 apply only 0006.
+Migration 0006 fixes all seven archive functions (including internal `archive_fence`) to
+`search_path=pg_catalog,rss_transactional_messaging,pg_temp`, preventing temporary relation/type
+shadowing. The startup probe rejects unsafe paths, including drift of the internal helper.
+Current recovery probes require nullable HOT capsule content and reject the previous broad UPDATE
+permission. External migrators must revoke UPDATE on `consumer_dead_letter` from the recovery
+operator (including inherited grants), then grant only UPDATE(recovery_version) on that table.
+The complete additional maintenance grants are UPDATE on `outbox` and SELECT/INSERT on
+`recovery_operations`, together with the already declared base SELECT/INSERT and operation
+permissions. No old-schema runtime mode exists.
+
+`PgArchiveRepository` uses a separate, private pool and an archive-only role. The external migrator
+owns tables/functions and executes upgrades. Give the workload role schema USAGE and SELECT on
+`consumer_dead_letter`, `archive_jobs`, `archive_objects`; grant EXECUTE only on `archive_claim`,
+`archive_prepare`, `archive_record`, `archive_purge`, `archive_missing`, `archive_fault` with their
+migration-defined signatures. Do not grant `archive_fence`, schema CREATE, table writes, role-owner
+membership, SUPERUSER or BYPASSRLS. Function ownership must remain with the trusted component
+migration owner. The receipt-writer credential is a trusted verifier capability, not a generic
+operator credential; products must keep it away from untrusted arbitrary SQL execution.
+
+Claim/replay/purge share source-first locking. Each new exact archive request increments recovery
+revision and fences older requests; retries reuse the same OperationId/digest. The lease duration is derived from the current operation budget (up to five minutes)
+and may be resumed after expiry. Zero budgets return `Deadline`; larger budgets return `Invalid`
+before claim I/O. Longer jobs must be split into bounded attempts with the same exact request. A live competing lease returns `Busy`; a request/version mismatch
+returns `Conflict`, while a stale worker produces the distinct `LocalTxAttempt::Fenced` settlement. A hold is persisted even when no object work is performed. Later
+hold/release decisions require the current source revision. Policy changes cannot retroactively
+restore already-purged HOT content.
+
+Only verified, matching, sufficiently retained objects permit HOT removal. Prepared ciphertext is
+removed upon receipt commit or superseding an expired generation. Object coordinates, original source
+rows, Inbox/Outbox and recovery operation receipts remain. The product owns lifecycle expiry; the
+library has no S3 deletion port and never removes recovery idempotency evidence during reconciliation.
+
+The archive startup probe checks exact column types/nullability, constraints, defaults, RLS policies,
+indexes and effective role privileges. The entire component namespace effective EXECUTE set must
+match the archive allowlist; direct, inherited, PUBLIC and overloaded grants are checked. Drift returns `StorageContract`. Receipt readback prioritizes
+persisted integrity faults over earlier verified/purged progress. Expired generation scans persist
+`last_checked` within the claim transaction to rotate their bounded batch fairly.

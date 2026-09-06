@@ -9,3 +9,6 @@ mod store;
 pub use access::*;
 pub use model::*;
 pub use store::*;
+
+/// Verified WORM archive lifecycle for persisted consumer dead letters.
+pub mod archive;

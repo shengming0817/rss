@@ -263,3 +263,12 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
   of the published dependency and feature surface.
 - This is the initial public API; there is no earlier published version, compatibility
   shim, or migration path.
+
+## #2302 — Consumer dead-letter archive
+
+- Add recovery-owned archive format/proofs and independently keyed encryption, atomic PG progress/cleanup, and a verified S3 Compliance Object Lock adapter.
+- Replace recovery consumer inspection with explicit HOT availability; new Replay of archived content returns Archived. Preserve original operation receipts and source identities.
+- Require one-way archive schema upgrade and recovery operator column-grant cutover. No legacy API/schema compatibility branch.
+- Add real TLS PG/MinIO failure recovery and isolated archive artifact consumption proof.
+- Enforce durable integrity faults and truthful settlement/error categories; rotate expired-generation scans fairly and validate archive format readability before HOT cleanup.
+- Derive bounded archive leases from execution budgets, enforce the complete function allowlist, compile the independent S3 construction path, and keep object-size projections tied to the recovery owner.

@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 /// Closed recovery failure; never includes payload or provider diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
+    /// HOT content was safely archived; new replay requires a separate cold recovery capability.
+    #[error("recovery content archived")]
+    Archived,
     /// Malformed identity, version, cursor or operation combination.
     #[error("invalid recovery input")]
     Invalid,
@@ -385,6 +388,8 @@ pub enum Details {
 /// Consumer-specific recovery decision facts.
 #[derive(Debug)]
 pub struct ConsumerDetails {
+    /// Whether an authenticated HOT capsule remains available for a new replay.
+    pub hot_available: bool,
     /// Original handler group.
     pub group: ConsumerGroup,
     /// Complete authored contract identity.

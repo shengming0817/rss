@@ -1,0 +1,25 @@
+[package]
+name = "archive-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+[dev-dependencies]
+rss-transactional-messaging-recovery.workspace = true
+rss-transactional-messaging-recovery-s3.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, features = ["recovery", "integration"] }
+rss-transactional-messaging.workspace = true
+rss-request-context.workspace = true
+rss-contract.workspace = true
+rss-data-protection.workspace = true
+aws-sdk-s3.workspace = true
+aws-smithy-http-client.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "json"] }
+serde_json.workspace = true
+sha2.workspace = true
+ring.workspace = true
+anyhow.workspace = true
+[lints]
+workspace = true

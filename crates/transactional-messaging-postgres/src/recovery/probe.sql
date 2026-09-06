@@ -1,5 +1,5 @@
 WITH required(name, privileges) AS (
- VALUES ('consumer_dead_letter', CASE WHEN $1 THEN 'SELECT,INSERT,UPDATE' ELSE 'SELECT,INSERT' END)
+ VALUES ('consumer_dead_letter', 'SELECT,INSERT')
  UNION ALL SELECT 'recovery_operations', 'SELECT,INSERT' WHERE $1
  UNION ALL SELECT 'outbox', 'SELECT,INSERT,UPDATE' WHERE $1
 ), checks AS (
@@ -8,7 +8,7 @@ WITH required(name, privileges) AS (
    AND c.relrowsecurity AND c.relforcerowsecurity
    AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(r.privileges,',')) p WHERE NOT has_table_privilege(current_user,c.oid,p))
    AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
-     WHERE NOT p=ANY(string_to_array(r.privileges,',')) AND
+     WHERE NOT p=ANY(string_to_array(r.privileges,',')) AND NOT (r.name='consumer_dead_letter' AND p='UPDATE') AND
        (has_table_privilege(current_user,c.oid,p) OR (p IN ('SELECT','INSERT','UPDATE','REFERENCES') AND has_any_column_privilege(current_user,c.oid,CASE WHEN p IN ('SELECT','INSERT','UPDATE','REFERENCES') THEN p ELSE 'SELECT' END)))) AS valid
  FROM required r LEFT JOIN pg_class c ON c.oid=to_regclass('rss_transactional_messaging.'||r.name)
 ), required_columns(relation,name,type) AS (VALUES
@@ -24,7 +24,7 @@ WITH required(name, privileges) AS (
  ('recovery_operations','result_version','bigint'),('recovery_operations','replay_message_id','text'),
  ('recovery_operations','resolution','text'),('recovery_operations','evidence_message_id','text'))
 SELECT NOT EXISTS (SELECT 1 FROM checks WHERE valid IS NOT TRUE)
- AND NOT EXISTS (SELECT 1 FROM required_columns e LEFT JOIN information_schema.columns a ON a.table_schema='rss_transactional_messaging' AND a.table_name=e.relation AND a.column_name=e.name WHERE (e.relation <> 'recovery_operations' OR $1) AND (a.column_name IS NULL OR a.data_type <> e.type OR a.is_nullable <> CASE WHEN e.name IN ('replay_message_id','resolution','evidence_message_id') THEN 'YES' ELSE 'NO' END))
+ AND NOT EXISTS (SELECT 1 FROM required_columns e LEFT JOIN information_schema.columns a ON a.table_schema='rss_transactional_messaging' AND a.table_name=e.relation AND a.column_name=e.name WHERE (e.relation <> 'recovery_operations' OR $1) AND (a.column_name IS NULL OR a.data_type <> e.type OR a.is_nullable <> CASE WHEN e.name IN ('replay_message_id','resolution','evidence_message_id','capsule') THEN 'YES' ELSE 'NO' END))
  AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid IN ('rss_transactional_messaging.consumer_dead_letter'::regclass,'rss_transactional_messaging.recovery_operations'::regclass) AND (p.polname <> 'recovery_tenant' OR p.polroles <> ARRAY[0]::oid[] OR NOT p.polpermissive OR p.polcmd <> '*'))
  AND (SELECT count(*) = 2 FROM pg_policy WHERE polrelid IN ('rss_transactional_messaging.consumer_dead_letter'::regclass,'rss_transactional_messaging.recovery_operations'::regclass) AND polname='recovery_tenant' AND pg_get_expr(polqual,polrelid) = '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)' AND pg_get_expr(polwithcheck,polrelid) = '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)')
  AND NOT EXISTS (
@@ -60,3 +60,7 @@ SELECT NOT EXISTS (SELECT 1 FROM checks WHERE valid IS NOT TRUE)
  AND i.indrelid='rss_transactional_messaging.recovery_operations'::regclass AND i.indisvalid AND i.indisready AND i.indisunique
  AND (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(num,ord) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num)=ARRAY['tenant_id','replay_message_id']::name[]
  AND i.indpred IS NULL))
+
+ AND NOT has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','UPDATE')
+ AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='rss_transactional_messaging.consumer_dead_letter'::regclass AND attnum>0 AND NOT attisdropped AND attname<>'recovery_version' AND has_column_privilege(current_user,attrelid,attnum,'UPDATE'))
+ AND (NOT $1 OR has_column_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','recovery_version','UPDATE'))

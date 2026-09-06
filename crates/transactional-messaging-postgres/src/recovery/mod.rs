@@ -52,7 +52,7 @@ impl<K: Aead + Send + Sync> PgRecoveryStore<K> {
         key: Arc<K>,
     ) -> Result<Self, Error> {
         let runtime = Arc::new(
-            PgRuntime::connect_profile(config, timer, true)
+            PgRuntime::connect_profile(config, timer, crate::transaction::Profile::Recovery)
                 .await
                 .map_err(error)?,
         );

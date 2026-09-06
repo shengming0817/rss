@@ -165,7 +165,7 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         .execute(&mut *install)
         .await?;
     install.commit().await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO device_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO device_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO device_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO device_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_device_command TO device_runtime;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO device_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO device_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO device_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO device_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_device_command TO device_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_device_command TO device_runtime;").execute(&owner).await?;
     let config = PgConfig::new(
         &p.host,
         p.port,

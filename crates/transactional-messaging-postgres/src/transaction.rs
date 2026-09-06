@@ -75,6 +75,10 @@ impl PgStorageContractFailure {
 /// Safely redacted PostgreSQL failures. Transaction outcome is carried separately.
 #[derive(Debug, thiserror::Error)]
 pub enum PgError {
+    /// Archive domain failure, independent of transaction settlement certainty.
+    #[cfg(feature = "recovery")]
+    #[error(transparent)]
+    Archive(#[from] rss_transactional_messaging_recovery::archive::Error),
     /// Recovery domain rejection; transaction outcome independently reports rollback certainty.
     #[cfg(feature = "recovery")]
     #[error(transparent)]
@@ -291,18 +295,26 @@ pub enum PgTransactionFault {
     CommitAcknowledgedPending = 4,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Profile {
+    Runtime,
+    Recovery,
+    #[cfg(feature = "recovery")]
+    Archive,
+}
+
 impl PgRuntime {
     /// Connect and validate only this package's schema and effective permissions.
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
     ) -> Result<Self, PgError> {
-        Self::connect_profile(config, timer, false).await
+        Self::connect_profile(config, timer, Profile::Runtime).await
     }
     pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        recovery_operator: bool,
+        profile: Profile,
     ) -> Result<Self, PgError> {
         config.validate()?;
         let timer = PgTimer(Arc::new(timer));
@@ -324,6 +336,12 @@ impl PgRuntime {
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };
+        #[cfg(feature = "recovery")]
+        if profile == Profile::Archive {
+            crate::archive::check(&runtime, cutoff.operation(&runtime.timer)).await?;
+            return Ok(runtime);
+        }
+        let recovery_operator = profile == Profile::Recovery;
         let failure = within(&runtime.timer, cutoff, |_| async {
             sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
                 .bind(recovery_operator)
@@ -708,6 +726,60 @@ impl BorrowedTransaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "recovery")]
+    #[tokio::test]
+    async fn archive_probe_preserves_execution_failure() -> Result<(), Box<dyn std::error::Error>> {
+        struct Frozen;
+        impl Clock for Frozen {
+            fn now(&self) -> rss_transactional_messaging::policy::MonotonicInstant {
+                rss_transactional_messaging::policy::MonotonicInstant::from_elapsed(
+                    std::time::Duration::ZERO,
+                )
+            }
+        }
+        impl ExecutionTimer for Frozen {
+            async fn sleep_until(&self, _: AbsoluteDeadline) {
+                std::future::pending::<()>().await
+            }
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let runtime = PgRuntime {
+            pool,
+            timer: PgTimer(Arc::new(Frozen)),
+            #[cfg(feature = "integration")]
+            fault: std::sync::atomic::AtomicU8::new(0),
+        };
+        let deadline = AbsoluteDeadline::from_timeout(&runtime.timer, std::time::Duration::ZERO)?
+            .operation(&runtime.timer);
+        let result = crate::archive::check(&runtime, deadline).await;
+        assert!(
+            matches!(
+                result,
+                Err(PgError::Operation {
+                    kind: MessagingErrorKind::DeadlineElapsed,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let deadline =
+            AbsoluteDeadline::from_timeout(&runtime.timer, std::time::Duration::from_secs(1))?
+                .operation(&runtime.timer);
+        let result = crate::archive::check(&runtime, deadline).await;
+        assert!(
+            matches!(
+                result,
+                Err(PgError::Operation {
+                    kind: MessagingErrorKind::Permanent,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        Ok(())
+    }
     #[test]
     fn probe_preserves_transient_failures() {
         for source in [

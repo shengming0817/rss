@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Envelope {
+pub(crate) struct Envelope {
     id: String,
     tenant: String,
     occurred_at: i64,
@@ -45,7 +45,7 @@ impl Drop for Envelope {
     }
 }
 impl Envelope {
-    fn encode<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Result<String, Error> {
+    pub(crate) fn encode<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Result<String, Error> {
         let m = message.metadata();
         serde_json::to_string(&Self {
             id: message.id().as_str().into(),
@@ -64,7 +64,7 @@ impl Envelope {
         })
         .map_err(|_| Error::Protection)
     }
-    fn decode(raw: &str) -> Result<MessageEnvelope<Payload>, Error> {
+    pub(crate) fn decode(raw: &str) -> Result<MessageEnvelope<Payload>, Error> {
         let mut value: Self = serde_json::from_str(raw).map_err(|_| Error::Protection)?;
         let invalid = |_| Error::Protection;
         let contract = ContractIdentity::new(
@@ -180,7 +180,10 @@ impl CaptureContext {
         .map(|context| context.derive())
         .map_err(|_| Error::Protection)
     }
-    fn validate<P: AsRef<[u8]>>(&self, message: &MessageEnvelope<P>) -> Result<(), Error> {
+    pub(crate) fn validate<P: AsRef<[u8]>>(
+        &self,
+        message: &MessageEnvelope<P>,
+    ) -> Result<(), Error> {
         if message.metadata().tenant_id() != self.consumer.tenant_id()
             || message.id() != self.consumer.message_id()
             || message.metadata().contract() != self.consumer.contract()

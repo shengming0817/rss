@@ -120,7 +120,10 @@ async fn replay<K: Aead>(
         return Err(Error::Invalid.into());
     }
     let context = capture_context(&row, request, message_id)?;
-    let capsule = Capsule::from_provider(row.try_get("capsule")?)?;
+    let capsule = Capsule::from_provider(
+        row.try_get::<Option<Vec<u8>>, _>("capsule")?
+            .ok_or(Error::Archived)?,
+    )?;
     let original = open(key, &context, &capsule)?;
     let replay = MessageEnvelope::new(
         new_id.clone(),

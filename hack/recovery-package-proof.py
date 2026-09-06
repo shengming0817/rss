@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build isolated core-only and PostgreSQL recovery consumers from actual .crate archives."""
+"""Build isolated core, PostgreSQL, S3 and combined recovery consumers from actual .crate archives."""
 import argparse
 import hashlib
 import json
@@ -34,7 +34,46 @@ pub fn consumer<H,K>(effect: H, capture: rss_transactional_messaging_postgres::P
 }
 #[cfg(feature = "postgres")]
 pub fn migration() -> &'static str { rss_transactional_messaging_postgres::RECOVERY_UPGRADE_SQL }
+#[cfg(feature = "s3")]
+pub fn s3_port(store: &rss_transactional_messaging_recovery_s3::S3ArchiveStore) {
+    fn implements<S: archive::ArchiveObjectStore>(_: &S) {}
+    implements(store);
+}
+#[cfg(feature = "postgres")]
+pub fn archive_repository(store: &rss_transactional_messaging_postgres::PgArchiveRepository) {
+    fn implements<R: archive::ArchiveRepository>(_: &R) {}
+    implements(store);
+}
+
+#[cfg(feature = "s3")]
+pub async fn product_archive<R,H,K,C,A,O>(
+    client: aws_sdk_s3::Client, bucket: String,
+    wall: &impl rss_transactional_messaging_recovery_s3::Clock,
+    repository: &R, hot: &archive::HotKey<H>, cold: &archive::ArchiveKey<K>,
+    authorizer: &A, request: archive::Request, clock: &C,
+    deadlines: rss_transactional_messaging::policy::ExecutionDeadlines, observer: &O,
+) -> Result<rss_transactional_messaging::transaction::LocalTxAttempt<archive::Outcome,archive::Error>,archive::Error>
+where R: archive::ArchiveRepository, H: rss_data_protection::Aead + Send + Sync,
+      K: rss_data_protection::Aead + Send + Sync, C: rss_transactional_messaging::policy::ExecutionTimer,
+      A: archive::Authorizer, O: archive::Observer,
+{
+    let store = rss_transactional_messaging_recovery_s3::Unverified::new(client,bucket)?
+        .verify(wall,deadlines.operation().operation(clock)).await?;
+    let request = archive::authorize(authorizer,request,deadlines.operation().operation(clock)).await?;
+    Ok(archive::execute(repository,&store,hot,cold,&request,clock,deadlines,observer).await)
+}
 '''
+
+def validate_selection(flags, names):
+    forbidden = {
+        ('--no-default-features',): {'sqlx', 'rss-transactional-messaging-postgres', 'rss-runtime', 'aws-sdk-s3'},
+        ('--features', 'postgres'): {'aws-sdk-s3'},
+        ('--features', 's3'): {'sqlx', 'rss-transactional-messaging-postgres', 'rss-runtime'},
+        ('--all-features',): set(),
+    }[tuple(flags)]
+    leaked = {name for name in names if name in forbidden or ('sqlx' in forbidden and name.startswith('sqlx-'))}
+    if leaked:
+        raise ValueError(f'{flags} acquired forbidden dependencies: {sorted(leaked)}')
 
 def run(args, cwd, env):
     subprocess.run(args, cwd=cwd, env=env, check=True, timeout=300)
@@ -59,6 +98,7 @@ def main():
             if dep.get('path') and dep['kind'] != 'dev': visit(dep['name'])
     visit('rss-transactional-messaging-recovery')
     visit('rss-transactional-messaging-postgres')
+    visit('rss-transactional-messaging-recovery-s3')
     with tempfile.TemporaryDirectory(prefix='rss-recovery-proof-') as tmp:
         root = Path(tmp).resolve()
         if options.artifacts:
@@ -104,8 +144,11 @@ rss-transactional-messaging = "=0.2.0"
 rss-request-context = "=0.1.0"
 rss-data-protection = "=0.1.0"
 rss-transactional-messaging-postgres = { version = "=0.1.0", optional = true, features = ["recovery"] }
+rss-transactional-messaging-recovery-s3 = { version = "=0.1.0", optional = true }
+aws-sdk-s3 = { version = "=1.142.0", default-features = false, features = ["rt-tokio"], optional = true }
 [features]
 default = []
+s3 = ["dep:rss-transactional-messaging-recovery-s3", "dep:aws-sdk-s3"]
 postgres = ["dep:rss-transactional-messaging-postgres"]
 managed = ["postgres", "rss-transactional-messaging-postgres/rss-runtime"]
 [patch.crates-io]
@@ -114,14 +157,14 @@ managed = ["postgres", "rss-transactional-messaging-postgres/rss-runtime"]
         (consumer/'Cargo.toml').write_text(manifest)
         (consumer/'src/lib.rs').write_text(CONSUMER)
         env['CARGO_TARGET_DIR'] = str(ROOT/'target'/'recovery-package-proof')
-        for flags in (['--no-default-features'],['--features','postgres'],['--all-features']):
+        for flags in (['--no-default-features'],['--features','postgres'],['--features','s3'],['--all-features']):
             run(['cargo','check','--offline',*flags],consumer,env)
             facts = json.loads(subprocess.check_output(['cargo','metadata','--offline','--format-version','1',*flags],cwd=consumer,env=env,timeout=60))
             active = {node['id'] for node in facts['resolve']['nodes']}
+            validate_selection(flags, {p['name'] for p in facts['packages'] if p['id'] in active})
             for package in facts['packages']:
                 if package['id'] not in active: continue
                 if package['source'] is None and not Path(package['manifest_path']).resolve().is_relative_to(root): raise ValueError('artifact consumer escaped extracted packages')
-                if flags == ['--no-default-features'] and package['name'] in ('sqlx','rss-transactional-messaging-postgres','rss-runtime'): raise ValueError('core-only consumer acquired provider/host')
-        print(json.dumps({'artifacts':receipts,'consumer':'core/postgres/managed passed'},indent=2))
+        print(json.dumps({'artifacts':receipts,'consumer':'core/postgres/s3/combined passed'},indent=2))
 
 if __name__ == '__main__': main()
