@@ -4544,6 +4544,7 @@ dependencies = [
  "rss-contract",
  "rss-request-context",
  "rss-transactional-messaging",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

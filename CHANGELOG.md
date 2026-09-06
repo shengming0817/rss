@@ -22,6 +22,8 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ### rss-transactional-messaging-testkit 0.1.0
 
+- Close the `none`/`producer`/`consumer` feature graph so each mode activates only its matching core
+  capability; keep LocalTx/FakeClock feature-neutral and gate inbox/settlement doubles as consumer API.
 - Separate publisher/delivery transport conformance from OutboxDriver storage proof. PostgreSQL retains
   real Retry/DeadLetter/Published and lease/reclaim evidence without a simulated publisher.
 - Establish the sole provider-neutral owner for transactional messaging conformance drivers and
@@ -47,6 +49,8 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ### rss-transactional-messaging 0.2.0
 
+- Keep provider-neutral LocalTx outcomes available without producer or consumer features while
+  compiling receipt, ingress, settlement, and `ConsumerTx` capabilities only for consumers.
 - Replace `RetryTimer` and relative phase projections with one `ExecutionTimer`, typed
   operation/settlement deadlines, and a deadline-first `within` funnel; distinguish elapsed budget
   from retryable provider failures without compatibility aliases.

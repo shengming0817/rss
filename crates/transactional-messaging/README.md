@@ -6,7 +6,8 @@ policy, and observability ports. It contains no relay or consumer execution algo
 runtime task, broker topology, SQL implementation, provider handle, health registry, or assembly.
 
 The default feature set enables both `consumer` and `producer`; disabling either removes that
-side's ports and state machines from the public API.
+side's ports and state machines from the public API. Provider-neutral LocalTx attempt, deadline,
+retry, and final-status types remain available without either feature.
 
 Consumer authority is represented by opaque, move-only phases. `verify_ingress` is the only
 constructor for `VerifiedConsumerBinding`; exact subscription, tenant, message, contract, and

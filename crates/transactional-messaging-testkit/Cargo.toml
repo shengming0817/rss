@@ -16,18 +16,21 @@ workspace = true
 
 [features]
 default = ["consumer", "producer"]
-consumer = []
+consumer = [
+  "rss-transactional-messaging/consumer",
+]
 producer = [
   "rss-transactional-messaging/producer",
 ]
 
 [dependencies]
-rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["consumer"] }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false }
 thiserror.workspace = true
 
 [dev-dependencies]
 rss-contract.workspace = true
 rss-request-context.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
 
 [[test]]

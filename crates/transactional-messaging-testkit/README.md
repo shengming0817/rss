@@ -14,8 +14,8 @@ deadline covers the complete suite, so a provider cannot reset the budget betwee
 
 | Feature | Modules and doubles |
 | --- | --- |
-| no default features | `localtx`, `ConformanceError`, `FakeClock`, `MemoryInboxStore`, `RecordingSettlement` |
-| `consumer` | `inbox`, `consumer`, delivery transport conformance |
+| no default features | `localtx`, `ConformanceError`, `FakeClock` |
+| `consumer` | `inbox`, `consumer`, `MemoryInboxStore`, `RecordingSettlement`, delivery transport conformance |
 | `producer` | `outbox`, `MemoryOutboxStore`, `MemoryPublisher`, publisher transport conformance |
 
 Both features are enabled by default. Memory stores are non-durable test doubles and make no

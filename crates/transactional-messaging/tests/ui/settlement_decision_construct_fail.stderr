@@ -7,8 +7,8 @@ error[E0423]: cannot initialize a tuple struct which contains private fields
 note: constructor is not visible here due to private fields
  --> src/transaction.rs
   |
-  | pub struct SettlementDecision(SettlementKind);
-  |                               ^^^^^^^^^^^^^^ private field
+  |     pub struct SettlementDecision(SettlementKind);
+  |                                   ^^^^^^^^^^^^^^ private field
 help: you might have meant to use the `requeue` associated function
   |
 4 -     let _forged = SettlementDecision(SettlementKind::Acknowledge);

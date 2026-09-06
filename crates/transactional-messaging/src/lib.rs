@@ -16,8 +16,7 @@ pub mod observability;
 pub mod outbox;
 /// Deadline, retry, delivery-budget, and monotonic-time policies.
 pub mod policy;
-#[cfg(feature = "consumer")]
-/// Consumer transaction outcomes and opaque transition capabilities.
+/// Local transaction outcomes and, with `consumer`, opaque consumer capabilities.
 pub mod transaction;
 /// Narrow publisher and delivery-source transport ports.
 pub mod transport;

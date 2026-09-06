@@ -478,6 +478,7 @@ mod producer {
 #[cfg(feature = "producer")]
 pub use producer::{MemoryOutboxStore, MemoryPublisher};
 
+#[cfg(feature = "consumer")]
 mod consumer {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -811,4 +812,5 @@ mod consumer {
     }
 }
 
+#[cfg(feature = "consumer")]
 pub use consumer::{MemoryInboxStore, RecordingSettlement};
