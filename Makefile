@@ -14,9 +14,11 @@ ci:
 	@python3 hack/ci-run.py -- $(CI_MAKE) -j1 --no-print-directory _ci
 
 ci-full:
-	@python3 hack/ci-run.py -- $(CI_MAKE) -j1 --no-print-directory _ci CI_FULL=1
+	@python3 hack/ci-run.py -- $(CI_MAKE) -j1 --no-print-directory _ci CI_FULL=1 CI_SEMVER_FULL=1
 
-export CI_BASE CI_HEAD CI_PART CI_FULL CI_FILTER CI_PLAN CI_ARTIFACTS
+export CI_BASE CI_HEAD CI_PART CI_FULL CI_FILTER CI_PLAN CI_ARTIFACTS CI_SEMVER_FULL
+# SemVer full scope is separate from develop test/deny depth.
+CI_SEMVER_FULL ?= 0
 _ci:
 	@python3 hack/ci-pipeline.py
 
@@ -29,7 +31,6 @@ _ci-checks:
 	cargo clippy --locked --all-targets --all-features $(CI_PACKAGES) -- -D warnings || status=$$?; \
 	if [ "$(CI_FULL)" = 1 ]; then \
 	cargo deny check -D unused-wrapper || status=$$?; \
-	bash hack/semver-checks.sh "$(CI_BASE)" "$(CI_HEAD)" || status=$$?; \
 	fi; \
 	exit $$status
 

@@ -30,7 +30,7 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。本�
 1. 先 `Read` 目标文件，`Grep` 搜索已有实现
 2. 编辑循环按改动类型运行最小复现测试；收尾统一运行 `make ci CI_BASE=<remote>/develop`。它按 Cargo
    reverse dependency closure 选择 package，并运行标准 check/nextest/clippy；影响分析异常保守回退
-   `make ci` 的全工作区测试和覆盖率。SemVer/deny 仅在 develop 或显式 `make ci-full` 执行；
+   `make ci` 的全工作区测试和覆盖率。deny 仅在 develop 或显式 `make ci-full` 执行；SemVer 按 Release Surface 的兼容承诺和变更影响独立选择；
    不设人为 CI 总时限，测试及资源操作保留有界等待
 3. 只改需要改的
 

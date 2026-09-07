@@ -82,3 +82,11 @@ same-revision digest、命令结果与维护者裁决只进入 issue 或 PR revi
 只有版本存在 unsound、安全风险、实质性损坏或关键 artifact/metadata 错误时才执行 yank。yank 不是删除，不得用于
 改写历史；应尽可能发布修正版并记录影响。仓库变更通过新的受 review commit 回滚；已发布 artifact 通过新版本回滚，
 必要时 yank 错误版本。凭据泄露必须立即轮换，因为 revert 和 yank 都无法将其删除。
+
+候选 package proof 先经独立 SemVer gate：已承担兼容承诺的包绑定候选 SHA、包身份与条目中的已发布版本/release commit；
+首次发布前无历史承诺的包明确跳过历史比较，但保留 package/独立消费证明。发布或冻结承诺时必须更新现有
+Release Surface compatibility 条目，不能通过保留 uncommitted 绕过后续检查。发布仍由维护者人工执行。
+候选包摘要与 inventory 校验及 artifact 上传为必需；最终 Summary 为可选展示，不改变发布候选结论。
+
+候选 workflow 的 `compatibility_base` 必须指定维护者已接纳的历史兼容政策 commit/tag，独立于候选 head；
+不能用候选本身或机械的 HEAD^ 代替。发布入口以此验证承诺删除、降级和换基准，base=head 明确拒绝。

@@ -26,7 +26,8 @@
 
 - 普通 PR 运行 affected T1 与必要 T2；rename/copy、全局输入、未知路径或分析异常必须 fail-full。
 - 全工作区回退、develop 和显式 full 执行完整测试与 80% 行覆盖率门禁；affected 不判定全工作区覆盖率。
-- 范围与深度独立：完整 SemVer、deny 属于 develop 或显式 full；未知影响回退只扩大测试范围。
+- 范围与深度独立：deny 属于 develop 或显式 full；SemVer 由同一选择器按明确兼容承诺及影响闭包独立选择，
+  PR/develop 使用 affected，显式 full 检查全部适用受保护包。未知影响保守扩大适用范围，不创建实验包兼容承诺。
 - 不设置人为 CI 总时限；测试与资源操作保持有界等待。performance 须另有明确验证需求。
 - candidate/release final-HEAD identity 验证只覆盖已接纳的 package artifact 与 release metadata；
   消费方应用装配、配置和运行计划漂移属于 External。

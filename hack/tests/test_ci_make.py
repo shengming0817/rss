@@ -21,7 +21,7 @@ class MakeTests(unittest.TestCase):
         shutil.copy(ROOT / "hack/ci-run.py", self.root / "hack")
         shutil.copy(ROOT / "hack/ci-pipeline.py", self.root / "hack")
         (self.root / "hack/ci-impact.py").write_text("import os; print(os.environ['DECISION'])\n")
-        (self.root / "hack/semver-checks.sh").write_text('echo semver >> "$COMMAND_LOG"\nexit "${FAIL_SEMVER:-0}"\n')
+        (self.root / 'hack/ci-semver.py').write_text('def select(*a, **k): return {"selected": False, "reason": "no-protected-packages"}\n')
         self.bin = self.root / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
@@ -73,7 +73,7 @@ class MakeTests(unittest.TestCase):
                         f'check --locked --no-default-features {packages}',
                         f'check --locked --all-features {packages}',
                         f'clippy --locked --all-targets --all-features {packages} -- -D warnings']
-            if deep: expected += ['deny check -D unused-wrapper', 'semver']
+            if deep: expected += ['deny check -D unused-wrapper']
             self.assertEqual(commands, expected)
 
     def test_every_check_runs_after_multiple_failures(self):
@@ -85,35 +85,19 @@ class MakeTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(commands, expected)
 
-    def test_semver_collects_package_and_feature_failures(self):
-        shutil.copy(ROOT / "hack/semver-checks.sh", self.root / "hack")
-        manifest = '\n'.join([
-            '[workspace]', 'members = []',
-            '[[workspace.metadata.release-surface.packages]]', 'package = "first"',
-            '[[workspace.metadata.release-surface.packages]]', 'package = "second"',
-        ])
-        (self.root / 'Cargo.toml').write_text(manifest)
-        for args in (["add", "Cargo.toml"], ["-c", "user.name=Test", "-c", "user.email=test@example.com",
-                                            "commit", "-qm", "surface"]):
-            subprocess.run(["/usr/bin/git", *args], cwd=self.root, check=True, capture_output=True)
-        metadata = {"packages": [{"name": name, "targets": [{"kind": ["lib"]}]}
-                                  for name in ('first', 'second')],
-                    "metadata": {"release-surface": {"packages": [{"package": name}
-                                                                  for name in ('first', 'second')]}}}
-        (self.bin / 'cargo').write_text(
-            '#!/usr/bin/env python3\nimport json, os, sys\n'
-            'if sys.argv[1] == "metadata": print(os.environ["METADATA"])\n'
-            'else:\n'
-            ' with open(os.environ["COMMAND_LOG"], "a") as log: log.write(" ".join(sys.argv[1:])+"\\n")\n'
-            ' sys.exit(9 if "--all-features" not in sys.argv else 0)\n')
-        result = subprocess.run(['bash', 'hack/semver-checks.sh', 'HEAD', 'HEAD~1'],
-                                cwd=self.root, env=self.env | {'METADATA': json.dumps(metadata)},
-                                capture_output=True, text=True, timeout=15)
+    def test_semver_has_one_separate_entry_and_preserves_failure(self):
+        (self.root / 'hack/ci-semver.py').write_text(
+            'import os\n'
+            'def select(*a, **k): return {"selected": True, "checks": []}\n'
+            'def execute(*a):\n'
+            ' with open(os.environ["COMMAND_LOG"], "a") as log: log.write("semver\\n")\n'
+            ' return 7\n')
+        result, commands = self.run_make('checks', target='ci-full')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('semver', commands)
+        result, commands = self.run_make('semver', target='ci-full')
         self.assertNotEqual(result.returncode, 0)
-        commands = self.log.read_text().splitlines()
-        self.assertEqual(len(commands), 4, result.stderr)
-        self.assertEqual(sum('--all-features' in command for command in commands), 2)
-        self.assertEqual(sum('--package second' in command for command in commands), 2)
+        self.assertEqual(commands, ['semver'])
 
     def test_invalid_part_and_empty_selection(self):
         result, commands = self.run_make("typo")

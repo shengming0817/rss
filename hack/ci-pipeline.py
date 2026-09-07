@@ -4,7 +4,9 @@
 ref: cargo-llvm-cov v0.8.7 src/report.rs (nextest archive objects), nextest archive metadata.
 """
 import hashlib
+import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -41,6 +43,46 @@ def run(command, *, env=None, capture=False):
     return result.stdout if capture else result.returncode
 
 
+def semver_module():
+    spec = importlib.util.spec_from_file_location('ci_semver', Path(__file__).with_name('ci-semver.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def semver_selection(plan):
+    requested = os.environ.get('CI_SEMVER_PACKAGES')
+    mode = os.environ.get('CI_SEMVER_MODE', 'affected')
+    if mode not in ('affected', 'all', 'compare', 'release'):
+        raise ValueError('invalid SemVer mode')
+    full = mode in ('all', 'release') or os.environ.get('CI_SEMVER_FULL') == '1'
+    if requested is not None and (mode != 'compare' or full):
+        raise ValueError('explicit SemVer packages require compare mode without full selection')
+    if mode == 'compare' and requested is None:
+        raise ValueError('explicit SemVer comparison requires packages')
+    if mode == 'release':
+        module = semver_module()
+        if module.revision(ROOT, plan['base']) == module.revision(ROOT, os.environ.get('CI_HEAD', 'HEAD')):
+            raise ValueError('release requires an independent accepted compatibility base')
+    return semver_module().select(ROOT, plan['base'], os.environ.get('CI_HEAD', 'HEAD'), plan,
+                                  full=full,
+                                  requested=requested.split(',') if requested is not None else None,
+                                  comparison=mode == 'compare')
+
+
+def semver(plan):
+    selected = semver_selection(plan)
+    if 'semver' in plan and selected != plan['semver']:
+        raise ValueError('SemVer selection identity mismatch')
+    if not selected['selected']:
+        print('SemVer: skipped (' + selected['reason'] + ')')
+        return 0
+    status = semver_module().execute(ROOT, selected, ARTIFACTS / 'semver')
+    if status == 130:
+        raise KeyboardInterrupt
+    return status
+
+
 def integration_groups():
     # Unit and independent Cargo consumers have distinct execution/cache contracts.
     # Every other partition uses the fixture launcher and the remote integration matrix.
@@ -59,7 +101,9 @@ def install_toolchain():
 
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n')
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n')
+    temporary.replace(path)
 
 
 def sha(path):
@@ -207,47 +251,113 @@ def execute(plan, group):
     profiles.mkdir()
     env = os.environ | {'LLVM_PROFILE_FILE': str(profiles / '%p-%m.profraw'),
                         'RSS_TEST_RUN_ID': f'rss-{uuid.uuid4().hex}',
-                        'RSS_TEST_METRICS': str(output / 'fixtures.jsonl')}
+                        'RSS_TEST_METRICS_DIR': str(output / 'fixture-metrics')}
     # Instrumented binaries need only the profile destination; independent consumers keep their own compiler environment.
     for key in list(env):
         if key.startswith(('__CARGO_LLVM_COV', 'CARGO_LLVM_COV')) or key in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'):
             env.pop(key)
     start = time.monotonic()
     code = 0
-    if chosen['tests']:
-        command = ['cargo', 'nextest', 'run', '--archive-file', str(bundle / 'tests.tar.zst'), '--workspace-remap', str(ROOT), '-E', chosen['filter'], '--no-fail-fast', '--no-tests', 'fail']
-        if group != 'unit':
-            command += ['--test-threads', '1']
-        if group in integration_groups():
-            providers = sorted({match.group(1) for test in chosen['tests'] for match in re.finditer(r'(?:\t|::)shared_(amqp|kafka|mqtt)_', test)})
-            launcher = bundle / 'rss-test-launcher'
-            launcher.chmod(0o755)
-            command = [str(launcher), *providers, '--', *command]
-        # Consumer proofs resolve/build independently and intentionally use offline Cargo.
-        # A fresh execution runner needs source downloads, not a second workspace build.
-        if group == 'consumer':
-            code = run(['cargo', 'fetch', '--locked'], env=env)
-        if code == 0:
-            code = run(command, env=env)
-    metrics = output / 'fixtures.jsonl'
-    if metrics.exists():
-        totals = {}
-        for line in metrics.read_text().splitlines():
-            item = json.loads(line)
-            key = (item['provider'], item['phase'], item['outcome'])
-            aggregate = totals.setdefault(key, {'seconds': 0, 'starts': 0, 'attempts': 0})
-            aggregate['seconds'] += item['seconds']
-            aggregate['starts'] += item['starts']
-            aggregate['attempts'] += item['attempts']
-        summary = '\n'.join(f'{group}: {provider} {phase} {outcome}: {v["seconds"]:.3f}s; attempts={v["attempts"]} ready={v["starts"]}' for (provider, phase, outcome), v in sorted(totals.items()))
+    execution_error = None
+    phase = 'test-run'
+    try:
+        if chosen['tests']:
+            phase = 'test-run'
+            command = ['cargo', 'nextest', 'run', '--archive-file', str(bundle / 'tests.tar.zst'), '--workspace-remap', str(ROOT), '-E', chosen['filter'], '--no-fail-fast', '--no-tests', 'fail']
+            if group != 'unit':
+                command += ['--test-threads', '1']
+            if group in integration_groups():
+                providers = sorted({match.group(1) for test in chosen['tests'] for match in re.finditer(r'(?:\t|::)shared_(amqp|kafka|mqtt)_', test)})
+                launcher = bundle / 'rss-test-launcher'
+                phase = 'launcher-setup'
+                launcher.chmod(0o755)
+                command = [str(launcher), *providers, '--', *command]
+            # Consumer proofs resolve/build independently and intentionally use offline Cargo.
+            # A fresh execution runner needs source downloads, not a second workspace build.
+            if group == 'consumer':
+                phase = 'fetch'
+                code = run(['cargo', 'fetch', '--locked'], env=env)
+            if code == 0:
+                phase = 'test-run'
+                code = run(command, env=env)
+    except KeyboardInterrupt:
+        code = None
+        execution_error = 'cancelled'
+    except OSError:
+        code = None
+        execution_error = phase
+    profile_error = False
+    digests = {}
+    try:
+        for profile in profiles.iterdir():
+            if profile.suffix == '.profraw':
+                digests[profile.name] = sha(profile)
+    except OSError:
+        profile_error = True
+    write(output / 'result.json', {'group': group, 'manifest': sha(bundle / 'manifest.json'),
+                                  'exit': code, 'execution_error': execution_error,
+                                  'profile_error': profile_error, 'tests': chosen['tests'],
+                                  'seconds': time.monotonic()-start, 'profiles': digests})
+    if execution_error == 'cancelled':
+        raise KeyboardInterrupt
+    fixture_summary(output)
+    return 2 if execution_error or profile_error else code
+
+
+def fixture_summary(output):
+    """Optional diagnostics only; never change the already persisted verdict."""
+    totals = {}
+    complete = True
+    records = 0
+    folder = output / 'fixture-metrics'
+    try:
+        complete = not folder.with_suffix('.incomplete').exists()
+        files = sorted(folder.iterdir())
+        for path in files:
+            try:
+                if path.suffix != '.jsonl' or not path.is_file():
+                    raise ValueError('invalid metric file')
+                raw = path.read_text()
+                if not raw or not raw.endswith('\n'):
+                    raise ValueError('truncated metrics')
+                for line in raw.splitlines():
+                    item = json.loads(line)
+                    if not isinstance(item, dict): raise ValueError('invalid record')
+                    if set(item) != {'provider', 'phase', 'outcome', 'seconds', 'starts', 'attempts'}:
+                        raise ValueError('invalid fields')
+                    if not all(type(item[k]) is str and item[k] and re.fullmatch(r'[A-Za-z0-9_./:-]+', item[k])
+                               for k in ('provider', 'phase', 'outcome')):
+                        raise ValueError('invalid labels')
+                    if item['phase'] not in ('image', 'start-ready', 'cleanup') or item['outcome'] not in ('success', 'error', 'cancelled'):
+                        raise ValueError('invalid metric kind')
+                    if type(item['seconds']) not in (int, float) or not math.isfinite(item['seconds']) or item['seconds'] < 0:
+                        raise ValueError('invalid duration')
+                    if any(type(item[k]) is not int or item[k] < 0 for k in ('starts', 'attempts')) or item['starts'] > item['attempts']:
+                        raise ValueError('invalid count')
+                    key = (item['provider'], item['phase'], item['outcome'])
+                    total = totals.setdefault(key, {'seconds': 0, 'starts': 0, 'attempts': 0})
+                    updated = {k: total[k] + item[k] for k in total}
+                    if not math.isfinite(updated['seconds']): raise ValueError('duration overflow')
+                    total.update(updated)
+                    records += 1
+            except (OSError, ValueError, TypeError, OverflowError):
+                complete = False
+    except OSError:
+        complete = False
+    status = 'complete' if complete and records else 'incomplete'
+    value = {'status': status, 'records': records,
+             'totals': [dict(zip(('provider', 'phase', 'outcome'), key)) | value for key, value in sorted(totals.items())]}
+    try:
+        write(output / 'fixture-summary.json', value)
+        summary = f'Fixture metrics ({status}): ' + json.dumps(value, allow_nan=False)
         print(summary)
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
                 stream.write(summary + '\n')
-    write(output / 'result.json', {'group': group, 'manifest': sha(bundle / 'manifest.json'),
-                                  'exit': code, 'tests': chosen['tests'], 'seconds': time.monotonic()-start,
-                                  'profiles': {p.name: sha(p) for p in profiles.glob('*.profraw')}})
-    return code
+    except (OSError, ValueError):
+        print('::warning::fixture diagnostic output unavailable', file=sys.stderr)
+    if status == 'incomplete':
+        print('::warning::fixture metrics incomplete; raw files retained', file=sys.stderr)
 
 
 def coverage(plan):
@@ -271,13 +381,13 @@ def coverage(plan):
         folder = ARTIFACTS / 'results' / group
         try:
             result = json.loads((folder / 'result.json').read_text())
-            if not isinstance(result, dict) or type(result.get('exit')) is not int or not isinstance(result.get('profiles'), dict):
+            if not isinstance(result, dict) or type(result.get('exit')) is not int or not isinstance(result.get('profiles'), dict) or type(result.get('profile_error')) is not bool or result.get('execution_error') not in (None, 'test-run', 'fetch', 'launcher-setup'):
                 raise ValueError('invalid test result schema')
             if not all(isinstance(name, str) and isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) for name, digest in result['profiles'].items()):
                 raise ValueError('invalid profile manifest')
             if result['group'] != group or result['manifest'] != sha(bundle / 'manifest.json') or result['tests'] != chosen['tests']:
                 raise ValueError('test result identity mismatch')
-            if result['exit'] != 0:
+            if result['exit'] != 0 or result['execution_error'] is not None or result['profile_error']:
                 status = 1
             if chosen['tests'] and not result['profiles']:
                 raise ValueError('missing required raw profiles')
@@ -318,29 +428,35 @@ def attempt(operation, *args):
 
 def main():
     part = os.environ.get('CI_PART', 'all')
-    if part not in ('all', 'select', 'checks', 'build', 'docs', 'tests', 'coverage', *GROUPS):
+    if part not in ('all', 'select', 'checks', 'build', 'docs', 'tests', 'coverage', 'semver', *GROUPS):
         raise ValueError('invalid CI_PART')
     plan_path = Path(os.environ['CI_PLAN']) if os.environ.get('CI_PLAN') else None
     plan = json.loads(plan_path.read_text()) if plan_path else selection()
     if plan['sha'] != run(['/usr/bin/git', 'rev-parse', 'HEAD'], capture=True).strip():
         raise ValueError('selection SHA mismatch')
     if part == 'select':
+        plan['semver'] = semver_selection(plan)
         write(ARTIFACTS / 'plan.json', plan)
+        print('ci: SemVer ' + json.dumps(plan['semver']))
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
                 out.write(f'active={str(active(plan)).lower()}\ncoverage={str(plan["coverage"]).lower()}\n')
+                out.write(f'semver={str(plan["semver"]["selected"]).lower()}\n')
                 out.write('integration_groups=' + json.dumps(integration_groups()) + '\n')
         return 0
+    if part == 'semver':
+        return semver(plan)
     if part == 'checks':
         return checks(plan)
+    semver_status = attempt(semver, plan) if part == 'all' else 0
     if not active(plan):
         print('ci: no selected Cargo packages')
-        return checks(plan) if part == 'all' else 0
+        return (checks(plan) or semver_status) if part == 'all' else 0
     if part == 'build': return build(plan)
     if part == 'docs': return docs(plan)
     if part in GROUPS: return execute(plan, part)
     if part == 'coverage': return coverage(plan)
-    status = checks(plan) if part == 'all' else 0
+    status = (checks(plan) or semver_status) if part == 'all' else 0
     built = attempt(build, plan)
     status = built or status
     if not built:
@@ -353,6 +469,8 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(install_toolchain() if sys.argv[1:] == ['--install-toolchain'] else main())
+    except KeyboardInterrupt:
+        sys.exit(130)
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         print(f'ci: {error}', file=sys.stderr)
         sys.exit(2)

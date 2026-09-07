@@ -3,8 +3,7 @@
 Make 是本地与 CI 的标准入口。`hack/ci-impact.py` 只选择 package 范围；`hack/ci-pipeline.py` 持有
 一次选择、唯一测试分组 filter、构建身份与覆盖率判定。归档保留 Cargo fingerprint 元数据，让 trybuild 使用真实编译 feature。workflow 只编排 runner、缓存和产物。selection 从同一分组定义输出集成矩阵；unit/consumer 保留各自执行契约，最终门禁同时要求矩阵聚合成功。
 
-普通 PR 为 affected；全局或未知影响回退全工作区测试及 80% 行覆盖率。deny/SemVer 深度独立，
-只由 develop/显式 `make ci-full` 开启。取消人为 CI 总时限，不修改单项测试期限；GitHub 平台时限仍适用。
+普通 PR 为 affected；全局或未知影响回退全工作区测试及 80% 行覆盖率。deny 深度只由 develop/显式 `make ci-full` 开启；SemVer 按兼容承诺及影响独立选择，full 检查全部适用受保护包。取消人为 CI 总时限，不修改单项测试期限；GitHub 平台时限仍适用。
 
 ## 执行
 
@@ -56,7 +55,10 @@ group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，�
 最终 `cargo` 同时要求选择、静态检查、构建、所有执行组和应运行的 coverage 成功。
 
 每阶段输出耗时；每个 fixture 输出镜像准备、容器启动至就绪和清理耗时、启动尝试次数及成功就绪数到不含凭据的
-`fixtures.jsonl`，包括失败和取消 outcome。多进程指标追加使用标准库文件锁（最多等待1秒），在锁内写入完整JSONL记录，避免格式化分段写交错。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
+`fixture-metrics/<pid>.jsonl`，包括失败和取消 outcome。唯一入口为 `RSS_TEST_METRICS_DIR`；每进程独立写，进程内串行，无跨进程文件锁或轮询。写入失败留下同级 `fixture-metrics.incomplete` 标记并打印脱敏 warning。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
+正式 `result.json` 在诊断聚合前原子落盘。启动/等待失败用空退出码和独立错误字段表示；profile 元数据失败仍保留测试结论但阻断门禁。缺正式结果不容错。
+聚合严格验证字段、范围和完整 JSONL；任一诊断故障或无记录标为 incomplete，保留原文件，不能将部分统计当完整数据。Summary/统计副本写入失败只告警。
+旧环境变量和旧结果格式不再读取；旧运行不能复用作新执行输入。
 GitHub step 时间保留 artifact 传输开销，缓存 summary 保留恢复 key、命中统计、保存结果和磁盘用量。
 
 ## 冷热验收
@@ -72,3 +74,35 @@ ref: [nextest archiving](https://nexte.st/docs/ci-features/archiving/)
 PG 取消/期限证明在真实数据库到达 effect 或注入 commit 阶段后推进已有测试时钟，
 保留 150ms 操作期限、连接回收与 durable rollback 断言；协调方同时观察操作提前完成，
 并以真实 5 秒等待约束连接、阶段进入、期限响应及关闭，避免前置超时后永等通知。
+
+## SemVer 独立检查与工具缓存
+
+正常 PR/develop 由 plan 内的 semver 选择受影响受保护包，workflow 不重复维护清单。当前无承诺包明确跳过，
+checks 不安装 SemVer；有受检项时独立 job 的失败、取消、缺正式结果均阻断最终 cargo。
+
+```sh
+make ci CI_PART=semver CI_BASE=<impact-base> CI_HEAD=HEAD
+make ci CI_PART=semver CI_SEMVER_MODE=all CI_BASE=<impact-base>
+# 显式比较可选择实验包；先 checkout 到声明 head，不隐式创建源码快照。
+make ci CI_PART=semver CI_SEMVER_MODE=compare CI_SEMVER_PACKAGES=rss-contract CI_BASE=<baseline> CI_HEAD=HEAD
+```
+
+`CI_SEMVER_PACKAGES` 仅允许用于 `compare`，且不能与 `CI_SEMVER_FULL=1` 组合；冲突输入直接失败，不能缩小全量检查。
+用户取消会先保存正式结果，再停止后续配置及流水线阶段。
+
+受检源码必须是干净的 tracked checkout，base==head 保留相同比较，不偷偷改成父提交。
+固定 cargo-semver-checks 0.49.0 与仓库 Rust 工具链联动验证。执行显式 default/all；仅两侧均证明 feature 集等价时去重。
+过程宏不是该工具的受检通过项，rss-redact-derive 仍由现有消费者编译/trybuild 证明；显式要求工具检查不支持 target 时失败。
+Rust 检查不替代 wire、持久化格式或行为证明。
+
+GitHub 的 RSS SemVer workflow 支持独立 dispatch（baseline/head/packages），不重跑测试。
+工具压缩包按版本/平台/架构/SHA256 缓存，恢复后复验；缺失、坏包或缓存服务失败回源，最多四次有界下载，
+仅校验成功的包可安装和保存。工具安装、rustdoc/执行错误、兼容性失败分别保留实际阶段和退出码。
+本地已选中检查需要同版 cargo-semver-checks；没有工具时严格失败，不影响未选中的普通检查。
+
+工具冷热证据复用 cold_cache/warm_run：冷跑隔离 cache key 后缀为 run ID-attempt，热跑只接受对应精确命中、
+再次验哈希且零回源，并核验相同 SemVer plan 与冷跑成功 result/cache facts。普通缓存失败可恢复，热跑不能以回源替代命中。
+指标 complete 仅表示现存记录通过校验；性能验收还必须核对具体场景预期记录，缺写入证据不能宣称完整测量。
+冷热事实及阶段耗时记入本次 PR 验收，不新增测量数据库或定时平台。
+
+ref: cargo-semver-checks v0.49.0 src/main.rs

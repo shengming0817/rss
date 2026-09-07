@@ -32,6 +32,7 @@ class PipelineTests(unittest.TestCase):
         with patch.dict(pipeline.GROUPS, {'extra-provider': 'package(=extra-integration)'}), \
              patch.dict(os.environ, {'CI_PART': 'select', 'GITHUB_OUTPUT': str(output)}, clear=True), \
              patch.object(pipeline, 'selection', return_value=self.plan), \
+             patch.object(pipeline, 'semver_selection', return_value={'selected': False}), \
              patch.object(pipeline, 'run', return_value='sha'):
             self.assertEqual(pipeline.main(), 0)
         values = dict(line.split('=', 1) for line in output.read_text().splitlines())
@@ -56,7 +57,7 @@ class PipelineTests(unittest.TestCase):
             profile.parent.mkdir()
             profile.write_bytes(b'profile')
             pipeline.write(folder / 'result.json', {'group': group, 'manifest': pipeline.sha(self.bundle / 'manifest.json'),
-                'exit': 0, 'tests': ['test'], 'profiles': {'test.profraw': pipeline.sha(profile)}})
+                'exit': 0, 'execution_error': None, 'profile_error': False, 'tests': ['test'], 'profiles': {'test.profraw': pipeline.sha(profile)}})
 
     def report(self):
         calls = []
@@ -101,6 +102,64 @@ class PipelineTests(unittest.TestCase):
                 result = json.loads((self.root / 'results/consumer/result.json').read_text())
                 self.assertEqual(result['exit'], fetched)
 
+    def test_diagnostics_do_not_change_execution_verdict(self):
+        for code in (0, 9):
+            for fault in ('json', 'type', 'directory', 'summary'):
+                with self.subTest(code=code, fault=fault):
+                    def run(command, **kwargs):
+                        if kwargs.get('capture'): return 'rustc'
+                        metrics = Path(kwargs['env']['RSS_TEST_METRICS_DIR'])
+                        metrics.mkdir(exist_ok=True)
+                        if fault == 'directory':
+                            metrics.rmdir()
+                            metrics.write_text('not a directory')
+                        else:
+                            item = {'provider': 'all', 'phase': 'cleanup', 'outcome': 'success',
+                                    'seconds': 1, 'attempts': 0, 'starts': 0}
+                            if fault == 'type': item['seconds'] = True
+                            (metrics / '123.jsonl').write_text('broken' if fault == 'json' else json.dumps(item) + '\n')
+                        return code
+                    with patch.object(pipeline, 'run', run), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(self.root)}):
+                        self.assertEqual(pipeline.execute(self.plan, 'unit'), code)
+                    result = json.loads((self.root / 'results/unit/result.json').read_text())
+                    self.assertEqual(result['exit'], code)
+                    if fault != 'summary':
+                        summary = json.loads((self.root / 'results/unit/fixture-summary.json').read_text())
+                        self.assertEqual(summary['status'], 'incomplete')
+
+    def test_profile_failure_keeps_test_exit_but_blocks_gate(self):
+        def run(command, **kwargs):
+            if kwargs.get('capture'): return 'rustc'
+            profile = self.root / 'results/unit/profiles/unreadable.profraw'
+            profile.symlink_to(self.root / 'missing')
+            return 9
+        with patch.object(pipeline, 'run', run):
+            self.assertEqual(pipeline.execute(self.plan, 'unit'), 2)
+        result = json.loads((self.root / 'results/unit/result.json').read_text())
+        self.assertEqual(result['exit'], 9)
+        self.assertTrue(result['profile_error'])
+
+    def test_cancelled_execution_saves_evidence_and_propagates(self):
+        def run(command, **kwargs):
+            if kwargs.get('capture'): return 'rustc'
+            raise KeyboardInterrupt()
+        with patch.object(pipeline, 'run', run), self.assertRaises(KeyboardInterrupt):
+            pipeline.execute(self.plan, 'unit')
+        result = json.loads((self.root / 'results/unit/result.json').read_text())
+        self.assertIsNone(result['exit'])
+        self.assertEqual(result['execution_error'], 'cancelled')
+
+    def test_execution_start_failure_keeps_formal_result(self):
+        def run(command, **kwargs):
+            if kwargs.get('capture'): return 'rustc'
+            raise OSError('sensitive-command-text')
+        with patch.object(pipeline, 'run', run):
+            self.assertEqual(pipeline.execute(self.plan, 'unit'), 2)
+        result = json.loads((self.root / 'results/unit/result.json').read_text())
+        self.assertIsNone(result['exit'])
+        self.assertEqual(result['execution_error'], 'test-run')
+        self.assertNotIn('sensitive', json.dumps(result))
+
     def test_complete_and_failed_groups_still_generate_report(self):
         self.results()
         self.assertEqual(self.report(), 0)
@@ -128,9 +187,23 @@ class PipelineTests(unittest.TestCase):
         with patch.object(pipeline, 'run', side_effect=AssertionError('must not report')):
             self.assertEqual(pipeline.coverage(self.plan | {'full': False, 'coverage': False}), 0)
 
+    def test_semver_cancellation_stops_entire_pipeline(self):
+        with patch.dict(os.environ, {'CI_PART': 'all', 'CI_PLAN': ''}), \
+             patch.object(pipeline, 'selection', return_value=self.plan), \
+             patch.object(pipeline, 'semver_selection', return_value={'selected': True}), \
+             patch.object(pipeline, 'semver_module') as module, \
+             patch.object(pipeline, 'run', return_value='sha'), \
+             patch.object(pipeline, 'checks') as checks, \
+             patch.object(pipeline, 'build') as build:
+            module.return_value.execute.return_value = 130
+            with self.assertRaises(KeyboardInterrupt): pipeline.main()
+            checks.assert_not_called()
+            build.assert_not_called()
+
     def test_all_groups_docs_and_report_run_after_test_failure(self):
         with patch.dict(os.environ, {'CI_PART': 'tests', 'CI_PLAN': ''}), \
              patch.object(pipeline, 'selection', return_value=self.plan), \
+             patch.object(pipeline, 'semver_selection', return_value={'selected': False}), \
              patch.object(pipeline, 'run', return_value='sha'), \
              patch.object(pipeline, 'build', return_value=0), \
              patch.object(pipeline, 'execute', side_effect=[0, 0, 9, 0, 0]) as execute, \

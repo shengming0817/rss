@@ -83,14 +83,23 @@ impl Drop for Stage {
     #[allow(clippy::disallowed_methods)]
     // reason: record elapsed resource time even when its future is cancelled.
     fn drop(&mut self) {
-        if let Err(error) = metric(
+        if metric(
             self.phase,
             &self.provider,
             self.started.elapsed().as_secs_f64(),
             self.attempts,
             self.outcome,
-        ) {
-            eprintln!("testkit: cannot record fixture metric: {error}");
+        )
+        .is_err()
+        {
+            // The sibling remains writable when the metric directory itself fails.
+            if let Ok(path) = std::env::var("RSS_TEST_METRICS_DIR") {
+                let _ = std::fs::write(
+                    std::path::Path::new(&path).with_extension("incomplete"),
+                    b"incomplete\n",
+                );
+            }
+            eprintln!("testkit: fixture metrics incomplete (write failed)");
         }
     }
 }
@@ -204,8 +213,6 @@ pub(super) fn bounded_command_output(mut bytes: Vec<u8>) -> String {
     output
 }
 
-#[allow(clippy::disallowed_methods)]
-// reason: metric append lock has its own bounded real-time wait.
 pub(super) fn metric(
     phase: &str,
     provider: &str,
@@ -214,32 +221,23 @@ pub(super) fn metric(
     outcome: &str,
 ) -> Result<()> {
     use std::io::Write as _;
-    if let Ok(path) = std::env::var("RSS_TEST_METRICS") {
+    // Only threads in this process share a file; no cross-process lock or polling.
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if let Ok(path) = std::env::var("RSS_TEST_METRICS_DIR") {
+        let _guard = WRITER
+            .lock()
+            .map_err(|_| anyhow::anyhow!("metric writer poisoned"))?;
+        let directory = std::path::Path::new(&path);
+        std::fs::create_dir_all(directory)?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)?;
-        // ref: std::fs::File::try_lock. O_APPEND alone does not serialize the
-        // multiple writes made by JSON Display formatting across launcher processes.
+            .open(directory.join(format!("{}.jsonl", std::process::id())))?;
         let mut record = serde_json::to_vec(
             &serde_json::json!({"phase": phase, "provider": provider, "seconds": seconds, "attempts": attempts, "starts": if outcome == "success" { attempts } else { 0 }, "outcome": outcome}),
         )?;
         record.push(b'\n');
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            match file.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    anyhow::ensure!(
-                        std::time::Instant::now() < deadline,
-                        "fixture metric lock deadline elapsed"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
-        file.write_all(&record)?; // closing this handle releases the process-shared lock
+        file.write_all(&record)?;
     }
     eprintln!(
         "testkit: phase={phase} provider={provider} seconds={seconds:.3} attempts={attempts} outcome={outcome}"

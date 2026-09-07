@@ -2,16 +2,29 @@ name: RSS candidate package proof
 
 on:
   workflow_dispatch:
+    inputs:
+      compatibility_base:
+        description: Last accepted compatibility-policy commit/tag, independent of candidate
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: rss-candidate-bundle-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  semver:
+    uses: ./.github/workflows/ci-semver.yml
+    with:
+      baseline: ${{ inputs.compatibility_base }}
+      head: ${{ github.sha }}
+      mode: release
   candidate-package-proof:
+    needs: semver
     name: candidate-package-proof
     runs-on: ubuntu-latest
     timeout-minutes: 50
@@ -126,6 +139,24 @@ jobs:
         run: |
           python3 hack/recovery-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
+      - name: Verify package digest inventory before upload
+        env:
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
+        run: |
+          python3 - <<'PY'
+          import hashlib, os
+          from pathlib import Path
+          folder = Path(os.environ['RSS_PACKAGE_PROOF'])
+          packages = [line.split('\t') for line in (folder / 'packages.tsv').read_text().splitlines()]
+          expected = {f'{name}-{version}.crate' for name, version, revision in packages if revision == os.environ['GITHUB_SHA']}
+          assert packages and len(expected) == len(packages)
+          lines = [line.split() for line in (folder / 'SHA256SUMS').read_text().splitlines()]
+          assert len(lines) == len(expected) and {name for digest, name in lines} == expected
+          for digest, name in lines:
+              with (folder / name).open('rb') as source:
+                  assert hashlib.file_digest(source, 'sha256').hexdigest() == digest
+          PY
+
       - name: Upload immutable package proof
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -152,4 +183,4 @@ jobs:
               test -n "$digest"
               echo "| \`$package\` | \`$version\` | \`$digest\` |"
             done < "$RSS_PACKAGE_PROOF/packages.tsv"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY" || echo "::warning::candidate package Summary unavailable"

@@ -111,7 +111,7 @@ async fn concurrent_launcher_metrics_remain_complete_json_lines() -> anyhow::Res
     let docker = directory.path().join("docker");
     std::fs::write(&docker, "#!/bin/sh\nexit 0\n")?;
     std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))?;
-    let metrics = directory.path().join("fixtures.jsonl");
+    let metrics = directory.path().join("fixture-metrics");
     let mut children = Vec::new();
     for _ in 0..16 {
         children.push(
@@ -119,7 +119,7 @@ async fn concurrent_launcher_metrics_remain_complete_json_lines() -> anyhow::Res
                 .args(["--", "/usr/bin/true"])
                 .env("PATH", directory.path())
                 .env("RSS_TEST_RUN_ID", "parallel-metrics-proof")
-                .env("RSS_TEST_METRICS", &metrics)
+                .env("RSS_TEST_METRICS_DIR", &metrics)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .kill_on_drop(true)
@@ -133,12 +133,46 @@ async fn concurrent_launcher_metrics_remain_complete_json_lines() -> anyhow::Res
         Ok::<(), anyhow::Error>(())
     })
     .await??;
-    let lines = std::fs::read_to_string(metrics)?;
+    let files = std::fs::read_dir(metrics)?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(files.len(), 16);
+    let mut lines = String::new();
+    for file in files {
+        let record = std::fs::read_to_string(file.path())?;
+        assert_eq!(record.lines().count(), 1);
+        lines.push_str(&record);
+    }
     assert_eq!(lines.lines().count(), 16);
     for line in lines.lines() {
         let metric: serde_json::Value = serde_json::from_str(line)?;
         assert_eq!(metric["phase"], "cleanup");
         assert_eq!(metric["outcome"], "success");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn metric_write_failure_preserves_child_exit_and_marks_incomplete() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let docker = directory.path().join("docker");
+    std::fs::write(&docker, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))?;
+    let metrics = directory.path().join("fixture-metrics");
+    std::fs::write(&metrics, "not a directory")?;
+    for code in [0, 9] {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::process::Command::new(std::env::var("CARGO_BIN_EXE_rss-test-launcher")?)
+                .args(["--", "/bin/sh", "-c", &format!("exit {code}")])
+                .env("PATH", directory.path())
+                .env("RSS_TEST_RUN_ID", "metrics-failure-proof")
+                .env("RSS_TEST_METRICS_DIR", &metrics)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        assert_eq!(output.status.code(), Some(code));
+        assert!(metrics.with_extension("incomplete").exists());
+        assert!(String::from_utf8(output.stderr)?.contains("fixture metrics incomplete"));
     }
     Ok(())
 }

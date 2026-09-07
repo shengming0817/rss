@@ -65,15 +65,6 @@ jobs:
         with:
           tool: ${{ inputs.part == 'checks' && 'cargo-deny@0.19.9,sccache@0.15.0' || 'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,sccache@0.15.0' }}
           fallback: none
-      - name: Install pinned SemVer checker from upstream release
-        if: inputs.part == 'checks'
-        run: |
-          archive="$RUNNER_TEMP/semver.tar.gz"
-          curl --fail --location --retry 3 -o "$archive" https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.49.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
-          echo "72f6834d75d28a66e02c9fd6a230ce901bb30eee6067b85867a97445df040e4a  $archive" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/semver-bin"
-          tar -xzf "$archive" -C "$RUNNER_TEMP/semver-bin"
-          echo "$RUNNER_TEMP/semver-bin" >> "$GITHUB_PATH"
       - name: Derive immutable cache keys
         id: keys
         run: |
@@ -178,7 +169,7 @@ jobs:
               if [ -d "$path" ]; then du -sh "$path" || true; else echo "Not created: $path"; fi
             done
             df -h . || true
-          } | tee -a "$GITHUB_STEP_SUMMARY" || true
+          } | tee -a "$GITHUB_STEP_SUMMARY" || echo "::warning::cache statistics Summary unavailable"
           sccache --stop-server
           # Save only the exact job-owned, non-symlink object directory.
           python3 - <<'PY'
@@ -227,5 +218,5 @@ jobs:
             echo "### $CI_PART save receipts"
             echo "Cargo save action: $DOWNLOAD_SAVE_OUTCOME; key: $DOWNLOAD_SAVE_KEY"
             echo "Compiler save action: $COMPILER_SAVE_OUTCOME; key: $COMPILER_SAVE_KEY"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY" || echo "::warning::cache save Summary unavailable"
 

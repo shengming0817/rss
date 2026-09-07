@@ -46,93 +46,40 @@ members = [
 
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
+# #2315: maintainer confirmed no published or external frozen Rust API commitments.
+compatibility-adoption = { baseline-rev = "fde9829ab01be3839465c18a7f04de10e152ab00", issue = 2315 }
 packages = [
-  { package = "rss-transactional-messaging-recovery-s3", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-mqtt", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging-kafka", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-axum", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging-recovery", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-saga-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-saga", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-device-command", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-device-command-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-reconcile", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-reconcile-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-observation", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-observation-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-projection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-projection-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
-  { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental" },
-  { package = "rss-redact-derive", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-redact", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-data-protection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental" },
-  { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging-testkit", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging-amqp", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-transactional-messaging-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
-  { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental" },
+  { package = "rss-transactional-messaging-recovery-s3", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-mqtt", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging-kafka", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-axum", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging-recovery", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-saga-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-saga", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-device-command", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-device-command-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-reconcile", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-reconcile-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-observation", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-observation-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-projection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-projection-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-redact-derive", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-redact", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-data-protection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging-testkit", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging-amqp", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
 ]
 
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging"
-baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
-issue = 2301
-
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-runtime"
-baseline-rev = "0b32db6619794f5fcac08288d26797942a3c897a"
-issue = 2282
-
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-testkit"
-baseline-rev = "aaacc65d672c593c483cba9e6ceea6aef67332f0"
-issue = 2265
-
-# Explicitly approved pre-publication default API cutover (#2279).
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-diag-context"
-baseline-rev = "73dec6f205de7b3c41e8f17412db89f759af0ae5"
-issue = 2279
-
-# Explicit pre-publication lifecycle API replacement (#2284).
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-amqp"
-baseline-rev = "97f26b68d5b822285df826e1ed4ce671aff04ae4"
-issue = 2284
-
-# Exact pre-publication Saga receipt owner replacement (#2293).
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-data-protection"
-baseline-rev = "d290fffe2378629a2afa5c468e9111e9b9780882"
-issue = 2293
-
-# #2300: approved pre-publication move to the sole rss-contract owner, without alias.
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-platform"
-baseline-rev = "9a2ab29a06b4bfb8baef4a1970412d03a9f0c1ef"
-issue = 2300
-
-
-# #2310: explicit pre-publication replacement of the arbitrary MQTT Outbox mapper.
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-mqtt"
-baseline-rev = "177000e70b34dd1cf8a0c989d1557dd2f5434cca"
-issue = 2310
-
-# #2303: approved pre-publication mandatory execution binding and closed authorization subjects.
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-postgres"
-baseline-rev = "2ba0cea46a3756c09f33268f8dd335315f5fbbfe"
-issue = 2303
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-recovery"
-baseline-rev = "2ba0cea46a3756c09f33268f8dd335315f5fbbfe"
-issue = 2303
 
 [workspace.package]
 version = "0.0.0"
@@ -142,12 +89,6 @@ repository = "https://github.com/shengming0817/rss"
 
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
-# #2297 intentionally replaces the pre-publication Observation authorization signature.
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-observation"
-baseline-rev = "dc889939f21bd3dcccdb23397b028789732d401c"
-issue = 2297
-
 [workspace.dependencies]
 aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 rss-transactional-messaging-recovery-s3 = { path = "crates/transactional-messaging-recovery-s3", version = "0.1.0" }
