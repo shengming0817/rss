@@ -1,0 +1,37 @@
+[package]
+name = "rss-ledger-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "PostgreSQL atomic authenticated ledger persistence"
+categories = ["asynchronous", "database"]
+keywords = ["ledger", "postgres", "checkpoint"]
+publish = ["crates-io"]
+
+[dependencies]
+thiserror.workspace = true
+rss-ledger.workspace = true
+rss-request-context.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+rss-redact.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tokio-util.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, optional = true }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false }
+futures = { workspace = true, features = ["std"] }
+
+[features]
+default = []
+integration = []
+messaging = ["dep:rss-transactional-messaging-postgres", "rss-transactional-messaging/consumer"]
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

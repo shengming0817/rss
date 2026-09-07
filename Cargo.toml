@@ -3,6 +3,9 @@
 [workspace]
 resolver = "2"
 members = [
+  "tests/ledger-postgres-integration",
+  "crates/ledger-postgres",
+  "crates/ledger",
   "tests/archive-integration",
   "crates/transactional-messaging-recovery-s3",
   "crates/mqtt",
@@ -49,6 +52,8 @@ members = [
 # #2315: maintainer confirmed no published or external frozen Rust API commitments.
 compatibility-adoption = { baseline-rev = "fde9829ab01be3839465c18a7f04de10e152ab00", issue = 2315 }
 packages = [
+  { package = "rss-ledger", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2312 } },
+  { package = "rss-ledger-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2312 } },
   { package = "rss-transactional-messaging-recovery-s3", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-mqtt", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-transactional-messaging-kafka", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
@@ -90,6 +95,8 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-ledger-postgres = { path = "crates/ledger-postgres", version = "0.1.0" }
+rss-ledger = { path = "crates/ledger", version = "0.1.0" }
 aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 rss-transactional-messaging-recovery-s3 = { path = "crates/transactional-messaging-recovery-s3", version = "0.1.0" }
 aws-sdk-s3 = { version = "=1.142.0", default-features = false, features = ["rt-tokio"] }

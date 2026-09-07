@@ -21,6 +21,11 @@ rss-axum 拥有已接纳公共能力到 Axum 的可选协议适配：类型化�
 storage lineage / tenant epoch 持久化 fencing，并约束正常消息、恢复与归档执行。
 成功 Published / Consumer terminal 事实及原投递期限保留，不引入产品 admission controller。
 
+可校验追加账本已接纳：`rss-ledger` 拥有链/记录身份、V1 规范认证编码、HMAC 链链接及有界窗口验证；
+`rss-ledger-postgres` 拥有组件 schema、同链幂等原子追加、持久恢复及现有 PG 事务接缝组合。
+产品拥有事件含义、查询授权、密钥托管与轮转、保留/hold 和生产迁移。该准入不恢复 audit/identity 产品域，
+不承诺历史审计数据导入、透明日志平台或 WORM；实现、独立消费与实际发布分别提供证据。
+
 ## 产品拥有
 
 - 消息 DR 的证据 authority、恢复点和成员选择、数据库/broker restore、跨进程 pause/drain/resume 与部署准入。

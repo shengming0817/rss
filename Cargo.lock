@@ -2393,6 +2393,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "ledger-postgres-integration"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-contract",
+ "rss-ledger",
+ "rss-ledger-postgres",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "testkit",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3435,6 +3454,35 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "rss-ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hmac 0.12.1",
+ "rss-request-context",
+ "sha2 0.10.9",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-ledger-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-ledger",
+ "rss-redact",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
