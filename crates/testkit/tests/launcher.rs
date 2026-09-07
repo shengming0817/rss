@@ -104,3 +104,41 @@ async fn child_and_cleanup_outcomes_are_both_preserved() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn concurrent_launcher_metrics_remain_complete_json_lines() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let docker = directory.path().join("docker");
+    std::fs::write(&docker, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))?;
+    let metrics = directory.path().join("fixtures.jsonl");
+    let mut children = Vec::new();
+    for _ in 0..16 {
+        children.push(
+            tokio::process::Command::new(std::env::var("CARGO_BIN_EXE_rss-test-launcher")?)
+                .args(["--", "/usr/bin/true"])
+                .env("PATH", directory.path())
+                .env("RSS_TEST_RUN_ID", "parallel-metrics-proof")
+                .env("RSS_TEST_METRICS", &metrics)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?,
+        );
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for child in &mut children {
+            assert!(child.wait().await?.success());
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
+    let lines = std::fs::read_to_string(metrics)?;
+    assert_eq!(lines.lines().count(), 16);
+    for line in lines.lines() {
+        let metric: serde_json::Value = serde_json::from_str(line)?;
+        assert_eq!(metric["phase"], "cleanup");
+        assert_eq!(metric["outcome"], "success");
+    }
+    Ok(())
+}

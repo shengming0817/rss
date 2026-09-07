@@ -56,7 +56,7 @@ group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，�
 最终 `cargo` 同时要求选择、静态检查、构建、所有执行组和应运行的 coverage 成功。
 
 每阶段输出耗时；每个 fixture 输出镜像准备、容器启动至就绪和清理耗时、启动尝试次数及成功就绪数到不含凭据的
-`fixtures.jsonl`，包括失败和取消 outcome。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
+`fixtures.jsonl`，包括失败和取消 outcome。多进程指标追加使用标准库文件锁（最多等待1秒），在锁内写入完整JSONL记录，避免格式化分段写交错。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
 GitHub step 时间保留 artifact 传输开销，缓存 summary 保留恢复 key、命中统计、保存结果和磁盘用量。
 
 ## 冷热验收

@@ -204,6 +204,8 @@ pub(super) fn bounded_command_output(mut bytes: Vec<u8>) -> String {
     output
 }
 
+#[allow(clippy::disallowed_methods)]
+// reason: metric append lock has its own bounded real-time wait.
 pub(super) fn metric(
     phase: &str,
     provider: &str,
@@ -217,11 +219,27 @@ pub(super) fn metric(
             .create(true)
             .append(true)
             .open(path)?;
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({"phase": phase, "provider": provider, "seconds": seconds, "attempts": attempts, "starts": if outcome == "success" { attempts } else { 0 }, "outcome": outcome})
+        // ref: std::fs::File::try_lock. O_APPEND alone does not serialize the
+        // multiple writes made by JSON Display formatting across launcher processes.
+        let mut record = serde_json::to_vec(
+            &serde_json::json!({"phase": phase, "provider": provider, "seconds": seconds, "attempts": attempts, "starts": if outcome == "success" { attempts } else { 0 }, "outcome": outcome}),
         )?;
+        record.push(b'\n');
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "fixture metric lock deadline elapsed"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        file.write_all(&record)?; // closing this handle releases the process-shared lock
     }
     eprintln!(
         "testkit: phase={phase} provider={provider} seconds={seconds:.3} attempts={attempts} outcome={outcome}"
