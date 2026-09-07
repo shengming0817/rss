@@ -11,6 +11,13 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。主�
 Observation 核心拥有来自离线、多来源生产者的可靠接收、报告语义、流身份与快照/增量完整性；
 `rss-observation-postgres` 拥有组件 schema 和原子持久化。核心不依赖 provider、命令库或 telemetry。
 
+rss-runtime 拥有局部生命周期作用域、即时资源接管、阶段注册、普通/deferred 取消、
+受控任务与专用线程、有界 LIFO 关闭、可恢复等待及独立的执行/关闭结果。
+显式关键任务的本地终止监视和不可复制 permit 的准入排空属于执行机制；
+产品决定开放条件、认证授权、readiness、信号来源与原 runtime 的驱动生命周期。
+计数归零、取消或 timeout 不证明任务真正终止；资源清理不回滚外部业务效果。
+不恢复中央装配、全局 supervisor、自动重启或跨进程 admission controller。
+
 rss-axum 拥有已接纳公共能力到 Axum 的可选协议适配：类型化契约绑定、请求处理预算与
 只读上下文、安全错误投影和 listener 到 rss-runtime 的资源交接；可选 H1/H2/Auto transport
 复用 Hyper/hyper-util 的协议实现并拥有连接生命周期。TLS/ALPN、认证授权、产品协议与业务编解码、

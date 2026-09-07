@@ -122,7 +122,7 @@ async fn http2_serves_and_http1_is_not_accepted() {
     assert!(!String::from_utf8_lossy(&bytes).contains("h2-only"));
     assert!(!bytes.starts_with(b"HTTP/1"));
     drop(client);
-    assert!(owner.shutdown().await.unwrap().is_clean());
+    assert!(owner.shutdown().join().await.unwrap().is_clean());
 }
 
 #[tokio::test]
@@ -149,7 +149,7 @@ async fn cancellation_before_first_poll_releases_listener() {
     let mut owner =
         ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(2)).unwrap()).unwrap();
     owner.startup().unwrap().stage_task_with_token(registration);
-    assert!(owner.shutdown().await.unwrap().is_clean());
+    assert!(owner.shutdown().join().await.unwrap().is_clean());
     assert_eq!(status.wait_stopped().await, TaskExit::Cancelled);
     let _rebound = TcpListener::bind(addr).await.unwrap();
 }
@@ -183,7 +183,7 @@ async fn in_flight_http2_stream_can_finish_during_graceful_drain() {
             tokio::time::timeout(Duration::from_secs(2), entered.notified())
                 .await
                 .unwrap();
-            owner.shutdown().await.unwrap()
+            owner.shutdown().join().await.unwrap()
         });
         assert!(receipt.is_clean());
         assert_eq!(
@@ -261,7 +261,7 @@ async fn all_http2_streams_are_cancelled_before_later_dependency_teardown() {
                 .unwrap()
                 .unwrap()
                 .forget();
-            owner.shutdown().await.unwrap()
+            owner.shutdown().join().await.unwrap()
         });
         assert_eq!(receipt.failures().len(), 1);
         assert_eq!(receipt.failures()[0].name, "http");
@@ -322,7 +322,7 @@ async fn total_budget_also_retires_the_http2_response_body() {
             tokio::time::timeout(Duration::from_secs(2), polled.notified())
                 .await
                 .unwrap();
-            owner.shutdown().await.unwrap()
+            owner.shutdown().join().await.unwrap()
         });
         assert!(
             receipt
@@ -374,7 +374,7 @@ async fn panicking_stream_does_not_detach_or_stop_a_healthy_stream() {
             "healthy"
         );
         drop(client);
-        assert!(owner.shutdown().await.unwrap().is_clean());
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
     }
 }
 
@@ -421,5 +421,5 @@ async fn auto_establishment_deadline_does_not_limit_admitted_h2_streams() {
             .to_bytes(),
         "finished"
     );
-    assert!(owner.shutdown().await.unwrap().is_clean());
+    assert!(owner.shutdown().join().await.unwrap().is_clean());
 }

@@ -30,7 +30,7 @@ let mut launch = startup.commit();
 // Register launch resources immediately with `launch.stage_*`.
 launch.finish();
 
-let receipt = stack.shutdown().await?;
+let receipt = stack.shutdown().join().await?;
 if !receipt.is_clean() {
     // The receipt is an in-process observation, not persisted evidence.
     for failure in receipt.failures() {
@@ -53,3 +53,99 @@ for one-shot operations that enforce their own finite bound.
 Task/resource panic control flow is isolated into closed error kinds, but `catch_unwind` does not
 suppress Rust's process-wide panic hook. Applications whose panic payloads may contain sensitive
 data remain responsible for installing their process-owned redacting hook before starting work.
+
+## Local scope, critical tasks and admission
+
+`LifecycleScope::drive` lends its startup transaction **by value** to one callback. The callback
+constructs resources, immediately stages each completed resource before its next cancellable await,
+commits startup, seals launch and runs. The transaction itself does not roll back on Drop. The scope
+owns cleanup on callback failure, panic, stop or drive cancellation; cleanup does not undo external
+business effects. Successfully returning without sealing registration is `RegistrationIncomplete(T)`, retaining the original value.
+
+```rust
+use std::time::Duration;
+use rss_runtime::{AdmissionGate, LifecycleScope, ManagedTask, ScopeExit, ShutdownError, TotalDrainBudget};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let mut scope = LifecycleScope::<(), ShutdownError, tokio::sync::oneshot::error::RecvError>::try_new(
+    TotalDrainBudget::new(Duration::from_secs(10))?,
+)?;
+// This example requests stop when one request is in flight. A product supplies its own source.
+let (request_stop, stop) = tokio::sync::oneshot::channel();
+let outcome = scope.drive(|mut startup| Box::pin(async move {
+    let (worker, _) = ManagedTask::prepare("dependency-worker", Duration::from_secs(2));
+    let dependency = startup.stage_deferred_task_with_token(worker.into_registration(|token| async move {
+        token.cancelled().await;
+        Ok(())
+    }).critical());
+    let (send_gate, receive_gate) = tokio::sync::oneshot::channel::<AdmissionGate>();
+    let (ingress, _) = ManagedTask::prepare("inflight-request", Duration::from_secs(2));
+    let mut launch = startup.commit();
+    launch.stage_task_with_token(ingress.into_registration(move |token| async move {
+        let gate = receive_gate.await.map_err(ShutdownError::new)?;
+        let permit = gate.try_admit().map_err(ShutdownError::new)?;
+        let _ = request_stop.send(());
+        token.cancelled().await;
+        assert!(gate.try_admit().is_err());
+        assert!(dependency.is_running()); // Deferred dependency is still available during drain.
+        // Finish current dependency access before releasing the in-flight lease.
+        drop(permit);
+        Ok(())
+    }).critical());
+    let (control, gate) = launch.finish_with_admission("inflight", Duration::from_secs(2));
+    control.open().map_err(ShutdownError::new)?; // Product prerequisites are satisfied.
+    assert!(send_gate.send(gate).is_ok());
+    let _control = control; // Keep open authority throughout the running phase.
+    std::future::pending().await
+}), stop).await?;
+assert!(matches!(outcome.exit(), ScopeExit::StopRequested(Ok(()))));
+assert!(outcome.shutdown().as_ref().map_err(|error| *error)?.is_clean());
+# Ok(())
+# }
+```
+
+`drive` and `wait` borrow the scope. Cancelling either wait preserves already-observed execution
+results and cleanup failures; retain the scope and call `wait` again. `into_outcome` transfers a
+completed result without requiring Clone. Dropping the entire scope abandons result delivery, not
+cleanup. An unpolled drive has not started; `wait` then reports `NotStarted`. A second drive reports
+`AlreadyDriven`. Execution and stop-source errors have independent types. Generic application results/errors are never automatically formatted or logged.
+
+Only registrations explicitly marked `.critical()` participate in a scope's early-exit monitor.
+The monitor observes tasks staged during startup as well as launch and running; it spawns no tasks.
+It preserves the registration's name and closed `TaskExit`. A ready stop wins over critical exit,
+which wins over execution in the same select poll. Ordinary one-shot success, Saga Yielded or paused
+compensation must not be marked critical merely because they are managed. Bare `ShutdownStack`
+consumers can obtain its read-only `critical_tasks()` monitor before registration and select on
+`monitor.wait()`. It observes only same-stack registrations, including later additions, without
+spawning tasks. It returns None only when the stack publisher closes with no critical tasks; a live
+empty set stays pending. Bare consumers decide whether an observed exit was expected;
+`LifecycleScope` applies the early-exit policy automatically using the same monitor.
+`TaskStatus` describes the runner's return/panic/cancellation observation, not business readiness or
+thread-local destruction. The resource owner still cancels and joins the task/thread at shutdown.
+
+Admission starts unopened. `finish_with_admission` seals registration and installs the drain last;
+only then is open authority returned. Closing is permanent, and dropping control closes the gate.
+The close lock serializes token minting with closure; Tokio TaskTracker's `close` alone is not an
+admission gate. On shutdown, admission closes synchronously before the normal cancellation broadcast.
+The last registered admission resource waits for permits before dependent resources close. Work that
+must remain usable during this wait uses deferred registration. Hold the move-only permit for the
+whole dependency-access lifetime, including any child work; releasing a count cannot terminate a
+future. Timeout/BudgetExhausted remains a failure even if a permit is released later. After timeout,
+the bounded shutdown driver may proceed to close dependencies while unfinished work still exists.
+Non-cooperative synchronous code and a stopped originating runtime cannot be forcibly cleaned up.
+
+A product can implement `rss_platform::HostView` with this gate and a local newtype implementing
+`rss_platform::AdmissionPermit`. The runtime crate does not depend on platform. Authentication,
+tenant/device authorization, readiness and cross-process DR admission remain product responsibilities;
+permit drain is not evidence that a product is stopped.
+
+## API replacement
+
+`ShutdownStack::shutdown` now synchronously returns `ShutdownDrain`; replace `stack.shutdown().await`
+with `stack.shutdown().join().await` for an owned result. Cancelling `join` abandons the receipt,
+while submitted cleanup continues. To recover the receipt after cancelling a wait, retain the drain
+and use `drain.wait().await`; `into_result` moves out its cached completed result. No compatibility
+await adapter or alternate shutdown entrypoint is provided. Stack, scope and Drop all use the same internal resource-transfer path.
+
+ref: tokio-rs/tokio tokio-util/src/task/task_tracker.rs@tokio-util-0.7.16
+ref: tokio-rs/tokio tokio/src/runtime/task/join.rs@tokio-1.53.1

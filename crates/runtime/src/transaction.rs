@@ -189,6 +189,16 @@ impl LaunchTransaction<'_> {
             .try_stage_deferred_blocking_with_token(registration)
     }
 
+    /// Seal launch and register admission last, so permits drain before dependencies close.
+    /// The returned gate starts closed to work; product code decides when to open it.
+    pub fn finish_with_admission(
+        self,
+        name: impl Into<String>,
+        timeout: std::time::Duration,
+    ) -> (crate::AdmissionControl, crate::AdmissionGate) {
+        self.core.stack.finish_with_admission(name.into(), timeout)
+    }
+
     /// Finish registration and release the exclusive borrow of the shutdown owner.
     pub fn finish(self) {
         self.core.stack.seal_registration();

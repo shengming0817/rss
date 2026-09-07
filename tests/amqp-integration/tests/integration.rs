@@ -631,6 +631,7 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id(
 
     let receipt = stack
         .shutdown()
+        .join()
         .await
         .map_err(|_| live_failure(LivePhase::Shutdown, MessagingErrorKind::Transient))?;
     if !matches!(
@@ -962,7 +963,7 @@ async fn assert_tls_startup_rollback(
         .is_err()
     );
     drop(startup);
-    let rollback = rollback_stack.shutdown().await?;
+    let rollback = rollback_stack.shutdown().join().await?;
     assert!(rollback.failures().is_empty());
     assert!(rollback_handle.transport_generation_for_test().is_none());
 

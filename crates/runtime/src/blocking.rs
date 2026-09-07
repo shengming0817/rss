@@ -53,6 +53,7 @@ pub struct ManagedBlockingWorker {
 /// resulting thread owner into the shutdown stack.
 #[must_use = "blocking worker registrations must be staged in a lifecycle transaction"]
 pub struct ManagedBlockingWorkerRegistration {
+    pub(crate) critical: bool,
     name: String,
     shutdown_timeout: Duration,
     run: Option<Box<BlockingRunner>>,
@@ -191,6 +192,13 @@ impl ManagedBlockingWorker {
 }
 
 impl ManagedBlockingWorkerRegistration {
+    /// Include this runner in the same-stack critical monitor and the scope early-exit policy.
+    /// The status does not certify thread-local destruction; shutdown still joins the thread.
+    pub const fn critical(mut self) -> Self {
+        self.critical = true;
+        self
+    }
+
     pub(crate) fn bind(
         mut self,
         token: CancellationToken,
@@ -214,6 +222,7 @@ where
     F: FnOnce(CancellationToken) -> Result<(), ShutdownError> + Send + 'static,
 {
     ManagedBlockingWorkerRegistration {
+        critical: false,
         name: name.into(),
         shutdown_timeout,
         run: Some(Box::new(run)),

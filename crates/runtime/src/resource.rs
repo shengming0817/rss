@@ -159,6 +159,7 @@ impl TaskStart {
             start: Some(self),
             make: Some(Box::new(move |token| Box::pin(make(token)))),
             status,
+            critical: false,
         }
     }
 
@@ -516,12 +517,20 @@ type TaskFactory = Box<
 /// Fields are private and the only constructor consumes [`ManagedTask`].
 #[must_use = "managed task registration must enter a shutdown-token funnel"]
 pub struct ManagedTaskRegistration {
+    pub(crate) critical: bool,
     start: Option<TaskStart>,
     make: Option<TaskFactory>,
     status: TaskStatus,
 }
 
 impl ManagedTaskRegistration {
+    /// Include this task in the same-stack critical monitor and the scope early-exit policy.
+    /// Ordinary one-shot work should not opt in. This flag follows the same registration owner.
+    pub const fn critical(mut self) -> Self {
+        self.critical = true;
+        self
+    }
+
     /// Borrow the same-source read-only status without exposing task ownership.
     pub fn status(&self) -> TaskStatus {
         self.status.clone()

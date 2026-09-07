@@ -585,7 +585,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
     tokio::task::yield_now().await;
     assert!(status.is_running());
 
-    let receipt = stack.shutdown().await.expect("shutdown");
+    let receipt = stack.shutdown().join().await.expect("shutdown");
     assert!(receipt.is_clean());
     assert_eq!(
         status.wait_stopped().await,

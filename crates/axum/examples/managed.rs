@@ -52,7 +52,7 @@ async fn smoke(
     if _h2 {
         http2_request(address).await?;
     }
-    assert!(owner.shutdown().await?.is_clean());
+    assert!(owner.shutdown().join().await?.is_clean());
     assert!(TcpStream::connect(address).await.is_err());
     Ok(())
 }

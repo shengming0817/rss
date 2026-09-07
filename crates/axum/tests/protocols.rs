@@ -100,7 +100,7 @@ async fn http1_keep_alive_then_idle_drain() {
                 "ok"
             );
         }
-        assert!(owner.shutdown().await.unwrap().is_clean());
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
         tokio::time::timeout(WAIT, &mut client.driver)
             .await
             .unwrap()
@@ -147,7 +147,7 @@ async fn http1_inflight_request_finishes_during_drain() {
             tokio::time::timeout(WAIT, entered.notified())
                 .await
                 .unwrap();
-            let shutdown = owner.shutdown();
+            let shutdown = owner.shutdown().join();
             tokio::pin!(shutdown);
             // Poll shutdown before releasing the handler, so this exercises drain.
             assert!(futures::poll!(&mut shutdown).is_pending());
@@ -233,7 +233,7 @@ async fn http1_timeout_drops_handler_before_dependency_teardown() {
             tokio::time::timeout(WAIT, entered.notified())
                 .await
                 .unwrap();
-            owner.shutdown().await.unwrap()
+            owner.shutdown().join().await.unwrap()
         });
         assert!(response.is_err());
         assert_eq!(receipt.failures().len(), 1);
@@ -314,7 +314,7 @@ async fn malformed_or_panicking_http1_peer_does_not_stop_healthy_connections() {
             response.into_body().collect().await.unwrap().to_bytes(),
             "healthy"
         );
-        assert!(owner.shutdown().await.unwrap().is_clean());
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
     }
     let fields = diagnostics.0.lock().unwrap();
     for outcome in ["peer_error", "panic"] {
@@ -352,7 +352,7 @@ async fn http1_listener_does_not_dispatch_h2_preface() {
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(owner.shutdown().await.unwrap().is_clean());
+    assert!(owner.shutdown().join().await.unwrap().is_clean());
 }
 
 #[cfg(feature = "auto-protocol")]
@@ -391,7 +391,7 @@ async fn auto_accepts_both_protocols_on_one_listener() {
         response.into_body().collect().await.unwrap().to_bytes(),
         "auto"
     );
-    assert!(owner.shutdown().await.unwrap().is_clean());
+    assert!(owner.shutdown().join().await.unwrap().is_clean());
     tokio::time::timeout(WAIT, driver).await.unwrap().unwrap();
 }
 
@@ -407,7 +407,7 @@ async fn auto_drain_cancels_idle_and_partial_preface_connections() {
     let mut ready = Client::connect(addr).await;
     let response = ready.request("/").await.unwrap();
     response.into_body().collect().await.unwrap();
-    assert!(owner.shutdown().await.unwrap().is_clean());
+    assert!(owner.shutdown().join().await.unwrap().is_clean());
     for peer in [&mut idle, &mut partial] {
         let mut bytes = Vec::new();
         let _ = tokio::time::timeout(WAIT, peer.read_to_end(&mut bytes))
@@ -477,7 +477,7 @@ async fn http1_response_body_is_drained_or_dropped_on_timeout() {
                 },
                 async {
                     tokio::time::timeout(WAIT, polled.notified()).await.unwrap();
-                    let shutdown = owner.shutdown();
+                    let shutdown = owner.shutdown().join();
                     tokio::pin!(shutdown);
                     assert!(futures::poll!(&mut shutdown).is_pending());
                     if finish {
@@ -552,7 +552,7 @@ async fn establishment_deadline_closes_partial_headers_without_stopping_listener
                 response.into_body().collect().await.unwrap().to_bytes(),
                 "healthy"
             );
-            assert!(owner.shutdown().await.unwrap().is_clean());
+            assert!(owner.shutdown().join().await.unwrap().is_clean());
         }
     }
 }
@@ -580,7 +580,7 @@ async fn establishment_deadline_closes_partial_exact_h2_preface() {
         let _ = tokio::time::timeout(WAIT, slow.read_to_end(&mut bytes))
             .await
             .unwrap();
-        assert!(owner.shutdown().await.unwrap().is_clean());
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
         tokio::time::resume();
     }
 }
@@ -622,6 +622,6 @@ async fn establishment_deadline_does_not_limit_an_admitted_handler() {
                 .to_bytes(),
             "finished"
         );
-        assert!(owner.shutdown().await.unwrap().is_clean());
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
     }
 }

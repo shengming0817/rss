@@ -136,7 +136,7 @@ let mut startup = owner.startup()?;
 startup.stage_task_with_token(registration);
 startup.commit().finish();
 // The product drives its application and decides when to shut down.
-let receipt = owner.shutdown().await?;
+let receipt = owner.shutdown().join().await?;
 assert!(receipt.is_clean());
 let _exit = status.wait_stopped().await;
 # Ok(()) }

@@ -1,9 +1,10 @@
-//! Provider-neutral lifecycle ownership and bounded shutdown.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod admission;
 mod blocking;
 mod resource;
+mod scope;
 mod shutdown;
 mod transaction;
 
@@ -17,7 +18,14 @@ pub use resource::{
     TaskStatus, join_owned_task,
 };
 pub use shutdown::{
-    DrainCompletion, RegistrationPhaseError, ResourceShutdownError, ShutdownFailureKind,
-    ShutdownReceipt, ShutdownStack, ShutdownStackError, TotalDrainBudget, TotalDrainBudgetError,
+    DrainCompletion, RegistrationPhaseError, ResourceShutdownError, ShutdownDrain,
+    ShutdownFailureKind, ShutdownReceipt, ShutdownStack, ShutdownStackError, TotalDrainBudget,
+    TotalDrainBudgetError,
 };
 pub use transaction::{LaunchTransaction, StartupTransaction};
+
+pub use scope::{
+    CriticalTaskExit, CriticalTasks, LifecycleOutcome, LifecycleScope, ScopeExit, ScopeStateError,
+};
+
+pub use admission::{AdmissionControl, AdmissionError, AdmissionGate, AdmissionPermit};

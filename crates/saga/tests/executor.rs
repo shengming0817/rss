@@ -501,7 +501,7 @@ async fn managed_cancellation_is_a_clean_lifecycle_exit() -> anyhow::Result<()> 
     startup.stage_task_with_token(registration);
     startup.commit().finish();
     tokio::time::timeout(Duration::from_secs(1), entered.notified()).await?;
-    assert!(stack.shutdown().await?.is_clean());
+    assert!(stack.shutdown().join().await?.is_clean());
     assert_eq!(
         status.current(),
         rss_runtime::TaskState::Stopped(rss_runtime::TaskExit::Cancelled)
@@ -594,7 +594,7 @@ async fn managed_yield_and_pause_preserve_continuation_owner() -> anyhow::Result
         startup.commit().finish();
         let report = result.await??;
         assert_eq!(report.stop, expected);
-        assert!(stack.shutdown().await?.is_clean());
+        assert!(stack.shutdown().join().await?.is_clean());
         if expected == RunStop::Paused {
             assert_eq!(
                 e.resume(s, report.revision, 30, &control).await?.status,

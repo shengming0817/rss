@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `AdmissionPermit` in the current scope
+ --> tests/ui/admission_permit_clone_fail.rs:3:25
+  |
+3 |     let _other = permit.clone();
+  |                         ^^^^^ method not found in `AdmissionPermit`

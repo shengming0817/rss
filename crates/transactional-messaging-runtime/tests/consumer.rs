@@ -2596,7 +2596,7 @@ async fn forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
     .await
     .expect("claim starts");
 
-    let receipt = stack.shutdown().await.expect("shutdown");
+    let receipt = stack.shutdown().join().await.expect("shutdown");
     assert!(matches!(
         receipt.failures()[0].kind,
         rss_runtime::ShutdownFailureKind::TimedOut(_)
@@ -2707,7 +2707,7 @@ async fn forced_worker_shutdown_drops_handler_without_settlement() {
     .await
     .expect("handler starts");
 
-    let receipt = stack.shutdown().await.expect("bounded shutdown");
+    let receipt = stack.shutdown().join().await.expect("bounded shutdown");
     assert!(!receipt.is_clean());
     assert!(matches!(
         receipt.failures()[0].kind,
@@ -3034,7 +3034,7 @@ async fn non_transient_subscribe_failure_is_fail_loud() {
         status.wait_stopped().await,
         rss_runtime::TaskExit::Failed(rss_runtime::ShutdownErrorKind::Operation)
     );
-    let receipt = stack.shutdown().await.expect("bounded shutdown");
+    let receipt = stack.shutdown().join().await.expect("bounded shutdown");
     assert!(matches!(
         &receipt.failures()[0].kind,
         rss_runtime::ShutdownFailureKind::Failed(error)
@@ -3078,7 +3078,7 @@ async fn provider_panic_maps_to_typed_worker_failure() {
         status.wait_stopped().await,
         rss_runtime::TaskExit::Failed(rss_runtime::ShutdownErrorKind::TaskPanicked)
     );
-    let receipt = stack.shutdown().await.expect("bounded shutdown");
+    let receipt = stack.shutdown().join().await.expect("bounded shutdown");
     assert!(matches!(
         receipt.failures()[0].kind,
         rss_runtime::ShutdownFailureKind::Panicked

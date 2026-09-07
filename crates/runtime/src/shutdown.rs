@@ -154,6 +154,53 @@ impl ShutdownReceipt {
     }
 }
 
+/// Receipt owner for a single submitted shutdown. Waiting never transfers task ownership.
+#[must_use = "retain the drain to observe its shutdown receipt"]
+pub struct ShutdownDrain {
+    state: DrainState,
+}
+
+enum DrainState {
+    Running(tokio::task::JoinHandle<ShutdownReceipt>),
+    Complete(Result<ShutdownReceipt, ShutdownStackError>),
+}
+
+impl ShutdownDrain {
+    /// Consume this drain, wait for completion and return its owned result.
+    ///
+    /// Dropping this future abandons the receipt, but leaves submitted cleanup running.
+    /// Use [`Self::wait`] when cancellation must preserve the receipt for a later wait.
+    pub async fn join(mut self) -> Result<ShutdownReceipt, ShutdownStackError> {
+        self.wait().await;
+        self.into_result()
+            .unwrap_or_else(|| unreachable!("wait stores a terminal result before returning"))
+    }
+
+    /// Wait for and retain the result. Cancelling this borrow loses neither cleanup nor receipt.
+    pub async fn wait(&mut self) -> &Result<ShutdownReceipt, ShutdownStackError> {
+        if let DrainState::Running(handle) = &mut self.state {
+            let result = handle
+                .await
+                .map_err(|_| ShutdownStackError::DriverUnavailable);
+            self.state = DrainState::Complete(result);
+        }
+        match &self.state {
+            DrainState::Complete(result) => result,
+            DrainState::Running(_) => {
+                unreachable!("wait stores a terminal result before returning")
+            }
+        }
+    }
+
+    /// Take a completed result. An unfinished handle yields None and leaves cleanup running.
+    pub fn into_result(self) -> Option<Result<ShutdownReceipt, ShutdownStackError>> {
+        match self.state {
+            DrainState::Complete(result) => Some(result),
+            DrainState::Running(_) => None,
+        }
+    }
+}
+
 /// A stack can only be created while a Tokio runtime is active.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ShutdownStackError {
@@ -191,6 +238,8 @@ pub struct ShutdownStack {
     root_token: Option<CancellationToken>,
     resources: Option<Vec<Box<DynManagedResource<'static>>>>,
     registration_phase: RegistrationPhase,
+    critical: tokio::sync::watch::Sender<Vec<TaskStatus>>,
+    admission: Option<std::sync::Arc<crate::admission::AdmissionInner>>,
 }
 
 /// 到达自身 LIFO 相位才取消后台 task 的资源包装。
@@ -261,6 +310,8 @@ impl ShutdownStack {
             root_token: Some(root_token),
             resources: Some(Vec::new()),
             registration_phase: RegistrationPhase::Open,
+            admission: None,
+            critical: tokio::sync::watch::channel(Vec::new()).0,
         }
     }
 
@@ -320,8 +371,10 @@ impl ShutdownStack {
         registration: ManagedTaskRegistration,
     ) -> TaskStatus {
         let token = self.root_token().child_token();
+        let critical = registration.critical;
         let status = registration.status();
         let task = registration.bind(token);
+        self.observe_critical(critical, &status);
         self.resources_mut().push(DynManagedResource::new_box(task));
         status
     }
@@ -330,8 +383,10 @@ impl ShutdownStack {
         &mut self,
         registration: crate::ManagedBlockingWorkerRegistration,
     ) -> Result<TaskStatus, crate::ManagedBlockingWorkerStartError> {
+        let critical = registration.critical;
         let worker = registration.bind(self.root_token().child_token())?;
         let status = worker.status();
+        self.observe_critical(critical, &status);
         self.resources_mut()
             .push(crate::blocking::registered_blocking_worker(worker));
         Ok(status)
@@ -343,8 +398,10 @@ impl ShutdownStack {
         registration: ManagedTaskRegistration,
     ) -> TaskStatus {
         let token = CancellationToken::new();
+        let critical = registration.critical;
         let status = registration.status();
         let task = registration.bind(token.clone());
+        self.observe_critical(critical, &status);
         let name = task.name().to_owned();
         let shutdown_timeout = task.shutdown_timeout();
         let resource = DynManagedResource::new_box(task);
@@ -363,8 +420,10 @@ impl ShutdownStack {
         registration: crate::ManagedBlockingWorkerRegistration,
     ) -> Result<TaskStatus, crate::ManagedBlockingWorkerStartError> {
         let token = CancellationToken::new();
+        let critical = registration.critical;
         let worker = registration.bind(token.clone())?;
         let status = worker.status();
+        self.observe_critical(critical, &status);
         let name = worker.name().to_owned();
         let shutdown_timeout = worker.shutdown_timeout();
         let resource = crate::blocking::registered_blocking_worker(worker);
@@ -442,23 +501,48 @@ impl ShutdownStack {
         self.registration_phase = RegistrationPhase::Launch;
     }
 
+    /// Observe this stack's explicitly critical registrations without taking task ownership.
+    /// The returned view also sees future registrations; LifecycleScope uses this same monitor.
+    pub fn critical_tasks(&self) -> crate::CriticalTasks {
+        crate::CriticalTasks::new(self.critical.subscribe())
+    }
+
+    fn observe_critical(&self, critical: bool, status: &TaskStatus) {
+        if critical {
+            self.critical
+                .send_modify(|tasks| tasks.push(status.clone()));
+        }
+    }
+
+    pub(crate) fn finish_with_admission(
+        &mut self,
+        name: String,
+        timeout: Duration,
+    ) -> (crate::AdmissionControl, crate::AdmissionGate) {
+        let (control, gate, drain, inner) = crate::admission::admission(name, timeout);
+        self.resources_mut()
+            .push(DynManagedResource::new_box(drain));
+        self.admission = Some(inner);
+        self.seal_registration();
+        (control, gate)
+    }
+
+    pub(crate) fn registration_is_sealed(&self) -> bool {
+        self.registration_phase == RegistrationPhase::Sealed
+    }
+
     pub(crate) fn seal_registration(&mut self) {
         debug_assert_eq!(self.registration_phase, RegistrationPhase::Launch);
         self.registration_phase = RegistrationPhase::Sealed;
     }
 
-    /// Consume this owner and await its mandatory bounded drain.
+    /// Synchronously submit this owner to its originating runtime's bounded drain.
     ///
-    /// The inner task accepts the resources before the first await. Cancelling this waiter only
-    /// drops its join handle; the captured runtime continues the drain while that runtime remains
-    /// driven. If the originating runtime stops first, this returns
-    /// [`ShutdownStackError::DriverUnavailable`] instead of panicking.
-    #[must_use = "the typed shutdown receipt must be observed"]
-    pub async fn shutdown(mut self) -> Result<ShutdownReceipt, ShutdownStackError> {
-        let drain = self.spawn_owned_drain();
-        match drain.await {
-            Ok(receipt) => Ok(receipt),
-            Err(_) => Err(ShutdownStackError::DriverUnavailable),
+    /// Retain the returned handle to recover the receipt after cancelling a wait. Dropping the
+    /// handle never cancels the already-submitted cleanup; the originating runtime must stay driven.
+    pub fn shutdown(mut self) -> ShutdownDrain {
+        ShutdownDrain {
+            state: DrainState::Running(self.spawn_owned_drain()),
         }
     }
 
@@ -468,10 +552,13 @@ impl ShutdownStack {
         total_budget: Duration,
     ) -> Result<ShutdownReceipt, ShutdownStackError> {
         self.total_budget = TotalDrainBudget(total_budget);
-        self.shutdown().await
+        self.shutdown().join().await
     }
 
     fn spawn_owned_drain(&mut self) -> tokio::task::JoinHandle<ShutdownReceipt> {
+        if let Some(admission) = self.admission.take() {
+            admission.close();
+        }
         let root = self
             .root_token
             .take()
@@ -930,7 +1017,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("b", Behavior::Ok, &log));
         stack.register_detached(MockResource::boxed("c", Behavior::Ok, &log));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert!(failures.is_empty(), "all-ok shutdown reports no failures");
@@ -946,7 +1033,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("b", Behavior::Err, &log));
         stack.register_detached(MockResource::boxed("c", Behavior::Ok, &log));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         // SHUTDOWN-CONTINUE-ON-ERROR-01：b 失败不中断链，被依赖的 a 仍被关闭。
@@ -978,7 +1065,7 @@ mod tests {
         ));
         stack.register_detached(MockResource::boxed("c", Behavior::Ok, &log));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert_eq!(
@@ -1001,7 +1088,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("a", Behavior::Err, &log));
         stack.register_detached(MockResource::boxed("b", Behavior::Err, &log));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert_eq!(entries(&log), vec!["b", "a"]);
@@ -1057,7 +1144,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("hang", Behavior::Hang, &log));
         stack.register_detached(MockResource::boxed("c", Behavior::Ok, &log));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         // hang 超时被跳过，但被依赖的 a 仍被关闭（顺序 c → hang → a）。
@@ -1075,7 +1162,7 @@ mod tests {
             dropped: Arc::clone(&dropped),
         }));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert_eq!(failures.len(), 1);
@@ -1095,7 +1182,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("boom", Behavior::Panic, &log));
         stack.register_detached(MockResource::boxed("ok", Behavior::Ok, &log)); // 最先关
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         // LIFO：ok → boom → hang → err；ok 成功不计入 failures。
@@ -1117,7 +1204,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("boom", Behavior::Panic, &log));
         stack.register_detached(MockResource::boxed("c", Behavior::Ok, &log));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         // SHUTDOWN-PANIC-ISOLATE-01：boom panic 被隔离，a/c 不受影响。
@@ -1143,7 +1230,7 @@ mod tests {
             log: Arc::clone(&log),
         }));
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         assert_eq!(
             entries(&log),
             vec!["metadata-panic", "metadata-panic", "dependency"]
@@ -1169,7 +1256,7 @@ mod tests {
             MockResource::boxed("waiter", Behavior::AwaitCancel(token), &log)
         });
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert!(failures.is_empty());
@@ -1191,7 +1278,11 @@ mod tests {
 
         assert_eq!(registered.current(), crate::TaskState::Running);
         assert_eq!(status.current(), crate::TaskState::Running);
-        assert!(receipt_of(stack.shutdown().await).failures().is_empty());
+        assert!(
+            receipt_of(stack.shutdown().join().await)
+                .failures()
+                .is_empty()
+        );
         assert_eq!(
             registered.current(),
             crate::TaskState::Stopped(crate::TaskExit::Cancelled)
@@ -1231,7 +1322,7 @@ mod tests {
             }
         });
 
-        let drain = tokio::spawn(async move { stack.shutdown().await });
+        let drain = tokio::spawn(async move { stack.shutdown().join().await });
         listener_started.notified().await;
         let captured = deferred_token
             .lock()
@@ -1397,7 +1488,7 @@ mod tests {
         let stack = ShutdownStack::new(CancellationToken::new());
         assert!(stack.is_empty());
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert!(failures.is_empty());
@@ -1410,7 +1501,7 @@ mod tests {
         stack.register_detached(MockResource::boxed("only", Behavior::Ok, &log));
         assert_eq!(stack.len(), 1);
 
-        let receipt = receipt_of(stack.shutdown().await);
+        let receipt = receipt_of(stack.shutdown().join().await);
         let failures = receipt.failures();
 
         assert!(failures.is_empty());

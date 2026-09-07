@@ -1,6 +1,8 @@
 #[test]
 fn lifecycle_capabilities_are_not_forgeable() {
     let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/admission_permit_clone_fail.rs");
+    t.compile_fail("tests/ui/admission_permit_forge_fail.rs");
     t.compile_fail("tests/ui/task_status_forge_fail.rs");
     t.compile_fail("tests/ui/managed_task_registration_forge_fail.rs");
     t.compile_fail("tests/ui/blocking_worker_registration_forge_fail.rs");
