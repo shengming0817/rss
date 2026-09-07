@@ -19,7 +19,8 @@ make ci CI_PART=tests CI_FILTER='package(=amqp-integration) and test(=shared_amq
 `CI_PART=select` 写出绑定 SHA 的 plan。GitHub 后续阶段通过 `CI_PLAN` 读取该产物，不能自行重新选择。
 `CI_PART=build` 生成 nextest archive，验证所有非 ignored 测试恰好分到 unit、consumer、amqp、kafka、
 providers 之一。consumer 先通过 `cargo fetch --locked` 准备冷 runner 的依赖下载，再运行 offline 证明；
-保留独立 workspace/依赖解析/target，组内串行并使用独立编译缓存，不重新构建工作区。
+保留独立 workspace/依赖解析/target，组内串行并使用独立编译缓存，不重新构建工作区。Kafka 独立 API/依赖图证明使用宿主 OpenSSL SDK（Linux 的 pkg-config/libssl-dev、
+macOS 的 Homebrew openssl），避免为 cargo check 重编译 vendored OpenSSL；原工作区归档及真实 TLS 场景仍验证 vendored 构建。
 三个 provider 组最多同时使用三个 runner，组内串行。doctest 使用独立 `cargo test --doc` 命令。
 
 本地产物位于 `.local-ci-runs/current`，被 Git 忽略。普通和插桩构建使用不同 target 子目录与缓存身份。
@@ -65,3 +66,7 @@ GitHub step 时间保留 artifact 传输开销，缓存 summary 保留恢复 key
 
 ref: [cargo-llvm-cov v0.8.7 report.rs](https://github.com/taiki-e/cargo-llvm-cov/blob/v0.8.7/src/report.rs)
 ref: [nextest archiving](https://nexte.st/docs/ci-features/archiving/)
+
+PG 取消/期限证明在真实数据库到达 effect 或注入 commit 阶段后推进已有测试时钟，
+保留 150ms 操作期限、连接回收与 durable rollback 断言；协调方同时观察操作提前完成，
+并以真实 5 秒等待约束连接、阶段进入、期限响应及关闭，避免前置超时后永等通知。

@@ -47,7 +47,11 @@ impl PgConsumerEffect<Vec<u8>> for FailingEffect {
 }
 #[allow(clippy::cognitive_complexity)]
 // reason: keep each fault mode beside its outcome, durable-state and connection-state assertions.
-pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
+pub(super) async fn run(
+    runtime: Arc<PgRuntime>,
+    owner: &sqlx::PgPool,
+    config: &PgConfig,
+) -> anyhow::Result<()> {
     let inbox = PgInboxStore::new(
         runtime.clone(),
         rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
@@ -110,6 +114,15 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
             connection_gone(owner, pid.load(Ordering::SeqCst)).await;
         }
     }
+    let clock = FakeClock::new();
+    let timed_runtime = Arc::new(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            PgRuntime::connect(config.clone(), clock.clone(), fence_fixture::binding()),
+        )
+        .await
+        .expect("controlled-clock runtime must connect")?,
+    );
     for cancel in [true, false] {
         let id = if cancel {
             "consumer-cancel"
@@ -126,15 +139,16 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         let pid = Arc::new(AtomicI32::new(0));
         let entered = Arc::new(Notify::new());
         let consumer = PgConsumerTx::receipt_only(
-            runtime.clone(),
+            timed_runtime.clone(),
             FailingEffect {
                 mode: Mode::Pending,
                 pid: pid.clone(),
                 entered: entered.clone(),
             },
         );
-        let task = tokio::spawn(async move {
-            let clock = Timer::new();
+        let operation_clock = clock.clone();
+        let mut operation = Box::pin(async move {
+            let clock = operation_clock;
             let bound = AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(150))
                 .expect("deadline")
                 .operation(&clock);
@@ -142,16 +156,30 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
                 .execute(&claim, &message, binding.receipt_intent(), bound)
                 .await
         });
-        entered.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                _ = &mut operation => panic!("{id}: consumer finished before pending effect"),
+                () = entered.notified() => {}
+            }
+        })
+        .await
+        .expect("consumer must reach pending effect");
         if cancel {
-            task.abort();
-            assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+            drop(operation);
         } else {
-            assert_eq!(task.await?.status(), Status::CommitUnknown);
+            clock.advance(Duration::from_millis(150));
+            let outcome = tokio::time::timeout(Duration::from_secs(5), operation)
+                .await
+                .expect("consumer must observe deadline");
+            assert_eq!(outcome.status(), Status::CommitUnknown);
         }
         connection_gone(owner, pid.load(Ordering::SeqCst)).await;
         assert_eq!(count(owner, id).await, 0);
         assert!(inbox.read_terminal(&identity, deadline()).await?.is_none());
     }
+    tokio::time::timeout(Duration::from_secs(5), timed_runtime.close())
+        .await
+        .expect("controlled-clock runtime must close");
     Ok(())
 }

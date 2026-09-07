@@ -44,6 +44,10 @@ pub async fn host(config: KafkaConfig) -> Result<(), KafkaError> {
         .args(["check", "--offline"])
         .current_dir(root.path())
         .env("CARGO_TARGET_DIR", root.path().join("target"))
+        // This proves the standalone Rust graph/API; the original workspace build already
+        // proves vendored TLS. Use the host SDK rather than rebuilding OpenSSL for cargo check.
+        // ref: https://docs.rs/openssl/latest/openssl/#manual
+        .env("OPENSSL_NO_VENDOR", "1")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .stdout(Stdio::from(output.try_clone()?))

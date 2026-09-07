@@ -67,17 +67,26 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
                 .username("tmsg_runtime").password("fixture-only").ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec())).await?;
         let runtime = Arc::new(PgRuntime::connect(config.clone(), timer, fence_fixture::binding()).await?);
+        eprintln!("pg-suite phase=tls_rejections");
         tls_rejections(&fixture, &network).await?;
         assert!(!runtime.is_closed());
+        eprintln!("pg-suite phase=outbox_roundtrip");
         outbox_roundtrip(runtime.clone()).await?;
+        eprintln!("pg-suite phase=consumer_receipt");
         consumer_receipt(runtime.clone(), &owner).await?;
+        eprintln!("pg-suite phase=localtx_faults");
         localtx_faults(runtime.clone(), &owner).await?;
+        eprintln!("pg-suite phase=conformance");
         Box::pin(conformance::run(runtime.clone(), &owner)).await?;
+        eprintln!("pg-suite phase=adversarial");
         Box::pin(adversarial::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
+        eprintln!("pg-suite phase=lifecycle::business_outbox_atomicity");
         lifecycle::business_outbox_atomicity(runtime.clone(), &owner).await?;
+        eprintln!("pg-suite phase=lifecycle::close_during_transaction");
         lifecycle::close_during_transaction(config.clone(), &owner).await?;
         #[cfg(feature = "rss-runtime")]
         lifecycle::managed_close(config).await?;
+        eprintln!("pg-suite phase=runtime.close");
         runtime.close().await;
         assert!(runtime.is_closed());
         owner.close().await;
