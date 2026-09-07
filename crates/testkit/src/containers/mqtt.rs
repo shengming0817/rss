@@ -59,25 +59,31 @@ pub async fn exclusive_mqtt_tls(matching_host: bool) -> Result<MqttTlsFixture> {
 }
 
 impl MqttTlsFixture {
-    pub(super) fn descriptor(&self) -> serde_json::Value {
+    pub(super) fn descriptor(&self) -> super::descriptor::MqttConnection {
         use runtime::ContainerId as _;
-        serde_json::json!({"container": self.container.container_id(), "port": self.port,
-            "ca": self.ca_pem(), "wrong_ca": self.wrong_ca_pem(),
-            "certificate": self.client_cert_pem(), "key": self.client_key_pem()})
+        super::descriptor::MqttConnection {
+            container: self.container.container_id().into(),
+            port: self.port,
+            ca: self.ca_pem().into(),
+            wrong_ca: self.wrong_ca_pem().into(),
+            certificate: self.client_cert_pem().into(),
+            key: self.client_key_pem().into(),
+        }
     }
 }
 /// Borrow client connection material; the launcher retains server keys and lifecycle ownership.
 pub async fn shared_mqtt_tls() -> Result<MqttTlsFixture> {
-    let d = super::launcher::descriptor("mqtt")?;
-    let get = |key| super::launcher::text(&d, key);
+    let d = super::descriptor::read()?
+        .mqtt
+        .ok_or_else(|| anyhow::anyhow!("MQTT shared fixture not selected"))?;
     Ok(MqttTlsFixture {
-        container: runtime::Container::Shared(get("container")?),
-        port: super::launcher::port(&d, "port")?,
+        container: runtime::Container::Shared(d.container),
+        port: d.port,
         material: tls::TlsMaterial {
-            ca_pem: get("ca")?,
-            wrong_ca_pem: get("wrong_ca")?,
-            client_cert_pem: get("certificate")?,
-            client_key_pem: get("key")?,
+            ca_pem: d.ca,
+            wrong_ca_pem: d.wrong_ca,
+            client_cert_pem: d.certificate,
+            client_key_pem: d.key,
             // reason: borrowed clients never construct a TLS server.
             server_cert_pem: String::new(),
             server_key_pem: String::new(),

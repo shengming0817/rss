@@ -271,27 +271,35 @@ impl Image for KafkaImage {
 }
 
 impl KafkaTlsFixture {
-    pub(super) fn descriptor(&self) -> serde_json::Value {
+    pub(super) fn descriptor(&self) -> super::descriptor::KafkaConnection {
         use runtime::ContainerId as _;
-        serde_json::json!({"container": self._container.container_id(), "brokers": self.brokers,
-            "scram_brokers": self.scram_brokers, "untrusted_client": self.untrusted_client,
-            "ca": self.ca, "wrong_ca": self.wrong_ca, "certificate": self.certificate, "key": self.key})
+        super::descriptor::KafkaConnection {
+            container: self._container.container_id().into(),
+            brokers: self.brokers.clone(),
+            scram_brokers: self.scram_brokers.clone(),
+            untrusted_client: self.untrusted_client.clone(),
+            ca: self.ca.clone(),
+            wrong_ca: self.wrong_ca.clone(),
+            certificate: self.certificate.clone(),
+            key: self.key.clone(),
+        }
     }
 }
 /// Borrow the shared broker and create a process-unique topic.
 pub async fn shared_kafka_tls() -> Result<KafkaTlsFixture> {
-    let d = super::launcher::descriptor("kafka")?;
-    let get = |key| super::launcher::text(&d, key);
+    let d = super::descriptor::read()?
+        .kafka
+        .ok_or_else(|| anyhow::anyhow!("Kafka shared fixture not selected"))?;
     let fixture = KafkaTlsFixture {
-        _container: runtime::Container::Shared(get("container")?),
+        _container: runtime::Container::Shared(d.container),
         topic: super::launcher::unique_name("events"),
-        brokers: get("brokers")?,
-        scram_brokers: get("scram_brokers")?,
-        untrusted_client: get("untrusted_client")?,
-        ca: get("ca")?,
-        wrong_ca: get("wrong_ca")?,
-        certificate: get("certificate")?,
-        key: get("key")?,
+        brokers: d.brokers,
+        scram_brokers: d.scram_brokers,
+        untrusted_client: d.untrusted_client,
+        ca: d.ca,
+        wrong_ca: d.wrong_ca,
+        certificate: d.certificate,
+        key: d.key,
     };
     runtime::run_container_command(
         &fixture._container,

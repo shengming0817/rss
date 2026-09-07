@@ -15,6 +15,7 @@ make ci-full CI_BASE=<baseline>
 make ci CI_PART=tests CI_FILTER='package(=amqp-integration) and test(=shared_amqp_subscriber_lifecycle_suite)'
 ```
 
+显式 `CI_FILTER` 独立于 affected 范围，零匹配即失败；筛选表达式同样写入 plan。
 `CI_PART=select` 写出绑定 SHA 的 plan。GitHub 后续阶段通过 `CI_PLAN` 读取该产物，不能自行重新选择。
 `CI_PART=build` 生成 nextest archive，验证所有非 ignored 测试恰好分到 unit、consumer、amqp、kafka、
 providers 之一。consumer 保留独立 workspace/依赖解析/target；组内串行并使用独立编译缓存。
@@ -37,7 +38,9 @@ group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，�
 共享与独占复用同一构造和管理命令实现。MQTT 共享句柄不能重启 broker。
 
 资源携带唯一 `rss.test-run` 标签。启动失败或取消时，启动器终止 nextest 进程组并清理本次标签的容器和网络；
-正常 guard Drop 负责常规释放，标签清理是本次运行的兜底。Docker 命令、启动与测试仍有界。
+容器 guard Drop 负责常规释放；网络 guard 在 5 秒期限内及时释放地址池容量，超时会终止并回收 Docker 子进程。
+启动器保留最终兜底；标签扫描在单一 30 秒截止时间内
+尝试所有可枚举资源，聚合失败而不因首项错误跳过后续删除。Docker 命令、启动与测试仍有界。
 
 ## 覆盖率与失败
 
@@ -48,8 +51,8 @@ group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，�
 它不编译、不执行测试。缺组、损坏、身份不符、测试失败均失败；有效部分仍尽可能生成诊断报告。
 最终 `cargo` 同时要求选择、静态检查、构建、所有执行组和应运行的 coverage 成功。
 
-每阶段输出耗时；每个 fixture 输出镜像准备、容器启动至就绪和清理耗时、启动次数到不含凭据的
-`fixtures.jsonl`。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
+每阶段输出耗时；每个 fixture 输出镜像准备、容器启动至就绪和清理耗时、启动尝试次数及成功就绪数到不含凭据的
+`fixtures.jsonl`，包括失败和取消 outcome。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
 GitHub step 时间保留 artifact 传输开销，缓存 summary 保留恢复 key、命中统计、保存结果和磁盘用量。
 
 ## 冷热验收

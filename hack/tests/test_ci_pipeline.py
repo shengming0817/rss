@@ -19,7 +19,7 @@ class PipelineTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.addCleanup(patch.stopall)
         patch.object(pipeline, 'ARTIFACTS', self.root).start()
-        self.plan = {'full': True, 'packages': [], 'reasons': ['explicit-full'], 'deep': True, 'coverage': True, 'sha': 'sha', 'base': 'base'}
+        self.plan = {'filter': 'all()', 'full': True, 'packages': [], 'reasons': ['explicit-full'], 'deep': True, 'coverage': True, 'sha': 'sha', 'base': 'base'}
         self.bundle = self.root / 'build'
         self.bundle.mkdir()
         (self.bundle / 'tests.tar.zst').write_bytes(b'archive')
@@ -48,6 +48,22 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(any('build' in c or 'run' in c or 'nextest' in c for c in calls))
         return status
 
+    def test_explicit_filter_overrides_empty_affected_selection(self):
+        with patch.dict(os.environ, {'CI_FULL': '0', 'CI_FILTER': 'test(only_this)'}), \
+             patch.object(pipeline, 'run', side_effect=[json.dumps({'full': False, 'packages': [], 'reasons': []}), 'sha']):
+            plan = pipeline.selection()
+        self.assertTrue(pipeline.active(plan))
+        self.assertFalse(plan['coverage'])
+        self.assertFalse(plan['deep'])
+        self.assertEqual(plan['filter'], 'test(only_this)')
+
+    def test_explicit_filter_with_no_matches_fails(self):
+        with patch.dict(os.environ, {'CARGO_TARGET_DIR': str(self.root / 'target')}), \
+             patch.object(pipeline, 'run', return_value=''), \
+             patch.object(pipeline, 'inventory', return_value=[]):
+            with self.assertRaisesRegex(ValueError, 'matched no runnable tests'):
+                pipeline.build(self.plan | {'coverage': False, 'filter': 'test(typo)'})
+
     def test_complete_and_failed_groups_still_generate_report(self):
         self.results()
         self.assertEqual(self.report(), 0)
@@ -61,7 +77,7 @@ class PipelineTests(unittest.TestCase):
         self.results()
         path = self.root / 'results/kafka/result.json'
         good = json.loads(path.read_text())
-        for key, value in [('tests', []), ('manifest', 'other-sha'), ('profiles', {}), ('profiles', {'../../escape.profraw': 'digest'})]:
+        for key, value in [('tests', []), ('manifest', 'other-sha'), ('profiles', {}), ('profiles', []), ('profiles', 'corrupt'), ('exit', '0'), ('profiles', {'../../escape.profraw': 'digest'})]:
             with self.subTest(key=key, value=value):
                 pipeline.write(path, good | {key: value})
                 self.assertNotEqual(self.report(), 0)

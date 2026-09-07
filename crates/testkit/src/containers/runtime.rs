@@ -19,44 +19,80 @@ where
         request = request.with_label("rss.test-run", run);
     }
     let image = format!("{}:{}", request.image().name(), request.image().tag());
-    let started = std::time::Instant::now();
-    let present = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        tokio::process::Command::new("docker")
-            .args(["image", "inspect", &image])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await??;
-    if !present.success() {
-        let pulled = tokio::time::timeout(
-            std::time::Duration::from_secs(110),
+    let mut preparation = Stage::new("image", request.image().name(), 0);
+    let prepared: Result<()> = async {
+        let present = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
             tokio::process::Command::new("docker")
-                .args(["pull", &image])
+                .args(["image", "inspect", &image])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .status(),
         )
         .await??;
-        anyhow::ensure!(pulled.success(), "fixture image preparation failed");
+        if !present.success() {
+            let pulled = tokio::time::timeout(
+                std::time::Duration::from_secs(110),
+                tokio::process::Command::new("docker")
+                    .args(["pull", &image])
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await??;
+            anyhow::ensure!(pulled.success(), "fixture image preparation failed");
+        }
+        Ok(())
     }
-    metric(
-        "image",
-        request.image().name(),
-        started.elapsed().as_secs_f64(),
-        0,
-    )?;
-    let started = std::time::Instant::now();
+    .await;
+    preparation.finish(prepared.is_ok());
+    drop(preparation);
+    prepared?;
+    let mut startup = Stage::new("start-ready", request.image().name(), 1);
     let container =
-        tokio::time::timeout(std::time::Duration::from_secs(110), request.start()).await??;
-    metric(
-        "start-ready",
-        container.image().name(),
-        started.elapsed().as_secs_f64(),
-        1,
-    )?;
-    Ok(container)
+        tokio::time::timeout(std::time::Duration::from_secs(110), request.start()).await;
+    startup.finish(matches!(&container, Ok(Ok(_))));
+    Ok(container??)
+}
+
+/// Dropping a cancelled resource future still records its elapsed time and attempted starts.
+pub(super) struct Stage {
+    phase: &'static str,
+    provider: String,
+    started: std::time::Instant,
+    attempts: u32,
+    outcome: &'static str,
+}
+impl Stage {
+    #[allow(clippy::disallowed_methods)]
+    // reason: fixture lifecycle instrumentation measures elapsed time.
+    pub(super) fn new(phase: &'static str, provider: &str, attempts: u32) -> Self {
+        Self {
+            phase,
+            provider: provider.into(),
+            started: std::time::Instant::now(),
+            attempts,
+            outcome: "cancelled",
+        }
+    }
+    pub(super) fn finish(&mut self, success: bool) {
+        self.outcome = if success { "success" } else { "error" };
+    }
+}
+impl Drop for Stage {
+    #[allow(clippy::disallowed_methods)]
+    // reason: record elapsed resource time even when its future is cancelled.
+    fn drop(&mut self) {
+        if let Err(error) = metric(
+            self.phase,
+            &self.provider,
+            self.started.elapsed().as_secs_f64(),
+            self.attempts,
+            self.outcome,
+        ) {
+            eprintln!("testkit: cannot record fixture metric: {error}");
+        }
+    }
 }
 
 pub(super) async fn run_container_command(
@@ -168,7 +204,13 @@ pub(super) fn bounded_command_output(mut bytes: Vec<u8>) -> String {
     output
 }
 
-pub(super) fn metric(phase: &str, provider: &str, seconds: f64, starts: u32) -> Result<()> {
+pub(super) fn metric(
+    phase: &str,
+    provider: &str,
+    seconds: f64,
+    attempts: u32,
+    outcome: &str,
+) -> Result<()> {
     use std::io::Write as _;
     if let Ok(path) = std::env::var("RSS_TEST_METRICS") {
         let mut file = std::fs::OpenOptions::new()
@@ -178,10 +220,12 @@ pub(super) fn metric(phase: &str, provider: &str, seconds: f64, starts: u32) -> 
         writeln!(
             file,
             "{}",
-            serde_json::json!({"phase": phase, "provider": provider, "seconds": seconds, "starts": starts})
+            serde_json::json!({"phase": phase, "provider": provider, "seconds": seconds, "attempts": attempts, "starts": if outcome == "success" { attempts } else { 0 }, "outcome": outcome})
         )?;
     }
-    eprintln!("testkit: phase={phase} provider={provider} seconds={seconds:.3} starts={starts}");
+    eprintln!(
+        "testkit: phase={phase} provider={provider} seconds={seconds:.3} attempts={attempts} outcome={outcome}"
+    );
     Ok(())
 }
 

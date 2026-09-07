@@ -4756,6 +4756,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "rcgen",
+ "serde",
  "serde_json",
  "tempfile",
  "testcontainers",

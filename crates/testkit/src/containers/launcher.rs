@@ -14,66 +14,60 @@ pub(super) fn unique_name(prefix: &str) -> String {
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
 }
-pub(super) fn text(d: &serde_json::Value, key: &str) -> Result<String> {
-    d.get(key)
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("invalid fixture field: {key}"))
-}
-pub(super) fn port(d: &serde_json::Value, key: &str) -> Result<u16> {
-    d.get(key)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|v| u16::try_from(v).ok())
-        .filter(|v| *v != 0)
-        .ok_or_else(|| anyhow::anyhow!("invalid fixture port: {key}"))
-}
-pub(super) fn descriptor(provider: &str) -> Result<serde_json::Value> {
-    let path = std::env::var("RSS_TEST_FIXTURES")
-        .map_err(|_| anyhow::anyhow!("shared fixture requires the Make test launcher"))?;
-    let file = std::fs::File::open(path)?;
-    let d: serde_json::Value = serde_json::from_reader(file)?;
-    anyhow::ensure!(d["version"] == 1, "unsupported fixture descriptor");
-    let provider = d
-        .get(provider)
-        .filter(|v| v.is_object())
-        .ok_or_else(|| anyhow::anyhow!("selected provider absent from fixture descriptor"))?;
-    let id = text(provider, "container")?;
-    anyhow::ensure!(
-        id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit()),
-        "invalid fixture container endpoint"
-    );
-    Ok(provider.clone())
-}
-
 async fn docker(args: &[&str]) -> Result<std::process::Output> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new("docker")
-            .args(args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await??;
+    let output = tokio::process::Command::new("docker")
+        .args(args)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    // Docker may include endpoint credentials in raw errors; emit only closed diagnostic classes.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let reason = if stderr.contains("permission denied") || stderr.contains("access denied") {
+        "permission-denied"
+    } else if stderr.contains("conflict") || stderr.contains("active endpoints") {
+        "resource-in-use"
+    } else if stderr.contains("no such") || stderr.contains("not found") {
+        "not-found"
+    } else if stderr.contains("cannot connect") || stderr.contains("connection refused") {
+        "daemon-unavailable"
+    } else {
+        "command-failed"
+    };
     anyhow::ensure!(
         output.status.success(),
-        "fixture Docker resource operation failed"
+        "fixture Docker {} {} failed (reason={reason}, exit={:?}, stderr_bytes={})",
+        args[0],
+        args[1],
+        output.status.code(),
+        output.stderr.len()
     );
     Ok(output)
 }
 async fn cleanup(run: &str) -> Result<()> {
+    let mut failed = false;
     for resource in ["container", "network"] {
         let filter = format!("label=rss.test-run={run}");
-        let args = if resource == "container" {
-            vec![resource, "ls", "-aq", "--filter", &filter]
-        } else {
-            vec![resource, "ls", "-q", "--filter", &filter]
-        };
-        let ids = docker(&args).await?;
-        for id in String::from_utf8(ids.stdout)?.split_whitespace() {
-            docker(&[resource, "rm", "-f", id]).await?;
+        let flags = if resource == "container" { "-aq" } else { "-q" };
+        let listed = docker(&[resource, "ls", flags, "--filter", &filter]).await;
+        match listed.and_then(|output| String::from_utf8(output.stdout).map_err(Into::into)) {
+            Ok(ids) => {
+                for id in ids.split_whitespace() {
+                    if let Err(error) = docker(&[resource, "rm", "-f", id]).await {
+                        eprintln!("testkit: cleanup remove resource={resource} id={id}: {error}");
+                        failed = true;
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("testkit: cleanup list resource={resource}: {error}");
+                failed = true;
+            }
         }
     }
+    anyhow::ensure!(
+        !failed,
+        "fixture cleanup failed; all enumerable resources were attempted"
+    );
     Ok(())
 }
 struct Fixtures {
@@ -98,16 +92,12 @@ async fn prepare(providers: &[String], path: &Path) -> Result<Fixtures> {
     } else {
         None
     };
-    let mut d = serde_json::json!({"version": 1});
-    if let Some(r) = &rabbit {
-        d["amqp"] = r.descriptor();
-    }
-    if let Some(k) = &kafka {
-        d["kafka"] = k.descriptor();
-    }
-    if let Some(m) = &mqtt {
-        d["mqtt"] = m.descriptor();
-    }
+    let d = super::descriptor::Descriptor {
+        version: 1,
+        amqp: rabbit.as_ref().map(|r| r.descriptor()),
+        kafka: kafka.as_ref().map(|k| k.descriptor()),
+        mqtt: mqtt.as_ref().map(|m| m.descriptor()),
+    };
     std::fs::write(path, serde_json::to_vec(&d)?)?;
     Ok(Fixtures {
         _rabbit: rabbit,
@@ -201,31 +191,10 @@ pub async fn launch(arguments: Vec<String>) -> Result<i32> {
         Ok(_fixtures) => execute(command, file.path(), &mut terminate, &mut interrupt).await,
         Err(error) => Err(error),
     };
-    let started = std::time::Instant::now();
-    let cleaned = cleanup(&run).await;
-    super::runtime::metric("cleanup", "all", started.elapsed().as_secs_f64(), 0)?;
-    cleaned?;
+    let mut stage = super::runtime::Stage::new("cleanup", "all", 0);
+    // One owner deadline bounds the entire sweep, irrespective of resource count.
+    let cleaned = tokio::time::timeout(Duration::from_secs(30), cleanup(&run)).await;
+    stage.finish(matches!(&cleaned, Ok(Ok(()))));
+    cleaned??;
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn invalid_connection_fields_fail_closed() {
-        for value in [
-            serde_json::json!({}),
-            serde_json::json!({"port": 0}),
-            serde_json::json!({"port": 65536}),
-            serde_json::json!({"port": "5672"}),
-        ] {
-            assert!(port(&value, "port").is_err());
-        }
-        assert_eq!(
-            port(&serde_json::json!({"port": 5672}), "port").ok(),
-            Some(5672)
-        );
-        assert!(text(&serde_json::json!({"host": ""}), "host").is_err());
-        assert_ne!(unique_name("topic"), unique_name("topic"));
-    }
 }

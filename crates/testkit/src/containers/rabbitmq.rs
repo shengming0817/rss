@@ -735,18 +735,24 @@ async fn rabbitmqctl_attempts(
 }
 
 impl RabbitFixture {
-    pub(super) fn descriptor(&self) -> serde_json::Value {
+    pub(super) fn descriptor(&self) -> super::descriptor::RabbitConnection {
         use runtime::ContainerId as _;
-        serde_json::json!({"container": self.container.container_id(), "host": self.host, "port": self.port})
+        super::descriptor::RabbitConnection {
+            container: self.container.container_id().into(),
+            host: self.host.clone(),
+            port: self.port,
+        }
     }
 }
 /// Borrow the launcher's broker. Missing descriptors fail before any container is started.
 pub async fn shared_rabbitmq() -> Result<RabbitFixture> {
-    let d = super::launcher::descriptor("amqp")?;
+    let d = super::descriptor::read()?
+        .amqp
+        .ok_or_else(|| anyhow::anyhow!("AMQP shared fixture not selected"))?;
     Ok(RabbitFixture {
-        container: runtime::Container::Shared(super::launcher::text(&d, "container")?),
-        host: super::launcher::text(&d, "host")?,
-        port: super::launcher::port(&d, "port")?,
+        container: runtime::Container::Shared(d.container),
+        host: d.host,
+        port: d.port,
         created: Vhosts::default(),
     })
 }

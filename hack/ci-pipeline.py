@@ -65,7 +65,10 @@ def selection():
             assert not d['full'] or (not d['packages'] and d['reasons'])
         except (AssertionError, ValueError, TypeError, RuntimeError):
             d = {'full': True, 'packages': [], 'reasons': ['invalid-selection']}
-    return d | {'coverage': d['full'] and os.environ.get('CI_FILTER', 'all()') == 'all()', 'deep': full, 'sha': run(['/usr/bin/git', 'rev-parse', 'HEAD'], capture=True).strip(),
+    expression = os.environ.get('CI_FILTER', 'all()')
+    if expression != 'all()':
+        d = {'full': True, 'packages': [], 'reasons': ['explicit-filter']}
+    return d | {'filter': expression, 'coverage': d['full'] and expression == 'all()', 'deep': full, 'sha': run(['/usr/bin/git', 'rev-parse', 'HEAD'], capture=True).strip(),
                 'base': os.environ.get('CI_BASE', 'origin/develop')}
 
 
@@ -122,7 +125,7 @@ def build(plan):
         # Proc-macro execution belongs to the original build coverage, but nextest does not archive these objects.
         for line in messages.splitlines():
             message = json.loads(line)
-            if message.get('reason') == 'compiler-artifact' and message['target']['kind'] == ['proc-macro'] and Path(message['manifest_path']).is_relative_to(ROOT):
+            if message.get('reason') == 'compiler-artifact' and message['target']['kind'] == ['proc-macro'] and not message['profile']['test'] and Path(message['manifest_path']).is_relative_to(ROOT):
                 for name in message['filenames']:
                     source = Path(name)
                     relative = Path('objects') / source.name
@@ -135,12 +138,14 @@ def build(plan):
             shutil.copyfile(source, bundle / relative)
             supplemental[str(relative)] = sha(source)
     selected = 'all()' if plan['full'] else ' or '.join(f'package(={p})' for p in plan['packages'])
-    selected = f'({selected}) and ({os.environ.get("CI_FILTER", "all()")})'
+    selected = f'({selected}) and ({plan["filter"]})'
     extracted = ARTIFACTS / 'inventory'
     if extracted.exists():
         shutil.rmtree(extracted)
     extracted.mkdir()
     all_tests = inventory(['--archive-file', str(archive), '--extract-to', str(extracted), '--workspace-remap', str(ROOT)], selected)
+    if plan['filter'] != 'all()' and not all_tests:
+        raise ValueError('explicit CI_FILTER matched no runnable tests')
     groups = {}
     for group, expression in GROUPS.items():
         expression = f'({selected}) and ({expression})'
@@ -202,6 +207,21 @@ def execute(plan, group):
             launcher.chmod(0o755)
             command = [str(launcher), *providers, '--', *command]
         code = run(command, env=env)
+    metrics = output / 'fixtures.jsonl'
+    if metrics.exists():
+        totals = {}
+        for line in metrics.read_text().splitlines():
+            item = json.loads(line)
+            key = (item['provider'], item['phase'], item['outcome'])
+            aggregate = totals.setdefault(key, {'seconds': 0, 'starts': 0, 'attempts': 0})
+            aggregate['seconds'] += item['seconds']
+            aggregate['starts'] += item['starts']
+            aggregate['attempts'] += item['attempts']
+        summary = '\n'.join(f'{group}: {provider} {phase} {outcome}: {v["seconds"]:.3f}s; attempts={v["attempts"]} ready={v["starts"]}' for (provider, phase, outcome), v in sorted(totals.items()))
+        print(summary)
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+                stream.write(summary + '\n')
     write(output / 'result.json', {'group': group, 'manifest': sha(bundle / 'manifest.json'),
                                   'exit': code, 'tests': chosen['tests'], 'seconds': time.monotonic()-start,
                                   'profiles': {p.name: sha(p) for p in profiles.glob('*.profraw')}})
@@ -229,6 +249,10 @@ def coverage(plan):
         folder = ARTIFACTS / 'results' / group
         try:
             result = json.loads((folder / 'result.json').read_text())
+            if not isinstance(result, dict) or type(result.get('exit')) is not int or not isinstance(result.get('profiles'), dict):
+                raise ValueError('invalid test result schema')
+            if not all(isinstance(name, str) and isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) for name, digest in result['profiles'].items()):
+                raise ValueError('invalid profile manifest')
             if result['group'] != group or result['manifest'] != sha(bundle / 'manifest.json') or result['tests'] != chosen['tests']:
                 raise ValueError('test result identity mismatch')
             if result['exit'] != 0:

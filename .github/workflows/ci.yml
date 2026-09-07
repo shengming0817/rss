@@ -41,7 +41,7 @@ jobs:
         env:
           BASELINE: ${{ inputs.baseline || github.event.pull_request.base.sha || github.event.before }}
           WARM_RUN: ${{ inputs.warm_run }}
-          COLD_CACHE: ${{ inputs.cold_cache }}
+          COLD_CACHE: ${{ inputs.cold_cache || false }}
           GH_TOKEN: ${{ github.token }}
         run: |
           baseline="$(/usr/bin/git rev-parse --verify "$BASELINE^{commit}")"
@@ -50,14 +50,25 @@ jobs:
             test "$COLD_CACHE" != true
             [[ "$WARM_RUN" =~ ^[0-9]+-[0-9]+$ ]]
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/${WARM_RUN%-*}/attempts/${WARM_RUN##*-}" > "$RUNNER_TEMP/cold-run.json"
+            gh run download "${WARM_RUN%-*}" --repo "$GITHUB_REPOSITORY" --name selection --dir "$RUNNER_TEMP/cold-selection"
             python3 - <<'PY'
           import json, os
           from pathlib import Path
           run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'cold-run.json').read_text())
           assert run['head_sha'] == os.environ['GITHUB_SHA'] and run['conclusion'] == 'success'
           assert run['event'] == 'workflow_dispatch'
+          measurement = json.loads((Path(os.environ['RUNNER_TEMP']) / 'cold-selection/measurement.json').read_text())
+          baseline = __import__('subprocess').check_output(['/usr/bin/git', 'rev-parse', os.environ['BASELINE'] + '^{commit}'], text=True).strip()
+          assert measurement == {'cold': True, 'baseline': baseline, 'sha': os.environ['GITHUB_SHA']}
           PY
           fi
+          mkdir -p .local-ci-runs/current
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          baseline = subprocess.check_output(['/usr/bin/git', 'rev-parse', os.environ['BASELINE'] + '^{commit}'], text=True).strip()
+          Path('.local-ci-runs/current/measurement.json').write_text(json.dumps({'cold': os.environ['COLD_CACHE'] == 'true', 'baseline': baseline, 'sha': os.environ['GITHUB_SHA']}))
+          PY
       - name: Select once through Make
         id: select
         env:
@@ -69,7 +80,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: selection
-          path: .local-ci-runs/current/plan.json
+          path: |
+            .local-ci-runs/current/plan.json
+            .local-ci-runs/current/measurement.json
           include-hidden-files: true
           if-no-files-found: error
   checks:
