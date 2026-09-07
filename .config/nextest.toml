@@ -25,3 +25,9 @@ test-group = "integration"
 # startup can cross that boundary under coverage load. Keep the fixture bounded without retrying.
 retries = 0
 slow-timeout = { period = "60s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+# Vendored OpenSSL/rdkafka compilation uses all cores internally. Reserve the test
+# executor while this proof runs; its independent target and 120s deadline remain intact.
+filter = 'package(=rss-transactional-messaging-kafka) & test(=independent_tokio_host)'
+threads-required = "num-test-threads"

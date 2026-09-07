@@ -28,7 +28,8 @@ jobs:
   checks:
     name: ${{ matrix.part }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Full cold runs include coverage and every Release Surface SemVer check.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || 20 }}
     strategy:
       fail-fast: false
       matrix:

@@ -59,3 +59,12 @@ ref: cargo-nextest https://nexte.st/docs/configuration/test-groups/
 
 ref: sccache README.md@v0.15.0
 ref: Cargo https://doc.rust-lang.org/cargo/reference/profiles.html#debug
+
+
+## 第二轮 Linux 定位
+
+Run [34076132335](https://github.com/shengming0817/rss/actions/runs/34076132335) 在 SHA `471fb6e34` 再次触及原 10 分钟预算：tests 初次编译 4m44s，591/680 项后取消；checks 尚未完成 Kafka SemVer。已修复新增回归的 Clippy 复杂度错误。Kafka 在编译 vendored OpenSSL/rdkafka 时超出 120 秒，现在独占 nextest 执行线程并在超时时终止整个编译进程组；保留独立 target、特性闭包和原期限。
+
+用户通过飞书请求 `Q-24bf6a60ba2d48bd9f82a033404dc1d9` 明确选择：显式全量 dispatch/develop 的 job 上限改为 20 分钟，PR affected preflight 保持 10 分钟。该选择覆盖原 issue 的预算约束，不改变任何单项测试期限或失败判定。
+
+本地第二轮 nextest 681/681 通过、doctest 通过，完整命令仍因上述 Clippy 错误返回非零，未将测试通过等同于全 CI 通过。远端仍复现 private CA subscriber Operation 和 delivery ACK shutdown transient，需继续修复 lapin Drop 自动关闭与连接关闭的竞态；冷热验收尚未完成。

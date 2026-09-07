@@ -1123,18 +1123,37 @@ pub(super) async fn subscriber_cancels_before_connection_close(
     tokio::time::timeout(TIMEOUT, entered).await??;
     let closing = resource.shutdown(Duration::from_secs(5));
     tokio::pin!(closing);
+    assert_open_during_shutdown(rabbit, vhost, &mut closing).await?;
+    assert!(resume.send(()).is_ok());
+    close(closing).await?;
+    await_connection_closed(rabbit, vhost).await
+}
+
+async fn await_connection_closed(
+    rabbit: &testkit::RabbitFixture,
+    vhost: &str,
+) -> anyhow::Result<()> {
+    testkit::await_try(TIMEOUT, async || {
+        let count = rabbit.broker_connection_count(vhost).await?;
+        Ok::<_, anyhow::Error>((count == 0).then_some(()))
+    })
+    .await?;
+    Ok(())
+}
+
+async fn assert_open_during_shutdown(
+    rabbit: &testkit::RabbitFixture,
+    vhost: &str,
+    closing: impl std::future::Future<
+        Output = Result<(), rss_transactional_messaging_amqp::AmqpShutdownError>,
+    >,
+) -> anyhow::Result<()> {
+    tokio::pin!(closing);
     tokio::select! {
         result = &mut closing => anyhow::bail!("shutdown crossed pending cancel: {result:?}"),
         count = rabbit.broker_connection_count(vhost) => {
             assert_eq!(count?, 1, "connection closed before subscription cancellation completed");
         }
     }
-    assert!(resume.send(()).is_ok());
-    close(closing).await?;
-    testkit::await_try(TIMEOUT, async || {
-        let count = rabbit.broker_connection_count(vhost).await?;
-        Ok::<_, anyhow::Error>((count == 0).then_some(()))
-    })
-    .await?;
     Ok(())
 }
