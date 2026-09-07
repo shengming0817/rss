@@ -59,7 +59,8 @@ static FIXTURE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 fn isolated_vhost(prefix: &str) -> String {
     format!(
-        "{prefix}_{}",
+        "{prefix}_{}_{}",
+        std::process::id(),
         FIXTURE_SEQUENCE.fetch_add(1, Ordering::SeqCst)
     )
 }
@@ -523,7 +524,7 @@ async fn run_ambiguous_publish_retries_the_same_message_identity(
 async fn rejected_commit_enters_broker_dead_letter_queue(
     rabbit: &testkit::RabbitFixture,
 ) -> anyhow::Result<()> {
-    let url = rabbit.vhost_url("rss_transactional_reject").await?;
+    let url = isolated_url(rabbit, "rss_transactional_reject").await?;
     let route = MessageRoute::parse("rss.integration.reject").expect("route");
     let (subscriber, subscriber_resource) = AmqpSubscriber::connect_for_test(
         &AmqpSubscriberEndpoint::for_test(&url)?,
@@ -776,12 +777,12 @@ async fn suite_phase<T, E: Into<anyhow::Error>>(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publisher_and_security_suite() -> anyhow::Result<()> {
+async fn shared_amqp_publisher_and_security_suite() -> anyhow::Result<()> {
     let deadline = suite_deadline();
     let rabbit = suite_phase(
         deadline,
         "publisher broker startup",
-        testkit::managed_rabbitmq(),
+        testkit::shared_rabbitmq(),
     )
     .await?;
     let network = suite_phase(
@@ -837,12 +838,12 @@ async fn publisher_and_security_suite() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn settlement_and_runtime_suite() -> anyhow::Result<()> {
+async fn shared_amqp_settlement_and_runtime_suite() -> anyhow::Result<()> {
     let deadline = suite_deadline();
     let rabbit = suite_phase(
         deadline,
         "settlement broker startup",
-        testkit::managed_rabbitmq(),
+        testkit::shared_rabbitmq(),
     )
     .await?;
     suite_phase(
@@ -874,18 +875,24 @@ async fn settlement_and_runtime_suite() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn subscriber_lifecycle_suite() -> anyhow::Result<()> {
+async fn shared_amqp_subscriber_lifecycle_suite() -> anyhow::Result<()> {
     let deadline = suite_deadline();
     let rabbit = suite_phase(
         deadline,
         "subscriber broker startup",
-        testkit::managed_rabbitmq(),
+        testkit::shared_rabbitmq(),
     )
     .await?;
     suite_phase(
         deadline,
         "headers / route isolation",
         transport::headers_roundtrip_and_subscription_cancel_is_isolated(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
+        "subscriber cancel before connection close",
+        transport::subscriber_cancels_before_connection_close(&rabbit),
     )
     .await?;
     suite_phase(

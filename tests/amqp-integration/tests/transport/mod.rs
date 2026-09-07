@@ -1101,3 +1101,98 @@ async fn cancel_confirming_publication(
     }
     Ok(())
 }
+
+/// The broker must retain the connection while basic.cancel is still owned and pending.
+pub(super) async fn subscriber_cancels_before_connection_close(
+    rabbit: &testkit::RabbitFixture,
+) -> anyhow::Result<()> {
+    assert_subscriber_close_order(rabbit, false).await?;
+    assert_subscriber_close_order(rabbit, true).await
+}
+
+async fn assert_subscriber_close_order(
+    rabbit: &testkit::RabbitFixture,
+    after_cancel: bool,
+) -> anyhow::Result<()> {
+    let vhost_name = if after_cancel {
+        "rss_subscriber_channel_before_close"
+    } else {
+        "rss_subscriber_cancel_before_close"
+    };
+    let url = isolated_url(rabbit, vhost_name).await?;
+    let vhost = url.rsplit('/').next().expect("fixture vhost");
+    let route = MessageRoute::parse("rss.cancel-before-close")?;
+    let (subscriber, resource) = prepared_subscriber(&url, &route, "ordered-close", true).await?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "ordered-close-pub").await?;
+    let message = envelope(&route, "ordered-close");
+    let subscription = subscription_for(&message, &route);
+    let mut stream = subscriber.deliveries(&subscription).await?;
+    publish_confirmed(&publisher, &message).await?;
+    let delivery = next_valid_delivery(&mut stream).await?;
+    let (_, settlement) = (*delivery).into_parts();
+    close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    let (entered, resume) =
+        prepare_close_barrier(settlement, &message, &subscription, after_cancel).await?;
+    drop(stream);
+    tokio::time::timeout(TIMEOUT, entered).await??;
+    let closing = resource.shutdown(Duration::from_secs(5));
+    tokio::pin!(closing);
+    assert_open_during_shutdown(rabbit, vhost, &mut closing).await?;
+    assert!(resume.send(()).is_ok());
+    close(closing).await?;
+    await_connection_closed(rabbit, vhost).await
+}
+
+async fn await_connection_closed(
+    rabbit: &testkit::RabbitFixture,
+    vhost: &str,
+) -> anyhow::Result<()> {
+    testkit::await_try(TIMEOUT, async || {
+        let count = rabbit.broker_connection_count(vhost).await?;
+        Ok::<_, anyhow::Error>((count == 0).then_some(()))
+    })
+    .await?;
+    Ok(())
+}
+
+async fn assert_open_during_shutdown(
+    rabbit: &testkit::RabbitFixture,
+    vhost: &str,
+    closing: impl std::future::Future<
+        Output = Result<(), rss_transactional_messaging_amqp::AmqpShutdownError>,
+    >,
+) -> anyhow::Result<()> {
+    tokio::pin!(closing);
+    tokio::select! {
+        result = &mut closing => anyhow::bail!("shutdown crossed pending cancel: {result:?}"),
+        count = rabbit.broker_connection_count(vhost) => {
+            assert_eq!(count?, 1, "connection closed before subscription cancellation completed");
+        }
+    }
+    Ok(())
+}
+
+async fn prepare_close_barrier(
+    settlement: rss_transactional_messaging_amqp::AmqpSettlement,
+    message: &MessageEnvelope<Vec<u8>>,
+    subscription: &SubscriptionIdentity,
+    after_cancel: bool,
+) -> anyhow::Result<(
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+)> {
+    if after_cancel {
+        let barrier = settlement.pause_subscription_close_for_test();
+        settlement
+            .settle(
+                terminal_decision(message, subscription, false)?,
+                provider_deadline(),
+            )
+            .await?;
+        Ok(barrier)
+    } else {
+        let barrier = settlement.pause_subscription_cancel_for_test();
+        drop(settlement);
+        Ok(barrier)
+    }
+}

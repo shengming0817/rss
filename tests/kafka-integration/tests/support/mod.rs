@@ -12,7 +12,6 @@ use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
-pub const TOPIC: &str = "events-v1";
 pub struct Timer(Instant);
 impl Timer {
     #[allow(clippy::disallowed_methods)]
@@ -64,12 +63,12 @@ pub fn message(id: &str) -> anyhow::Result<MessageEnvelope<Vec<u8>>> {
 }
 pub fn config(f: &testkit::KafkaTlsFixture) -> anyhow::Result<KafkaConfig> {
     Ok(KafkaConfig::new(
-        KafkaClientId::parse("rss-fixture-publisher")?,
+        KafkaClientId::parse(f.topic())?,
         f.brokers().into(),
         f.ca_pem().into(),
         KafkaCredentials::mutual_tls(f.client_certificate_pem().into(), f.client_key_pem().into())?,
         MessagingDomain::parse("events")?,
-        [(MessageRoute::parse("event:v1")?, TOPIC.into())],
+        [(MessageRoute::parse("event:v1")?, f.topic().into())],
         KafkaLimits::new(1, 1, 4096, Duration::from_secs(2))?,
     )?)
 }
@@ -90,17 +89,18 @@ pub async fn read_records(
     c.set("bootstrap.servers", f.brokers())
         // Fixture ports are allocated via Docker IPv4, while DNS is retained for SAN verification.
         .set("broker.address.family", "v4")
-        .set("group.id", "rss-fixture-readback")
+        .set("group.id", f.topic())
         .set("enable.auto.commit", "false")
         .set("security.protocol", "ssl")
         .set("ssl.ca.pem", f.ca_pem())
         .set("ssl.certificate.pem", f.client_certificate_pem())
         .set("ssl.key.pem", f.client_key_pem());
+    let topic = f.topic().to_owned();
     let id = id.to_owned();
     tokio::task::spawn_blocking(move || {
         let consumer: BaseConsumer<Quiet> = c.create_with_context(Quiet)?;
         let mut assignments = TopicPartitionList::new();
-        assignments.add_partition_offset(TOPIC, 0, Offset::Beginning)?;
+        assignments.add_partition_offset(&topic, 0, Offset::Beginning)?;
         consumer.assign(&assignments)?;
         let timer = Timer::new();
         let mut records = Vec::new();

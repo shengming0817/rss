@@ -150,7 +150,7 @@ unsupported-QoS error, never a reliable delivery with fabricated ACK authority.
 
 ## Validation and sources
 
-`cargo test -p rss-mqtt` covers value/error boundaries. `cargo nextest run -p mqtt-integration` covers
+`cargo test -p rss-mqtt` covers value/error boundaries. `make ci CI_PART=tests CI_FILTER='package(=mqtt-integration)'` covers
 real private-CA/mTLS Mosquitto, PostgreSQL Outbox/relay, ACK-loss proxy, durable session reconstruction,
 backpressure, and scripted TLS protocol failure windows. The integration package owns test-only
 storage and fault endpoints; no production broker/backend is included here.

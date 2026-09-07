@@ -1,5 +1,4 @@
 name: CI
-
 on:
   pull_request:
     branches: [develop]
@@ -11,174 +10,182 @@ on:
         description: Earlier Git revision used for SemVer comparison
         required: true
         type: string
-
+      cold_cache:
+        description: Skip restores and save successful cold snapshots
+        default: false
+        type: boolean
+      warm_run:
+        description: Successful cold run ID-attempt for exact same-SHA cache restoration
+        default: ''
+        type: string
 permissions:
   contents: read
-
+  actions: read
 concurrency:
   group: rss-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  checks:
-    name: ${{ matrix.part }}
+  selection:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [checks, tests]
-    env:
-      SCCACHE_CACHE_SIZE: 2G
-      RSS_COMPILER_CACHE: 'on'
-      CI_PART: ${{ matrix.part }}
+    outputs:
+      integration_groups: ${{ steps.select.outputs.integration_groups }}
+      active: ${{ steps.select.outputs.active }}
+      coverage: ${{ steps.select.outputs.coverage }}
+      baseline: ${{ steps.base.outputs.sha }}
     steps:
-      - name: Configure job-owned directories
-        run: |
-          {
-            echo "CARGO_HOME=$RUNNER_TEMP/rss-cargo"
-            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/rss-target"
-            echo "SCCACHE_DIR=$RUNNER_TEMP/rss-sccache"
-            echo "SCCACHE_SERVER_UDS=$RUNNER_TEMP/rss-sccache.sock"
-          } >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.96.0 --profile minimal --component clippy --component llvm-tools-preview
-          rustup default 1.96.0
-      - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
-        with:
-          tool: ${{ matrix.part == 'checks' && 'cargo-deny@0.19.9,sccache@0.15.0' || 'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,sccache@0.15.0' }}
-          fallback: none
-      - name: Install pinned SemVer checker from upstream release
-        if: matrix.part == 'checks'
-        run: |
-          archive="$RUNNER_TEMP/semver.tar.gz"
-          curl --fail --location --retry 3 -o "$archive" https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.49.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
-          echo "72f6834d75d28a66e02c9fd6a230ce901bb30eee6067b85867a97445df040e4a  $archive" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/semver-bin"
-          tar -xzf "$archive" -C "$RUNNER_TEMP/semver-bin"
-          echo "$RUNNER_TEMP/semver-bin" >> "$GITHUB_PATH"
-      - name: Derive immutable cache keys
-        id: keys
-        run: |
-          toolchain="$(rustc -Vv | sha256sum | cut -d' ' -f1)"
-          inputs="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
-          download="rss-download-v1-$RUNNER_OS-$RUNNER_ARCH-$toolchain-"
-          compiler="rss-sccache-v1-$RUNNER_OS-$RUNNER_ARCH-$toolchain-0.15.0-$CI_PART-"
-          {
-            echo "download=$download"
-            echo "compiler=$compiler"
-            echo "inputs=$inputs"
-            echo "suffix=$inputs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          } >> "$GITHUB_OUTPUT"
-      - name: Restore Cargo downloads
-        id: download
-        continue-on-error: true
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-          key: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
-          restore-keys: |
-            ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.inputs }}-
-            ${{ steps.keys.outputs.download }}
-      - name: Restore compiler objects
-        id: compiler
-        continue-on-error: true
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
-          restore-keys: |
-            ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.inputs }}-
-            ${{ steps.keys.outputs.compiler }}
-      - name: Discard partial restores on cache failure
+      - name: Resolve baseline and warm-run identity
+        id: base
         env:
-          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
-          COMPILER_OUTCOME: ${{ steps.compiler.outcome }}
+          BASELINE: ${{ inputs.baseline || github.event.pull_request.base.sha || github.event.before }}
+          WARM_RUN: ${{ inputs.warm_run }}
+          COLD_CACHE: ${{ inputs.cold_cache || false }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$DOWNLOAD_OUTCOME" = failure ]; then
-            rm -rf -- "$RUNNER_TEMP/rss-cargo/registry/index" "$RUNNER_TEMP/rss-cargo/registry/cache" "$RUNNER_TEMP/rss-cargo/git/db"
-          fi
-          if [ "$COMPILER_OUTCOME" = failure ]; then rm -rf -- "$RUNNER_TEMP/rss-sccache"; fi
-      - name: Run canonical Make checks
-        id: execution
-        env:
-          EVENT: ${{ github.event_name }}
-          REQUESTED_BASELINE: ${{ inputs.baseline || github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          baseline="$(/usr/bin/git rev-parse --verify "$REQUESTED_BASELINE^{commit}")"
-          [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
-          if [ "$EVENT" = pull_request ]; then target=ci; else target=ci-full; fi
-          /usr/bin/time -v make "$target" CI_BASE="$baseline" CI_PART="$CI_PART"
-      - name: Record cache statistics and stop job server
-        id: finish
-        if: always() && !cancelled() && steps.execution.outcome != 'skipped'
-        continue-on-error: true
-        env:
-          DOWNLOAD_KEY: ${{ steps.download.outputs.cache-matched-key }}
-          COMPILER_KEY: ${{ steps.compiler.outputs.cache-matched-key }}
-        run: |
-          {
-            echo "### $CI_PART cache"
-            echo "Cargo restore: ${DOWNLOAD_KEY:-miss}"
-            echo "Compiler restore: ${COMPILER_KEY:-miss}"
-            sccache --show-stats || echo 'Compiler statistics unavailable'
-            for path in "$CARGO_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR"; do
-              if [ -d "$path" ]; then du -sh "$path" || true; else echo "Not created: $path"; fi
-            done
-            df -h . || true
-          } | tee -a "$GITHUB_STEP_SUMMARY" || true
-          sccache --stop-server
-          # Save only the exact job-owned, non-symlink object directory.
-          python3 - <<'PY'
-          import os
+          baseline="$(/usr/bin/git rev-parse --verify "$BASELINE^{commit}")"
+          echo "sha=$baseline" >> "$GITHUB_OUTPUT"
+          if [ -n "$WARM_RUN" ]; then
+            test "$COLD_CACHE" != true
+            [[ "$WARM_RUN" =~ ^[0-9]+-[0-9]+$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/${WARM_RUN%-*}/attempts/${WARM_RUN##*-}" > "$RUNNER_TEMP/cold-run.json"
+            gh run download "${WARM_RUN%-*}" --repo "$GITHUB_REPOSITORY" --name selection --dir "$RUNNER_TEMP/cold-selection"
+            python3 - <<'PY'
+          import json, os
           from pathlib import Path
-          root = Path(os.environ['SCCACHE_DIR'])
-          assert not root.is_symlink() and root.resolve() == Path(os.environ['RUNNER_TEMP']).resolve() / 'rss-sccache'
-          assert root.is_dir()
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f"has_objects={str(any(root.iterdir())).lower()}\n")
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'cold-run.json').read_text())
+          assert run['head_sha'] == os.environ['GITHUB_SHA'] and run['conclusion'] == 'success'
+          assert run['event'] == 'workflow_dispatch'
+          measurement = json.loads((Path(os.environ['RUNNER_TEMP']) / 'cold-selection/measurement.json').read_text())
+          baseline = __import__('subprocess').check_output(['/usr/bin/git', 'rev-parse', os.environ['BASELINE'] + '^{commit}'], text=True).strip()
+          assert measurement == {'cold': True, 'baseline': baseline, 'sha': os.environ['GITHUB_SHA']}
           PY
-          echo 'stopped=true' >> "$GITHUB_OUTPUT"
-      - name: Save Cargo downloads from the checks writer
-        if: >-
-          always() && !cancelled() && matrix.part == 'checks' &&
-          steps.execution.outcome != 'skipped' && steps.keys.outcome == 'success' &&
-          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
-        continue-on-error: true
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          fi
+          mkdir -p .local-ci-runs/current
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          baseline = subprocess.check_output(['/usr/bin/git', 'rev-parse', os.environ['BASELINE'] + '^{commit}'], text=True).strip()
+          Path('.local-ci-runs/current/measurement.json').write_text(json.dumps({'cold': os.environ['COLD_CACHE'] == 'true', 'baseline': baseline, 'sha': os.environ['GITHUB_SHA']}))
+          PY
+      - name: Select once through Make
+        id: select
+        env:
+          CI_BASE: ${{ steps.base.outputs.sha }}
+          CI_FULL: ${{ github.event_name != 'pull_request' && '1' || '0' }}
+          RSS_COMPILER_CACHE: 'off'
+          RSS_TARGET_POOL_N: 'off'
+        run: make ci CI_PART=select
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          name: selection
           path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-          key: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
-      - name: Save stopped compiler snapshot
-        if: >-
-          always() && !cancelled() && steps.finish.outputs.stopped == 'true' && steps.finish.outputs.has_objects == 'true' &&
-          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
-        continue-on-error: true
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+            .local-ci-runs/current/plan.json
+            .local-ci-runs/current/measurement.json
+          include-hidden-files: true
+          if-no-files-found: error
+  checks:
+    needs: selection
+    uses: ./.github/workflows/ci-compile.yml
+    with:
+      part: checks
+      baseline: ${{ needs.selection.outputs.baseline }}
+      coverage: false
+      cold_cache: ${{ inputs.cold_cache || false }}
+      warm_run: ${{ inputs.warm_run || '' }}
+  build:
+    needs: selection
+    if: needs.selection.outputs.active == 'true'
+    uses: ./.github/workflows/ci-compile.yml
+    with:
+      part: build
+      baseline: ${{ needs.selection.outputs.baseline }}
+      coverage: ${{ needs.selection.outputs.coverage == 'true' }}
+      cold_cache: ${{ inputs.cold_cache || false }}
+      warm_run: ${{ inputs.warm_run || '' }}
+  unit:
+    needs: build
+    uses: ./.github/workflows/ci-execute.yml
+    with:
+      group: unit
+  consumer:
+    needs: [selection, build]
+    uses: ./.github/workflows/ci-compile.yml
+    with:
+      part: consumer
+      baseline: ${{ needs.selection.outputs.baseline }}
+      coverage: false
+      cold_cache: ${{ inputs.cold_cache || false }}
+      warm_run: ${{ inputs.warm_run || '' }}
+  integration:
+    needs: [selection, build]
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        group: ${{ fromJSON(needs.selection.outputs.integration_groups) }}
+    uses: ./.github/workflows/ci-execute.yml
+    with:
+      group: ${{ matrix.group }}
+  coverage:
+    needs: [selection, build, unit, consumer, integration]
+    if: always() && needs.build.result == 'success' && needs.selection.outputs.coverage == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
-
+          persist-credentials: false
+      - uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
+        with:
+          tool: cargo-llvm-cov@0.8.7
+          fallback: none
+      - run: python3 hack/ci-pipeline.py --install-toolchain
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selection
+          path: .local-ci-runs/current
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-build
+          path: .local-ci-runs/current/build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: result-*
+          path: .local-ci-runs/current/results
+          merge-multiple: true
+      - name: Aggregate original profiles and enforce 80 percent
+        env:
+          CI_PLAN: .local-ci-runs/current/plan.json
+          RSS_COMPILER_CACHE: 'off'
+          RSS_TARGET_POOL_N: 'off'
+        run: make ci CI_PART=coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage-report
+          path: .local-ci-runs/current/coverage/lcov.info
+          include-hidden-files: true
+          if-no-files-found: warn
   cargo:
     name: cargo
     runs-on: ubuntu-latest
-    needs: checks
+    needs: [selection, checks, build, unit, consumer, integration, coverage]
     if: always()
-    timeout-minutes: 1
     steps:
-      - name: Require both groups to succeed
+      - name: Require every selected stage and coverage verdict
         env:
-          RESULT: ${{ needs.checks.result }}
-        run: test "$RESULT" = success
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert results['selection']['result'] == 'success'
+          assert results['checks']['result'] == 'success'
+          active = results['selection']['outputs']['active'] == 'true'
+          covered = results['selection']['outputs']['coverage'] == 'true'
+          for job in ('build', 'unit', 'consumer', 'integration'):
+              assert results[job]['result'] == ('success' if active else 'skipped'), job
+          assert results['coverage']['result'] == ('success' if covered else 'skipped')
+          PY

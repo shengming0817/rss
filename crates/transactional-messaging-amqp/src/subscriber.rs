@@ -7,6 +7,9 @@
 //! Provider-neutral delivery doubles live in `rss-transactional-messaging-testkit`.
 //! ref: lapin examples/pubsub.rs@main；rabbitmq docs/confirms。
 
+mod close;
+use close::{OwnedSubscription, SettlementPermit, SubscriptionClose};
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,7 +111,7 @@ struct SubscriberLifecycle {
     connection: Arc<Connection>,
     generation: u64,
     closed: bool,
-    cancellation_tasks: Vec<AbortOnDropHandle<()>>,
+    cancellation_tasks: Vec<OwnedSubscription>,
 }
 
 impl SubscriberInner {
@@ -243,26 +246,6 @@ impl SubscriberInner {
     }
 }
 
-/// 两阶段排空的 admission stop：token cancel 后以稳定 tag 发送 `basic.cancel`，并等待
-/// broker 的 `basic.cancel-ok`。只停止新 delivery，不关闭 channel，因此取消前已在途的
-/// manual-ack delivery 仍可由 worker settle。channel/connection 只由 subscriber shutdown 关闭；若排空
-/// 失败，该关闭语义使 broker 重投未 settle 消息。
-async fn cancel_delivery_source(channel: Channel, consumer_tag: String) {
-    if let Err(error) = channel
-        .basic_cancel(consumer_tag.into(), BasicCancelOptions::default())
-        .await
-    {
-        tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp delivery source basic.cancel error");
-        close_failed_subscription(&channel, "basic.cancel failed").await;
-    }
-}
-
-async fn close_failed_subscription(channel: &Channel, reason: &'static str) {
-    if let Err(error) = channel.close(REPLY_SUCCESS, reason.into()).await {
-        tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp failed subscription channel close error");
-    }
-}
-
 impl SubscriberInner {
     #[cfg(feature = "managed-runtime")]
     pub(crate) fn name(&self) -> &str {
@@ -295,6 +278,13 @@ impl SubscriberInner {
         };
         self.shutdown.cancel();
         let close_on_cancel = conn::OnDrop::new(|| conn::close_connection_now(&connection));
+        // Finish basic.cancel/cancel-ok while the channels are still Connected. Lapin marks
+        // all channels Closing when connection.close starts; racing the two RPCs can fail both.
+        // The outer total budget and guard still force retirement if a cancellation gets stuck.
+        let mut failures = ShutdownFailures::default();
+        for task in tasks {
+            failures.record_subscription(&self.name, task.wait().await);
+        }
         let result = if connection.status().connected() {
             connection
                 .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
@@ -304,15 +294,7 @@ impl SubscriberInner {
             Ok(())
         };
         close_on_cancel.disarm_on_success(&result);
-        let mut failures = ShutdownFailures::default();
         failures.record(&self.name, ShutdownStage::TransportClose, result);
-        for task in tasks {
-            failures.record(
-                &self.name,
-                ShutdownStage::SubscriberCancellation,
-                task.await.map_err(AmqpShutdownError::task),
-            );
-        }
         failures.finish()
     }
 }
@@ -344,7 +326,7 @@ fn extract_metadata(props: &lapin::BasicProperties) -> std::collections::BTreeMa
 /// （settle-once；二次 settle 在 lapin 层返 Err，由调用方处理失败，不 panic）。
 fn delivery_to_core(
     delivery: Delivery,
-    channel: Channel,
+    permit: SettlementPermit,
     subscription_rpc: Arc<SubscriptionRpc>,
     subscription: &SubscriptionIdentity,
 ) -> IncomingDelivery<Vec<u8>, AmqpSettlement> {
@@ -361,7 +343,7 @@ fn delivery_to_core(
         #[cfg(feature = "test-support")]
         pause: None,
         inner: acker,
-        channel,
+        _permit: permit,
         subscription_rpc,
     };
     match decode_message(
@@ -474,7 +456,7 @@ pub struct AmqpSettlement {
     #[cfg(feature = "test-support")]
     pause: Option<conn::TestPause>,
     inner: lapin::Acker,
-    channel: Channel,
+    _permit: SettlementPermit,
     subscription_rpc: Arc<SubscriptionRpc>,
 }
 
@@ -498,6 +480,7 @@ struct SubscriptionRpc {
     gate: tokio::sync::Mutex<()>,
     cancel_requested: CancellationToken,
     admission_stopped: CancellationToken,
+    closing: SubscriptionClose,
     #[cfg(feature = "test-support")]
     cancel_pause: std::sync::Mutex<Option<conn::TestPause>>,
 }
@@ -512,6 +495,68 @@ impl SubscriptionRpc {
         } else {
             guard
         }
+    }
+}
+
+async fn run_subscription_close(
+    rpc: &SubscriptionRpc,
+    channel: &Channel,
+    consumer_tag: String,
+    shutdown: &CancellationToken,
+    resource: &str,
+) {
+    await_subscription_stop(rpc).await;
+    rpc.cancel_requested.cancel();
+    rpc.closing.seal();
+    stop_subscription_admission(rpc, channel, consumer_tag).await;
+    // Normal stream cancellation preserves admitted settlement authority. Abandonment or
+    // resource shutdown retires it; every path still awaits the same channel-close receipt.
+    await_settlement_retirement(rpc, shutdown).await;
+    let result = rpc.closing.drive().await;
+    ShutdownFailures::report_subscription_close(resource, &result);
+}
+
+async fn await_subscription_stop(rpc: &SubscriptionRpc) {
+    tokio::select! {
+        () = rpc.cancel_requested.cancelled() => {},
+        () = rpc.closing.requested.cancelled() => {},
+    }
+}
+
+async fn stop_subscription_admission(
+    rpc: &SubscriptionRpc,
+    channel: &Channel,
+    consumer_tag: String,
+) {
+    #[cfg(feature = "test-support")]
+    {
+        let pause = rpc
+            .cancel_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+        }
+    }
+    {
+        let _gate = rpc.gate.lock().await;
+        if let Err(error) = channel
+            .basic_cancel(consumer_tag.into(), BasicCancelOptions::default())
+            .await
+        {
+            tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp delivery source basic.cancel error");
+            rpc.closing.requested.cancel();
+        }
+        rpc.admission_stopped.cancel();
+    }
+}
+
+async fn await_settlement_retirement(rpc: &SubscriptionRpc, shutdown: &CancellationToken) {
+    tokio::select! {
+        () = rpc.closing.drained() => {},
+        () = rpc.closing.requested.cancelled() => {},
+        () = shutdown.cancelled() => {},
     }
 }
 
@@ -533,6 +578,16 @@ impl AmqpSettlement {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
         self.subscription_rpc.cancel_requested.cancel();
         (entered, resume)
+    }
+
+    /// Pause the uniquely driven channel close after cancellation has finished.
+    pub fn pause_subscription_close_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.subscription_rpc.closing.pause()
     }
 
     /// Pause this delivery before its one-shot broker decision, within the actual watchdog.
@@ -592,37 +647,31 @@ impl DeliverySettlement for AmqpSettlement {
             }
             Ok(Err(error)) => {
                 let error = MessagingError::new(MessagingErrorKind::Transient, error);
-                conn::close_channel_now(&self.channel);
+                self.subscription_rpc.closing.requested.cancel();
                 Err(error)
             }
             Err(error) => {
-                conn::close_channel_now(&self.channel);
+                self.subscription_rpc.closing.requested.cancel();
                 Err(MessagingError::new(MessagingErrorKind::Transient, error))
             }
         }
     }
 
     async fn abandon(self, deadline: OperationDeadline) -> Result<(), MessagingError> {
-        // Always poll the close request before the watchdog. The first lapin poll fences the
-        // original session even when the close-ok cannot be awaited within the remaining budget.
-        let close = self
-            .channel
-            .close(REPLY_SUCCESS, "delivery ownership abandoned".into());
-        tokio::pin!(close);
-        let timeout = tokio::time::sleep(deadline.timeout());
-        tokio::pin!(timeout);
-        tokio::select! {
-            biased;
-            result = &mut close => result.map_err(|e| MessagingError::new(MessagingErrorKind::Transient, e)),
-            () = &mut timeout => Err(MessagingError::new(MessagingErrorKind::DeadlineElapsed, std::io::Error::new(std::io::ErrorKind::TimedOut, "AMQP abandon deadline elapsed"))),
-        }
+        let closing = self.subscription_rpc.closing.clone();
+        closing.requested.cancel();
+        drop(self);
+        tokio::time::timeout(deadline.timeout(), closing.wait())
+            .await
+            .map_err(|error| MessagingError::new(MessagingErrorKind::DeadlineElapsed, error))?
+            .map_err(|error| MessagingError::new(MessagingErrorKind::Transient, error))
     }
 }
 
 impl Drop for AmqpSettlement {
     fn drop(&mut self) {
-        if !self.settled || self.subscription_rpc.cancel_requested.is_cancelled() {
-            conn::close_channel_now(&self.channel);
+        if !self.settled {
+            self.subscription_rpc.closing.requested.cancel();
         }
     }
 }
@@ -687,15 +736,17 @@ impl SubscriberInner {
         // delivery at a time and may be blocked in its PG transaction when shutdown begins.
         let admission_stopped = CancellationToken::new();
         let cancel_confirmation = admission_stopped.clone();
+        let close_channel = channel.clone();
+        let closing =
+            SubscriptionClose::new(async move { close::close_channel(&close_channel).await });
         let subscription_rpc = Arc::new(SubscriptionRpc {
             gate: tokio::sync::Mutex::new(()),
             cancel_requested: token.clone(),
             admission_stopped,
+            closing: closing.clone(),
             #[cfg(feature = "test-support")]
             cancel_pause: std::sync::Mutex::new(None),
         });
-        let cancel_rpc = Arc::clone(&subscription_rpc);
-        let cancel_channel = channel.clone();
         {
             let mut lifecycle = self
                 .lifecycle
@@ -704,31 +755,27 @@ impl SubscriberInner {
             if lifecycle.closed {
                 return Err(closed_subscriber());
             }
-            let abort_channel = cancel_channel.clone();
+            let rpc = Arc::clone(&subscription_rpc);
+            let cancel_channel = channel.clone();
+            let retained_consumer = consumer.clone();
+            let shutdown = self.shutdown.clone();
+            let resource = self.name.clone();
+            let abort_channel = channel.clone();
             let abort_cleanup = conn::OnDrop::new(move || conn::close_channel_now(&abort_channel));
             let task = AbortOnDropHandle::new(tokio::spawn(async move {
                 let abort_cleanup = abort_cleanup;
-                token.cancelled().await;
-                #[cfg(feature = "test-support")]
-                {
-                    let pause = cancel_rpc
-                        .cancel_pause
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    if let Some(pause) = pause {
-                        pause.wait().await;
-                    }
-                }
-                let _rpc = cancel_rpc.gate.lock().await;
-                cancel_delivery_source(cancel_channel, consumer_tag).await;
-                cancel_rpc.admission_stopped.cancel();
+                run_subscription_close(&rpc, &cancel_channel, consumer_tag, &shutdown, &resource)
+                    .await;
+                // Retain lapin's external canceler/closer until the explicit close receipt exists.
+                drop(retained_consumer);
                 abort_cleanup.disarm();
             }));
-            lifecycle.cancellation_tasks.retain_mut(|task| {
-                !crate::shutdown::observe_finished_task(task, "subscription_cancel")
-            });
-            lifecycle.cancellation_tasks.push(task);
+            lifecycle
+                .cancellation_tasks
+                .retain_mut(|task| !task.observed_finished());
+            lifecycle
+                .cancellation_tasks
+                .push(OwnedSubscription { task, closing });
         }
         cleanup.disarm();
         let delivery_rpc = Arc::clone(&subscription_rpc);
@@ -739,18 +786,21 @@ impl SubscriberInner {
         // subscriber channel shutdown requeues it for the replacement consumer.
         let stream = consumer
             .filter_map(move |res| {
-                let delivery_channel = channel.clone();
                 let delivery_rpc = Arc::clone(&delivery_rpc);
                 let delivery_subscription = delivery_subscription.clone();
                 async move {
                     match res {
-                        Ok(_delivery) if delivery_rpc.cancel_requested.is_cancelled() => None,
-                        Ok(delivery) => Some(delivery_to_core(
-                            delivery,
-                            delivery_channel,
-                            delivery_rpc,
-                            &delivery_subscription,
-                        )),
+                        Ok(delivery) => delivery_rpc
+                            .closing
+                            .acquire(&delivery_rpc.cancel_requested)
+                            .map(|permit| {
+                                delivery_to_core(
+                                    delivery,
+                                    permit,
+                                    delivery_rpc,
+                                    &delivery_subscription,
+                                )
+                            }),
                         Err(error) => {
                             tracing::warn!(
                                 target: "amqp",
@@ -803,7 +853,7 @@ impl SubscriberInner {
         (entered, resume)
     }
 
-    fn close_admission(&self) -> (Arc<Connection>, Vec<AbortOnDropHandle<()>>) {
+    fn close_admission(&self) -> (Arc<Connection>, Vec<OwnedSubscription>) {
         let mut lifecycle = self
             .lifecycle
             .lock()
@@ -994,6 +1044,7 @@ mod cancellation_tests {
             gate: tokio::sync::Mutex::new(()),
             cancel_requested: CancellationToken::new(),
             admission_stopped: CancellationToken::new(),
+            closing: super::SubscriptionClose::new(async { Ok(()) }),
             #[cfg(feature = "test-support")]
             cancel_pause: std::sync::Mutex::new(None),
         };

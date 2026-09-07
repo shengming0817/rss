@@ -11,6 +11,7 @@ fn error(_: impl std::fmt::Debug) -> ConformanceError {
     ConformanceError::publish(MessagingErrorKind::Invariant)
 }
 fn attempt(
+    topic: &str,
     id: &str,
     outcome: PublishOutcome<KafkaPublishReceipt>,
 ) -> Result<PublishAttempt, ConformanceError> {
@@ -18,7 +19,7 @@ fn attempt(
         message_id: rss_transactional_messaging::message::MessageId::parse(id).map_err(error)?,
         outcome: match outcome {
             PublishOutcome::Confirmed(receipt) => {
-                assert_eq!(receipt.topic(), TOPIC);
+                assert_eq!(receipt.topic(), topic);
                 assert!(receipt.partition() >= 0);
                 assert!(receipt.offset() >= 0);
                 PublishOutcome::Confirmed(())
@@ -45,7 +46,7 @@ impl PublisherTransportDriver for Driver<'_> {
         compare_receipt(self.1, "confirmed", &outcome, 1)
             .await
             .map_err(error)?;
-        attempt("confirmed", outcome)
+        attempt(self.1.topic(), "confirmed", outcome)
     }
     async fn permanent(&self) -> Result<PublishAttempt, ConformanceError> {
         let mut m = message("oversize").map_err(error)?;
@@ -56,6 +57,7 @@ impl PublisherTransportDriver for Driver<'_> {
             vec![0; 4097],
         );
         attempt(
+            self.1.topic(),
             "oversize",
             self.0
                 .publish(&m, deadline(Duration::from_secs(1)).map_err(error)?)
@@ -82,7 +84,7 @@ impl PublisherTransportDriver for Driver<'_> {
             .await;
         let _ = release.send(());
         drained(self.0).await.map_err(error)?;
-        attempt("capacity-refusal", outcome)
+        attempt(self.1.topic(), "capacity-refusal", outcome)
     }
     async fn ambiguous_retry(&self) -> Result<Vec<PublishAttempt>, ConformanceError> {
         let m = message("same-id-retry").map_err(error)?;
@@ -99,15 +101,15 @@ impl PublisherTransportDriver for Driver<'_> {
             .await
             .map_err(error)?;
         Ok(vec![
-            attempt("same-id-retry", first)?,
-            attempt("same-id-retry", second)?,
+            attempt(self.1.topic(), "same-id-retry", first)?,
+            attempt(self.1.topic(), "same-id-retry", second)?,
         ])
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kafka_transport_suite() -> anyhow::Result<()> {
+async fn shared_kafka_transport_suite() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(110), async {
-        let fixture = testkit::kafka_tls(testkit::KafkaTlsServerIdentity::MatchingHost).await?;
+        let fixture = testkit::shared_kafka_tls().await?;
         let (publisher, resource) =
             KafkaPublisher::create(config(&fixture)?, Duration::from_secs(5)).await?;
         run_publisher_transport_conformance(

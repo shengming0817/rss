@@ -30,6 +30,32 @@ pub fn deadline(clock: &impl Clock) -> OperationDeadline {
         .unwrap_or_else(|_| unreachable!())
 }
 
+pub fn ready_generation(
+    state: &tokio::sync::watch::Receiver<rss_mqtt::ConnectionState>,
+) -> anyhow::Result<u64> {
+    match *state.borrow() {
+        rss_mqtt::ConnectionState::Ready { generation, .. } => Ok(generation),
+        other => anyhow::bail!("fixture connection is not ready: {other:?}"),
+    }
+}
+
+// Retire is synchronous admission only. Broker replay can arrive before the new SUBACK.
+pub async fn wait_reconnected(
+    state: &tokio::sync::watch::Receiver<rss_mqtt::ConnectionState>,
+    before: u64,
+) -> anyhow::Result<()> {
+    let mut state = state.clone();
+    let ready = tokio::time::timeout(Duration::from_secs(5), state.wait_for(|value| {
+        matches!(value, rss_mqtt::ConnectionState::Ready { generation, .. } if *generation > before)
+            || matches!(value, rss_mqtt::ConnectionState::Failed(_) | rss_mqtt::ConnectionState::Closed)
+    })).await??;
+    anyhow::ensure!(
+        matches!(*ready, rss_mqtt::ConnectionState::Ready { generation, .. } if generation > before),
+        "fixture reconnect failed: {ready:?}"
+    );
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct FileStore {
     dir: tempfile::TempDir,
@@ -142,7 +168,7 @@ pub fn config(
     Ok(rss_mqtt::MqttConfig::new(
         "localhost",
         fixture.port(),
-        id,
+        format!("rss-{}-{id}", std::process::id()),
         "mqtt-integration",
         tls(fixture, false, true)?,
         rss_mqtt::Limits::new(32, 32, 32, 65536)?,

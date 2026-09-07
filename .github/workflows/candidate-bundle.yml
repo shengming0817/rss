@@ -28,8 +28,8 @@ jobs:
       - name: Install pinned Rust toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
-          rustup default 1.96.0
+          python3 hack/ci-pipeline.py --install-toolchain
+
           rustc --version --verbose
           cargo --version --verbose
 

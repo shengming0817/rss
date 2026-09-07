@@ -1,7 +1,7 @@
 //! 真容器 fixtures（testcontainers 0.27）。
 //!
-//! Fixtures own temporary containers; callers share a guard within one bounded test suite.
-//! Provider endpoints and credentials are returned explicitly, never selected from environment.
+//! The Make launcher owns shared AMQP/Kafka/MQTT containers across nextest processes.
+//! Shared clients require its private descriptor; exclusive scenarios own the same constructors.
 //!
 //! **guard 须绑定到测试作用域结束**——其 `Drop` 停容器（提前 drop 后续连接失败）。
 //! 不透明 guard 把 `testcontainers` 类型挡在消费方签名外（消费方只 name `testkit::{*Fixture,FixtureError}`）。
@@ -37,7 +37,7 @@ pub struct NetworkAttachment<'a> {
     pub dns_name: &'a str,
 }
 
-/// Drop guard for a fixture-owned bridge network created by [`bridge_network`].
+/// Handle for a launcher-owned bridge network created by [`bridge_network`].
 #[derive(Debug)]
 pub struct BridgeNetwork {
     name: String,
@@ -50,27 +50,58 @@ impl BridgeNetwork {
     }
 }
 
+// Normal exclusive-fixture teardown releases address-pool capacity between serial tests.
+// The launcher retains the final label sweep for cancellation or any failed release.
 impl Drop for BridgeNetwork {
+    #[allow(clippy::disallowed_methods)]
+    // reason: a bounded destructor cannot depend on the test runtime still being alive.
     fn drop(&mut self) {
-        match std::process::Command::new("docker")
-            .args(["network", "rm", "-f", &self.name])
-            .output()
-        {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => eprintln!(
-                "testkit: docker network rm -f {} failed: {}",
-                self.name,
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            Err(error) => eprintln!(
-                "testkit: docker network rm -f {} failed to spawn: {error}",
+        let result = (|| -> std::io::Result<()> {
+            let mut child = std::process::Command::new("docker")
+                .args(["network", "rm", "-f", &self.name])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let status = match child.try_wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(error);
+                    }
+                };
+                if let Some(status) = status {
+                    return if status.success() {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other("Docker network removal failed"))
+                    };
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Docker network removal deadline elapsed",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })();
+        if let Err(error) = result {
+            eprintln!(
+                "testkit: network release id={} failed: {error}; launcher will sweep",
                 self.name
-            ),
+            );
         }
     }
 }
 
-/// Creates a unique user-defined bridge network. Drop removes it.
+pub(super) const LAUNCHER_REQUIRED: &str = "fixture requires the Make launcher; from the workspace root run: make ci CI_PART=tests CI_FILTER='package(/-integration$/)'";
+
+/// Creates a unique bridge with bounded normal release and launcher-owned fallback cleanup.
 pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     if !is_safe_label_token(prefix) {
         return Err(anyhow::anyhow!(
@@ -80,11 +111,12 @@ pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     let seq = BRIDGE_NETWORK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = format!("{prefix}-{}-{seq}", std::process::id());
     let mut command = tokio::process::Command::new("docker");
-    command.args(["network", "create", "--driver", "bridge", &name]);
-    let output = command
-        .output()
-        .await
-        .map_err(|error| anyhow::anyhow!("docker network create failed to spawn: {error}"))?;
+    command.args(["network", "create", "--driver", "bridge"]);
+    let run = std::env::var("RSS_TEST_RUN_ID").map_err(|_| anyhow::anyhow!(LAUNCHER_REQUIRED))?;
+    anyhow::ensure!(is_safe_label_token(&run), "invalid fixture run ID");
+    command.args(["--label", &format!("rss.test-run={run}")]);
+    command.arg(&name).kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await??;
     if !output.status.success() {
         return Err(anyhow::anyhow!(
             "docker network create {name} failed: {}",
@@ -177,16 +209,23 @@ mod postgres;
 mod rabbitmq;
 mod redis;
 
-pub use kafka::{KafkaTlsFixture, KafkaTlsServerIdentity, kafka_tls};
+pub use kafka::{KafkaTlsFixture, KafkaTlsServerIdentity, exclusive_kafka_tls, shared_kafka_tls};
 pub use postgres::{PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls};
-pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, managed_rabbitmq, rabbitmq_tls};
+pub use rabbitmq::{
+    RabbitFixture, RabbitTlsFixture, exclusive_rabbitmq, rabbitmq_tls, shared_rabbitmq,
+};
 pub use redis::{RedisFixture, managed_redis};
 
 #[cfg(test)]
 mod tests;
 
 mod mqtt;
-pub use mqtt::{MqttTlsFixture, mqtt_tls};
+pub use mqtt::{MqttTlsFixture, exclusive_mqtt_tls, shared_mqtt_tls};
 
 mod minio;
 pub use minio::{MinioTlsFixture, minio_tls_archive};
+
+mod launcher;
+pub use launcher::launch;
+
+mod descriptor;

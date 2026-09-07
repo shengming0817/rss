@@ -2,7 +2,7 @@
 //! ref: apache/kafka docker/resources/common-scripts/configure@4.1.1
 use super::{Result, runtime};
 use testcontainers::{
-    ContainerAsync, Image, ImageExt as _,
+    Image, ImageExt as _,
     core::{CmdWaitFor, ContainerPort, ContainerState, ExecCommand, WaitFor},
 };
 
@@ -15,7 +15,8 @@ pub enum KafkaTlsServerIdentity {
 
 /// Owns the broker; authentication material is explicit and never included in Debug.
 pub struct KafkaTlsFixture {
-    _container: ContainerAsync<KafkaImage>,
+    _container: runtime::Container<KafkaImage>,
+    topic: String,
     brokers: String,
     scram_brokers: String,
     untrusted_client: String,
@@ -25,6 +26,9 @@ pub struct KafkaTlsFixture {
     key: String,
 }
 impl KafkaTlsFixture {
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
     pub fn brokers(&self) -> &str {
         &self.brokers
     }
@@ -50,7 +54,7 @@ impl KafkaTlsFixture {
                 "--bootstrap-server",
                 "127.0.0.1:29092",
                 "--topic",
-                "events-v1",
+                &self.topic,
             ],
         )
         .await?;
@@ -60,7 +64,7 @@ impl KafkaTlsFixture {
         Ok(output
             .stdout
             .trim()
-            .strip_prefix("events-v1:0:")
+            .strip_prefix(&format!("{}:0:", self.topic))
             .ok_or_else(|| anyhow::anyhow!("unexpected topic offset response"))?
             .parse()?)
     }
@@ -132,7 +136,7 @@ fn material(identity: KafkaTlsServerIdentity) -> Result<Material> {
 }
 /// Start a single-node test-only Kafka cluster with host-published mTLS and SCRAM listeners.
 /// The internal controller/broker listeners stay inside the fixture container.
-pub async fn kafka_tls(identity: KafkaTlsServerIdentity) -> Result<KafkaTlsFixture> {
+pub async fn exclusive_kafka_tls(identity: KafkaTlsServerIdentity) -> Result<KafkaTlsFixture> {
     let material = material(identity)?;
     let port = "__RSS_ADVERTISED_PORT__";
     let pem = |value: &str| value.replace('\n', "\\n");
@@ -214,7 +218,8 @@ sasl.enabled.mechanisms=SCRAM-SHA-512
     )
     .await?;
     Ok(KafkaTlsFixture {
-        _container: container,
+        _container: runtime::Container::Owned(Box::new(container)),
+        topic: "events-v1".into(),
         brokers: format!("127.0.0.1:{port}"),
         scram_brokers: format!("127.0.0.1:{scram_port}"),
         untrusted_client: material.untrusted_client,
@@ -263,4 +268,55 @@ impl Image for KafkaImage {
             .replace("__RSS_SCRAM_PORT__", &scram_port.to_string());
         Ok(vec![ExecCommand::new(vec!["/bin/sh".to_owned(), "-c".to_owned(), "set -eu; printf '%s' \"$1\" > /tmp/rss-kafka.properties; touch /tmp/rss-kafka-ready".to_owned(), "rss-config".to_owned(), properties]).with_cmd_ready_condition(CmdWaitFor::exit())])
     }
+}
+
+impl KafkaTlsFixture {
+    pub(super) fn descriptor(&self) -> super::descriptor::KafkaConnection {
+        use runtime::ContainerId as _;
+        super::descriptor::KafkaConnection {
+            container: self._container.container_id().into(),
+            brokers: self.brokers.clone(),
+            scram_brokers: self.scram_brokers.clone(),
+            untrusted_client: self.untrusted_client.clone(),
+            ca: self.ca.clone(),
+            wrong_ca: self.wrong_ca.clone(),
+            certificate: self.certificate.clone(),
+            key: self.key.clone(),
+        }
+    }
+}
+/// Borrow the shared broker and create a process-unique topic.
+pub async fn shared_kafka_tls() -> Result<KafkaTlsFixture> {
+    let d = super::descriptor::read()?
+        .kafka
+        .ok_or_else(|| anyhow::anyhow!("Kafka shared fixture not selected"))?;
+    let fixture = KafkaTlsFixture {
+        _container: runtime::Container::Shared(d.container),
+        topic: super::launcher::unique_name("events"),
+        brokers: d.brokers,
+        scram_brokers: d.scram_brokers,
+        untrusted_client: d.untrusted_client,
+        ca: d.ca,
+        wrong_ca: d.wrong_ca,
+        certificate: d.certificate,
+        key: d.key,
+    };
+    runtime::run_container_command(
+        &fixture._container,
+        "create-kafka-topic",
+        &[
+            "/opt/kafka/bin/kafka-topics.sh",
+            "--bootstrap-server",
+            "127.0.0.1:29092",
+            "--create",
+            "--topic",
+            &fixture.topic,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+        ],
+    )
+    .await?;
+    Ok(fixture)
 }

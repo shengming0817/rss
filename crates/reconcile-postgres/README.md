@@ -30,7 +30,7 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 ## 验证
 
-`cargo test -p rss-reconcile`；真实 provider 运行 `cargo nextest run -p reconcile-postgres-integration --all-features`（Docker、PostgreSQL TLS fixture）。该 suite 包含真实 COMMIT/ROLLBACK I/O 期间终止 backend、关闭取消/超时的行为证明，以及由父测试启动并 kill 的 worker 子进程；子测试单独标记 ignored，不代表恢复场景跳过。
+`cargo test -p rss-reconcile`；真实 provider 运行 `make ci CI_PART=tests CI_FILTER='package(=reconcile-postgres-integration)'`（Docker、PostgreSQL TLS fixture）。该 suite 包含真实 COMMIT/ROLLBACK I/O 期间终止 backend、关闭取消/超时的行为证明，以及由父测试启动并 kill 的 worker 子进程；子测试单独标记 ignored，不代表恢复场景跳过。
 
 `python3 hack/reconcile-package-proof.py` 验证真实 `.crate` 的独立解析、core-only、默认 PostgreSQL 和消息组合。candidate workflow 验证同提交上传 artifact 的 hash 与版本。
 

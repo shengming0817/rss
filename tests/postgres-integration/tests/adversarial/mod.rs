@@ -2,6 +2,7 @@ use super::fence_fixture;
 use super::{Effect, Timer, binding, deadline, message};
 use rss_transactional_messaging::{inbox::*, message::MessageEnvelope, policy::*, transaction::*};
 use rss_transactional_messaging_postgres::*;
+use rss_transactional_messaging_testkit::memory::FakeClock;
 use std::{
     sync::{
         Arc,
@@ -143,7 +144,9 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         );
         let execution = consumer.execute(&claim, &message, binding.receipt_intent(), deadline());
         let coordination = async {
-            entered.notified().await;
+            tokio::time::timeout(Duration::from_secs(5), entered.notified())
+                .await
+                .expect("concurrent consumer must enter effect");
             if lock_until_expired {
                 let mut blocker = owner.begin().await.expect("blocker");
                 sqlx::query("SELECT 1 FROM rss_transactional_messaging.inbox WHERE message_id=$1 FOR UPDATE").bind(id).execute(&mut *blocker).await.expect("hold inbox lock");
@@ -176,7 +179,16 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
     Ok(())
 }
 
-async fn cancellation(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
+async fn cancellation(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
+    let clock = FakeClock::new();
+    let runtime = Arc::new(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            PgRuntime::connect(config.clone(), clock.clone(), fence_fixture::binding()),
+        )
+        .await
+        .expect("controlled-clock runtime must connect")?,
+    );
     for mode in ["cancel-effect", "timeout-effect", "timeout-commit"] {
         let entered = Arc::new(Notify::new());
         let pid = Arc::new(AtomicI32::new(0));
@@ -186,9 +198,10 @@ async fn cancellation(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::
         if mode == "timeout-commit" {
             runtime.inject_next_transaction_fault(PgTransactionFault::CommitPending);
         }
-        let task = tokio::spawn(async move {
+        let operation_clock = clock.clone();
+        let mut operation = Box::pin(async move {
             let tenant = message(mode).metadata().tenant_id();
-            let clock = Timer::new();
+            let clock = operation_clock;
             let bound = AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(150))
                 .expect("deadline")
                 .operation(&clock);
@@ -202,24 +215,40 @@ async fn cancellation(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::
                 Ok(())
             })).await
         });
-        entered.notified().await;
+        // Poll the operation first: notification is observed only after the effect or
+        // injected commit has yielded. Real database setup cannot consume the test clock.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                _ = &mut operation => panic!("{mode}: transaction finished before fault boundary"),
+                () = entered.notified() => {}
+            }
+        })
+        .await
+        .expect("transaction must reach fault boundary");
         if mode == "cancel-effect" {
-            task.abort();
-            assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+            drop(operation);
         } else {
-            let status = task.await?.fold(
-                |_| "committed",
-                |_| "not-started",
-                |_| "rolled-back",
-                |_| "rollback-failed",
-                |_| "unknown",
-                |_| "fenced",
-            );
+            clock.advance(Duration::from_millis(150));
+            let status = tokio::time::timeout(Duration::from_secs(5), operation)
+                .await
+                .expect("transaction must observe deadline")
+                .fold(
+                    |_| "committed",
+                    |_| "not-started",
+                    |_| "rolled-back",
+                    |_| "rollback-failed",
+                    |_| "unknown",
+                    |_| "fenced",
+                );
             assert_eq!(status, "unknown");
         }
         connection_gone(owner, pid.load(Ordering::SeqCst)).await;
         assert_eq!(count(owner, mode).await, 0);
     }
+    tokio::time::timeout(Duration::from_secs(5), runtime.close())
+        .await
+        .expect("controlled-clock runtime must close");
     Ok(())
 }
 
@@ -287,7 +316,8 @@ pub(super) async fn run(
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.inbox DROP CONSTRAINT inbox_receipt_shape, ADD CONSTRAINT inbox_receipt_shape {original}"))).execute(owner).await?;
     assert!(!accepted, "same-name weakened constraint must fail connect");
     storage_mutations(owner, &config).await?;
-    consumer_failures::run(runtime.clone(), owner).await?;
+    eprintln!("pg-suite phase=consumer_failures");
+    consumer_failures::run(runtime.clone(), owner, &config).await?;
     relay::run(runtime.clone(), owner).await?;
     projection_mismatch(runtime.clone(), owner).await?;
     sqlx::raw_sql(
@@ -324,7 +354,8 @@ pub(super) async fn run(
     tenant_isolation(runtime.clone(), raw_runtime).await?;
     inbox_lock_expiry(runtime.clone(), owner).await?;
     concurrency(runtime.clone(), owner).await?;
-    cancellation(runtime, owner).await?;
+    eprintln!("pg-suite phase=cancellation");
+    cancellation(&config, owner).await?;
     sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO PUBLIC").execute(owner).await?;
     assert!(
         PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
