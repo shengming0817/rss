@@ -42,3 +42,26 @@ assert!(!safe.contains("secret"));
 
 This package does not own storage encryption, key-provider integrations, logging backends, or
 authorization policy.
+
+## Output trust boundaries
+
+`ErrorSummary` is a closed, payload-free diagnostic vocabulary. Components retain their own error
+classification and explicitly project it at the output boundary; summaries do not determine retry,
+authorization or HTTP behavior. `LastError::from_summary` stores the enum itself and can only render
+its fixed label. There is no raw-error or open-renderer constructor.
+
+```rust
+use rss_redact::{ErrorSummary, LastError};
+assert_eq!(LastError::from_summary(ErrorSummary::Io).as_str(), "io");
+```
+
+`Redact` and `safe` render the type author's policy, including public/show fields. A handwritten
+implementation can return arbitrary text. `Redacted` records a particular helper's result, not a
+universal secrecy guarantee: key filtering leaves unmatched values intact and URL credential
+scrubbing only removes userinfo. None of these results can construct `LastError`.
+
+### API replacement (#2326)
+
+`redact_error`, `LastError::from_error` and `LastError::from_redactable` have been removed. Classify
+errors at their component owner and explicitly select `ErrorSummary`; never infer a category from
+provider text. Built-in secret wrappers remain available with or without the optional derive feature.

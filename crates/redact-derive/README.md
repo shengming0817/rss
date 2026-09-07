@@ -17,3 +17,20 @@ the built-in types' safety guarantees.
 Keeping the macro in a dedicated `proc-macro` package is required by Rust, while the re-export keeps
 one user-facing redaction dependency. Consumers should not depend directly on this implementation
 package.
+
+Generic derives add bounds only to the generated `Redact` and `Debug` impls. Public/show fields require
+`FieldType: Debug`; partial masks require `FieldType: RedactField`. Fixed/drop fields are not read and
+require neither trait. Bounds apply to complete field types, including wrappers and associated types,
+and preserve the input where clause. A public declaration remains the type author's responsibility;
+the derive checks policy grammar, not whether a value is actually public.
+
+Concrete fields are checked in the generated impl body. The macro traverses type syntax to detect
+generic uses; it does not resolve aliases or guess recursion from type names. For generic recursion,
+use a struct-level override such as `#[redact(bound = "T: std::fmt::Debug")]`, or `bound = ""`
+when no extra bound is needed. This replaces all inferred bounds on both generated impls while
+preserving the struct's existing where clause. Field policy checks and rendering expressions still
+compile normally, so an insufficient override is rejected by Rust. Bounds describe the actual
+visible/masked fields; hidden generic parameters need no bound.
+
+ref: serde-rs/serde serde_derive/src/bound.rs@v1.0.228
+ref: https://serde.rs/attr-bound.html

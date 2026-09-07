@@ -78,15 +78,9 @@ impl Endpoint {
         &self.0
     }
 }
-impl std::fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let raw = self.0.split(['?', '#']).next().unwrap_or(&self.0);
-        write!(f, "{}", rss_redact::redact_url_credentials(raw))
-    }
-}
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Endpoint({self})")
+        f.write_str("Endpoint(<redacted>)")
     }
 }
 macro_rules! role_endpoint {
@@ -137,18 +131,7 @@ mod tests {
     #[test]
     fn endpoint_and_errors_do_not_expose_credentials() -> Result<(), AmqpEndpointError> {
         let endpoint = Endpoint::parse("amqps://alice:secretpass@broker/v", false)?;
-        for rendered in [format!("{endpoint:?}"), endpoint.to_string()] {
-            for secret in [
-                "alice",
-                "secretpass",
-                "supersecret",
-                "fragmentsecret",
-                "?",
-                "#",
-            ] {
-                assert!(!rendered.contains(secret));
-            }
-        }
+        assert_eq!(format!("{endpoint:?}"), "Endpoint(<redacted>)");
         Ok(())
     }
 }

@@ -2,14 +2,14 @@
 //!
 //! 从每字段的 `#[redact(...)]` 策略派生两个 impl：
 //! - `impl ::rss_redact::Redact`：`redact_scoped(scope)` 调 `::rss_redact::redact_struct` 公开 funnel 产出脱敏 `String`
-//!   （`Redacted::new` 仍 `pub(crate)` 封闭——脱敏逻辑在 `rss-redact` 内单源，外部不可伪造安全值）。`scope`
+//!   （策略渲染在 `rss-redact` 内单源；不生成受保护错误摘要）。`scope`
 //!   （`RedactScope::Wire`/`ServerLog`，#1361）穿透给 funnel 决定 pii/部分泄露 mode 的渲染严格度。
 //! - `impl ::core::fmt::Debug`：`write!(f, "{}", self.redact_scoped(RedactScope::ServerLog))`——替换手写
-//!   Debug、杜绝 `{:?}` 泄漏（默认 `ServerLog` = 受信进程内诊断渲染，保留掩码）。
+//!   Debug，按声明策略渲染（默认 `ServerLog` = 受信进程内诊断渲染，保留掩码）。
 //!
 //! **fail-closed（Hard）**：每个字段必须显式带 `#[redact(sensitivity = ...)]`；
 //! 缺标注 / 重复敏感度 / 未知 sensitivity / 未知 mode / `secret|pii|internal` 又 `mode = "show"` /
-//! `mode = "hash"` 均编译错误——「忘标脱敏的 secret 字段」「把敏感字段标成明文」从类型层不可表达
+//! `mode = "hash"` 均编译错误——缺标注或显式矛盾策略不能通过宏展开；public 声明是否真实仍由类型作者负责
 //! （compile-fail golden 见 `tests/`）。
 //!
 //! 不依赖 `rss-redact` crate：展开时解析消费方声明的实际依赖名并生成对应绝对路径（无编译环；
@@ -24,6 +24,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::spanned::Spanned;
+use syn::visit::Visit as _;
 use syn::{Data, DeriveInput, Fields, Ident, Index, LitStr};
 
 /// 派生 `Redact` + 安全 `Debug`，按每字段 `#[redact(...)]` 策略脱敏。
@@ -35,6 +36,9 @@ use syn::{Data, DeriveInput, Fields, Ident, Index, LitStr};
 /// - `#[redact(sensitivity = pii)]`
 /// - `#[redact(sensitivity = pii_email|pii_phone|pii_name|pii_address)]`
 /// - 可选 `mode = "show|fixed|last4|email_mask|drop"`。
+///
+/// Struct 属性 `#[redact(bound = "T: std::fmt::Debug")]` 替换生成 impl 的推导约束；
+/// 泛型递归（含别名）须显式声明实际约束，空字符串表示不追加约束。原 where clause 与字段检查保留。
 ///
 /// 每个字段必须且只能声明一个 sensitivity。显式 mode 优先；但 internal/pii/secret 与 `mode = "show"`
 /// 同用、任意字段与 `mode = "hash"` 同用 = 编译错误。
@@ -105,6 +109,7 @@ struct FieldPolicy {
     /// 经 `RedactField::as_redact_value(&self.f)`；显式 `fixed`/`drop`（不读值）= `RedactValue::Absent`
     /// ——后者不施加 `RedactField` 约束，自定义字段类型即可固定脱敏（#1360 F2）。
     value_expr: TokenStream2,
+    bound: Option<syn::WherePredicate>,
 }
 
 #[cfg(test)]
@@ -141,6 +146,7 @@ fn expand_with_path(input: &DeriveInput, redact: &TokenStream2) -> syn::Result<T
             name_token,
             mode_expr,
             value_expr,
+            ..
         } = p;
         quote! {
             #redact::FieldRedaction {
@@ -153,7 +159,20 @@ fn expand_with_path(input: &DeriveInput, redact: &TokenStream2) -> syn::Result<T
 
     let ident = &input.ident;
     let type_name = ident.to_string();
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    // ref: serde-rs/serde serde_derive/src/bound.rs@v1.0.228
+    // Bound the complete field type, only when the generated expression reads it.
+    let mut generics = input.generics.clone();
+    let bounds = explicit_bounds(input)?.unwrap_or_else(|| {
+        policies
+            .iter()
+            .filter_map(|policy| policy.bound.clone())
+            .filter_map(|bound| generic_bound(bound, input))
+            .collect()
+    });
+    if !bounds.is_empty() {
+        generics.make_where_clause().predicates.extend(bounds);
+    }
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
         impl #impl_generics #redact::Redact for #ident #ty_generics #where_clause {
@@ -172,6 +191,62 @@ fn expand_with_path(input: &DeriveInput, redact: &TokenStream2) -> syn::Result<T
             }
         }
     })
+}
+
+/// Explicit bounds replace inferred predicates, but never the impl body or existing where clause.
+/// Like Serde's bound override, this lets the type owner express constraints hidden behind aliases.
+fn explicit_bounds(input: &DeriveInput) -> syn::Result<Option<Vec<syn::WherePredicate>>> {
+    let mut bounds = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("redact") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("bound") {
+                return Err(meta.error("struct redact 属性仅支持 bound"));
+            }
+            if bounds.is_some() {
+                return Err(meta.error("重复 bound 声明"));
+            }
+            let value: LitStr = meta.value()?.parse()?;
+            let predicates = value.parse_with(
+                syn::punctuated::Punctuated::<syn::WherePredicate, syn::Token![,]>::parse_terminated,
+            )?;
+            bounds = Some(predicates.into_iter().collect());
+            Ok(())
+        })?;
+    }
+    Ok(bounds)
+}
+
+// Concrete fields are checked inside the impl body. Detect generic type uses through the AST;
+// do not guess type identity or expand aliases. Generic recursion uses an explicit bound override.
+fn generic_bound(bound: syn::WherePredicate, input: &DeriveInput) -> Option<syn::WherePredicate> {
+    struct GenericUse<'a> {
+        generics: &'a syn::Generics,
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for GenericUse<'_> {
+        fn visit_type_path(&mut self, ty: &'ast syn::TypePath) {
+            if ty.path.leading_colon.is_none()
+                && ty.path.segments.first().is_some_and(|first| {
+                    self.generics.type_params().any(|p| p.ident == first.ident)
+                })
+            {
+                self.found = true;
+            }
+            syn::visit::visit_type_path(self, ty);
+        }
+    }
+    let syn::WherePredicate::Type(predicate) = &bound else {
+        return None;
+    };
+    let mut usage = GenericUse {
+        generics: &input.generics,
+        found: false,
+    };
+    usage.visit_type(&predicate.bounded_ty);
+    usage.found.then_some(bound)
 }
 
 fn field_policy(field: &syn::Field, idx: usize, redact: &TokenStream2) -> syn::Result<FieldPolicy> {
@@ -218,12 +293,15 @@ fn field_policy(field: &syn::Field, idx: usize, redact: &TokenStream2) -> syn::R
         }
     };
 
-    let value_expr = redact_value_expr(mode, sens, &accessor, redact);
+    let (value_expr, requirement) = redact_value_expr(mode, sens, &accessor, redact);
+    let field_type = &field.ty;
+    let bound = requirement.map(|bound| syn::parse_quote!(#field_type: #bound));
 
     Ok(FieldPolicy {
         name_token,
         mode_expr,
         value_expr,
+        bound,
     })
 }
 
@@ -362,27 +440,19 @@ fn redact_value_expr(
     sens: Option<ParsedDataClass>,
     accessor: &TokenStream2,
     redact: &TokenStream2,
-) -> TokenStream2 {
-    match mode {
-        Some(Mode::Fixed | Mode::Drop) => quote!(#redact::RedactValue::Absent),
-        Some(Mode::Show) => quote!(#redact::RedactValue::Debug(#accessor)),
-        Some(Mode::Last4 | Mode::EmailMask) => {
-            quote!(#redact::RedactField::as_redact_value(#accessor))
-        }
-        None => match sens {
-            Some(ParsedDataClass::Public) => quote!(#redact::RedactValue::Debug(#accessor)),
-            Some(
-                ParsedDataClass::Internal
-                | ParsedDataClass::Secret
-                | ParsedDataClass::Pii(PiiKind::Generic | PiiKind::Name | PiiKind::Address),
-            ) => {
-                quote!(#redact::RedactValue::Absent)
-            }
-            Some(ParsedDataClass::Pii(PiiKind::Email | PiiKind::Phone)) => {
-                quote!(#redact::RedactField::as_redact_value(#accessor))
-            }
-            None => quote!(#redact::RedactValue::Absent),
-        },
+) -> (TokenStream2, Option<TokenStream2>) {
+    match (mode, sens) {
+        (Some(Mode::Show), _) | (None, Some(ParsedDataClass::Public)) => (
+            quote!(#redact::RedactValue::Debug(#accessor)),
+            Some(quote!(::core::fmt::Debug)),
+        ),
+        (Some(Mode::Last4 | Mode::EmailMask), _)
+        | (None, Some(ParsedDataClass::Pii(PiiKind::Email | PiiKind::Phone))) => (
+            quote!(#redact::RedactField::as_redact_value(#accessor)),
+            Some(quote!(#redact::RedactField)),
+        ),
+        // Fixed/drop and default fixed sensitivities do not capture the field at all.
+        _ => (quote!(#redact::RedactValue::Absent), None),
     }
 }
 

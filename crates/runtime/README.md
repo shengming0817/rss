@@ -54,6 +54,9 @@ Task/resource panic control flow is isolated into closed error kinds, but `catch
 suppress Rust's process-wide panic hook. Applications whose panic payloads may contain sensitive
 data remain responsible for installing their process-owned redacting hook before starting work.
 
+Shutdown failure observations publish the closed `ShutdownErrorKind` label and a fixed event message.
+They do not format the provider source or include a redundant free-text error field.
+
 ## Local scope, critical tasks and admission
 
 `LifecycleScope::drive` lends its startup transaction **by value** to one callback. The callback

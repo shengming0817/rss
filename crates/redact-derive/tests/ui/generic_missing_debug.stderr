@@ -1,0 +1,27 @@
+error[E0277]: `Opaque` doesn't implement `std::fmt::Debug`
+ --> tests/ui/generic_missing_debug.rs:8:22
+  |
+8 |     let _ = format!("{value:?}");
+  |                      ^^^^^^^^^ `Opaque` cannot be formatted using `{:?}` because it doesn't implement `std::fmt::Debug`
+  |
+  = help: the trait `std::fmt::Debug` is not implemented for `Opaque`
+  = note: add `#[derive(Debug)]` to `Opaque` or manually `impl std::fmt::Debug for Opaque`
+help: the trait `std::fmt::Debug` is implemented for `Visible<T>`
+ --> tests/ui/generic_missing_debug.rs:1:10
+  |
+1 | #[derive(privacy::Redact)]
+  |          ^^^^^^^^^^^^^^^
+note: required for `Visible<Opaque>` to implement `std::fmt::Debug`
+ --> tests/ui/generic_missing_debug.rs:2:8
+  |
+1 | #[derive(privacy::Redact)]
+  |          --------------- type parameter would need to implement `std::fmt::Debug`
+2 | struct Visible<T>(#[redact(sensitivity = public)] T);
+  |        ^^^^^^^^^^
+  = help: consider manually implementing `std::fmt::Debug` to avoid undesired bounds
+  = note: this error originates in the macro `$crate::__export::format_args` which comes from the expansion of the derive macro `privacy::Redact` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `Opaque` with `#[derive(Debug)]`
+  |
+4 + #[derive(Debug)]
+5 | struct Opaque;
+  |

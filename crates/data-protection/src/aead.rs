@@ -50,17 +50,15 @@ pub trait Aead {
     /// 加密：绑定 `aad`，产出自描述 [`CiphertextEnvelope`]（impl 写入 alg/mode/kid/nonce/tag + 存储 aad 坐标）。
     fn seal(&self, plaintext: &[u8], aad: &DerivedAad) -> Result<CiphertextEnvelope, AeadError>;
 
-    /// 解密：`aad` 必须由调用方从**受信上下文新派生**（`&DerivedAad`，绝不回灌 `envelope.aad()`）。
+    /// Authenticate and decrypt against caller-supplied canonical coordinates.
     ///
-    /// 调用方义务（#1466/#1467 落地）：
-    /// - **tenant 必须取自受信源**——已鉴权请求经可信认证边界，离线维护经
-    ///   被解密记录的已知坐标（[`crate::ProtectionContext`] 两构造器）；**不可**由业务自由拼，否则跨租绑定静默失效
-    ///   （`FIELDPROT-AAD-DERIVE-FROM-CTX-01` 在 L0 不可见认证对象，此约束落 #1466 call site governance）。
-    /// - **错误诊断**：[`AeadError::Open`] 不携带任何上下文（防降级探测），故调用方须在 `Err` 分支自行记录
-    ///   envelope 元数据，如 `tracing::error!(kid = envelope.kid(), key_version = envelope.key_version(),
-    ///   "aead open failed")`，以保证生产可观测性。
+    /// The caller must verify coordinate provenance and access permission before deriving AAD.
+    /// [`crate::ProtectionContext::new`] only validates coordinate shape; neither it nor this trait
+    /// authenticates a principal. Possession of a key and matching coordinates is sufficient for
+    /// cryptographic decryption, regardless of application authorization.
     ///
-    /// AAD/tag/version 任一不符 → fail-closed [`AeadError::Open`]（不泄漏哪一维失败，防降级探测）。
+    /// Implementations must reject AAD/tag mismatches, malformed envelopes and unsupported versions
+    /// as [`AeadError::Open`]. Diagnostics must not expose plaintext or untrusted error text.
     fn open(&self, envelope: &CiphertextEnvelope, aad: &DerivedAad)
     -> Result<Plaintext, AeadError>;
 }
@@ -133,7 +131,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn derived(tenant: &str, key: &str, field: &str, ver: u32) -> DerivedAad {
         let tenant = TenantId::parse(tenant).expect("canonical tenant");
-        ProtectionContext::authenticated_request(tenant, key, field, ver)
+        ProtectionContext::new(tenant, key, field, ver)
             .expect("ctx")
             .derive()
     }
@@ -156,7 +154,7 @@ mod tests {
             .seal(b"super-secret", &derived(TENANT_A, "k", "f", 1))
             .expect("seal");
         // open AAD 与 seal AAD 在**任一**维度不符（tenant/config-key/field/schema-version）→ fail-closed，
-        // 覆盖 ADR §D2「任一维度不匹配则 open fail-closed」全四维（杜绝跨租/跨键/跨字段/跨版本重放）。
+        // 覆盖 ADR §D2「任一维度不匹配则 open fail-closed」全四维（测试替身验证四维契约；真实 tag 验证由 provider 测试覆盖）。
         let cross_cases = [
             (TENANT_B, "k", "f", 1u32),    // cross-tenant
             (TENANT_A, "key-b", "f", 1),   // cross-config-key

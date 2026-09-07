@@ -83,7 +83,7 @@ fragments are rejected, including SASL mechanism overrides.
 `AmqpPrivateCa::from_pem` requires a non-empty usable certificate bundle. Connection failures use a redacted source chain; `AmqpConnectError::InvalidRecoveryTimeout` distinguishes
 local configuration failures from `Transport` setup failures. Production connections
 verify the broker against only those roots; WebPKI/platform roots are not appended. Endpoint
-Debug/Display removes credentials, query and fragment. Recovery events contain only closed
+Debug hides all coordinates; endpoints do not implement Display. Recovery events contain only closed
 stage/reason labels and generation, never endpoint coordinates or provider error text.
 
 ## Publication, delivery and deadlines
@@ -178,3 +178,12 @@ Task ownership reference: tokio-util 0.7.18 `src/task/abort_on_drop.rs` at
 `9cc02cc88d083113cd9889a74b382e39e430e180`; drop requests abort, while normal await observes completion.
 
 Licensed under the Apache License, Version 2.0.
+
+### Diagnostic boundary
+
+Connection and delivery failures are classified by the AMQP adapter from lapin error variants.
+Initial connection and delivery logs use a closed `rss_redact::ErrorSummary` projection; recovery logs
+retain their component-owned stage/reason fields. No raw provider error text is formatted or traversed.
+Connection events no longer include an endpoint field, and endpoint Debug hides all coordinates.
+Resource names are caller-selected diagnostic identifiers and must not contain credentials, endpoints
+or other secrets. This diagnostic projection does not change settlement, retry or terminal semantics.

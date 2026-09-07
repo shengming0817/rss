@@ -135,7 +135,7 @@ fn object_key(request: &Request, generation: &str) -> String {
     )
 }
 fn aad(request: &Request, key: &str) -> Result<rss_data_protection::DerivedAad, Error> {
-    ProtectionContext::authorized_maintenance(
+    ProtectionContext::new(
         request.tenant(),
         key,
         "rss.message.recovery.archive",

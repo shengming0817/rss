@@ -704,7 +704,6 @@ fn observe_returned_shutdown_error(source: ShutdownError) -> ShutdownFailureKind
 fn observe_operation_error(source: ShutdownError) -> ShutdownFailureKind {
     tracing::warn!(
         error_kind = ShutdownErrorKind::Operation.as_str(),
-        error = %rss_redact::redact_error(&source),
         "resource shutdown returned error"
     );
     ShutdownFailureKind::Failed(source)
@@ -804,9 +803,7 @@ where
                         return ShutdownStep::Done(metadata_failure);
                     }
                     // 业务错误：资源优雅上报 Err（typed `ShutdownError`，内部 source 经 `RedactedSource` 脱敏）。
-                    // 经 `rss_redact::redact_error` 记录——funnel 只取顶层 Display（安全摘要常量、不遍历 source 链，
-                    // 杜绝 adapter 原始错误 PII 经日志泄漏）；原始 source 由 `RedactedSource` owned 但 write-only
-                    // 保留，不经 `Error::source()` 链暴露（fail-closed，REDACT-SOURCE-OPAQUE-01）。
+                    // 仅记录 ShutdownErrorKind；原始 source 由 RedactedSource 持有，不进入诊断。
                     Ok(Ok(Err(source))) => Some(observe_returned_shutdown_error(source)),
                     // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 下游 panic 被 spawn 隔离，仅本资源失败。
                     Ok(Err(join_err)) => {

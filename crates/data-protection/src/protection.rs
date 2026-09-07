@@ -1,4 +1,4 @@
-//! Field protection AAD derived only from trusted request or maintenance coordinates.
+//! Canonical field-protection AAD derived from caller-supplied coordinates.
 use rss_request_context::TenantId;
 const AAD_DOMAIN_LABEL: &[u8] = b"rss-field-protection-aad-v2";
 #[derive(Debug, thiserror::Error)]
@@ -52,30 +52,17 @@ impl ProtectionAad {
         out
     }
 }
+/// Validated coordinate shape used to derive AAD; carries no principal or capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectionContext {
     aad: ProtectionAad,
 }
 impl ProtectionContext {
-    /// 受信源 ①：已鉴权请求上下文（tenant 由调用方从可信认证边界提取后传入——`rss-data-protection` 是 L0，
-    /// 不可见业务 principal）。
-    pub fn authenticated_request(
-        tenant: TenantId,
-        config_key: &str,
-        field: &str,
-        schema_version: u32,
-    ) -> Result<Self, AadError> {
-        Ok(Self {
-            aad: ProtectionAad::new(tenant, config_key, field, schema_version)?,
-        })
-    }
-
-    /// 受信源 ②：经授权的维护/迁移上下文（backfill/rewrap/key rotation 离线路径，按已知记录坐标重派生）。
+    /// Validate coordinate shape, without authenticating or authorizing the caller.
     ///
-    /// 与 [`Self::authenticated_request`] 给定**相同坐标**时产出**完全相同**的 [`DerivedAad`]——受信源类别
-    /// 不编入 canonical bytes，故 #1467 离线 rewrap/backfill 能解开线上由请求路径加密的密文（source 区分仅是
-    /// 调用意图的显式自文档，不改密文绑定）。
-    pub fn authorized_maintenance(
+    /// The caller must validate tenant/key/field/version and permission at its own trust boundary.
+    /// Request and maintenance paths use the same constructor and canonical encoding.
+    pub fn new(
         tenant: TenantId,
         config_key: &str,
         field: &str,
@@ -86,7 +73,7 @@ impl ProtectionContext {
         })
     }
 
-    /// 从受信坐标**派生** [`DerivedAad`]——这是 [`DerivedAad`] 的**唯一**产出口。
+    /// Derive the canonical bytes for these coordinates; no identity evidence is checked.
     pub fn derive(&self) -> DerivedAad {
         DerivedAad {
             canonical: self.aad.to_canonical_bytes(),
@@ -95,11 +82,13 @@ impl ProtectionContext {
     }
 }
 
-/// 受信派生的 AAD「凭证」（`FIELDPROT-AAD-DERIVE-FROM-CTX-01`，Hard）。
+/// Canonically encoded AAD coordinates, not authentication or authorization evidence.
 ///
-/// 私有字段 + **无 `from_bytes`/`from_stored_bytes`**：crate 外只能经 [`ProtectionContext::derive`] 取得，
-/// 无法用 DB stored bytes 裸拼。[`crate::Aead::seal`]/[`crate::Aead::open`] 只接受 `&DerivedAad`，故
-/// `open(&env, env.aad())`（回灌 envelope 存储的 [`ProtectionAad`]）**类型不匹配、编译失败** → 杜绝跨租重放。
+/// `FIELDPROT-AAD-DERIVE-FROM-CTX-01`: private representation ensures construction through
+/// [`ProtectionContext::derive`]; stored [`ProtectionAad`] cannot be passed directly to `Aead::open`.
+/// A correct AEAD implementation authenticates these bytes with its tag. A caller holding a valid
+/// key can derive the same bytes from the same coordinates; this type cannot prevent that caller
+/// from decrypting. Access control and coordinate provenance belong to the caller.
 #[derive(Clone)]
 pub struct DerivedAad {
     canonical: Vec<u8>,
@@ -149,14 +138,7 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn der(tenant: &str, key: &str, field: &str, ver: u32) -> DerivedAad {
-        ProtectionContext::authenticated_request(self::tenant(tenant), key, field, ver)
-            .expect("ctx")
-            .derive()
-    }
-
-    #[allow(clippy::expect_used)]
-    fn der_maint(tenant: &str, key: &str, field: &str, ver: u32) -> DerivedAad {
-        ProtectionContext::authorized_maintenance(self::tenant(tenant), key, field, ver)
+        ProtectionContext::new(self::tenant(tenant), key, field, ver)
             .expect("ctx")
             .derive()
     }
@@ -195,14 +177,8 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_request_rejects_zero_schema_version() {
-        let result = ProtectionContext::authenticated_request(tenant(TENANT_A), "k", "f", 0);
-        assert!(matches!(result, Err(AadError::InvalidVersion)));
-    }
-
-    #[test]
-    fn authorized_maintenance_rejects_zero_schema_version() {
-        let result = ProtectionContext::authorized_maintenance(tenant(TENANT_A), "k", "f", 0);
+    fn context_rejects_zero_schema_version() {
+        let result = ProtectionContext::new(tenant(TENANT_A), "k", "f", 0);
         assert!(matches!(result, Err(AadError::InvalidVersion)));
     }
 
@@ -250,16 +226,8 @@ mod tests {
     }
 
     #[test]
-    fn two_trusted_sources_with_equal_coordinates_derive_equal_aad() {
-        // 受信源类别（请求 vs 维护）不进 AAD——同坐标必产同密文绑定（否则 backfill 解不开线上密文）。
-        let req = der(TENANT_A, "k", "f", 7);
-        let maint = der_maint(TENANT_A, "k", "f", 7);
-        assert_eq!(req.as_canonical_bytes(), maint.as_canonical_bytes());
-    }
-
-    #[test]
     fn derived_coordinates_round_trip() {
-        let d = der_maint(TENANT_A, "svc.key", "token", 4);
+        let d = der(TENANT_A, "svc.key", "token", 4);
         let c = d.coordinates();
         assert!(matches!(
             c,

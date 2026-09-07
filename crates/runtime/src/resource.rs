@@ -314,9 +314,8 @@ pub trait ManagedResourceLocal {
 ///
 /// **PII 边界**（替代 `anyhow` 暴露在公共 port）：`Display` 仅输出资源无关的安全摘要常量
 /// （不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、
-/// `Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露，fail-closed）。`rss_redact::redact_error`
-/// funnel 取顶层 Display、不遍历 source 链；[`crate::ShutdownStack`] 业务错误分支已采纳 `redact_error`
-/// 记录 redacted 顶层摘要。
+/// `Error::source()` 恒 `None`——原始错误不经任何 `Error` 接口暴露）。
+/// [`crate::ShutdownStack`] 只记录 [`ShutdownErrorKind`] 的固定标签，不格式化 source。
 /// 见 INVARIANT: REDACT-SOURCE-OPAQUE-01 { level = "Hard", exec = "native-test", source = "code" }。
 #[derive(Debug, thiserror::Error)]
 #[error("resource shutdown failed")]

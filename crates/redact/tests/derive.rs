@@ -112,8 +112,4 @@ fn derive_forwards_scope_to_the_runtime_policy() {
         wire,
         "DerivedMixed { visible: \"ok\", secret: <redacted>, card: <redacted>, email: <redacted> }"
     );
-    assert_eq!(
-        rss_redact::LastError::from_redactable(&value, RedactScope::Wire).as_str(),
-        wire
-    );
 }

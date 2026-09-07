@@ -514,7 +514,7 @@ async fn run_subscription_close(
     await_subscription_stop(rpc).await;
     rpc.cancel_requested.cancel();
     rpc.closing.seal();
-    stop_subscription_admission(rpc, channel, consumer_tag).await;
+    stop_subscription_admission(rpc, channel, consumer_tag, resource).await;
     // Normal stream cancellation preserves admitted settlement authority. Abandonment or
     // resource shutdown retires it; every path still awaits the same channel-close receipt.
     await_settlement_retirement(rpc, shutdown).await;
@@ -533,6 +533,7 @@ async fn stop_subscription_admission(
     rpc: &SubscriptionRpc,
     channel: &Channel,
     consumer_tag: String,
+    resource: &str,
 ) {
     #[cfg(feature = "test-support")]
     {
@@ -551,7 +552,10 @@ async fn stop_subscription_admission(
             .basic_cancel(consumer_tag.into(), BasicCancelOptions::default())
             .await
         {
-            tracing::warn!(target: "amqp", error = %rss_redact::redact_error(&error), "amqp delivery source basic.cancel error");
+            crate::conn_events::emit_subscription_cancel_failed(
+                resource,
+                crate::conn::amqp_failure_reason(&error),
+            );
             rpc.closing.requested.cancel();
         }
         rpc.admission_stopped.cancel();
@@ -786,6 +790,7 @@ impl SubscriberInner {
         cleanup.disarm();
         let delivery_rpc = Arc::clone(&subscription_rpc);
         let delivery_subscription = subscription.clone();
+        let delivery_resource: Arc<str> = Arc::from(self.name.as_str());
         // A delivery can already be buffered client-side when token cancellation races the
         // in-flight Ack that reopens the prefetch window. Once cancellation is requested, never
         // expose that raced delivery to ConsumerTx. Dropping it leaves it unsettled; the later
@@ -794,6 +799,7 @@ impl SubscriberInner {
             .filter_map(move |res| {
                 let delivery_rpc = Arc::clone(&delivery_rpc);
                 let delivery_subscription = delivery_subscription.clone();
+                let delivery_resource = delivery_resource.clone();
                 async move {
                     match res {
                         Ok(delivery) => delivery_rpc
@@ -808,10 +814,10 @@ impl SubscriberInner {
                                 )
                             }),
                         Err(error) => {
-                            tracing::warn!(
-                                target: "amqp",
-                                error = %rss_redact::redact_error(&error),
-                                "amqp delivery source error; skipping",
+                            crate::conn_events::emit_delivery_failed(
+                                &delivery_resource,
+                                delivery_subscription.route().as_str(),
+                                crate::conn::amqp_failure_reason(&error),
                             );
                             None
                         }

@@ -124,7 +124,10 @@ impl AsRef<[u8]> for Payload {
     }
 }
 
-/// Exact trusted durable context; providers derive it from verified consumer identity or authorized storage coordinates.
+/// Caller-supplied durable coordinates used to bind a capsule to its intended record.
+///
+/// The caller owns coordinate provenance and access authorization. This value neither authenticates
+/// a provider nor grants access; opening a capsule checks coordinate matching and the AEAD tag.
 #[derive(Clone)]
 pub struct CaptureContext {
     id: DeadLetterId,
@@ -132,7 +135,8 @@ pub struct CaptureContext {
     fingerprint: MessageFingerprint,
 }
 impl CaptureContext {
-    /// Bind the provider's dead-letter identity to verified consumer facts.
+    /// Collect a dead-letter identity, consumer coordinates and authored fingerprint.
+    /// The caller must validate their source and authorization before using them.
     pub fn from_provider(
         id: DeadLetterId,
         consumer: ConsumerIdentity,
@@ -171,7 +175,7 @@ impl CaptureContext {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        ProtectionContext::authorized_maintenance(
+        ProtectionContext::new(
             self.consumer.tenant_id(),
             &key,
             "rss.message.recovery.capsule",
@@ -205,7 +209,8 @@ impl std::fmt::Debug for Capsule {
     }
 }
 impl Capsule {
-    /// Rehydrate provider bytes; authentication happens only in `open` with trusted coordinates.
+    /// Rehydrate provider bytes; `open` authenticates ciphertext against caller-supplied coordinates.
+    /// Coordinate provenance and access authorization must be verified by the caller.
     pub fn from_provider(bytes: Vec<u8>) -> Result<Self, Error> {
         if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
             Err(Error::Protection)

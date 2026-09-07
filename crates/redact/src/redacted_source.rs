@@ -6,8 +6,8 @@
 //! `#[source] source: RedactedSource` + `#[derive(Debug, thiserror::Error)]` 持有它，derive(Debug) 即安全
 //! ——`SignerError { source: <redacted> }`。
 //!
-//! 顶层安全摘要由各 wrapper 的 `#[error("...")]` const `Display` 承载；需要 source 诊断时走统一脱敏
-//! funnel `rss_redact::redact_error`（顶层 `Display`、不遍历 source 链）——这是**默认安全路径**。
+//! 顶层诊断由组件的固定 Display 或闭合错误分类承载；需要可持久化摘要时，显式投影为
+//! [`crate::ErrorSummary`]。不格式化第三方正文，也不从原始 source 文本推导安全摘要。
 //!
 //! **fail-closed source 链**：原始 adapter 错误被 wrapper **owned**，但**不经任何 `std::error::Error`
 //! 接口暴露**——`Debug` / `Display` 恒 `<redacted>`，`Error::source()` 恒 `None`。故标准递归链遍历

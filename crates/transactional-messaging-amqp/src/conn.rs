@@ -13,7 +13,7 @@ use lapin::{Channel, Connection, ConnectionProperties};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::conn_events::{
-    RecoveryConnectResult, RecoveryFailureReason, RecoveryFailureStage, emit_connect_failed,
+    AmqpFailureReason, RecoveryConnectResult, RecoveryFailureStage, emit_connect_failed,
     emit_connected, emit_recovery_connect_result,
 };
 
@@ -228,13 +228,7 @@ async fn connect_with_context(
         AmqpTlsTrust::WebPki => {
             DefaultConnectionBuilder::new()
                 .map_err(|source| {
-                    connect_err(
-                        source,
-                        endpoint,
-                        name,
-                        context,
-                        RecoveryFailureStage::Connect,
-                    )
+                    connect_err(source, name, context, RecoveryFailureStage::Connect)
                 })?
                 .with_uri_str(url.to_owned())
                 .with_properties(ConnectionProperties::default())
@@ -243,42 +237,22 @@ async fn connect_with_context(
         }
         AmqpTlsTrust::PrivateCa(ca) => connect_with_exclusive_private_ca(url, ca).await,
     }
-    .map_err(|source| {
-        connect_err(
-            source,
-            endpoint,
-            name,
-            context,
-            RecoveryFailureStage::Connect,
-        )
-    })?;
+    .map_err(|source| connect_err(source, name, context, RecoveryFailureStage::Connect))?;
     let conn = Arc::new(connection);
     let cleanup = OnDrop::new(|| close_connection_now(&conn));
     let channel = conn.create_channel().await.map_err(|source| {
-        connect_err(
-            source,
-            endpoint,
-            name,
-            context,
-            RecoveryFailureStage::CreateChannel,
-        )
+        connect_err(source, name, context, RecoveryFailureStage::CreateChannel)
     })?;
     if confirm {
         channel
             .confirm_select(ConfirmSelectOptions::default())
             .await
             .map_err(|source| {
-                connect_err(
-                    source,
-                    endpoint,
-                    name,
-                    context,
-                    RecoveryFailureStage::ConfirmSelect,
-                )
+                connect_err(source, name, context, RecoveryFailureStage::ConfirmSelect)
             })?;
     }
     match context {
-        ConnectContext::Initial => emit_connected(name, endpoint),
+        ConnectContext::Initial => emit_connected(name),
         ConnectContext::Recovery {
             replacement_generation,
         } => emit_recovery_connect_result(
@@ -328,13 +302,12 @@ async fn connect_with_exclusive_private_ca(
 
 fn connect_err(
     source: lapin::Error,
-    endpoint: &crate::endpoint::Endpoint,
     name: &str,
     context: ConnectContext,
     recovery_stage: RecoveryFailureStage,
 ) -> AmqpConnectError {
     match context {
-        ConnectContext::Initial => emit_connect_failed(name, endpoint, &source),
+        ConnectContext::Initial => emit_connect_failed(name, amqp_failure_reason(&source)),
         ConnectContext::Recovery {
             replacement_generation,
         } => emit_recovery_connect_result(
@@ -342,7 +315,7 @@ fn connect_err(
             replacement_generation,
             RecoveryConnectResult::Failed {
                 stage: recovery_stage,
-                reason: recovery_failure_reason(&source),
+                reason: amqp_failure_reason(&source),
             },
         ),
     }
@@ -352,18 +325,18 @@ fn connect_err(
     }
 }
 
-fn recovery_failure_reason(error: &lapin::Error) -> RecoveryFailureReason {
+pub(crate) fn amqp_failure_reason(error: &lapin::Error) -> AmqpFailureReason {
     match error.kind() {
-        lapin::ErrorKind::IOError(_) => RecoveryFailureReason::Io,
-        lapin::ErrorKind::ProtocolError(_) => RecoveryFailureReason::Protocol,
+        lapin::ErrorKind::IOError(_) => AmqpFailureReason::Io,
+        lapin::ErrorKind::ProtocolError(_) => AmqpFailureReason::Protocol,
         lapin::ErrorKind::InvalidChannel(_)
         | lapin::ErrorKind::InvalidChannelState(..)
-        | lapin::ErrorKind::InvalidConnectionState(_) => RecoveryFailureReason::State,
+        | lapin::ErrorKind::InvalidConnectionState(_) => AmqpFailureReason::State,
         lapin::ErrorKind::RuntimeShutdownError(_) | lapin::ErrorKind::NoDefaultRuntime => {
-            RecoveryFailureReason::Runtime
+            AmqpFailureReason::Runtime
         }
-        lapin::ErrorKind::MissingHeartbeatError => RecoveryFailureReason::Heartbeat,
-        _ => RecoveryFailureReason::Client,
+        lapin::ErrorKind::MissingHeartbeatError => AmqpFailureReason::Heartbeat,
+        _ => AmqpFailureReason::Client,
     }
 }
 
@@ -432,20 +405,20 @@ pub(crate) fn invalid_recovery_timeout() -> AmqpConnectError {
 }
 
 #[cfg(test)]
-mod recovery_failure_reason_tests {
+mod amqp_failure_reason_tests {
     use std::sync::Arc;
 
     use lapin::ErrorKind;
     use lapin::protocol::{AMQPError, AMQPErrorKind, AMQPHardError};
 
-    use super::{RecoveryFailureReason, recovery_failure_reason};
+    use super::{AmqpFailureReason, amqp_failure_reason};
 
     #[test]
     fn lapin_errors_map_to_closed_low_cardinality_recovery_reasons() {
         let cases = [
             (
                 ErrorKind::IOError(Arc::new(std::io::Error::other("secret raw io"))).into(),
-                RecoveryFailureReason::Io,
+                AmqpFailureReason::Io,
             ),
             (
                 ErrorKind::ProtocolError(AMQPError::new(
@@ -453,31 +426,33 @@ mod recovery_failure_reason_tests {
                     "secret raw protocol".into(),
                 ))
                 .into(),
-                RecoveryFailureReason::Protocol,
+                AmqpFailureReason::Protocol,
             ),
             (
                 ErrorKind::InvalidConnectionState(lapin::ConnectionState::Error).into(),
-                RecoveryFailureReason::State,
+                AmqpFailureReason::State,
             ),
             (
                 ErrorKind::RuntimeShutdownError(Arc::new(std::io::Error::other(
                     "secret raw runtime",
                 )))
                 .into(),
-                RecoveryFailureReason::Runtime,
+                AmqpFailureReason::Runtime,
             ),
             (
                 ErrorKind::MissingHeartbeatError.into(),
-                RecoveryFailureReason::Heartbeat,
+                AmqpFailureReason::Heartbeat,
             ),
             (
                 ErrorKind::AuthProviderError("secret raw client".into()).into(),
-                RecoveryFailureReason::Client,
+                AmqpFailureReason::Client,
             ),
         ];
 
         for (error, expected) in cases {
-            assert_eq!(recovery_failure_reason(&error), expected);
+            let reason = amqp_failure_reason(&error);
+            assert_eq!(reason, expected);
+            assert_eq!(reason.summary().as_str(), expected.as_str());
         }
     }
 }

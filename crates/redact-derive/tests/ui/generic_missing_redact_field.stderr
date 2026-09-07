@@ -1,0 +1,36 @@
+error[E0277]: the trait bound `DebugOnly: RedactField` is not satisfied
+ --> tests/ui/generic_missing_redact_field.rs:9:27
+  |
+9 |     let _ = privacy::safe(&value, privacy::RedactScope::Wire);
+  |             ------------- ^^^^^^ unsatisfied trait bound
+  |             |
+  |             required by a bound introduced by this call
+  |
+help: the trait `RedactField` is not implemented for `DebugOnly`
+ --> tests/ui/generic_missing_redact_field.rs:5:1
+  |
+5 | struct DebugOnly;
+  | ^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `RedactField`:
+            Option<T>
+            String
+            Vec<u8>
+            [u8]
+            bool
+            i128
+            i16
+            i32
+          and $N others
+note: required for `Masked<DebugOnly>` to implement `Redact`
+ --> tests/ui/generic_missing_redact_field.rs:2:8
+  |
+1 | #[derive(privacy::Redact)]
+  |          --------------- type parameter would need to implement `Redact`
+2 | struct Masked<T>(#[redact(sensitivity = pii_email)] T);
+  |        ^^^^^^^^^
+  = help: consider manually implementing `Redact` to avoid undesired bounds
+note: required by a bound in `safe`
+ --> $WORKSPACE/crates/redact/src/redaction.rs
+  |
+  | pub fn safe<R: Redact + ?Sized>(value: &R, scope: RedactScope) -> String {
+  |                ^^^^^^ required by this bound in `safe`

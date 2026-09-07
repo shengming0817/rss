@@ -1,6 +1,37 @@
 mod support;
 use rss_transactional_messaging_recovery::protection::{Capsule, open, seal};
 use support::*;
+
+#[test]
+fn real_aead_rejects_each_coordinate_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    use rss_data_protection::{Aead, AeadError, ProtectionContext};
+    use rss_request_context::TenantId;
+    let tenant_a = tenant();
+    let tenant_b = TenantId::parse("22222222-2222-4222-8222-222222222222")?;
+    let original = ProtectionContext::new(tenant_a, "key", "field", 1)?.derive();
+    let encrypted = Key(1).seal(b"SENSITIVE_2326", &original)?;
+    // Matching coordinates are sufficient for cryptographic verification, not proof of authority.
+    let same = ProtectionContext::new(tenant_a, "key", "field", 1)?.derive();
+    assert_eq!(Key(1).open(&encrypted, &same)?.expose(), b"SENSITIVE_2326");
+    for (tenant, key, field, version) in [
+        (tenant_b, "key", "field", 1),
+        (tenant_a, "other-key", "field", 1),
+        (tenant_a, "key", "other-field", 1),
+        (tenant_a, "key", "field", 2),
+    ] {
+        let changed = ProtectionContext::new(tenant, key, field, version)?.derive();
+        assert!(matches!(
+            Key(1).open(&encrypted, &changed),
+            Err(AeadError::Open)
+        ));
+    }
+    assert!(matches!(
+        Key(2).open(&encrypted, &same),
+        Err(AeadError::Open)
+    ));
+    Ok(())
+}
+
 #[test]
 #[allow(clippy::expect_used)] // reason: successful fixtures and negative assertions.
 fn capsule_is_authenticated_authored_only_and_redacted() {

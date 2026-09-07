@@ -84,7 +84,11 @@ privacy = {{ package = "rss-redact", path = {owner:?}{default} }}
                 .any(|line| line.starts_with("rss-redact-derive ")),
             "{graph}"
         );
-        // Behavioral scenarios are owned by crates/examples and the independent package proof.
+        // Behavioral scenarios are owned by component tests and the independent package proof.
+        fs::write(
+            consumer.0.join("src/main.rs"),
+            "fn main() { let last = privacy::LastError::from_summary(privacy::ErrorSummary::Io); let _: &str = last.as_str(); }",
+        )?;
         consumer.cargo(&["check", "--quiet"], true)?;
         fs::write(
             consumer.0.join("src/main.rs"),
