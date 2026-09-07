@@ -1,7 +1,7 @@
 # CI 分组、归档与共享 fixture
 
 Make 是本地与 CI 的标准入口。`hack/ci-impact.py` 只选择 package 范围；`hack/ci-pipeline.py` 持有
-一次选择、唯一测试分组 filter、构建身份与覆盖率判定。归档保留 Cargo fingerprint 元数据，让 trybuild 使用真实编译 feature。workflow 只编排 runner、缓存和产物。
+一次选择、唯一测试分组 filter、构建身份与覆盖率判定。归档保留 Cargo fingerprint 元数据，让 trybuild 使用真实编译 feature。workflow 只编排 runner、缓存和产物。selection 从同一分组定义输出集成矩阵；unit/consumer 保留各自执行契约，最终门禁同时要求矩阵聚合成功。
 
 普通 PR 为 affected；全局或未知影响回退全工作区测试及 80% 行覆盖率。deny/SemVer 深度独立，
 只由 develop/显式 `make ci-full` 开启。取消人为 CI 总时限，不修改单项测试期限；GitHub 平台时限仍适用。
@@ -26,6 +26,8 @@ macOS 的 Homebrew openssl），避免为 cargo check 重编译 vendored OpenSSL
 本地产物位于 `.local-ci-runs/current`，被 Git 忽略。普通和插桩构建使用不同 target 子目录与缓存身份。
 执行 job 只运行原 archive；fixture 启动器作为 nextest non-test binary 一并构建、传递，不在执行 runner 重建。
 
+所有 workflow 用 `python3 hack/ci-pipeline.py --install-toolchain` 从 `rust-toolchain.toml` 读取 channel/profile/components，统一安装并为独立消费目录设置默认工具链；不重复维护版本。
+
 ## fixture 所有权
 
 `testkit` 的 `rss-test-launcher` 启动所选 provider，持有容器，向 nextest 子进程传递临时 0600 描述文件。
@@ -42,7 +44,7 @@ group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，�
 资源携带唯一 `rss.test-run` 标签。启动失败或取消时，启动器终止 nextest 进程组并清理本次标签的容器和网络；
 容器 guard Drop 负责常规释放；网络 guard 在 5 秒期限内及时释放地址池容量，超时会终止并回收 Docker 子进程。
 启动器保留最终兜底；标签扫描在单一 30 秒截止时间内
-尝试所有可枚举资源，聚合失败而不因首项错误跳过后续删除。Docker 命令、启动与测试仍有界。
+尝试所有可枚举资源，聚合失败而不因首项错误跳过后续删除。Docker 命令、启动与测试仍有界。清理失败或超时会与原 child exit code／启动或执行错误分类共同报告，不覆盖测试结果，不透传原始凭据。
 
 ## 覆盖率与失败
 

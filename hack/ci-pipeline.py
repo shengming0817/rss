@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 
 INTEGRATION = 'package(/-integration$/)'
@@ -38,6 +39,22 @@ def run(command, *, env=None, capture=False):
     if capture and result.returncode:
         raise RuntimeError(f'command failed: {command[0]} {command[1]}')
     return result.stdout if capture else result.returncode
+
+
+def integration_groups():
+    # Unit and independent Cargo consumers have distinct execution/cache contracts.
+    # Every other partition uses the fixture launcher and the remote integration matrix.
+    return [group for group in GROUPS if group not in ('unit', 'consumer')]
+
+
+def install_toolchain():
+    # ref: rustup src/config.rs ToolchainSection; the repository file is the only pin.
+    config = tomllib.loads((ROOT / 'rust-toolchain.toml').read_text())['toolchain']
+    command = ['rustup', 'toolchain', 'install', config['channel'], '--profile', config['profile']]
+    for component in config['components']:
+        command += ['--component', component]
+    # Standalone consumer workspaces are outside the repository override directory.
+    return run(command) or run(['rustup', 'default', config['channel']])
 
 
 def write(path, value):
@@ -201,7 +218,7 @@ def execute(plan, group):
         command = ['cargo', 'nextest', 'run', '--archive-file', str(bundle / 'tests.tar.zst'), '--workspace-remap', str(ROOT), '-E', chosen['filter'], '--no-fail-fast', '--no-tests', 'fail']
         if group != 'unit':
             command += ['--test-threads', '1']
-        if group in ('amqp', 'kafka', 'providers'):
+        if group in integration_groups():
             providers = sorted({match.group(1) for test in chosen['tests'] for match in re.finditer(r'(?:\t|::)shared_(amqp|kafka|mqtt)_', test)})
             launcher = bundle / 'rss-test-launcher'
             launcher.chmod(0o755)
@@ -312,6 +329,7 @@ def main():
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
                 out.write(f'active={str(active(plan)).lower()}\ncoverage={str(plan["coverage"]).lower()}\n')
+                out.write('integration_groups=' + json.dumps(integration_groups()) + '\n')
         return 0
     if part == 'checks':
         return checks(plan)
@@ -334,7 +352,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        sys.exit(main())
+        sys.exit(install_toolchain() if sys.argv[1:] == ['--install-toolchain'] else main())
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         print(f'ci: {error}', file=sys.stderr)
         sys.exit(2)

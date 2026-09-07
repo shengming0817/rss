@@ -110,7 +110,7 @@ parent constraints; unrelated OpenSSL/native TLS providers remain banned. This e
 no security advisory. Consumer applications control their own resolved feature/build environment.
 
 Run `cargo test -p rss-transactional-messaging-kafka --all-features` for component and independent
-consumer checks, and `cargo nextest run -p kafka-integration --all-features` for the real mTLS Kafka
+consumer checks, and `make ci CI_PART=tests CI_FILTER='package(=kafka-integration)'` for the real mTLS Kafka
 and PostgreSQL closure. The real authentication matrix proves mTLS/SCRAM success, wrong CA,
 trusted-CA hostname mismatch, untrusted client certificate and incorrect SCRAM password rejection.
 Tests compare receipt coordinates with broker records and preserve actual duplicates after ambiguity.

@@ -62,3 +62,45 @@ exit 0
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn child_and_cleanup_outcomes_are_both_preserved() -> anyhow::Result<()> {
+    for cleanup_fails in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let docker = directory.path().join("docker");
+        std::fs::write(
+            &docker,
+            if cleanup_fails {
+                "#!/bin/sh\necho 'token=secret' >&2\nexit 1\n"
+            } else {
+                "#!/bin/sh\nexit 0\n"
+            },
+        )?;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))?;
+        for code in [9, 0] {
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::process::Command::new(std::env::var("CARGO_BIN_EXE_rss-test-launcher")?)
+                    .args(["--", "/bin/sh", "-c", &format!("exit {code}")])
+                    .env("PATH", directory.path())
+                    .env("RSS_TEST_RUN_ID", "dual-outcome-proof")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await??;
+            if cleanup_fails {
+                assert!(!output.status.success());
+                let diagnostic = String::from_utf8(output.stderr)?;
+                assert!(
+                    diagnostic.contains(&format!("child_exit={code}")),
+                    "{diagnostic}"
+                );
+                assert!(diagnostic.contains("cleanup=failed"), "{diagnostic}");
+                assert!(!diagnostic.contains("token=secret"));
+            } else {
+                assert_eq!(output.status.code(), Some(code));
+            }
+        }
+    }
+    Ok(())
+}

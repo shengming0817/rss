@@ -177,7 +177,8 @@ pub async fn launch(arguments: Vec<String>) -> Result<i32> {
             .all(|p| matches!(p.as_str(), "amqp" | "kafka" | "mqtt")),
         "unknown shared provider"
     );
-    let run = std::env::var("RSS_TEST_RUN_ID")?;
+    let run =
+        std::env::var("RSS_TEST_RUN_ID").map_err(|_| anyhow::anyhow!(super::LAUNCHER_REQUIRED))?;
     anyhow::ensure!(super::is_safe_label_token(&run), "invalid fixture run ID");
     let file = tempfile::NamedTempFile::new()?; // private 0600; never included in CI artifacts
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -187,14 +188,30 @@ pub async fn launch(arguments: Vec<String>) -> Result<i32> {
         _ = terminate.recv() => Err(anyhow::anyhow!("fixture startup terminated")),
         _ = interrupt.recv() => Err(anyhow::anyhow!("fixture startup interrupted")),
     };
-    let result = match prepared {
-        Ok(_fixtures) => execute(command, file.path(), &mut terminate, &mut interrupt).await,
-        Err(error) => Err(error),
+    let (result, failure_class) = match prepared {
+        Ok(_fixtures) => (
+            execute(command, file.path(), &mut terminate, &mut interrupt).await,
+            "child-execution-error",
+        ),
+        Err(error) => (Err(error), "fixture-startup-error"),
     };
     let mut stage = super::runtime::Stage::new("cleanup", "all", 0);
     // One owner deadline bounds the entire sweep, irrespective of resource count.
     let cleaned = tokio::time::timeout(Duration::from_secs(30), cleanup(&run)).await;
     stage.finish(matches!(&cleaned, Ok(Ok(()))));
-    cleaned??;
-    result
+    // Do not let cleanup's error propagation discard the saved child outcome.
+    let cleanup = match cleaned {
+        Ok(Ok(())) => "success",
+        Ok(Err(_)) => "failed",
+        Err(_) => "timeout",
+    };
+    match (result, cleanup) {
+        (result, "success") => result,
+        (Ok(code), cleanup) => {
+            anyhow::bail!("fixture launcher failed: child_exit={code}, cleanup={cleanup}")
+        }
+        (Err(_), cleanup) => {
+            anyhow::bail!("fixture launcher failed: primary={failure_class}, cleanup={cleanup}")
+        }
+    }
 }

@@ -28,6 +28,7 @@ jobs:
   selection:
     runs-on: ubuntu-latest
     outputs:
+      integration_groups: ${{ steps.select.outputs.integration_groups }}
       active: ${{ steps.select.outputs.active }}
       coverage: ${{ steps.select.outputs.coverage }}
       baseline: ${{ steps.base.outputs.sha }}
@@ -119,12 +120,12 @@ jobs:
       cold_cache: ${{ inputs.cold_cache || false }}
       warm_run: ${{ inputs.warm_run || '' }}
   integration:
-    needs: build
+    needs: [selection, build]
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        group: [amqp, kafka, providers]
+        group: ${{ fromJSON(needs.selection.outputs.integration_groups) }}
     uses: ./.github/workflows/ci-execute.yml
     with:
       group: ${{ matrix.group }}
@@ -140,7 +141,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.8.7
           fallback: none
-      - run: rustup toolchain install 1.96.0 --profile minimal --component llvm-tools-preview
+      - run: python3 hack/ci-pipeline.py --install-toolchain
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: selection

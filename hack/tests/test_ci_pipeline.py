@@ -27,6 +27,27 @@ class PipelineTests(unittest.TestCase):
                          'launcher': None, 'supplemental': {}, 'groups': {g: {'filter': 'all()', 'tests': ['test']} for g in pipeline.GROUPS}}
         pipeline.write(self.bundle / 'manifest.json', self.manifest)
 
+    def test_new_group_reaches_remote_matrix_from_selection(self):
+        output = self.root / 'github-output'
+        with patch.dict(pipeline.GROUPS, {'extra-provider': 'package(=extra-integration)'}), \
+             patch.dict(os.environ, {'CI_PART': 'select', 'GITHUB_OUTPUT': str(output)}, clear=True), \
+             patch.object(pipeline, 'selection', return_value=self.plan), \
+             patch.object(pipeline, 'run', return_value='sha'):
+            self.assertEqual(pipeline.main(), 0)
+        values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+        matrix = json.loads(values['integration_groups'])
+        self.assertEqual(sorted(matrix + ['unit', 'consumer']), sorted([*pipeline.GROUPS, 'extra-provider']))
+        self.assertEqual(len(matrix), len(set(matrix)))
+
+    def test_toolchain_install_follows_changed_repository_file(self):
+        (self.root / 'rust-toolchain.toml').write_text(
+            '[toolchain]\nchannel="1.99.1"\nprofile="minimal"\ncomponents=["clippy", "llvm-tools-preview"]\n')
+        with patch.object(pipeline, 'ROOT', self.root), patch.object(pipeline, 'run', return_value=0) as run:
+            self.assertEqual(pipeline.install_toolchain(), 0)
+        self.assertEqual(run.call_args_list[0].args[0], ['rustup', 'toolchain', 'install', '1.99.1', '--profile', 'minimal',
+                                                '--component', 'clippy', '--component', 'llvm-tools-preview'])
+        self.assertEqual(run.call_args_list[1].args[0], ['rustup', 'default', '1.99.1'])
+
     def results(self):
         for group in pipeline.GROUPS:
             folder = self.root / 'results' / group

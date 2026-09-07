@@ -58,8 +58,8 @@ jobs:
           path: .local-ci-runs/current/build
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal --component clippy --component llvm-tools-preview
-          rustup default 1.96.0
+          python3 hack/ci-pipeline.py --install-toolchain
+
       - name: Install pinned Cargo tools
         uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:

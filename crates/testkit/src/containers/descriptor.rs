@@ -80,7 +80,7 @@ impl Descriptor {
 }
 pub(super) fn read() -> Result<Descriptor> {
     let path = std::env::var("RSS_TEST_FIXTURES")
-        .map_err(|_| anyhow::anyhow!("shared fixture requires the Make test launcher"))?;
+        .map_err(|_| anyhow::anyhow!(super::LAUNCHER_REQUIRED))?;
     let descriptor: Descriptor = serde_json::from_reader(std::fs::File::open(path)?)?;
     descriptor.validate()?;
     Ok(descriptor)

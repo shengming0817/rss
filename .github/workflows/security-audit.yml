@@ -28,8 +28,8 @@ jobs:
       - name: Install pinned Rust toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.96.0 --profile minimal
-          rustup default 1.96.0
+          python3 hack/ci-pipeline.py --install-toolchain
+
       - name: Install pinned audit tools
         uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:

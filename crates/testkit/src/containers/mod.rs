@@ -99,6 +99,8 @@ impl Drop for BridgeNetwork {
     }
 }
 
+pub(super) const LAUNCHER_REQUIRED: &str = "fixture requires the Make launcher; from the workspace root run: make ci CI_PART=tests CI_FILTER='package(/-integration$/)'";
+
 /// Creates a unique bridge with bounded normal release and launcher-owned fallback cleanup.
 pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     if !is_safe_label_token(prefix) {
@@ -110,8 +112,7 @@ pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     let name = format!("{prefix}-{}-{seq}", std::process::id());
     let mut command = tokio::process::Command::new("docker");
     command.args(["network", "create", "--driver", "bridge"]);
-    let run = std::env::var("RSS_TEST_RUN_ID")
-        .map_err(|_| anyhow::anyhow!("bridge network requires the test launcher"))?;
+    let run = std::env::var("RSS_TEST_RUN_ID").map_err(|_| anyhow::anyhow!(LAUNCHER_REQUIRED))?;
     anyhow::ensure!(is_safe_label_token(&run), "invalid fixture run ID");
     command.args(["--label", &format!("rss.test-run={run}")]);
     command.arg(&name).kill_on_drop(true);
