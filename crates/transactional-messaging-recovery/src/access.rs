@@ -1,34 +1,34 @@
-use crate::{Error, Mutation, Query, Target};
+use crate::{Error, Mutation, Query};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, ExecutionTimer, OperationDeadline, within,
 };
 
 /// Borrowed, library-issued authorization challenge. Products authenticate and authorize its exact inputs.
+/// Closed request presented to the trusted product authorizer.
+#[derive(Clone, Copy)]
+pub enum AuthorizationSubject<'a> {
+    /// A dead-letter mutation or its exact receipt readback.
+    Mutation(&'a Mutation),
+    /// A bounded dead-letter query.
+    Query(&'a Query),
+    /// A DR plan or its exact receipt/progress readback.
+    Dr(&'a crate::dr::Plan),
+}
+/// Library-issued authorization challenge.
 pub struct Challenge<'a> {
-    mutation: Option<&'a Mutation>,
-    query: Option<&'a Query>,
+    subject: AuthorizationSubject<'a>,
     digest: [u8; 32],
     tenant: TenantId,
 }
 impl Challenge<'_> {
-    /// Exact mutation, when requesting mutation or operation-receipt readback.
-    pub const fn mutation(&self) -> Option<&Mutation> {
-        self.mutation
-    }
-    /// Exact read query, when listing/inspecting.
-    pub const fn query(&self) -> Option<&Query> {
-        self.query
+    /// Exact subject, including external restore evidence for DR.
+    pub const fn subject(&self) -> AuthorizationSubject<'_> {
+        self.subject
     }
     /// Tenant requested by the caller; the product must authenticate it.
     pub const fn tenant(&self) -> TenantId {
         self.tenant
-    }
-    /// Exact target, or none for a tenant-scoped list.
-    pub fn target(&self) -> Option<&Target> {
-        self.mutation
-            .map(Mutation::target)
-            .or_else(|| self.query.and_then(Query::target))
     }
     /// Bind this challenge after product authorization. This records a trusted decision; it does not perform authentication.
     pub fn authorized(self) -> Authorization {
@@ -78,8 +78,7 @@ pub async fn authorize_mutation<A: Authorizer, C: ExecutionTimer>(
     let digest = request.digest();
     let tenant = request.tenant();
     let challenge = Challenge {
-        mutation: Some(&request),
-        query: None,
+        subject: AuthorizationSubject::Mutation(&request),
         digest,
         tenant,
     };
@@ -103,8 +102,7 @@ pub async fn authorize_query<A: Authorizer, C: ExecutionTimer>(
     let digest = request.digest();
     let tenant = request.tenant();
     let challenge = Challenge {
-        mutation: None,
-        query: Some(&request),
+        subject: AuthorizationSubject::Query(&request),
         digest,
         tenant,
     };
@@ -117,4 +115,29 @@ pub async fn authorize_query<A: Authorizer, C: ExecutionTimer>(
         return Err(Error::Unauthorized);
     }
     Ok(AuthorizedQuery(request))
+}
+
+/// Bind product authorization to the exact DR recovery or termination action and execution facts.
+pub async fn authorize_dr<A: Authorizer, C: ExecutionTimer>(
+    authorizer: &A,
+    request: crate::dr::Plan,
+    clock: &C,
+    cutoff: AbsoluteDeadline,
+) -> Result<crate::dr::AuthorizedPlan, Error> {
+    let digest = request.digest();
+    let tenant = request.tenant();
+    let challenge = Challenge {
+        subject: AuthorizationSubject::Dr(&request),
+        digest,
+        tenant,
+    };
+    let proof = within(clock, cutoff, |deadline| {
+        authorizer.authorize(challenge, deadline)
+    })
+    .await
+    .map_err(|_| Error::Deadline)??;
+    if proof.digest != digest || proof.tenant != tenant {
+        return Err(Error::Unauthorized);
+    }
+    Ok(crate::dr::AuthorizedPlan(request))
 }

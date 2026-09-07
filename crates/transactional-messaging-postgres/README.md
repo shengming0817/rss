@@ -29,7 +29,7 @@ SELECT/INSERT; Outbox sequence USAGE; and EXECUTE on the three package functions
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
-Construct `PgRuntime::connect(config, timer)` with the same monotonic `ExecutionTimer` used by the
+Construct `PgRuntime::connect(config, timer, binding)` with the same monotonic `ExecutionTimer` used by the
 consumer/relay. `PgInboxStore` takes a core `LeaseRenewalPolicy`; `PgOutboxStore<R>` takes a
 `DeliveryBudget`. Each store owns its policy and the runtime reads it through the port: there is
 no separate runtime TTL or renewal setting to mismatch. Use `local_tx` to bind repositories and Outbox append to one transaction.
@@ -133,9 +133,9 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-async fn compose<C: ExecutionTimer + Clone + 'static>(config: PgConfig, timer: &C,
+async fn compose<C: ExecutionTimer + Clone + 'static>(config: PgConfig, timer: &C, binding: rss_transactional_messaging::fence::ExecutionBinding,
     domain: MessagingDomain, budget: DeliveryBudget) -> Result<(Arc<PgRuntime>, Arc<PgOutboxStore<()>>, PgConsumerTx<Effect>), PgError> {
-    let runtime = Arc::new(PgRuntime::connect(config, timer.clone()).await?);
+    let runtime = Arc::new(PgRuntime::connect(config, timer.clone(), binding).await?);
     let outbox = Arc::new(PgOutboxStore::new(runtime.clone(), domain, budget)?);
     let consumer = PgConsumerTx::receipt_only(runtime.clone(), Effect);
     Ok((runtime, outbox, consumer))
@@ -195,7 +195,7 @@ Configure an `rss-data-protection::Aead` implementation with external key owners
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
 An existing terminal Inbox receipt with no saved payload is not retroactively replayable.
 
-Create the opaque operator store with `PgRecoveryStore::connect(config, timer, protector)` after
+Create the opaque operator store with `PgRecoveryStore::connect(config, timer, binding, protector)` after
 provisioning its privileges. The store privately owns the same PG pool/transaction implementation;
 it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
 continues to reject operator UPDATE rights. Provision the operator using the single
@@ -229,10 +229,19 @@ observation. It performs one mutation and never resets the total budget.
 
 ## Consumer archive schema and role cutover (#2302)
 
-`ARCHIVE_UPGRADE_SQL` applies migrations 0004–0006 to the #2301 schema once; `MIGRATION_SQL`
-includes all three. Sites that already applied 0004 execute the appended 0005 and 0006 definitions, then grant
-EXECUTE on the replacement `archive_fault(uuid,uuid,bytea,text)` function. The three-argument overload
-is removed; no compatibility function remains. Sites already at 0005 apply only 0006.
+Fresh installation uses `MIGRATION_SQL` (0001–0008). Upgrade exactly once from the installed boundary:
+
+| Installed through | Remaining SQL |
+|---|---|
+| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0008) |
+| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0008) |
+| 0004 or 0005 | Apply each remaining numbered migration in order, through 0008 |
+| 0006 | `DR_UPGRADE_SQL` (0007/0008) |
+
+Do not rerun aggregate constants containing already applied DDL. Migration 0005 replaces
+`archive_fault` with `archive_fault(uuid,uuid,bytea,text)`; grant that signature after upgrading.
+The three-argument overload is removed. Every upgrade must complete the DR provisioning and role
+cutover below before admitting this version's runtime.
 Migration 0006 fixes all seven archive functions (including internal `archive_fence`) to
 `search_path=pg_catalog,rss_transactional_messaging,pg_temp`, preventing temporary relation/type
 shadowing. The startup probe rejects unsafe paths, including drift of the internal helper.
@@ -270,3 +279,91 @@ indexes and effective role privileges. The entire component namespace effective 
 match the archive allowlist; direct, inherited, PUBLIC and overloaded grants are checked. Drift returns `StorageContract`. Receipt readback prioritizes
 persisted integrity faults over earlier verified/purged progress. Expired generation scans persist
 `last_checked` within the claim transaction to rotate their bounded batch fairly.
+
+
+## Message disaster recovery and execution fencing (#2303)
+
+Every runtime, recovery operator and archive repository requires an immutable `ExecutionBinding`:
+`StorageIdentity` identifies the externally selected physical restore unit and lineage, and the
+nonempty tenant/`Epoch` map defines its exact execution scope. There is no default epoch, implicit
+single-tenant mode, automatic adoption of database values or legacy SQL overload. An epoch change
+fences only that tenant; a multi-tenant relay skips fenced tenants while serving its remaining scope.
+Reconstruct the affected runtime with a newly authorized binding after cutover.
+
+`DR_UPGRADE_SQL` applies migrations 0007/0008 after 0006, once, with traffic isolated. Fresh installs
+use `MIGRATION_SQL`. The external migrator must provision the singleton `storage_lineage` row with
+nonzero 16-byte target/lineage identifiers and each `tenant_epoch` row with a positive epoch before
+admitting traffic. Supply these values from independently verified restore/deployment evidence.
+During physical restore, install the externally selected new lineage before allowing workers back.
+An old snapshot plus matching old credentials cannot prove that restore happened: fencing cannot
+replace that external isolation and lineage installation step. These identifiers are coordinates,
+not authentication secrets; database credentials and the product authorizer remain trusted.
+
+All execution roles require `EXECUTE ON FUNCTION rss_transactional_messaging.check_execution()`.
+Replace Outbox grants with the current exact signatures:
+
+```sql
+GRANT EXECUTE ON FUNCTION
+ rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),
+ rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),
+ rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)
+TO application_runtime;
+```
+
+A separate DR operator role gets schema USAGE and EXECUTE on `check_execution()`,
+`apply_dr(uuid,bytea,text,jsonb,jsonb,bigint)` and `read_dr(uuid,bytea)`. Give it no direct table writes,
+relay ownership or inherited privileged roles. `PgDrStore::connect(config, timer, binding)` verifies
+this contract; ordinary runtime profiles reject DR application authority. Migration owners administer
+lineage/epoch provisioning; application roles cannot write the control tables.
+
+For recovery, construct and product-authorize a bounded `recovery::dr::Plan` (1–500 exact members) with target,
+lineage, expected tenant epoch, operation identity and both restore-evidence digests. Application
+atomically compares the epoch, advances it by one, installs the selected members and writes the
+exact receipt. After a crash, a newly constructed operator with the current binding can retry the exact authorized
+operation or query its receipt/progress. Storage identity and tenant scope remain mandatory; SQL
+checks the plan's expected epoch separately before any first application. Identical retries read the
+receipt even after the epoch advances;
+conflicting digests fail. The shared transaction fence is acquired before message/archive locks,
+so cutover waits for already admitted old transactions; subsequent stale work is fenced.
+
+Database-ahead recovery requires retained Published Outbox facts with matching fingerprints and
+recovery versions inside their original delivery window. It retains the Published fact and tracks
+DR delivery separately. The existing Outbox relay publishes the same envelope/MessageId; it never
+extends the deadline or fabricates a broker acknowledgement. Pending DR members participate in
+partition ordering; an expired member blocks its partition. A later epoch supersedes unfinished
+members, retaining their historical progress.
+
+Broker-ahead members name the complete tenant/message/group/contract and fingerprint. Ordinary
+verified ingress and ConsumerTx remain the only route to terminal receipts; their real effects,
+Inbox terminal and matching DR completion commit together. The library does not move broker cursors.
+Archive claims and verified object receipts are generation-bound too: an older S3 inspection cannot
+permit HOT purge after cutover; a new claim must inspect the immutable object again.
+
+Products own physical database/broker restore, evidence authentication, ingress/cursor control,
+worker replacement and orchestration. No Saga, projection or reconcile reset is implied.
+
+Source provenance: historical extraction uses commit
+`5b63e10a1b396b0ff70b7d1e6e55db296cd7a891`; transaction ownership was checked against
+[SQLx v0.9.0 transaction.rs](https://github.com/launchbadge/sqlx/blob/v0.9.0/sqlx-core/src/transaction.rs)
+and row-lock/trigger behavior against PostgreSQL REL_17_STABLE `heapam.c` and `trigger.c`.
+
+A relay claim call returns at most one tenant's committed batch. Calls rotate the starting tenant
+and scan empty or fenced tenants; no further tenant transaction runs after a nonempty commit.
+This preserves already acquired claims when another tenant fails, without promising to fill the
+requested limit across tenants. Fenced skips emit only closed, low-cardinality diagnostic labels.
+The definer role may lock the external storage witness through `UPDATE(singleton)`; the checked
+singleton key permits a no-op only, and neither `target` nor `lineage` is writable by that role.
+
+
+The DR operator also applies the explicit `PlanAction::Terminate` through the same `apply_dr`
+transaction. It locks the tenant epoch, checks the exact current recovery operation/digest, inserts
+a linked termination receipt and advances the epoch once. It neither rewrites member evidence nor
+changes Published rows or their deadlines. Historical queries project Terminated for unfinished
+members, preserving Completed and any durable block reason. The `dr_plan_action` constraint and
+same-tenant foreign key enforce the recovery/termination row shapes; `dr_member_block_shape` and
+`dr_member_reason` forbid a blocked row without a closed reason. Startup probes reject drift.
+
+Use an exact-authorized termination when a blocked plan must stop, including an all-expired plan.
+Create new runtime bindings for the committed epoch before resuming work. Normal successors can
+then proceed because the old DR partition barrier has lost execution authority. The original
+same-ID deadline is never extended; product policy decides whether later new-ID recovery is needed.

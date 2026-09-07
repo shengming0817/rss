@@ -72,7 +72,7 @@ async fn reconcile_postgres_suite() -> anyhow::Result<()> {
         let network=testkit::bridge_network("reconcile-pg").await?;
         let fixture=testkit::postgres_tls(testkit::NetworkAttachment{network:network.name(),dns_name:"reconcile-pg"},testkit::PgTlsServerIdentity::MatchingHost).await?;
         let params=fixture.params();let base=PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database).ssl_mode(PgSslMode::VerifyFull).ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec());
-        let owner=PgPoolOptions::new().max_connections(5).connect_with(base.clone().username(&params.username).password(&params.password)).await?;
+        let owner=PgPoolOptions::new().max_connections(5).connect_with(base.clone().username(&params.username).options([("rss.tenant_id","f47ac10b-58cc-4372-a567-0e02b2c3d479"),("rss.storage_target","01010101010101010101010101010101"),("rss.storage_lineage","02020202020202020202020202020202"),("rss.execution_epoch","1")]).password(&params.password)).await?;
         sqlx::raw_sql("CREATE ROLE reconcile_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE reconcile_runtime LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE rss_test TO reconcile_owner; CREATE TABLE public.reconcile_targets(legacy boolean);").execute(&owner).await?;
         let options=base.username("reconcile_runtime").password("fixture-only");let pool=PgPoolOptions::new().max_connections(6).acquire_timeout(Duration::from_secs(2)).connect_with(options.clone()).await?;
         let clock=Clock::new();let cancel=CancellationToken::new();let control=Control::new(&clock,Duration::from_secs(210),&cancel);

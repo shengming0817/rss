@@ -15,11 +15,13 @@ impl PgArchiveRepository {
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
     ) -> Result<Self, Error> {
         Ok(Self {
             runtime: PgRuntime::connect_profile(
                 config,
                 timer,
+                binding,
                 crate::transaction::Profile::Archive,
             )
             .await
@@ -63,26 +65,23 @@ fn attempt<T>(v: LocalTxAttempt<T, PgError>) -> LocalTxAttempt<T, Error> {
     )
 }
 pub(crate) async fn check(runtime: &PgRuntime, deadline: OperationDeadline) -> Result<(), PgError> {
-    let result = runtime
-        .local_tx(
-            rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000001")
-                .map_err(|_| PgError::invariant())?,
-            deadline,
-            |tx| {
-                Box::pin(async move {
-                    let valid = sqlx::query_scalar::<_, bool>(include_str!("probe.sql"))
-                        .fetch_one(&mut *tx.connection)
-                        .await
-                        .map_err(PgError::probe)?;
-                    if !valid {
-                        return Err(PgError::Archive(Error::StorageContract));
-                    }
-                    Ok(())
-                })
-            },
-        )
-        .await;
-    result.fold(Ok, Err, Err, Err, Err, Err)
+    let cutoff = rss_transactional_messaging::policy::AbsoluteDeadline::from_timeout(
+        &runtime.timer,
+        deadline.timeout(),
+    )
+    .map_err(|_| PgError::invariant())?;
+    let valid = rss_transactional_messaging::policy::within(&runtime.timer, cutoff, |_| async {
+        sqlx::query_scalar::<_, bool>(include_str!("probe.sql"))
+            .fetch_one(&runtime.pool)
+            .await
+    })
+    .await?
+    .map_err(PgError::probe)?;
+    if valid {
+        Ok(())
+    } else {
+        Err(PgError::Archive(Error::StorageContract))
+    }
 }
 
 fn sql_error(error: sqlx::Error) -> PgError {

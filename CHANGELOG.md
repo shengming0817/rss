@@ -6,6 +6,20 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Transactional message DR (#2303)
+
+- Add exact-authorized termination of the current DR plan with an atomic epoch/receipt transition;
+  retain Completed facts and durable DeadlineExpired / PermanentPublishFailure block diagnostics.
+  Recovery and termination use a closed action type and share one completion funnel.
+
+- Add exact-authorized, bounded database-ahead / broker-ahead plans with atomic tenant epoch
+  advancement, durable receipts and separate member progress. Reuse normal relay and ConsumerTx.
+- Require immutable storage target/lineage and tenant epoch bindings for every PostgreSQL runtime,
+  recovery operator and archive repository; remove legacy relay SQL overloads and optional
+  authorization-target dispatch. Workspace consumers move directly to the new contract.
+- Add one-way migrations 0007/0008. External restore isolation, lineage installation, role grants
+  and runtime replacement are mandatory; stale claims or archive proofs cannot authorize writes.
+
 ### rss-mqtt: canonical Outbox and transactional consumer (#2310)
 
 - Replace the experimental Outbox mapper with immutable domain/route configuration and canonical

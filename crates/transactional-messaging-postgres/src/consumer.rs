@@ -88,57 +88,92 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> 
         intent: ReceiptIntent,
         deadline: OperationDeadline,
     ) -> TransactionOutcome<Self::CommitProof> {
-        if intent.consumer() != &claim.identity
-            || intent.fingerprint() != MessageFingerprint::of(message)
-            || claim.identity.tenant_id() != message.metadata().tenant_id()
-            || claim.identity.message_id() != message.id()
-            || claim.identity.contract() != message.metadata().contract()
-        {
+        if !claim.matches(&self.runtime.binding) {
+            return TransactionOutcome::fenced();
+        }
+        if !matches_message(claim, message, &intent) {
             return TransactionOutcome::not_started(FailureClass::Infrastructure);
         }
-        let timer = &self.runtime.timer;
-        let cutoff = match AbsoluteDeadline::from_timeout(timer, deadline.timeout()) {
-            Ok(value) => value,
-            Err(_) => return TransactionOutcome::not_started(FailureClass::Infrastructure),
-        };
-        let mut lease = match stage(
-            timer,
-            cutoff,
-            LocalTxDeadlineStage::Acquire,
-            self.runtime.acquire(),
+        execute_transaction(
+            &self.runtime,
+            &self.effect,
+            &self.mode,
+            claim,
+            message,
+            intent,
+            deadline,
         )
         .await
-        {
+    }
+}
+
+async fn execute_transaction<
+    P: AsRef<[u8]> + Sync,
+    H: PgConsumerEffect<P>,
+    M: ConsumerRecoveryMode<P>,
+>(
+    runtime: &PgRuntime,
+    effect: &H,
+    mode: &M,
+    claim: &PgInboxClaim,
+    message: &MessageEnvelope<P>,
+    intent: ReceiptIntent,
+    deadline: OperationDeadline,
+) -> TransactionOutcome<PgConsumerTxCommitProof> {
+    let timer = &runtime.timer;
+    let cutoff = match AbsoluteDeadline::from_timeout(timer, deadline.timeout()) {
+        Ok(value) => value,
+        Err(_) => return TransactionOutcome::not_started(FailureClass::Infrastructure),
+    };
+    let mut lease = match stage(
+        timer,
+        cutoff,
+        LocalTxDeadlineStage::Acquire,
+        runtime.acquire(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
+    };
+    let mut transaction =
+        match stage(timer, cutoff, LocalTxDeadlineStage::Begin, lease.begin()).await {
             Ok(value) => value,
             _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
         };
-        let mut transaction =
-            match stage(timer, cutoff, LocalTxDeadlineStage::Begin, lease.begin()).await {
-                Ok(value) => value,
-                _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
-            };
-        let mut tx = PgTransaction::new(
-            transaction.connection(),
-            claim.identity.tenant_id(),
-            cutoff,
-            &self.runtime,
-        );
-        let body = within(timer, cutoff, |_| {
-            effect_body(&self.effect, &self.mode, &mut tx, claim, message, &intent)
-        })
-        .await;
-        let body = match body {
-            Ok(body) => body,
-            Err(error) => {
-                tracing::warn!(phase = "operation", kind = error.kind().as_label(), error = ?error, "consumer transaction deadline elapsed");
-                return TransactionOutcome::commit_unknown();
-            }
-        };
-        if cutoff.remaining(timer).is_zero() {
+    let mut tx = PgTransaction::new(
+        transaction.connection(),
+        claim.identity.tenant_id(),
+        cutoff,
+        runtime,
+    );
+    let body = within(timer, cutoff, |_| {
+        effect_body(effect, mode, &mut tx, claim, message, &intent)
+    })
+    .await;
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(phase = "operation", kind = error.kind().as_label(), error = ?error, "consumer transaction deadline elapsed");
             return TransactionOutcome::commit_unknown();
         }
-        finish(transaction, body, intent, timer, cutoff).await
+    };
+    if cutoff.remaining(timer).is_zero() {
+        return TransactionOutcome::commit_unknown();
     }
+    finish(transaction, body, intent, timer, cutoff).await
+}
+
+fn matches_message<P: AsRef<[u8]>>(
+    claim: &PgInboxClaim,
+    message: &MessageEnvelope<P>,
+    intent: &ReceiptIntent,
+) -> bool {
+    intent.consumer() == &claim.identity
+        && intent.fingerprint() == MessageFingerprint::of(message)
+        && claim.identity.tenant_id() == message.metadata().tenant_id()
+        && claim.identity.message_id() == message.id()
+        && claim.identity.contract() == message.metadata().contract()
 }
 
 async fn finish(
@@ -191,9 +226,12 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
     message: &MessageEnvelope<P>,
     intent: &ReceiptIntent,
 ) -> Result<Option<TerminalDisposition>, PgConsumerEffectFailure> {
-    tx.setup()
-        .await
-        .map_err(PgConsumerEffectFailure::infrastructure)?;
+    if let Err(error) = tx.setup().await {
+        if error.kind() == rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost {
+            return Ok(None);
+        }
+        return Err(PgConsumerEffectFailure::infrastructure(error));
+    }
     // No row lock across the handler: independent renewal must remain able to update Inbox.
     let held: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp())")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(&claim.token)

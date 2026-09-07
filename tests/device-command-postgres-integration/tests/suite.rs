@@ -1,6 +1,8 @@
 #[path = "../../../crates/device-command-postgres/examples/compose.rs"]
 pub mod compose;
 mod crash;
+#[path = "../../fixtures/message_fence.rs"]
+mod fence_fixture;
 mod scenarios;
 use rss_device_command::*;
 use rss_device_command_postgres::PgStore;
@@ -117,7 +119,8 @@ struct Fixture {
 async fn stores(
     config: PgConfig,
 ) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
-    let runtime = Arc::new(PgRuntime::connect(config, Timer::new()).await?);
+    let runtime =
+        Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::binding()).await?);
     let outbox = Arc::new(PgOutboxStore::new(
         runtime.clone(),
         MessagingDomain::parse("device-tests")?,
@@ -148,6 +151,12 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
                 .port(p.port)
                 .database(&p.database)
                 .username(&p.username)
+                .options([
+                    ("rss.tenant_id", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+                    ("rss.storage_target", "01010101010101010101010101010101"),
+                    ("rss.storage_lineage", "02020202020202020202020202020202"),
+                    ("rss.execution_epoch", "1"),
+                ])
                 .password(&p.password)
                 .ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec()),
@@ -165,7 +174,7 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         .execute(&mut *install)
         .await?;
     install.commit().await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO device_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO device_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO device_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO device_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_device_command TO device_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_device_command TO device_runtime;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO device_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO device_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO device_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO device_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_device_command TO device_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_device_command TO device_runtime;").execute(&owner).await?;
     let config = PgConfig::new(
         &p.host,
         p.port,
@@ -174,6 +183,7 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         PgPassword::new("fixture-only"),
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
     );
+    fence_fixture::provision(&owner).await?;
     let (runtime, store, outbox) = stores(config.clone()).await?;
     Ok(Fixture {
         runtime,

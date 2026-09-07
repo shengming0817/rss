@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 mod access;
+mod completion;
 mod model;
 /// Authenticated, encrypted authored-message capsules.
 pub mod protection;
@@ -12,3 +13,6 @@ pub use store::*;
 
 /// Verified WORM archive lifecycle for persisted consumer dead letters.
 pub mod archive;
+
+/// Message disaster recovery plans and durable progress.
+pub mod dr;

@@ -10,6 +10,7 @@ use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
+#[allow(dead_code)] // reason: shared fixture also supplies timer/message helpers to receipt-only DR tests.
 pub struct Key(pub u8);
 impl Aead for Key {
     fn seal(&self, plain: &[u8], aad: &DerivedAad) -> Result<CiphertextEnvelope, AeadError> {

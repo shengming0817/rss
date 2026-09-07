@@ -1,3 +1,5 @@
+#[path = "../../fixtures/message_fence.rs"]
+mod fence_fixture;
 #[path = "recovery/support.rs"]
 mod support;
 use anyhow::Context;
@@ -161,6 +163,12 @@ async fn run() -> anyhow::Result<()> {
         .port(params.port)
         .database(&params.database)
         .username(&params.username)
+        .options([
+            ("rss.tenant_id", "11111111-1111-1111-1111-111111111111"),
+            ("rss.storage_target", "01010101010101010101010101010101"),
+            ("rss.storage_lineage", "02020202020202020202020202020202"),
+            ("rss.execution_epoch", "1"),
+        ])
         .password(&params.password)
         .ssl_mode(PgSslMode::VerifyFull)
         .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec());
@@ -178,7 +186,6 @@ async fn run() -> anyhow::Result<()> {
         .strip_suffix(RECOVERY_UPGRADE_SQL)
         .ok_or_else(|| anyhow::anyhow!("ordered migrations"))?;
     sqlx::raw_sql(original).execute(&owner).await?;
-    base_grants(&owner).await?;
     let config = PgConfig::new(
         &params.host,
         params.port,
@@ -188,7 +195,7 @@ async fn run() -> anyhow::Result<()> {
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
     );
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
             .await
             .is_err(),
         "old schema rejected"
@@ -201,7 +208,9 @@ async fn run() -> anyhow::Result<()> {
     );
     base_grants(&owner).await?;
     sqlx::raw_sql("CREATE TABLE public.effect (id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect TO recovery_runtime;").execute(&owner).await?;
-    let runtime = Arc::new(PgRuntime::connect(config.clone(), Timer::new()).await?);
+    fence_fixture::provision(&owner).await?;
+    let runtime =
+        Arc::new(PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await?);
     assert!(
         PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(1)), deadline())
             .await
@@ -209,9 +218,14 @@ async fn run() -> anyhow::Result<()> {
     );
     sqlx::raw_sql("GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO recovery_runtime;").execute(&owner).await?;
     assert!(
-        PgRecoveryStore::connect(config.clone(), Timer::new(), Arc::new(Key(1)))
-            .await
-            .is_err(),
+        PgRecoveryStore::connect(
+            config.clone(),
+            Timer::new(),
+            fence_fixture::binding(),
+            Arc::new(Key(1))
+        )
+        .await
+        .is_err(),
         "capture does not grant mutation"
     );
     assert_eq!(
@@ -263,13 +277,36 @@ async fn run() -> anyhow::Result<()> {
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
     );
     assert!(
-        PgRuntime::connect(operator_config.clone(), Timer::new())
-            .await
-            .is_err(),
+        PgRuntime::connect(
+            operator_config.clone(),
+            Timer::new(),
+            fence_fixture::binding()
+        )
+        .await
+        .is_err(),
         "application profile rejects operator privileges"
     );
     let store = Arc::new(
-        PgRecoveryStore::connect(operator_config.clone(), Timer::new(), Arc::new(Key(1))).await?,
+        PgRecoveryStore::connect(
+            operator_config.clone(),
+            Timer::new(),
+            fence_fixture::binding(),
+            Arc::new(Key(1)),
+        )
+        .await?,
+    );
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint) TO recovery_operator").execute(&owner).await?;
+    let excess = PgRecoveryStore::connect(
+        operator_config.clone(),
+        Timer::new(),
+        fence_fixture::binding(),
+        Arc::new(Key(1)),
+    )
+    .await;
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint) FROM recovery_operator").execute(&owner).await?;
+    assert!(
+        excess.is_err(),
+        "recovery operator must not possess DR authority"
     );
     replay_scenarios(store.clone(), &owner)
         .await
@@ -314,7 +351,7 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 async fn base_grants(owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO recovery_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
     Ok(())
 }
 async fn schema_signature(owner: &sqlx::PgPool) -> anyhow::Result<Vec<String>> {
@@ -684,9 +721,14 @@ async fn privilege_failures(
     for privilege in ["UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("GRANT {privilege} ON rss_transactional_messaging.recovery_operations TO recovery_operator"))).execute(owner).await?;
         assert!(
-            PgRecoveryStore::connect(operator.clone(), Timer::new(), Arc::new(Key(1)))
-                .await
-                .is_err()
+            PgRecoveryStore::connect(
+                operator.clone(),
+                Timer::new(),
+                fence_fixture::binding(),
+                Arc::new(Key(1))
+            )
+            .await
+            .is_err()
         );
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("REVOKE {privilege} ON rss_transactional_messaging.recovery_operations FROM recovery_operator"))).execute(owner).await?;
     }
@@ -708,9 +750,14 @@ async fn schema_failures(operator: &PgConfig, owner: &sqlx::PgPool) -> anyhow::R
         .execute(owner)
         .await?;
         assert!(
-            PgRecoveryStore::connect(operator.clone(), Timer::new(), Arc::new(Key(1)))
-                .await
-                .is_err()
+            PgRecoveryStore::connect(
+                operator.clone(),
+                Timer::new(),
+                fence_fixture::binding(),
+                Arc::new(Key(1))
+            )
+            .await
+            .is_err()
         );
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE rss_transactional_messaging.{table} ADD CONSTRAINT {name} {definition}"
@@ -720,9 +767,14 @@ async fn schema_failures(operator: &PgConfig, owner: &sqlx::PgPool) -> anyhow::R
     }
     sqlx::raw_sql("ALTER TABLE rss_transactional_messaging.consumer_dead_letter ALTER COLUMN recovery_version DROP DEFAULT").execute(owner).await?;
     assert!(
-        PgRecoveryStore::connect(operator.clone(), Timer::new(), Arc::new(Key(1)))
-            .await
-            .is_err()
+        PgRecoveryStore::connect(
+            operator.clone(),
+            Timer::new(),
+            fence_fixture::binding(),
+            Arc::new(Key(1))
+        )
+        .await
+        .is_err()
     );
     sqlx::raw_sql("ALTER TABLE rss_transactional_messaging.consumer_dead_letter ALTER COLUMN recovery_version SET DEFAULT 1").execute(owner).await?;
     Ok(())

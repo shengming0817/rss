@@ -17,8 +17,13 @@ rss-axum 拥有已接纳公共能力到 Axum 的可选协议适配：类型化�
 
 消息 recovery 拥有已接纳的 consumer 死信归档格式、验证证明与安全清理算法；PG owner 持有组件归档 schema 和原子持久化，专属 S3 adapter 实现 Object Lock port。产品拥有保留/hold 决策、密钥、调度和 bucket 生命周期。
 
+消息 DR 核心拥有外部选定的有界计划、精确授权、终止、回执及带闭合阻断原因的进度；PG owner 拥有原子应用和
+storage lineage / tenant epoch 持久化 fencing，并约束正常消息、恢复与归档执行。
+成功 Published / Consumer terminal 事实及原投递期限保留，不引入产品 admission controller。
+
 ## 产品拥有
 
+- 消息 DR 的证据 authority、恢复点和成员选择、数据库/broker restore、跨进程 pause/drain/resume 与部署准入。
 - 业务流程、读模型、设备认证与协议、MDM 策略和准入判定。
 - Observation 的采集定义/执行/调度、来源授权、注册生命周期、事实解释、多源优先级、Inventory 与合规判定。
 - 应用装配、进程入口、配置、业务表、生产迁移执行、部署运维和产品 T3。

@@ -116,22 +116,23 @@ issue = 2293
 package = "rss-platform"
 baseline-rev = "9a2ab29a06b4bfb8baef4a1970412d03a9f0c1ef"
 issue = 2300
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-postgres"
-baseline-rev = "406c2f61cacf10b672e2351ace62c16e18963dae"
-issue = 2302
 
-# #2302: explicit pre-publication recovery inspection/error replacement.
-[[workspace.metadata.semver-breaking-authorizations]]
-package = "rss-transactional-messaging-recovery"
-baseline-rev = "406c2f61cacf10b672e2351ace62c16e18963dae"
-issue = 2302
 
 # #2310: explicit pre-publication replacement of the arbitrary MQTT Outbox mapper.
 [[workspace.metadata.semver-breaking-authorizations]]
 package = "rss-mqtt"
 baseline-rev = "177000e70b34dd1cf8a0c989d1557dd2f5434cca"
 issue = 2310
+
+# #2303: approved pre-publication mandatory execution binding and closed authorization subjects.
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-postgres"
+baseline-rev = "2ba0cea46a3756c09f33268f8dd335315f5fbbfe"
+issue = 2303
+[[workspace.metadata.semver-breaking-authorizations]]
+package = "rss-transactional-messaging-recovery"
+baseline-rev = "2ba0cea46a3756c09f33268f8dd335315f5fbbfe"
+issue = 2303
 
 [workspace.package]
 version = "0.0.0"

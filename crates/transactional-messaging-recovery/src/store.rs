@@ -1,6 +1,6 @@
 use crate::{Action, AuthorizedMutation, AuthorizedQuery, Error, Page, Receipt};
 use rss_transactional_messaging::{
-    policy::{ExecutionDeadlines, ExecutionTimer, OperationDeadline, within},
+    policy::{ExecutionDeadlines, ExecutionTimer, OperationDeadline},
     transaction::LocalTxAttempt,
 };
 
@@ -28,6 +28,10 @@ pub trait RecoveryStore: Send + Sync {
 /// Low-cardinality mutation category; no message identity enters observations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionKind {
+    /// Atomic DR plan application; not broker completion.
+    DrApply,
+    /// Exact DR termination and epoch advance; not message completion.
+    DrTerminate,
     /// New-ID consumer replay.
     Replay,
     /// Same-ID Outbox retry.
@@ -74,88 +78,24 @@ pub async fn execute<S: RecoveryStore, C: ExecutionTimer, O: Observer>(
     deadlines: ExecutionDeadlines,
     observer: &O,
 ) -> LocalTxAttempt<Receipt, Error> {
-    let cutoff = deadlines.operation();
-    let attempt = if cutoff.remaining(clock).is_zero() {
-        LocalTxAttempt::not_started(Error::Deadline)
-    } else {
-        match within(clock, cutoff, |deadline| store.mutate(request, deadline)).await {
-            Ok(attempt) => attempt,
-            Err(_) => LocalTxAttempt::commit_unknown(Error::Deadline),
-        }
-    };
-    let (unknown, attempt) = attempt.fold(
-        |receipt| (false, LocalTxAttempt::committed(receipt)),
-        |error| (false, LocalTxAttempt::not_started(error)),
-        |error| (false, LocalTxAttempt::rolled_back(error)),
-        |error| (false, LocalTxAttempt::rollback_failed(error)),
-        |error| (true, LocalTxAttempt::commit_unknown(error)),
-        |error| (false, LocalTxAttempt::fenced(error)),
-    );
-    let attempt = if unknown {
-        match within(clock, deadlines.settlement(), |deadline| {
-            store.receipt(request, deadline)
-        })
-        .await
-        {
-            Ok(Ok(Some(receipt))) => LocalTxAttempt::committed(receipt),
-            _ => attempt,
-        }
-    } else {
-        attempt
-    };
     let action = match request.request().action() {
         Action::Replay(_) => ActionKind::Replay,
         Action::Redrive => ActionKind::Redrive,
         Action::Resolve(_) => ActionKind::Resolve,
     };
-    attempt.fold(
-        |receipt| {
+    crate::completion::execute(
+        clock,
+        deadlines,
+        Error::Deadline,
+        |deadline| store.mutate(request, deadline),
+        |deadline| store.receipt(request, deadline),
+        |status, _, error| {
             observer.observe(Observation {
                 action,
-                status: AttemptStatus::Committed,
-                error: None,
-            });
-            LocalTxAttempt::committed(receipt)
-        },
-        |e| {
-            observer.observe(Observation {
-                action,
-                status: AttemptStatus::NotStarted,
-                error: Some(e),
-            });
-            LocalTxAttempt::not_started(e)
-        },
-        |e| {
-            observer.observe(Observation {
-                action,
-                status: AttemptStatus::RolledBack,
-                error: Some(e),
-            });
-            LocalTxAttempt::rolled_back(e)
-        },
-        |e| {
-            observer.observe(Observation {
-                action,
-                status: AttemptStatus::RollbackFailed,
-                error: Some(e),
-            });
-            LocalTxAttempt::rollback_failed(e)
-        },
-        |e| {
-            observer.observe(Observation {
-                action,
-                status: AttemptStatus::CommitUnknown,
-                error: Some(e),
-            });
-            LocalTxAttempt::commit_unknown(e)
-        },
-        |e| {
-            observer.observe(Observation {
-                action,
-                status: AttemptStatus::Fenced,
-                error: Some(e),
-            });
-            LocalTxAttempt::fenced(e)
+                status,
+                error,
+            })
         },
     )
+    .await
 }

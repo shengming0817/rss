@@ -3,6 +3,7 @@ use crate::PgConfig;
 use futures::future::BoxFuture;
 use rss_redact::RedactedSource;
 use rss_request_context::TenantId;
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     policy::{
@@ -218,6 +219,7 @@ fn sqlstate_kind(code: Option<&str>) -> MessagingErrorKind {
         Some(value) if value.starts_with("22") || value.starts_with("23") => {
             MessagingErrorKind::Permanent
         }
+        Some("PZ001") => MessagingErrorKind::OwnershipLost,
         _ => MessagingErrorKind::Invariant,
     }
 }
@@ -275,6 +277,7 @@ where
 /// Shared bounded pool. A caller supplies a timer sharing the runtime's monotonic time domain.
 pub struct PgRuntime {
     pub(crate) pool: PgPool,
+    pub(crate) binding: ExecutionBinding,
     pub(crate) timer: PgTimer,
     #[cfg(feature = "integration")]
     fault: std::sync::atomic::AtomicU8,
@@ -300,6 +303,8 @@ pub(crate) enum Profile {
     Runtime,
     Recovery,
     #[cfg(feature = "recovery")]
+    Dr,
+    #[cfg(feature = "recovery")]
     Archive,
 }
 
@@ -308,12 +313,14 @@ impl PgRuntime {
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
+        binding: ExecutionBinding,
     ) -> Result<Self, PgError> {
-        Self::connect_profile(config, timer, Profile::Runtime).await
+        Self::connect_profile(config, timer, binding, Profile::Runtime).await
     }
     pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
+        binding: ExecutionBinding,
         profile: Profile,
     ) -> Result<Self, PgError> {
         config.validate()?;
@@ -332,38 +339,55 @@ impl PgRuntime {
         .await??;
         let runtime = Self {
             pool,
+            binding,
             timer,
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };
-        #[cfg(feature = "recovery")]
-        if profile == Profile::Archive {
-            crate::archive::check(&runtime, cutoff.operation(&runtime.timer)).await?;
-            return Ok(runtime);
+        let probe_result: Result<(), PgError> = async {
+            crate::fence::probe(&runtime, profile, cutoff).await?;
+            #[cfg(feature = "recovery")]
+            if profile == Profile::Dr {
+                return Ok(());
+            }
+            #[cfg(feature = "recovery")]
+            if profile == Profile::Archive {
+                crate::archive::check(&runtime, cutoff.operation(&runtime.timer)).await?;
+                return Ok(());
+            }
+            let recovery_operator = profile == Profile::Recovery;
+            let failure = within(&runtime.timer, cutoff, |_| async {
+                sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
+                    .bind(recovery_operator)
+                    .fetch_optional(&runtime.pool)
+                    .await
+            })
+            .await?
+            .map_err(PgError::probe)?;
+            if let Some(reason) = failure {
+                let reason =
+                    PgStorageContractFailure::from_label(&reason).ok_or_else(PgError::invariant)?;
+                tracing::warn!(
+                    phase = "probe",
+                    reason = reason.as_label(),
+                    "PostgreSQL storage contract rejected"
+                );
+                return Err(PgError::IncompatibleStorageContract(reason));
+            }
+            #[cfg(feature = "recovery")]
+            if recovery_operator {
+                crate::recovery::check(&runtime, true, cutoff.operation(&runtime.timer)).await?;
+            }
+            Ok(())
         }
-        let recovery_operator = profile == Profile::Recovery;
-        let failure = within(&runtime.timer, cutoff, |_| async {
-            sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
-                .bind(recovery_operator)
-                .fetch_optional(&runtime.pool)
-                .await
-        })
-        .await?
-        .map_err(PgError::probe)?;
-        if let Some(reason) = failure {
-            let reason =
-                PgStorageContractFailure::from_label(&reason).ok_or_else(PgError::invariant)?;
-            tracing::warn!(
-                phase = "probe",
-                reason = reason.as_label(),
-                "PostgreSQL storage contract rejected"
-            );
-            return Err(PgError::IncompatibleStorageContract(reason));
+        .await;
+        if let Err(error) = probe_result {
+            // SQLx close marks admissions closed synchronously, even if the remaining wait expires.
+            let closing = runtime.pool.close();
+            let _ = within(&runtime.timer, cutoff, |_| closing).await;
+            return Err(error);
         }
-        #[cfg(feature = "recovery")]
-        if recovery_operator {
-            crate::recovery::check(&runtime, true, cutoff.operation(&runtime.timer)).await?;
-        }
+
         Ok(runtime)
     }
 
@@ -390,7 +414,26 @@ impl PgRuntime {
         &self,
         tenant: TenantId,
         deadline: OperationDeadline,
+        context: C,
+        operation: F,
+    ) -> LocalTxAttempt<T, PgError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut C,
+                &'a mut PgTransaction<'_>,
+            ) -> BoxFuture<'a, Result<T, PgError>>
+            + Send,
+    {
+        self.transaction_with_context(tenant, deadline, context, true, operation)
+            .await
+    }
+
+    pub(crate) async fn transaction_with_context<T: Send, C: Send, F>(
+        &self,
+        tenant: TenantId,
+        deadline: OperationDeadline,
         mut context: C,
+        lock: bool,
         operation: F,
     ) -> LocalTxAttempt<T, PgError>
     where
@@ -428,7 +471,7 @@ impl PgRuntime {
         };
         let mut view = PgTransaction::new(transaction.connection(), tenant, cutoff, self);
         let result = within(&self.timer, cutoff, |_| async {
-            view.setup().await?;
+            view.setup_context(lock).await?;
             operation(&mut context, &mut view).await
         })
         .await;
@@ -518,6 +561,7 @@ impl PgRuntime {
     // SECURITY DEFINER calls use the same quarantine lease but no fabricated tenant identity.
     pub(crate) async fn relay<T: Send, F>(
         &self,
+        tenant: TenantId,
         cutoff: AbsoluteDeadline,
         operation: F,
     ) -> Result<T, PgError>
@@ -540,10 +584,15 @@ impl PgRuntime {
         .await?;
         let result = within(&self.timer, cutoff, |_| async {
             let millis = cutoff.remaining(&self.timer).as_millis().max(1);
-            sqlx::query("SELECT set_config('rss.tenant_id', '', true), set_config('statement_timeout', $1, true)")
-                .bind(format!("{millis}ms")).execute(transaction.connection()).await?;
+            sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+                .bind(format!("{millis}ms"))
+                .execute(transaction.connection())
+                .await?;
+            crate::fence::setup(transaction.connection(), &self.binding, tenant, true).await?;
             operation(transaction.connection()).await
-        }).await.unwrap_or_else(|error| Err(error.into()));
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.into()));
         match result {
             Ok(value) => {
                 stage(
@@ -616,14 +665,21 @@ impl PgTransaction<'_> {
             owner,
         }
     }
+    pub(crate) fn binding(&self) -> &ExecutionBinding {
+        &self.owner.binding
+    }
     pub(crate) fn belongs_to(&self, owner: &PgRuntime) -> bool {
         std::ptr::eq(self.owner, owner)
     }
     pub(crate) async fn setup(&mut self) -> Result<(), PgError> {
+        self.setup_context(true).await
+    }
+    async fn setup_context(&mut self, lock: bool) -> Result<(), PgError> {
         let millis = self.cutoff.remaining(self.timer).as_millis().max(1);
         stage(self.timer, self.cutoff, LocalTxDeadlineStage::Setup,
             sqlx::query("SELECT set_config('rss.tenant_id', $1, true), set_config('statement_timeout', $2, true)")
                 .bind(self.tenant.to_string()).bind(format!("{millis}ms")).execute(&mut *self.connection)).await?;
+        crate::fence::setup(self.connection, &self.owner.binding, self.tenant, lock).await?;
         Ok(())
     }
     /// Tenant bound by the transaction owner.
@@ -746,6 +802,13 @@ mod tests {
             .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
         pool.close().await;
         let runtime = PgRuntime {
+            binding: ExecutionBinding::new(
+                rss_transactional_messaging::fence::StorageIdentity::new([1; 16], [2; 16])?,
+                vec![(
+                    TenantId::parse("11111111-1111-1111-1111-111111111111")?,
+                    rss_transactional_messaging::fence::Epoch::new(1)?,
+                )],
+            )?,
             pool,
             timer: PgTimer(Arc::new(Frozen)),
             #[cfg(feature = "integration")]

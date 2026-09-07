@@ -49,12 +49,18 @@ impl<K: Aead + Send + Sync> PgRecoveryStore<K> {
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         key: Arc<K>,
     ) -> Result<Self, Error> {
         let runtime = Arc::new(
-            PgRuntime::connect_profile(config, timer, crate::transaction::Profile::Recovery)
-                .await
-                .map_err(error)?,
+            PgRuntime::connect_profile(
+                config,
+                timer,
+                binding,
+                crate::transaction::Profile::Recovery,
+            )
+            .await
+            .map_err(error)?,
         );
         Ok(Self { runtime, key })
     }

@@ -3,9 +3,9 @@ use message_core::{policy::{ExecutionTimer, OperationDeadline}, transaction::Loc
 use rss_request_context::TenantId;
 
 pub async fn own_host<C: ExecutionTimer + 'static>(
-    config: PgConfig, timer: C, tenant: TenantId, deadline: OperationDeadline,
+    config: PgConfig, timer: C, binding: message_core::fence::ExecutionBinding, tenant: TenantId, deadline: OperationDeadline,
 ) -> Result<LocalTxAttempt<(), PgError>, PgError> {
-    let runtime = PgRuntime::connect(config, timer).await?;
+    let runtime = PgRuntime::connect(config, timer, binding).await?;
     let result = runtime.local_tx(tenant, deadline, |_| Box::pin(async { Ok(()) })).await;
     runtime.close().await;
     Ok(result)

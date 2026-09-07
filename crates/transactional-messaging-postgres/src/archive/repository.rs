@@ -76,7 +76,7 @@ impl ArchiveRepository for PgArchiveRepository {
     ) -> Result<Option<Outcome>, Error> {
         let r = request.request();
         attempt(self.runtime.local_tx_with_context(r.tenant(),deadline,r,|r,tx|Box::pin(async move {
-            let row=sqlx::query("SELECT j.request_digest,j.held,j.purged,j.fault,o.verified,o.reconciled FROM rss_transactional_messaging.archive_jobs j LEFT JOIN rss_transactional_messaging.archive_objects o ON o.tenant_id=j.tenant_id AND o.generation=j.generation WHERE j.tenant_id=$1::uuid AND j.operation_id=$2::uuid")
+            let row=sqlx::query("SELECT j.request_digest,j.held,j.purged,j.fault,o.verified,o.reconciled FROM rss_transactional_messaging.archive_jobs j LEFT JOIN rss_transactional_messaging.archive_objects o ON o.tenant_id=j.tenant_id AND o.generation=j.generation WHERE j.tenant_id=$1::uuid AND j.operation_id=$2::uuid AND j.claim_epoch=current_setting('rss.execution_epoch')::bigint AND j.claim_lineage=decode(current_setting('rss.storage_lineage'),'hex')")
                 .bind(r.tenant().to_string()).bind(r.operation().to_string()).fetch_optional(&mut *tx.connection).await.map_err(super::sql_error)?;
             let Some(row)=row else {return Ok(None)};
             if row.try_get::<Vec<u8>,_>("request_digest")?!=r.digest(){return Err(invalid())}

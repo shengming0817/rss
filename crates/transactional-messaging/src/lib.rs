@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod fence;
 #[cfg(feature = "consumer")]
 pub mod inbox;
 pub mod message;

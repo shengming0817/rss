@@ -1,3 +1,4 @@
+use super::fence_fixture;
 use super::{Timer, deadline, message, outbox_budget};
 use rss_transactional_messaging::{
     error::MessagingErrorKind,
@@ -70,7 +71,14 @@ pub(super) async fn close_during_transaction(
     config: PgConfig,
     owner: &sqlx::PgPool,
 ) -> anyhow::Result<()> {
-    let runtime = Arc::new(PgRuntime::connect(config.with_pool_limits(2, 2), Timer::new()).await?);
+    let runtime = Arc::new(
+        PgRuntime::connect(
+            config.with_pool_limits(2, 2),
+            Timer::new(),
+            fence_fixture::binding(),
+        )
+        .await?,
+    );
     let tenant = message("close").metadata().tenant_id();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -152,7 +160,7 @@ async fn assert_admission_stopped(runtime: &PgRuntime) {
 
 #[cfg(feature = "rss-runtime")]
 pub(super) async fn managed_close(config: PgConfig) -> anyhow::Result<()> {
-    let runtime = PgRuntime::connect(config, Timer::new()).await?;
+    let runtime = PgRuntime::connect(config, Timer::new(), fence_fixture::binding()).await?;
     assert!(!runtime.is_closed());
     rss_runtime::ManagedResource::shutdown(&runtime).await?;
     assert!(runtime.is_closed());

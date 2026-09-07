@@ -19,6 +19,17 @@ use std::{sync::Arc, time::Duration};
 pub struct PgInboxClaim {
     pub(crate) identity: ConsumerIdentity,
     pub(crate) token: String,
+    pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
+}
+impl PgInboxClaim {
+    pub(crate) fn matches(
+        &self,
+        binding: &rss_transactional_messaging::fence::ExecutionBinding,
+    ) -> bool {
+        self.binding.storage() == binding.storage()
+            && self.binding.epoch(self.identity.tenant_id())
+                == binding.epoch(self.identity.tenant_id())
+    }
 }
 /// PostgreSQL inbox. Lease duration is explicit and bounded to one day.
 pub struct PgInboxStore {
@@ -130,6 +141,7 @@ impl InboxStore for PgInboxStore {
                             .await?;
                         if let Some(row) = row {
                             return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
+                                binding: tx.binding().clone(),
                                 identity,
                                 token: row.try_get("token")?,
                             }));
@@ -171,6 +183,9 @@ impl InboxStore for PgInboxStore {
         claim: &Self::Claim,
         deadline: OperationDeadline,
     ) -> Result<LeaseStatus, MessagingError> {
+        if !claim.matches(&self.runtime.binding) {
+            return Ok(LeaseStatus::Lost);
+        }
         let identity = claim.identity.clone();
         let token = claim.token.clone();
         let lease_ms = self.lease_ms;
@@ -187,6 +202,9 @@ impl InboxStore for PgInboxStore {
         claim: Self::Claim,
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
+        if !claim.matches(&self.runtime.binding) {
+            return Err(PgError::lost().port());
+        }
         settled(self.runtime.local_tx(claim.identity.tenant_id(), deadline, move |tx| Box::pin(async move {
             lock_identity(tx, &claim.identity).await?;
             let count = sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()")
@@ -203,7 +221,7 @@ const CLAIM_SQL: &str = "INSERT INTO rss_transactional_messaging.inbox AS i
  VALUES ($1::uuid,$2,$3,$4,gen_random_uuid(),clock_timestamp()+$5*interval '1 millisecond')
  ON CONFLICT (tenant_id,message_id,consumer_group) DO UPDATE
  SET lease_token=gen_random_uuid(), lease_until=clock_timestamp()+$5*interval '1 millisecond', receive_count=i.receive_count+1
- WHERE i.disposition IS NULL AND i.lease_until<=clock_timestamp() AND i.contract=EXCLUDED.contract
+ WHERE i.disposition IS NULL AND (i.lease_until<=clock_timestamp() OR i.claim_epoch<>current_setting('rss.execution_epoch')::bigint OR i.claim_lineage IS DISTINCT FROM decode(current_setting('rss.storage_lineage'),'hex')) AND i.contract=EXCLUDED.contract
  RETURNING lease_token::text AS token";
 
 #[cfg(test)]

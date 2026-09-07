@@ -6,6 +6,7 @@
 mod config;
 mod consumer;
 mod envelope;
+mod fence;
 mod inbox;
 mod outbox;
 mod transaction;
@@ -33,7 +34,9 @@ pub const MIGRATION_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0005_enforce_archive_settlement.sql"),
     "\n",
-    include_str!("../migrations/0006_secure_archive_search_path.sql")
+    include_str!("../migrations/0006_secure_archive_search_path.sql"),
+    include_str!("../migrations/0007_add_message_dr.sql"),
+    include_str!("../migrations/0008_apply_message_dr.sql")
 );
 /// One-way upgrade from the original component schema; executed only by the external migrator.
 pub const RECOVERY_UPGRADE_SQL: &str = concat!(
@@ -45,7 +48,9 @@ pub const RECOVERY_UPGRADE_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0005_enforce_archive_settlement.sql"),
     "\n",
-    include_str!("../migrations/0006_secure_archive_search_path.sql")
+    include_str!("../migrations/0006_secure_archive_search_path.sql"),
+    include_str!("../migrations/0007_add_message_dr.sql"),
+    include_str!("../migrations/0008_apply_message_dr.sql")
 );
 #[cfg(feature = "recovery")]
 mod recovery;
@@ -58,9 +63,21 @@ pub const ARCHIVE_UPGRADE_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0005_enforce_archive_settlement.sql"),
     "\n",
-    include_str!("../migrations/0006_secure_archive_search_path.sql")
+    include_str!("../migrations/0006_secure_archive_search_path.sql"),
+    include_str!("../migrations/0007_add_message_dr.sql"),
+    include_str!("../migrations/0008_apply_message_dr.sql")
 );
 #[cfg(feature = "recovery")]
 mod archive;
 #[cfg(feature = "recovery")]
 pub use archive::PgArchiveRepository;
+
+/// One-way upgrade after the archive schema. Identities must be provisioned before admitting traffic.
+pub const DR_UPGRADE_SQL: &str = concat!(
+    include_str!("../migrations/0007_add_message_dr.sql"),
+    include_str!("../migrations/0008_apply_message_dr.sql")
+);
+#[cfg(feature = "recovery")]
+mod dr;
+#[cfg(feature = "recovery")]
+pub use dr::PgDrStore;

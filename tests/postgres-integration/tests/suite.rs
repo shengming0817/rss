@@ -1,4 +1,6 @@
 #![allow(clippy::expect_used, clippy::panic)]
+#[path = "../../fixtures/message_fence.rs"]
+mod fence_fixture;
 // reason: integration fixtures fail loudly on invalid static identities and test setup.
 mod adversarial;
 mod conformance;
@@ -49,21 +51,22 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         let params = fixture.params();
         let owner = PgPoolOptions::new().max_connections(4).acquire_timeout(Duration::from_secs(5))
             .connect_with(PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database)
-                .username(&params.username).password(&params.password).ssl_mode(PgSslMode::VerifyFull)
+                .username(&params.username).options([("rss.tenant_id","f47ac10b-58cc-4372-a567-0e02b2c3d479"),("rss.storage_target","01010101010101010101010101010101"),("rss.storage_lineage","02020202020202020202020202020202"),("rss.execution_epoch","1")]).password(&params.password).ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec())).await?;
         sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE tmsg_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE TABLE public.outbox (legacy boolean); CREATE TABLE public.rss_fences (legacy boolean);")
             .execute(&owner).await?;
         sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL).execute(&owner).await?;
-        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO tmsg_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO tmsg_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO tmsg_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO tmsg_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO tmsg_runtime;")
+        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO tmsg_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO tmsg_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO tmsg_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO tmsg_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime;")
             .execute(&owner).await?;
         sqlx::raw_sql("CREATE TABLE public.business_effects (tenant_id uuid NOT NULL, id text NOT NULL, PRIMARY KEY(tenant_id,id)); ALTER TABLE public.business_effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.business_effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_effect ON public.business_effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT ON public.business_effects TO tmsg_runtime;").execute(&owner).await?;
+        fence_fixture::provision(&owner).await?;
         let timer = Timer::new();
         let config = PgConfig::new(&params.host, params.port, &params.database, "tmsg_runtime", PgPassword::new("fixture-only"), rss_transactional_messaging_postgres::PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?);
         let raw_runtime = PgPoolOptions::new().max_connections(2).acquire_timeout(Duration::from_secs(5))
             .connect_with(PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database)
                 .username("tmsg_runtime").password("fixture-only").ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec())).await?;
-        let runtime = Arc::new(PgRuntime::connect(config.clone(), timer).await?);
+        let runtime = Arc::new(PgRuntime::connect(config.clone(), timer, fence_fixture::binding()).await?);
         tls_rejections(&fixture, &network).await?;
         assert!(!runtime.is_closed());
         outbox_roundtrip(runtime.clone()).await?;
@@ -108,7 +111,7 @@ async fn tls_rejections(
             PgPassword::new(password),
             PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
         );
-        let error = PgRuntime::connect(config, Timer::new())
+        let error = PgRuntime::connect(config, Timer::new(), fence_fixture::binding())
             .await
             .err()
             .expect("invalid configuration");
@@ -133,7 +136,7 @@ async fn tls_rejections(
         PgPassword::new("fixture-only"),
         PgPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?,
     );
-    let error = PgRuntime::connect(wrong_ca, Timer::new())
+    let error = PgRuntime::connect(wrong_ca, Timer::new(), fence_fixture::binding())
         .await
         .err()
         .expect("wrong CA must fail TLS");
@@ -155,7 +158,7 @@ async fn tls_rejections(
         PgPassword::new(&params.password),
         PgPrivateCa::from_pem(wrong_identity.ca_pem().as_bytes().to_vec())?,
     );
-    let result = PgRuntime::connect(wrong_host, Timer::new()).await;
+    let result = PgRuntime::connect(wrong_host, Timer::new(), fence_fixture::binding()).await;
     assert_eq!(
         result.err().expect("wrong hostname must fail TLS").kind(),
         MessagingErrorKind::Permanent

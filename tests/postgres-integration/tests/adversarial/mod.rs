@@ -1,3 +1,4 @@
+use super::fence_fixture;
 use super::{Effect, Timer, binding, deadline, message};
 use rss_transactional_messaging::{inbox::*, message::MessageEnvelope, policy::*, transaction::*};
 use rss_transactional_messaging_postgres::*;
@@ -231,7 +232,7 @@ pub(super) async fn run(
     config: PgConfig,
 ) -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE ROLE tmsg_bypass NOLOGIN BYPASSRLS; CREATE ROLE tmsg_bridge NOLOGIN; GRANT tmsg_bypass TO tmsg_bridge; GRANT tmsg_bridge TO tmsg_runtime").execute(owner).await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
         .await
         .is_ok();
     sqlx::raw_sql(
@@ -244,33 +245,42 @@ pub(super) async fn run(
         "indirect SET ROLE into BYPASSRLS must fail connect"
     );
     sqlx::query("INSERT INTO rss_transactional_messaging.outbox(tenant_id,message_id,domain,envelope,fingerprint) SELECT tenant_id,'ttl-bound','ttl-bound',envelope,fingerprint FROM rss_transactional_messaging.outbox LIMIT 1").execute(owner).await?;
-    let claimed: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM rss_transactional_messaging.claim_outbox('ttl-bound',1,86400001)",
+    let mut raw = raw_runtime.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch','1',true)").bind("f47ac10b-58cc-4372-a567-0e02b2c3d479").bind("01010101010101010101010101010101").bind("02020202020202020202020202020202").execute(&mut *raw).await?;
+    sqlx::query("SAVEPOINT invalid_claim")
+        .execute(&mut *raw)
+        .await?;
+    let claimed = sqlx::query_scalar::<_,i64>(
+        "SELECT count(*) FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,86400001)",
     )
-    .fetch_one(raw_runtime)
-    .await?;
-    assert_eq!(
-        claimed, 0,
+    .fetch_one(&mut *raw)
+    .await;
+    assert!(
+        claimed.is_err(),
         "definer must reject overlong lease before mutation"
     );
-    let lease: (i64, String, i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox('ttl-bound',1,60000)").fetch_one(raw_runtime).await?;
+    sqlx::query("ROLLBACK TO SAVEPOINT invalid_claim")
+        .execute(&mut *raw)
+        .await?;
+    let lease: (i64, String, i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,60000)").fetch_one(&mut *raw).await?;
     for invalid in [-1_i64, 86400001, i64::MAX] {
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM rss_transactional_messaging.outbox_lease($1,$2::uuid,$3,$4)",
+            "SELECT count(*) FROM rss_transactional_messaging.outbox_lease(current_setting('rss.tenant_id')::uuid,$1,$2::uuid,$3,$4,NULL)",
         )
         .bind(lease.0)
         .bind(&lease.1)
         .bind(lease.2)
         .bind(invalid)
-        .fetch_one(raw_runtime)
+        .fetch_one(&mut *raw)
         .await?;
         assert_eq!(count, 0, "invalid extension must not change lease");
-        let actual: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.outbox WHERE seq=$1").bind(lease.0).fetch_one(owner).await?;
+        let actual: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.outbox WHERE seq=$1").bind(lease.0).fetch_one(&mut *raw).await?;
         assert_eq!(actual, lease.2);
     }
+    raw.rollback().await?;
     let original: String = sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='rss_transactional_messaging.inbox'::regclass AND conname='inbox_receipt_shape'").fetch_one(owner).await?;
     sqlx::raw_sql("ALTER TABLE rss_transactional_messaging.inbox DROP CONSTRAINT inbox_receipt_shape, ADD CONSTRAINT inbox_receipt_shape CHECK(true)").execute(owner).await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
         .await
         .is_ok();
     // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
@@ -285,7 +295,7 @@ pub(super) async fn run(
     )
     .execute(owner)
     .await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
         .await
         .is_ok();
     sqlx::raw_sql("DROP POLICY accidental_widening ON rss_transactional_messaging.inbox")
@@ -298,7 +308,7 @@ pub(super) async fn run(
     sqlx::raw_sql("GRANT UPDATE ON rss_transactional_messaging.outbox TO tmsg_runtime")
         .execute(owner)
         .await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
         .await
         .is_ok();
     sqlx::raw_sql("REVOKE UPDATE ON rss_transactional_messaging.outbox FROM tmsg_runtime")
@@ -306,7 +316,7 @@ pub(super) async fn run(
         .await?;
     assert!(!accepted, "excess Outbox privilege must fail connect");
     sqlx::raw_sql("ALTER POLICY inbox_tenant ON rss_transactional_messaging.inbox USING (true) WITH CHECK (true)").execute(owner).await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
         .await
         .is_ok();
     sqlx::raw_sql("ALTER POLICY inbox_tenant ON rss_transactional_messaging.inbox USING (tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK (tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid)").execute(owner).await?;
@@ -315,16 +325,16 @@ pub(super) async fn run(
     inbox_lock_expiry(runtime.clone(), owner).await?;
     concurrency(runtime.clone(), owner).await?;
     cancellation(runtime, owner).await?;
-    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint) TO PUBLIC").execute(owner).await?;
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO PUBLIC").execute(owner).await?;
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
             .await
             .is_err(),
         "PUBLIC definer entry must fail connect"
     );
-    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint) FROM PUBLIC; GRANT rss_tmsg_relay TO tmsg_runtime").execute(owner).await?;
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) FROM PUBLIC; GRANT rss_tmsg_relay TO tmsg_runtime").execute(owner).await?;
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
             .await
             .is_err(),
         "runtime must not inherit relay identity"
@@ -348,7 +358,9 @@ async fn storage_defaults(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Re
         )))
         .execute(owner)
         .await?;
-        let error = PgRuntime::connect(config.clone(), Timer::new()).await.err();
+        let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .err();
         // SQL safety: SQL fragments are literals from the fixture table below/above.
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.{relation} ALTER COLUMN {column} SET DEFAULT {restore}"))).execute(owner).await?;
         assert!(matches!(
@@ -369,7 +381,9 @@ async fn storage_mutations(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::R
     )
     .execute(owner)
     .await?;
-    let error = PgRuntime::connect(config.clone(), Timer::new()).await.err();
+    let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        .await
+        .err();
     // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.outbox ADD CONSTRAINT outbox_lease_shape {definition}"))).execute(owner).await?;
     assert!(matches!(
@@ -383,7 +397,9 @@ async fn storage_mutations(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::R
     )
     .execute(owner)
     .await?;
-    let error = PgRuntime::connect(config.clone(), Timer::new()).await.err();
+    let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        .await
+        .err();
     sqlx::raw_sql(
         "ALTER TABLE rss_transactional_messaging.outbox ALTER COLUMN seq SET GENERATED ALWAYS",
     )
@@ -415,7 +431,18 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
         ("partition_key='projection-other'", "integration"),
     ] {
         // SQL safety: SQL fragments are literals from the fixture table below/above.
-        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE rss_transactional_messaging.outbox SET status='pending', {mutation} WHERE seq=$1"))).bind(seq).execute(owner).await?;
+        let mut corrupt = owner.begin().await?;
+        let tenant = if mutation.starts_with("tenant_id=") {
+            "f47ac10b-58cc-4372-a567-0e02b2c3d480"
+        } else {
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        };
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(tenant)
+            .execute(&mut *corrupt)
+            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE rss_transactional_messaging.outbox SET status='pending', {mutation} WHERE seq=$1"))).bind(seq).execute(&mut *corrupt).await?;
+        corrupt.commit().await?;
         let store = PgOutboxStore::<()>::new(
             runtime.clone(),
             MessagingDomain::parse(domain)?,

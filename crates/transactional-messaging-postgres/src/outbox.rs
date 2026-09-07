@@ -18,6 +18,9 @@ use tokio::sync::Mutex;
 pub struct PgOutboxClaim {
     message: PendingMessage<Vec<u8>>,
     seq: i64,
+    dr_operation: Option<String>,
+    storage: rss_transactional_messaging::fence::StorageIdentity,
+    epoch: rss_transactional_messaging::fence::Epoch,
     token: String,
     lease_us: Mutex<i64>,
 }
@@ -28,6 +31,7 @@ pub struct PgOutboxStore<R> {
     lease_ms: i64,
     budget: DeliveryBudget,
     receipt: PhantomData<fn() -> R>,
+    next_tenant: std::sync::atomic::AtomicUsize,
 }
 impl<R> PgOutboxStore<R> {
     /// Bind one domain and the explicit lease duration.
@@ -42,6 +46,7 @@ impl<R> PgOutboxStore<R> {
             lease_ms: milliseconds(budget.lease_ttl())?,
             budget,
             receipt: PhantomData,
+            next_tenant: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     /// Reject a transaction from a different runtime before any companion operation.
@@ -93,6 +98,14 @@ impl<R> PgOutboxStore<R> {
             _ => Err(PgError::invariant()),
         }
     }
+    fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
+        self.runtime.binding.storage() == claim.storage
+            && self
+                .runtime
+                .binding
+                .epoch(claim.message.envelope().metadata().tenant_id())
+                == Some(claim.epoch)
+    }
     async fn lease(
         &self,
         claim: &PgOutboxClaim,
@@ -101,21 +114,28 @@ impl<R> PgOutboxStore<R> {
     ) -> Result<OutboxLeaseStatus, MessagingError> {
         let cutoff = AbsoluteDeadline::from_timeout(&self.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
+        if !self.valid_claim(claim) {
+            return Ok(OutboxLeaseStatus::Lost);
+        }
+        let tenant = claim.message.envelope().metadata().tenant_id();
+        let dr = claim.dr_operation.clone();
         let mut lease = within(&self.runtime.timer, cutoff, |_| claim.lease_us.lock()).await?;
         let previous = *lease;
         let seq = claim.seq;
         let token = claim.token.clone();
         let result = self
             .runtime
-            .relay(cutoff, move |connection| {
+            .relay(tenant, cutoff, move |connection| {
                 Box::pin(async move {
                     Ok(sqlx::query(
-                        "SELECT * FROM rss_transactional_messaging.outbox_lease($1,$2::uuid,$3,$4)",
+                        "SELECT * FROM rss_transactional_messaging.outbox_lease($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
                     )
+                    .bind(tenant.to_string())
                     .bind(seq)
                     .bind(token)
                     .bind(previous)
                     .bind(extend_ms)
+                    .bind(dr)
                     .fetch_optional(connection)
                     .await?)
                 })
@@ -170,26 +190,61 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         if count > 64 {
             return Err(PgError::invariant().port());
         }
-        let domain = self.domain.as_str().to_owned();
         let ttl = self.lease_ms;
-        let claims = self.runtime.relay(cutoff, move |connection| Box::pin(async move {
-            let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint FROM rss_transactional_messaging.claim_outbox($1,$2,$3)")
-                .bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
-            rows.into_iter().map(|row| {
-                let message = PendingMessage::new(Envelope::decode(&row.try_get::<String,_>("envelope")?)?);
-                if message.fingerprint() != fingerprint(row.try_get("fingerprint")?)? { return Err(PgError::invariant()); }
-                let envelope = message.envelope();
-                if row.try_get::<String,_>("tenant_id")? != envelope.metadata().tenant_id().to_string()
-                    || row.try_get::<String,_>("message_id")? != envelope.id().as_str()
-                    || row.try_get::<String,_>("domain")? != envelope.metadata().domain().as_str()
-                    || envelope.metadata().domain().as_str() != domain
-                    || row.try_get::<Option<String>,_>("partition_key")?.as_deref() != message.partition().map(|p| p.key().as_str()) {
-                    return Err(PgError::invariant());
+        let mut admitted = false;
+        let tenants = self.runtime.binding.tenants();
+        let first = self
+            .next_tenant
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % tenants.len();
+        for offset in 0..tenants.len() {
+            let (tenant, epoch) = tenants[(first + offset) % tenants.len()];
+            let storage = self.runtime.binding.storage();
+            let domain = self.domain.as_str().to_owned();
+            let batch = self.runtime.relay(tenant, cutoff, move |connection| Box::pin(async move {
+                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
+                    .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
+                rows.into_iter().map(|row| {
+                    let message = PendingMessage::new(Envelope::decode(&row.try_get::<String,_>("envelope")?)?);
+                    if message.fingerprint() != fingerprint(row.try_get("fingerprint")?)? { return Err(PgError::invariant()); }
+                    let envelope = message.envelope();
+                    if row.try_get::<String,_>("tenant_id")? != envelope.metadata().tenant_id().to_string()
+                        || tenant != envelope.metadata().tenant_id()
+                        || row.try_get::<String,_>("message_id")? != envelope.id().as_str()
+                        || row.try_get::<String,_>("domain")? != envelope.metadata().domain().as_str()
+                        || envelope.metadata().domain().as_str() != domain
+                        || row.try_get::<Option<String>,_>("partition_key")?.as_deref() != message.partition().map(|p| p.key().as_str()) {
+                        return Err(PgError::invariant());
+                    }
+                    Ok(PgOutboxClaim { message, storage, epoch, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
+                }).collect::<Result<Vec<_>, PgError>>()
+            })).await;
+            let batch = match batch {
+                Ok(batch) => {
+                    admitted = true;
+                    batch
                 }
-                Ok(PgOutboxClaim { message, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
-            }).collect::<Result<Vec<_>, PgError>>()
-        })).await.map_err(PgError::port)?;
-        OutboxClaimBatch::try_from_provider(claims, limit)
+                Err(error) if error.kind() == MessagingErrorKind::OwnershipLost => {
+                    tracing::warn!(
+                        phase = "relay_claim",
+                        reason = "tenant_fenced",
+                        "bound tenant execution was fenced"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.port()),
+            };
+            // Return the committed tenant batch before awaiting any other transaction. This
+            // preserves its claims even when the next tenant fails or the outer budget expires.
+            if !batch.is_empty() {
+                return OutboxClaimBatch::try_from_provider(batch, limit)
+                    .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e));
+            }
+        }
+        if !admitted {
+            return Err(PgError::lost().port());
+        }
+        OutboxClaimBatch::try_from_provider(Vec::new(), limit)
             .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
     }
     async fn lease_status(
@@ -215,6 +270,10 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         settlement: OutboxSettlement<R>,
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
+        if !self.valid_claim(&claim) {
+            return Err(PgError::lost().port());
+        }
+        let tenant = claim.message.envelope().metadata().tenant_id();
         let cutoff = AbsoluteDeadline::from_timeout(&self.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let disposition = match settlement {
@@ -224,15 +283,17 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         };
         let lease = claim.lease_us.into_inner();
         self.runtime
-            .relay(cutoff, move |connection| {
+            .relay(tenant, cutoff, move |connection| {
                 Box::pin(async move {
                     let result: String = sqlx::query_scalar(
-                        "SELECT rss_transactional_messaging.settle_outbox($1,$2::uuid,$3,$4)",
+                        "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
                     )
+                    .bind(tenant.to_string())
                     .bind(claim.seq)
                     .bind(claim.token)
                     .bind(lease)
                     .bind(disposition)
+                    .bind(claim.dr_operation)
                     .fetch_one(connection)
                     .await?;
                     match result.as_str() {

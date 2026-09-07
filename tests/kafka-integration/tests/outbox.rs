@@ -1,3 +1,5 @@
+#[path = "../../fixtures/message_fence.rs"]
+mod fence_fixture;
 mod support;
 use rss_transactional_messaging::{
     message::MessagingDomain,
@@ -43,6 +45,12 @@ async fn run() -> anyhow::Result<()> {
                 .port(params.port)
                 .database(&params.database)
                 .username(&params.username)
+                .options([
+                    ("rss.tenant_id", "00000000-0000-0000-0000-000000000001"),
+                    ("rss.storage_target", "01010101010101010101010101010101"),
+                    ("rss.storage_lineage", "02020202020202020202020202020202"),
+                    ("rss.execution_epoch", "1"),
+                ])
                 .password(&params.password)
                 .ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(pg.ca_pem().as_bytes().to_vec()),
@@ -52,7 +60,8 @@ async fn run() -> anyhow::Result<()> {
     sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
         .execute(&owner)
         .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO kafka_outbox_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO kafka_outbox_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO kafka_outbox_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO kafka_outbox_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO kafka_outbox_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(text,integer,bigint),rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint),rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text) TO kafka_outbox_runtime;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO kafka_outbox_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO kafka_outbox_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO kafka_outbox_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO kafka_outbox_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO kafka_outbox_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO kafka_outbox_runtime;").execute(&owner).await?;
+    fence_fixture::provision(&owner).await?;
     let runtime = Arc::new(
         PgRuntime::connect(
             PgConfig::new(
@@ -64,6 +73,7 @@ async fn run() -> anyhow::Result<()> {
                 PgPrivateCa::from_pem(pg.ca_pem().as_bytes().to_vec())?,
             ),
             Timer::new(),
+            fence_fixture::binding(),
         )
         .await?,
     );

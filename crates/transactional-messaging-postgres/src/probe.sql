@@ -17,9 +17,9 @@ columns(relation, name, type, nullable) AS (VALUES
  ('outbox','retry_after','timestamp with time zone',false), ('outbox','lease_token','uuid',true),
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
 functions(signature) AS (VALUES
- ('rss_transactional_messaging.claim_outbox(text,integer,bigint)'),
- ('rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint)'),
- ('rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text)')),
+ ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'),
+ ('rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid)'),
+ ('rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)')),
 tenant_predicate(value) AS (VALUES ($predicate$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$predicate$)),
 expected_policies(relation, name, roles, predicate) AS (
  SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
@@ -90,7 +90,7 @@ expected_policies(relation, name, roles, predicate) AS (
  ('relay_acl', (has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'SELECT'))),
  ('relay_acl', (has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'UPDATE'))),
  ('relay_acl', (NOT has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'INSERT,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
- ('relay_acl', (NOT has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.inbox', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
+ ('relay_acl', (NOT has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.inbox', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
  ('rls_policy', (NOT EXISTS (SELECT 1 FROM expected_policies e FULL JOIN actual_policies p ON p.polrelid = e.relation AND p.polname = e.name
     WHERE e.name IS NULL OR p.oid IS NULL OR NOT p.polpermissive OR p.polcmd <> '*'
       OR p.polroles IS DISTINCT FROM e.roles
@@ -98,7 +98,7 @@ expected_policies(relation, name, roles, predicate) AS (
       OR pg_get_expr(p.polwithcheck, p.polrelid) IS DISTINCT FROM e.predicate))),
  ('functions', (NOT EXISTS (SELECT 1 FROM functions f LEFT JOIN pg_proc p ON p.oid = to_regprocedure(f.signature)
     WHERE p.oid IS NULL OR NOT p.prosecdef OR p.proowner <> (SELECT oid FROM relay_role)
-      OR NOT ('search_path=pg_catalog, rss_transactional_messaging' = ANY(p.proconfig))
+      OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp' = ANY(p.proconfig))
       OR NOT has_function_privilege(current_user, p.oid, 'EXECUTE')
       OR EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f',p.proowner))) a
         WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')))),

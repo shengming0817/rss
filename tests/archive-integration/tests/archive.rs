@@ -1,3 +1,6 @@
+mod dr;
+#[path = "../../fixtures/message_fence.rs"]
+mod fence_fixture;
 #[path = "../../postgres-integration/tests/recovery/support.rs"]
 mod support;
 use anyhow::Context;
@@ -167,6 +170,12 @@ async fn run() -> anyhow::Result<()> {
         .port(params.port)
         .database(&params.database)
         .username(&params.username)
+        .options([
+            ("rss.tenant_id", "11111111-1111-1111-1111-111111111111"),
+            ("rss.storage_target", "01010101010101010101010101010101"),
+            ("rss.storage_lineage", "02020202020202020202020202020202"),
+            ("rss.execution_epoch", "1"),
+        ])
         .password(&params.password)
         .ssl_mode(PgSslMode::VerifyFull)
         .ssl_root_cert_from_pem(pg.ca_pem().as_bytes().to_vec());
@@ -187,9 +196,17 @@ async fn run() -> anyhow::Result<()> {
         PgPassword::new("fixture-only"),
         PgPrivateCa::from_pem(pg.ca_pem().as_bytes().to_vec())?,
     );
-    let repository = PgArchiveRepository::connect(config.clone(), Timer::new()).await?;
+    fence_fixture::provision(&owner).await?;
+    let repository =
+        PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::binding())
+            .await?;
     let raw = PgPoolOptions::new()
-        .connect_with(options.username("archive_worker").password("fixture-only"))
+        .connect_with(
+            options
+                .clone()
+                .username("archive_worker")
+                .password("fixture-only"),
+        )
         .await?;
     assert!(
         sqlx::query("UPDATE rss_transactional_messaging.consumer_dead_letter SET capsule=NULL")
@@ -278,6 +295,23 @@ async fn run() -> anyhow::Result<()> {
     Box::pin(fault_receipt(&repository, &store, &owner)).await?;
     Box::pin(interrupted_fault_receipt(&repository, &store, &owner)).await?;
     adversarial_schema(&config, &owner).await?;
+    let upgrade_config = PgConfig::new(
+        &params.host,
+        params.port,
+        "archive_upgrade",
+        "archive_worker",
+        PgPassword::new("fixture-only"),
+        PgPrivateCa::from_pem(pg.ca_pem().as_bytes().to_vec())?,
+    );
+    Box::pin(dr::upgrade::run(
+        &repository,
+        &store,
+        &owner,
+        options,
+        upgrade_config,
+    ))
+    .await?;
+    dr::run(&repository, &store, &owner, &config).await?;
     repository.close().await;
     Ok(())
 }
@@ -717,7 +751,7 @@ async fn expiry_reconciliation(
     };
     let object = store.put(&p, deadline()).await?;
     // Seed the state after a formerly sufficient horizon has elapsed. This short lock never authorizes production purge.
-    sqlx::query("INSERT INTO rss_transactional_messaging.archive_objects(tenant_id,operation_id,generation,object,verified) VALUES($1::uuid,$2::uuid,$3::uuid,$4,true)").bind(tenant().to_string()).bind(r.request().operation().to_string()).bind(&c.generation).bind(serde_json::to_value(&object)?).execute(owner).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.archive_objects(tenant_id,operation_id,generation,object,verified,verified_epoch,verified_lineage) VALUES($1::uuid,$2::uuid,$3::uuid,$4,true,current_setting('rss.execution_epoch')::bigint,decode(current_setting('rss.storage_lineage'),'hex'))").bind(tenant().to_string()).bind(r.request().operation().to_string()).bind(&c.generation).bind(serde_json::to_value(&object)?).execute(owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.consumer_dead_letter SET capsule=NULL WHERE id=$1::uuid").bind(id.to_string()).execute(owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.archive_jobs SET purged=true WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).execute(owner).await?;
     expire(owner, &r).await?;
@@ -846,7 +880,12 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
             .await?;
         assert!(
             matches!(
-                PgArchiveRepository::connect(config.clone(), Timer::new()).await,
+                PgArchiveRepository::connect(
+                    config.clone(),
+                    Timer::new(),
+                    fence_fixture::binding()
+                )
+                .await,
                 Err(Error::StorageContract)
             ),
             "{corrupt}"
@@ -855,7 +894,7 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
             .execute(owner)
             .await?;
     }
-    PgArchiveRepository::connect(config.clone(), Timer::new())
+    PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::binding())
         .await?
         .close()
         .await;

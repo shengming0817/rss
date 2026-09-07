@@ -13,6 +13,23 @@ ROOT = Path(__file__).resolve().parents[1]
 CONSUMER = r'''
 use rss_transactional_messaging_recovery::*;
 use rss_transactional_messaging::policy::OperationDeadline;
+pub fn dr_plan(tenant: rss_request_context::TenantId, storage: rss_transactional_messaging::fence::StorageIdentity, epoch: rss_transactional_messaging::fence::Epoch, evidence: dr::RestoreEvidence, members: Vec<dr::Member>) -> Result<dr::Plan, Error> {
+    dr::Plan::new(tenant, OperationId::new(), storage, epoch, evidence, members)
+}
+pub fn dr_terminate(tenant: rss_request_context::TenantId, storage: rss_transactional_messaging::fence::StorageIdentity, epoch: rss_transactional_messaging::fence::Epoch, prior: OperationId, digest: [u8;32]) -> Result<dr::Plan, Error> {
+    dr::Plan::terminate(tenant, OperationId::new(), storage, epoch, prior, digest)
+}
+pub fn dr_block_reason(status: dr::MemberStatus) -> Option<dr::BlockReason> {
+    match status {
+        dr::MemberStatus::Blocked(reason) => Some(reason),
+        dr::MemberStatus::Superseded(reason) | dr::MemberStatus::Terminated(reason) => reason,
+        dr::MemberStatus::Pending | dr::MemberStatus::Publishing | dr::MemberStatus::Completed => None,
+    }
+}
+#[cfg(feature = "postgres")]
+pub async fn dr_store<C: rss_transactional_messaging::policy::ExecutionTimer + 'static>(config: rss_transactional_messaging_postgres::PgConfig, timer: C, binding: rss_transactional_messaging::fence::ExecutionBinding) -> Result<rss_transactional_messaging_postgres::PgDrStore, Error> {
+    rss_transactional_messaging_postgres::PgDrStore::connect(config,timer,binding).await
+}
 pub struct ProductAuthorization;
 impl Authorizer for ProductAuthorization {
     async fn authorize(&self, challenge: Challenge<'_>, _: OperationDeadline) -> Result<Authorization, Error> {
@@ -25,13 +42,15 @@ pub fn request(tenant: rss_request_context::TenantId, target: Target, version: V
     Mutation::new(tenant, OperationId::new(), target, version, Action::Redrive)
 }
 #[cfg(feature = "postgres")]
-pub async fn store<K: rss_data_protection::Aead + Send + Sync, C: rss_transactional_messaging::policy::ExecutionTimer + 'static>(config: rss_transactional_messaging_postgres::PgConfig, timer: C, key: std::sync::Arc<K>) -> Result<rss_transactional_messaging_postgres::PgRecoveryStore<K>, Error> {
-    rss_transactional_messaging_postgres::PgRecoveryStore::connect(config, timer, key).await
+pub async fn store<K: rss_data_protection::Aead + Send + Sync, C: rss_transactional_messaging::policy::ExecutionTimer + 'static>(config: rss_transactional_messaging_postgres::PgConfig, timer: C, binding: rss_transactional_messaging::fence::ExecutionBinding, key: std::sync::Arc<K>) -> Result<rss_transactional_messaging_postgres::PgRecoveryStore<K>, Error> {
+    rss_transactional_messaging_postgres::PgRecoveryStore::connect(config, timer, binding, key).await
 }
 #[cfg(feature = "postgres")]
 pub fn consumer<H,K>(effect: H, capture: rss_transactional_messaging_postgres::PgRecoveryCapture<K>) -> rss_transactional_messaging_postgres::PgConsumerTx<H,rss_transactional_messaging_postgres::PgRecoveryCapture<K>> {
     rss_transactional_messaging_postgres::PgConsumerTx::with_recovery(effect,capture)
 }
+#[cfg(feature = "postgres")]
+pub fn dr_migration() -> &'static str { rss_transactional_messaging_postgres::DR_UPGRADE_SQL }
 #[cfg(feature = "postgres")]
 pub fn migration() -> &'static str { rss_transactional_messaging_postgres::RECOVERY_UPGRADE_SQL }
 #[cfg(feature = "s3")]

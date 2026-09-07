@@ -77,3 +77,41 @@ version and no currently visible object remains unresolved: a key-level absence 
 an unknown immutable version disappeared. Provider failures never mean missing. Closed observations
 carry no tenant, object path, payload or key data. Providers and product authorizers are trusted
 implementations; private proof construction does not establish the truth of a malicious provider.
+
+
+## Bounded disaster recovery
+
+Recovery constructor `dr::Plan::new` binds one tenant, external storage target/lineage, expected epoch, operation identity,
+restore evidence and 1–500 canonical members. `dr::Member` selects one direction: retained Published
+Outbox facts for database-ahead delivery, or full ConsumerIdentity/fingerprint for broker-ahead
+ordinary consumption. Mixed directions, duplicate members and cross-tenant subscriptions are
+rejected before authorization. The next epoch is exactly one checked increment.
+
+`Challenge::subject()` is the closed `AuthorizationSubject::{Mutation, Query, Dr}`. Product policy
+must inspect the exact variant and verify external evidence; no optional target API conflates a DR
+plan with a list query. `authorize_dr` issues an opaque, exact-digest `AuthorizedPlan`.
+`dr::execute` reuses core deadlines/LocalTxAttempt and the existing closed recovery observer. Unknown
+commit can become success only by reading the exact durable receipt; absent/unavailable readback
+remains unknown. Application receipt means the plan was installed, not that its members completed.
+`Store::progress` exposes separate delivery states, including blocked and superseded members.
+
+Same-ID recovery never changes the original Published fact or extends its deadline. Normal relay
+confirmation and real atomic ConsumerTx effects establish member completion. Providers must fence
+all message/recovery/archive execution against a fixed binding; see the PostgreSQL adapter's
+migration and external restore prerequisites. The library does not orchestrate restore or broker
+cursors and provides no compatibility execution mode.
+
+
+`Plan::terminate(tenant, operation, storage, expected_epoch, prior_operation, prior_digest)`
+constructs a separate `PlanAction::Terminate`, authorized through the same exact-digest challenge.
+The authorizer must distinguish `PlanAction::Recover` from `Terminate`. Termination binds the exact
+current recovery plan and atomically advances the epoch with a durable receipt, including when all
+original delivery windows expired. It has no executable members. Exact retry/readback preserves
+that receipt after restart; a stale plan, changed digest, or termination-as-target fails.
+
+`MemberStatus::Blocked(BlockReason)` retains `DeadlineExpired` or `PermanentPublishFailure`.
+Superseded and Terminated states preserve any prior block reason. Termination fences unfinished
+work and unblocks its DR partition barrier; Completed members remain Completed, and original
+Published facts, envelopes, fingerprints and delivery deadlines are unchanged. Termination never
+asserts that an unfinished delivery succeeded. `ActionKind::DrTerminate` distinguishes this
+transition in the same closed completion observer.

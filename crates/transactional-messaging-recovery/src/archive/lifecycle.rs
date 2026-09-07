@@ -1,7 +1,7 @@
 use super::*;
 use rss_data_protection::Aead;
 use rss_transactional_messaging::{
-    policy::{ExecutionDeadlines, ExecutionTimer, OperationDeadline, within},
+    policy::{ExecutionDeadlines, ExecutionTimer, OperationDeadline},
     transaction::LocalTxAttempt,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,10 +136,12 @@ pub async fn execute<
     observer: &O,
 ) -> LocalTxAttempt<Outcome, Error> {
     let integrity_observed = AtomicBool::new(false);
-    let result = if deadlines.operation().remaining(clock).is_zero() {
-        LocalTxAttempt::not_started(Error::Deadline)
-    } else {
-        match within(clock, deadlines.operation(), |deadline| {
+    let integrity_observed = &integrity_observed;
+    crate::completion::execute(
+        clock,
+        deadlines,
+        Error::Deadline,
+        |deadline| {
             run(
                 repository,
                 store,
@@ -147,87 +149,28 @@ pub async fn execute<
                 archive,
                 request,
                 deadline,
-                &integrity_observed,
+                integrity_observed,
             )
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => LocalTxAttempt::commit_unknown(Error::Deadline),
-        }
-    };
-    let (unknown, result) = result.fold(
-        |v| (false, LocalTxAttempt::committed(v)),
-        |e| (false, LocalTxAttempt::not_started(e)),
-        |e| (false, LocalTxAttempt::rolled_back(e)),
-        |e| (false, LocalTxAttempt::rollback_failed(e)),
-        |e| (true, LocalTxAttempt::commit_unknown(e)),
-        |e| (false, LocalTxAttempt::fenced(e)),
-    );
-    // An older successful receipt cannot settle an integrity fault whose write was interrupted.
-    let result = if unknown && !integrity_observed.load(Ordering::Relaxed) {
-        match within(clock, deadlines.settlement(), |deadline| {
-            repository.receipt(request, deadline)
-        })
-        .await
-        {
-            Ok(Ok(Some(outcome))) => LocalTxAttempt::committed(outcome),
-            _ => result,
-        }
-    } else {
-        result
-    };
-    result.fold(
-        |v| {
-            observer.observe(Event {
-                status: crate::AttemptStatus::Committed,
-                outcome: Some(v),
-                error: None,
-            });
-            LocalTxAttempt::committed(v)
         },
-        |e| {
-            observer.observe(Event {
-                status: crate::AttemptStatus::NotStarted,
-                outcome: None,
-                error: Some(e),
-            });
-            LocalTxAttempt::not_started(e)
+        |deadline| async move {
+            // An older receipt cannot settle an integrity fault whose write was interrupted.
+            if integrity_observed.load(Ordering::Relaxed) {
+                Ok(None)
+            } else {
+                repository.receipt(request, deadline).await
+            }
         },
-        |e| {
+        |status, outcome, error| {
             observer.observe(Event {
-                status: crate::AttemptStatus::RolledBack,
-                outcome: None,
-                error: Some(e),
-            });
-            LocalTxAttempt::rolled_back(e)
-        },
-        |e| {
-            observer.observe(Event {
-                status: crate::AttemptStatus::RollbackFailed,
-                outcome: None,
-                error: Some(e),
-            });
-            LocalTxAttempt::rollback_failed(e)
-        },
-        |e| {
-            observer.observe(Event {
-                status: crate::AttemptStatus::CommitUnknown,
-                outcome: None,
-                error: Some(e),
-            });
-            LocalTxAttempt::commit_unknown(e)
-        },
-        |e| {
-            observer.observe(Event {
-                status: crate::AttemptStatus::Fenced,
-                outcome: None,
-                error: Some(e),
-            });
-            LocalTxAttempt::fenced(e)
+                status,
+                outcome: outcome.copied(),
+                error,
+            })
         },
     )
+    .await
 }
+
 async fn run<
     R: ArchiveRepository,
     S: ArchiveObjectStore,
