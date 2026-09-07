@@ -88,23 +88,15 @@ rss-diag-context = {{ path = {diag:?}{default} }}
             !graph.lines().any(|line| line.starts_with("tokio ")),
             "{graph}"
         );
-        fs::write(
-            consumer.0.join("src/main.rs"),
-            r#"
-fn main() {
-    let id = rss_diag_context::CorrelationId::parse("request-42").unwrap();
-    assert_eq!(rss_diag_context::DiagnosticCtx::new(id).correlation().as_str(), "request-42");
-    assert_eq!(rss_transactional_messaging::message::MessageId::parse("message-42").unwrap().as_str(), "message-42");
-}
-"#,
-        )?;
-        consumer.cargo(&["run", "--quiet"], true)?;
+        // Behavioral scenarios are owned by crates/examples and the independent package proof.
+        consumer.cargo(&["check", "--quiet"], true)?;
         fs::write(
             consumer.0.join("src/main.rs"),
             "use rss_diag_context::{scope, current, correlation}; fn main() {}",
         )?;
         let error = consumer.cargo(&["check", "--quiet"], false)?;
         assert!(error.contains("unresolved imports"), "{error}");
+        fs::write(consumer.0.join("src/main.rs"), "fn main() {}")?;
     }
     Ok(())
 }

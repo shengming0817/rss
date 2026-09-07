@@ -2,6 +2,10 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 
+// Includes cold startup of relocated archive binaries (notably on macOS), the
+// launcher's 20-second cancellation and 30-second cleanup budgets, plus exit.
+const LAUNCHER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[tokio::test]
 async fn cleanup_attempts_remaining_resources_after_docker_failure() -> anyhow::Result<()> {
     for fail in ["remove", "list"] {
@@ -26,7 +30,7 @@ exit 0
         // Rust 1.96 and nextest 0.9.137 both supply the relocated binary path at runtime.
         let launcher = std::env::var("CARGO_BIN_EXE_rss-test-launcher")?;
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            LAUNCHER_DEADLINE,
             tokio::process::Command::new(launcher)
                 .args(["--", "/usr/bin/true"])
                 .env("PATH", directory.path())
@@ -79,7 +83,7 @@ async fn child_and_cleanup_outcomes_are_both_preserved() -> anyhow::Result<()> {
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))?;
         for code in [9, 0] {
             let output = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                LAUNCHER_DEADLINE,
                 tokio::process::Command::new(std::env::var("CARGO_BIN_EXE_rss-test-launcher")?)
                     .args(["--", "/bin/sh", "-c", &format!("exit {code}")])
                     .env("PATH", directory.path())
@@ -126,7 +130,7 @@ async fn concurrent_launcher_metrics_remain_complete_json_lines() -> anyhow::Res
                 .spawn()?,
         );
     }
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(LAUNCHER_DEADLINE, async {
         for child in &mut children {
             assert!(child.wait().await?.success());
         }
@@ -160,7 +164,7 @@ async fn metric_write_failure_preserves_child_exit_and_marks_incomplete() -> any
     std::fs::write(&metrics, "not a directory")?;
     for code in [0, 9] {
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            LAUNCHER_DEADLINE,
             tokio::process::Command::new(std::env::var("CARGO_BIN_EXE_rss-test-launcher")?)
                 .args(["--", "/bin/sh", "-c", &format!("exit {code}")])
                 .env("PATH", directory.path())

@@ -10,9 +10,10 @@ workspace = true
 
 [features]
 default = []
-rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime"]
+rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime", "rss-examples/managed"]
 
 [dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["providers"] }
 rss-projection.workspace = true
 rss-projection-postgres = { workspace = true, features = ["integration"] }
 tokio-util.workspace = true
@@ -31,6 +32,6 @@ rss-contract.workspace = true
 rss-request-context.workspace = true
 rss-runtime.workspace = true
 testkit = { path = "../../crates/testkit", features = ["containers"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "any", "migrate", "json"] }
 anyhow.workspace = true

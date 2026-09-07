@@ -3005,6 +3005,7 @@ dependencies = [
  "ring",
  "rss-contract",
  "rss-data-protection",
+ "rss-examples",
  "rss-observation",
  "rss-observation-postgres",
  "rss-projection",
@@ -3456,6 +3457,35 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "rss-examples"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "ring",
+ "rss-contract",
+ "rss-data-protection",
+ "rss-diag-context",
+ "rss-redact",
+ "rss-request-context",
+ "rss-runtime",
+ "rss-trace-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-amqp",
+ "rss-transactional-messaging-postgres",
+ "rss-transactional-messaging-runtime",
+ "rss-transactional-messaging-testkit",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

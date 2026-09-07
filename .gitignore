@@ -30,6 +30,7 @@ tmp/
 .azlogs
 .codex-tmp/
 /.local-ci-runs/
+/rss-external-check/
 /.codex-backups/
 
 # Local env / secrets

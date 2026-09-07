@@ -84,33 +84,15 @@ privacy = {{ package = "rss-redact", path = {owner:?}{default} }}
                 .any(|line| line.starts_with("rss-redact-derive ")),
             "{graph}"
         );
-        fs::write(
-            consumer.0.join("src/main.rs"),
-            r#"
-use privacy::{Redact, RedactScope, SecretText, RedactionHashKey, RedactedBytes, RedactedSource};
-fn main() {
-    let secret = SecretText::from_string("do-not-log".into());
-    let key = RedactionHashKey::from_bytes(vec![42; 32]).unwrap();
-    for scope in [RedactScope::ServerLog, RedactScope::Wire] {
-        assert_eq!(secret.redact_scoped(scope), "SecretText(<redacted>)");
-        assert_eq!(key.redact_scoped(scope), "RedactionHashKey(<redacted>)");
-    }
-    assert_eq!(format!("{secret:?}"), "SecretText(<redacted>)");
-    assert_eq!(format!("{key:?}"), "RedactionHashKey(<redacted>)");
-    assert_eq!(format!("{:?}", RedactedBytes::new(vec![42])), "<redacted>");
-    let source = RedactedSource::new(std::io::Error::other("do-not-log"));
-    assert_eq!(format!("{source:?}"), "RedactedSource(<redacted>)");
-    assert!(std::error::Error::source(&source).is_none());
-}
-"#,
-        )?;
-        consumer.cargo(&["run", "--quiet"], true)?;
+        // Behavioral scenarios are owned by crates/examples and the independent package proof.
+        consumer.cargo(&["check", "--quiet"], true)?;
         fs::write(
             consumer.0.join("src/main.rs"),
             "#[derive(privacy::Redact)] struct Secret; fn main() {}",
         )?;
         let error = consumer.cargo(&["check", "--quiet"], false)?;
         assert!(error.contains("could not find `Redact`"), "{error}");
+        fs::write(consumer.0.join("src/main.rs"), "fn main() {}")?;
     }
     Ok(())
 }

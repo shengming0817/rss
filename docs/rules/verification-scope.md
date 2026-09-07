@@ -22,6 +22,25 @@
 - 构建成功、artifact 可消费和实际发布是不同事实；发布证明绑定被验证的版本与 artifact 身份。
 - package 与依赖闭包以构建事实验证；文档不充当包清单、删除完成证明或运行记录。
 
+### 示例与隔离消费目录
+
+- `crates/examples/` 持有不发布的最小使用示例，通过能力的公共 API 消费；不进入 Release Surface，
+  不承接产品模型、认证策略、部署或生产 T3。各场景显式选择必要依赖与 feature；共享示例 package 的
+  编译结果不能证明 feature 隔离。已有示例按相关实施项复用或迁移，不保留重复维护的同一场景。
+- 按风险依次验证仓内可运行示例及结果断言、独立源码 consumer、固定候选 artifact consumer。
+  优先复用同一场景源码；完整故障矩阵由已有组件 T1/T2 承担，artifact 层运行最低充分的消费路径。
+- 仓库根目录 `rss-external-check/` 为 gitignore 的可再生执行目录。测试源码、模板与脚本仍提交在
+  `crates/examples/`、对应测试 owner 或 `hack/`；该目录不持有唯一源码或唯一验收记录。
+- 目录虽位于 Git checkout 内，consumer 必须各自声明独立 `[workspace]`、显式依赖和独立 lock，
+  不加入主 workspace。各运行使用独立子目录和显式 `CARGO_TARGET_DIR`，核验祖先 Cargo 配置不会引入
+  原源码依赖或隐式 feature；不得以 `.gitignore` 或目录名称代替隔离证明。
+- 源码阶段可显式引用待验证源码；artifact 阶段仅允许精确候选包及其闭包，可使用指向解包 artifact 的
+  path patch，禁止回到原 workspace 源码、internal package 或其它消费者补齐的依赖。正式验收绑定固定
+  revision、version、archive digest 与实际命令结果；`cargo check` 不代表行为运行通过。
+- RSS 拥有库级 example、T1/T2 和 package correctness；rss-incubator 保留实际产品孵化、独立 pin/lock、
+  产品 CI 与接入验收，不作为所有 RSS 包的通用必经门禁。其 registry-only 消费约束不因主仓 artifact
+  proof 使用解包 path patch 而放宽；产品生产验收仍由产品 owner 按明确范围承担。
+
 ## 默认选择
 
 - 普通 PR 运行 affected T1 与必要 T2；rename/copy、全局输入、未知路径或分析异常必须 fail-full。

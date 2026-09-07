@@ -1,0 +1,57 @@
+[package]
+name = "rss-examples"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "rss-examples"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+diagnostic = ["dep:rss-diag-context"]
+task-local = ["diagnostic", "rss-diag-context/task-local", "dep:tokio"]
+trace = ["dep:rss-trace-context", "dep:tracing", "dep:tracing-subscriber", "dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk"]
+redact = ["dep:rss-redact"]
+derive = ["redact", "rss-redact/derive"]
+protection = ["dep:rss-data-protection", "dep:rss-request-context", "dep:ring"]
+lifecycle = ["dep:rss-runtime", "dep:tokio"]
+core = ["dep:rss-transactional-messaging"]
+memory = ["core", "dep:rss-transactional-messaging-testkit", "dep:rss-transactional-messaging-runtime", "dep:tokio"]
+producer = ["memory", "rss-transactional-messaging/producer", "rss-transactional-messaging-testkit/producer", "rss-transactional-messaging-runtime/producer", "dep:rss-contract", "dep:rss-request-context"]
+consumer = ["memory", "rss-transactional-messaging/consumer", "rss-transactional-messaging-testkit/consumer", "rss-transactional-messaging-runtime/consumer", "dep:rss-contract", "dep:rss-request-context"]
+providers = ["core", "rss-transactional-messaging/producer", "rss-transactional-messaging/consumer", "dep:rss-transactional-messaging-postgres", "dep:rss-transactional-messaging-amqp", "rss-transactional-messaging-runtime/producer", "rss-transactional-messaging-runtime/consumer", "dep:tokio", "dep:rss-contract", "dep:rss-request-context", "dep:serde", "dep:serde_json", "dep:sqlx"]
+managed = ["providers", "dep:rss-runtime", "rss-transactional-messaging-postgres/rss-runtime", "rss-transactional-messaging-amqp/managed-runtime", "rss-transactional-messaging-runtime/managed-runtime"]
+managed-worker = ["producer", "lifecycle", "rss-transactional-messaging-runtime/managed-runtime"]
+
+[dependencies]
+anyhow.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, optional = true }
+rss-transactional-messaging-amqp = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
+rss-diag-context = { path = "../diagctx", version = "0.1.0", default-features = false, optional = true }
+rss-trace-context = { path = "../tracewire", version = "0.1.0", optional = true }
+rss-redact = { path = "../redact", version = "0.1.0", default-features = false, optional = true }
+rss-data-protection = { workspace = true, optional = true }
+rss-request-context = { workspace = true, optional = true }
+rss-contract = { workspace = true, optional = true }
+rss-runtime = { workspace = true, optional = true }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, optional = true }
+rss-transactional-messaging-runtime = { path = "../transactional-messaging-runtime", version = "0.1.0", default-features = false, optional = true }
+rss-transactional-messaging-testkit = { path = "../transactional-messaging-testkit", version = "0.1.0", default-features = false, optional = true }
+ring = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+
+[[bin]]
+name = "providers"
+path = "src/bin/providers.rs"
+required-features = ["providers"]

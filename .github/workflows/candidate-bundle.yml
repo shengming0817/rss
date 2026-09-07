@@ -27,7 +27,6 @@ jobs:
     needs: semver
     name: candidate-package-proof
     runs-on: ubuntu-latest
-    timeout-minutes: 50
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -86,6 +85,33 @@ jobs:
             test "$revision" = "$GITHUB_SHA"
             test -f "$RSS_PACKAGE_PROOF/$package-$version.crate"
           done < "$RSS_PACKAGE_PROOF/packages.tsv"
+
+      - name: Run extraction examples through independent source and artifact consumers
+        env:
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
+        run: |
+          python3 -m unittest discover -s hack/tests -p test_ci_extract_package_proof.py
+          cargo test --locked -p rss-examples --all-features
+          for features in '' rss-runtime; do
+            RSS_TEST_RUN_ID="extract-internal-${features:-self-host}" \
+              cargo run --locked -p testkit --features containers --bin rss-test-launcher -- \
+              -- cargo test --locked -p postgres-integration --test suite --features "$features" \
+              postgres_transactional_messaging_suite -- --exact --nocapture
+          done
+          python3 hack/extract-package-proof.py --source
+          python3 hack/extract-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
+
+      - name: Preserve extraction consumer commands and resolved graphs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extraction-consumers-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            rss-external-check/**/commands.log
+            rss-external-check/**/resolved.json
+            rss-external-check/**/provider-integration.log
+            rss-external-check/**/Cargo.lock
+          if-no-files-found: error
 
       - name: Run independent Contract public behavior
         env:

@@ -4,6 +4,7 @@ mod fence_fixture;
 // reason: integration fixtures fail loudly on invalid static identities and test setup.
 mod adversarial;
 mod conformance;
+mod examples;
 mod lifecycle;
 use rss_transactional_messaging::policy::{
     AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant,
@@ -60,6 +61,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
             .execute(&owner).await?;
         sqlx::raw_sql("CREATE TABLE public.business_effects (tenant_id uuid NOT NULL, id text NOT NULL, PRIMARY KEY(tenant_id,id)); ALTER TABLE public.business_effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.business_effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_effect ON public.business_effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT ON public.business_effects TO tmsg_runtime;").execute(&owner).await?;
         fence_fixture::provision(&owner).await?;
+        Box::pin(examples::run(&fixture, &network, &owner)).await?;
         let timer = Timer::new();
         let config = PgConfig::new(&params.host, params.port, &params.database, "tmsg_runtime", PgPassword::new("fixture-only"), rss_transactional_messaging_postgres::PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?);
         let raw_runtime = PgPoolOptions::new().max_connections(2).acquire_timeout(Duration::from_secs(5))

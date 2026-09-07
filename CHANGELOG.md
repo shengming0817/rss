@@ -6,6 +6,15 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Original extraction consumer proofs (#2286 / #2266)
+
+- Add non-publishable public consumers in `crates/examples`, independently resolved source and
+  exact-artifact runs, including real PostgreSQL → AMQP → PostgreSQL effect/receipt → ACK and
+  optional managed shutdown. Candidate logs bind behavior to version, revision and archive digest.
+- Consolidate duplicate base consumption scenarios while retaining component fault/API tests.
+  Public library versions, Rust APIs and persisted wire formats are unchanged; this is not a
+  registry release or product acceptance declaration.
+
 ### Transactional message DR (#2303)
 
 - Add exact-authorized termination of the current DR plan with an atomic epoch/receipt transition;

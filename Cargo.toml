@@ -3,6 +3,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/examples",
   "tests/ledger-postgres-integration",
   "crates/ledger-postgres",
   "crates/ledger",
