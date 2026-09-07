@@ -68,3 +68,13 @@ Run [34076132335](https://github.com/shengming0817/rss/actions/runs/34076132335)
 用户通过飞书请求 `Q-24bf6a60ba2d48bd9f82a033404dc1d9` 明确选择：显式全量 dispatch/develop 的 job 上限改为 20 分钟，PR affected preflight 保持 10 分钟。该选择覆盖原 issue 的预算约束，不改变任何单项测试期限或失败判定。
 
 本地第二轮 nextest 681/681 通过、doctest 通过，完整命令仍因上述 Clippy 错误返回非零，未将测试通过等同于全 CI 通过。远端仍复现 private CA subscriber Operation 和 delivery ACK shutdown transient，需继续修复 lapin Drop 自动关闭与连接关闭的竞态；冷热验收尚未完成。
+
+## AMQP 单一关闭所有权
+
+第二轮证据说明仅先等 cancellation task 仍不足：lapin 4.10.0 的 `ConsumerCanceler` / `ChannelCloser` 在最后一个外部句柄释放时向 internal RPC 排队，后者启动的异步 channel close 可能与 connection close 竞争。依据同一上游提交 `71d01e2cc3e3221496d11ffcf1f4aaf41532fb9d` 的 `src/consumer_canceler.rs`、`src/channel_closer.rs`、`src/internal_rpc.rs`。用户通过 `Q-2c9b4091bd114fb59a1a0f894122f57a` 批量确认在本 PR 完成该 Cx3 修复。
+
+现在每订阅的唯一 task 持有 external Consumer 与 channel，依次封 settlement admission、等待 cancel-ok、排空已有 settlement（正常取消）或强制退役（resource shutdown/abandon）、等待唯一 channel-close receipt；subscriber 最后关闭连接。Drop 与 abandon 请求同一任务，不能再次发关闭 RPC。已被 broker 终止的旧 generation 仅在明确 `Closed/Error` 状态下视为无需再次关闭；`Closing/Reconnecting/Initial` 不得伪造完成回执。原 resource 单一总预算不变。
+
+新增回归覆盖 cancel 前与 cancel-ok 后的关闭 barrier、ACK 后 stream Drop、admission 原子封闭与 permit 排空、多个 waiter 共享一次关闭及错误、通道过渡状态不是成功回执。现有真实 broker 三个套件均已通过（47.890s / 23.656s / 27.196s），包括 private CA、错误 CA、角色权限、结算、重连与关闭期限。新增结构化日志只报告一次 `channel_close/subscription_close/Operation`，聚合保留错误但不重复或错标为 task join。
+
+最终同 SHA/baseline 冷热运行与本地 canonical preflight 以 PR 评论中的可追溯证据为准；本节不预先声明最终 CI 通过。

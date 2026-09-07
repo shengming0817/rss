@@ -103,6 +103,29 @@ impl ShutdownFailures {
         };
         tracing::warn!(target: "amqp", resource, phase, task_kind, error_kind = ?error.kind(),
             "amqp shutdown stage failed");
+        self.retain(error);
+    }
+
+    pub(crate) fn report_subscription_close(resource: &str, result: &lapin::Result<()>) {
+        if result.is_err() {
+            tracing::warn!(target: "amqp", resource, phase = "channel_close", task_kind = "subscription_close", error_kind = ?AmqpShutdownErrorKind::Operation, "amqp shutdown stage failed");
+        }
+    }
+
+    /// Channel-close drivers report their receipt once, at completion. Aggregation must
+    /// preserve its verdict without relabelling it as a task join or logging it twice.
+    pub(crate) fn record_subscription(
+        &mut self,
+        resource: &str,
+        result: Result<(), AmqpShutdownError>,
+    ) {
+        match result {
+            Err(error) if error.kind() == AmqpShutdownErrorKind::Operation => self.retain(error),
+            result => self.record(resource, ShutdownStage::SubscriberCancellation, result),
+        }
+    }
+
+    fn retain(&mut self, error: AmqpShutdownError) {
         if self.primary.as_ref().is_none_or(|previous| {
             shutdown_priority(error.kind()) > shutdown_priority(previous.kind())
         }) {
@@ -230,6 +253,11 @@ mod tests {
                     Err(AmqpShutdownError::classified(kind)),
                 );
             }
+            let close = Err(lapin::Error::from(std::io::Error::other(
+                "secret credential",
+            )));
+            ShutdownFailures::report_subscription_close("test", &close);
+            failures.record_subscription("test", close.map_err(AmqpShutdownError::operation));
             failures.finish().map_err(|e| e.kind())
         });
         assert_eq!(primary, Err(AmqpShutdownErrorKind::TaskPanicked));
@@ -239,9 +267,11 @@ mod tests {
                 .map_err(|_| std::io::Error::other("capture lock poisoned"))?
                 .clone(),
         )?;
-        assert_eq!(capture.matches("amqp shutdown stage failed").count(), 4);
+        assert_eq!(capture.matches("amqp shutdown stage failed").count(), 5);
         assert!(capture.contains("publisher_recovery") && capture.contains("subscription_cancel"));
         assert!(capture.contains("connection_close") && capture.contains("task_join"));
+        assert_eq!(capture.matches("channel_close").count(), 1);
+        assert_eq!(capture.matches("subscription_close").count(), 1);
         assert!(
             capture.contains("TaskPanicked")
                 && capture.contains("TaskCancelled")

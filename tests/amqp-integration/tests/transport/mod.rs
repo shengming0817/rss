@@ -1106,7 +1106,20 @@ async fn cancel_confirming_publication(
 pub(super) async fn subscriber_cancels_before_connection_close(
     rabbit: &testkit::RabbitFixture,
 ) -> anyhow::Result<()> {
-    let url = isolated_url(rabbit, "rss_subscriber_cancel_before_close").await?;
+    assert_subscriber_close_order(rabbit, false).await?;
+    assert_subscriber_close_order(rabbit, true).await
+}
+
+async fn assert_subscriber_close_order(
+    rabbit: &testkit::RabbitFixture,
+    after_cancel: bool,
+) -> anyhow::Result<()> {
+    let vhost_name = if after_cancel {
+        "rss_subscriber_channel_before_close"
+    } else {
+        "rss_subscriber_cancel_before_close"
+    };
+    let url = isolated_url(rabbit, vhost_name).await?;
     let vhost = url.rsplit('/').next().expect("fixture vhost");
     let route = MessageRoute::parse("rss.cancel-before-close")?;
     let (subscriber, resource) = prepared_subscriber(&url, &route, "ordered-close", true).await?;
@@ -1118,7 +1131,8 @@ pub(super) async fn subscriber_cancels_before_connection_close(
     let delivery = next_valid_delivery(&mut stream).await?;
     let (_, settlement) = (*delivery).into_parts();
     close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
-    let (entered, resume) = settlement.pause_subscription_cancel_for_test();
+    let (entered, resume) =
+        prepare_close_barrier(settlement, &message, &subscription, after_cancel).await?;
     drop(stream);
     tokio::time::timeout(TIMEOUT, entered).await??;
     let closing = resource.shutdown(Duration::from_secs(5));
@@ -1156,4 +1170,29 @@ async fn assert_open_during_shutdown(
         }
     }
     Ok(())
+}
+
+async fn prepare_close_barrier(
+    settlement: rss_transactional_messaging_amqp::AmqpSettlement,
+    message: &MessageEnvelope<Vec<u8>>,
+    subscription: &SubscriptionIdentity,
+    after_cancel: bool,
+) -> anyhow::Result<(
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+)> {
+    if after_cancel {
+        let barrier = settlement.pause_subscription_close_for_test();
+        settlement
+            .settle(
+                terminal_decision(message, subscription, false)?,
+                provider_deadline(),
+            )
+            .await?;
+        Ok(barrier)
+    } else {
+        let barrier = settlement.pause_subscription_cancel_for_test();
+        drop(settlement);
+        Ok(barrier)
+    }
 }
