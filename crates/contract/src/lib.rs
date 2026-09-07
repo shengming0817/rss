@@ -235,7 +235,9 @@ impl fmt::Display for IdentityError {
 }
 impl Error for IdentityError {}
 
-/// Canonical dotted contract identifier.
+/// Canonical dotted contract identifier: at least two lower-kebab segments, at most 255 bytes.
+/// Each segment starts with an ASCII lowercase letter; subsequent characters are lowercase
+/// letters, digits, or single hyphens between letters/digits. No normalization is performed.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct ContractId(Text);
 
@@ -245,6 +247,12 @@ impl ContractId {
         Ok(Self(Text::owned(value)))
     }
 
+    /// Construct a validated constant. Panics for a noncanonical identifier.
+    ///
+    /// ```compile_fail,E0080
+    /// use rss_contract::ContractId;
+    /// const INVALID: ContractId = ContractId::from_static("foo");
+    /// ```
     #[must_use]
     pub const fn from_static(value: &'static str) -> Self {
         assert!(valid_contract_id(value), "invalid contract id");
@@ -291,6 +299,7 @@ const fn valid_contract_id(value: &str) -> bool {
     }
     let mut index = 0;
     let mut segment_start = true;
+    let mut dotted = false;
     while index < bytes.len() {
         let byte = bytes[index];
         if segment_start {
@@ -300,12 +309,19 @@ const fn valid_contract_id(value: &str) -> bool {
             segment_start = false;
         } else if byte == b'.' {
             segment_start = true;
-        } else if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+            dotted = true;
+        } else if byte == b'-' {
+            if index + 1 == bytes.len()
+                || !(bytes[index + 1].is_ascii_lowercase() || bytes[index + 1].is_ascii_digit())
+            {
+                return false;
+            }
+        } else if !(byte.is_ascii_lowercase() || byte.is_ascii_digit()) {
             return false;
         }
         index += 1;
     }
-    !segment_start
+    dotted && !segment_start
 }
 
 /// Canonical manifest contract version (`v{N}`).
@@ -500,34 +516,6 @@ const fn parse_static_version(value: &str) -> ContractVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, SystemTime};
-
-    #[test]
-    fn canonical_values_round_trip() -> Result<(), IdentityError> {
-        let id = ContractId::parse("runtime.inventory")?;
-        let version = ContractVersion::parse("v12")?;
-        let digest = SchemaDigest::parse(&format!("sha256:{}", "a".repeat(64)))?;
-        assert_eq!(id.as_str(), "runtime.inventory");
-        assert_eq!(version.to_string(), "v12");
-        assert_eq!(digest.as_str().len(), 71);
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_noncanonical_values() {
-        for value in [
-            "",
-            "Runtime.inventory",
-            "runtime..inventory",
-            "runtime._inventory",
-        ] {
-            assert!(ContractId::parse(value).is_err(), "{value}");
-        }
-        for value in ["", "1", "v0", "v01", "v-1"] {
-            assert!(ContractVersion::parse(value).is_err(), "{value}");
-        }
-        assert!(SchemaDigest::parse(&format!("sha256:{}", "A".repeat(64))).is_err());
-    }
 
     #[test]
     fn static_versions_accept_max_and_reject_invalid_values() {
@@ -535,106 +523,6 @@ mod tests {
         for value in ["v0", "v01", "v12x", "v4294967296"] {
             assert!(std::panic::catch_unwind(|| parse_static_version(value)).is_err());
         }
-    }
-
-    #[test]
-    fn identity_error_messages_are_stable_distinct_and_redacted() {
-        let messages = [
-            IdentityError::Empty,
-            IdentityError::TooLong,
-            IdentityError::InvalidFormat,
-            IdentityError::ZeroVersion,
-        ]
-        .map(|error| error.to_string());
-        assert_eq!(
-            messages
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            4
-        );
-        assert!(messages.iter().all(|message| !message.contains("secret")));
-    }
-
-    #[test]
-    fn exhaustive_public_value_boundaries() -> Result<(), IdentityError> {
-        let max = format!("a.{}", "b".repeat(253));
-        assert_eq!(ContractId::parse(&max)?.to_string(), max);
-        assert_eq!(
-            ContractId::parse(&"a".repeat(256)),
-            Err(IdentityError::TooLong)
-        );
-        assert_eq!(ContractId::parse("a/b"), Err(IdentityError::InvalidFormat));
-        assert_eq!(
-            ContractVersion::from_major(0),
-            Err(IdentityError::ZeroVersion)
-        );
-        assert_eq!(ContractVersion::from_major(7)?.major(), 7);
-        assert!(ContractVersion::parse("v4294967296").is_err());
-        let digest = format!("sha256:{}", "0".repeat(64));
-        let parsed = SchemaDigest::parse(&digest)?;
-        assert_eq!(parsed.to_string(), digest);
-        assert!(SchemaDigest::parse("sha256:00").is_err());
-        let descriptor = ContractDescriptor::from_static_version(
-            "runtime.inventory",
-            "v12",
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
-        assert_eq!(descriptor.id(), "runtime.inventory");
-        assert_eq!(descriptor.version().major(), 12);
-        assert_eq!(descriptor.schema_digest().len(), 71);
-        assert_eq!(
-            descriptor,
-            ContractDescriptor::from_static(
-                "runtime.inventory",
-                12,
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-        );
-        assert_eq!(
-            ContractId::from_static("runtime.inventory"),
-            ContractId::parse("runtime.inventory")?
-        );
-        assert_eq!(
-            SchemaDigest::from_static(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            ),
-            SchemaDigest::parse(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )?
-        );
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn timepoint_rejects_out_of_range_values_and_round_trips() {
-        assert_eq!(Timepoint::try_from(-1), Err(TimepointError::BeforeEpoch));
-        assert_eq!(
-            Timepoint::try_from(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
-            Err(TimepointError::BeforeEpoch)
-        );
-        assert_eq!(
-            Timepoint::try_from_duration(Duration::from_secs(i64::MAX as u64 + 1)),
-            Err(TimepointError::Overflow)
-        );
-
-        let epoch = Timepoint::try_from(0).expect("epoch is representable");
-        let later = Timepoint::try_from(42).expect("timestamp is representable");
-        assert!(epoch < later);
-        assert_eq!(later.unix_seconds(), 42);
-        assert_eq!(
-            later
-                .to_system_time()
-                .expect("system time is representable"),
-            SystemTime::UNIX_EPOCH + Duration::from_secs(42)
-        );
-        assert_eq!(
-            Timepoint::try_from(i64::MAX)
-                .expect("wire maximum is representable")
-                .unix_seconds(),
-            i64::MAX
-        );
     }
 
     #[test]
@@ -649,39 +537,5 @@ mod tests {
                 .unix_seconds(),
             i64::MAX
         );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn page_cursor_accepts_only_bounded_canonical_base64url() {
-        for raw in ["AQ", "AAE", "cGFnZTo0Mg", &"A".repeat(4096)] {
-            let cursor = PageCursor::parse(raw).expect("canonical cursor");
-            assert_eq!(cursor.as_str(), raw);
-        }
-
-        for raw in ["", "A", "AR", "AAF", "abc=", "abc+", "abc/", "not valid"] {
-            assert_eq!(PageCursor::parse(raw), Err(PageCursorError::Malformed));
-        }
-        assert_eq!(
-            PageCursor::parse(&"A".repeat(4097)),
-            Err(PageCursorError::TooLong)
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn page_cursor_diagnostics_are_closed_and_redacted() {
-        let raw = "c2VjcmV0LXRva2Vu";
-        let cursor = PageCursor::parse(raw).expect("canonical cursor");
-        assert!(!format!("{cursor:?}").contains(raw));
-
-        let errors = [
-            PageCursorError::Malformed,
-            PageCursorError::TooLong,
-            PageCursorError::Stale,
-        ];
-        for error in errors {
-            assert!(!error.to_string().contains(raw));
-        }
     }
 }

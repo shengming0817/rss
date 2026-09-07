@@ -13,6 +13,19 @@ not contain a registry, generated catalog, runtime binding, or admission authori
 Parsing errors distinguish empty, overlong, malformed, and zero-version identities without
 echoing rejected input.
 
+`ContractId` is at most 255 ASCII bytes and contains at least two dot-separated segments.
+Each segment starts with a lowercase letter, followed by lowercase letters, digits, or single
+hyphens between letters/digits. For example, `a.b` and `a-b.c1.d-2` are valid; `foo`, `foo-.bar`,
+and `foo--bar.baz` are rejected. Runtime parsing and all static identity/descriptor constructors
+share one validator; invalid static construction panics (a compile error in a constant).
+Identifiers are never normalized, aliased, or accepted through a legacy parser.
+
+The #2325 correction tightens the previously over-permissive parser. The owner confirmed there
+are no persisted or external noncanonical identities to retain. Canonical IDs retain their exact
+bytes, versions, routing keys and fingerprints. Message headers, PostgreSQL decoding, recovery
+and archive readers apply the same validation and reject noncanonical identities through their
+existing errors. This confirmation does not authorize changes to other persisted identities.
+
 `Timepoint` is a non-negative Unix `int64` seconds value with total ordering and fallible
 conversions. It does not provide a clock, `now`, deadlines, or scheduling authority.
 
@@ -51,5 +64,32 @@ const INVENTORY: ContractDescriptor = ContractDescriptor::from_static(
 assert_eq!(INVENTORY.id(), "runtime.inventory");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## Independent consumption proof
+
+From the RSS checkout, run:
+
+```sh
+cargo test -p rss-contract --locked
+python3 -m unittest discover -s hack/tests -p test_contract_package_proof.py
+python3 hack/contract-package-proof.py --source
+python3 hack/contract-package-proof.py --artifacts /path/to/candidate --revision <full-commit-sha>
+```
+
+The candidate directory uses the existing `packages.tsv`, `SHA256SUMS` and `.crate` format.
+The revision must match the proof checkout and the archive’s `.cargo_vcs_info.json`; its origin
+must be the clean `crates/contract` path. Both consumers run the same `tests/public_values.rs`
+and `tests/safe_semantics.rs`; the artifact consumer reads them from the verified archive itself.
+Missing, empty, ignored or failed suites cannot satisfy the proof. The package currently has no
+Cargo dependencies; any additional resolved package fails the proof until its consumption is
+explicitly designed. Each run uses a temporary independent workspace, lock and target directory,
+an empty Cargo home and the checkout's pinned Rust toolchain. Before running tests, rustc dep-info
+must place every transitive source input (including `include!` and `include_str!`) within the
+consumer or exact Contract package; checking only Cargo target roots is insufficient.
+
+The candidate workflow saves `contract-proof.json` with the revision, version, archive SHA-256,
+lock digest and executed test counts; commands and test results are in the job log. This proves
+behavior of that candidate artifact, not registry publication or product acceptance. Full private
+boundary tests and compile-fail documentation remain component tests, without a second copy.
 
 Licensed under the Apache License, Version 2.0.

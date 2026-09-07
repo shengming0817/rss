@@ -87,6 +87,14 @@ jobs:
             test -f "$RSS_PACKAGE_PROOF/$package-$version.crate"
           done < "$RSS_PACKAGE_PROOF/packages.tsv"
 
+      - name: Run independent Contract public behavior
+        env:
+          RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
+        run: |
+          python3 -m unittest discover -s hack/tests -p test_contract_package_proof.py
+          python3 hack/contract-package-proof.py --source
+          python3 hack/contract-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA" > "$RSS_PACKAGE_PROOF/contract-proof.json"
+
       - name: Verify independent MQTT artifact consumption
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
