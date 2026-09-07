@@ -40,7 +40,7 @@ pub async fn host(config: KafkaConfig) -> Result<(), KafkaError> {
     let log = root.path().join("cargo.log");
     let output = fs::File::create(&log)?;
     let mut child = Command::new(env!("CARGO"))
-        .args(["check", "--offline", "--quiet"])
+        .args(["check", "--offline"])
         .current_dir(root.path())
         .env("CARGO_TARGET_DIR", root.path().join("target"))
         .env_remove("RUSTFLAGS")
@@ -59,7 +59,10 @@ pub async fn host(config: KafkaConfig) -> Result<(), KafkaError> {
     let Some(status) = status else {
         child.kill()?;
         child.wait()?;
-        anyhow::bail!("independent compilation exceeded 120s");
+        anyhow::bail!(
+            "independent compilation exceeded 120s:\n{}",
+            fs::read_to_string(&log)?
+        );
     };
     assert!(status.success(), "{}", fs::read_to_string(log)?);
     let graph = Command::new(env!("CARGO"))

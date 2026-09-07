@@ -11,6 +11,11 @@ on:
         description: Earlier Git revision used for SemVer comparison
         required: true
         type: string
+      cold_cache:
+        description: Skip restores to measure a cold build; still save trusted branch caches
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -31,6 +36,12 @@ jobs:
     env:
       SCCACHE_CACHE_SIZE: 2G
       RSS_COMPILER_CACHE: 'on'
+      # Keep line-level diagnostics/coverage without expensive full variable debug metadata.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # llvm-cov owns RUSTC_WRAPPER, so cc-rs cannot infer the native compiler cache from it.
+      CC: sccache cc
+      CXX: sccache c++
       CI_PART: ${{ matrix.part }}
     steps:
       - name: Configure job-owned directories
@@ -78,6 +89,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Restore Cargo downloads
         id: download
+        if: inputs.cold_cache != true
         continue-on-error: true
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -91,6 +103,7 @@ jobs:
             ${{ steps.keys.outputs.download }}
       - name: Restore compiler objects
         id: compiler
+        if: inputs.cold_cache != true
         continue-on-error: true
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -116,6 +129,7 @@ jobs:
         run: |
           baseline="$(/usr/bin/git rev-parse --verify "$REQUESTED_BASELINE^{commit}")"
           [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
           if [ "$EVENT" = pull_request ]; then target=ci; else target=ci-full; fi
           /usr/bin/time -v make "$target" CI_BASE="$baseline" CI_PART="$CI_PART"
       - name: Record cache statistics and stop job server
@@ -123,13 +137,27 @@ jobs:
         if: always() && !cancelled() && steps.execution.outcome != 'skipped'
         continue-on-error: true
         env:
+          COLD_CACHE: ${{ inputs.cold_cache || false }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          BASELINE_SHA: ${{ steps.execution.outputs.baseline }}
+          EXECUTION_OUTCOME: ${{ steps.execution.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          COMPILER_OUTCOME: ${{ steps.compiler.outcome }}
+          DOWNLOAD_SAVE_KEY: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+          COMPILER_SAVE_KEY: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
           DOWNLOAD_KEY: ${{ steps.download.outputs.cache-matched-key }}
           COMPILER_KEY: ${{ steps.compiler.outputs.cache-matched-key }}
         run: |
           {
             echo "### $CI_PART cache"
-            echo "Cargo restore: ${DOWNLOAD_KEY:-miss}"
-            echo "Compiler restore: ${COMPILER_KEY:-miss}"
+            echo "Cold cache: $COLD_CACHE"
+            echo "Candidate: $CANDIDATE_SHA"
+            echo "Baseline: $BASELINE_SHA"
+            echo "Execution: $EXECUTION_OUTCOME"
+            echo "Cargo restore outcome: $DOWNLOAD_OUTCOME; key: ${DOWNLOAD_KEY:-none}"
+            echo "Compiler restore outcome: $COMPILER_OUTCOME; key: ${COMPILER_KEY:-none}"
+            echo "Cargo save candidate: $DOWNLOAD_SAVE_KEY"
+            echo "Compiler save candidate: $COMPILER_SAVE_KEY"
             sccache --show-stats || echo 'Compiler statistics unavailable'
             for path in "$CARGO_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR"; do
               if [ -d "$path" ]; then du -sh "$path" || true; else echo "Not created: $path"; fi

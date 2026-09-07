@@ -176,12 +176,16 @@ type Stream =
     rss_transactional_messaging::transport::ManagedDeliveryStream<rss_mqtt::MqttDeliveries>;
 impl TransactionCase {
     async fn publish(&self, id: &str) -> anyhow::Result<()> {
-        assert!(matches!(
-            self.adapter
-                .publish(&message(id)?, support::deadline(&*self.clock))
-                .await,
-            PublishOutcome::Confirmed(())
-        ));
+        let outcome = self
+            .adapter
+            .publish(&message(id)?, support::deadline(&*self.clock))
+            .await;
+        assert!(
+            matches!(outcome, PublishOutcome::Confirmed(())),
+            "fixture publication {id}: ambiguous={} failure={:?}",
+            outcome.is_ambiguous(),
+            outcome.failure()
+        );
         Ok(())
     }
     async fn process(

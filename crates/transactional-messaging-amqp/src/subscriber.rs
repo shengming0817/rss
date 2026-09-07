@@ -295,6 +295,17 @@ impl SubscriberInner {
         };
         self.shutdown.cancel();
         let close_on_cancel = conn::OnDrop::new(|| conn::close_connection_now(&connection));
+        // Finish basic.cancel/cancel-ok while the channels are still Connected. Lapin marks
+        // all channels Closing when connection.close starts; racing the two RPCs can fail both.
+        // The outer total budget and guard still force retirement if a cancellation gets stuck.
+        let mut failures = ShutdownFailures::default();
+        for task in tasks {
+            failures.record(
+                &self.name,
+                ShutdownStage::SubscriberCancellation,
+                task.await.map_err(AmqpShutdownError::task),
+            );
+        }
         let result = if connection.status().connected() {
             connection
                 .close(REPLY_SUCCESS, "subscriber resource shutdown".into())
@@ -304,15 +315,7 @@ impl SubscriberInner {
             Ok(())
         };
         close_on_cancel.disarm_on_success(&result);
-        let mut failures = ShutdownFailures::default();
         failures.record(&self.name, ShutdownStage::TransportClose, result);
-        for task in tasks {
-            failures.record(
-                &self.name,
-                ShutdownStage::SubscriberCancellation,
-                task.await.map_err(AmqpShutdownError::task),
-            );
-        }
         failures.finish()
     }
 }

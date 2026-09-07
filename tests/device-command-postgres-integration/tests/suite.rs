@@ -261,16 +261,31 @@ impl Fixture {
         )
     }
     async fn publish(&self) -> anyhow::Result<()> {
-        let claims = self
-            .outbox
-            .claim_partition_heads(std::num::NonZeroUsize::MIN.saturating_add(63), budget()?)
-            .await?;
-        for claim in claims {
-            self.outbox
-                .settle(claim, OutboxSettlement::Published(()), budget()?)
+        // A claim returns one tenant's committed batch; drain all ready fixture batches.
+        // One inherited deadline bounds the whole drain without retrying failed operations.
+        let timer = Timer::new();
+        let deadline = AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(10))?;
+        loop {
+            let claims = self
+                .outbox
+                .claim_partition_heads(
+                    std::num::NonZeroUsize::MIN.saturating_add(63),
+                    deadline.operation(&timer),
+                )
                 .await?;
+            if claims.is_empty() {
+                return Ok(());
+            }
+            for claim in claims {
+                self.outbox
+                    .settle(
+                        claim,
+                        OutboxSettlement::Published(()),
+                        deadline.operation(&timer),
+                    )
+                    .await?;
+            }
         }
-        Ok(())
     }
     async fn count(&self, table: &str, id: &str) -> anyhow::Result<i64> {
         // Test-owned closed table selection; no caller SQL interpolation.

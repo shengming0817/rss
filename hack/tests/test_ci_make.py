@@ -24,7 +24,7 @@ class MakeTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
-        cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$COMMAND_LOG"\ncase "$*" in *"${FAIL_COMMAND:-NEVER}"*) exit 9;; esac\n')
+        cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$COMMAND_LOG"\ncase "$*" in *"${FAIL_COMMAND-NEVER}"*) exit 9;; esac\n')
         cargo.chmod(0o755)
         for command in (["init", "-q"], ["-c", "user.name=Test", "-c", "user.email=test@example.com",
                                         "commit", "--allow-empty", "-qm", "fixture"],

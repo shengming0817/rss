@@ -25,12 +25,22 @@ class FinalizerTests(unittest.TestCase):
                                 'SCCACHE_DIR': str(root / 'rss-sccache'), 'CARGO_HOME': str(root / 'missing-home'),
                                 'CARGO_TARGET_DIR': str(root / 'missing-target'), 'CI_PART': 'tests',
                                 'GITHUB_STEP_SUMMARY': str(root / 'summary'), 'GITHUB_OUTPUT': str(root / 'outputs'),
-                                'STOP_PROOF': str(root / 'stopped')}
+                                'STOP_PROOF': str(root / 'stopped'), 'COLD_CACHE': 'true',
+                                'CANDIDATE_SHA': 'a' * 40, 'BASELINE_SHA': 'b' * 40,
+                                'EXECUTION_OUTCOME': 'failure', 'DOWNLOAD_OUTCOME': 'skipped',
+                                'COMPILER_OUTCOME': 'skipped', 'DOWNLOAD_SAVE_KEY': 'download-cold',
+                                'COMPILER_SAVE_KEY': 'compiler-cold'}
             result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], env=env,
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((root / 'stopped').exists())
             summary = (root / 'summary').read_text()
+            self.assertIn('Cold cache: true', summary)
+            self.assertIn('Candidate: ' + 'a' * 40, summary)
+            self.assertIn('Baseline: ' + 'b' * 40, summary)
+            self.assertIn('Cargo restore outcome: skipped; key: none', summary)
+            self.assertIn('Compiler save candidate: compiler-cold', summary)
+            self.assertIn('Execution: failure', summary)
             self.assertIn('Filesystem', summary)
             self.assertIn('missing-target', summary)
             self.assertIn('stopped=true', (root / 'outputs').read_text())
