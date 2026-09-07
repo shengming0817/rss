@@ -102,13 +102,16 @@ async fn permanent_resolver_failures_reject_the_effect() -> anyhow::Result<()> {
     projection
         .initialize(
             &scope,
+            &super::scenarios::model::DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             &control,
         )
         .await?;
     let execution = projection.projection(
-        projection.takeover(&scope, &control).await?,
+        projection
+            .takeover(&scope, &super::scenarios::model::DEFINITION, &control)
+            .await?,
         super::scenarios::model::Facts::new(source.clone()),
     )?;
     reject_permanent(&f, &source, &execution, &control, &event).await

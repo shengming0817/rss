@@ -116,7 +116,7 @@ pub const MIGRATION:&str=rss_observation_postgres::MIGRATION_SQL;
 use rss_observation_postgres::PgSource;
 use rss_projection::{Source,Event,SourceScope,BatchLimit,Execution,Timer,Control,RunLimit};
 use std::sync::Arc;
-pub fn source<C:Clock>(store:Arc<PgStore<C>>,grant:JournalReadGrant)->Result<PgSource<C>,Error>{PgSource::new(store,grant)}
+pub fn source<C:Clock>(store:Arc<PgStore<C>>,grant:JournalReadGrant,scope:SourceScope)->Result<PgSource<C>,Error>{PgSource::new(store,grant,scope)}
 pub async fn read<C:Clock>(source:&PgSource<C>,scope:&SourceScope)->Result<Vec<Event>,rss_projection::Error>{source.read(scope,None,BatchLimit::new(10)?).await}
 pub async fn resolve<C:Clock>(source:&PgSource<C>,event:&Event,deadline:Deadline)->Result<ApplicableRecord,Error>{source.resolve(event,deadline).await}
 pub async fn run<C:Clock,E:Execution,T:Timer>(source:&PgSource<C>,execution:&E,control:&Control<'_,T>)->Result<rss_projection::Report,rss_projection::Error>{rss_projection::run(source,execution,control,RunLimit::new(BatchLimit::new(10)?,100)?).await.into_result()}

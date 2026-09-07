@@ -1,7 +1,7 @@
 # rss-projection-postgres
 
 PostgreSQL 16+ committed-order journals and atomic projection execution. In one event transaction the
-adapter locks the checkpoint, validates the worker epoch, applies trusted read-model SQL, records
+adapter locks the checkpoint, validates the worker epoch and definition identity, applies trusted read-model SQL, records
 fact identity and advances the checkpoint. An old worker is fenced **before** the effect.
 
 The caller provides a configured SQLx `PgPool`; the adapter adopts its lifecycle. Configure TLS
@@ -22,9 +22,23 @@ and business-table policies. The tenant setting provides isolation within a trus
 it does not authenticate a caller that already holds database credentials.
 
 The schema contains only source allocators, events, generation/checkpoint state and fact receipts.
-It does not contain product read models or settings. First release supports fresh installation
-only; no historical PostgreSQL migration chain or data adoption is attempted. Future migrations
-are append-only and must preserve these persisted identities.
+It does not contain product read models or settings. Revision 3 binds each generation to exactly
+one 32-byte `definition_identity`, independent of its primary key. Runtime roles cannot update it.
+
+`UPGRADE_SQL` upgrades revision 2 to 3 only when **all tenants have no existing checkpoints**.
+It owns an explicit transaction: stop workers and execute it outside another transaction as the
+schema owner. A nullable column is added then immediately made NOT NULL; PostgreSQL validates
+all physical rows, including those hidden by FORCE RLS. Any existing generation aborts the
+upgrade without adopting or changing its data. Roll back the failed connection before reuse,
+or close it. No default identity, backfill or first-takeover adoption is provided. If unexpected
+legacy generations exist, stop: their disposition requires a separate product migration decision.
+
+After a successful upgrade, grant runtime EXECUTE on the new component functions before starting
+v3 workers. Old initialize/takeover/lock/finish signatures are removed, so old clients cannot
+continue through a compatibility path. The provider admits only revision 3 with its required
+identity column/constraint and EXECUTE permission on each required new function.
+Missing or revoked function permission rejects `PgStore::new` with `StorageContract`. Existing migration files remain append-only.
+Fresh `MIGRATION_SQL` also includes this transaction; do not nest it inside a caller transaction.
 
 ## API and recovery
 
@@ -38,14 +52,17 @@ are append-only and must preserve these persisted identities.
    is unacknowledged, quarantine the caller-owned pool lease with `close_on_drop` rather than
    returning it for reuse. The returned position is staged, never proof of commit.
    Acquire allocator locks before business rows, and multiple allocator locks in sorted source order.
-2. `initialize` accepts `GenerationStart::beginning()` or
+2. `initialize(scope, definition, start, bound, control)` requires an explicit
+   `DefinitionIdentity` and accepts `GenerationStart::beginning()` or
    `GenerationStart::after(position, complete_baseline_receipts)`. Positioned starts atomically
    import the supplied fact IDs/digests, so a baseline fact redelivered at a later position cannot
    apply twice. The product must prepare the matching read model and complete receipt set,
-   including filtered facts. Reinitialization rejects changed start, bound or baseline receipts;
-   starting at a bare coordinate without receipts is not supported. `takeover`
+   including filtered facts. Reinitialization rejects changed definition, start, bound or baseline receipts;
+   starting at a bare coordinate without receipts is not supported. `takeover(scope, definition, control)` locks and verifies the stored definition before it
    explicitly increments the checkpoint epoch and returns a private `PgClaim`; no lease or timer
-   controls authority. Store identity prevents a claim being attached to a different store handle.
+   controls authority. A different definition returns `Conflict` without changing epoch/token or
+   granting a claim, even when initialization was skipped. Claims and sessions expose their
+   immutable definition; checkpoint reads, event lock and settlement verify it again. Store identity prevents a claim being attached to a different store handle.
 3. `projection(claim, effect)` implements core `Execution`. `PgEffect` receives the borrowed SQL
    transaction and exact scope, returning only `PgEffectOutcome::Applied` or `Filtered`.
    Only the adapter can report a receipt-confirmed `Duplicate`. Include tenant, source/projection (when shared), and generation in
@@ -138,3 +155,17 @@ Application SQL errors cannot claim component protocol codes even when they rais
 Call `store.close(&control)` after cancelling and joining workers. Admission closes immediately;
 `CloseOutcome` distinguishes a drained pool from cancellation/deadline with outstanding borrowers.
 All adopted connections must use the same dedicated runtime login without `SET ROLE` masking.
+
+## Definition declaration and API replacement
+
+The application mapping owns its definition value. The counter example declares a stable fingerprint
+beside its effect; initialization, replay and restart reuse it. The library does not compute or prove
+SQL/binary identity. Change the generation when changing the mapping; change the source when
+rebuilding the input stream, even if payload encoding stays the same.
+
+Revision 3 replaces the old Rust initialization/takeover signatures and adds session identity
+accessors and the external-target definition parameter. Update consumers together with the schema;
+there are no old overloads, aliases, defaults or compatibility features.
+
+ref: serverlesstechnology/cqrs persistence/postgres-es/src/view_repository.rs (version CAS;
+this adapter retains effect, receipt and checkpoint in its own single transaction)

@@ -108,8 +108,12 @@ ref: baseline 5b63e10 adapters/postgres/src/device_command.rs (exact receipt rec
 
 Enable `projection` for Source and independent resolution, without loading `rss-projection-postgres`.
 Enable the additive `projection-postgres` feature for borrowed PostgreSQL transaction resolution.
-Both features use the same journal and reference format. Use `PgSource::new(Arc<PgStore<C>>, JournalReadGrant)`. It implements
-`rss_projection::Source` for exactly `(tenant, "rss.observation.v1")`; source mismatches fail.
+Both features use the same journal and reference format. Use `PgSource::new(Arc<PgStore<C>>, JournalReadGrant, SourceScope)`. It implements
+`rss_projection::Source` for that exact scope; the constructor rejects a tenant different from
+the grant, and reads/resolution reject scope mismatches. The application declares the journal's
+source lineage (the example uses `rss.observation.v1`), reuses it across restarts and changes it
+after rebuilding the input journal. This does not authenticate database provenance. Source lineage
+is independent of Reference v1 encoding, producer epoch and source-local positions.
 The flag controls dependencies and APIs only: every installation and every receive uses the same
 revision-2 journal, including when this feature is disabled. `high_water` and `read` query visible
 immutable batch positions, never producer sequence, wall-clock time or current lifecycle state.
@@ -129,7 +133,10 @@ and table SELECT as well. The resolver does not change session identity, deadlin
 Observation error classification in both entry points; the example maps invalid references,
 authorization failures and storage-contract violations to a rejected effect, rather than transient
 unavailability. Neither category advances the checkpoint.
-Use the existing Projection `initialize` / `takeover` / `projection` / `run` APIs for atomic
+The consumer mapping supplies its own `DefinitionIdentity` to Projection `initialize` and
+`takeover`; the source does not invent a definition for a business read model. The handoff mapping
+owns its declaration next to its effect. A changed definition requires a new generation, and
+mismatched takeover must fail before Facts SQL. Use `projection` / `run` for atomic
 read-model SQL, write-authority validation, fact receipt and checkpoint. The source's own reads
 have a 30-second provider bound; runner Control additionally bounds the whole invocation.
 

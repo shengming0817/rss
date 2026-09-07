@@ -12,7 +12,13 @@ pub(super) async fn crash(
 ) -> anyhow::Result<()> {
     let s = scope("process-crash", TENANT)?;
     store
-        .initialize(&s, GenerationStart::beginning(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
     let root = std::env::temp_dir().join(format!("rss-projection-crash-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root)?;
@@ -49,7 +55,7 @@ pub(super) async fn crash(
     child.wait()?;
     ready??;
     assert_eq!(count(owner, &s).await?, 0);
-    let projection = store.projection(store.takeover(&s, control).await?, Counter)?;
+    let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     assert_eq!(projection.checkpoint().await?.position, None);
     projection
         .execute(None, &event(&s, 0, "crash-fact", b"x")?, control)
@@ -95,7 +101,7 @@ async fn projection_worker_child() -> anyhow::Result<()> {
     let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let s = scope("process-crash", TENANT)?;
     let projection = store.projection(
-        store.takeover(&s, &control).await?,
+        store.takeover(&s, &DEFINITION, &control).await?,
         CrashEffect(std::env::var("PROJECTION_TEST_MARKER")?.into()),
     )?;
     projection

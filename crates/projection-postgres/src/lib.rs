@@ -15,4 +15,11 @@ pub const MIGRATION_SQL: &str = concat!(
     include_str!("../migrations/0001_create_projection.sql"),
     "\n",
     include_str!("../migrations/0002_require_baseline_receipts.sql"),
+    "\n",
+    include_str!("../migrations/0003_bind_definition_identity.sql"),
 );
+
+/// One-way v2 to v3 upgrade, requiring no existing generations.
+/// Execute outside another transaction as the dedicated owner with workers stopped.
+/// Nonempty checkpoints abort and must be rolled back; no data adoption is provided.
+pub const UPGRADE_SQL: &str = include_str!("../migrations/0003_bind_definition_identity.sql");

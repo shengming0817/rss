@@ -15,6 +15,27 @@ pub(crate) fn validate_name(value: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Caller-declared identity of an exact projection definition and schema.
+/// The library compares these opaque bytes; it does not hash or verify SQL, binaries or closures.
+/// A changed definition requires a new generation, not a second identity for the same generation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefinitionIdentity([u8; 32]);
+impl DefinitionIdentity {
+    /// Declare an identity. The caller owns its meaning and stable derivation.
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+    /// Exact bytes for persistence and comparison.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+impl std::fmt::Debug for DefinitionIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DefinitionIdentity(<redacted>)")
+    }
+}
+
 /// Position within exactly one tenant/source. Zero is a valid first event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position(u64);

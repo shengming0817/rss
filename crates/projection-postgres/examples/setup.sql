@@ -8,6 +8,7 @@ SELECT format('GRANT CREATE ON DATABASE %I TO projection_owner', current_databas
 SET ROLE projection_owner;
 \ir ../migrations/0001_create_projection.sql
 \ir ../migrations/0002_require_baseline_receipts.sql
+\ir ../migrations/0003_bind_definition_identity.sql
 RESET ROLE;
 GRANT USAGE ON SCHEMA rss_projection TO projection_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA rss_projection TO projection_runtime;

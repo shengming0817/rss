@@ -186,6 +186,7 @@ impl Fixture {
         Ok(Arc::new(PgSource::new(
             store,
             JournalReadGrant::verify(&Trusted, TenantId::parse(tenant)?)?,
+            rss_projection::SourceScope::new(TenantId::parse(tenant)?, "rss.observation.v1")?,
         )?))
     }
     pub async fn projection(&self) -> anyhow::Result<rss_projection_postgres::PgStore> {

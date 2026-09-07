@@ -20,6 +20,7 @@ pub async fn crash(f: &Fixture) -> anyhow::Result<()> {
     projection
         .initialize(
             &scope,
+            &model::DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             &control,
@@ -34,7 +35,9 @@ pub async fn crash(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     assert_eq!(count, 0);
     let execution = projection.projection(
-        projection.takeover(&scope, &control).await?,
+        projection
+            .takeover(&scope, &model::DEFINITION, &control)
+            .await?,
         model::Facts::new(source.clone()),
     )?;
     assert_eq!(execution.checkpoint().await?.position, None);
@@ -150,6 +153,7 @@ async fn worker_child() -> anyhow::Result<()> {
     let source = Arc::new(PgSource::new(
         store,
         JournalReadGrant::verify(&Trusted, TenantId::parse(CRASH_TENANT)?)?,
+        rss_projection::SourceScope::new(TenantId::parse(CRASH_TENANT)?, "rss.observation.v1")?,
     )?);
     let projection = rss_projection_postgres::PgStore::new(
         PgPoolOptions::new()
@@ -166,7 +170,9 @@ async fn worker_child() -> anyhow::Result<()> {
         .read(source.scope(), None, BatchLimit::new(1)?)
         .await?;
     let execution = projection.projection(
-        projection.takeover(&scope, &control).await?,
+        projection
+            .takeover(&scope, &model::DEFINITION, &control)
+            .await?,
         CrashEffect {
             inner: model::Facts::new(source),
             marker: marker.into(),

@@ -1,4 +1,9 @@
 //! Application composition example. Provision examples/setup.sql first; see README.
+// SHA-256 of the application declaration "counter:sum-first-payload-byte:schema-v1".
+const DEFINITION: rss_projection::DefinitionIdentity = rss_projection::DefinitionIdentity::new([
+    189, 214, 58, 242, 104, 235, 47, 212, 61, 133, 205, 45, 244, 157, 158, 222, 11, 5, 102, 165,
+    56, 173, 45, 32, 8, 173, 6, 218, 162, 142, 19, 36,
+]);
 use rss_projection::{
     BatchLimit, Control, Event, GenerationStart, ProjectionScope, ReplayBound, RunLimit, Source,
     SourceScope, Timer, run,
@@ -75,12 +80,13 @@ pub async fn demo(store: &PgStore) -> anyhow::Result<()> {
     store
         .initialize(
             &live,
+            &DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             &control,
         )
         .await?;
-    let worker = store.projection(store.takeover(&live, &control).await?, Counter)?;
+    let worker = store.projection(store.takeover(&live, &DEFINITION, &control).await?, Counter)?;
     let limits = RunLimit::new(BatchLimit::new(100)?, 1000)?;
     println!("live: {:?}", run(store, &worker, &control, limits).await);
     // A second invocation resumes the same checkpoint and produces no extra effect.
@@ -90,12 +96,16 @@ pub async fn demo(store: &PgStore) -> anyhow::Result<()> {
     store
         .initialize(
             &replay,
+            &DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Through(bound),
             &control,
         )
         .await?;
-    let worker = store.projection(store.takeover(&replay, &control).await?, Counter)?;
+    let worker = store.projection(
+        store.takeover(&replay, &DEFINITION, &control).await?,
+        Counter,
+    )?;
     println!("replay: {:?}", run(store, &worker, &control, limits).await);
     let tenant = source.tenant();
     let totals=store.local_tx(&source,&control,move |tx| Box::pin(async move {

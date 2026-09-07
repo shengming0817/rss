@@ -19,9 +19,15 @@ pub(crate) async fn baseline_receipts_prevent_cross_start_duplicates(
         })
         .await?;
     store
-        .initialize(&s, baseline.clone(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            baseline.clone(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
-    let projection = store.projection(store.takeover(&s, control).await?, Counter)?;
+    let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     let repeated = event(&s, 1, "one", b"one")?;
     assert_eq!(
         projection
@@ -35,7 +41,7 @@ pub(crate) async fn baseline_receipts_prevent_cross_start_duplicates(
         Some(repeated.position())
     );
     store
-        .initialize(&s, baseline, ReplayBound::Live, control)
+        .initialize(&s, &DEFINITION, baseline, ReplayBound::Live, control)
         .await?;
     let changed = GenerationStart::after(
         original.position(),
@@ -45,7 +51,7 @@ pub(crate) async fn baseline_receipts_prevent_cross_start_duplicates(
     )?;
     assert_eq!(
         store
-            .initialize(&s, changed, ReplayBound::Live, control)
+            .initialize(&s, &DEFINITION, changed, ReplayBound::Live, control)
             .await,
         Err(Error::new(rss_projection::ErrorKind::Conflict))
     );
@@ -66,7 +72,7 @@ pub(crate) async fn invalid_baselines_are_atomic(
     )?;
     assert_eq!(
         store
-            .initialize(&s, baseline, ReplayBound::Live, control)
+            .initialize(&s, &DEFINITION, baseline, ReplayBound::Live, control)
             .await,
         Err(Error::new(rss_projection::ErrorKind::ScopeMismatch))
     );
@@ -82,7 +88,7 @@ pub(crate) async fn invalid_baselines_are_atomic(
         .bind(TENANT)
         .execute(&mut *tx)
         .await?;
-    assert!(sqlx::query("SELECT rss_projection.initialize($1::uuid,'baseline-invalid','counter','v1',0,false,NULL,ARRAY['one'],ARRAY[NULL::bytea])").bind(TENANT).execute(&mut *tx).await.is_err());
+    assert!(sqlx::query("SELECT rss_projection.initialize($1::uuid,'baseline-invalid','counter','v1',0,false,NULL,ARRAY['one'],ARRAY[NULL::bytea],decode(repeat('01',32),'hex'))").bind(TENANT).execute(&mut *tx).await.is_err());
     tx.rollback().await?;
     let absent: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rss_projection.checkpoints WHERE source_id='baseline-invalid'",

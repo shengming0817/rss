@@ -22,7 +22,9 @@ let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
 - `Source` returns a committed, immutable prefix in strictly increasing source-local position
   order. Positions are not comparable across tenants/sources. The runner validates the complete
   fetched batch before admitting effects. `None` precedes the first event; position zero is legal.
-- `Execution` represents a provider-bound generation/session. `run` loads its checkpoint, reads
+- `Execution` represents a provider-bound generation/session and exposes its verified
+  `DefinitionIdentity`. Providers must bind this identity before granting authority and verify
+  it on checkpoint reads and writes, before effects. `run` loads its checkpoint, reads
   bounded batches and settles each event. No task is spawned and no implicit retry/takeover occurs.
 - `Control` uses a required caller-injected monotonic `Timer`, absolute deadline and cancellation
   token. The total event budget includes duplicates and filtered events; phases never reset time.
@@ -32,6 +34,8 @@ let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
 - `AtLeastOnce` composes `ExternalCheckpoint` and an idempotent `ExternalTarget`. A successful
   remote effect followed by checkpoint failure is replayed. Remote deduplication keys must include
   tenant, source, projection, generation and fact ID, with conflict detection for changed bytes.
+  `ExternalTarget::apply` receives the session definition. The target must bind it immutably to
+  the generation and reject a different definition, not add it to the deduplication key.
   Remote conditional-write/fencing is the application's responsibility: local checkpoint CAS
   cannot stop an already admitted remote write. This is not an atomic cross-system transaction.
 
@@ -42,6 +46,14 @@ matching read-model baseline and its complete processed fact receipt set.
 conflicting facts; a provider verifies source binding and persists receipts with initialization.
 The snapshot producer is responsible for completeness, including filtered facts. A new generation gets separate read-model keys; product code decides
 when to switch readers. There is no in-place reset, cleanup, active/shadow registry or DLQ policy.
+
+`DefinitionIdentity::new([u8; 32])` is an opaque caller-declared definition/schema fingerprint.
+It is a generation attribute, not another scope key. The application supplies the same value on
+initialization and direct takeover; a mismatch is `Conflict` and grants no new execution right.
+There is no default, implicit adoption or automatic hashing of SQL, closures or build artifacts.
+The fingerprint checks declaration equality, not the truth of the actual mapping. A changed
+mapping uses a new generation. A rebuilt input journal uses a new `SourceScope` identity even
+when its encoding is unchanged; worker epoch and position never substitute for source lineage.
 
 Names are 1–128 ASCII alphanumeric/`_.:-` bytes. Payloads are encoded application facts, at most
 1 MiB; event type/schema information belongs in those bytes. Fingerprints use the exact bytes,

@@ -122,8 +122,9 @@ pub async fn composition(pool: sqlx::PgPool, tenant: TenantId) -> Result<rss_pro
     let store = PgStore::new(pool.clone()).await?;
     let source = SourceScope::new(tenant,"source")?;
     let scope = ProjectionScope::new(source.clone(),"projection","v1")?;
-    store.initialize(&scope,rss_projection::GenerationStart::beginning(),rss_projection::ReplayBound::Live,control).await?;
-    let execution = store.projection(store.takeover(&scope,control).await?,Effect)?;
+    let definition = rss_projection::DefinitionIdentity::new([1;32]);
+    store.initialize(&scope,&definition,rss_projection::GenerationStart::beginning(),rss_projection::ReplayBound::Live,control).await?;
+    let execution = store.projection(store.takeover(&scope,&definition,control).await?,Effect)?;
     let borrowed_source = source.clone();
     store.local_tx(&source,control,move |tx| Box::pin(async move {
         tx.append(&borrowed_source,"fact",&[1]).await?;

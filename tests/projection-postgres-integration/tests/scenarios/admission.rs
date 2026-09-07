@@ -27,7 +27,7 @@ pub(crate) async fn rejects_dangerous_acl(pool: &PgPool, owner: &PgPool) -> anyh
         );
         PgStore::new(pool.clone()).await?;
     }
-    Ok(())
+    required_function_permissions(pool, owner).await
 }
 
 pub(crate) async fn borrowed_timeout_rolls_back(
@@ -80,17 +80,23 @@ pub(crate) async fn store_identity(
 ) -> anyhow::Result<()> {
     let s = scope("claim-identity", TENANT)?;
     store
-        .initialize(&s, GenerationStart::beginning(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
     let second = PgStore::new(pool.clone()).await?;
     assert!(
-        matches!(second.projection(store.takeover(&s, control).await?, Counter), Err(e) if e.kind() == ErrorKind::ScopeMismatch)
+        matches!(second.projection(store.takeover(&s, &DEFINITION, control).await?, Counter), Err(e) if e.kind() == ErrorKind::ScopeMismatch)
     );
     assert!(
-        matches!(second.external_checkpoint(store.takeover(&s, control).await?), Err(e) if e.kind() == ErrorKind::ScopeMismatch)
+        matches!(second.external_checkpoint(store.takeover(&s, &DEFINITION, control).await?), Err(e) if e.kind() == ErrorKind::ScopeMismatch)
     );
-    store.projection(store.takeover(&s, control).await?, Counter)?;
-    store.external_checkpoint(store.takeover(&s, control).await?)?;
+    store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
+    store.external_checkpoint(store.takeover(&s, &DEFINITION, control).await?)?;
 
     Ok(())
 }
@@ -160,5 +166,36 @@ pub(crate) async fn application_error_cannot_claim_settlement(
     assert!(source.source().is_none());
     assert!(!format!("{source:?} {source}").contains("private-value"));
     assert_eq!(store.high_water(s.source()).await?, None);
+    Ok(())
+}
+
+async fn required_function_permissions(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
+    for (revoke, grant) in [
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[],bytea) FROM projection_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[],bytea) TO projection_runtime",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_projection.takeover(uuid,text,text,text,uuid,bytea) FROM projection_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_projection.takeover(uuid,text,text,text,uuid,bytea) TO projection_runtime",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_projection.lock_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea) FROM projection_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_projection.lock_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea) TO projection_runtime",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea) FROM projection_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea) TO projection_runtime",
+        ),
+    ] {
+        sqlx::raw_sql(revoke).execute(owner).await?;
+        let adoption = PgStore::new(pool.clone()).await;
+        sqlx::raw_sql(grant).execute(owner).await?;
+        assert!(
+            matches!(adoption, Err(error) if error.kind() == ErrorKind::StorageContract),
+            "missing EXECUTE must reject store admission"
+        );
+        PgStore::new(pool.clone()).await?;
+    }
     Ok(())
 }

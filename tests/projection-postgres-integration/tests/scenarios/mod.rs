@@ -1,3 +1,7 @@
+mod upgrade;
+pub(super) use upgrade::upgrade;
+mod definition;
+pub(super) use definition::binding as definition_binding;
 mod baseline;
 pub(super) use baseline::{
     baseline_receipts_prevent_cross_start_duplicates, invalid_baselines_are_atomic,
@@ -20,7 +24,7 @@ pub(super) async fn atomic_recovery(
     let s = scope("atomic", TENANT)?;
     let first = event(&s, 0, "fact", b"one")?;
     let old = session(store, &s, control).await?;
-    let current = store.projection(store.takeover(&s, control).await?, Counter)?;
+    let current = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     assert_eq!(
         old.execute(None, &first, control).await,
         Err(Error::new(rss_projection::ErrorKind::Fenced))
@@ -80,7 +84,7 @@ async fn rollback_cases(
     position: Position,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let rejected = store.projection(store.takeover(s, control).await?, Reject)?;
+    let rejected = store.projection(store.takeover(s, &DEFINITION, control).await?, Reject)?;
     let next = event(s, 2, "new", b"two")?;
     assert_eq!(
         rejected.execute(Some(position), &next, control).await,
@@ -250,9 +254,15 @@ pub(super) async fn replay(
     append(store, &s, "b", b"2", control).await?;
     let bound = ReplayBound::Through(store.high_water(s.source()).await?);
     store
-        .initialize(&s, GenerationStart::beginning(), bound, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            bound,
+            control,
+        )
         .await?;
-    let projection = store.projection(store.takeover(&s, control).await?, Counter)?;
+    let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     append(store, &s, "later", b"3", control).await?;
     let limit = RunLimit::new(BatchLimit::new(10)?, 1)?;
     let report = run(store, &projection, control, limit).await;
@@ -266,7 +276,7 @@ async fn replay_resume(
     s: &ProjectionScope,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let next = store.projection(store.takeover(s, control).await?, Counter)?;
+    let next = store.projection(store.takeover(s, &DEFINITION, control).await?, Counter)?;
     let report = run(
         store,
         &next,
@@ -279,7 +289,13 @@ async fn replay_resume(
     assert_eq!(count(owner, s).await?, 2);
     assert_eq!(
         store
-            .initialize(s, GenerationStart::beginning(), ReplayBound::Live, control)
+            .initialize(
+                s,
+                &DEFINITION,
+                GenerationStart::beginning(),
+                ReplayBound::Live,
+                control
+            )
             .await,
         Err(Error::new(rss_projection::ErrorKind::Conflict))
     );
@@ -295,6 +311,7 @@ async fn replay_new_generation(
     store
         .initialize(
             &fresh,
+            &DEFINITION,
             GenerationStart::after(
                 Position::new(1)?,
                 vec![
@@ -306,7 +323,7 @@ async fn replay_new_generation(
             control,
         )
         .await?;
-    let new = store.projection(store.takeover(&fresh, control).await?, Counter)?;
+    let new = store.projection(store.takeover(&fresh, &DEFINITION, control).await?, Counter)?;
     let report = run(
         store,
         &new,
@@ -366,12 +383,18 @@ pub(super) async fn takeover_waits_for_the_old_transaction(
 ) -> anyhow::Result<()> {
     let s = scope("handoff", TENANT)?;
     store
-        .initialize(&s, GenerationStart::beginning(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let old = store.projection(
-        store.takeover(&s, control).await?,
+        store.takeover(&s, &DEFINITION, control).await?,
         HeldEffect {
             entered: entered.clone(),
             release: release.clone(),
@@ -381,7 +404,7 @@ pub(super) async fn takeover_waits_for_the_old_transaction(
     let applying = old.execute(None, &fact, control);
     let taking = async {
         entered.notified().await;
-        let taking = store.takeover(&s, control);
+        let taking = store.takeover(&s, &DEFINITION, control);
         tokio::pin!(taking);
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut taking)
@@ -413,6 +436,7 @@ pub(super) async fn cancel_after_apply_discards_the_transaction(
     store
         .initialize(
             &s,
+            &DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             &control,
@@ -421,7 +445,7 @@ pub(super) async fn cancel_after_apply_discards_the_transaction(
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let projection = store.projection(
-        store.takeover(&s, &control).await?,
+        store.takeover(&s, &DEFINITION, &control).await?,
         HeldEffect {
             entered: entered.clone(),
             release,
@@ -488,11 +512,17 @@ pub(super) async fn filtered_receipts(
     append(store, &s, "fact", b"x", control).await?;
     append(store, &s, "next", b"y", control).await?;
     store
-        .initialize(&s, GenerationStart::beginning(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
     let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let execution = store.projection(
-        store.takeover(&s, control).await?,
+        store.takeover(&s, &DEFINITION, control).await?,
         Filter {
             calls: calls.clone(),
         },

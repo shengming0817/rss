@@ -87,13 +87,16 @@ async fn session(
     projection
         .initialize(
             scope,
+            &model::DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             control,
         )
         .await?;
     let execution = projection.projection(
-        projection.takeover(scope, control).await?,
+        projection
+            .takeover(scope, &model::DEFINITION, control)
+            .await?,
         model::Facts::new(source.clone()),
     )?;
     Ok(execution)
@@ -106,6 +109,7 @@ pub async fn composition(f: &Fixture) -> anyhow::Result<()> {
     let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "live")?;
     let execution = session(&projection, &scope, &input.source, &control).await?;
+    definition_and_source(f, &input, &projection, &scope, &execution, &control).await?;
     initial_projection(f, &input.source, &execution, &control).await?;
     reject_incomplete(&input).await?;
     queue_recovery(&input).await?;
@@ -308,7 +312,7 @@ async fn resumed_projection(
     } = input;
     let restart = f.projection().await?;
     let resumed = restart.projection(
-        restart.takeover(scope, control).await?,
+        restart.takeover(scope, &model::DEFINITION, control).await?,
         model::Facts::new(source.clone()),
     )?;
     let report = rss_projection::run(
@@ -605,13 +609,16 @@ async fn isolated_effects(f: &Fixture, source: &Arc<ObsSource>) -> anyhow::Resul
     projection
         .initialize(
             &scope,
+            &model::DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             &control,
         )
         .await?;
     let execution = projection.projection(
-        projection.takeover(&scope, &control).await?,
+        projection
+            .takeover(&scope, &model::DEFINITION, &control)
+            .await?,
         model::Facts::new(source.clone()),
     )?;
     let report = rss_projection::run(
@@ -626,5 +633,90 @@ async fn isolated_effects(f: &Fixture, source: &Arc<ObsSource>) -> anyhow::Resul
     let counts:(i64,i64)=sqlx::query_as("SELECT count(*),count(DISTINCT scope) FROM public.observation_facts WHERE tenant_id=$1::uuid AND generation='isolation'").bind(OTHER).fetch_one(&f.admin).await?;
     assert_eq!(counts, (18, 4));
     assert_eq!(values(f, "live", "outside").await?.len(), 1);
+    Ok(())
+}
+
+async fn definition_and_source(
+    f: &Fixture,
+    input: &Inputs,
+    projection: &rss_projection_postgres::PgStore,
+    scope: &ProjectionScope,
+    execution: &Session,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    let before: String = sqlx::query_scalar("SELECT row_to_json(c)::text FROM rss_projection.checkpoints c WHERE tenant_id=$1::uuid AND generation='live'").bind(TENANT).fetch_one(&f.admin).await?;
+    let changed = rss_projection::DefinitionIdentity::new([2; 32]);
+    assert!(
+        matches!(projection.takeover(scope, &changed, control).await, Err(e) if e.kind() == rss_projection::ErrorKind::Conflict)
+    );
+    let after: String = sqlx::query_scalar("SELECT row_to_json(c)::text FROM rss_projection.checkpoints c WHERE tenant_id=$1::uuid AND generation='live'").bind(TENANT).fetch_one(&f.admin).await?;
+    assert_eq!(before, after);
+    assert_eq!(execution.checkpoint().await?.position, None);
+    assert!(values(f, "live", "inside").await?.is_empty());
+    rebuilt_checkpoint(input, projection, scope, control).await
+}
+
+async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
+    let tenant = rss_request_context::TenantId::parse(TENANT)?;
+    let grant = rss_observation::JournalReadGrant::verify(&Trusted, tenant)?;
+    let wrong =
+        rss_projection::SourceScope::new(rss_request_context::TenantId::parse(OTHER)?, "rebuilt")?;
+    assert!(
+        matches!(ObsSource::new(input.store.clone(), grant, wrong), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
+    );
+    let rebuilt = ObsSource::new(
+        input.store.clone(),
+        rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,
+        rss_projection::SourceScope::new(tenant, "rebuilt")?,
+    )?;
+    let original = input
+        .source
+        .read(input.source.scope(), None, BatchLimit::new(1)?)
+        .await?;
+    let new = rebuilt
+        .read(rebuilt.scope(), None, BatchLimit::new(1)?)
+        .await?;
+    assert_eq!(original.len(), 1);
+    assert_eq!(new.len(), 1);
+    assert_eq!(original[0].payload(), new[0].payload());
+    assert_ne!(original[0].source(), new[0].source());
+    assert!(
+        matches!(rebuilt.resolve(&original[0], deadline()).await, Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
+    );
+    Ok(rebuilt)
+}
+
+async fn rebuilt_checkpoint(
+    input: &Inputs,
+    projection: &rss_projection_postgres::PgStore,
+    scope: &ProjectionScope,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    let rebuilt = rebuilt_source(input).await?;
+    let new_scope = ProjectionScope::new(
+        rebuilt.scope().clone(),
+        scope.projection(),
+        scope.generation(),
+    )?;
+    projection
+        .initialize(
+            &new_scope,
+            &model::DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
+        .await?;
+    let checkpoint = projection.external_checkpoint(
+        projection
+            .takeover(&new_scope, &model::DEFINITION, control)
+            .await?,
+    )?;
+    assert_eq!(
+        rss_projection::ExternalCheckpoint::load(&checkpoint)
+            .await?
+            .position,
+        None
+    );
     Ok(())
 }

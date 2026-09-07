@@ -86,3 +86,13 @@ fn diagnostics_keep_classification_and_stop_before_raw_source() -> anyhow::Resul
     assert_eq!(invalid.uncertain().kind(), ErrorKind::CommitUnknown);
     Ok(())
 }
+
+#[test]
+fn definition_identity_is_exact_and_redacted() {
+    use rss_projection::DefinitionIdentity;
+    let identity = DefinitionIdentity::new([173; 32]);
+    assert_eq!(identity.as_bytes(), &[173; 32]);
+    assert_eq!(identity, DefinitionIdentity::new([173; 32]));
+    assert_ne!(identity, DefinitionIdentity::new([174; 32]));
+    assert!(!format!("{identity:?}").contains("173"));
+}

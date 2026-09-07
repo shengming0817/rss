@@ -17,10 +17,14 @@ impl ExternalTarget for &Remote {
     async fn apply<T: Timer>(
         &self,
         scope: &ProjectionScope,
+        definition: &DefinitionIdentity,
         event: &Event,
         control: &Control<'_, T>,
     ) -> Result<ApplyOutcome, Error> {
         control.check()?;
+        if definition != &DEFINITION {
+            return Err(Error::new(ErrorKind::Conflict));
+        }
         let mut facts = self
             .facts
             .lock()
@@ -48,7 +52,13 @@ pub(crate) async fn external_recovery(
 ) -> anyhow::Result<()> {
     let s = scope("external", TENANT)?;
     store
-        .initialize(&s, GenerationStart::beginning(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
     let remote = Remote {
         facts: Mutex::new(HashMap::new()),
@@ -56,8 +66,8 @@ pub(crate) async fn external_recovery(
         store: store.clone(),
         lose_checkpoint_ack: AtomicBool::new(true),
     };
-    let old = store.external_checkpoint(store.takeover(&s, control).await?)?;
-    let checkpoint = store.external_checkpoint(store.takeover(&s, control).await?)?;
+    let old = store.external_checkpoint(store.takeover(&s, &DEFINITION, control).await?)?;
+    let checkpoint = store.external_checkpoint(store.takeover(&s, &DEFINITION, control).await?)?;
     let execution = AtLeastOnce::new(checkpoint, &remote);
     let first = event(&s, 0, "one", b"one")?;
     assert_eq!(
@@ -107,9 +117,15 @@ pub(crate) async fn direct_advance_obeys_control(
 ) -> anyhow::Result<()> {
     let s = scope("direct-advance", TENANT)?;
     store
-        .initialize(&s, GenerationStart::beginning(), ReplayBound::Live, control)
+        .initialize(
+            &s,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
         .await?;
-    let checkpoint = store.external_checkpoint(store.takeover(&s, control).await?)?;
+    let checkpoint = store.external_checkpoint(store.takeover(&s, &DEFINITION, control).await?)?;
     let fact = event(&s, 0, "one", b"one")?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();

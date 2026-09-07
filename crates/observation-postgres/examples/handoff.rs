@@ -127,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let source = Arc::new(PgSource::new(
         store.clone(),
         JournalReadGrant::verify(&DemoAuthority, tenant)?,
+        rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
     )?);
     let projection = rss_projection_postgres::PgStore::new(
         PgPoolOptions::new()
@@ -141,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
     projection
         .initialize(
             &scope,
+            &model::DEFINITION,
             GenerationStart::beginning(),
             ReplayBound::Live,
             &control,
@@ -148,7 +150,9 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     for _ in 0..2 {
         let execution = projection.projection(
-            projection.takeover(&scope, &control).await?,
+            projection
+                .takeover(&scope, &model::DEFINITION, &control)
+                .await?,
             model::Facts::new(source.clone()),
         )?;
         let report = rss_projection::run(

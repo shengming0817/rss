@@ -10,7 +10,6 @@ use rss_request_context::Deadline;
 use serde::Serialize;
 use sqlx::{Row, postgres::PgRow};
 use std::{sync::Arc, time::Duration};
-const SOURCE: &str = "rss.observation.v1";
 const LOOKUP: &str = "SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
 const READ: &str = "SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND applicable AND ($2::bigint IS NULL OR log_position>$2) ORDER BY log_position LIMIT $3";
 /// Tenant-authorized immutable source. The adopted Observation store owns the pool lifecycle.
@@ -21,9 +20,17 @@ pub struct PgSource<C> {
     grant: JournalReadGrant,
 }
 impl<C: Clock> PgSource<C> {
-    /// Bind the existing admitted store to explicit tenant-wide journal authority.
-    pub fn new(store: Arc<PgStore<C>>, grant: JournalReadGrant) -> Result<Self, Error> {
-        let scope = SourceScope::new(grant.tenant(), SOURCE).map_err(projection_error)?;
+    /// Bind the admitted journal to explicit tenant authority and caller-declared source lineage.
+    /// Reuse this source on restart; use a new source after rebuilding the input journal.
+    /// This declaration does not authenticate the caller or prove the database's provenance.
+    pub fn new(
+        store: Arc<PgStore<C>>,
+        grant: JournalReadGrant,
+        scope: SourceScope,
+    ) -> Result<Self, Error> {
+        if scope.tenant() != grant.tenant() {
+            return Err(ErrorKind::Unauthorized.into());
+        }
         Ok(Self {
             store,
             scope,
@@ -180,7 +187,7 @@ fn event_for(
     record: &ApplicableRecord,
 ) -> Result<Event, Error> {
     let record = record.record();
-    if scope.tenant() != record.scope().tenant() || scope.source() != SOURCE {
+    if scope.tenant() != record.scope().tenant() {
         return Err(ErrorKind::Invariant.into());
     }
     let fingerprint = record.batch().fingerprint(record.scope())?;
@@ -247,21 +254,22 @@ mod tests {
         let decision = State::initial().advance(&batch, 100, &policy)?;
         let record =
             Record::from_durable(scope, batch, 100, policy, decision)?.into_applicable()?;
-        let source = SourceScope::new(tenant, SOURCE)?;
+        let source = SourceScope::new(tenant, "rss.observation.v1")?;
         let first = event_for(&source, Position::new(1)?, &record)?;
         let second = event_for(&source, Position::new(2)?, &record)?;
         assert_eq!(first.id(), second.id());
         assert_eq!(first.payload(), second.payload());
         assert_eq!(first.id().len(), 64);
         assert!(first.payload().len() < 4096);
-        assert!(
-            event_for(
-                &SourceScope::new(tenant, "other")?,
-                Position::new(1)?,
-                &record
-            )
-            .is_err()
-        );
+        let rebuilt = event_for(
+            &SourceScope::new(tenant, "rebuilt")?,
+            Position::new(1)?,
+            &record,
+        )?;
+        assert_ne!(first.source(), rebuilt.source());
+        assert_eq!(first.id(), rebuilt.id());
+        assert_eq!(first.payload(), rebuilt.payload());
+        assert_eq!(first.fingerprint(), rebuilt.fingerprint());
         Ok(())
     }
     #[test]
@@ -272,7 +280,7 @@ mod tests {
         let batch=Batch::decode(br#"{"version":1,"id":"golden","sequence":0,"observedAt":100,"coverage":{"id":"all","version":"v1","definition":"catalog","format":"bytes"},"body":{"kind":"snapshot","data":[]}}"#)?;
         let policy = Policy::new(10, 1, 10)?;
         let decision = State::initial().advance(&batch, 100, &policy)?;
-        let source = SourceScope::new(scope.tenant(), SOURCE)?;
+        let source = SourceScope::new(scope.tenant(), "rss.observation.v1")?;
         let record =
             Record::from_durable(scope, batch, 100, policy, decision)?.into_applicable()?;
         let event = event_for(&source, Position::new(1)?, &record)?;

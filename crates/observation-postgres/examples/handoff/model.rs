@@ -4,6 +4,13 @@ use rss_observation_postgres::PgSource;
 use rss_projection::{Event, ProjectionScope};
 use rss_projection_postgres::{PgEffect, PgEffectOutcome, PgOperationError, PgTransaction};
 use std::sync::Arc;
+// SHA-256 of the application declaration "observation-facts:coverage-regions:reference-v1:schema-v1".
+// Change this declaration when the mapping/schema changes; use a new generation.
+pub const DEFINITION: rss_projection::DefinitionIdentity =
+    rss_projection::DefinitionIdentity::new([
+        54, 81, 75, 83, 140, 245, 111, 193, 132, 112, 84, 184, 169, 178, 250, 111, 122, 139, 158,
+        212, 11, 198, 217, 90, 50, 161, 94, 154, 152, 245, 186, 190,
+    ]);
 pub struct Facts<C> {
     source: Arc<PgSource<C>>,
 }

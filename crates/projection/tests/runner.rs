@@ -1,4 +1,6 @@
 //! Scenarios extracted from projection_worker_restart.rs@5b63e10; no product bindings.
+const DEFINITION: rss_projection::DefinitionIdentity =
+    rss_projection::DefinitionIdentity::new([1; 32]);
 use rss_projection::*;
 use rss_request_context::TenantId;
 use std::{
@@ -77,6 +79,9 @@ impl Memory {
     }
 }
 impl Execution for Memory {
+    fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
+        &DEFINITION
+    }
     fn scope(&self) -> &ProjectionScope {
         &self.scope
     }
@@ -237,9 +242,11 @@ impl ExternalTarget for &Remote {
     async fn apply<T: Timer>(
         &self,
         _: &ProjectionScope,
+        definition: &rss_projection::DefinitionIdentity,
         event: &Event,
         control: &Control<'_, T>,
     ) -> Result<ApplyOutcome, Error> {
+        assert_eq!(definition.as_bytes(), &[1; 32]);
         control.check()?;
         let mut facts = self
             .facts
@@ -262,6 +269,9 @@ struct Progress {
     fail: AtomicBool,
 }
 impl ExternalCheckpoint for &Progress {
+    fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
+        &DEFINITION
+    }
     fn scope(&self) -> &ProjectionScope {
         &self.inner.scope
     }
@@ -348,6 +358,9 @@ struct ConsumingTime<'a> {
     clock: &'a Clock,
 }
 impl Execution for ConsumingTime<'_> {
+    fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
+        &DEFINITION
+    }
     fn scope(&self) -> &ProjectionScope {
         self.memory.scope()
     }
@@ -497,6 +510,9 @@ async fn observer_failure_cannot_prevent_or_erase_the_execution_report() -> anyh
 
 struct Filtering(Memory);
 impl Execution for Filtering {
+    fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
+        &DEFINITION
+    }
     fn scope(&self) -> &ProjectionScope {
         self.0.scope()
     }

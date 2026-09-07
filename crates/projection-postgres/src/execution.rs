@@ -4,8 +4,8 @@ use crate::{
     transaction::map_sql,
 };
 use rss_projection::{
-    ApplyOutcome, Checkpoint, Control, Error, ErrorKind, Event, Execution, ExternalCheckpoint,
-    GenerationStart, Position, ProjectionScope, ReplayBound, Timer,
+    ApplyOutcome, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event, Execution,
+    ExternalCheckpoint, GenerationStart, Position, ProjectionScope, ReplayBound, Timer,
 };
 use sqlx::Row;
 use std::{future::Future, sync::Arc, time::Duration};
@@ -15,11 +15,16 @@ use uuid::Uuid;
 /// Moving it into a session binds that session to one store and generation.
 pub struct PgClaim {
     scope: ProjectionScope,
+    definition: DefinitionIdentity,
     epoch: i64,
     token: Uuid,
     store: Arc<()>,
 }
 impl PgClaim {
+    /// Caller-declared definition verified before this claim was issued.
+    pub const fn definition_identity(&self) -> &DefinitionIdentity {
+        &self.definition
+    }
     /// Generation bound to this claim.
     pub const fn scope(&self) -> &ProjectionScope {
         &self.scope
@@ -31,6 +36,7 @@ impl PgStore {
     pub async fn initialize<T: Timer>(
         &self,
         scope: &ProjectionScope,
+        definition: &DefinitionIdentity,
         start: GenerationStart,
         bound: ReplayBound,
         control: &Control<'_, T>,
@@ -42,6 +48,7 @@ impl PgStore {
         {
             return Err(Error::new(ErrorKind::ScopeMismatch));
         }
+        let definition = *definition;
         let scope = scope.clone();
         let source = scope.source().clone();
         self.controlled_tx(&source, control, move |tx| {
@@ -50,31 +57,34 @@ impl PgStore {
                     ReplayBound::Live => (false, None),
                     ReplayBound::Through(end) => (true, end),
                 };
-                sqlx::query("SELECT rss_projection.initialize($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9)")
-                    .bind(scope.source().tenant().to_string())
-                    .bind(scope.source().source())
-                    .bind(scope.projection())
-                    .bind(scope.generation())
-                    .bind(encode_position(start.position()))
-                    .bind(replay)
-                    .bind(encode_position(end))
-                    .bind(
-                        start
-                            .receipts()
-                            .iter()
-                            .map(|r| r.id().to_owned())
-                            .collect::<Vec<_>>(),
-                    )
-                    .bind(
-                        start
-                            .receipts()
-                            .iter()
-                            .map(|r| r.fingerprint().to_vec())
-                            .collect::<Vec<_>>(),
-                    )
-                    .execute(&mut *tx.connection)
-                    .await
-                    .map_err(map_sql)?;
+                sqlx::query(
+                    "SELECT rss_projection.initialize($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                )
+                .bind(scope.source().tenant().to_string())
+                .bind(scope.source().source())
+                .bind(scope.projection())
+                .bind(scope.generation())
+                .bind(encode_position(start.position()))
+                .bind(replay)
+                .bind(encode_position(end))
+                .bind(
+                    start
+                        .receipts()
+                        .iter()
+                        .map(|r| r.id().to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .bind(
+                    start
+                        .receipts()
+                        .iter()
+                        .map(|r| r.fingerprint().to_vec())
+                        .collect::<Vec<_>>(),
+                )
+                .bind(definition.as_bytes().as_slice())
+                .execute(&mut *tx.connection)
+                .await
+                .map_err(map_sql)?;
                 Ok(())
             })
         })
@@ -84,8 +94,10 @@ impl PgStore {
     pub async fn takeover<T: Timer>(
         &self,
         scope: &ProjectionScope,
+        definition: &DefinitionIdentity,
         control: &Control<'_, T>,
     ) -> Result<PgClaim, Error> {
+        let definition = *definition;
         let scope = scope.clone();
         let source = scope.source().clone();
         let token = Uuid::new_v4();
@@ -93,18 +105,20 @@ impl PgStore {
         self.controlled_tx(&source, control, move |tx| {
             Box::pin(async move {
                 let epoch = sqlx::query_scalar(
-                    "SELECT rss_projection.takeover($1::uuid,$2,$3,$4,$5::uuid)",
+                    "SELECT rss_projection.takeover($1::uuid,$2,$3,$4,$5::uuid,$6)",
                 )
                 .bind(scope.source().tenant().to_string())
                 .bind(scope.source().source())
                 .bind(scope.projection())
                 .bind(scope.generation())
                 .bind(token.to_string())
+                .bind(definition.as_bytes().as_slice())
                 .fetch_one(&mut *tx.connection)
                 .await
                 .map_err(map_sql)?;
                 Ok(PgClaim {
                     scope,
+                    definition,
                     epoch,
                     token,
                     store,
@@ -145,9 +159,12 @@ impl PgStore {
     async fn checkpoint_for(&self, claim: Arc<PgClaim>) -> Result<Checkpoint, Error> {
         self.transact(claim.scope.source().tenant(), Duration::from_secs(30), move |tx| Box::pin(async move {
             let s = &claim.scope;
-            let row = sqlx::query("SELECT position,replay,end_position FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
+            let row = sqlx::query("SELECT position,replay,end_position,definition_identity FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
                 .bind(s.source().tenant().to_string()).bind(s.source().source()).bind(s.projection()).bind(s.generation()).bind(claim.epoch).bind(claim.token.to_string())
                 .fetch_optional(&mut *tx.connection).await.map_err(map_sql)?.ok_or(Error::new(ErrorKind::Fenced))?;
+            if row.try_get::<Vec<u8>,_>("definition_identity").map_err(map_sql)?.as_slice() != claim.definition.as_bytes() {
+                return Err(Error::new(ErrorKind::Conflict));
+            }
             let position = row.try_get::<Option<i64>,_>("position").map_err(map_sql)?.map(decode_position).transpose()?;
             let end = row.try_get::<Option<i64>,_>("end_position").map_err(map_sql)?.map(decode_position).transpose()?;
             Ok::<_, Error>(Checkpoint { position, bound: if row.try_get::<bool,_>("replay").map_err(map_sql)? { ReplayBound::Through(end) } else { ReplayBound::Live } })
@@ -183,6 +200,9 @@ pub struct PgProjection<H> {
 impl<H: PgEffect + 'static> Execution for PgProjection<H> {
     fn scope(&self) -> &ProjectionScope {
         &self.claim.scope
+    }
+    fn definition_identity(&self) -> &DefinitionIdentity {
+        self.claim.definition_identity()
     }
     async fn checkpoint(&self) -> Result<Checkpoint, Error> {
         self.store.checkpoint_for(self.claim.clone()).await
@@ -231,6 +251,9 @@ impl ExternalCheckpoint for PgCheckpoint {
     fn scope(&self) -> &ProjectionScope {
         &self.claim.scope
     }
+    fn definition_identity(&self) -> &DefinitionIdentity {
+        self.claim.definition_identity()
+    }
     async fn load(&self) -> Result<Checkpoint, Error> {
         self.store.checkpoint_for(self.claim.clone()).await
     }
@@ -260,7 +283,7 @@ async fn lock(
 ) -> Result<bool, Error> {
     let s = &claim.scope;
     sqlx::query_scalar(
-        "SELECT rss_projection.lock_event($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10)",
+        "SELECT rss_projection.lock_event($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10,$11)",
     )
     .bind(s.source().tenant().to_string())
     .bind(s.source().source())
@@ -272,6 +295,7 @@ async fn lock(
     .bind(encode_position(Some(event.position())))
     .bind(event.id())
     .bind(event.fingerprint().as_slice())
+    .bind(claim.definition.as_bytes().as_slice())
     .fetch_one(&mut *tx.connection)
     .await
     .map_err(map_sql)
@@ -283,19 +307,22 @@ async fn finish(
     event: &Event,
 ) -> Result<(), Error> {
     let s = &claim.scope;
-    sqlx::query("SELECT rss_projection.finish_event($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10)")
-        .bind(s.source().tenant().to_string())
-        .bind(s.source().source())
-        .bind(s.projection())
-        .bind(s.generation())
-        .bind(claim.epoch)
-        .bind(claim.token.to_string())
-        .bind(encode_position(expected))
-        .bind(encode_position(Some(event.position())))
-        .bind(event.id())
-        .bind(event.fingerprint().as_slice())
-        .execute(&mut *tx.connection)
-        .await
-        .map_err(map_sql)?;
+    sqlx::query(
+        "SELECT rss_projection.finish_event($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10,$11)",
+    )
+    .bind(s.source().tenant().to_string())
+    .bind(s.source().source())
+    .bind(s.projection())
+    .bind(s.generation())
+    .bind(claim.epoch)
+    .bind(claim.token.to_string())
+    .bind(encode_position(expected))
+    .bind(encode_position(Some(event.position())))
+    .bind(event.id())
+    .bind(event.fingerprint().as_slice())
+    .bind(claim.definition.as_bytes().as_slice())
+    .execute(&mut *tx.connection)
+    .await
+    .map_err(map_sql)?;
     Ok(())
 }
