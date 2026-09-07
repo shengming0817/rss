@@ -124,8 +124,8 @@ fn worker<S: DeliverySource<Vec<u8>>>(
     Ok(async move { worker.run(token).await })
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worker_resubscribes_after_lost_settlement_without_duplicate_effect() -> anyhow::Result<()>
-{
+async fn shared_mqtt_worker_resubscribes_after_lost_settlement_without_duplicate_effect()
+-> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(45), recovery()).await?
 }
 async fn recovery() -> anyhow::Result<()> {
@@ -133,7 +133,7 @@ async fn recovery() -> anyhow::Result<()> {
     sqlx::raw_sql("GRANT SELECT,INSERT ON public.mqtt_handoff TO mqtt_runtime")
         .execute(&database.owner)
         .await?;
-    let mqtt = testkit::mqtt_tls(true).await?;
+    let mqtt = testkit::shared_mqtt_tls().await?;
     let clock = Arc::new(Timer::new());
     let (publisher, receiver, resource) = rss_mqtt::connect(
         support::config(&mqtt, "worker-recovery", vec!["outbox/events".into()])?,

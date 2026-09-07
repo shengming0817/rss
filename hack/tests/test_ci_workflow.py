@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class FinalizerTests(unittest.TestCase):
     def test_empty_selection_and_failed_diagnostics_still_stop_server(self):
-        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        workflow = (ROOT / '.github/workflows/ci-compile.yml').read_text()
         step = workflow.split('      - name: Record cache statistics and stop job server\n', 1)[1]
         body = step.split('        run: |\n', 1)[1].split('      - name:', 1)[0]
         script = textwrap.dedent(body)
@@ -47,7 +47,7 @@ class FinalizerTests(unittest.TestCase):
             self.assertIn('has_objects=false', (root / 'outputs').read_text())
 
     def test_save_receipts_distinguish_failure_success_and_skipped(self):
-        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        workflow = (ROOT / '.github/workflows/ci-compile.yml').read_text()
         step = workflow.split('      - name: Record cache save outcomes\n', 1)[1]
         body = step.split('        run: |\n', 1)[1].split('\n  cargo:', 1)[0]
         script = textwrap.dedent(body)

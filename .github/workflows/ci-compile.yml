@@ -1,0 +1,231 @@
+name: CI compile
+on:
+  workflow_call:
+    inputs:
+      part:
+        required: true
+        type: string
+      baseline:
+        required: true
+        type: string
+      coverage:
+        required: true
+        type: boolean
+      cold_cache:
+        default: false
+        type: boolean
+      warm_run:
+        default: ''
+        type: string
+permissions:
+  contents: read
+jobs:
+  compile:
+    name: ${{ inputs.part }}
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_CACHE_SIZE: 2G
+      RSS_COMPILER_CACHE: 'on'
+      # Keep line-level diagnostics/coverage without expensive full variable debug metadata.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # llvm-cov owns RUSTC_WRAPPER, so cc-rs cannot infer the native compiler cache from it.
+      CC: sccache cc
+      CXX: sccache c++
+      CI_PART: ${{ inputs.part }}
+      CI_PLAN: .local-ci-runs/current/plan.json
+    steps:
+      - name: Configure job-owned directories
+        run: |
+          {
+            echo "CARGO_HOME=$RUNNER_TEMP/rss-cargo"
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/rss-target"
+            echo "SCCACHE_DIR=$RUNNER_TEMP/rss-sccache"
+            echo "SCCACHE_SERVER_UDS=$RUNNER_TEMP/rss-sccache.sock"
+          } >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selection
+          path: .local-ci-runs/current
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.part == 'consumer'
+        with:
+          name: test-build
+          path: .local-ci-runs/current/build
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component clippy --component llvm-tools-preview
+          rustup default 1.96.0
+      - name: Install pinned Cargo tools
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
+        with:
+          tool: ${{ inputs.part == 'checks' && 'cargo-deny@0.19.9,sccache@0.15.0' || 'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,sccache@0.15.0' }}
+          fallback: none
+      - name: Install pinned SemVer checker from upstream release
+        if: inputs.part == 'checks'
+        run: |
+          archive="$RUNNER_TEMP/semver.tar.gz"
+          curl --fail --location --retry 3 -o "$archive" https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.49.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz
+          echo "72f6834d75d28a66e02c9fd6a230ce901bb30eee6067b85867a97445df040e4a  $archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/semver-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/semver-bin"
+          echo "$RUNNER_TEMP/semver-bin" >> "$GITHUB_PATH"
+      - name: Derive immutable cache keys
+        id: keys
+        run: |
+          toolchain="$(rustc -Vv | sha256sum | cut -d' ' -f1)"
+          inputs="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
+          download="rss-download-v2-$RUNNER_OS-$RUNNER_ARCH-$toolchain-$CI_PART-"
+          compiler="rss-sccache-v1-$RUNNER_OS-$RUNNER_ARCH-$toolchain-0.15.0-$CI_PART-${{ inputs.coverage && 'coverage' || 'ordinary' }}-"
+          {
+            echo "download=$download"
+            echo "compiler=$compiler"
+            echo "inputs=$inputs"
+            echo "suffix=$inputs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore Cargo downloads
+        id: download
+        if: inputs.cold_cache != true
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: ${{ steps.keys.outputs.download }}${{ inputs.warm_run != '' && format('{0}-{1}', steps.keys.outputs.inputs, inputs.warm_run) || steps.keys.outputs.suffix }}
+          restore-keys: ${{ inputs.warm_run == '' && steps.keys.outputs.download || 'rss-no-fallback-' }}
+      - name: Restore compiler objects
+        id: compiler
+        if: inputs.cold_cache != true
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ steps.keys.outputs.compiler }}${{ inputs.warm_run != '' && format('{0}-{1}', steps.keys.outputs.inputs, inputs.warm_run) || steps.keys.outputs.suffix }}
+          restore-keys: ${{ inputs.warm_run == '' && steps.keys.outputs.compiler || 'rss-no-fallback-' }}
+      - name: Discard partial restores on cache failure
+        env:
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          COMPILER_OUTCOME: ${{ steps.compiler.outcome }}
+        run: |
+          if [ "$DOWNLOAD_OUTCOME" = failure ]; then
+            rm -rf -- "$RUNNER_TEMP/rss-cargo/registry/index" "$RUNNER_TEMP/rss-cargo/registry/cache" "$RUNNER_TEMP/rss-cargo/git/db"
+          fi
+          if [ "$COMPILER_OUTCOME" = failure ]; then rm -rf -- "$RUNNER_TEMP/rss-sccache"; fi
+      - name: Require exact warm cache restoration
+        if: inputs.warm_run != ''
+        env:
+          DOWNLOAD_HIT: ${{ steps.download.outputs.cache-hit }}
+          COMPILER_HIT: ${{ steps.compiler.outputs.cache-hit }}
+        run: test "$DOWNLOAD_HIT" = true && test "$COMPILER_HIT" = true
+      - name: Run canonical Make checks
+        id: execution
+        run: |
+          status=0
+          make ci CI_PART="$CI_PART" || status=$?
+          if [ "$CI_PART" = checks ]; then make ci CI_PART=docs || status=$?; fi
+          exit "$status"
+      - name: Upload immutable test build
+        if: inputs.part == 'build' && steps.execution.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-build
+          path: .local-ci-runs/current/build
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload independent-consumer profiles and verdict
+        if: always() && inputs.part == 'consumer'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: result-consumer
+          path: .local-ci-runs/current/results
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Record cache statistics and stop job server
+        id: finish
+        if: always() && !cancelled() && steps.execution.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          COLD_CACHE: ${{ inputs.cold_cache || false }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          BASELINE_SHA: ${{ inputs.baseline }}
+          EXECUTION_OUTCOME: ${{ steps.execution.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          COMPILER_OUTCOME: ${{ steps.compiler.outcome }}
+          DOWNLOAD_SAVE_KEY: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+          COMPILER_SAVE_KEY: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+          DOWNLOAD_KEY: ${{ steps.download.outputs.cache-matched-key }}
+          COMPILER_KEY: ${{ steps.compiler.outputs.cache-matched-key }}
+        run: |
+          {
+            echo "### $CI_PART cache"
+            echo "Cold cache: $COLD_CACHE"
+            echo "Candidate: $CANDIDATE_SHA"
+            echo "Baseline: $BASELINE_SHA"
+            echo "Execution: $EXECUTION_OUTCOME"
+            echo "Cargo restore outcome: $DOWNLOAD_OUTCOME; key: ${DOWNLOAD_KEY:-none}"
+            echo "Compiler restore outcome: $COMPILER_OUTCOME; key: ${COMPILER_KEY:-none}"
+            echo "Cargo save candidate: $DOWNLOAD_SAVE_KEY"
+            echo "Compiler save candidate: $COMPILER_SAVE_KEY"
+            sccache --show-stats || echo 'Compiler statistics unavailable'
+            for path in "$CARGO_HOME" "$CARGO_TARGET_DIR" "$SCCACHE_DIR"; do
+              if [ -d "$path" ]; then du -sh "$path" || true; else echo "Not created: $path"; fi
+            done
+            df -h . || true
+          } | tee -a "$GITHUB_STEP_SUMMARY" || true
+          sccache --stop-server
+          # Save only the exact job-owned, non-symlink object directory.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['SCCACHE_DIR'])
+          assert not root.is_symlink() and root.resolve() == Path(os.environ['RUNNER_TEMP']).resolve() / 'rss-sccache'
+          assert root.is_dir()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"has_objects={str(any(root.iterdir())).lower()}\n")
+          PY
+          echo 'stopped=true' >> "$GITHUB_OUTPUT"
+      - name: Save Cargo downloads from the checks writer
+        id: download_save
+        if: >-
+          always() && !cancelled() && steps.execution.outcome == 'success' && steps.keys.outcome == 'success' &&
+          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+      - name: Save stopped compiler snapshot
+        id: compiler_save
+        if: >-
+          always() && !cancelled() && steps.finish.outputs.stopped == 'true' && steps.finish.outputs.has_objects == 'true' && steps.execution.outcome == 'success' &&
+          (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+
+      - name: Record cache save outcomes
+        if: always() && !cancelled() && steps.execution.outcome != 'skipped'
+        env:
+          DOWNLOAD_SAVE_OUTCOME: ${{ steps.download_save.outcome }}
+          COMPILER_SAVE_OUTCOME: ${{ steps.compiler_save.outcome }}
+          DOWNLOAD_SAVE_KEY: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+          COMPILER_SAVE_KEY: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+        run: |
+          {
+            echo "### $CI_PART save receipts"
+            echo "Cargo save action: $DOWNLOAD_SAVE_OUTCOME; key: $DOWNLOAD_SAVE_KEY"
+            echo "Compiler save action: $COMPILER_SAVE_OUTCOME; key: $COMPILER_SAVE_KEY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+

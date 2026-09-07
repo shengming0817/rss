@@ -19,6 +19,7 @@ class MakeTests(unittest.TestCase):
         (self.root / "hack/tests/test_ci_fixture.py").write_text("import unittest\nclass Fixture(unittest.TestCase):\n def test_fixture(self): pass\n")
         shutil.copy(ROOT / "Makefile", self.root)
         shutil.copy(ROOT / "hack/ci-run.py", self.root / "hack")
+        shutil.copy(ROOT / "hack/ci-pipeline.py", self.root / "hack")
         (self.root / "hack/ci-impact.py").write_text("import os; print(os.environ['DECISION'])\n")
         (self.root / "hack/semver-checks.sh").write_text('echo semver >> "$COMMAND_LOG"\nexit "${FAIL_SEMVER:-0}"\n')
         self.bin = self.root / "bin"
@@ -38,7 +39,7 @@ class MakeTests(unittest.TestCase):
                                  "DECISION": json.dumps({"full": False, "packages": ["rss-contract"], "reasons": []})}
         # Each fixture is an independent Make invocation, not a recursive parent build.
         for key in ('CARGO_TARGET_DIR', 'MAKEFLAGS', 'MFLAGS', 'MAKELEVEL', 'CI_FULL',
-                    'CI_PART', 'CI_PACKAGES', 'CI_BASE', 'CI_HEAD'):
+                    'CI_PART', 'CI_PACKAGES', 'CI_BASE', 'CI_HEAD', 'CI_PLAN', 'CI_ARTIFACTS', 'CI_FILTER'):
             self.env.pop(key, None)
 
     def run_make(self, part, target="ci", **env):
@@ -59,46 +60,30 @@ class MakeTests(unittest.TestCase):
         self.assertFalse(pool.exists())
         self.assertNotIn('rss-ci:', result.stderr)
 
-    def test_partition_and_full_fallback(self):
-        for full in (False, True):
-            env = {"DECISION": json.dumps({"full": True, "packages": [], "reasons": ["global"]})} if full else {}
-            checks, a = self.run_make("checks", **env)
-            tests, b = self.run_make("tests", **env)
-            all_result, both = self.run_make("all", **env)
-            for result in (checks, tests, all_result):
-                self.assertEqual(result.returncode, 0, result.stderr)
-            packages = '--workspace' if full else '-p rss-contract'
-            expected_checks = [f'check --locked {packages}',
-                               f'check --locked --no-default-features {packages}',
-                               f'check --locked --all-features {packages}',
-                               f'clippy --locked --all-targets --all-features {packages} -- -D warnings']
-            if full:
-                expected_checks += ['deny check -D unused-wrapper', 'semver']
-            expected_tests = ([f'llvm-cov nextest --locked {packages} --all-features --no-report --no-fail-fast'] if full else
-                              [f'nextest run --locked --all-features {packages} --no-fail-fast'])
-            expected_tests += [f'test --doc --locked --all-features {packages} --no-fail-fast']
-            if full:
-                expected_tests += ['llvm-cov report --fail-under-lines 80 --lcov --output-path lcov.info']
-            self.assertEqual(a, expected_checks)
-            self.assertEqual(b, expected_tests)
-            self.assertEqual(both, expected_checks + expected_tests)
-            self.assertEqual(all_result.stderr.count("pool=off"), 1)
+    def test_scope_and_depth_are_independent(self):
+        for target, decision, deep, packages in [
+            ("ci", self.env['DECISION'], False, '-p rss-contract'),
+            ("ci", '{"full":true,"packages":[],"reasons":["global"]}', False, '--workspace'),
+            ("ci-full", self.env['DECISION'], True, '--workspace'),
+            ("ci", 'invalid json', False, '--workspace'),
+        ]:
+            result, commands = self.run_make("checks", target=target, DECISION=decision)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected = [f'check --locked {packages}',
+                        f'check --locked --no-default-features {packages}',
+                        f'check --locked --all-features {packages}',
+                        f'clippy --locked --all-targets --all-features {packages} -- -D warnings']
+            if deep: expected += ['deny check -D unused-wrapper', 'semver']
+            self.assertEqual(commands, expected)
 
-    def test_failure_propagates_but_other_group_runs(self):
-        result, commands = self.run_make("all", FAIL_COMMAND="check --locked")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertTrue(any("nextest run" in c for c in commands))
-
-    def test_every_executable_check_runs_after_multiple_failures(self):
-        green, expected = self.run_make("all", target="ci-full")
+    def test_every_check_runs_after_multiple_failures(self):
+        green, expected = self.run_make("checks", target="ci-full")
         self.assertEqual(green.returncode, 0, green.stderr)
-        for failure in ("check --locked", "clippy", "nextest", "test --doc", "llvm-cov", ""):
-            with self.subTest(failure=failure):
-                # Empty pattern fails every Cargo operation; SemVer fails independently.
-                result, commands = self.run_make("all", target="ci-full",
-                                                 FAIL_COMMAND=failure, FAIL_SEMVER="7")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(commands, expected)
+        for failure in ("check --locked", "clippy", ""):
+            result, commands = self.run_make("checks", target="ci-full",
+                                             FAIL_COMMAND=failure, FAIL_SEMVER="7")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(commands, expected)
 
     def test_semver_collects_package_and_feature_failures(self):
         shutil.copy(ROOT / "hack/semver-checks.sh", self.root / "hack")

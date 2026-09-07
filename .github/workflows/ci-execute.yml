@@ -1,0 +1,48 @@
+name: CI execute
+on:
+  workflow_call:
+    inputs:
+      group:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  execute:
+    name: ${{ inputs.group }}
+    runs-on: ubuntu-latest
+    env:
+      CI_PLAN: .local-ci-runs/current/plan.json
+      RSS_TARGET_POOL_N: 'off'
+      RSS_COMPILER_CACHE: 'off'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.96.0 --profile minimal
+      - uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
+        with:
+          tool: cargo-nextest@0.9.137
+          fallback: none
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selection
+          path: .local-ci-runs/current
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-build
+          path: .local-ci-runs/current/build
+      - name: Run archived tests through Make
+        env:
+          CI_PART: ${{ inputs.group }}
+        run: make ci
+      - name: Upload group profiles and verdict even after test failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: result-${{ inputs.group }}
+          path: .local-ci-runs/current/results
+          include-hidden-files: true
+          if-no-files-found: error

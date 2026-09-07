@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 #[tokio::test(flavor = "multi_thread")]
 async fn persistent_receive_settlement_and_reconstruction() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
-        let fixture = testkit::mqtt_tls(true).await?;
+        let fixture = testkit::exclusive_mqtt_tls(true).await?;
         let clock = Arc::new(Timer::new());
         let store = Arc::new(FileStore::new()?);
         let (publisher, mut receiver, resource) = rss_mqtt::connect(
@@ -145,8 +145,8 @@ async fn persistent_receive_settlement_and_reconstruction() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tls_and_credentials_fail_closed() -> anyhow::Result<()> {
-    let fixture = testkit::mqtt_tls(true).await?;
+async fn shared_mqtt_tls_and_credentials_fail_closed() -> anyhow::Result<()> {
+    let fixture = testkit::shared_mqtt_tls().await?;
     for (id, wrong_ca, client_auth, password) in [
         ("wrong-ca", true, true, "fixture-only"),
         ("no-cert", false, false, "fixture-only"),
@@ -155,7 +155,7 @@ async fn tls_and_credentials_fail_closed() -> anyhow::Result<()> {
         let config = rss_mqtt::MqttConfig::new(
             "localhost",
             fixture.port(),
-            id,
+            format!("rss-{}-{id}", std::process::id()),
             "tls",
             support::tls(&fixture, wrong_ca, client_auth)?,
             rss_mqtt::Limits::new(2, 2, 2, 1024)?,
@@ -171,7 +171,7 @@ async fn tls_and_credentials_fail_closed() -> anyhow::Result<()> {
         assert!(!format!("{error:?} {error}").contains(password));
         drop(resource);
     }
-    let wrong_host = testkit::mqtt_tls(false).await?;
+    let wrong_host = testkit::exclusive_mqtt_tls(false).await?;
     let (publisher, _receiver, resource) = rss_mqtt::connect(
         support::config(&wrong_host, "wrong-host", vec![])?,
         Arc::new(Timer::new()),
@@ -183,13 +183,14 @@ async fn tls_and_credentials_fail_closed() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn receive_maximum_applies_to_deliveries_held_by_the_caller() -> anyhow::Result<()> {
-    let fixture = testkit::mqtt_tls(true).await?;
+async fn shared_mqtt_receive_maximum_applies_to_deliveries_held_by_the_caller() -> anyhow::Result<()>
+{
+    let fixture = testkit::shared_mqtt_tls().await?;
     let clock = Arc::new(Timer::new());
     let config = rss_mqtt::MqttConfig::new(
         "localhost",
         fixture.port(),
-        "backpressure",
+        format!("backpressure-{}", std::process::id()),
         "integration",
         support::tls(&fixture, false, true)?,
         rss_mqtt::Limits::new(4, 1, 4, 4096)?,

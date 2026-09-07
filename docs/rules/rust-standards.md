@@ -24,7 +24,8 @@ crate 划分、依赖方向及模块边界只按[架构与依赖规则](dependen
 - mock 放 `#[cfg(test)]` 模块或 `mockall`；crate 的 dependency/dev-dependency 边界由 Cargo manifest 显式声明。
 - 真实 provider 集成测试放在 `tests/*-integration` 的 `publish=false` workspace package；该 package
   直接依赖被测 adapter、testkit，并显式启用 adapter 所需的测试 feature。Cargo 反向依赖图
-  自然负责选择，不维护 provider catalog、lane 或 shard 表。
+  自然负责选择；执行器只按真实资源风险分为 AMQP、Kafka、其它 provider 三组，
+  分组从唯一 nextest filter 定义派生并校验并集，不维护第二份测试清单。
 
 ## 覆盖率
 

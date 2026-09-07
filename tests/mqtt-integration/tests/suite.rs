@@ -1,7 +1,7 @@
 mod support;
 #[tokio::test]
-async fn broker_smoke() -> anyhow::Result<()> {
-    let fixture = testkit::mqtt_tls(true).await?;
+async fn shared_mqtt_broker_smoke() -> anyhow::Result<()> {
+    let fixture = testkit::shared_mqtt_tls().await?;
     let clock = std::sync::Arc::new(support::Timer::new());
     let store = std::sync::Arc::new(support::FileStore::new()?);
     let config = support::config(&fixture, "smoke", vec!["smoke/events".into()])?;

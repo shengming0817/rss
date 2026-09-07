@@ -142,7 +142,7 @@ pub fn config(
     Ok(rss_mqtt::MqttConfig::new(
         "localhost",
         fixture.port(),
-        id,
+        format!("rss-{}-{id}", std::process::id()),
         "mqtt-integration",
         tls(fixture, false, true)?,
         rss_mqtt::Limits::new(32, 32, 32, 65536)?,

@@ -114,7 +114,8 @@ async fn count(database: &Database, id: &str) -> anyhow::Result<i64> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_commit_evidence_controls_real_mqtt_ack_and_redelivery() -> anyhow::Result<()> {
+async fn shared_mqtt_postgres_commit_evidence_controls_real_mqtt_ack_and_redelivery()
+-> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(90), scenario()).await?
 }
 async fn scenario() -> anyhow::Result<()> {
@@ -122,7 +123,7 @@ async fn scenario() -> anyhow::Result<()> {
     sqlx::raw_sql("GRANT SELECT,INSERT ON public.mqtt_handoff TO mqtt_runtime")
         .execute(&database.owner)
         .await?;
-    let mqtt = testkit::mqtt_tls(true).await?;
+    let mqtt = testkit::shared_mqtt_tls().await?;
     let clock = Arc::new(Timer::new());
     let (publisher, receiver, resource) = rss_mqtt::connect(
         support::config(&mqtt, "transactional", vec!["outbox/+".into()])?,

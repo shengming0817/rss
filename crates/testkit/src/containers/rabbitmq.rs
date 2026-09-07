@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
+use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::OnceCell;
 
@@ -20,7 +20,7 @@ const AMQPS_PORT: u16 = 5671;
 
 /// Owns one temporary broker. Suites isolate scenarios with fixture-created vhosts.
 pub struct RabbitFixture {
-    container: Box<ContainerAsync<GenericImage>>,
+    container: runtime::Container<GenericImage>,
     host: String,
     port: u16,
     created: Vhosts,
@@ -186,7 +186,7 @@ pub(super) fn validate_rabbit_vhost(vhost: &str) -> Result<()> {
 }
 
 /// Start an owned broker for fault injection and management observations.
-pub async fn managed_rabbitmq() -> Result<RabbitFixture> {
+pub async fn exclusive_rabbitmq() -> Result<RabbitFixture> {
     // Quorum queue TTL and at-least-once dead-lettering require RabbitMQ >= 3.10. Keep the plain
     // fixture on the exact same broker version as the private-CA fixture instead of inheriting the
     // testcontainers module's obsolete 3.8 default.
@@ -203,7 +203,7 @@ pub async fn managed_rabbitmq() -> Result<RabbitFixture> {
     )
     .await?;
     Ok(RabbitFixture {
-        container: Box::new(container),
+        container: runtime::Container::Owned(Box::new(container)),
         host,
         port,
         created: Vhosts::default(),
@@ -322,8 +322,8 @@ impl RabbitTlsFixture {
     }
 }
 
-async fn broker_queue_total_depth<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+async fn broker_queue_total_depth(
+    container: &impl runtime::ContainerId,
     vhost: &str,
     queue: &str,
 ) -> Result<u32> {
@@ -343,8 +343,8 @@ async fn broker_queue_total_depth<I: testcontainers::Image>(
     Err(anyhow::anyhow!("RabbitMQ queue observation was absent"))
 }
 
-pub(super) async fn provision_adjacent_rabbit_queue<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+pub(super) async fn provision_adjacent_rabbit_queue(
+    container: &impl runtime::ContainerId,
     adjacent_queue: &str,
 ) -> Result<()> {
     run_rabbitmqctl(
@@ -405,8 +405,8 @@ pub(super) async fn provision_adjacent_rabbit_queue<I: testcontainers::Image>(
 }
 
 // Management credentials belong to this temporary fixture, never to the adapter subscriber.
-async fn provision_delivery_fixture<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+async fn provision_delivery_fixture(
+    container: &impl runtime::ContainerId,
     queue: &str,
 ) -> Result<()> {
     run_rabbitmqctl(
@@ -478,8 +478,8 @@ async fn provision_delivery_fixture<I: testcontainers::Image>(
     run_rabbitmqctl(container, &["clear_permissions", "-p", TLS_VHOST, "guest"]).await
 }
 
-pub(super) async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+pub(super) async fn provision_rabbit_tls_permissions(
+    container: &impl runtime::ContainerId,
     queue_pattern: &str,
     subscriber_configure_pattern: &str,
     subscriber_write_pattern: &str,
@@ -552,8 +552,8 @@ pub(super) async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
     provision_rabbit_tls_shared_user(container).await
 }
 
-pub(super) async fn provision_rabbit_tls_shared_user<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+pub(super) async fn provision_rabbit_tls_shared_user(
+    container: &impl runtime::ContainerId,
 ) -> Result<()> {
     run_rabbitmqctl(
         container,
@@ -673,10 +673,7 @@ pub(super) fn validate_exact_queue_name(queue_name: &str) -> Result<()> {
 }
 
 /// 在运行中的 rabbitmq 容器内建 `vhost` + 给默认 `guest` 用户全权限（per-domain 隔离）。
-pub(super) async fn create_vhost(
-    container: &ContainerAsync<GenericImage>,
-    vhost: &str,
-) -> Result<()> {
+pub(super) async fn create_vhost(container: &impl runtime::ContainerId, vhost: &str) -> Result<()> {
     run_rabbitmqctl(container, &["await_startup"]).await?;
     run_rabbitmqctl(container, &["add_vhost", vhost]).await?;
     run_rabbitmqctl(
@@ -690,15 +687,15 @@ pub(super) async fn create_vhost(
 /// Fixture management has one execution budget, including CLI startup, Docker I/O and backoff.
 /// BusyBox timeout also terminates a stuck CLI process inside the owned container.
 /// ref: BusyBox 1.36.1 timeout; tokio time::timeout cancellation semantics.
-pub(super) async fn run_rabbitmqctl<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+pub(super) async fn run_rabbitmqctl(
+    container: &impl runtime::ContainerId,
     args: &[&str],
 ) -> Result<()> {
     run_rabbitmqctl_output(container, args).await.map(|_| ())
 }
 
-pub(super) async fn run_rabbitmqctl_output<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+pub(super) async fn run_rabbitmqctl_output(
+    container: &impl runtime::ContainerId,
     args: &[&str],
 ) -> Result<String> {
     tokio::time::timeout(
@@ -709,23 +706,21 @@ pub(super) async fn run_rabbitmqctl_output<I: testcontainers::Image>(
     .map_err(|_| anyhow::anyhow!("RabbitMQ fixture management deadline elapsed"))?
 }
 
-async fn rabbitmqctl_attempts<I: testcontainers::Image>(
-    container: &ContainerAsync<I>,
+async fn rabbitmqctl_attempts(
+    container: &impl runtime::ContainerId,
     args: &[&str],
 ) -> Result<String> {
     let command = ["timeout", "-s", "KILL", "10", "rabbitmqctl"]
         .into_iter()
         .chain(args.iter().copied())
-        .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut last_exit = None;
     for attempt in 0..RABBITMQCTL_MAX_ATTEMPTS {
-        let mut result = container
-            .exec(ExecCommand::new(command.clone()).with_cmd_ready_condition(CmdWaitFor::exit()))
-            .await?;
-        last_exit = result.exit_code().await?;
+        let result =
+            runtime::run_container_command_output(container, "rabbitmqctl", &command).await?;
+        last_exit = result.exit_code;
         if last_exit == Some(0) {
-            return String::from_utf8(result.stdout_to_vec().await?).map_err(Into::into);
+            return Ok(result.stdout);
         }
         if attempt + 1 < RABBITMQCTL_MAX_ATTEMPTS {
             crate::await_delay(Duration::from_millis(
@@ -737,4 +732,21 @@ async fn rabbitmqctl_attempts<I: testcontainers::Image>(
     Err(anyhow::anyhow!(
         "RabbitMQ fixture management failed after bounded attempts (exit={last_exit:?})"
     ))
+}
+
+impl RabbitFixture {
+    pub(super) fn descriptor(&self) -> serde_json::Value {
+        use runtime::ContainerId as _;
+        serde_json::json!({"container": self.container.container_id(), "host": self.host, "port": self.port})
+    }
+}
+/// Borrow the launcher's broker. Missing descriptors fail before any container is started.
+pub async fn shared_rabbitmq() -> Result<RabbitFixture> {
+    let d = super::launcher::descriptor("amqp")?;
+    Ok(RabbitFixture {
+        container: runtime::Container::Shared(super::launcher::text(&d, "container")?),
+        host: super::launcher::text(&d, "host")?,
+        port: super::launcher::port(&d, "port")?,
+        created: Vhosts::default(),
+    })
 }

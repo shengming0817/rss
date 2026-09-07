@@ -21,12 +21,12 @@ impl TransactionalMessagingEmitter for Emitter {
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn postgres_outbox_to_kafka_suite() -> anyhow::Result<()> {
+async fn shared_kafka_postgres_outbox_to_kafka_suite() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(110), run()).await??;
     Ok(())
 }
 async fn run() -> anyhow::Result<()> {
-    let kafka = testkit::kafka_tls(testkit::KafkaTlsServerIdentity::MatchingHost).await?;
+    let kafka = testkit::shared_kafka_tls().await?;
     let network = testkit::bridge_network("kafka-outbox").await?;
     let pg = testkit::postgres_tls(
         testkit::NetworkAttachment {

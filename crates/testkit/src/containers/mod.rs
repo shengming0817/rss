@@ -1,7 +1,7 @@
 //! 真容器 fixtures（testcontainers 0.27）。
 //!
-//! Fixtures own temporary containers; callers share a guard within one bounded test suite.
-//! Provider endpoints and credentials are returned explicitly, never selected from environment.
+//! The Make launcher owns shared AMQP/Kafka/MQTT containers across nextest processes.
+//! Shared clients require its private descriptor; exclusive scenarios own the same constructors.
 //!
 //! **guard 须绑定到测试作用域结束**——其 `Drop` 停容器（提前 drop 后续连接失败）。
 //! 不透明 guard 把 `testcontainers` 类型挡在消费方签名外（消费方只 name `testkit::{*Fixture,FixtureError}`）。
@@ -80,7 +80,12 @@ pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     let seq = BRIDGE_NETWORK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = format!("{prefix}-{}-{seq}", std::process::id());
     let mut command = tokio::process::Command::new("docker");
-    command.args(["network", "create", "--driver", "bridge", &name]);
+    command.args(["network", "create", "--driver", "bridge"]);
+    if let Ok(run) = std::env::var("RSS_TEST_RUN_ID") {
+        anyhow::ensure!(is_safe_label_token(&run), "invalid fixture run ID");
+        command.args(["--label", &format!("rss.test-run={run}")]);
+    }
+    command.arg(&name).kill_on_drop(true);
     let output = command
         .output()
         .await
@@ -177,16 +182,21 @@ mod postgres;
 mod rabbitmq;
 mod redis;
 
-pub use kafka::{KafkaTlsFixture, KafkaTlsServerIdentity, kafka_tls};
+pub use kafka::{KafkaTlsFixture, KafkaTlsServerIdentity, exclusive_kafka_tls, shared_kafka_tls};
 pub use postgres::{PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls};
-pub use rabbitmq::{RabbitFixture, RabbitTlsFixture, managed_rabbitmq, rabbitmq_tls};
+pub use rabbitmq::{
+    RabbitFixture, RabbitTlsFixture, exclusive_rabbitmq, rabbitmq_tls, shared_rabbitmq,
+};
 pub use redis::{RedisFixture, managed_redis};
 
 #[cfg(test)]
 mod tests;
 
 mod mqtt;
-pub use mqtt::{MqttTlsFixture, mqtt_tls};
+pub use mqtt::{MqttTlsFixture, exclusive_mqtt_tls, shared_mqtt_tls};
 
 mod minio;
 pub use minio::{MinioTlsFixture, minio_tls_archive};
+
+mod launcher;
+pub use launcher::launch;

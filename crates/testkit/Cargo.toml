@@ -16,10 +16,16 @@ testcontainers = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [features]
 default = []
-containers = ["dep:testcontainers", "dep:anyhow", "dep:rcgen", "dep:serde_json", "tokio/sync", "tokio/process", "tokio/io-util"]
+containers = ["dep:testcontainers", "dep:tempfile", "tokio/signal", "tokio/rt-multi-thread", "tokio/macros", "dep:anyhow", "dep:rcgen", "dep:serde_json", "tokio/sync", "tokio/process", "tokio/io-util"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "rss-test-launcher"
+required-features = ["containers"]
+test = false

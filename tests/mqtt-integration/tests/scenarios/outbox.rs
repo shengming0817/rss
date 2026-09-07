@@ -172,12 +172,12 @@ async fn provision(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_outbox_relay_to_real_mqtt() -> anyhow::Result<()> {
+async fn shared_mqtt_postgres_outbox_relay_to_real_mqtt() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(45), outbox_scenario()).await?
 }
 async fn outbox_scenario() -> anyhow::Result<()> {
     let database = Database::new().await?;
-    let mqtt = testkit::mqtt_tls(true).await?;
+    let mqtt = testkit::shared_mqtt_tls().await?;
     let clock = Arc::new(Timer::new());
     confirmed(&database, &mqtt, clock.clone()).await?;
     ambiguous(&database, &mqtt, clock).await?;
@@ -271,7 +271,7 @@ async fn lost_ack(
     let config = rss_mqtt::MqttConfig::new(
         "localhost",
         proxy.port,
-        "ambiguous-relay",
+        format!("ambiguous-relay-{}", std::process::id()),
         "mqtt-integration",
         proxy.peer_tls.clone(),
         rss_mqtt::Limits::new(32, 32, 32, 65536)?,

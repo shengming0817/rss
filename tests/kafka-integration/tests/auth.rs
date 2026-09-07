@@ -57,7 +57,7 @@ fn configured(f: &testkit::KafkaTlsFixture, case: Case) -> anyhow::Result<KafkaC
         )?,
     };
     Ok(KafkaConfig::new(
-        KafkaClientId::parse(case.id())?,
+        KafkaClientId::parse(&format!("{}-{}", f.topic(), case.id()))?,
         brokers,
         if matches!(case, Case::WrongCa) {
             f.wrong_ca_pem()
@@ -67,14 +67,14 @@ fn configured(f: &testkit::KafkaTlsFixture, case: Case) -> anyhow::Result<KafkaC
         .into(),
         credentials,
         MessagingDomain::parse("events")?,
-        [(MessageRoute::parse("event:v1")?, TOPIC.into())],
+        [(MessageRoute::parse("event:v1")?, f.topic().into())],
         KafkaLimits::new(1, 1, 4096, Duration::from_secs(2))?,
     )?)
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_authentication_matrix() -> anyhow::Result<()> {
+async fn shared_kafka_real_authentication_matrix() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(110), async {
-        let fixture = testkit::kafka_tls(testkit::KafkaTlsServerIdentity::MatchingHost).await?;
+        let fixture = testkit::shared_kafka_tls().await?;
         for case in [
             Case::MutualTls,
             Case::WrongCa,
@@ -111,7 +111,8 @@ async fn real_authentication_matrix() -> anyhow::Result<()> {
             let closed = resource.shutdown(Duration::from_secs(5)).await;
             assert!(matches!(closed, Ok(()) | Err(KafkaError::OwnerFailed)));
         }
-        let mismatch = testkit::kafka_tls(testkit::KafkaTlsServerIdentity::UnmatchedHost).await?;
+        let mismatch =
+            testkit::exclusive_kafka_tls(testkit::KafkaTlsServerIdentity::UnmatchedHost).await?;
         let (publisher, resource) = KafkaPublisher::create(
             configured(&mismatch, Case::WrongHostname)?,
             Duration::from_secs(5),

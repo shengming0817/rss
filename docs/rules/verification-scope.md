@@ -25,7 +25,9 @@
 ## 默认选择
 
 - 普通 PR 运行 affected T1 与必要 T2；rename/copy、全局输入、未知路径或分析异常必须 fail-full。
-- 完整 conformance、fault/recovery、coverage 与 performance 属于 develop/release 或显式 full。
+- 全工作区回退、develop 和显式 full 执行完整测试与 80% 行覆盖率门禁；affected 不判定全工作区覆盖率。
+- 范围与深度独立：完整 SemVer、deny 属于 develop 或显式 full；未知影响回退只扩大测试范围。
+- 不设置人为 CI 总时限；测试与资源操作保持有界等待。performance 须另有明确验证需求。
 - candidate/release final-HEAD identity 验证只覆盖已接纳的 package artifact 与 release metadata；
   消费方应用装配、配置和运行计划漂移属于 External。
 - performance 必须绑定已接纳的 library SLO；Markdown、聚合 receipt 和静态 inventory 不得冒充运行证据。
