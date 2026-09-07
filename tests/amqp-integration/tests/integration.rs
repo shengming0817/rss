@@ -890,6 +890,12 @@ async fn subscriber_lifecycle_suite() -> anyhow::Result<()> {
     .await?;
     suite_phase(
         deadline,
+        "subscriber cancel before connection close",
+        transport::subscriber_cancels_before_connection_close(&rabbit),
+    )
+    .await?;
+    suite_phase(
+        deadline,
         "registration / shutdown",
         transport::subscription_cannot_register_after_resource_shutdown(&rabbit),
     )

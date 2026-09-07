@@ -1101,3 +1101,40 @@ async fn cancel_confirming_publication(
     }
     Ok(())
 }
+
+/// The broker must retain the connection while basic.cancel is still owned and pending.
+pub(super) async fn subscriber_cancels_before_connection_close(
+    rabbit: &testkit::RabbitFixture,
+) -> anyhow::Result<()> {
+    let url = isolated_url(rabbit, "rss_subscriber_cancel_before_close").await?;
+    let vhost = url.rsplit('/').next().expect("fixture vhost");
+    let route = MessageRoute::parse("rss.cancel-before-close")?;
+    let (subscriber, resource) = prepared_subscriber(&url, &route, "ordered-close", true).await?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "ordered-close-pub").await?;
+    let message = envelope(&route, "ordered-close");
+    let subscription = subscription_for(&message, &route);
+    let mut stream = subscriber.deliveries(&subscription).await?;
+    publish_confirmed(&publisher, &message).await?;
+    let delivery = next_valid_delivery(&mut stream).await?;
+    let (_, settlement) = (*delivery).into_parts();
+    close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    let (entered, resume) = settlement.pause_subscription_cancel_for_test();
+    drop(stream);
+    tokio::time::timeout(TIMEOUT, entered).await??;
+    let closing = resource.shutdown(Duration::from_secs(5));
+    tokio::pin!(closing);
+    tokio::select! {
+        result = &mut closing => anyhow::bail!("shutdown crossed pending cancel: {result:?}"),
+        count = rabbit.broker_connection_count(vhost) => {
+            assert_eq!(count?, 1, "connection closed before subscription cancellation completed");
+        }
+    }
+    assert!(resume.send(()).is_ok());
+    close(closing).await?;
+    testkit::await_try(TIMEOUT, async || {
+        let count = rabbit.broker_connection_count(vhost).await?;
+        Ok::<_, anyhow::Error>((count == 0).then_some(()))
+    })
+    .await?;
+    Ok(())
+}

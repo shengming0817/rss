@@ -20,7 +20,7 @@ class MakeTests(unittest.TestCase):
         shutil.copy(ROOT / "Makefile", self.root)
         shutil.copy(ROOT / "hack/ci-run.py", self.root / "hack")
         (self.root / "hack/ci-impact.py").write_text("import os; print(os.environ['DECISION'])\n")
-        (self.root / "hack/semver-checks.sh").write_text('echo semver >> "$COMMAND_LOG"\n')
+        (self.root / "hack/semver-checks.sh").write_text('echo semver >> "$COMMAND_LOG"\nexit "${FAIL_SEMVER:-0}"\n')
         self.bin = self.root / "bin"
         self.bin.mkdir()
         cargo = self.bin / "cargo"
@@ -74,9 +74,9 @@ class MakeTests(unittest.TestCase):
                                f'clippy --locked --all-targets --all-features {packages} -- -D warnings']
             if full:
                 expected_checks += ['deny check -D unused-wrapper', 'semver']
-            expected_tests = ([f'llvm-cov nextest --locked {packages} --all-features --no-report'] if full else
-                              [f'nextest run --locked --all-features {packages}'])
-            expected_tests += [f'test --doc --locked --all-features {packages}']
+            expected_tests = ([f'llvm-cov nextest --locked {packages} --all-features --no-report --no-fail-fast'] if full else
+                              [f'nextest run --locked --all-features {packages} --no-fail-fast'])
+            expected_tests += [f'test --doc --locked --all-features {packages} --no-fail-fast']
             if full:
                 expected_tests += ['llvm-cov report --fail-under-lines 80 --lcov --output-path lcov.info']
             self.assertEqual(a, expected_checks)
@@ -88,6 +88,47 @@ class MakeTests(unittest.TestCase):
         result, commands = self.run_make("all", FAIL_COMMAND="check --locked")
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(any("nextest run" in c for c in commands))
+
+    def test_every_executable_check_runs_after_multiple_failures(self):
+        green, expected = self.run_make("all", target="ci-full")
+        self.assertEqual(green.returncode, 0, green.stderr)
+        for failure in ("check --locked", "clippy", "nextest", "test --doc", "llvm-cov", ""):
+            with self.subTest(failure=failure):
+                # Empty pattern fails every Cargo operation; SemVer fails independently.
+                result, commands = self.run_make("all", target="ci-full",
+                                                 FAIL_COMMAND=failure, FAIL_SEMVER="7")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(commands, expected)
+
+    def test_semver_collects_package_and_feature_failures(self):
+        shutil.copy(ROOT / "hack/semver-checks.sh", self.root / "hack")
+        manifest = '\n'.join([
+            '[workspace]', 'members = []',
+            '[[workspace.metadata.release-surface.packages]]', 'package = "first"',
+            '[[workspace.metadata.release-surface.packages]]', 'package = "second"',
+        ])
+        (self.root / 'Cargo.toml').write_text(manifest)
+        for args in (["add", "Cargo.toml"], ["-c", "user.name=Test", "-c", "user.email=test@example.com",
+                                            "commit", "-qm", "surface"]):
+            subprocess.run(["/usr/bin/git", *args], cwd=self.root, check=True, capture_output=True)
+        metadata = {"packages": [{"name": name, "targets": [{"kind": ["lib"]}]}
+                                  for name in ('first', 'second')],
+                    "metadata": {"release-surface": {"packages": [{"package": name}
+                                                                  for name in ('first', 'second')]}}}
+        (self.bin / 'cargo').write_text(
+            '#!/usr/bin/env python3\nimport json, os, sys\n'
+            'if sys.argv[1] == "metadata": print(os.environ["METADATA"])\n'
+            'else:\n'
+            ' with open(os.environ["COMMAND_LOG"], "a") as log: log.write(" ".join(sys.argv[1:])+"\\n")\n'
+            ' sys.exit(9 if "--all-features" not in sys.argv else 0)\n')
+        result = subprocess.run(['bash', 'hack/semver-checks.sh', 'HEAD', 'HEAD~1'],
+                                cwd=self.root, env=self.env | {'METADATA': json.dumps(metadata)},
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        commands = self.log.read_text().splitlines()
+        self.assertEqual(len(commands), 4, result.stderr)
+        self.assertEqual(sum('--all-features' in command for command in commands), 2)
+        self.assertEqual(sum('--package second' in command for command in commands), 2)
 
     def test_invalid_part_and_empty_selection(self):
         result, commands = self.run_make("typo")

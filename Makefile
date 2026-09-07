@@ -31,27 +31,31 @@ _ci:
 		fi; \
 	done; exit $$status
 
+# Keep each group in one shell so every executable check contributes to its verdict.
 _ci-checks:
-	cargo check --locked $(CI_PACKAGES)
-	cargo check --locked --no-default-features $(CI_PACKAGES)
-	cargo check --locked --all-features $(CI_PACKAGES)
-	cargo clippy --locked --all-targets --all-features $(CI_PACKAGES) -- -D warnings
-ifeq ($(CI_FULL),1)
-	@base="$$(/usr/bin/git rev-parse --verify "$(CI_BASE)^{commit}")"; head="$$(/usr/bin/git rev-parse --verify "$(CI_HEAD)^{commit}")"; if [ "$$base" = "$$head" ]; then /usr/bin/git rev-parse --verify "$$head^" >/dev/null; fi
-	cargo deny check -D unused-wrapper
-	@bash hack/semver-checks.sh "$(CI_BASE)" "$(CI_HEAD)"
-endif
+	@status=0; \
+	cargo check --locked $(CI_PACKAGES) || status=$$?; \
+	cargo check --locked --no-default-features $(CI_PACKAGES) || status=$$?; \
+	cargo check --locked --all-features $(CI_PACKAGES) || status=$$?; \
+	cargo clippy --locked --all-targets --all-features $(CI_PACKAGES) -- -D warnings || status=$$?; \
+	if [ "$(CI_FULL)" = 1 ]; then \
+	cargo deny check -D unused-wrapper || status=$$?; \
+	bash hack/semver-checks.sh "$(CI_BASE)" "$(CI_HEAD)" || status=$$?; \
+	fi; \
+	exit $$status
 
 _ci-tests:
-ifeq ($(CI_FULL),1)
-	cargo llvm-cov nextest --locked $(CI_PACKAGES) --all-features --no-report
-else
-	cargo nextest run --locked --all-features $(CI_PACKAGES)
-endif
-	cargo test --doc --locked --all-features $(CI_PACKAGES)
-ifeq ($(CI_FULL),1)
-	cargo llvm-cov report --fail-under-lines 80 --lcov --output-path lcov.info
-endif
+	@status=0; \
+	if [ "$(CI_FULL)" = 1 ]; then \
+	cargo llvm-cov nextest --locked $(CI_PACKAGES) --all-features --no-report --no-fail-fast || status=$$?; \
+	else \
+	cargo nextest run --locked --all-features $(CI_PACKAGES) --no-fail-fast || status=$$?; \
+	fi; \
+	cargo test --doc --locked --all-features $(CI_PACKAGES) --no-fail-fast || status=$$?; \
+	if [ "$(CI_FULL)" = 1 ]; then \
+	cargo llvm-cov report --fail-under-lines 80 --lcov --output-path lcov.info || status=$$?; \
+	fi; \
+	exit $$status
 
 audit:
 	cargo deny check advisories

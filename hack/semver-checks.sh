@@ -14,7 +14,7 @@ baseline_packages="$(/usr/bin/git show "${base}:Cargo.toml" | python3 -c 'import
 current_metadata="$(cargo metadata --locked --no-deps --format-version 1)"
 library_packages="$(printf '%s\n' "${current_metadata}" | python3 -c 'import json,sys; print("\n".join(sorted(package["name"] for package in json.load(sys.stdin)["packages"] if any("lib" in target["kind"] for target in package["targets"]))))')"
 
-printf '%s\n' "${current_metadata}" | python3 -c '
+selection="$(printf '%s\n' "${current_metadata}" | python3 -c '
 import json,re,sys
 metadata=json.load(sys.stdin)["metadata"]
 entries=metadata["release-surface"]["packages"]
@@ -38,7 +38,9 @@ for entry in sorted(entries, key=lambda item: item["package"]):
         issue=authorization["issue"]
         mode=f"major:{issue}"
     print(f"{package}|{mode}")
-' "${base}" | while IFS='|' read -r package mode; do
+' "${base}")"
+status=0
+while IFS='|' read -r package mode; do
 	if ! grep -Fqx "${package}" <<<"${library_packages}"; then
 		echo "semver-checks: skipping non-library target for ${package}"
 	elif ! grep -Fqx "${package}" <<<"${baseline_packages}"; then
@@ -46,11 +48,12 @@ for entry in sorted(entries, key=lambda item: item["package"]):
 	else
 		if [[ "${mode}" == major:* ]]; then
 			echo "semver-checks: exact pre-publication breaking authorization for ${package} (${mode#major:})"
-			cargo semver-checks check-release --package "${package}" --baseline-rev "${base}" --release-type major
-			cargo semver-checks check-release --package "${package}" --all-features --baseline-rev "${base}" --release-type major
+			cargo semver-checks check-release --package "${package}" --baseline-rev "${base}" --release-type major || status=$?
+			cargo semver-checks check-release --package "${package}" --all-features --baseline-rev "${base}" --release-type major || status=$?
 		else
-			cargo semver-checks check-release --package "${package}" --baseline-rev "${base}"
-			cargo semver-checks check-release --package "${package}" --all-features --baseline-rev "${base}"
+			cargo semver-checks check-release --package "${package}" --baseline-rev "${base}" || status=$?
+			cargo semver-checks check-release --package "${package}" --all-features --baseline-rev "${base}" || status=$?
 		fi
 	fi
-done
+done <<<"${selection}"
+exit "${status}"

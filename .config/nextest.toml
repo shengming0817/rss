@@ -15,7 +15,7 @@ max-threads = 1
 [[profile.default.overrides]]
 # These tests spawn Cargo; sharing this group prevents independent compilers from
 # starving each other on a standard four-core runner. Test deadlines stay unchanged.
-filter = 'binary(/(^trybuild$|_trybuild$|^optional_features$|^feature_matrix$)/)'
+filter = 'binary(/(^trybuild$|_trybuild$|^optional_features$|^feature_matrix$|^consumer$)/)'
 test-group = "compiler-proof"
 
 [[profile.default.overrides]]
